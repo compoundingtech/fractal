@@ -113,15 +113,18 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     refusal, onRefused: setRefusal,
   })
   // The composer's Stop (and Esc) interrupts the agent's turn, as Interrupt in its actions does.
-  // A refusal is shown beside Stop while the run lasts; the next Stop clears it.
+  // A refusal belongs to the run it answered (the running turn's id): it shows beside Stop while that run
+  // lasts, clears when the run ends or another starts, and a late answer for an older run is dropped.
   const agentControls = source.agentControls
   const running = state._tag === 'Observed' && state.isRunning
-  const [stopRefusal, setStopRefusal] = React.useState<string>()
+  const runId = state._tag === 'Observed' && state.isRunning ? state.turns.findLast(turn => turn.work.running)?.id ?? '' : undefined
+  const [stopRefusal, setStopRefusal] = React.useState<{ readonly runId: string; readonly detail: string }>()
+  if (stopRefusal !== undefined && stopRefusal.runId !== runId) setStopRefusal(undefined)
   const onCancel = React.useMemo(() => agentControls === undefined ? undefined : async () => {
     setStopRefusal(undefined)
     const result = await agentControls.interrupt(agentRef)
-    if (result._tag === 'Refused') setStopRefusal(result.detail)
-  }, [agentControls, agentRef])
+    if (result._tag === 'Refused' && runId !== undefined) setStopRefusal({ runId, detail: result.detail })
+  }, [agentControls, agentRef, runId])
   const retryConversation = source.retryConversation
   const renderInlineReference = React.useMemo(() => onOpenDocument === undefined ? undefined : documentReferences(onOpenDocument), [onOpenDocument])
   // A Markdown link to a `doc/…` opens it in a tab instead of following a relative URL.
@@ -164,7 +167,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     <LiveAgentTodos agentRef={agentRef} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     <div data-testid="conversation-composer-dock" style={{ flexShrink: 0, paddingBottom: spaceVars.lg }}>
-      <EmbraceComposer variant="C1" readingColumn disabledReason={binding.disabledReason} {...(running && stopRefusal !== undefined ? { stopRefusal } : {})} />
+      <EmbraceComposer variant="C1" readingColumn disabledReason={binding.disabledReason} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
     </div>
   </EmbraceRuntimeProvider>
 })

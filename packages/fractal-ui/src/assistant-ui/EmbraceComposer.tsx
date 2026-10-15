@@ -335,11 +335,13 @@ function PlainComposer({ targetLabel, disabledReason, toolbar, style, onRequestS
       onCompositionStartCapture={() => { composing.current = true }}
       onCompositionEndCapture={() => { composing.current = false }}
       onKeyDownCapture={event => {
-        if (event.key === 'Escape' && canStop) { event.preventDefault(); stop(); return }
+        const imeKey = event.nativeEvent.isComposing || composing.current || event.nativeEvent.keyCode === 229
+        // An Escape that dismisses an IME composition belongs to the IME, never to the run.
+        if (event.key === 'Escape' && canStop && !imeKey) { event.preventDefault(); stop(); return }
         if (event.key !== 'Enter') return
         const target = event.target
         if (!(target instanceof HTMLElement && (target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT'))) return
-        if (event.nativeEvent.isComposing || composing.current || event.nativeEvent.keyCode === 229) { event.stopPropagation(); return }
+        if (imeKey) { event.stopPropagation(); return }
         if (event.repeat) { event.preventDefault(); event.stopPropagation(); return }
         if (onRequestSubmit !== undefined && !event.shiftKey && !(window.matchMedia('(pointer: coarse) and (not (any-pointer: fine))').matches && !event.metaKey && !event.ctrlKey)) {
           event.preventDefault(); event.stopPropagation(); if (!readOnly) onRequestSubmit(event.metaKey || event.ctrlKey)
@@ -352,6 +354,8 @@ function PlainComposer({ targetLabel, disabledReason, toolbar, style, onRequestS
         aria-label={targetLabel === undefined ? 'Message' : `Message to ${targetLabel}`}
         aria-describedby={[helpId, runtimeText === '' && reason === undefined ? guidanceId : undefined].filter(Boolean).join(' ')}
         placeholder=""
+        // Without host `actions`, Escape-to-stop is handled once above (with its IME guard); the primitive's own Escape would cancel a second time.
+        cancelOnEscape={actions !== undefined}
         disabled={readOnly}
         {...stylex.props(styles.input, inputStyle, cold && styles.coldInput)}
       />}

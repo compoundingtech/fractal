@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, waitFor, within } from 'storybook/test'
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import { ThreadHeader } from './assistant-ui/composition/Shell'
 import { Transcript, type TranscriptTurn } from './assistant-ui/composition/Transcript'
 import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
@@ -38,15 +38,16 @@ const refusal = 'That agent has no terminal to stop its turn through.'
  * While a run can be stopped, Stop sits beside Send and Escape in the composer stops too. Stop asks
  * the runtime's `onCancel`; here the run ends 1.5 s later, or the host refuses with a reason.
  */
-function RunStopStory({ scheme, refuse }: { scheme: Scheme; refuse: boolean }) {
+function RunStopStory({ scheme, refuse, onStopRequest }: { scheme: Scheme; refuse: boolean; onStopRequest: () => void }) {
   const [running, setRunning] = React.useState(true)
   const [stopRefusal, setStopRefusal] = React.useState<string>()
   const turn = React.useMemo(() => turnFor(running), [running])
   const messages = React.useMemo(() => [turn.prompt!, ...turn.items], [turn])
   const onCancel = React.useCallback(async () => {
+    onStopRequest()
     setStopRefusal(undefined)
     window.setTimeout(() => refuse ? setStopRefusal(refusal) : setRunning(false), 1500)
-  }, [refuse])
+  }, [refuse, onStopRequest])
   const options = React.useMemo(() => ({ messages, isRunning: running, onNew: async () => {}, onCancel }), [messages, running, onCancel])
   return <main aria-label="Thread" data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'dark' && darkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && lightTheme)}>
     <EmbraceRuntimeProvider options={options}>
@@ -64,15 +65,15 @@ const meta = {
   title: 'Fractal UI/Run stop',
   component: RunStopStory,
   parameters: { layout: 'fullscreen' },
-  args: { scheme: 'dark', refuse: false },
+  args: { scheme: 'dark', refuse: false, onStopRequest: fn() },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, refuse: { control: 'boolean' } },
 } satisfies Meta<typeof RunStopStory>
 export default meta
 type Story = StoryObj<typeof meta>
 
 const stop = (canvasElement: HTMLElement) => canvasElement.querySelector<HTMLButtonElement>('[data-testid="run-stop"]')
-/** Pressing Stop (or Escape) holds "Stopping…" until the runtime ends the run; then Stop leaves and the call reads interrupted. */
-const stopsOnce = (via: 'press' | 'escape') => async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+/** Pressing Stop (or Escape) asks the host once and holds "Stopping…" until the runtime ends the run; then Stop leaves and the call reads interrupted. */
+const stopsOnce = (via: 'press' | 'escape') => async ({ canvasElement, args }: { canvasElement: HTMLElement; args: { onStopRequest: () => void } }) => {
   const canvas = within(canvasElement)
   await waitFor(() => expect(stop(canvasElement)).toHaveAttribute('aria-label', 'Stop run'))
   if (via === 'press') await userEvent.click(stop(canvasElement)!)
@@ -81,6 +82,7 @@ const stopsOnce = (via: 'press' | 'escape') => async ({ canvasElement }: { canva
   await expect(stop(canvasElement)).toBeDisabled()
   await waitFor(() => expect(stop(canvasElement)).toBeNull(), { timeout: 4000 })
   await expect(canvasElement.querySelector('[data-tool-status="interrupted"]')).not.toBeNull()
+  await expect(args.onStopRequest).toHaveBeenCalledTimes(1)
 }
 
 /** While the run is active Stop sits left of Send; Send keeps its one meaning. Escape is announced, not drawn. */
@@ -97,6 +99,28 @@ export const Running: Story = { play: async ({ canvasElement }) => {
 export const RunningLight: Story = { ...Running, args: { scheme: 'light' } }
 export const StopsOnPress: Story = { play: stopsOnce('press') }
 export const StopsOnEscape: Story = { play: stopsOnce('escape') }
+/** Escape that dismisses an IME composition belongs to the IME: nothing asks to stop the run. Once composition ends, Escape stops it. */
+export const EscapeDuringCompositionKeepsRunning: Story = { play: async ({ canvasElement, args }) => {
+  await waitFor(() => expect(stop(canvasElement)).toHaveAttribute('aria-label', 'Stop run'))
+  const field = within(canvasElement).getByRole('textbox', { name: 'Message' })
+  await userEvent.click(field)
+  field.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }))
+  field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true, isComposing: true }))
+  field.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '' }))
+  // keyCode 229 alone (Safari reports IME keys this way without isComposing) is the IME's too.
+  field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true, keyCode: 229 }))
+  // Barrier: a later keystroke has rendered, so any stop those Escapes asked for would have reached the host.
+  await userEvent.keyboard('x')
+  await waitFor(() => expect(field).toHaveValue('x'))
+  await expect(args.onStopRequest).not.toHaveBeenCalled()
+  await expect(stop(canvasElement)).toHaveAttribute('aria-label', 'Stop run')
+  await expect(stop(canvasElement)).toBeEnabled()
+  // Positive control on the same path: once composition ended, Escape stops the run exactly once.
+  field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }))
+  await waitFor(() => expect(args.onStopRequest).toHaveBeenCalledTimes(1))
+  await waitFor(() => expect(stop(canvasElement)).toHaveAttribute('aria-label', 'Stopping run'))
+  await waitFor(() => expect(stop(canvasElement)).toBeNull(), { timeout: 4000 })
+} }
 /** The host could not stop the run: its reason shows beside Stop, which can be pressed again. */
 export const StopRefused: Story = { args: { refuse: true }, play: async ({ canvasElement }) => {
   await waitFor(() => expect(stop(canvasElement)).toHaveAttribute('aria-label', 'Stop run'))
