@@ -32,15 +32,16 @@ fn implicit_person(path: &str) -> bool {
 }
 
 fn walk(command: &clap::Command, path: &str, commands: &mut BTreeMap<String, Value>) {
-    let children = command.get_subcommands().filter(|child| child.get_name() != "help").collect::<Vec<_>>();
-    if path != "st" && (children.is_empty() || !command.is_subcommand_required_set()) {
+    let has_children = command.get_subcommands().any(|child| child.get_name() != "help");
+    if path != "st" && (!has_children || !command.is_subcommand_required_set()) {
         let argument = actor_argument(command);
         let requirement = match argument {
             None => "none",
             Some(argument) if argument.is_required_set() => "required",
             Some(_) => "optional",
         };
-        let ignored = argument.is_some_and(|argument| argument.get_id() == "ignored_actor");
+        let ignored = path == "st devices complete"
+            || argument.is_some_and(|argument| argument.get_id() == "ignored_actor");
         let document_name = path == "st documents put";
         let person = argument.is_some_and(accepts_person);
         let alternate_actor = command.get_arguments().find(|argument| argument.get_long() == Some("actor"));
@@ -57,7 +58,7 @@ fn walk(command: &clap::Command, path: &str, commands: &mut BTreeMap<String, Val
             "ignores_actor": ignored,
         }));
     }
-    for child in children {
+    for child in command.get_subcommands().filter(|child| child.get_name() != "help") {
         walk(child, &format!("{path} {}", child.get_name()), commands);
     }
 }
