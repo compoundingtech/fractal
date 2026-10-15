@@ -501,7 +501,16 @@ fn generated_action_union_and_machine_manifest_stay_in_lockstep() {
         READ_OPERATIONS.len(),
         operations["reads"].as_array().unwrap().len()
     );
-    assert_eq!(CONTRACT_SHA256.len(), 64);
+    // The build script's digest: SHA-256 of the schema followed by the operations manifest, the
+    // formula the committed digest used before it was computed at build time.
+    let digest = <sha2::Sha256 as sha2::Digest>::new()
+        .chain_update(include_bytes!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))
+        .chain_update(include_bytes!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ));
+    assert_eq!(CONTRACT_SHA256, format!("{:x}", sha2::Digest::finalize(digest)));
 }
 
 #[test]

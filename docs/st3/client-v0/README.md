@@ -14,8 +14,9 @@ local Unix socket and authenticated paired HTTP over Tailscale or optional Fabri
 [`clients/typescript/st3-client`](../../../clients/typescript/st3-client). Regenerate all three
 clients' contract tables with `cargo run -p st3-client-codegen`;
 CI and local verification use `cargo run -p st3-client-codegen -- --check` for byte stability.
-The contract digest is written once, in `crates/st3-client/src/contract.rs`. When generated
-client files conflict in a merge, resolve the schema and template files, take either side of every
+The contract digest (`CONTRACT_SHA256`, SHA-256 of `client-v0.schema.json` followed by
+`operations.json`) is not committed: `crates/st3-client/build.rs` computes it at build time, so two
+schema changes no longer conflict on it. When generated client files conflict in a merge, resolve the schema and template files, take either side of every
 generated file (`git checkout --theirs -- clients crates/st3-client/src/contract.rs
 crates/st3-client/src/generated.rs`), and run the generator again; never edit generated files by
 hand.

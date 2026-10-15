@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "st3-client computes CONTRACT_SHA256 in a build script instead of committing it, so schema changes stop conflicting on one generated line",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers, schema-version changes or data rewrites. The client contract is unchanged; CONTRACT_SHA256 keeps its formula and value (SHA-256 of client-v0.schema.json followed by operations.json)."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes; no coordinated member upgrade required."},
+  "compatibility": {"status": "none", "detail": "Build-only. The constant's value is identical; st3-client-codegen no longer writes it, and contract.rs includes the build script's output."},
+  "downtime": {"status": "none", "detail": "No startup work or expected interruption."},
+  "manual": {"status": "none", "detail": "No operator actions. A merge that touches the schema no longer needs CONTRACT_SHA256 recomputed by hand."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or swap-back restrictions."}
+}
