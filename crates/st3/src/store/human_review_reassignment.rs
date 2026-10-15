@@ -700,6 +700,23 @@ mission "review-repair" state="ready" {
     fn unfiltered_candidates_do_not_scan_unrelated_review_history() {
         let (store, run) = fixture();
         let pending = request(&store, &run, "pending", "unfiltered-pending", 0);
+        // Keep the episode-index boundary nonempty in both measurements. An empty
+        // suffix lets SQLite's Next jump directly to Halt; one unrelated owner
+        // exercises the terminating IdxGT before measuring growth by 1,024 rows.
+        let mut baseline_fields: BTreeMap<String, Value> =
+            serde_json::from_value(pending.body["fields"].clone()).unwrap();
+        baseline_fields.insert("owner".into(), json!("step-run/unrelated/baseline"));
+        baseline_fields.insert("operation".into(), json!("gate-operation/unfiltered-baseline"));
+        let baseline = store.append_claim(&ClaimInput {
+            subject: "gate-operation/unfiltered-baseline".into(),
+            kind: "gate.requested".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: baseline_fields,
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        answer(&store, &baseline, OLD, "unfiltered-baseline-answer");
         let measure = || {
             let connection = store.readers.get();
             let mut statement = connection.prepare(&pending_requests_sql(false)).unwrap();
