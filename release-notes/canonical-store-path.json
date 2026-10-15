@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "This change authorizes no file copy, symlink/bind installation, live database action or configuration change. Operations must separately qualify the actual narrow relocation and path-derived runtime-start lock directory under the normal cut; mixed processes retaining old alias-derived paths are not certified. Canonical naming is not protection against concurrent target or parent replacement."
+    "detail": "This change authorizes no file copy, symlink/bind installation, live database action or configuration change. Operations must separately qualify the actual narrow relocation and path-derived runtime-start lock directory under the normal cut. Stop the old process before the new build opens the state, or run only one build per state directory: old alias-derived and new target-derived runtime-start locks do not exclude each other. Canonical naming is not protection against concurrent target or parent replacement."
   },
   "recovery": {
     "status": "changed",
