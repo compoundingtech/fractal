@@ -120,12 +120,23 @@ impl<'connection> WriterTransaction<'connection> {
     /// A writer-owned scope may refuse immediately before COMMIT, after managed finalizers.
     /// A check error drops/rolls back the transaction. It cannot cancel a completed COMMIT.
     pub(super) fn commit_checked(self, check: impl FnOnce() -> Result<()>) -> Result<()> {
+        self.commit_validated(|_| check())
+    }
+
+    /// Private publication seam: recheck prepared predicates after managed maintenance,
+    /// using this same transaction immediately before COMMIT. This supplies ordering, not
+    /// source coverage or a bound on the callback's cost. No producer is certified by it.
+    /// An error after entering SQLite COMMIT must not be interpreted as a proven rollback.
+    pub(super) fn commit_validated(
+        self,
+        check: impl FnOnce(&Transaction<'_>) -> Result<()>,
+    ) -> Result<()> {
         ensure!(
             !self.transaction.is_autocommit(),
             "writer transaction was ended through raw SQL"
         );
         self.finalizers.run(&self.transaction)?;
-        check()?;
+        check(&self.transaction)?;
         self.transaction.commit()?;
         crate::profile::managed_commit_succeeded();
         Ok(())
