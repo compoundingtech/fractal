@@ -859,9 +859,10 @@ def idle_delivery_control(node, seats):
         return node.json("conversations", "send", subject, "--from", "person/eval",
                          "--subject", label, "--body", label)["subject"]
 
-    # Each delivery waits on its event within the phase bound. The idle minute above already
-    # proves no hold poll runs; the hold below outlasts the bound, so only its release can
-    # deliver the held message, and only expiry can deliver the last one.
+    # Each delivery waits on its event within the phase bound. That the first mail after the
+    # minute gets its permit at once, not after a poll, now rests on the idle minute alone (no
+    # hold poll runs); after_idle_seconds records the latency. The hold below outlasts the
+    # bound, so only its release can deliver the held message, and only expiry the last one.
     def finish(reference, label):
         start = time.monotonic()
         until(lambda: read(reference), seats.bound, label + " did not reach consumption/read")
@@ -881,11 +882,17 @@ def idle_delivery_control(node, seats):
     node.cli("agents", "hold", subject, "--release", "--reason", "fixture release", "--as", "person/eval")
     finish(held, "released")
     node.cli("agents", "hold", subject, "--for", "4s", "--reason", "fixture expiry", "--as", "person/eval")
+    claims = (node.api("/v1/claims?subject=" + subject + "&limit=500") or {}).get("claims", [])
+    hold = max((row for row in claims if row.get("kind") == "delivery.hold"),
+               key=lambda row: row.get("store_index", 0))["body"]["fields"]
     expiry = send("expiry-delivery")
-    time.sleep(1)
-    if read(expiry) or any(row.get("reference") == expiry for row in receipts(node, "a")):
-        fail("a message reached the native provider before hold expiry")
     finish(expiry, "expired")
+    # A slow send can outlast a 4 s hold, so compare the provider's turn with the recorded
+    # expiry instead of checking a fixed second after sending.
+    turns = [row["at"] for row in receipts(node, "a")
+             if row.get("event") == "turn" and expiry.removeprefix("message/") in row.get("text", "")]
+    if not hold.get("held") or not turns or min(turns) * 1000 < hold["until_unix_ms"]:
+        fail(f"a message reached the native provider before hold expiry: {hold} {turns}")
     time.sleep(3)
     counts = Counter(row.get("reference") for row in receipts(node, "a") if row.get("event") == "read")
     for reference in seats.read_probes | {fresh, held, expiry}:
