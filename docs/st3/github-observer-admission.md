@@ -1,58 +1,70 @@
-# Local GitHub observer admission
+# Local GitHub observer request meter and admission
 
 The response meter previously counted only completed resource-provider HTTP
-responses in memory. An interrupted or failed send and a daemon restart could
-lose usage. This change reserves each configured daemon GitHub HTTP send before
-the local reqwest or authorized-RPC path runs, persists the reservation in
-`STATE/github-admission.json`, and reports it separately in
-`doctor` as `github-requests/admitted/CALLER/RESOURCE`.
+responses in memory. A failed send or restart could lose usage. This change
+reserves configured daemon GitHub HTTP requests before local reqwest or the
+existing authorized RPC runs. `STATE/github-admission.json` retains the last
+hour's reservations; doctor reads them as
+`github-requests/admitted/CALLER/RESOURCE` even before a new request after restart.
 
-GLOBAL-VIEW: no. This machine never consults another machine's state, takes a
-distributed lock or assumes it has reserved capacity in a shared token bucket.
-There is still one local repository observer and its existing per-URL conditional
-REST cache. A per-process mutex serializes only this daemon's local journal. The
-existing state directory and daemon singleton own the file; no second poller or
-new token/credential/grant/setting is introduced.
+**Default: meter only, no quota enforcement.** The optional DAEMON setting
+`[github].observer_requests_per_hour = 1000` enables the Factory allocation, per
+resource and per caller, with a shared aggregate of1000 rather than1000 for each
+observer. This is a local config setting, not a GitHub setting. No live config is
+changed. Existing production observer usage is UNKNOWN in this source review.
+Before setting a cap, the owner must measure current per-resource request rates
+including pagination at the5-minute interval and confirm quota/freshness headroom.
+Meter-only I/O failures are visible gaps and do not stop polling; enforced
+observer admissions fail closed on an unproven durable write. Unscoped commands
+remain metered and uncapped; a broken meter must not block merge writes.
 
-An observer's caller is the existing `spend_as` task-local subject, assigned by
-the reconciler. Neither ST_AGENT, URL nor an HTTP header selects it. Observers
-share a1000/hour aggregate ceiling for each request resource and each caller has
-the same per-resource ceiling. Changing observers cannot obtain another1000
-allocation. Core, GraphQL and REST search are separate; these are request counts,
-not a measurement of GraphQL points or a promise about the provider's separate
-search/secondary limits. Admission retains failed sends and304 reservations
-conservatively. A refusal appends no reservation and returns the existing typed
-ProviderRateLimit so reconciliation records the actual next eligible time.
+GLOBAL-VIEW: no. No other machine, distributed lock or shared-token reservation
+is consulted. The existing repository observer and shared per-URL cache remain
+the only poller. A local per-process mutex serializes this daemon's journal. The
+caller is the reconciler's task-local `spend_as` subject, never ST_AGENT or an HTTP
+header. Unenrolled direct comment/merge-gate traffic is `unattributed`; authentic
+per-agent write admission remains a separate obligation.
 
-The existing REST reader retains ETags and sends If-None-Match on revalidation,
-reusing complete bodies and pagination on304. First reads and endpoints that do
-not return an ETag cannot send a valid conditional header. GraphQL does not offer
-ETag revalidation: the shared repository check interval is now at least5minutes
-rather than60seconds; settled repositories remain15minutes. Explicit refresh is
-still an explicit refresh. Existing shared-URL and conditional-read controls are
-retained. No new per-agent polling is added.
+Core, GraphQL and search use separate request counters (including GitHub
+Enterprise `/api/graphql` and `/api/v3/search` path shapes without relaxing any
+existing transport-domain policy). These are NOT GraphQL points, search-provider
+or secondary-limit guarantees. Failed sends and conditional304s remain reserved.
+Refusal adds no reservation and returns the existing typed ProviderRateLimit.
 
-The journal is bounded, written to an exclusive temporary file, fsynced and
-atomically renamed, then its parent fsynced before sending. Its read rejects
-symlinks/nonregular files, invalid records and future timestamps rather than
-resetting usage. A directory-sync failure invalidates the memory copy so the next
-attempt rereads any reservation that the rename already committed. A corrupt
-journal remains a visible doctor gap; no empty fallback erases prior usage.
-Doctor loads prior-hour reservations at configuration, before the first new send.
+Counters are coalesced per minute/caller/resource, including unscoped traffic:
+a100000-call unscoped flood in one minute occupies one row and cannot consume
+the observer quota or fill its row allowance. Whole-minute expiry is conservative
+by at most a minute, so doctor reports a61-minute upper window. Small backward
+clock steps preserve counts and clamp future timestamps to now; timestamps more
+than a day ahead remain invalid. A cold read never silently resets bad data.
 
-Scope still missing: unscoped daemon commands (including merge gates and comment
-writes) do not yet carry an enrolled per-caller identity. They are recorded as
-unattributed and are **not throttled by the observer allowance**. A meter failure
-on that path emits a visible gap and preserves merge availability. This is not
-per-agent write admission or authenticated merge-path enrollment. Requests made
-outside the configured daemon send path, standalone gh, binaries not yet installed
-and protected CI-service signing are separate. No installed/running qualification
-is inferred from this source.
+Publication writes an exclusive private temporary, fsyncs, renames atomically and
+syncs the parent before send. A directory-sync failure invalidates memory so the
+next attempt rereads any committed reservation. Configuration removes stale
+private regular temporaries in a bounded scan, without following symlinks; UUID
+names avoid pid-reuse collisions. Doctor try-locks rather than waiting for disk
+sync, and limits output to127caller/resource groups plus an aggregated other row
+and any fault line. Expected fsync latency has NOT been measured; minute buckets
+reduce file size, but there is still a durable publication per admitted request.
 
-Validation: five new Rust controls cover durable restart/expiry, aggregate-vs-caller
-limits, separate GraphQL requests, refusing without spending, preserving usage
-without a response, corrupt/future state and symlink refusal. They are WRITTEN,
-NOT RUN locally: this host is not authorized for Cargo/native qualification.
-`rustfmt` parsed the new module and `git diff --check` passed. Existing resource
-controls cover shared listing reads and200/304/head-change ETag behavior. Hosted
-qualification and exact-head Intake review are required before a GO.
+Conditional REST behavior is unchanged: valid retained ETags produce
+If-None-Match on revalidation and a304 preserves full bodies/page links. First
+reads and endpoints without ETags cannot supply a valid conditional header.
+GraphQL has no ETag revalidation. Its shared repository minimum is now5minutes
+(was60seconds), settled remains15minutes, explicit refresh remains explicit.
+This visibly affects st gh watch wakes and observer-backed PR/check/queue UI
+freshness, up to5minutes while settling. Curator's source page says live merge
+and ci-passed gates fetch current data and enqueue/merge are direct writes; this
+patch does not replace those live gates with cached PR facts. Consumer coverage
+must still be qualified on the deployed build. No automatic skip or stale-head
+approval follows from the cache or this meter.
+
+Rust controls are WRITTEN, NOT RUN on hetz (no Cargo/native authorization):
+restart/expiry and aggregate limits, separate resource counting, refusal without
+spending, persistence without a response, corrupt/gross-future state, symlink
+refusal, unscoped flood, tolerated skew, meter-only policy, enforced failure vs
+unscoped availability, stale temporary cleanup, and doctor contention. The new
+module parses with rustfmt and the diff passes whitespace checks. Existing
+resource tests cover shared lists and200/304/head-change behavior. Exact-head
+Intake review, ordinary hosted qualification and later deployment evidence are
+required; no live admission or savings claim is made here.
