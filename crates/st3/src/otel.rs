@@ -525,11 +525,64 @@ const DURATION_BUCKET_BOUNDARIES: [f64; 14] = [
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
 ];
 
+pub(crate) const MISSION_LEAD_TIME: &str = "st.mission.run.lead_time";
+pub(crate) const MISSION_LEAD_TIME_BUCKETS: [f64; 10] = [
+    60.0, 300.0, 900.0, 1800.0, 3600.0, 7200.0, 14400.0, 28800.0, 86400.0, 172800.0,
+];
+
+pub(crate) fn mission_lead_time_histogram(meter: opentelemetry::metrics::Meter)
+    -> opentelemetry::metrics::Histogram<f64>
+{
+    meter.f64_histogram(MISSION_LEAD_TIME).with_unit("s")
+        .with_description("Mission run lead time by terminal outcome, recorded by the completing daemon")
+        .with_boundaries(MISSION_LEAD_TIME_BUCKETS.into()).build()
+}
+
+pub(crate) fn record_mission_completion(
+    histogram: &opentelemetry::metrics::Histogram<f64>,
+    sample: &crate::store::mission_metrics::MissionCompletion,
+) {
+    histogram.record(sample.seconds, &[KeyValue::new("st.mission.run.outcome", sample.outcome.as_str())]);
+}
+
+pub struct MissionMetricsTask(tokio::task::JoinHandle<()>);
+
+impl Drop for MissionMetricsTask {
+    fn drop(&mut self) { self.0.abort(); }
+}
+
+/// New terminal receipts only: a bounded catch-up batch per tick, off the async runtime.
+pub fn start_mission_metrics(store: std::sync::Arc<crate::store::Store>) -> Option<MissionMetricsTask> {
+    if !metrics_enabled() { return None; }
+    Some(MissionMetricsTask(tokio::spawn(async move {
+        static HISTOGRAM: std::sync::LazyLock<opentelemetry::metrics::Histogram<f64>> =
+            std::sync::LazyLock::new(|| mission_lead_time_histogram(opentelemetry::global::meter("st3")));
+        let mut cursor = None;
+        let mut ticks = tokio::time::interval(Duration::from_secs(60));
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticks.tick().await;
+            let reader = store.clone();
+            match tokio::task::spawn_blocking(move || reader.mission_completion_batch(cursor)).await {
+                Ok(Ok((next, samples))) => {
+                    cursor = Some(next);
+                    for sample in &samples {
+                        if metrics_enabled() { record_mission_completion(&HISTOGRAM, sample); }
+                    }
+                }
+                Ok(Err(error)) => tracing::warn!(%error, "mission metric batch read failed"),
+                Err(error) => tracing::warn!(%error, "mission metric reader failed"),
+            }
+        }
+    })))
+}
+
 fn duration_view(instrument: &Instrument) -> Option<Stream> {
     if instrument.unit() != "s"
         || instrument.kind() != opentelemetry_sdk::metrics::InstrumentKind::Histogram
         // Startup owns longer, explicit boundaries rather than the request-duration view.
         || instrument.name() == "st.startup.duration"
+        || instrument.name() == MISSION_LEAD_TIME
     {
         return None;
     }
@@ -755,13 +808,15 @@ pub struct Telemetry {
 /// SQLite runs on the SDK-owned blocking metric reader, never on a Tokio worker.
 pub fn register_work_metrics(store: std::sync::Arc<crate::store::Store>) {
     if !metrics_enabled() { return; }
-    register_work_metrics_on(opentelemetry::global::meter("st3"), store);
+    let meter = opentelemetry::global::meter("st3");
+    let sample = register_work_metrics_on(meter.clone(), store);
+    register_mission_wait_metrics_on(meter, sample);
 }
 
 pub(crate) fn register_work_metrics_on(
     meter: opentelemetry::metrics::Meter,
     store: std::sync::Arc<crate::store::Store>,
-) {
+) -> std::sync::Arc<impl Fn() -> Option<crate::store::flow_metrics::FlowSnapshot> + Send + Sync> {
     use crate::store::flow_metrics::{FlowSnapshot, WORK_STATES};
     struct Cache {
         sampled: Option<Instant>,
@@ -808,11 +863,48 @@ pub(crate) fn register_work_metrics_on(
         .with_callback(move |observer| {
             if let Some(value) = holders() { observer.observe(value.with_work, &[]); }
         }).build();
+    let idle = sample.clone();
     meter.u64_observable_gauge("st.agents.idle_with_work")
         .with_unit("{agent}")
         .with_description("Work holders with no replicated substantive activity for over 600 seconds")
         .with_callback(move |observer| {
-            if let Some(value) = sample() { observer.observe(value.idle_with_work, &[]); }
+            if let Some(value) = idle() { observer.observe(value.idle_with_work, &[]); }
+        }).build();
+    sample
+}
+
+pub(crate) fn register_mission_wait_metrics_on(
+    meter: opentelemetry::metrics::Meter,
+    sample: std::sync::Arc<impl Fn() -> Option<crate::store::flow_metrics::FlowSnapshot> + Send + Sync + 'static>,
+) {
+    use crate::store::mission_metrics::WAIT_REASONS;
+    let counts = sample.clone();
+    meter.u64_observable_gauge("st.mission.steps.waiting")
+        .with_unit("{step}")
+        .with_description("Current fleet mission steps waiting by bounded reason")
+        .with_callback(move |observer| {
+            if let Some(value) = counts().filter(|value| value.mission_wait.unknown == 0) {
+                for (reason, count) in WAIT_REASONS.into_iter().zip(value.mission_wait.counts) {
+                    observer.observe(count, &[KeyValue::new("st.mission.wait_reason", reason)]);
+                }
+            }
+        }).build();
+    let ages = sample.clone();
+    meter.f64_observable_gauge("st.mission.steps.oldest_wait")
+        .with_unit("s")
+        .with_description("Oldest current mission wait by bounded reason")
+        .with_callback(move |observer| {
+            if let Some(value) = ages().filter(|value| value.mission_wait.unknown == 0) {
+                for (reason, age) in WAIT_REASONS.into_iter().zip(value.mission_wait.oldest_seconds) {
+                    observer.observe(age, &[KeyValue::new("st.mission.wait_reason", reason)]);
+                }
+            }
+        }).build();
+    meter.u64_observable_gauge("st.mission.steps.wait_unknown")
+        .with_unit("{step}")
+        .with_description("Current steps with missing, dirty or pending clock evidence; reason gauges are omitted when nonzero")
+        .with_callback(move |observer| {
+            if let Some(value) = sample() { observer.observe(value.mission_wait.unknown, &[]); }
         }).build();
 }
 

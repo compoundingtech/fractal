@@ -1,5 +1,6 @@
 mod trace_principal;
 pub(crate) mod flow_metrics;
+pub(crate) mod mission_metrics;
 #[cfg(test)]
 mod accountable_tests;
 pub mod custom;

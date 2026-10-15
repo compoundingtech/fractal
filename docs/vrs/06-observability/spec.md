@@ -324,15 +324,17 @@ max(st_agents_idle_with_work) / max(st_agents_with_work)
 
 Use the existing resource/`target_info` join for host attribution rather than adding a host
 label. No subject, agent, work identifier, free text, process identifier, revision or PR is
-a metric attribute. There are exactly ten gauge points per daemon sample.
+a metric attribute. These four instruments publish exactly ten gauge points per daemon sample.
 
 The SDK-owned blocking metric reader performs one reader-pool statement at most every
 60 seconds, shared by every gauge callback; it never takes the writer or enters a Tokio
 worker. It walks only `step_runs_open_index`, joins owners by primary key, and performs
 one indexed latest-claim seek per open step plus four indexed latest-activity seeks per
-distinct holder. Thus the hard probe cap is `W + 4H`, where `W` is current
-open projected work and `H <= W` is distinct held agents, independent of
-completed history. Snapshot memory is O(W + H); export callback output is constant size.
+distinct holder. Mission waits share this same statement and cache, adding three indexed
+state/retry/carry timestamp seeks and three clock/dirty/pending projection seeks per step.
+Including three owner joins, the hard point-lookup cap is `10W + 4H`, where `W` is current
+open projected work and `H <= W` is distinct held agents, independent of completed history.
+Snapshot memory is O(W + H); export callback output is constant size.
 Failed refreshes omit samples rather than export stale values or fabricated zeros.
 `flow_metrics_cost_is_independent_of_completed_history` records elapsed time and SQLite VM
 work at two completed-history sizes and asserts bounded growth.
@@ -379,3 +381,81 @@ max by (st_person, st_attention_kind) (st_attention_oldest_age_seconds)
 
 Use the existing resource/`target_info` join for host attribution. During replication or
 publication lag, max is an upper envelope; it is exact after convergence.
+
+### Fleet mission flow metrics (O11Y-R18)
+
+```text
+current work + clean projected clocks -> shared work snapshot -> wait gauges
+new local terminal receipts          -> bounded reader task  -> lead-time histogram
+```
+
+| Instrument | Type | Unit | Labels | Source |
+| --- | --- | --- | --- | --- |
+| `st.mission.run.lead_time` | histogram | `s` | `st.mission.run.outcome` = `succeeded`, `failed`, `cancelled` | First locally authored terminal-state receipt minus run creation |
+| `st.mission.steps.waiting` | gauge | `{step}` | `st.mission.wait_reason` = `human`, `dependency`, `infrastructure` | Current open work and clean current-attempt clock projection |
+| `st.mission.steps.oldest_wait` | gauge | `s` | same bounded wait reasons | Oldest start among the same waiting steps |
+| `st.mission.steps.wait_unknown` | gauge | `{step}` | none | Working/claimed steps whose current clock is absent, pending, dirty, or has the wrong attempt |
+
+Wait reasons are a projection mapping, not an interpretation of titles or arbitrary summaries:
+
+| Evidence | Reason | Wait start |
+| --- | --- | --- |
+| `waiting-person` | human | Latest state transition |
+| `ready` or `pending`, assigned to a person | human | Readiness activation, or state transition if not activated |
+| Other `pending` steps, including scheduled backoff | dependency | Latest state/retry/carry transition |
+| `blocked` on the scheduler's `step baseline` predicate | dependency | Latest state transition |
+| Agentless `working` step with the scheduler's `waiting for` mission-run dependency | dependency | Latest state transition |
+| Active declared work wait | dependency | Clock projection `pause_started` |
+| Other `blocked` or `orphaned` steps | infrastructure | Latest state transition |
+
+Initial state has creation time as its fallback. State-transition time is the greatest
+acceptance time among the latest `step-run.state`, `step-run.retried`, and `step-run.carried`
+receipts, read by indexed seeks. Lease renewals do not shorten a wait's measured age.
+A declared wait remains active through `paused_until` inclusive, matching the clock reducer.
+The read joins `local_step_clocks` by subject and current attempt and rejects rows with
+`local_step_clock_pending` or `local_step_clock_dirty` evidence. It reads raw pause fields
+without invoking the reducer or its history fallback. A missing pause start for an active
+declared wait is unknown as well.
+
+When any required clock is unknown, reason counts and oldest-wait gauges are omitted rather
+than publish incomplete totals. The unlabeled unknown gauge remains visible and reports how
+many steps are omitted. These gauges share the work sampler's single reader statement and
+60-second cache; they add no separate export query or async-runtime read.
+
+The lead-time sampler is a daemon-owned task on the existing runtime, with SQLite reads in
+`spawn_blocking` through the reader pool only. At startup its first tick records the current
+store frontier without backfilling history. Every subsequent 60-second tick reads at most
+1024 new `mission-run.state` receipts through `claims_kind_index` and advances only through
+the returned batch. A larger backlog continues on following ticks; no tail is skipped.
+The query joins creation times by run primary key, has O(1024) maximum rows and O(1024)
+temporary memory per tick, and is independent of total run history. Read failure preserves
+the cursor and retries next tick; missing run projection also fails the batch rather than
+drop a completion.
+
+Only the authoring daemon records receipts with `phase=terminal`; replication copies do
+not record, and later outcome corrections without that phase do not record again. Outcomes
+map `completed` to `succeeded`, `failed` to `failed`, and `cancelled` to `cancelled`.
+This covers ordinary completion and descendant/direct cancellation paths without adding
+writer hooks or changing lifecycle behavior. Lead time is receipt acceptance minus creation,
+clamped at zero for clock skew, in seconds. Explicit buckets are
+60, 300, 900, 1800, 3600, 7200, 14400, 28800, 86400, and 172800 seconds, plus infinity.
+These are process metrics, not a durable outcome ledger: a process restart begins a new
+frontier, so a completion during its downtime is not backfilled. The task aborts when its
+daemon-owned handle drops.
+
+Wait gauges are fleet-wide replicas and use max. Lead-time buckets are owner-emitted
+events, so sum per-node rates rather than max:
+
+```promql
+max by (st_mission_wait_reason) (st_mission_steps_waiting)
+  unless on() (max(st_mission_steps_wait_unknown) > 0)
+max by (st_mission_wait_reason) (st_mission_steps_oldest_wait_seconds)
+  unless on() (max(st_mission_steps_wait_unknown) > 0)
+max(st_mission_steps_wait_unknown)
+histogram_quantile(0.5, sum by (le) (rate(st_mission_run_lead_time_seconds_bucket[1d])))
+histogram_quantile(0.9, sum by (le) (rate(st_mission_run_lead_time_seconds_bucket[1d])))
+```
+
+The unknown guard also hides previously scraped reason values while a fresh sample is
+unavailable. Add `st_mission_run_outcome` to the histogram's `sum by` for per-outcome quantiles.
+No mission, run, step, agent, subject or free-text value is a metric label.

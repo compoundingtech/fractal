@@ -15,6 +15,7 @@ pub(crate) struct FlowSnapshot {
     pub oldest_seconds: [f64; 4],
     pub with_work: u64,
     pub idle_with_work: u64,
+    pub mission_wait: super::mission_metrics::MissionWaitMetrics,
 }
 
 // One statement; four latest-entry index seeks per distinct holder.
@@ -27,11 +28,32 @@ WITH work AS MATERIALIZED (
         COALESCE((SELECT CAST(accepted_at_unix_ms AS INTEGER) FROM claims
           WHERE subject=s.subject AND kind='work.claimed'
           ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1),
-          CAST(s.created_at_unix_ms AS INTEGER)) AS claimed_at
+          CAST(s.created_at_unix_ms AS INTEGER)) AS claimed_at,
+        CASE WHEN s.blocked_reason GLOB 'step baseline `*' THEN 1
+             WHEN s.blocked_reason GLOB 'waiting for `mission-run/*' THEN 2
+             ELSE 0 END AS reason_class,
+        CAST(s.activated_at_unix_ms AS INTEGER) AS activated,
+        MAX(CAST(s.created_at_unix_ms AS INTEGER),
+          COALESCE((SELECT CAST(accepted_at_unix_ms AS INTEGER) FROM claims
+            WHERE subject=s.subject AND kind='step-run.state'
+            ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1),0),
+          COALESCE((SELECT CAST(accepted_at_unix_ms AS INTEGER) FROM claims
+            WHERE subject=s.subject AND kind='step-run.retried'
+            ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1),0),
+          COALESCE((SELECT CAST(accepted_at_unix_ms AS INTEGER) FROM claims
+            WHERE subject=s.subject AND kind='step-run.carried'
+            ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1),0)
+        ) AS state_since,
+        json_extract(c.state,'$.pause_started') AS pause_started,
+        json_extract(c.state,'$.paused_until') AS paused_until,
+        c.subject IS NOT NULL AS clock_known, s.agentless
  FROM step_runs s INDEXED BY step_runs_open_index
  JOIN mission_runs r ON r.id=s.run_id
  JOIN run_generations g ON g.id=s.generation_id
  JOIN mission_runs root ON root.id=r.root_run_id
+ LEFT JOIN local_step_clocks c ON c.subject=s.subject AND c.attempt=s.attempt
+   AND NOT EXISTS(SELECT 1 FROM local_step_clock_pending WHERE subject=s.subject)
+   AND NOT EXISTS(SELECT 1 FROM local_step_clock_dirty WHERE subject=s.subject)
  WHERE s.status NOT IN ('completed','failed','cancelled')
    AND s.generation_id=r.current_generation_id
    AND r.status NOT IN ('completed','failed','cancelled') AND r.phase!='terminal'
@@ -48,7 +70,9 @@ WITH work AS MATERIALIZED (
     AND (expires IS NULL OR expires>?1)
  ) WHERE position=1
 )
-SELECT 0, status, assignee, lease_owner, expires, updated, NULL FROM work
+SELECT 0, status, assignee, lease_owner, expires, updated, NULL,
+       reason_class, activated, state_since, pause_started, paused_until, clock_known, agentless
+FROM work
 UNION ALL
 SELECT 1, agent, NULL, NULL, NULL, since,
  MAX(
@@ -65,7 +89,8 @@ SELECT 1, agent, NULL, NULL, NULL, since,
   WHERE subject=holders.agent AND kind='harness.timeline'
    AND json_extract(body,'$.fields.incarnation_id')=holders.incarnation
    AND json_extract(body,'$.fields.entry_type') IN ('message','content','tool_call','tool_result')
-  ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1),0))
+  ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1),0)),
+ NULL, NULL, NULL, NULL, NULL, NULL, NULL
 FROM holders
 "#;
 
@@ -130,6 +155,18 @@ fn flow_snapshot_tx(connection: &Connection, now: i64) -> Result<FlowSnapshot> {
         result.counts[bucket] += 1;
         result.oldest_seconds[bucket] = result.oldest_seconds[bucket]
             .max(now.saturating_sub(updated).max(0) as f64 / 1000.0);
+        let evidence = super::mission_metrics::MissionWaitEvidence {
+            state,
+            person: assignee.as_deref().is_some_and(|a| a.starts_with("person/")),
+            reason: row.get(7)?,
+            activated: row.get(8)?,
+            state_since: row.get(9)?,
+            pause_started: row.get(10)?,
+            paused_until: row.get(11)?,
+            clock_known: row.get(12)?,
+            agentless: row.get(13)?,
+        };
+        evidence.observe(&mut result.mission_wait, now);
     }
     result.with_work = holders.len() as u64;
     result.idle_with_work = holders.values().filter(|last| now.saturating_sub(**last) > 600_000).count() as u64;

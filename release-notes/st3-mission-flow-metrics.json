@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Export bounded mission wait gauges, visible unknown-clock counts, and terminal-outcome lead-time histograms",
+  "replay": { "status": "none", "detail": "Metrics never backfill or alter claim history." },
+  "schema": { "status": "none", "detail": "Reads existing work and current-attempt clock projections; no additional schema or migration." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "Additive OTLP instruments only; lifecycle, client, peer and harness protocols remain unchanged." },
+  "downtime": { "status": "none", "detail": "No interruption beyond a normal daemon upgrade." },
+  "manual": { "status": "none", "detail": "Use max for replicated wait gauges and sum of per-node bucket rates for owner-emitted lead-time histograms. Unknown-clock counts guard incomplete waits." },
+  "recovery": { "status": "none", "detail": "No persistent metric state; process restarts establish a fresh completion frontier without replaying past runs." }
+}

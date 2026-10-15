@@ -6829,6 +6829,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     })?);
     st3::otel::register_work_metrics(store.clone());
     st3::otel::register_attention_metrics(store.clone(), config.person.as_deref());
+    let _mission_metrics = st3::otel::start_mission_metrics(store.clone());
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
     }
