@@ -19,6 +19,16 @@ pub(super) struct BundleSecurity {
     style_sources: String,
 }
 
+pub(super) fn is_executable(file: &Path) -> bool {
+    file.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["js", "mjs", "cjs"]
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        })
+}
+
 impl BundleSecurity {
     pub fn load(root: &Path, mount: &str) -> Result<Self> {
         let mut html = HashMap::new();
@@ -33,7 +43,7 @@ impl BundleSecurity {
                 continue;
             }
             let extension = entry.path().extension().and_then(|value| value.to_str());
-            if !matches!(extension, Some("html" | "js" | "mjs")) {
+            if extension != Some("html") && !is_executable(entry.path()) {
                 continue;
             }
             let path = std::fs::canonicalize(entry.path()).context("resolve bundle asset")?;

@@ -268,6 +268,11 @@ fall back to the root index for client-side routing. Missing assets return `404`
 symlinks cannot escape the configured directory. The static bundle is public within the trusted
 tailnet carrier, not an authenticated API, and must not contain credentials or private data.
 
+Compatibility: enabling a bundle changes `GET /` and the bare configured mount
+(`GET /app` by default) into redirects to the mount's trailing-slash URL. With no bundle
+configured, existing routing is unchanged. Bundle responses, including redirects and errors,
+send `X-Content-Type-Options: nosniff`.
+
 Browsers complete the same pairing as native clients and receive the same scoped bearer in JSON.
 The TypeScript client's `IndexedDbCredentialStore` keeps it in IndexedDB, keyed by the gateway
 origin and base path, and supplies it through the client's `credential` callback. Delete the entry
@@ -310,7 +315,8 @@ fail startup instead of relaxing CSP; externalize the style for other React Aria
 At startup the gateway parses every installed HTML document, rejects external, missing or escaping
 script/style references and base overrides, and computes SHA384 `integrity` attributes on script,
 stylesheet, script/style preload and modulepreload tags. Asset URLs become mount-absolute paths
-so deep SPA routes retain the same resolution. Every built `.js`/`.mjs` chunk receives an
+so deep SPA routes retain the same resolution. Every built `.js`/`.mjs`/`.cjs` chunk, matched
+case-insensitively, receives an
 integrity-bearing modulepreload as browser defense in depth. Independently, the server pins each
 registered executable's SHA384 hash at startup and verifies the exact response bytes before
 serving them, including on HEAD and query-variant requests. Changed or newly added executables
@@ -326,9 +332,18 @@ Only `/api/v1/quota` and `/api/v1/lens/usage_over_time` on the configured upstre
 history pins `window=all`, `group_by=account`, `bucket=day` and the requested account as `group`.
 Responses are returned unchanged. Quota reads cache for five seconds and history for sixty;
 identical concurrent requests share one fetch. Failed reads are not cached.
-The telemetry route, `POST /v1/client/telemetry/traces`, accepts OTLP JSON and
-relays to the collector's `/v1/traces`; it does not rewrite resource attributes. Relays require
-the existing paired client boundary and return `404` when their endpoint is absent.
+The cache retains at most 64 entries, evicting the oldest insertion when full. History account
+identifiers must be nonempty and at most 256 UTF-8 bytes. These bound retained cache entries and
+keys, not total simultaneous usage requests or upstream authorization per account.
+The telemetry route, `POST /v1/client/telemetry/traces`, accepts at most 4 MiB of OTLP JSON and
+relays to the collector's `/v1/traces`; it does not rewrite resource attributes. At most four
+client exports may be in flight per gateway; excess requests return `429` with the existing
+`rate-limited` error shape, without queueing or contacting the collector. The permit covers
+request-body reading, forwarding and collector-response buffering. The collector's HTTP status
+and response body pass through unchanged. Relays require the existing paired client boundary
+and return `404` when their endpoint is absent. Client telemetry is untrusted input. Upstream
+responses are buffered under a trusted-upstream assumption: the usage size check runs after
+buffering, and collector response bytes are not capped.
 These relays do not read or write the local graph; the daemon graph-cost inventory records
 them as outside-graph endpoints rather than measuring upstream usage or collector work.
 

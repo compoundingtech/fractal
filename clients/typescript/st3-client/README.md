@@ -122,7 +122,7 @@ pnpm --filter @smalltalk/st3-client run typecheck:schema
 ```
 The browser integration check requires a local Chromium executable (defaults to `chromium`) and the same TypeScript installation as the contract checks. It exercises real IndexedDB persistence across navigation, gateway isolation, overwrite/deletion, credential callbacks, and native browser WebSocket handshakes for all three streams.
 
-`pnpm --filter @smalltalk/st3-client run test:socket` requires Node and Bun on PATH.
-It starts a loopback WebSocket server and checks actual Authorization headers and offered
-protocols for terminal, conversation and collection streams from both runtimes, without
-replacing their WebSocket constructors.
+`pnpm --filter @smalltalk/st3-client run test:socket` checks actual Authorization headers and
+offered protocols against a loopback WebSocket server for terminal, conversation and collection
+streams, without replacing runtime WebSocket constructors. CI always runs the Node proof.
+When Bun is not on PATH, its subtest reports a visible skip; the Bun proof is local-only.

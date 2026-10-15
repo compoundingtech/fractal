@@ -11,6 +11,7 @@ use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Extension, RawQuery, State};
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_LENGTH, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST, LOCATION,
+    X_CONTENT_TYPE_OPTIONS,
 };
 use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::middleware::Next;
@@ -18,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use futures_util::future::{BoxFuture, FutureExt as _, Shared};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::time::Instant;
 
 use super::{ApiError, AppState};
@@ -30,6 +31,9 @@ use security::BundleSecurity;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(5);
 const USAGE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const OTLP_MAX_BYTES: usize = 4 * 1024 * 1024;
+const USAGE_CACHE_ENTRIES: usize = 64;
+const USAGE_ACCOUNT_MAX_BYTES: usize = 256;
+const OTLP_MAX_IN_FLIGHT: usize = 4;
 const QUOTA_TTL: Duration = Duration::from_secs(5);
 const HISTORY_TTL: Duration = Duration::from_secs(60);
 
@@ -139,7 +143,8 @@ pub struct ClientWeb {
     security: Option<BundleSecurity>,
     usage: Option<UsageConfig>,
     http: reqwest::Client,
-    usage_reads: Mutex<HashMap<String, UsageRead>>,
+    usage_reads: Mutex<HashMap<String, (Instant, UsageRead)>>,
+    telemetry_slots: Semaphore,
     node: String,
 }
 
@@ -195,6 +200,7 @@ impl ClientWeb {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             usage_reads: Mutex::new(HashMap::new()),
+            telemetry_slots: Semaphore::new(OTLP_MAX_IN_FLIGHT),
         }))
     }
 
@@ -215,14 +221,14 @@ impl ClientWeb {
             let mut reads = self.usage_reads.lock().await;
             // Completed errors never become cached answers. Pending futures remain shareable even
             // if their first caller disconnects; the next caller drives the same fetch to completion.
-            reads.retain(|_, read| match read.peek() {
+            reads.retain(|_, (_, read)| match read.peek() {
                 None => true,
                 Some(Ok(answer)) => answer.fetched.elapsed() < HISTORY_TTL,
                 Some(Err(_)) => false,
             });
             if reads
                 .get(&url)
-                .and_then(Shared::peek)
+                .and_then(|(_, read)| read.peek())
                 .is_some_and(|answer| {
                     answer
                         .as_ref()
@@ -231,11 +237,16 @@ impl ClientWeb {
             {
                 reads.remove(&url);
             }
+            if !reads.contains_key(&url) && reads.len() >= USAGE_CACHE_ENTRIES {
+                let oldest = reads.values().map(|(inserted, _)| *inserted).min().unwrap();
+                // Remove one oldest entry without copying its account-bearing URL.
+                let _ = reads.extract_if(|_, (inserted, _)| *inserted == oldest).next();
+            }
             reads
                 .entry(url.clone())
                 .or_insert_with(|| {
                     let http = self.http.clone();
-                    async move {
+                    (Instant::now(), async move {
                         let upstream = http
                             .get(url)
                             .header("accept", "application/json")
@@ -267,8 +278,9 @@ impl ClientWeb {
                         })
                     }
                     .boxed()
-                    .shared()
+                    .shared())
                 })
+                .1
                 .clone()
         };
         read.await.map(|answer| answer.body)
@@ -321,6 +333,9 @@ async fn static_or_next(
     };
     response.headers_mut().insert(CONTENT_SECURITY_POLICY, csp);
     response
+        .headers_mut()
+        .insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    response
 }
 
 async fn serve_static(web: &ClientWeb, relative: &str, head: bool) -> Response {
@@ -364,9 +379,7 @@ async fn serve_static(web: &ClientWeb, relative: &str, head: bool) -> Response {
         .security
         .as_ref()
         .and_then(|security| security.html.get(&file));
-    let executable = file
-        .extension()
-        .is_some_and(|value| value == "js" || value == "mjs");
+    let executable = security::is_executable(&file);
     let (length, mut response) = if file.extension().is_some_and(|value| value == "html") {
         // HTML added after startup has not passed the build security boundary.
         let Some(document) = document else {
@@ -426,7 +439,7 @@ async fn serve_static(web: &ClientWeb, relative: &str, head: bool) -> Response {
 fn content_type(file: &Path) -> &'static str {
     match file.extension().and_then(|extension| extension.to_str()) {
         Some("html") => "text/html; charset=utf-8",
-        Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        _ if security::is_executable(file) => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("json" | "map") => "application/json",
         Some("webmanifest") => "application/manifest+json",
@@ -472,14 +485,16 @@ pub(super) async fn usage_history(
     params.set_query(query.as_deref());
     let mut pairs = params.query_pairs();
     let account = match (pairs.next(), pairs.next()) {
-        (Some((key, account)), None) if key == "account" && !account.is_empty() => {
+        (Some((key, account)), None)
+            if key == "account" && !account.is_empty() && account.len() <= USAGE_ACCOUNT_MAX_BYTES =>
+        {
             account.into_owned()
         }
         _ => {
             return Err(relay_error(
                 StatusCode::BAD_REQUEST,
                 "validation-failed",
-                "expected exactly ?account=<ledgerAccountId>",
+                "expected exactly ?account=<ledgerAccountId> with an account of at most 256 bytes",
             ));
         }
     };
@@ -540,6 +555,13 @@ pub(super) async fn telemetry_traces(
         .otlp_endpoint
         .as_ref()
         .ok_or_else(|| ApiError::not_found("this gateway has no telemetry relay"))?;
+    let _permit = web.telemetry_slots.try_acquire().map_err(|_| {
+        relay_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate-limited",
+            "the telemetry relay already has four exports in flight",
+        )
+    })?;
     if !request
         .headers()
         .get(CONTENT_TYPE)
@@ -759,6 +781,154 @@ mod tests {
             "test-node".into(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn static_responses_nosniff_and_pin_case_insensitive_executables() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("index.html"), "<main>client</main>").unwrap();
+        for name in ["main.JS", "module.MjS", "common.cJs"] {
+            std::fs::write(root.path().join(name), "export default 1;").unwrap();
+        }
+        let app = wrap(
+            Router::new(),
+            web(
+                ClientWebConfig {
+                    static_dir: Some(root.path().into()),
+                    ..Default::default()
+                },
+                None,
+            ),
+        );
+        for path in ["/", "/app", "/app/", "/app/deep/route", "/app/missing.js"] {
+            let response = app.clone().oneshot(
+                Request::builder().uri(path).body(Body::empty()).unwrap()
+            ).await.unwrap();
+            assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff", "{path}");
+        }
+        for name in ["main.JS", "module.MjS", "common.cJs"] {
+            let response = app.clone().oneshot(
+                Request::builder().uri(format!("/app/{name}")).body(Body::empty()).unwrap()
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[CONTENT_TYPE], "text/javascript; charset=utf-8");
+            assert_eq!(body(response).await, "export default 1;");
+            std::fs::write(root.path().join(name), "export default 2;").unwrap();
+            for method in [Method::GET, Method::HEAD] {
+                let response = app.clone().oneshot(
+                    Request::builder().method(method).uri(format!("/app/{name}?v=2"))
+                        .body(Body::empty()).unwrap()
+                ).await.unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{name}");
+                assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
+            }
+        }
+        std::fs::write(root.path().join("new.CJS"), "export default 3;").unwrap();
+        let response = app.oneshot(
+            Request::builder().uri("/app/new.CJS").body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
+    }
+
+    #[tokio::test]
+    async fn usage_cache_caps_entries_evicts_oldest_and_bounds_account_bytes() {
+        let upstream = server(Router::new().fallback(|| async { "{}" })).await;
+        let runtime = web(Default::default(), Some(upstream.endpoint.clone()));
+        for index in 0..USAGE_CACHE_ENTRIES {
+            usage_history(
+                Some(Extension(runtime.clone())),
+                RawQuery(Some(format!("account=account-{index}"))),
+            ).await.unwrap();
+        }
+        {
+            let mut reads = runtime.usage_reads.lock().await;
+            assert_eq!(reads.len(), USAGE_CACHE_ENTRIES);
+            let (_, (inserted, _)) = reads.iter_mut()
+                .find(|(url, _)| url.ends_with("group=account-0")).unwrap();
+            *inserted = Instant::now() - Duration::from_secs(30);
+        }
+        usage_history(
+            Some(Extension(runtime.clone())),
+            RawQuery(Some("account=new-account".into())),
+        ).await.unwrap();
+        {
+            let reads = runtime.usage_reads.lock().await;
+            assert_eq!(reads.len(), USAGE_CACHE_ENTRIES);
+            assert!(!reads.keys().any(|url| url.ends_with("group=account-0")));
+            assert!(reads.keys().any(|url| url.ends_with("group=new-account")));
+        }
+        usage_history(
+            Some(Extension(runtime.clone())),
+            RawQuery(Some(format!("account={}", "a".repeat(USAGE_ACCOUNT_MAX_BYTES)))),
+        ).await.unwrap();
+        for account in ["a".repeat(USAGE_ACCOUNT_MAX_BYTES + 1), "é".repeat(129)] {
+            let error = usage_history(
+                Some(Extension(runtime.clone())),
+                RawQuery(Some(format!("account={account}"))),
+            ).await.unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, "validation-failed");
+        }
+        assert_eq!(runtime.usage_reads.lock().await.len(), USAGE_CACHE_ENTRIES);
+    }
+
+    #[tokio::test]
+    async fn telemetry_limits_concurrent_exports_and_returns_capacity() {
+        let gate = Arc::new(Semaphore::new(0));
+        let (entered, mut requests) = mpsc::unbounded_channel();
+        let collector = server(Router::new().route("/v1/traces", post({
+            let gate = gate.clone();
+            move || {
+                let gate = gate.clone();
+                let entered = entered.clone();
+                async move {
+                    entered.send(()).unwrap();
+                    gate.acquire().await.unwrap().forget();
+                    (StatusCode::ACCEPTED, "{}")
+                }
+            }
+        }))).await;
+        let runtime = web(ClientWebConfig {
+            otlp_endpoint: Some(collector.endpoint.clone()),
+            ..Default::default()
+        }, None);
+        let request = || Request::builder().method(Method::POST)
+            .header(CONTENT_TYPE, "application/json").body(Body::from("{}")).unwrap();
+        let mut exports = Vec::new();
+        for _ in 0..OTLP_MAX_IN_FLIGHT {
+            let runtime = runtime.clone();
+            let request = request();
+            exports.push(tokio::spawn(async move {
+                telemetry_traces(Some(Extension(runtime)), request).await
+            }));
+        }
+        for _ in 0..OTLP_MAX_IN_FLIGHT {
+            requests.recv().await.unwrap();
+        }
+        let error = telemetry_traces(Some(Extension(runtime.clone())), request()).await.unwrap_err();
+        assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error.code, "rate-limited");
+        assert!(error.details.is_empty());
+        assert!(requests.try_recv().is_err());
+        gate.add_permits(OTLP_MAX_IN_FLIGHT);
+        for export in exports {
+            assert_eq!(export.await.unwrap().unwrap().status(), StatusCode::ACCEPTED);
+        }
+        assert_eq!(runtime.telemetry_slots.available_permits(), OTLP_MAX_IN_FLIGHT);
+        gate.add_permits(1);
+        assert_eq!(
+            telemetry_traces(Some(Extension(runtime.clone())), request()).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        let oversized = Request::builder().method(Method::POST)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(vec![b' '; OTLP_MAX_BYTES + 1])).unwrap();
+        assert_eq!(
+            telemetry_traces(Some(Extension(runtime.clone())), oversized).await.unwrap_err().status,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(runtime.telemetry_slots.available_permits(), OTLP_MAX_IN_FLIGHT);
     }
 
     #[tokio::test]

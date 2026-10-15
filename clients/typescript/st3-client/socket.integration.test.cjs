@@ -9,7 +9,7 @@ const { spawn } = require('node:child_process');
 const ts = require('typescript');
 
 // Exercise each runtime's actual WebSocket constructor, not a socket factory double.
-test('Node and Bun default sockets send Authorization without a bearer subprotocol', { timeout: 15000 }, async () => {
+test('native default sockets send Authorization without a bearer subprotocol', { timeout: 15000 }, async t => {
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'st3-native-sockets-'));
     const sockets = new Set();
     const upgrades = [];
@@ -53,25 +53,35 @@ test('Node and Bun default sockets send Authorization without a bearer subprotoc
                 }
             })().catch(error => { console.error(error); process.exit(1); });
         `;
-        for (const runtime of [process.execPath, 'bun']) {
-            const child = spawn(runtime, ['--eval', program], { stdio: ['ignore', 'pipe', 'pipe'] });
-            let output = '';
-            child.stdout.on('data', data => { output += data; });
-            child.stderr.on('data', data => { output += data; });
-            const deadline = setTimeout(() => child.kill('SIGKILL'), 5000);
-            try {
-                const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); });
-                assert.equal(code, 0, `${runtime}: ${output}`);
-            } finally {
-                clearTimeout(deadline);
-                child.kill();
-            }
-        }
-        const expected = ['st3.client.terminal.v0', 'st3.client.conversation.v0', 'st3.client.collections.v0'];
-        assert.equal(upgrades.length, 6);
-        for (const [index, upgrade] of upgrades.entries()) {
-            assert.equal(upgrade.authorization, 'Bearer native-header-proof');
-            assert.deepEqual(upgrade.protocols, [expected[index % 3], ...(index % 3 === 0 ? ['st3.cap.attach-proof'] : [])]);
+        for (const [name, runtime] of [['Node', process.execPath], ['Bun', 'bun']]) {
+            await t.test(name, async t => {
+                const start = upgrades.length;
+                const child = spawn(runtime, ['--eval', program], { stdio: ['ignore', 'pipe', 'pipe'] });
+                let output = '';
+                child.stdout.on('data', data => { output += data; });
+                child.stderr.on('data', data => { output += data; });
+                const deadline = setTimeout(() => child.kill('SIGKILL'), 5000);
+                try {
+                    const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); });
+                    assert.equal(code, 0, `${runtime}: ${output}`);
+                } catch (error) {
+                    if (name === 'Bun' && error.code === 'ENOENT') {
+                        t.skip('Bun is not on PATH; the Bun handshake proof is local-only');
+                        return;
+                    }
+                    throw error;
+                } finally {
+                    clearTimeout(deadline);
+                    child.kill();
+                }
+                const expected = ['st3.client.terminal.v0', 'st3.client.conversation.v0', 'st3.client.collections.v0'];
+                const received = upgrades.slice(start);
+                assert.equal(received.length, 3);
+                for (const [index, upgrade] of received.entries()) {
+                    assert.equal(upgrade.authorization, 'Bearer native-header-proof');
+                    assert.deepEqual(upgrade.protocols, [expected[index], ...(index === 0 ? ['st3.cap.attach-proof'] : [])]);
+                }
+            });
         }
     } finally {
         for (const socket of sockets) socket.destroy();
