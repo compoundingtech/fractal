@@ -24068,7 +24068,7 @@ async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Resu
         .await?;
     // Most resident seats hold no work. Only a held claim needs the status reduction
     // that proves its harness incarnation is still live before renewing the lease.
-    if !work.iter().any(|step| work_claim_is_held_by(step, subject)) {
+    if !work.iter().any(|step| step.work_claim_is_held_by(subject)) {
         return Ok(());
     }
     let status: StatusResponse = client
@@ -24195,19 +24195,12 @@ fn renewal_lost_its_claim(error: &anyhow::Error) -> bool {
     )
 }
 
-fn work_claim_is_held_by(step: &StepRunView, subject: &str) -> bool {
-    matches!(
-        step.status.as_str(),
-        "claimed" | "working" | "verifying" | "blocked"
-    ) && step.claimant.as_deref() == Some(subject)
-}
-
 fn work_claim_has_active_harness(
     step: &StepRunView,
     subject: &str,
     harness: Option<&CurrentHarnessView>,
 ) -> bool {
-    work_claim_is_held_by(step, subject)
+    step.work_claim_is_held_by(subject)
         && harness.is_some_and(|harness| {
             harness.state != "ended"
                 && step.claim_incarnation.as_deref() == Some(harness.incarnation_id.as_str())
@@ -30007,13 +30000,13 @@ mod tests {
         for state in ["claimed", "working", "verifying", "blocked"] {
             let mut held = step.clone();
             held.status = state.into();
-            assert!(work_claim_is_held_by(&held, "agent/node.worker"));
-            assert!(!work_claim_is_held_by(&held, "agent/other"));
+            assert!(held.work_claim_is_held_by("agent/node.worker"));
+            assert!(!held.work_claim_is_held_by("agent/other"));
         }
         for state in ["ready", "pending", "completed", "cancelled", "failed"] {
             let mut unheld = step.clone();
             unheld.status = state.into();
-            assert!(!work_claim_is_held_by(&unheld, "agent/node.worker"));
+            assert!(!unheld.work_claim_is_held_by("agent/node.worker"));
         }
     }
 

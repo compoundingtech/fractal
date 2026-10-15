@@ -42,7 +42,7 @@ they are not shared state folds. Reason selection uses canonical claim order, in
 from an earlier transition, so replicated arrival order cannot choose a different reason.
 
 Native lease polling uses `GET /v1/work?actor=...&view=renewal`: only the actor's
-currently held claimed/working steps, with owner and lease validity applied. This view
+currently held claimed/working/verifying/blocked steps, with owner and lease validity applied. This view
 does not populate execution timing, queue, wake, summaries or agent hierarchy. The
 default work list remains fully enriched. Performance tasks distinguish `work/renewal`
 from `work/list`; native diagnostics, timeline binding, wait interruption and subagent

@@ -8067,7 +8067,7 @@ impl Store {
                 "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                         lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
                  FROM step_runs INDEXED BY step_runs_lease_index
-                 WHERE lease_owner=?1 AND status IN ('claimed','working') AND agentless=0
+                 WHERE lease_owner=?1 AND agentless=0
                    AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
                  ORDER BY subject",
             )?
@@ -8076,9 +8076,7 @@ impl Store {
         let mut held = Vec::with_capacity(views.len());
         for mut view in views {
             apply_effective_step_state(&connection, &mut view, snapshot)?;
-            if matches!(view.status.as_str(), "claimed" | "working")
-                && view.claimant.as_deref() == Some(actor.as_str())
-            {
+            if view.work_claim_is_held_by(&actor) {
                 held.push(view);
             }
         }
