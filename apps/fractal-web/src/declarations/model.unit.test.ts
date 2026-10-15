@@ -16,7 +16,7 @@ const agentWire = { id: 'agent/builder', kdl, revision: 'rev-7', revisions: ['re
 const SECRET = {
   missionGate: 'sk-mission-gate', stepGate: 'sk-step-llm-gate', missionKdl: 'sk-mission-kdl', stepKdl: 'sk-step-kdl',
   metric: 'sk-loop-metric', loopRound: 'sk-loop-round-gate', loopUntil: 'sk-loop-until', completion: 'sk-completion-gate',
-  dependency: 'sk-step-dependency-gate', baseline: 'sk-baseline-gate', candidate: 'sk-candidate-gate',
+  dependency: 'fixture-step-dependency-gate', baseline: 'sk-baseline-gate', candidate: 'sk-candidate-gate',
 } as const
 const mechanical = (name: string, secret: string) => ({ predicate: 'mechanical', name, command: 'just check', host: 'host/dev', workspace: '/srv/app', environment: { API_TOKEN: secret }, time_limit_ms: 60000 })
 const llm = (name: string, secret: string) => ({ predicate: 'llm', name, model: 'model/x', host: 'host/dev', workspace: '/srv/app', tools: ['read'], environment: { OPENAI_API_KEY: secret }, token_budget: 1000, time_limit_ms: 60000, prompt: 'Judge it.' })

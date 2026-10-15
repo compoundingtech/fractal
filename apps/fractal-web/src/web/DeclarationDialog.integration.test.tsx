@@ -11,7 +11,7 @@ import { DeclarationDialog } from './DeclarationDialog.tsx'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
 
-const SECRET = 'sk-live-mission-secret'
+const SECRET = 'fixture'
 // A fixture-held definition skips the gateway decode, so this proves the mapping redacts on its own.
 const mission = decodeUnknownSync(PublicationDefinition)({
   kind: 'publication-definition', subject: 'mission/kdl-view', revision: 'rev-3', token: 'token-3',
