@@ -71,6 +71,7 @@ lane "UI kit typecheck" pnpm --filter @smalltalk/fractal-ui typecheck
 case "${KIT_INPUTS:-true}" in
   true)
     lane "UI kit play index contracts" node --test packages/fractal-ui/scripts/kit-play-index.node-test.mjs
+    lane "UI kit context isolation controls" node packages/fractal-ui/scripts/kit-play-isolation.browser-test.mjs
     lane "UI kit Storybook" pnpm --filter @smalltalk/fractal-ui build-storybook
     lane "UI kit strict plays (440/1440 × dark/light)" kit_plays
     ;;
