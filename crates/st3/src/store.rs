@@ -48821,14 +48821,18 @@ mission "external-blocker" state="ready" {
         publish_mission(
             &source,
             r#"version 2
-    mission "terminal-stamps" state="ready" {
+    mission "terminal-stamps-root" state="ready" {
       goal "Keep each completed child's own completion time."
+      step "work" { agentless }
+    }
+    mission "terminal-stamps-child" state="ready" {
+      goal "Complete one child before admitting the next."
       step "work" { agentless }
     }"#,
             "terminal-stamps-mission",
         );
-        let request = |key: &str| MissionRunRequest {
-            mission: "terminal-stamps".into(),
+        let request = |mission: &str, key: &str| MissionRunRequest {
+            mission: mission.into(),
             revision: None,
             workspace: "/tmp".into(),
             requester: Some("person/test".into()),
@@ -48836,12 +48840,9 @@ mission "external-blocker" state="ready" {
             inputs: BTreeMap::new(),
             idempotency_key: key.into(),
         };
-        let root = source.create_mission_run(&request("root")).unwrap();
-        let children = ["child-one", "child-two"].map(|key| {
-            source
-                .create_child_mission_run(&request(key), &root, &root.steps[0].subject, None)
-                .unwrap()
-        });
+        let root = source
+            .create_mission_run(&request("terminal-stamps-root", "root"))
+            .unwrap();
         let exchange_all = || {
             for sender in members {
                 for receiver in members {
@@ -48883,15 +48884,39 @@ mission "external-blocker" state="ready" {
                 .unwrap()
         };
         exchange_all();
-        for (index, child) in children.iter().enumerate() {
-            at(start + (index as u128 + 1) * 1_000);
+        // Both declarations retain the default one-active-run limit. Complete and project
+        // each child before admitting the next child; the distinct root remains active.
+        let children = ["child-one", "child-two"].map(|key| {
+            let index = if key == "child-one" { 0 } else { 1 };
+            at(start + index * 1_000 + 500);
+            let child = source
+                .create_child_mission_run(
+                    &request("terminal-stamps-child", key),
+                    &root,
+                    &root.steps[0].subject,
+                    None,
+                )
+                .unwrap();
+            exchange_all();
+            at(start + (index + 1) * 1_000);
             assert!(
                 source
                     .set_mission_run_state(&child.id, "completed", "terminal", None)
                     .unwrap()
             );
+            assert_eq!(
+                source.mission_run_status(&child.id).unwrap().as_deref(),
+                Some("completed"),
+                "the child must release its mission capacity before the next admission"
+            );
+            assert_eq!(
+                source.mission_run_status(&root.id).unwrap().as_deref(),
+                Some("running"),
+                "the root stays live until its separate later terminal claim"
+            );
             exchange_all();
-        }
+            child
+        });
         let child_inputs = lifecycle_inputs(&source);
         assert_eq!(
             child_inputs.len(),
