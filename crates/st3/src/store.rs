@@ -59009,6 +59009,38 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 0);
     }
 
+    #[test]
+    fn forgetting_views_invalidates_every_status_reduction_mode() {
+        let store = Store::open_memory("node").unwrap();
+        observe_runtime(&store, "agent/cache/forget", "running", "one");
+        let cut = store.index().unwrap();
+        let modes = [
+            ClaimsReduction::Full,
+            ClaimsReduction::Summary,
+            ClaimsReduction::Runtime,
+            ClaimsReduction::AgentCard,
+        ];
+        let read = |mode| {
+            store
+                .status_for_subject_prefix_at("agent/", Some(cut), true, mode)
+                .unwrap()
+        };
+        for mode in modes {
+            read(mode);
+        }
+        SUBJECT_REDUCTIONS.with(|count| count.set(0));
+        for mode in modes {
+            read(mode);
+        }
+        assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 0);
+        store.forget_current_views();
+        for mode in modes {
+            SUBJECT_REDUCTIONS.with(|count| count.set(0));
+            read(mode);
+            assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 1, "{mode:?}");
+        }
+    }
+
 
     /// Run against a reflink-copied live store only:
     /// `CLAIM_SUMMARY_BENCH=/path/to/copy.sqlite3 cargo test -p st3 --lib claim_summary -- --ignored --nocapture`.

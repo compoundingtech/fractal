@@ -3746,7 +3746,7 @@ fn managed_session_resources(
             None => subject
                 .actual_claim
                 .as_deref()
-                .or_else(|| subject.claims_summary.first.as_deref())
+                .or(subject.claims_summary.first.as_deref())
                 .map(|id| store.claim_by_id(id))
                 .transpose()?
                 .flatten()
