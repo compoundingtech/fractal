@@ -500,11 +500,13 @@ GET /v1/client/agents SERVER / first_frame     st.roster.rebuild INTERNAL root (
 | `st.roster.admission.hold_ms` | double | Acquire to release |
 | `st.roster.invalidation` | string enum | `cold`, `unknown_kind`, `structural_claim`, `missing_message`, `membership`, `local_frontier`, `queue_deadline`, `coverage_gap`, `safe_delta`, `historical_snapshot` |
 | `st.roster.changed`, `st.roster.covered`, `st.roster.refolded` | integer | Changed agents, resulting subject coverage (card count for a complete roster), and cards refolded |
-| `st.roster.phase.<phase>.wall_ms`, `st.roster.phase.<phase>.cpu_ms` | double | Wall and calling-thread CPU time; `<phase>` is `membership`, `status_fold`, `card_presentation`, `queue_selection`, or `serialization` |
+| `st.roster.phase.<phase>.wall_ms`, `st.roster.phase.<phase>.cpu_ms` | double | Wall and calling-thread CPU time; `<phase>` is `membership`, `status_fold`, `card_presentation`, `subagent_leases`, `queue_selection`, or `serialization` |
 
 Phases are synchronous sections measured on the thread that runs them, so `cpu_ms` is
 that section's own thread CPU rather than a share of an outer task. Durations keep
 sub-millisecond precision as doubles. Repeated phases within one read accumulate.
+`subagent_leases` measures the live lease query inside `card_presentation`; it is a
+component of that enclosing phase, not an additional duration to sum with it.
 Worker queue and reader acquisition totals survive a WS probe and its admitted retry.
 The first publication includes its preparatory warm worker's measurements, moved into
 the cold root without creating another span. Those sections can precede root start.
