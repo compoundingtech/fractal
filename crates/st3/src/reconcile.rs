@@ -2994,14 +2994,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                             }
                             return Ok(());
                         }
-                        if observed.as_ref().is_none_or(|o| o.status != "running") {
-                            if self.reconcile_claude_channel_recovery(
+                        if observed.as_ref().is_none_or(|o| o.status != "running")
+                            && (self.reconcile_claude_channel_recovery(
                                 subject, member, observed.as_ref(), blocked.as_ref(), now_ms(),
                             )? || self.reconcile_requested_restart(
                                 subject, member, observed.as_ref(), blocked.as_ref(),
-                            )? {
-                                return Ok(());
-                            }
+                            )?)
+                        {
+                            return Ok(());
                         }
                         match observed {
                             Some(observation) if observation.status == "running" => {
