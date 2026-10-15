@@ -74,7 +74,7 @@ const factFailure = (feed: Feed<unknown>): string => feed._tag === 'Waiting' ? '
 const resource = ({ key, label, detail }: { readonly key: string; readonly label: string; readonly detail: string }): DetailsResource => ({ uri: `${nativeDetailsUriPrefix}${key}`, glyph: 'resource', card: { kind: 'worktree', label, detail, fileCount: { _tag: 'Unknown' }, files: [] } })
 
 /** Pure host DTO boundary: no fixture fallback and no private producer dependencies. */
-export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: sessionFeed, period: periodFeed, declarations, missions, now, onRetry }: {
+export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: sessionFeed, period: periodFeed, declarations, missions, queue, needsMe, now, onRetry }: {
   readonly agentRef: string
   readonly agent: Feed<Agent | undefined>
   readonly row: Feed<Native.Agent | undefined>
@@ -82,11 +82,14 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   readonly period: Feed<Native.UsagePeriod>
   readonly declarations: Feed<NativeDeclarations>
   readonly missions: Feed<readonly Native.Mission[]>
+  readonly queue?: Feed<Native.AgentQueue>
+  /** The same selected-agent attention union used by the sidebar, not inferred from runtime waiting. */
+  readonly needsMe?: boolean
   readonly now: number
   readonly onRetry: () => void
 }): NativeDetailsObservation => {
-  const row = rowFeed._tag === 'Observed' ? rowFeed.value : undefined
-  const projected = agent._tag === 'Observed' ? agent.value : undefined
+  const row = rowFeed._tag === 'Observed' && rowFeed.error?.reason !== 'ungranted' ? rowFeed.value : undefined
+  const projected = agent._tag === 'Observed' && agent.error?.reason !== 'ungranted' ? agent.value : undefined
   const session = sessionFeed._tag === 'Observed' && sessionFeed.error?.reason !== 'ungranted' ? sessionFeed.value : undefined
   const period = periodFeed._tag === 'Observed' && periodFeed.error?.reason !== 'ungranted' ? periodFeed.value : undefined
   const declared = declarations._tag === 'Observed' && declarations.error?.reason !== 'ungranted' && declarations.value.agentRef === agentRef ? declarations.value : undefined
@@ -125,6 +128,12 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   const workspaceItems: DetailsResource[] = []
   if (row !== undefined && Option.isSome(row.workspace)) workspaceItems.push(resource({ key: 'workspace/declared', label: 'Declared workspace', detail: 'Configured on the owning host; path withheld. Observed checkout/cwd confirmation is not reported.' }))
   if (row !== undefined && Option.isSome(row.checkout)) workspaceItems.push(resource({ key: 'workspace/requested-checkout', label: 'Requested repository / branch', detail: 'Repository, base and branch are declared intent; reference targets withheld. Successful checkout is not observed.' }))
+  const nativeQueue = queue?._tag === 'Observed' && queue.error?.reason !== 'ungranted' && queue.value.agent_id === agentRef ? queue.value : undefined
+  const queuedResources = nativeQueue === undefined ? [] : [
+    resource({ key: 'queue/summary', label: `Current work · ${nativeQueue.current_work_ids.length}`, detail: `${nativeQueue.runs.length} observed mission runs in this agent queue${queue?._tag === 'Observed' && queue.freshness === 'stale' ? ' · last observed queue' : ''}` }),
+    ...nativeQueue.runs.map(run => resource({ key: `queue/${run.mission_run_id}`, label: `Mission run · ${run.mission_run_id}`, detail: `${run.state} · ${run.run_state} · ${run.ready_work_ids.length} ready, ${run.waiting_work_ids.length} waiting · position ${run.position}` })),
+  ]
+  const terminal = row !== undefined && row.runtime_ids.length > 0 ? projected?.terminal : undefined
   const sections: DetailsSection[] = [
     { title: 'Workspace', items: workspaceItems.length === 0 ? { _tag: 'Unknown' } : { _tag: 'Known', value: workspaceItems }, unavailableReason: 'Declared workspace/checkout not reported; observed workspace confirmation is unsupported.' },
     { title: 'Subagents', items: row?.subagents === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: row.subagents.map((child, index) => resource({ key: `subagent/${index}`, label: `Observed st subagent ${index + 1}`, detail: `${child.driver} · ${Option.getOrUndefined(child.subagent_type) ?? 'type unreported'} · status unobserved${Option.match(child.started_at, { onNone: () => ' · start unreported', onSome: at => ` · started ${new Date(DateTime.toEpochMillis(at)).toISOString()}` })}` })) }, unavailableReason: 'Currently leased st subagents are not reported; not a traced-descendant list.' },
@@ -132,7 +141,12 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
       ...declared.bindings.map((binding, index) => resource({ key: `binding/${index}`, label: `Declared ${binding.kind}`, detail: `${binding.count} reference${binding.count === 1 ? '' : 's'} · revision ${declared.revision} · targets withheld; declared intent, not observed resources.` })),
       ...(declared.declaredModel === undefined ? [] : [resource({ key: 'binding/model', label: 'Declared model', detail: `${declared.declaredModel} · revision ${declared.revision} · declared harness setting, not the observed runtime model.` })]),
     ] }, unavailableReason: factFailure(declarations) },
-    ...(['Pull requests', 'CI runs', 'Reviews', 'Files touched', 'Terminals', 'Missions / queue', 'Attention', 'History'] as const).map(title => ({ title, items: { _tag: 'Unknown' as const }, unavailableReason: `${title} observations are not supplied by this native Details feed.` })),
+    { title: 'Terminals', items: row === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: terminal === undefined ? [] : [{ ...resource({ key: 'terminal', label: 'Agent terminal', detail: 'Observed native runtime terminal; opening uses the app’s existing terminal view.' }), uri: terminal, glyph: 'terminal' }] }, unavailableReason: 'The selected agent runtime terminal is not observed.' },
+    { title: 'Missions / queue', items: nativeQueue === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: queuedResources }, unavailableReason: queue === undefined ? 'Agent queue is not supplied.' : factFailure(queue) },
+    { title: 'Attention', items: projected === undefined || needsMe === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: [
+      resource({ key: 'attention', label: needsMe ? 'Needs your attention' : 'No attention action observed', detail: `${projected.ask._tag === 'Known' ? `Native ask · ${projected.ask.value}` : 'Native ask unreported'}${row === undefined || Option.isNone(row.reason) ? '' : ` · ${row.reason.value}`} · same pending-ask and attention union as the sidebar; read-only, not an answer action.` }),
+    ] }, unavailableReason: 'Selected-agent attention state is not observed.' },
+    ...(['Pull requests', 'CI runs', 'Reviews', 'Files touched', 'History'] as const).map(title => ({ title, items: { _tag: 'Unknown' as const }, unavailableReason: `${title} observations are not supplied by this native Details feed.` })),
   ]
   return {
     overview: { title: row?.name, status: projected?.status, machine: projected?.host, harness: projected?.harness, model, mission,

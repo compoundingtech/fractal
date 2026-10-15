@@ -44,7 +44,7 @@ describe('native Details mounted hook with real getter adapters', () => {
     const root = createRoot(host)
     const requests: URL[] = []
     let holdGetters = false
-    const selectedPaths = ['/v1/client/usage', '/v1/client/agent-declarations/agent%2Fexample', '/v1/client/sessions/second']
+    const selectedPaths = ['/v1/client/usage', '/v1/client/agent-declarations/agent%2Fexample', '/v1/client/sessions/second', '/v1/client/agent-queues/agent%2Fexample']
     const blocked = new Map<string, { readonly signal: AbortSignal; readonly cancellation: Promise<void> }>()
     const options = { baseUrl: 'http://gateway.invalid', fetchImpl: async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input))
@@ -63,6 +63,7 @@ describe('native Details mounted hook with real getter adapters', () => {
       }
       if (url.pathname.endsWith('/usage')) value = { since_ms: 1000, until_ms: 5000, rows: [] }
       else if (url.pathname.includes('/agent-declarations/')) value = { id: 'agent/example', revision: '1', revisions: ['1'], kdl: '', tree: { name: 'agent', children: [] } }
+      else if (url.pathname.includes('/agent-queues/')) value = { kind: 'agent-queue', agent_id: 'agent/example', current_work_ids: [], next_work_id: null, move_count: 0, moves: [], runs: [] }
       else if (url.pathname.includes('/sessions/')) {
         // The SDK strips "session/" for routing; the DTO retains the canonical ref.
         const incarnation = decodeURIComponent(url.pathname.split('/').at(-1)!)
@@ -94,6 +95,7 @@ describe('native Details mounted hook with real getter adapters', () => {
       expect(last?.trace.meters.context.reportedPercent).toMatchObject({ _tag: 'Known', value: 42 })
       expect(requests.filter(url => url.pathname.endsWith('/usage'))).toHaveLength(1)
       expect(requests.some(url => url.pathname.includes('root-detail') || url.pathname.includes('conversation'))).toBe(false)
+      expect(last?.sections.find(section => section.title === 'Missions / queue')?.items._tag).toBe('Known')
       await act(async () => registry.set(agents, observed({ value: [nativeRow('second')] })))
       expect(last?.trace.meters.context.reportedPercent._tag).toBe('Unknown')
       await act(async () => { await vi.waitFor(() => expect(requests.filter(url => url.pathname.includes('/sessions/')).map(url => url.pathname)).toEqual(['/v1/client/sessions/first', '/v1/client/sessions/second'])) })
@@ -107,6 +109,7 @@ describe('native Details mounted hook with real getter adapters', () => {
         registry.refresh(source.subjectReads.session.feed('session/second'))
         registry.refresh(source.nativeDetails!.usagePeriod)
         registry.refresh(source.nativeDetails!.rawDeclarations({ agentRef: 'agent/example', revision: '1' }))
+        registry.refresh(source.subjectReads.agentQueue.feed('agent/example'))
       })
       await act(async () => { await vi.waitFor(() => expect([...blocked.keys()].sort()).toEqual([...selectedPaths].sort())) })
       expect(blocked.size).toBe(selectedPaths.length)

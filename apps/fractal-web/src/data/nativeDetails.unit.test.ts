@@ -15,7 +15,7 @@ const usageRow = { agent: row.id, native_session_id: 'native/root', model: 'firs
 const period = Native.decodeUnknownSync(Native.UsagePeriod)({ since_ms: 1000, until_ms: 5000, rows: [usageRow, { ...usageRow, model: 'second-model', account: 'second-account', total_tokens: 63, cost_microusd: 2300000 }, { ...usageRow, agent: 'agent/other', cost_microusd: 99000000 }] })
 const session = Native.decodeUnknownSync(Native.Session)({ id: 'session/current', kind: 'session', owner_id: row.id, runtime_incarnation: 'inc/current', started_at: '1970-01-01T00:00:01Z', ended_at: '1970-01-01T00:00:03Z', updated_at: '1970-01-01T00:00:03Z', revision: '1', state: 'completed', timeline_cursor: 'cursor/0' })
 const missing = unavailable({ reason: 'unsupported', detail: 'Not reported' })
-const project = ({ selected = row, selectedPeriod = observed({ value: period }), selectedSession = session }: { readonly selected?: Native.Agent; readonly selectedPeriod?: Feed<Native.UsagePeriod>; readonly selectedSession?: Native.Session } = {}) => projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: createProjections().fleetFromAgents([selected]).agents[0] }), period: selectedPeriod, session: observed({ value: selectedSession }), declarations: missing, missions: observed({ value: [] }), now: 10000, onRetry: () => undefined })
+const project = ({ selected = row, selectedPeriod = observed({ value: period }), selectedSession = session, selectedQueue, needsMe }: { readonly selected?: Native.Agent; readonly selectedPeriod?: Feed<Native.UsagePeriod>; readonly selectedSession?: Native.Session; readonly selectedQueue?: Feed<Native.AgentQueue>; readonly needsMe?: boolean } = {}) => projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: createProjections().fleetFromAgents([selected]).agents[0] }), period: selectedPeriod, session: observed({ value: selectedSession }), declarations: missing, missions: observed({ value: [] }), queue: selectedQueue, needsMe, now: 10000, onRetry: () => undefined })
 
 describe('fixture-free native Details projection', () => {
   it('sums attributed main cost across models/accounts with exact bounds, independently of cumulative tokens', () => {
@@ -50,6 +50,20 @@ describe('fixture-free native Details projection', () => {
     const work = Native.decodeUnknownSync(Native.WorkLabel)({ id: 'work/example', mission_id: 'mission/example', mission_run_id: 'mission-run/example', path: 'execute', state: 'claimed', since: '1970-01-01T00:00:01Z', title: 'Observed step title' })
     const result = project({ selected: { ...row, current_work: [work] } })
     expect(result.overview.mission).toBe('mission/example · mission title unreported · current work: Observed step title')
+  })
+  it('uses known sidebar attention, runtime terminal identity and the same native agent queue, not placeholder sections', () => {
+    const selected = { ...row, runtime_ids: [Native.decodeUnknownSync(Native.RuntimeId)('runtime/example')], ask: Option.some('question'), blocked_on: Option.some('human'), reason: Option.some('Observed pending question') }
+    const queue = Native.decodeUnknownSync(Native.AgentQueue)({ kind: 'agent-queue', agent_id: row.id, current_work_ids: ['work/example'], next_work_id: null, move_count: 0, moves: [], runs: [{ mission_run_id: 'mission-run/example', joined_at: '1970-01-01T00:00:01Z', position: 1, state: 'ready', run_state: 'active', claimed_work_ids: [], ready_work_ids: ['work/example'], waiting_work_ids: [] }] })
+    const sections = project({ selected, selectedQueue: observed({ value: queue }), needsMe: true }).sections
+    expect(JSON.stringify(sections.find(section => section.title === 'Attention'))).toContain('Needs your attention')
+    expect(JSON.stringify(sections.find(section => section.title === 'Attention'))).toContain('Native ask · question')
+    const terminals = sections.find(section => section.title === 'Terminals')?.items
+    expect(terminals?._tag === 'Known' ? terminals.value.map(item => item.uri) : []).toEqual(['terminal/example'])
+    expect(JSON.stringify(sections.find(section => section.title === 'Missions / queue'))).toContain('1 ready, 0 waiting')
+    expect(project({ selectedQueue: observed({ value: { ...queue, agent_id: Native.decodeUnknownSync(Native.Id)('agent/other') } }) }).sections.find(section => section.title === 'Missions / queue')?.items._tag).toBe('Unknown')
+    expect(project({ selectedQueue: { _tag: 'Observed', freshness: 'live', value: queue, error: { reason: 'ungranted', detail: 'Revoked' } } }).sections.find(section => section.title === 'Missions / queue')?.items._tag).toBe('Unknown')
+    expect(project({ needsMe: false }).sections.find(section => section.title === 'Attention')?.items._tag).toBe('Known')
+    expect(project().sections.find(section => section.title === 'Attention')?.items._tag).toBe('Unknown')
   })
   it('selects only the proven current binding, ignores unrelated old roots, and never selects from period rows alone', () => {
     expect(nativeDetailsRoot({ row: { ...row, todo: Option.none() }, period })).toBeUndefined()
