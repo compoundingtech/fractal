@@ -63,11 +63,16 @@ a11y addon. App plays always run when web execution is required, including app-o
 changes for which `KIT_INPUTS=false` skips kit plays. CI records app build and play
 timings separately; the runner receipt includes story count, expected/actual cases,
 per-case lifecycle/a11y reporter evidence and elapsed play seconds.
-Before removing the temporary app receipt, CI also publishes a separate app result
-table to `GITHUB_STEP_SUMMARY`: story count, completed/expected cases, passed/failed
+Before removing each temporary receipt, CI publishes separate app and kit result
+tables to `GITHUB_STEP_SUMMARY`: story count, completed/expected cases, passed/failed
 case counts, overall result and play-only minutes. This happens on both successful
-and failed gates, before the original runner exit code propagates. App build time
-remains a separate lane timing, and kit results are not combined with app counts.
+and failed gates. App build time remains a separate lane timing, and kit results
+are not combined with app counts. When kit inputs require both suites, each runs
+in its own strict subshell: a failed app build/play cannot suppress kit evidence,
+and a failed kit contract/build/play cannot suppress app evidence. The script
+collects both suite statuses and fails if either fails, returning the app failure
+code first when both fail. Failures still stop later commands within their own
+suite, so a failed build does not run stale Storybook output.
 
 Before selecting stories, the gate validates every index entry: its type must be `story` or `docs`, and both `id` and `importPath` must be nonempty strings. Unknown or malformed entries fail the gate instead of silently shrinking its required matrix. The CI index-contract test includes a malformed built-index fixture that must exit nonzero before browser execution.
 Navigation waits for DOM readiness, then the unchanged strict guard waits for the story's lifecycle completion; global network idleness is not substituted for a successful play.

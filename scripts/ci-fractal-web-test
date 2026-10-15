@@ -285,66 +285,85 @@ print("passed: deterministic SDK tests and isolated frame CPU budgets have separ
 assert lanes.index('lane "CSS asset guard" node --test apps/fractal-web/scripts/vite-css-assets.node-test.mjs') < lanes.index('lane "App production build" production_build')
 assert "fractalCssAssets()" in (root / "apps/fractal-web/vite.config.ts").read_text()
 print("passed: the CSS asset guard proves its negatives before guarding the app production build")
-assert 'node packages/fractal-ui/scripts/kit-play-gate.mjs apps/fractal-web/storybook-static "$receipt_dir"' in lanes
-app_lanes = lanes[lanes.index('lane "App Storybook"'):lanes.index('case "${KIT_INPUTS:-true}" in')]
-for required in (False, True):
-    result = subprocess.run(["bash", "-c", 'set -eu\nlane() { printf "%s\\n" "$1"; }\n' + app_lanes],
-                            check=True, capture_output=True, text=True,
-                            env={**os.environ, "KIT_INPUTS": str(required).lower()})
-    assert "App Storybook" in result.stdout and "App strict plays" in result.stdout
-print("passed: app stories use the strict kit runner regardless of the kit input filter")
-
-# Exercise the real lane and receipt publication under errexit, replacing only
-# the expensive browser command with a deterministic completed receipt.
-lane_function = lanes[lanes.index("lane() {"):lanes.index("\ntoolchain()")]
-app_function = lanes[lanes.index("app_plays() ("):lanes.index('\nlane "Toolchain')]
-for status, passed in ((0, 8), (7, 6)):
-    with tempfile.TemporaryDirectory() as scratch:
-        scratch = Path(scratch)
-        summary = scratch / "summary"
-        receipt = scratch / "fixture.json"
-        receipt_directory = scratch / "receipt-directory"
-        receipt.write_text(json.dumps({
-            "pass": status == 0, "stories": 2, "cases": 8, "expectedCases": 8,
-            "elapsedSeconds": 90, "rows": [{"pass": index < passed} for index in range(8)],
-        }))
-        harness = 'set -euo pipefail\nsummary=$GITHUB_STEP_SUMMARY\n' + lane_function + app_function + """
-node() {
-  if [ "$1" = packages/fractal-ui/scripts/kit-play-gate.mjs ]; then
-    cp "$APP_TEST_RECEIPT" "$3/receipt.json"
-    printf '%s' "$3" > "$APP_TEST_RECEIPT_DIRECTORY"
-    return "$APP_TEST_EXIT"
-  fi
-  command node "$@"
-}
-lane "App strict plays (440/1440 × dark/light)" app_plays
-lane "UI kit strict plays (440/1440 × dark/light)" true
-"""
-        result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True,
-                                env={**os.environ, "TMPDIR": str(scratch),
-                                     "GITHUB_STEP_SUMMARY": str(summary),
-                                     "APP_TEST_RECEIPT": str(receipt),
-                                     "APP_TEST_RECEIPT_DIRECTORY": str(receipt_directory),
-                                     "APP_TEST_EXIT": str(status)})
-        assert result.returncode == status, (result.returncode, result.stderr)
-        outcome = "PASS" if status == 0 else "FAIL"
-        text = summary.read_text()
-        assert f"| 2 | 8/8 | {passed} | {8 - passed} | {outcome} | 1.50 |" in text, text
-        assert ("| UI kit strict plays" in text) == (status == 0), text
-        assert not Path(receipt_directory.read_text()).exists(), "receipt cleanup must still run"
-        print(f"passed: app {outcome} receipt reaches the summary before gate status {status} propagates")
-
-# Exercise the actual conditional lane wiring without launching browsers or installing dependencies.
-kit_lanes = lanes[lanes.index('case "${KIT_INPUTS:-true}" in'):]
+assert 'node packages/fractal-ui/scripts/kit-play-gate.mjs "$build_directory" "$receipt_dir"' in lanes
+assert "story_plays App apps/fractal-web/storybook-static" in lanes
+assert 'story_plays "UI kit" packages/fractal-ui/storybook-static' in lanes
+play_lanes = lanes[lanes.index("# App stories depend"):]
 for required in (False, True):
     with tempfile.TemporaryDirectory() as scratch:
         summary = Path(scratch, "summary")
-        harness = 'set -eu\nlane() { printf "%s\\n" "$1"; }\nsummary=$GITHUB_STEP_SUMMARY\n' + kit_lanes
+        harness = 'set -euo pipefail\nlane() { printf "%s\\n" "$1"; }\nsummary=$GITHUB_STEP_SUMMARY\n' + play_lanes
         result = subprocess.run(["bash", "-c", harness], check=True, capture_output=True, text=True,
                                 env={**os.environ, "KIT_INPUTS": str(required).lower(),
                                      "BASE_SHA": "base", "HEAD_SHA": "head", "GITHUB_STEP_SUMMARY": str(summary)})
+        assert "App Storybook" in result.stdout and "App strict plays" in result.stdout
         for name in ("UI kit play index contracts", "UI kit Storybook", "UI kit strict plays"):
             assert (name in result.stdout) == required, result.stdout
         if not required:
             assert "skipped: no kit inputs changed (base..head)" in summary.read_text()
-        print(f"passed: kit lanes {'run' if required else 'skip explicitly'}")
+        print(f"passed: app lanes run and kit lanes {'run' if required else 'skip explicitly'}")
+
+# Run the actual suite orchestration and summary writer, replacing only browser,
+# build and index-test commands. Failed commands remain strict within each suite.
+lane_function = lanes[lanes.index("lane() {"):lanes.index("\ntoolchain()")]
+play_functions = lanes[lanes.index("story_plays() ("):lanes.index('\nlane "Toolchain')]
+for app_exit, kit_exit, app_build_exit, kit_index_exit in (
+        (0, 0, 0, 0), (7, 0, 0, 0), (0, 9, 0, 0), (7, 9, 0, 0),
+        (0, 0, 11, 0), (0, 0, 0, 13)):
+    with tempfile.TemporaryDirectory() as scratch:
+        scratch = Path(scratch)
+        summary = scratch / "summary"
+        receipt_directories = scratch / "receipt-directories"
+        fixtures = {}
+        for suite, status, stories, seconds in (("APP", app_exit, 2, 90), ("KIT", kit_exit, 3, 120)):
+            fixture = scratch / f"{suite}.json"
+            cases = stories * 4
+            passed = cases if status == 0 else cases - 2
+            fixture.write_text(json.dumps({
+                "pass": status == 0, "stories": stories, "cases": cases, "expectedCases": cases,
+                "elapsedSeconds": seconds, "rows": [{"pass": index < passed} for index in range(cases)],
+            }))
+            fixtures[f"{suite}_TEST_RECEIPT"] = str(fixture)
+        harness = 'set -euo pipefail\nsummary=$GITHUB_STEP_SUMMARY\n' + lane_function + play_functions + """
+pnpm() {
+  if [ "$2" = fractal-web ]; then return "$APP_BUILD_EXIT"; fi
+  return 0
+}
+node() {
+  if [ "$1" = --test ]; then return "$KIT_INDEX_EXIT"; fi
+  if [ "$1" = packages/fractal-ui/scripts/kit-play-gate.mjs ]; then
+    if [ "$2" = apps/fractal-web/storybook-static ]; then
+      cp "$APP_TEST_RECEIPT" "$3/receipt.json"
+      status=$APP_TEST_EXIT
+    else
+      cp "$KIT_TEST_RECEIPT" "$3/receipt.json"
+      status=$KIT_TEST_EXIT
+    fi
+    printf '%s\\n' "$3" >> "$TEST_RECEIPT_DIRECTORIES"
+    return "$status"
+  fi
+  command node "$@"
+}
+""" + play_lanes
+        result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True,
+                                env={**os.environ, **fixtures, "TMPDIR": str(scratch),
+                                     "KIT_INPUTS": "true", "GITHUB_STEP_SUMMARY": str(summary),
+                                     "TEST_RECEIPT_DIRECTORIES": str(receipt_directories),
+                                     "APP_TEST_EXIT": str(app_exit), "KIT_TEST_EXIT": str(kit_exit),
+                                     "APP_BUILD_EXIT": str(app_build_exit), "KIT_INDEX_EXIT": str(kit_index_exit)})
+        expected_exit = app_build_exit or app_exit or kit_index_exit or kit_exit
+        assert result.returncode == expected_exit, (result.returncode, result.stderr)
+        text = summary.read_text()
+        for suite, status, stories, minutes, skipped in (
+                ("App", app_exit, 2, "1.50", app_build_exit),
+                ("UI kit", kit_exit, 3, "2.00", kit_index_exit)):
+            assert (f"### {suite} strict play results" in text) == (not skipped), text
+            if not skipped:
+                cases = stories * 4
+                passed = cases if status == 0 else cases - 2
+                outcome = "PASS" if status == 0 else "FAIL"
+                assert f"| {stories} | {cases}/{cases} | {passed} | {cases - passed} | {outcome} | {minutes} |" in text, text
+        for directory in receipt_directories.read_text().splitlines():
+            assert not Path(directory).exists(), "receipt cleanup must still run"
+        print(f"passed: independent app/kit evidence with exits app={app_exit}, kit={kit_exit}, "
+              f"app-build={app_build_exit}, kit-index={kit_index_exit}; combined={expected_exit}")

@@ -41,28 +41,20 @@ production_build() (
 )
 
 
-kit_plays() (
-  local receipt_dir
-  receipt_dir=$(mktemp -d "${TMPDIR:-/tmp}/fractal-kit-plays.XXXXXX")
+story_plays() (
+  local suite=$1 build_directory=$2 receipt_dir status=0
+  receipt_dir=$(mktemp -d "${TMPDIR:-/tmp}/fractal-plays.XXXXXX")
   trap 'rm -rf "$receipt_dir"' EXIT
-  node packages/fractal-ui/scripts/kit-play-gate.mjs packages/fractal-ui/storybook-static "$receipt_dir"
-)
-
-app_plays() (
-  local receipt_dir status=0
-  receipt_dir=$(mktemp -d "${TMPDIR:-/tmp}/fractal-app-plays.XXXXXX")
-  trap 'rm -rf "$receipt_dir"' EXIT
-  node packages/fractal-ui/scripts/kit-play-gate.mjs apps/fractal-web/storybook-static "$receipt_dir" || status=$?
-  # Preserve the gate's result, but publish its receipt even when set -e would
-  # otherwise end the lane before its normal elapsed-time row is written.
-  node --input-type=module - "$receipt_dir/receipt.json" "$summary" <<'NODE'
+  node packages/fractal-ui/scripts/kit-play-gate.mjs "$build_directory" "$receipt_dir" || status=$?
+  # Publish either suite's receipt before cleanup and exit-status propagation.
+  node --input-type=module - "$receipt_dir/receipt.json" "$summary" "$suite" <<'NODE'
 import { appendFileSync, readFileSync } from 'node:fs'
-const [receiptPath, summaryPath] = process.argv.slice(2)
+const [receiptPath, summaryPath, suite] = process.argv.slice(2)
 const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'))
 const passed = receipt.rows.filter(row => row.pass).length
 const failed = receipt.rows.length - passed
 appendFileSync(summaryPath, [
-  '\n### App strict play results\n',
+  `\n### ${suite} strict play results\n`,
   '| Stories | Cases (completed/expected) | Passed | Failed | Result | Minutes (plays only) |',
   '| --- | --- | --- | --- | --- | --- |',
   `| ${receipt.stories} | ${receipt.cases}/${receipt.expectedCases} | ${passed} | ${failed} | ${receipt.pass ? 'PASS' : 'FAIL'} | ${(receipt.elapsedSeconds / 60).toFixed(2)} |`,
@@ -72,6 +64,14 @@ appendFileSync(summaryPath, [
 ].join('\n'))
 NODE
   return "$status"
+)
+
+app_plays() (
+  story_plays App apps/fractal-web/storybook-static
+)
+
+kit_plays() (
+  story_plays "UI kit" packages/fractal-ui/storybook-static
 )
 lane "Toolchain and Buck root" toolchain
 lane "Frozen install" pnpm install --frozen-lockfile
@@ -95,8 +95,18 @@ lane "SDK unit tests" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest r
 lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.perf.config.ts
 lane "UI kit typecheck" pnpm --filter @smalltalk/fractal-ui typecheck
 # App stories depend on app inputs, even when KIT_INPUTS skips the kit index.
+# Do not use `suite || status=$?`: Bash disables errexit throughout functions
+# invoked in a conditional. Standalone subshells retain strict failures inside
+# each suite, while the parent collects both statuses without suppressing either.
+set +e
+(
+  set -e
 lane "App Storybook" pnpm --filter fractal-web build-storybook
 lane "App strict plays (440/1440 × dark/light)" app_plays
+)
+app_status=$?
+(
+  set -e
 case "${KIT_INPUTS:-true}" in
   true)
     lane "UI kit play index contracts" node --test packages/fractal-ui/scripts/kit-play-index.node-test.mjs
@@ -111,3 +121,10 @@ case "${KIT_INPUTS:-true}" in
     exit 1
     ;;
 esac
+)
+kit_status=$?
+set -e
+if [ "$app_status" -ne 0 ]; then
+  exit "$app_status"
+fi
+exit "$kit_status"
