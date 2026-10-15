@@ -81,8 +81,10 @@ Under the writer, sealing reads again what it prepared from:
 - which named blobs are stored;
 - each claim's stored signature;
 - the member key and the fleet id;
-- for each claim it signed, the key, principal, principal acted for and chain the keyring would
-  sign it with now, read in one view no keyring change overlapped.
+- for the claims it signed, the key, principal, principal acted for and chain the keyring would
+  sign them with now. This is read in one view that no keyring change overlapped, once per
+  distinct signer input (a key grant's issuer and issuer key, and the claim's actor), not once
+  per claim.
 
 Only then does it write the prepared rows. If any of these changed, it writes nothing and
 prepares the chunk again off the writer. Keys added or replaced for principals the chunk's claims

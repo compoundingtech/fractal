@@ -5652,9 +5652,9 @@ impl Store {
         }
         // Something the chunk was prepared from changed. Dropping the transaction writes nothing;
         // the next pass prepares again, off the writer. Retries are bounded by input churn, not by
-        // a count: each one follows a commit, or a change to a key a claim of this finite chunk
-        // is signed with (or a keyring change overlapping the writer's brief read of it), and a
-        // store quiet in those facts seals on the next pass.
+        // a count: each one follows a commit, a change to a key a claim of this finite chunk is
+        // signed with, or a keyring change overlapping the writer's brief read of it, and a store
+        // quiet in those facts seals on the next pass.
         #[cfg(test)]
         SEALS_PREPARED_AGAIN.with(|count| count.set(count.get() + 1));
         Ok(true)
@@ -8614,6 +8614,8 @@ thread_local! {
     static SEAL_BEFORE_LOAN: std::cell::RefCell<Option<SealHook>> = const { std::cell::RefCell::new(None) };
     /// Sealing chunks this thread prepared again because their store changed before the loan.
     static SEALS_PREPARED_AGAIN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Signer selections sealing made under the writer on this thread.
+    static SIGNERS_SELECTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub fn apply_replication_repair_tx(

@@ -13,15 +13,18 @@
 //! - which named blobs are stored;
 //! - each claim's stored signature;
 //! - the member key and the fleet id;
-//! - for each claim it signed itself, who the keyring would have it signed as now: the key, the
-//!   principal, the principal acted for and the chain, read in one settled view of the keyring
-//!   (see `Keyring::settled`). A change to keys no claim of the chunk is signed with does not
-//!   matter.
+//! - for the claims it signed itself, who the keyring would have them signed as now: the key, the
+//!   principal, the principal acted for and the chain. Preparation reduces those claims to their
+//!   distinct signer inputs (a key grant's issuer and issuer key, and the actor; see
+//!   `SignerInput`), so the writer selects once per input, not once per claim, in one settled
+//!   view of the keyring (see `Keyring::settled`). A change to keys no claim of the chunk is
+//!   signed with does not matter.
 //!
 //! When any fact has changed, the transaction is not committed and the caller prepares the
 //! chunk again, off the writer. A committed chunk therefore holds what sealing under the writer
 //! would have stored from the same state, apart from the nonces of claim signatures made now.
-//! Every retry follows a change to one of these facts.
+//! A retry follows a change to one of these facts, a keyring change that overlaps the writer's
+//! brief read of it, or a preparation handed to another store.
 //!
 //! Claims and blobs are compared by id and hash, not by content: both are content-addressed and
 //! never rewritten in place, so equal ids name equal bytes. The rereads do not detect a raw
@@ -161,30 +164,22 @@ pub(crate) struct SealedBatch {
     pub(crate) payload: Vec<u8>,
     pub(crate) envelope_hash: String,
     records: Vec<SealedRecord>,
-    /// The claims this sealing signed itself, having found no stored signature.
-    fresh: Vec<FreshClaim>,
+    /// For each claim this sealing signed itself, having found no stored signature: its signer
+    /// input and the signature made (`None` when the keyring had no key to sign with).
+    fresh: Vec<(principals::SignerInput, Option<ClaimSignature>)>,
 }
 
-/// A claim sealing signed itself, with the signature it made: `None` when the keyring had no
-/// key to sign with.
-struct FreshClaim {
-    subject: String,
-    kind: String,
-    actor: Option<String>,
-    body: Value,
-    accepted_at_unix_ms: u128,
-    signature: Option<ClaimSignature>,
-}
-
-impl FreshClaim {
-    fn unsealed(&self) -> principals::Unsealed<'_> {
-        principals::Unsealed {
-            subject: &self.subject,
-            kind: &self.kind,
-            actor: self.actor.as_deref(),
-            body: &self.body,
-            accepted_at_unix_ms: self.accepted_at_unix_ms,
+/// Whether two signatures name the same signer: key, principal, principal acted for and chain.
+fn same_signer(one: &Option<ClaimSignature>, other: &Option<ClaimSignature>) -> bool {
+    match (one, other) {
+        (Some(one), Some(other)) => {
+            one.key == other.key
+                && one.signer == other.signer
+                && one.on_behalf == other.on_behalf
+                && one.chain == other.chain
         }
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -231,21 +226,15 @@ pub(crate) fn seal_batch(
         let signature = match (existing, sign) {
             (Some(signature), _) => Some(signature),
             (None, Some(sign)) => {
-                let signature = sign(&principals::Unsealed {
+                let unsealed = principals::Unsealed {
                     subject: &claim.subject,
                     kind: &claim.kind,
                     actor: claim.actor.as_deref(),
                     body: &claim.body,
                     accepted_at_unix_ms: claim.accepted_at_unix_ms,
-                });
-                fresh.push(FreshClaim {
-                    subject: claim.subject.clone(),
-                    kind: claim.kind.clone(),
-                    actor: claim.actor.clone(),
-                    body: claim.body.clone(),
-                    accepted_at_unix_ms: claim.accepted_at_unix_ms,
-                    signature: signature.clone(),
-                });
+                };
+                let signature = sign(&unsealed);
+                fresh.push((principals::SignerInput::of(&unsealed), signature.clone()));
                 signature
             }
             (None, None) => None,
@@ -413,6 +402,12 @@ pub(crate) struct PreparedSeal {
     origin: String,
     signer: Option<EnvelopeSigner>,
     pub(crate) batches: Vec<SealedBatch>,
+    /// Each distinct signer input among the claims the chunk signed itself, with the signer
+    /// preparation signed them as.
+    signers: BTreeMap<principals::SignerInput, Option<ClaimSignature>>,
+    /// Whether every claim with the same signer input was signed by the same signer. Not when a
+    /// keyring change landed while preparation signed.
+    signers_agree: bool,
     /// A member-key signature for each envelope the writer may find unsigned: those unsigned
     /// at preparation and every envelope this chunk seals for this node.
     envelope_signatures: BTreeMap<(u64, String), String>,
@@ -477,6 +472,16 @@ impl Store {
             bytes += sealed.payload.len();
             batches.push(sealed);
         }
+        let mut signers = BTreeMap::new();
+        let mut signers_agree = true;
+        for (input, signature) in batches.iter().flat_map(|sealed| &sealed.fresh) {
+            match signers.get(input) {
+                Some(seen) => signers_agree &= same_signer(seen, signature),
+                None => {
+                    signers.insert(input.clone(), signature.clone());
+                }
+            }
+        }
         let signer = self.envelope_signer(&snapshot)?;
         let mut envelope_signatures = BTreeMap::new();
         if let Some((
@@ -517,6 +522,8 @@ impl Store {
             origin: self.origin.clone(),
             signer: signer.map(|(_, signer)| signer),
             batches,
+            signers,
+            signers_agree,
             envelope_signatures,
         }))
     }
@@ -554,23 +561,27 @@ impl Store {
                 return Ok(false);
             }
         }
-        // Each claim sealing signed itself is signed as the keyring would sign it now. A change
-        // to the keyring in progress or overlapping this read counts as a change.
-        let signers_unchanged = self.keyring.settled(|| {
-            prepared
-                .batches
-                .iter()
-                .flat_map(|sealed| &sealed.fresh)
-                .all(
-                    |fresh| match (self.claim_signer(&fresh.unsealed()), &fresh.signature) {
+        // Each claim sealing signed itself is signed as the keyring would sign it now: one
+        // selection per distinct signer input. A change to the keyring in progress or
+        // overlapping this read counts as a change.
+        if !prepared.signers_agree {
+            return Ok(false);
+        }
+        if !prepared.signers.is_empty() {
+            let signers_unchanged = self.keyring.settled(|| {
+                prepared.signers.iter().all(|(input, signature)| {
+                    #[cfg(test)]
+                    SIGNERS_SELECTED.with(|count| count.set(count.get() + 1));
+                    match (self.claim_signer_for(input), signature) {
                         (Some(signer), Some(signature)) => signer.signed(signature),
                         (None, None) => true,
                         _ => false,
-                    },
-                )
-        });
-        if signers_unchanged != Some(true) {
-            return Ok(false);
+                    }
+                })
+            });
+            if signers_unchanged != Some(true) {
+                return Ok(false);
+            }
         }
         for sealed in &prepared.batches {
             write_sealed_batch_tx(transaction, &self.origin, sealed)?;

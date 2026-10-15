@@ -578,6 +578,33 @@ pub struct Unsealed<'a> {
     pub accepted_at_unix_ms: u128,
 }
 
+/// All `claim_signer` reads of a claim besides the keyring: the issuer and issuer key of the
+/// grant it makes, when it is a key grant, and its actor. Claims with equal inputs are signed by
+/// the same signer.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SignerInput {
+    grant: Option<(String, String)>,
+    actor: Option<String>,
+}
+
+impl SignerInput {
+    pub(crate) fn of(claim: &Unsealed<'_>) -> Self {
+        let grant = if claim.kind == KEY_GRANTED {
+            claim
+                .body
+                .get("fields")
+                .and_then(KeyGrant::from_fields)
+                .map(|grant| (grant.issuer, grant.issuer_key))
+        } else {
+            None
+        };
+        Self {
+            grant,
+            actor: claim.actor.map(str::to_owned),
+        }
+    }
+}
+
 /// The key a claim is signed with, the principal it signs as, the principal it acts for and the
 /// delegation chain from its key: what a claim signature records about its signer.
 pub(crate) struct ClaimSigner {
@@ -947,12 +974,15 @@ impl Store {
     /// Who `sign_unsealed` signs `claim` as, read from the keyring without signing. `None`
     /// without a node key.
     pub(crate) fn claim_signer(&self, claim: &Unsealed<'_>) -> Option<ClaimSigner> {
+        self.claim_signer_for(&SignerInput::of(claim))
+    }
+
+    /// Who `sign_unsealed` signs a claim with these inputs as. `None` without a node key.
+    pub(crate) fn claim_signer_for(&self, input: &SignerInput) -> Option<ClaimSigner> {
         let node = self.keyring.node()?;
         let node_subject = self.node_subject();
-        if claim.kind == KEY_GRANTED
-            && let Some(grant) = claim.body.get("fields").and_then(KeyGrant::from_fields)
-        {
-            if grant.issuer == node_subject && grant.issuer_key == node.public() {
+        if let Some((issuer, issuer_key)) = &input.grant {
+            if *issuer == node_subject && issuer_key == node.public() {
                 return Some(ClaimSigner {
                     key: node,
                     signer: node_subject,
@@ -960,18 +990,18 @@ impl Store {
                     chain: Vec::new(),
                 });
             }
-            if let Some(issuer) = self.keyring.by_public(&grant.issuer_key)
-                && issuer.principal == grant.issuer
+            if let Some(held) = self.keyring.by_public(issuer_key)
+                && held.principal == *issuer
             {
                 return Some(ClaimSigner {
-                    key: issuer.key,
-                    signer: issuer.principal,
+                    key: held.key,
+                    signer: held.principal,
                     on_behalf: None,
-                    chain: issuer.chain,
+                    chain: held.chain,
                 });
             }
         }
-        if let Some(actor) = claim.actor
+        if let Some(actor) = input.actor.as_deref()
             && let Some(held) = self.keyring.signing(actor)
         {
             return Some(ClaimSigner {
@@ -981,8 +1011,9 @@ impl Store {
                 chain: held.chain,
             });
         }
-        let on_behalf = claim
+        let on_behalf = input
             .actor
+            .as_deref()
             .filter(|actor| *actor != node_subject)
             .map(str::to_owned);
         Some(ClaimSigner {

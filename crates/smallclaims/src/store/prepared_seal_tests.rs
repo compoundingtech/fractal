@@ -10,7 +10,9 @@
 use super::runtime::Plain;
 use super::*;
 use crate::fleet::{MemberKey, envelope_signature_message, verify_signature};
-use crate::principal::{ClaimSignature, HeldKey, Judged, Role, content_digest};
+use crate::principal::{
+    ClaimSignature, HeldKey, Judged, KEY_GRANTED, KeyGrant, Role, content_digest,
+};
 use std::cell::Cell;
 
 const FLEET: &str = "3e7a9c41-5d2b-4f86-b0c3-9a1e6d4f2b58";
@@ -35,6 +37,26 @@ fn note(store: &Store, subject: &str, fields: BTreeMap<String, Value>) -> ClaimR
             subject: subject.into(),
             kind: "example.note".into(),
             actor: None,
+            fields,
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap()
+}
+
+fn claim_by(
+    store: &Store,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    fields: BTreeMap<String, Value>,
+) -> ClaimRecord {
+    store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: actor.map(str::to_owned),
             fields,
             evidence: Vec::new(),
             expected_subject: None,
@@ -654,6 +676,111 @@ fn keys_added_for_other_principals_before_every_loan_do_not_hold_sealing_back() 
     assert_eq!(
         store.seeded_batch_rowid.load(Ordering::Acquire),
         max_batch_rowid(&store.readers.get()).unwrap()
+    );
+}
+
+#[test]
+fn the_writer_selects_each_distinct_signer_once_however_many_claims_share_it() {
+    let store = node("nutmeg");
+    keyed(&store);
+    for index in 0..20 {
+        for actor in [None, Some("agent/left"), Some("agent/right")] {
+            let subject = format!("note/shared-{index}-{}", actor.unwrap_or("node"));
+            claim_by(&store, &subject, "example.note", actor, BTreeMap::new());
+        }
+    }
+    // 60 notes and the node's grant of each agent's key: 62 batches, one chunk.
+    assert_eq!(claims(&store.readers.get()).len(), 62);
+    SIGNERS_SELECTED.with(|count| count.set(0));
+    assert_eq!(seal(&store), 0);
+    // The notes without an actor, each agent's notes, and the two grants, which the node issues
+    // with its own key: four signer inputs, each selected once under the writer.
+    assert_eq!(SIGNERS_SELECTED.with(Cell::get), 4);
+    assert_eq!(payloads(&store.readers.get()).len(), 62);
+}
+
+#[test]
+fn two_key_grants_by_one_actor_with_different_issuers_are_selected_apart() {
+    let store = node("oak");
+    let node_key = keyed(&store);
+    claim_by(
+        &store,
+        "note/mints-the-agent-key",
+        "example.note",
+        Some("agent/scribe"),
+        BTreeMap::new(),
+    );
+    let agent = store.keyring.signing("agent/scribe").unwrap();
+    let grant = |issuer: &str, issuer_key: &str| {
+        KeyGrant {
+            key: MemberKey::generate().unwrap().0.public().to_owned(),
+            role: Role::Agent,
+            issuer: issuer.into(),
+            issuer_key: issuer_key.into(),
+            label: None,
+        }
+        .fields()
+    };
+    // Both grants are written by the node, so they share an actor and a kind; their issuers
+    // differ, and so do their signers.
+    let by_node = claim_by(
+        &store,
+        "agent/granted-by-the-node",
+        KEY_GRANTED,
+        Some("host/oak"),
+        grant("host/oak", node_key.public()),
+    );
+    let by_agent = claim_by(
+        &store,
+        "agent/granted-by-the-agent",
+        KEY_GRANTED,
+        Some("host/oak"),
+        grant("agent/scribe", agent.key.public()),
+    );
+    SIGNERS_SELECTED.with(|count| count.set(0));
+    assert_eq!(seal(&store), 0);
+    // The agent's note, the node's grants (the minted key's and `by_node`, the same input), and
+    // `by_agent`.
+    assert_eq!(SIGNERS_SELECTED.with(Cell::get), 3);
+    let payloads = payloads(&store.readers.get());
+    let first = &payloads["agent/granted-by-the-node"].claim_signatures[&by_node.id];
+    assert_eq!(
+        (first.key.as_str(), first.signer.as_str()),
+        (node_key.public(), "host/oak")
+    );
+    assert!(verifies(&by_node, first));
+    let second = &payloads["agent/granted-by-the-agent"].claim_signatures[&by_agent.id];
+    assert_eq!(
+        (second.key.as_str(), second.signer.as_str()),
+        (agent.key.public(), "agent/scribe")
+    );
+    assert_eq!(second.chain, agent.chain);
+    assert!(verifies(&by_agent, second));
+}
+
+#[test]
+fn a_preparation_is_written_only_to_the_store_it_was_prepared_from() {
+    let prepared_on = node("pine");
+    keyed(&prepared_on);
+    note(&prepared_on, "note/prepared-elsewhere", BTreeMap::new());
+    let target = max_batch_rowid(&prepared_on.readers.get()).unwrap();
+    let prepared = prepared_on
+        .prepare_seal(target, usize::MAX)
+        .unwrap()
+        .unwrap();
+    let other = node("quince");
+    keyed(&other);
+    let mut connection = other.connection.write();
+    let transaction = connection.transaction().unwrap();
+    assert!(!other.seal_prepared_tx(&transaction, &prepared).unwrap());
+    drop(transaction);
+    drop(connection);
+    let mut connection = prepared_on.connection.write();
+    let transaction = connection.transaction().unwrap();
+    assert!(
+        prepared_on
+            .seal_prepared_tx(&transaction, &prepared)
+            .unwrap()
     );
 }
 
