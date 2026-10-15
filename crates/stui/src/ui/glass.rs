@@ -2308,9 +2308,25 @@ impl Ui {
             let needs = pane.is_some_and(|pane| self.pane_needs_person(&pane));
             (title, needs)
         });
-        for (shown, (title, needs)) in tabs.enumerate() {
-            let label = format!(" {}{title} ", if needs { "◆ " } else { "" });
-            let label = text::truncate(&label, 28);
+        let labels: Vec<(String, bool)> = tabs
+            .map(|(title, needs)| {
+                let label = format!(" {}{title} ", if needs { "◆ " } else { "" });
+                (text::truncate(&label, 28), needs)
+            })
+            .collect();
+        let widths: Vec<u16> = labels.iter().map(|(label, _)| text::width(label) as u16).collect();
+        let (first, last) = visible_tabs(&widths, group.current, area.width.saturating_sub(x - area.x));
+        // Tabs that do not fit are not lost: the strip scrolls to keep the one in front on
+        // screen, and a marker at each end counts the hidden ones and shows the nearest.
+        if first > 0 {
+            let marker = format!("‹{} ", first);
+            let width = text::width(&marker) as u16;
+            buf.set_stringn(x, area.y, &marker, width as usize, theme::fg(theme::PERSON).bg(strip));
+            self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, first - 1));
+            x += width;
+        }
+        for (shown, (label, needs)) in labels.iter().enumerate().take(last + 1).skip(first) {
+            let needs = *needs;
             let style = match (shown == group.current, focused) {
                 (true, true) => Style::default()
                     .fg(theme::CRUST)
@@ -2321,12 +2337,17 @@ impl Ui {
                 (_, true) => theme::fg(theme::SUBTEXT0).bg(strip),
                 _ => theme::fg(theme::OVERLAY0).bg(strip),
             };
-            let width = text::width(&label) as u16;
-            if x + width > area.x + area.width {
-                break;
-            }
-            buf.set_stringn(x, area.y, &label, width as usize, style);
+            // A tab wider than the strip (it alone fits nowhere) is cut, not dropped.
+            let width = widths[shown].min((area.x + area.width).saturating_sub(x));
+            buf.set_stringn(x, area.y, label, width as usize, style);
             self.hit(Rect { x, width, ..area }, Hit::GlassTab(index, shown));
+            x += width + 1;
+        }
+        if last + 1 < labels.len() {
+            let marker = format!(" {}›", labels.len() - 1 - last);
+            let width = text::width(&marker) as u16;
+            buf.set_stringn(x, area.y, &marker, width as usize, theme::fg(theme::PERSON).bg(strip));
+            self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, last + 1));
             x += width + 1;
         }
         if x + 3 <= area.x + area.width {
@@ -4117,6 +4138,34 @@ fn home_popover_rect(body: Rect) -> Rect {
     }
 }
 
+/// The first and last tab that fit in `room` cells, the one in front always among them: the
+/// strip stays where it is until the tab in front passes its end, then moves just enough. Each
+/// tab takes its width and a gap; the markers for hidden tabs are reserved from `room`.
+fn visible_tabs(widths: &[u16], current: usize, room: u16) -> (usize, usize) {
+    const MARKER: u16 = 4;
+    let count = widths.len();
+    if count == 0 {
+        return (0, 0);
+    }
+    let current = current.min(count - 1);
+    let fits = |first: usize, last: usize| {
+        let tabs: u16 = widths[first..=last].iter().map(|width| width + 1).sum();
+        let before = if first > 0 { MARKER } else { 0 };
+        let after = if last + 1 < count { MARKER } else { 0 };
+        tabs + before + after <= room
+    };
+    let mut first = 0;
+    // Move the start on until the front tab fits (it always shows, even alone and cut short).
+    while first < current && !fits(first, current) {
+        first += 1;
+    }
+    let mut last = current;
+    while last + 1 < count && fits(first, last + 1) {
+        last += 1;
+    }
+    (first, last)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4633,6 +4682,60 @@ mod tests {
         // Switched back, the conversation is the default again.
         ui.toggle_terminal_first();
         assert!(!ui.terminal_first());
+    }
+
+    #[test]
+    fn tabs_that_do_not_fit_scroll_into_view_and_a_marker_reaches_the_hidden_ones() {
+        // Nathan, 2026-10-14: with too many tabs to show, the others could never be reached.
+        let mut ui = glass();
+        for n in 0..14 {
+            ui.open_in_glass(
+                Pane::Mission(Some(format!("mission/fleet/example/m{n:02}"))),
+                Open::Tab,
+            );
+        }
+        let (_, current, all) = tabs(&ui);
+        let last = all[0].len() - 1;
+        assert_eq!(current, last, "the newest tab is in front");
+        let shown = screen(&ui);
+        assert!(shown.contains("example/m13"), "the front tab is on screen: {shown}");
+        assert!(shown.contains('‹'), "the tabs before it are counted: {shown}");
+        assert!(!shown.contains('›'), "nothing is hidden after the last tab");
+        // Back at the first tab, the others are counted after it, and the marker shows the next.
+        ui.show_tab(0);
+        let shown = screen(&ui);
+        assert!(shown.contains('›'), "{shown}");
+        assert!(!shown.contains('‹'), "{shown}");
+        let more = ui
+            .frame
+            .borrow()
+            .hits
+            .iter()
+            .find_map(|(_, hit)| match hit {
+                Hit::GlassTabMore(0, tab) => Some(*tab),
+                _ => None,
+            })
+            .expect("a marker for the hidden tabs");
+        assert!(more > 1, "it names the first hidden tab, not a visible one");
+        ui.click(Hit::GlassTabMore(0, more));
+        assert_eq!(tabs(&ui).1, more, "the marker shows that tab");
+        assert!(screen(&ui).contains(&format!("example/m{:02}", more - 1)), "and it is on screen");
+    }
+
+    #[test]
+    fn the_strip_keeps_still_until_the_front_tab_passes_its_end() {
+        let widths = [10u16; 8];
+        // Room for three tabs and a marker: 3 × 11 + 4 = 37. In the middle both ends need a
+        // marker (8 cells), so only two tabs fit.
+        assert_eq!(visible_tabs(&widths, 0, 37), (0, 2));
+        assert_eq!(visible_tabs(&widths, 2, 37), (0, 2));
+        assert_eq!(visible_tabs(&widths, 3, 37), (2, 3));
+        assert_eq!(visible_tabs(&widths, 7, 37), (5, 7));
+        // Everything fits: no scrolling.
+        assert_eq!(visible_tabs(&widths, 7, 200), (0, 7));
+        // A strip too small for even one tab still shows the front one.
+        assert_eq!(visible_tabs(&widths, 5, 5), (5, 5));
+        assert_eq!(visible_tabs(&[], 0, 50), (0, 0));
     }
 
     #[test]
@@ -6352,9 +6455,24 @@ mod tests {
     }
 
     #[test]
+    fn a_lowercase_r_types_into_the_box_while_the_link_is_down() {
+        // Nathan, 2026-10-14: with the link stale he could not type a lowercase r (the key was
+        // taken to mean reconnect); R worked. Letters are letters, link or no link.
+        let mut ui = glass();
+        ui.world.link = Link::Offline("No member reachable · reconnecting · Ctrl+R retry now".into());
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".into())),
+            Open::Tab,
+        );
+        typed(&mut ui, "rare");
+        let draft = ui.conversation_state.drafts.get("agent/example/atlas/builder");
+        assert_eq!(draft.map(String::as_str), Some("rare"));
+    }
+
+    #[test]
     fn the_connection_word_is_clickable_and_says_what_is_known() {
         let mut ui = glass();
-        ui.world.link = Link::Offline("Last connected at 10:02 · reconnecting · r retry now".into());
+        ui.world.link = Link::Offline("Last connected at 10:02 · reconnecting · Ctrl+R retry now".into());
         screen(&ui);
         let rect = {
             let info = ui.frame.borrow();
