@@ -18,7 +18,10 @@ export function tierTitle(tier: Tier): string {
   }
 }
 
-export type HomeKind = 'review' | 'launch' | 'revision' | 'request' | 'update' | 'prompt' | 'login';
+/** `unplaced`: an item st did not place in a way this client knows (an older st presents
+ * nothing; a newer one may name a group or card this client does not know). It shows what st
+ * says, where st's alert flag puts it, and the app offers only the answers st lists. */
+export type HomeKind = 'review' | 'launch' | 'revision' | 'request' | 'update' | 'prompt' | 'login' | 'unplaced';
 /** Semantic colors; renderers resolve them through their own palette. */
 export type HomeColor = 'person' | 'green';
 export type HomeRow = {
@@ -35,22 +38,29 @@ export type HomeRow = {
 
 const HOME_KINDS: readonly string[] = ['review', 'launch', 'revision', 'request', 'update', 'prompt', 'login'];
 
-type Kindish = Pick<Attention, 'presentation'> & { alert?: boolean };
+type Kindish = Pick<Attention, 'presentation' | 'attention_kind'> & { alert?: boolean; update?: unknown };
 /**
- * Where Home shows an item, as st presents it, or null for one st puts on no Now (or in a group
- * Home has no section for). A feedback gate is a review here. An st too old to present its items
- * presents none: each shows as a request, where its alert flag puts it.
+ * Where Home shows an item, as st presents it, or null for one st puts on no Now (a null group
+ * or card). A feedback gate is a review here. An item st places in a way this client does not
+ * know (an older st presents nothing; a newer one may name a group or card this client does not
+ * know) is unplaced, where st's alert flag puts it, never dropped; st puts neither a message nor
+ * a fault on Now.
  */
 export function homeKind(item: Kindish): { tier: Tier; kind: HomeKind } | null {
   const presented = item.presentation;
-  if (!presented) return { tier: item.alert === false ? 'later' : 'stopped', kind: 'request' };
-  const tier = TIERS.find(tier => tier === presented.tier);
+  const fallback: Tier = isAlert(item) ? 'stopped' : 'later';
+  if (!presented) {
+    const offNow = (item.attention_kind as string) === 'unread-message' || item.attention_kind === 'fault';
+    return offNow ? null : { tier: fallback, kind: 'unplaced' };
+  }
+  if (presented.tier === null || presented.kind === null || presented.kind === 'fault') return null;
+  const tier = TIERS.find(tier => tier === presented.tier) ?? fallback;
   const kind = presented.kind === 'feedback' ? 'review' : presented.kind;
-  return tier && kind && HOME_KINDS.includes(kind) ? { tier, kind: kind as HomeKind } : null;
+  return { tier, kind: HOME_KINDS.includes(kind) ? kind as HomeKind : 'unplaced' };
 }
 
 export function kindGlyph(kind: HomeKind): { glyph: string; color: HomeColor } {
-  return kind === 'update' ? { glyph: '✦', color: 'green' } : { glyph: '◆', color: 'person' };
+  return kind === 'update' ? { glyph: '✦', color: 'green' } : kind === 'unplaced' ? { glyph: '?', color: 'person' } : { glyph: '◆', color: 'person' };
 }
 
 export const HOME_LEGEND: ReadonlyArray<{ glyph: string; color: HomeColor; word: string }> = [
@@ -100,7 +110,8 @@ export function homeRows(items: KeptAttention[], actor: string | undefined, now 
     if (!place) return [];
     const step = item.presentation?.waiting?.path;
     const waiting = item.closedElsewhere ? 'closed; stays until you clear it'
-      : !item.presentation ? 'st is older and does not say what this is'
+      : !item.presentation ? 'st does not say what this is: this host\'s st is older, or has not presented it yet'
+      : place.kind === 'unplaced' ? 'st names a card this app does not know'
       : step ? `step ${step}` : null;
     return [{ item, ...place, ...kindGlyph(place.kind), title: cleanTitle(item.title), waiting, age: ago(item.requested_at, now) }];
   });
@@ -137,7 +148,7 @@ function cleanTitle(title: string): string {
 
 type Alertish = Pick<Attention, 'attention_kind'> & { alert?: boolean; update?: unknown };
 
-/** Whether the item is an alert. A daemon that predates alerts does not say, and then everything but an update or an unread message is one. */
+/** Whether the item is an alert, as st's CLI reads it. A daemon that predates alerts does not say, and then everything but an update or an unread message is one. */
 export function isAlert(item: Alertish): boolean {
   return item.alert ?? (!item.update && item.attention_kind !== 'unread-message');
 }
