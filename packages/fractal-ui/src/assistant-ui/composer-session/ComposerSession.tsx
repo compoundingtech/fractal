@@ -155,7 +155,8 @@ export function ComposerAttachments({ picker = true, readOnly = false }: { reado
     {/* The live region stays mounted so the first refusal is announced; empty, it takes no space. */}
     <div data-testid="composer-attachment-notice" {...stylex.props(refusals.length === 0 ? styles.refusalIdle : styles.refusal)}>
       {refusals.length > 0 && <span {...stylex.props(styles.refusalIcon)}><Icon name="alert" size={14} /></span>}
-      <div role="status" aria-live="polite" {...stylex.props(styles.refusalText)}>{refusals.map((message, index) => <p key={index} {...stylex.props(styles.refusalLine)}>{message}</p>)}</div>
+      {/* Each refusal remounts its line by id, so an identical repeat still changes the live region and is re-announced. */}
+      <div role="status" aria-live="polite" {...stylex.props(styles.refusalText)}>{refusals.map(refusal => <p key={refusal.id} data-refusal-id={refusal.id} {...stylex.props(styles.refusalLine)}>{refusal.message}</p>)}</div>
       {refusals.length > 0 && <Button aria-label="Dismiss image notice" onPress={() => setRefusals([])} {...stylex.props(styles.refusalDismiss)}><Icon name="x" size={12} /></Button>}
     </div>
   </div>
@@ -164,10 +165,13 @@ export function ComposerAttachments({ picker = true, readOnly = false }: { reado
  * Messages for images the runtime refused in the latest add attempt. One picker selection or paste
  * adds its files concurrently within a task, so refusals from that batch accumulate and an accepted
  * sibling in the same batch does not clear them; an accepted add in a later batch does.
+ * Every refusal gets a fresh id, so repeating the same refusal replaces the DOM node rather than
+ * leaving identical text in place, which assistive technology would not re-announce.
  */
 function useAttachmentRefusals() {
   const aui = useAui()
-  const [refusals, setRefusals] = React.useState<readonly string[]>([])
+  const [refusals, setRefusals] = React.useState<readonly { readonly id: number; readonly message: string }[]>([])
+  const sequence = React.useRef(0)
   const batch = React.useRef({ open: false, refused: false })
   const enterBatch = () => {
     if (batch.current.open) return batch.current
@@ -179,10 +183,10 @@ function useAttachmentRefusals() {
   useAuiEvent('composer.attachmentAddError', event => {
     if (event.messageId !== undefined) return
     const current = enterBatch()
-    const message = attachmentAddErrorNotice(event, aui.composer.getState().attachmentAccept)
+    const refusal = { id: ++sequence.current, message: attachmentAddErrorNotice(event, aui.composer.getState().attachmentAccept) }
     const append = current.refused
     current.refused = true
-    setRefusals(previous => append ? [...previous, message] : [message])
+    setRefusals(previous => append ? [...previous, refusal] : [refusal])
   })
   useAuiEvent('composer.attachmentAdd', event => {
     if (event.messageId !== undefined) return

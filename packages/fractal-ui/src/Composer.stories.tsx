@@ -296,7 +296,7 @@ export const ImageRefusal: Story = {
     const row = within(canvasElement).getByTestId('composer-attachments')
     const notice = within(row).getByRole('status')
     const dismiss = () => within(row).queryByRole('button', { name: 'Dismiss image notice' })
-    const [first, second, third, fourth, fifth] = await Promise.all(['#326af1', '#0f9d58', '#f4b400', '#db4437', '#8e44ad'].map((fill, index) => pngFile(`photo-${index + 1}.png`, fill)))
+    const [first, second, third, fourth, fifth] = await Promise.all(['#326af1', '#e8710a', '#f4b400', '#db4437', '#8e44ad'].map((fill, index) => pngFile(`photo-${index + 1}.png`, fill)))
     const oversized = new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'huge-scan.png', { type: 'image/png' })
     const countRefusal = 'photo-5.png wasn\'t added. A message can include up to 4 images.'
     const sizeRefusal = 'huge-scan.png is over the 10 MB image limit.'
@@ -328,6 +328,17 @@ export const ImageRefusal: Story = {
     await waitFor(() => expect(notice).toHaveTextContent(countRefusal))
     await userEvent.click(dismiss()!)
     await expect(notice).toBeEmptyDOMElement()
+    // The same refusal twice is announced twice: the line is replaced, not left as identical text.
+    await pickImages(canvasElement, [fifth])
+    await waitFor(() => expect(notice).toHaveTextContent(countRefusal))
+    const firstLine = notice.querySelector('p')
+    await pickImages(canvasElement, [fifth])
+    await waitFor(() => expect(notice.querySelector('p')).not.toBe(firstLine))
+    const secondLine = notice.querySelector('p')
+    await expect(secondLine).toHaveTextContent(countRefusal)
+    await expect(notice.querySelectorAll('p')).toHaveLength(1)
+    await expect(Number(secondLine?.dataset.refusalId)).toBeGreaterThan(Number(firstLine?.dataset.refusalId))
+    await expect(firstLine?.isConnected).toBe(false)
     // Reviewed end state: four previews with the size refusal announced beneath them.
     await pickImages(canvasElement, [oversized])
     await waitFor(() => expect(notice).toHaveTextContent(sizeRefusal))
@@ -335,6 +346,14 @@ export const ImageRefusal: Story = {
   },
 }
 export const ImageRefusalLight: Story = { ...ImageRefusal, args: { scheme: 'light' } }
+/** The refusal play in a single lane at the reviewed 440/1440 widths. */
+function ImageRefusalLane({ scheme, width }: { readonly scheme: Scheme; readonly width: 440 | 1440 }) {
+  return <Surface scheme={scheme}><div data-testid="composer-image-refusal-lane" {...stylex.props(styles.geometryLane(width))}><ComposerFrame policy={decided} state="idle" effort="supported" frameId={`image-refusal.${width}`} /></div></Surface>
+}
+export const ImageRefusalDark440: Story = { beforeEach: clearDrafts, render: () => <ImageRefusalLane scheme="dark" width={440} />, play: ImageRefusal.play }
+export const ImageRefusalDark1440: Story = { beforeEach: clearDrafts, render: () => <ImageRefusalLane scheme="dark" width={1440} />, play: ImageRefusal.play }
+export const ImageRefusalLight440: Story = { beforeEach: clearDrafts, render: () => <ImageRefusalLane scheme="light" width={440} />, play: ImageRefusal.play }
+export const ImageRefusalLight1440: Story = { beforeEach: clearDrafts, render: () => <ImageRefusalLane scheme="light" width={1440} />, play: ImageRefusal.play }
 
 /** Stable staged file: the session re-stages its initial image whenever this identity changes. */
 const offlineImage = new File(['<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" fill="#326af1"/></svg>'], 'offline-capture.svg', { type: 'image/svg+xml' })
