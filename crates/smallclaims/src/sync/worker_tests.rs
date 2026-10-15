@@ -3259,5 +3259,36 @@ mod early_recovery {
         assert!(stalled.is_timeout());
         assert!(!exchange_unanswered(&anyhow::Error::new(stalled)));
         held.abort();
+        // A peer that answers every exchange with a redirect to itself did answer: reqwest gives
+        // up after its redirect limit, and that is no outage.
+        let redirecting = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", redirecting.local_addr().unwrap());
+        let looping = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = redirecting.accept().await.unwrap();
+                tokio::spawn(async move {
+                    while read_request(&mut stream).await.is_some() {
+                        let answer = format!(
+                            "HTTP/1.1 302 Found\r\nlocation: {EXCHANGE_PATH}\r\ncontent-length: 0\r\n\r\n"
+                        );
+                        if stream.write_all(answer.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let redirected = send(url, Duration::from_secs(5)).await.unwrap_err();
+        assert!(redirected.is_redirect(), "{redirected:?}");
+        assert!(!exchange_unanswered(&anyhow::Error::new(redirected)));
+        looping.abort();
+        // A request this node could not build never left it.
+        let unbuilt = replication_http_client()
+            .post("not a url")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(unbuilt.is_builder(), "{unbuilt:?}");
+        assert!(!exchange_unanswered(&anyhow::Error::new(unbuilt)));
     }
 }

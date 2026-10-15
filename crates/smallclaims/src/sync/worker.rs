@@ -1430,17 +1430,15 @@ fn fabric_refusal_delay_with_jitter(jitter: u16) -> Duration {
 /// be made, or was closed, reset or aborted before an answer. reqwest 0.12.28 with hyper 1.11.0
 /// reports these as a connect error, or as a request error with no status that is not a
 /// timeout. A timeout after connecting is not this: that peer was reached and stalled. Neither
-/// is any answer, however it failed, nor a failure reading a body after its head.
+/// is any answer, however it failed (an error status, a redirect loop, a body cut off after its
+/// head), nor a fault building the request here.
 fn exchange_unanswered(error: &anyhow::Error) -> bool {
     error
         .chain()
         .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
         .any(|error| {
             error.is_connect()
-                || (error.status().is_none()
-                    && !error.is_timeout()
-                    && !error.is_body()
-                    && !error.is_decode())
+                || (error.is_request() && error.status().is_none() && !error.is_timeout())
         })
 }
 
