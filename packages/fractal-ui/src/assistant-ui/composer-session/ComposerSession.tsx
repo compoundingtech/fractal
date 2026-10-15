@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Schema } from 'effect'
-import { AttachmentPrimitive, ComposerPrimitive, useAui, useAuiState } from '@assistant-ui/react'
+import { AttachmentPrimitive, ComposerPrimitive, useAui, useAuiEvent, useAuiState } from '@assistant-ui/react'
 import { Button, Dialog, Modal, ModalOverlay, TokenFieldValue } from 'react-aria-components'
 import { EmbraceComposer, EmbraceComposerToolbar, ComposerQueueStrip } from '../EmbraceComposer'
 import { EmbraceRuntimeProvider, type ConversationRuntimeOptions } from '../EmbraceRuntime'
@@ -10,6 +10,7 @@ import { accentVars as accent, borderVars as border, geometryVars as g, radiusVa
 import { Icon } from '../composition/Icons'
 import type { ComposerTarget } from './composer-fixtures'
 import { unknownEffort, type EffortControl } from '../embrace-composer/EffortPicker'
+import { attachmentAddErrorNotice } from './image-limits'
 
 export type ComposerLayout = 'C1' | 'C2' | 'C3'
 export type RunningBehavior = 'R1' | 'R2' | 'R3'
@@ -139,15 +140,62 @@ function ComposerSessionBody({ draftKey, layout, runningBehavior, mentions, targ
  * Staged native composer attachments: preview, name, upload error and remove for each file, plus the
  * native image picker. The picker follows the runtime's attachment capability and read-only state;
  * hosts whose toolbar already owns selection pass `picker={false}`.
+ *
+ * Refused images (type, size, count) from every add path the runtime owns — picker, paste — are
+ * announced in a polite live region under the previews until the next accepted add, removal or send.
  */
 export function ComposerAttachments({ picker = true, readOnly = false }: { readonly picker?: boolean; readonly readOnly?: boolean }) {
   const supported = useAuiState(state => state.thread.capabilities.attachments)
   const disabled = useAuiState(state => state.thread.isDisabled)
   const selectable = picker && supported && !readOnly && !disabled
+  const [refusals, setRefusals] = useAttachmentRefusals()
   return <div data-testid="composer-attachments" {...stylex.props(styles.attachments)}>
     <ComposerPrimitive.Attachments>{() => <AttachmentPreview />}</ComposerPrimitive.Attachments>
     {selectable && <ComposerPrimitive.AddAttachment asChild><Button {...stylex.props(styles.button)}><Icon name="attach" />Attach image</Button></ComposerPrimitive.AddAttachment>}
+    {/* The live region stays mounted so the first refusal is announced; empty, it takes no space. */}
+    <div data-testid="composer-attachment-notice" {...stylex.props(refusals.length === 0 ? styles.refusalIdle : styles.refusal)}>
+      {refusals.length > 0 && <span {...stylex.props(styles.refusalIcon)}><Icon name="alert" size={14} /></span>}
+      <div role="status" aria-live="polite" {...stylex.props(styles.refusalText)}>{refusals.map((message, index) => <p key={index} {...stylex.props(styles.refusalLine)}>{message}</p>)}</div>
+      {refusals.length > 0 && <Button aria-label="Dismiss image notice" onPress={() => setRefusals([])} {...stylex.props(styles.refusalDismiss)}><Icon name="x" size={12} /></Button>}
+    </div>
   </div>
+}
+/**
+ * Messages for images the runtime refused in the latest add attempt. One picker selection or paste
+ * adds its files concurrently within a task, so refusals from that batch accumulate and an accepted
+ * sibling in the same batch does not clear them; an accepted add in a later batch does.
+ */
+function useAttachmentRefusals() {
+  const aui = useAui()
+  const [refusals, setRefusals] = React.useState<readonly string[]>([])
+  const batch = React.useRef({ open: false, refused: false })
+  const enterBatch = () => {
+    if (batch.current.open) return batch.current
+    const next = { open: true, refused: false }
+    batch.current = next
+    window.setTimeout(() => { next.open = false }, 0)
+    return next
+  }
+  useAuiEvent('composer.attachmentAddError', event => {
+    if (event.messageId !== undefined) return
+    const current = enterBatch()
+    const message = attachmentAddErrorNotice(event, aui.composer.getState().attachmentAccept)
+    const append = current.refused
+    current.refused = true
+    setRefusals(previous => append ? [...previous, message] : [message])
+  })
+  useAuiEvent('composer.attachmentAdd', event => {
+    if (event.messageId !== undefined) return
+    if (!enterBatch().refused) setRefusals([])
+  })
+  useAuiEvent('composer.send', event => { if (event.messageId === undefined) setRefusals([]) })
+  const staged = useAuiState(state => state.composer.attachments.length)
+  const previous = React.useRef(staged)
+  React.useEffect(() => {
+    if (staged < previous.current) setRefusals([])
+    previous.current = staged
+  }, [staged])
+  return [refusals, setRefusals] as const
 }
 function AttachmentPreview() {
   const attachment = useAuiState(state => state.attachment)
@@ -174,5 +222,10 @@ const styles = stylex.create({
   button: { display: 'inline-flex', justifyContent: 'center', alignItems: 'center', gap: s.xs, flexShrink: 0, minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary }, ':disabled': { cursor: 'not-allowed', opacity: 0.64 } },
   help: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted }, notice: { padding: s.md, borderRadius: r.sm, backgroundColor: surface.rowActive, color: ink.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading },
   attachments: { display: 'flex', alignItems: 'center', gap: s.md, flexWrap: 'wrap' }, attachment: { display: 'flex', alignItems: 'center', gap: s.md, padding: s.md, borderRadius: r.sm, backgroundColor: surface.rowActive, minWidth: 0 }, image: { width: g.band, height: g.band, objectFit: 'cover', borderRadius: r.sm }, meta: { display: 'flex', flexDirection: 'column', minWidth: 0 }, name: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', fontSize: t.metaSize }, error: { color: status.dangerFg, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
+  refusalIdle: { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
+  refusal: { flexBasis: '100%', display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0, paddingBlock: s.xs, paddingInlineStart: s.md, paddingInlineEnd: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: status.dangerMuted, borderRadius: r.sm, backgroundColor: surface.rowActive },
+  refusalIcon: { display: 'inline-flex', flexShrink: 0, color: status.dangerFg },
+  refusalText: { flexGrow: 1, minWidth: 0, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' }, refusalLine: { margin: 0 },
+  refusalDismiss: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, width: g.controlSm, height: g.controlSm, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, cursor: 'pointer', ':hover': { color: ink.fg, backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   overlay: { position: 'fixed', inset: 0, backgroundColor: surface.scrim, display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 30, padding: s.xl }, modal: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.lg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, maxWidth: '90vw', outline: 'none' }, dialog: { padding: s.xl, borderRadius: r.lg }, dialogTitle: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading }, dialogActions: { display: 'flex', gap: s.md, flexWrap: 'wrap' },
 })

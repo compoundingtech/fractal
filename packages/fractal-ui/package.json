@@ -14,6 +14,7 @@
     "./assistant-ui/workbench-model": "./src/assistant-ui/workbench/workbench-model.ts",
     "./assistant-ui/sync": "./src/assistant-ui/st3-views/index.ts",
     "./assistant-ui/sync-status": "./src/assistant-ui/st3-views/sync-line.ts",
+    "./assistant-ui/image-limits": "./src/assistant-ui/composer-session/image-limits.ts",
     "./human-time": "./src/time/HumanTime.tsx",
     "./human-time/format": "./src/time/human-time.ts",
     "./human-time/clock": "./src/time/clock.tsx"
@@ -26,7 +27,8 @@
     "test:transcript": "node --test --test-force-exit src/assistant-ui/composition/Transcript.unit.test.mjs",
     "check:shell-imports": "node scripts/check-shell-imports.mjs",
     "test:human-time": "node --test --test-force-exit src/time/human-time.unit.test.mjs",
-    "test:work-log": "node --test --test-force-exit src/assistant-ui/taste/work-log.unit.test.mjs"
+    "test:work-log": "node --test --test-force-exit src/assistant-ui/taste/work-log.unit.test.mjs",
+    "test:image-limits": "node --test --test-force-exit src/assistant-ui/composer-session/image-limits.unit.test.mjs"
   },
   "dependencies": {
     "react": "19.2.3",

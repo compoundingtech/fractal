@@ -26,16 +26,18 @@ it('keeps separate runtime identities and cached native refs through retry and r
   await adapter.remove(ready)
   expect(adapter.nativeId(ready.id)).toBeUndefined()
   for (let i = 0; i < 3; i++) await adapter.add({ file: file() })
-  await expect(adapter.add({ file: file() })).rejects.toThrow('four images')
+  await expect(adapter.add({ file: file() })).rejects.toThrow('fixture.png wasn\'t added. A message can include up to 4 images.')
 })
 
 it('limits type, size and retained image count before uploading bytes', async () => {
   const transport = port()
   const adapter = createComposerAttachmentAdapter(transport)
-  await expect(adapter.add({ file: new File(['x'], 'unsupported.svg', { type: 'image/svg+xml' }) })).rejects.toThrow('PNG')
-  await expect(adapter.add({ file: new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'large.png', { type: 'image/png' }) })).rejects.toThrow('10 MiB')
-  for (let i = 0; i < 4; i++) await adapter.add({ file: file() })
-  await expect(adapter.add({ file: file() })).rejects.toThrow('four images')
+  await expect(adapter.add({ file: new File(['x'], 'unsupported.svg', { type: 'image/svg+xml' }) })).rejects.toThrow('unsupported.svg isn\'t a supported image. Use PNG, JPEG, GIF or WebP.')
+  await expect(adapter.add({ file: new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'large.png', { type: 'image/png' }) })).rejects.toThrow('large.png is over the 10 MB image limit.')
+  // Exactly the byte limit is accepted.
+  await expect(adapter.add({ file: new File([new Uint8Array(10 * 1024 * 1024)], 'limit.png', { type: 'image/png' }) })).resolves.toMatchObject({ name: 'limit.png' })
+  for (let i = 0; i < 3; i++) await adapter.add({ file: file() })
+  await expect(adapter.add({ file: file() })).rejects.toThrow('fixture.png wasn\'t added. A message can include up to 4 images.')
   expect(transport.upload).not.toHaveBeenCalled()
   expect(transport.send).not.toHaveBeenCalled()
 })

@@ -752,6 +752,42 @@ describe('ConversationPane composition activation', () => {
     expect(source.send).not.toHaveBeenCalled()
   })
 
+  it('announces refused pasted and picked images beside the previews until the next valid change or send', async () => {
+    source.sendEnabled = true
+    source.upload.mockResolvedValue({ _tag: 'Refused', reason: 'failed', detail: 'Upload failed fixture' })
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false } }
+    await mount()
+    const notice = () => container.querySelector('[data-testid="composer-attachments"] [role="status"]')!
+    const paste = async (file: File) => act(async () => {
+      const event = new Event('paste', { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'clipboardData', { value: { files: [file] } })
+      container.querySelector('textarea')!.dispatchEvent(event)
+    })
+    const png = (name: string, size = 1) => new File([new Uint8Array(size)], name, { type: 'image/png' })
+    expect(notice().getAttribute('aria-live')).toBe('polite')
+    expect(notice().textContent).toBe('')
+    await paste(png('huge.png', 10 * 1024 * 1024 + 1))
+    expect(notice().textContent).toBe('huge.png is over the 10 MB image limit.')
+    expect(container.querySelector('img[alt="huge.png"]')).toBeNull()
+    await paste(new File(['<svg/>'], 'vector.svg', { type: 'image/svg+xml' }))
+    expect(notice().textContent).toBe('SVG files can\'t be attached. Use PNG, JPEG, GIF or WebP.')
+    await paste(png('first.png'))
+    expect(container.querySelector('img[alt="first.png"]')).not.toBeNull()
+    expect(notice().textContent).toBe('')
+    const picker = [...container.querySelectorAll('button')].find(button => button.textContent === 'Attach image')!
+    await act(async () => { picker.click() })
+    const input = [...document.body.querySelectorAll<HTMLInputElement>('input[type="file"]')].at(-1)!
+    await act(async () => {
+      Object.defineProperty(input, 'files', { value: ['second.png', 'third.png', 'fourth.png', 'fifth.png'].map(name => png(name)) })
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(container.querySelectorAll('[data-testid="composer-attachments"] img')).toHaveLength(4)
+    expect(notice().textContent).toBe('fifth.png wasn\'t added. A message can include up to 4 images.')
+    await editComposer('Send the staged images')
+    await submitComposer()
+    expect(notice().textContent).toBe('')
+  })
+
   it.each(['button', 'enter', 'form'] as const)('keeps offline drafts editable through %s submission and reconnect', async method => {
     source.sendEnabled = true
     source.offline = true

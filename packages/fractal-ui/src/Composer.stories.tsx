@@ -260,6 +260,81 @@ export const ImageAttached: Story = {
   },
 }
 
+/** Real PNG bytes drawn in the play's browser, so accepted previews render like a user's photos. */
+async function pngFile(name: string, fill: string): Promise<File> {
+  const canvas = document.createElement('canvas')
+  canvas.width = 64
+  canvas.height = 64
+  const context = canvas.getContext('2d')
+  if (context === null) throw new Error('2D canvas unavailable')
+  context.fillStyle = fill
+  context.fillRect(0, 0, 64, 64)
+  const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
+  if (blob === null) throw new Error('PNG encoding failed')
+  return new File([blob], name, { type: 'image/png' })
+}
+/** Drives the toolbar's native picker: captures the file input it creates instead of opening the OS dialog. */
+async function pickImages(canvasElement: HTMLElement, files: readonly File[]) {
+  const nativeClick = HTMLInputElement.prototype.click
+  const picker: { input?: HTMLInputElement } = {}
+  HTMLInputElement.prototype.click = function captureFilePicker(this: HTMLInputElement) {
+    if (this.type === 'file') picker.input = this
+    else nativeClick.call(this)
+  }
+  try { await userEvent.click(within(canvasElement).getByRole('button', { name: 'Attach image' })) }
+  finally { HTMLInputElement.prototype.click = nativeClick }
+  if (picker.input === undefined) throw new Error('Attach image did not open the native picker')
+  const transfer = new DataTransfer()
+  for (const file of files) transfer.items.add(file)
+  picker.input.files = transfer.files
+  fireEvent.change(picker.input)
+}
+/** Refused picks are announced under the previews with the file and the limit; valid picks announce nothing and clear it. */
+export const ImageRefusal: Story = {
+  beforeEach: clearDrafts,
+  play: async ({ canvasElement }) => {
+    const row = within(canvasElement).getByTestId('composer-attachments')
+    const notice = within(row).getByRole('status')
+    const dismiss = () => within(row).queryByRole('button', { name: 'Dismiss image notice' })
+    const [first, second, third, fourth, fifth] = await Promise.all(['#326af1', '#0f9d58', '#f4b400', '#db4437', '#8e44ad'].map((fill, index) => pngFile(`photo-${index + 1}.png`, fill)))
+    const oversized = new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'huge-scan.png', { type: 'image/png' })
+    const countRefusal = 'photo-5.png wasn\'t added. A message can include up to 4 images.'
+    const sizeRefusal = 'huge-scan.png is over the 10 MB image limit.'
+    await expect(notice).toHaveAttribute('aria-live', 'polite')
+    // Negative control: a valid pick stages its preview and announces nothing.
+    await pickImages(canvasElement, [first])
+    await waitFor(() => expect(within(row).getByRole('img', { name: 'photo-1.png' })).toBeVisible())
+    await expect(notice).toBeEmptyDOMElement()
+    await expect(dismiss()).toBeNull()
+    // Oversized: refused before staging, named with the limit.
+    await pickImages(canvasElement, [oversized])
+    await waitFor(() => expect(notice).toHaveTextContent(sizeRefusal))
+    await expect(notice).toBeVisible()
+    await expect(within(row).queryByRole('img', { name: 'huge-scan.png' })).toBeNull()
+    // The next accepted pick clears it.
+    await pickImages(canvasElement, [second])
+    await waitFor(() => expect(within(row).getByRole('img', { name: 'photo-2.png' })).toBeVisible())
+    await expect(notice).toBeEmptyDOMElement()
+    // One selection crossing the limit keeps the accepted images and names only the fifth.
+    await pickImages(canvasElement, [third, fourth, fifth])
+    await waitFor(() => expect(notice).toHaveTextContent(countRefusal))
+    await expect(within(row).getAllByRole('img')).toHaveLength(4)
+    await expect(within(row).queryByRole('img', { name: 'photo-5.png' })).toBeNull()
+    // Removal is a valid change and clears it; the explicit dismiss does too.
+    await userEvent.click(within(row).getByRole('button', { name: 'Remove photo-4.png' }))
+    await waitFor(() => expect(notice).toBeEmptyDOMElement())
+    await pickImages(canvasElement, [fourth, fifth])
+    await waitFor(() => expect(notice).toHaveTextContent(countRefusal))
+    await userEvent.click(dismiss()!)
+    await expect(notice).toBeEmptyDOMElement()
+    // Reviewed end state: four previews with the size refusal announced beneath them.
+    await pickImages(canvasElement, [oversized])
+    await waitFor(() => expect(notice).toHaveTextContent(sizeRefusal))
+    await expect(dismiss()).toBeVisible()
+  },
+}
+export const ImageRefusalLight: Story = { ...ImageRefusal, args: { scheme: 'light' } }
+
 /** Stable staged file: the session re-stages its initial image whenever this identity changes. */
 const offlineImage = new File(['<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" fill="#326af1"/></svg>'], 'offline-capture.svg', { type: 'image/svg+xml' })
 /** C1 lane at the reviewed 440/1440 widths: offline gates submission while staged images stay previewable and removable. */

@@ -1,7 +1,8 @@
-import { createMessageQueue, MessageNotSentError, SimpleImageAttachmentAdapter, type AppendMessage } from '@assistant-ui/react'
+import { createMessageQueue, MessageNotSentError, SimpleImageAttachmentAdapter, type AppendMessage, type AttachmentAdapter } from '@assistant-ui/react'
 import type { ConversationRuntimeOptions } from '../EmbraceRuntime'
 import type { ConversationItem } from '../embrace-data/model'
 import { messageEffort, unknownEffort, type EffortControl } from '../embrace-composer/EffortPicker'
+import { composerImageLimits, composerImageRejection, composerImageRejectionMessage, type ComposerImageLimits } from './image-limits'
 
 export const fixtureEffortControls = {
   supported: { state: 'supported', values: ['low', 'medium', 'high'], default: 'medium' },
@@ -29,7 +30,25 @@ export interface ComposerFixture {
   readonly finish: () => void
   readonly reconnect: () => void
 }
-const imageAdapter = new SimpleImageAttachmentAdapter()
+/** Product count and size limits; SVG is admitted only so the fixture's generated previews stay vector. */
+const fixtureImageLimits: ComposerImageLimits = { ...composerImageLimits, types: [...composerImageLimits.types, 'image/svg+xml'] }
+function limitedImageAdapter(): AttachmentAdapter {
+  const simple = new SimpleImageAttachmentAdapter()
+  const staged = new Set<string>()
+  return {
+    accept: fixtureImageLimits.types.join(','),
+    // Stage before any await: one picker selection adds its files concurrently.
+    add: async ({ file }) => {
+      const rejection = composerImageRejection(file, staged.size, fixtureImageLimits)
+      if (rejection !== undefined) throw new Error(composerImageRejectionMessage(rejection, fixtureImageLimits))
+      const id = crypto.randomUUID()
+      staged.add(id)
+      return { id, type: 'image', name: file.name, contentType: file.type, file, status: { type: 'requires-action', reason: 'composer-send' } }
+    },
+    send: async attachment => { staged.delete(attachment.id); return simple.send(attachment) },
+    remove: async attachment => { staged.delete(attachment.id) },
+  }
+}
 const image = '<svg xmlns="http://www.w3.org/2000/svg" width="360" height="180" viewBox="0 0 360 180"><rect width="360" height="180" fill="#151515"/><rect x="20" y="24" width="136" height="132" rx="8" fill="#326af1"/><rect x="180" y="24" width="160" height="32" rx="6" fill="#eeeeee"/><rect x="180" y="72" width="130" height="12" rx="6" fill="#aaaaaa"/><rect x="180" y="100" width="160" height="12" rx="6" fill="#aaaaaa"/><rect x="180" y="128" width="112" height="12" rx="6" fill="#aaaaaa"/></svg>'
 const append = (text: string, effort?: string): AppendMessage => ({ role: 'user', content: [{ type: 'text', text }], attachments: [], createdAt: new Date(), metadata: { custom: {} }, parentId: null, sourceId: null, runConfig: effort === undefined ? undefined : { custom: { effort } } })
 
@@ -101,7 +120,7 @@ export function createComposerFixture(state: ComposerState, effortControl: Effor
     queuedEffort = new Map([...queuedEffort].filter(([id]) => ids.has(id)))
     publish()
   })
-  const adapters = { attachments: imageAdapter }
+  const adapters = { attachments: limitedImageAdapter() }
   const onNew: ConversationRuntimeOptions['onNew'] = async message => dispatch(message, false)
   const onCancel: NonNullable<ConversationRuntimeOptions['onCancel']> = async () => finish()
   publish()

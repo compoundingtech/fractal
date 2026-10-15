@@ -1,7 +1,7 @@
 import type { ConversationRuntimeOptions } from '@smalltalk/fractal-ui/assistant-ui'
+import { composerImageRejection, composerImageRejectionMessage, composerImageTypes } from '@smalltalk/fractal-ui/assistant-ui/image-limits'
 import type { AttachmentPort } from '../data/source.ts'
 
-export const composerImageTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const
 export const isComposerImageType = (value: string): value is typeof composerImageTypes[number] => composerImageTypes.some(type => type === value)
 type Adapter = NonNullable<NonNullable<ConversationRuntimeOptions['adapters']>['attachments']>
 
@@ -24,9 +24,8 @@ export const createComposerAttachmentAdapter = (port: AttachmentPort): Adapter &
     },
     accept: composerImageTypes.join(','),
     add: async ({ file }) => {
-      if (!isComposerImageType(file.type)) throw new Error('Choose a PNG, JPEG, GIF or WebP image.')
-      if (file.size > 10 * 1024 * 1024) throw new Error('Each image must be 10 MiB or smaller.')
-      if (staged.size >= 4) throw new Error('A message can contain up to four images.')
+      const rejection = composerImageRejection(file, staged.size)
+      if (rejection !== undefined) throw new Error(composerImageRejectionMessage(rejection))
       const id = crypto.randomUUID()
       staged.add(id)
       return { id, type: 'image', name: file.name, contentType: file.type, file,
