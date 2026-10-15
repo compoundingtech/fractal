@@ -423,23 +423,28 @@ export const UnavailableWithComposer: Story = { render: args => <UnavailableComp
   await expect(input).toHaveValue('Still here')
 } }
 export const UnavailableWithComposerLight: Story = { ...UnavailableWithComposer, args: { scheme: 'light' } }
-const loadEarlier = fn()
-export const HasOlderWithLoad: Story = { args: { history: { _tag: 'HasOlder', onLoadEarlier: loadEarlier } }, play: async ({ canvasElement }) => {
+// The request stays in flight, so a second press joins it instead of paging twice.
+const loadOlder = fn(() => new Promise<void>(() => {}))
+export const MoreHistory: Story = { args: { history: { _tag: 'More', loadOlder } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  loadEarlier.mockClear()
+  loadOlder.mockClear()
   await canvas.findByRole('button', { name: /Worked for 24s/ })
-  await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
+  await waitFor(() => expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded'))
+  await expect(loadOlder, 'mounting never pages').not.toHaveBeenCalled()
   await userEvent.click(canvas.getByRole('button', { name: 'Load earlier messages' }))
-  await expect(loadEarlier).toHaveBeenCalledTimes(1)
+  await expect(loadOlder).toHaveBeenCalledTimes(1)
+  await userEvent.click(canvas.getByRole('button', { name: 'Load earlier messages' }))
+  await expect(loadOlder, 'one older-page request at a time').toHaveBeenCalledTimes(1)
 } }
-export const HasOlderWithLoadLight: Story = { ...HasOlderWithLoad, args: { ...HasOlderWithLoad.args, scheme: 'light' } }
-export const HasOlderWithoutLoad: Story = { args: { history: { _tag: 'HasOlder' } }, play: async ({ canvasElement }) => {
+export const MoreHistoryLight: Story = { ...MoreHistory, args: { ...MoreHistory.args, scheme: 'light' } }
+export const PendingHistory: Story = { args: { history: { _tag: 'Pending' } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await canvas.findByRole('button', { name: /Worked for 24s/ })
-  await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
+  await waitFor(() => expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded'))
   await expect(canvas.queryByRole('button', { name: 'Load earlier messages' })).toBeNull()
+  await expect(canvas.queryByTestId('history-start')).toBeNull()
 } }
-export const HasOlderLight: Story = { ...HasOlderWithoutLoad, args: { ...HasOlderWithoutLoad.args, scheme: 'light' } }
+export const PendingHistoryLight: Story = { ...PendingHistory, args: { ...PendingHistory.args, scheme: 'light' } }
 export const PendingSend: Story = { args: { state: 'pending-send' }, play: async ({ canvasElement }) => {
   const prompt = await within(canvasElement).findByTestId('user-message')
   await expect(prompt).toHaveAttribute('data-send-state', 'pending')
@@ -662,7 +667,7 @@ const promptlessData: TranscriptStoryData = {
   sync: { _tag: 'Live', since: now },
   turns: fixture('settled', 'promptless').turns.map(({ prompt, ...turn }) => turn),
 }
-export const MidTurnHistory: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={promptlessData} onOpenTool={() => {}} onRetry={() => {}} history={{ _tag: 'HasOlder' }} /></main>, play: async ({ canvasElement }) => {
+export const MidTurnHistory: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={promptlessData} onOpenTool={() => {}} onRetry={() => {}} history={{ _tag: 'Pending' }} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(await canvas.findByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
   await expect(await canvas.findByTestId('agent-message')).toHaveTextContent('The row projection now keeps')

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Virtualize long conversations and load older native timeline pages while preserving the reading anchor and server-rendered history and pending-send boundaries.",
+  "replay": { "status": "none", "detail": "No persisted projections or replay changes." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "Uses the existing native timeline paging cursor; adds no wire operation." },
+  "downtime": { "status": "none", "detail": "No service restart or coordinated rollout required." },
+  "manual": { "status": "none", "detail": "No manual migration required." },
+  "recovery": { "status": "none", "detail": "Failed history pages retain loaded messages and expose explicit retry; no persisted state changes." }
+}

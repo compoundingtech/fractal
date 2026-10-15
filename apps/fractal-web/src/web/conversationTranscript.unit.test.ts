@@ -278,9 +278,11 @@ describe('conversation feed mapping', () => {
     expect(mapConversationFeed({ _tag: 'Waiting' }, {})).toEqual({ _tag: 'Waiting' })
   })
 
-  it('maps older history to the in-lane HasOlder boundary without internal wording', () => {
+  it('keeps bounded native history pending until the host binds its paging port', () => {
     const state = mapConversationFeed({ _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: true } }, { agentName: 'Example Agent' })
-    expect(state).toMatchObject({ _tag: 'Observed', history: { _tag: 'HasOlder' } })
+    expect(state).toMatchObject({ _tag: 'Observed', history: { _tag: 'Pending' } })
+    expect(state._tag === 'Observed' && state.history).toEqual({ _tag: 'Pending' })
+    expect(state._tag === 'Observed' && state.items.map(item => item.id)).toEqual(['p1', 'read', 'reasoning', 'answer', 'status', 'p2', 'run'])
     expect(JSON.stringify(state)).not.toContain('sequences')
   })
 

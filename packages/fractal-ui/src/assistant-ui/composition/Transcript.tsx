@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { ActionBarPrimitive, MessagePrimitive, ThreadPrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import { Button, Disclosure, DisclosurePanel, ProgressBar } from 'react-aria-components'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
-import { EmbraceScrollViewport } from '../EmbraceScrollViewport'
+import { EmbraceVirtualScrollViewport, type VirtualViewportHandle, type VirtualViewportHistory } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
 import { WorkLogV1 } from '../taste/WorkLogV1'
 import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
@@ -32,9 +32,13 @@ export interface TranscriptTurn {
 }
 /** `Unavailable` is the whole status: one host reason line and no sync line. `detail` may be diagnostic, so it stays behind "Show details". `action` is the host's recovery, e.g. `{ label: 'Try again', onPress }`. */
 export type TranscriptAvailability = { readonly _tag: 'Available' } | { readonly _tag: 'Unavailable'; readonly reason: string; readonly detail?: string; readonly action?: { readonly label: string; readonly onPress: () => void } }
-export type TranscriptHistory = { readonly _tag: 'Complete' } | { readonly _tag: 'HasOlder'; readonly onLoadEarlier?: () => void }
+export type TranscriptHistory = VirtualViewportHistory
+export type TranscriptHandle = VirtualViewportHandle
+export type { JumpResult } from '../EmbraceScrollViewport'
 export interface TranscriptProps {
   readonly turns: readonly TranscriptTurn[]
+  /** `jumpTo(id)` anchors a loaded turn or source item id; it settles `Anchored`, `Missing` or `Superseded`. */
+  readonly ref?: React.Ref<TranscriptHandle>
   readonly title: string
   readonly sync: SyncStatus
   readonly now: number
@@ -244,7 +248,7 @@ export function LiveActivity({ state, startedAt, now }: { readonly state: LiveAc
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true }: TranscriptProps) {
+export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, ref }: TranscriptProps) {
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
   // adopted messages a task later. Recording the snapshot after its commit is the adoption epoch.
@@ -254,7 +258,15 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
   // adoption, so neither is recorded while every id is published: a freshly mounted pane commits once.
   const [adoptionEpoch, setAdoptionEpoch] = React.useState<readonly TranscriptTurn[]>()
   const published = React.useMemo(() => new Set(messages.map(message => message.id)), [messages])
-  const unpublished = React.useMemo(() => turns.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)]).filter(id => !published.has(id)), [turns, published])
+  const sourceIds = React.useMemo(() => {
+    const ids = new Set<string>()
+    for (const turn of turns) {
+      if (turn.prompt !== undefined) ids.add(turn.prompt.id)
+      for (const item of turn.items) ids.add(item.id)
+    }
+    return ids
+  }, [turns])
+  const unpublished = React.useMemo(() => [...sourceIds].filter(id => !published.has(id)), [sourceIds, published])
   const adoption = React.useContext(RuntimeAdoptedIds)
   const getHeldKey = () => {
     const held = adoption?.get()
@@ -292,7 +304,11 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
   }, [strandedIds])
   const imageOptions = React.useMemo(() => ({ resolveImage, onLoadImage, renderInlineReference }), [resolveImage, onLoadImage, renderInlineReference])
   // New rows or changed content are news; send state, tool status and timing are metadata.
-  const rows = React.useMemo(() => committed.map(turn => ({ id: turn.id, version: (turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]).map(contentVersion).join(' ') })), [committed])
+  // A row is keyed by its turn id, so a pending send keeps its DOM through acknowledgement.
+  const rows = React.useMemo(() => committed.map(turn => {
+    const items = turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]
+    return { id: turn.id, turn, targetIds: items.map(item => item.id), version: items.map(contentVersion).join(' ') }
+  }), [committed])
   const running = [...committed].reverse().find(turn => turn.work.running)
   const progress = sync._tag === 'Progress' && sync.stage === 'reading' && sync.done !== undefined && sync.total !== undefined ? sync : undefined
   const failure = syncLine({ status: sync, label: 'conversation', now, observedAt })
@@ -311,10 +327,16 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
       {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} />}
       {running !== undefined && <><div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div><span data-testid="run-elapsed">Running{Number.isFinite(started) && started <= now ? ` · ${formatWorkDuration(now - started) || '<1s'}` : ''}</span></>}
     </header>
-    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}>
-      {history._tag === 'HasOlder' && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
-      {committed.length === 0 ? empty : <div {...stylex.props(styles.timeline)}>{committed.map(turn => <PreparedTurn key={turn.id} turn={turn} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}</div>}
-    </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
+    <ErrorOverlayHost lane><EmbraceVirtualScrollViewport key={viewportKey} ref={ref} items={rows} sourceIds={sourceIds} history={history} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
+      empty={empty}
+      boundary={request => history._tag === 'Complete' && committed.length === 0 ? null : <div data-testid="history-boundary" data-history={history._tag.toLowerCase()} {...stylex.props(styles.historyBoundary)}>
+        {history._tag === 'Complete' ? <span data-testid="history-start" {...stylex.props(styles.historyNote)}>Start of conversation</span>
+          : history._tag === 'Loading' ? <span role="status" data-testid="history-loading" {...stylex.props(styles.historyNote)}>Loading earlier messages…</span>
+          : history._tag === 'Failed' ? <><span role="status" data-testid="history-error" {...stylex.props(styles.historyNote)}>Earlier messages could not be loaded.</span>{history.detail !== undefined && <span data-testid="history-error-detail" {...stylex.props(styles.historyNote)}>{history.detail}</span>}<Button data-testid="history-retry" onPress={request} {...stylex.props(styles.historyLoad)}>Try again</Button></>
+          : <><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history._tag === 'More' && <Button data-testid="history-load" onPress={request} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</>}
+      </div>}
+      renderItem={({ turn }) => <PreparedTurn turn={turn} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />}
+    />{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
   </ThreadPrimitive.Root></RetrySend.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider>
 }
 const runSweep = stylex.keyframes({ from: { transform: 'translateX(0%)' }, to: { transform: 'translateX(300%)' } })
@@ -324,8 +346,9 @@ const styles = stylex.create({
   header: { height: g.band, minHeight: g.band, position: 'relative', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   title: { flex: '1 1 0', minWidth: 0, fontWeight: t.weightMedium, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   lane: { flex: '1 1 0', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden', overflowAnchor: 'none' },
-  // The shared reading column keeps rows and a reading-column composer on the same bounds.
-  content: { paddingBlock: s.lg }, timeline: { display: 'flex', flexDirection: 'column', gap: s.xl, minWidth: 0 }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
+  // The shared reading column keeps rows and a reading-column composer on the same bounds. Each
+  // measured row carries its own block padding, so adjacent rows keep the timeline rhythm.
+  content: { paddingBlock: s.lg }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   workList: { maxHeight: 'none', overflowY: 'visible', overscrollBehavior: 'auto' },
   user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
   userClamp: { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 8, maxHeight: `calc(${g.userClamp} - ${s.xs} * 2 - ${g.controlSm})`, overflow: 'hidden' },
