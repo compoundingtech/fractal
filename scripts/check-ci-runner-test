@@ -412,7 +412,7 @@ build_check('producer selects lightly loaded ci1 only', producer_pages(), ['ci-h
 build_check('producer selects eligible ci2 when ci1 busy', producer_pages(4, 2), ['ci-host-ci2', 'ci1-priority'])
 build_check('producer admits exactly three busy', producer_pages(3, 4), ['ci-host-ci1', 'ci1-priority'])
 build_check('producer does not admit four busy', producer_pages(4, 4), build_fallback)
-for mutation in ('missing-member', 'offline-member', 'truncated', 'missing-host-label', 'invalid-busy', 'duplicate', 'no-idle-priority'):
+for mutation in ('missing-member', 'offline-member', 'truncated', 'missing-host-label', 'invalid-busy', 'duplicate', 'no-idle-priority', 'one-idle-priority'):
     pages = producer_pages(2, 4); rows = pages[0]['runners']
     if mutation == 'missing-member': rows.pop(0); pages[0]['total_count'] -= 1
     elif mutation == 'offline-member': rows[0]['status'] = 'offline'
@@ -421,8 +421,9 @@ for mutation in ('missing-member', 'offline-member', 'truncated', 'missing-host-
         for row in rows[:6]: row['labels'] = [{'name': 'ci1-priority'}]
     elif mutation == 'invalid-busy': rows[0]['busy'] = None
     elif mutation == 'duplicate': rows.append(rows[0]); pages[0]['total_count'] += 1
-    elif mutation == 'no-idle-priority':
-        for row in rows[2:6]: row['labels'] = [{'name': 'ci-host-ci1'}]
+    elif mutation in ('no-idle-priority', 'one-idle-priority'):
+        start = 2 if mutation == 'no-idle-priority' else 3
+        for row in rows[start:6]: row['labels'] = [{'name': 'ci-host-ci1'}]
     build_check('producer falls back on '+mutation, pages, build_fallback)
 check('producer read failure falls back without changing other roles', [],
       {'ci1': ['ci1-priority'], 'ci1_build': build_fallback}, EVENT='merge_group', MERGE_PRODUCER_OWNED='on', API_EXIT='1')
@@ -430,6 +431,15 @@ check('producer missing token falls back without another request', [],
       {'ci1': ['ci1-priority'], 'ci1_build': build_fallback}, EVENT='merge_group', MERGE_PRODUCER_OWNED='on', GH_TOKEN='', api=False)
 check('producer explicit off forces Namespace forward-only rollback', producer_pages(),
       {'ci1': ['ci1-priority'], 'ci1_build': build_fallback}, EVENT='merge_group', MERGE_PRODUCER_OWNED='off')
+check('producer fallback preserves configured Namespace profile', producer_pages(4,4),
+      {'ci1': ['ci1-priority'], 'ci1_build': ['namespace-profile-existing-custom;job.priority=1;github.run-id=123']}, EVENT='merge_group', MERGE_PRODUCER_OWNED='on', MERGE_NAMESPACE_PROFILE='existing-custom')
+check('producer API failure preserves configured Namespace profile', [],
+      {'ci1': ['ci1-priority'], 'ci1_build': ['namespace-profile-existing-custom;job.priority=1;github.run-id=123']}, EVENT='merge_group', MERGE_PRODUCER_OWNED='on', MERGE_NAMESPACE_PROFILE='existing-custom', API_EXIT='1')
+check('producer off preserves configured Namespace profile', producer_pages(),
+      {'ci1': ['ci1-priority'], 'ci1_build': ['namespace-profile-existing-custom;job.priority=1;github.run-id=123']}, EVENT='merge_group', MERGE_PRODUCER_OWNED='off', MERGE_NAMESPACE_PROFILE='existing-custom')
+margin = producer_pages()
+for row in margin[0]['runners'][4:6]: row['labels'] = [{'name': 'ci-host-ci1'}]
+build_check('exactly two eligible idle workers meet margin', margin, ['ci-host-ci1', 'ci1-priority'])
 check('producer flag unset is inert', producer_pages(), 'ci1-priority', EVENT='merge_group', MERGE_PRODUCER_OWNED='')
 check('producer flag does not alter ordinary PRs', idle, 'ci1', MERGE_PRODUCER_OWNED='on')
 check('producer flag does not alter releases', [], 'ci1-priority', EVENT='push', MODE='priority', MERGE_PRODUCER_OWNED='on')
@@ -441,7 +451,8 @@ for event in ('pull_request', 'push', 'workflow_dispatch'):
         assert route('linux-test-build', event, producer_mode=mode, producer_picked='["ci-host-ci2","ci1-priority"]') == route('linux-test-build', event)
 for mode in ('on', 'off', 'invalid'):
     assert route('linux-test-build', 'merge_group', producer_mode=mode)[0].startswith(('namespace-profile-', 'nscloud-'))
+assert route('linux-test-build', 'merge_group', profile='existing-custom', producer_mode='on') == ['namespace-profile-existing-custom;job.priority=1;github.run-id=123']
 assert route('linux-test-build', 'merge_group', producer_mode='on', producer_picked='["ci-host-ci1","ci1-priority"]') == ['ci-host-ci1', 'ci1-priority']
 for job in ('linux-tests','linux-tests-shard-2','linux-tests-shard-3','linux-tests-shard-4','mail-redelivery-canaries','isolation-vm','linux-clippy','linux-fleet-compat'):
     assert 'ci1_build' not in blocks[job] and 'CI_MERGE_TEST_BUILD_OWNED' not in blocks[job]
-print('passed: merge producer-only six-member admission, at most three busy, host affinity, Namespace rollback and unchanged other consumers')
+print('passed: merge producer-only six-member admission, at most three busy and two eligible idle, host affinity, configured Namespace rollback and unchanged other consumers')

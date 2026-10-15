@@ -1,6 +1,6 @@
 Owned producer placement: bounded capacity assessment, 2026-10-15
 
-Decision: no added runner slots or NixOS switch (Factory0c116102/57ccc506). First source change targets merge_group linux-test-build only; PR producers remain a later unit after measured before/after. Use the same runner census, choose a host with all six records online, <=3 busy and an eligible idle priority worker; otherwise Namespace. Advisory reads are not reservations. Current three concurrent merge groups give a planning ceiling of three added merge producers across12 slots (25%); this does not bound existing PR producers and is not a new global semaphore. Activation still needs Factory's word.
+Decision: no added runner slots or NixOS switch (Factory0c116102/57ccc506). First source change targets merge_group linux-test-build only; PR producers remain a later unit after measured before/after. Use the same runner census, choose a host with all six records online, <=3 busy and at least two eligible idle priority workers; otherwise Namespace. Advisory reads are not reservations. Current three concurrent merge groups give a planning ceiling of three added merge producers across12 slots (25%); this does not bound existing PR producers and is not a new global semaphore. Activation still needs Factory's word.
 
 | Held cohort / scenario | Count / occupied job-minutes | Median / p90 whole-job occupancy |
 |---|---:|---:|
@@ -19,7 +19,7 @@ Registration if slots were ever added: source hosts/ci1/modules/runners.nix gene
 
 Live limits remain important: repository host-module default MemoryMax=14G per job, regardless of92GB whole-host RAM. No memory-limit/parallelism change is proposed, and owned placement is not an OOM cure claim. At nine14G maxima the configured possible sum would be126G versus92GB host RAM (not allocated memory), another reason idle snapshots cannot justify extra slots.
 
-Before activation, freeze a genuine existing-reader census/SLO baseline and exact eligible/selected producer rows; after activation compare owned producer occupancy, owned-label queue ages/starts, central job-minutes and merges/hour against that baseline using the SAME reader, separating merge_group and PR. If owned wait increases or merges/hour degrades relative to the frozen baseline, set the source toggle to off for Namespace-only FUTURE merge producers; do not cancel running work or retry CI. No new poller/GitHub loop. Source defaults unset/inert; PR-surface extension needs its own total-producer bound and a second reviewed PR only after step1 results.
+Before activation, freeze a genuine existing-reader census/SLO baseline and exact eligible/selected producer rows; after activation compare owned producer occupancy, owned-label queue ages/starts, central job-minutes and merges/hour against that baseline using the SAME reader, separating merge_group and PR. If owned queue/start wait, merge-group CONSUMER start wait, or merge-group p90 start wait PER POOL increases, or merges/hour degrades relative to the frozen baseline, set the source toggle to off for Namespace-only FUTURE merge producers; do not cancel running work or retry CI. No new poller/GitHub loop. Source defaults unset/inert; PR-surface extension needs its own total-producer bound and a second reviewed PR only after step1 results.
 
 Evidence: build-memory-comparison@a33693b5 and cached-rows@301d43c2; seven-day-central-minutes-held@d9ae52cf (partial lower bounds through09:50); Factory0c116/57ccc sampler/scope decision. All calculations reused local rows; no new GitHub or host acquisition.
 
@@ -30,3 +30,15 @@ Namespace while the toggle is set. Required test consumers keep the old picker
 output. The read-only runner token and existing single group-3 census are reused.
 An ordinary PR hosted run with the toggle unset qualifies syntax/inactive paths,
 not active placement, headroom, savings or the per-unit memory budget.
+
+The two-eligible-idle margin reduces concurrent-picker contention but does not
+reserve either worker. Three simultaneous groups can still choose the same host
+before any assignment is visible, and GitHub does not move a queued producer to
+Namespace automatically. A queued producer is an explicit remaining activation
+risk; the off switch affects future admissions, not already queued/running jobs.
+Consumer starvation is included in the baseline and rollback observation above.
+Configured CI_MERGE_NAMESPACE_PROFILE is preserved by both picker fallback and
+the failed/skipped-picker runs-on expression. Factory message/fbdf38c0 explicitly records that it weighed st2#2980 and that
+this moves our producers to owned capacity without changing the shared order.
+Activation still requires a separate word after merge, a frozen baseline and
+Operations' variable deployment; this source merge sets nothing.

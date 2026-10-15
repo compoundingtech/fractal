@@ -23,10 +23,10 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "After Factory activation approval only, CI_MERGE_TEST_BUILD_OWNED=on admits merge_group linux-test-build to a chosen owned host with all six runners online, at most three busy and an eligible idle priority worker; unknown/saturated views use Namespace. Unset is inert. PR producers and every consumer retain their prior routing; no new runner, token, capacity or API request."
+    "detail": "After Factory activation approval only, CI_MERGE_TEST_BUILD_OWNED=on admits merge_group linux-test-build to a chosen owned host with all six runners online, at most three busy and at least two eligible idle priority workers; unknown/saturated views use the existing configured Namespace profile. Unset is inert. PR producers and every consumer retain their prior routing; no new runner, token, capacity or API request."
   },
   "recovery": {
     "status": "changed",
-    "detail": "Set CI_MERGE_TEST_BUILD_OWNED=off to force future merge-group producers to Namespace if owned wait increases or merges/hour degrades against the frozen pre-activation baseline. No running job cancellation or automatic rerun. The three-group build count is the three-producer planning ceiling, not an atomic reservation."
+    "detail": "Set CI_MERGE_TEST_BUILD_OWNED=off to force future merge-group producers to Namespace if owned wait, merge-group consumer start wait or per-pool merge-group p90 wait increases, or merges/hour degrades against the frozen pre-activation baseline. No running job cancellation or automatic rerun. The three-group build count is the three-producer planning ceiling, not an atomic reservation."
   }
 }

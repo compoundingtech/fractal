@@ -70,6 +70,7 @@ jobs:
           NEED: ${{ vars.CI1_MIN_IDLE || '1' }}
           MERGE_OVERFLOW: ${{ vars.CI_MERGE_OVERFLOW }}
           MERGE_PRODUCER_OWNED: ${{ vars.CI_MERGE_TEST_BUILD_OWNED }}
+          MERGE_NAMESPACE_PROFILE: ${{ vars.CI_MERGE_NAMESPACE_PROFILE }}
           MERGE_NEED: ${{ vars.CI_MERGE_MIN_IDLE || '3' }}
           RUN_ID: ${{ github.run_id }}
           MODE: priority
@@ -85,8 +86,8 @@ jobs:
           def producer_host(pages):
               """Advisory, complete six-member host census; no reservation or API mutation.
 
-              Return host affinity only with <=3 busy of six online members and an idle
-              priority worker. Missing ephemeral registrations or ambiguous views fall back.
+              Return host affinity only with <=3 busy of six online members and two idle
+              priority workers (a race margin, not a reservation). Missing ephemeral registrations or ambiguous views fall back.
               """
               try:
                   totals = {page['total_count'] for page in pages}
@@ -115,9 +116,9 @@ jobs:
                       if len(members) != 6 or any(status != 'online' for status, busy, labels in members.values()):
                           continue
                       busy = sum(busy for status, busy, labels in members.values())
-                      eligible = any(not occupied and {'ci1-priority', 'ci-host-'+host} <= labels
+                      eligible = sum(not occupied and {'ci1-priority', 'ci-host-'+host} <= labels
                                      for status, occupied, labels in members.values())
-                      if busy <= 3 and eligible:
+                      if busy <= 3 and eligible >= 2:
                           choices.append((busy, host))
                   return min(choices)[1] if choices else None
               except (KeyError, TypeError, ValueError):
@@ -142,7 +143,8 @@ jobs:
                   print(f'{key}: **{label.split("-")[0]}** ({label})', file=summary)
               producer_mode = env.get('MERGE_PRODUCER_OWNED', '') if event == 'merge_group' else ''
               run_id = env.get('RUN_ID', '')
-              producer_fallback = [f'namespace-profile-linux-x86-64;job.priority=1;github.run-id={run_id}'] if run_id.isascii() and run_id.isdigit() and int(run_id) > 0 else []
+              profile = env.get('MERGE_NAMESPACE_PROFILE') or 'linux-x86-64'
+              producer_fallback = [f'namespace-profile-{profile};job.priority=1;github.run-id={run_id}'] if run_id.isascii() and run_id.isdigit() and int(run_id) > 0 else []
               def pick_producer(pages=None):
                   if not producer_mode or not producer_fallback:
                       return

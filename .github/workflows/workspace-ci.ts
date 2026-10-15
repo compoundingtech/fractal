@@ -78,6 +78,7 @@ export const pickRunnerJob = {
         NEED: `\${{ vars.CI1_MIN_IDLE || '${ci1MinIdle}' }}`,
         MERGE_OVERFLOW: '${{ vars.CI_MERGE_OVERFLOW }}',
         MERGE_PRODUCER_OWNED: '${{ vars.CI_MERGE_TEST_BUILD_OWNED }}',
+        MERGE_NAMESPACE_PROFILE: '${{ vars.CI_MERGE_NAMESPACE_PROFILE }}',
         MERGE_NEED: "${{ vars.CI_MERGE_MIN_IDLE || '3' }}",
         RUN_ID: '${{ github.run_id }}',
       },
