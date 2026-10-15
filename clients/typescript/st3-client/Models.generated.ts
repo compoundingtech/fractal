@@ -544,6 +544,7 @@ export type AssistantPairingBegin = {
   device_name: string;
   disclosure_consent: true;
   expires_in_seconds?: number;
+  minimal_read_mode?: AssistantMinimalReadMode;
   scopes: Array<AssistantScope>;
 };
 

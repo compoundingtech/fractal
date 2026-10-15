@@ -58,6 +58,7 @@ impl Harness {
             api_version: st3_client::API_VERSION.into(), device_name: "Native ChatGPT test".into(),
             assistant_id: AssistantPrincipal::Chatgpt, scopes: scopes(), expires_in_seconds: Some(3600),
             disclosure_consent: true, consent_evidence: "Isolated integration disclosure consent".into(),
+            minimal_read_mode: Some(AssistantMinimalReadMode::CallerBoundAllow),
         };
         let challenge = self.owner("POST", "/v1/client/pairings", &begin).await;
         let path = format!("/v1/client/pairings/{}/complete", challenge["value"]["pairing_id"].as_str().unwrap().trim_start_matches("pairing/"));
@@ -71,7 +72,15 @@ impl Harness {
         let paired: AssistantPairedSession = serde_json::from_value(value["value"].clone()).unwrap();
         assert_eq!(paired.grant.issuer, OWNER);
         assert_eq!(paired.principal, AssistantPrincipal::Chatgpt);
-        assert_eq!(paired.grant.minimal_read_mode, AssistantMinimalReadMode::ApprovalOnce);
+        assert_eq!(paired.grant.minimal_read_mode, AssistantMinimalReadMode::CallerBoundAllow);
+        let (status, summary) = self.assistant(&paired, "GET", "/v1/client/assistant/summary", &()).await;
+        assert_eq!(status, StatusCode::OK, "fresh pairing must read without a policy call: {summary}");
+        for id in [paired.grant.id.as_str(), paired.grant.id.trim_start_matches("assistant-grant/")] {
+            let inspected = self.owner("GET", &format!("/v1/client/assistant/grants/{}", urlencoding::encode(id)), &()).await;
+            assert_eq!(inspected["value"]["id"], paired.grant.id);
+            let raw = self.owner("GET", &format!("/v1/client/assistant/grants/{id}"), &()).await;
+            assert_eq!(raw["value"]["id"], paired.grant.id);
+        }
         let (replay, _) = request(&self.fabric, "POST", &path, None, None, &complete).await;
         assert_eq!(replay, StatusCode::FORBIDDEN);
         self.policy(&paired, scopes()).await;

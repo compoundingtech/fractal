@@ -60,11 +60,10 @@ def policy(grant, scopes=SCOPES, seconds=3600, recipients=('agent/prototype.work
     return local('/v1/client/assistant/grants/'+grant.split('/')[-1]+'/policy', {'api_version':API,'scopes':scopes,'expires_in_seconds':seconds,'disclosure_consent':True,'consent_evidence':'scripted explicit disclosure consent','minimal_read_mode':'caller-bound-allow','recipient_allowlist':list(recipients)})
 
 def pair(info, seconds=3600):
-    challenge=local('/v1/client/pairings',{'api_version':API,'device_name':'Prototype ChatGPT','assistant_id':'assistant/chatgpt','scopes':READ_SCOPES,'expires_in_seconds':seconds,'disclosure_consent':True,'consent_evidence':'prototype scripted explicit disclosure consent'})['value']
+    challenge=local('/v1/client/pairings',{'api_version':API,'device_name':'Prototype ChatGPT','assistant_id':'assistant/chatgpt','scopes':SCOPES,'expires_in_seconds':seconds,'disclosure_consent':True,'consent_evidence':'prototype scripted explicit disclosure consent','minimal_read_mode':'caller-bound-allow'})['value']
     status, raw=http(info['pairing_url']+'/v1/client/pairings/'+challenge['pairing_id'].split('/')[-1]+'/complete',{'api_version':API,'code':challenge['code'],'device_public_key':base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip('=')})
     if status != 200: raise RuntimeError(raw.decode())
     paired=json.loads(raw)['value']
-    policy(paired['grant']['id'], seconds=seconds)
     return paired
 
 def mcp(url, name, arguments=None):
@@ -175,6 +174,7 @@ try:
     conversation_args={'agent_id':'agent/prototype.worker','session_id':info['session_id'],'reference':reference,'revision':containing_revision(timeline),'start':0,'end':23,'max_response_bytes':16384}
     conversation,error=mcp(endpoint,'st_conversation_read',conversation_args)
     record('conversation bounded content',not error and 'Prototype conversation' in json.dumps(conversation),conversation)
+    policy(paired['grant']['id'])  # Add the exact write recipient; initial reads needed no policy call.
     before=count_messages()
     message_args={'action_id':'action/prototype-message','idempotency_key':'prototype-message-exact-key','fence':{'snapshot_id':local('/v1/client/attention')['snapshot']['id']},'to':'agent/prototype.worker','title':'Prototype message','content':'Hello from approved grant'}
     message,error=mcp(endpoint,'st_message_send',message_args)

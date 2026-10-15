@@ -1568,16 +1568,16 @@ impl Client {
         ).await
     }
     pub async fn assistant_grant(&self, id: &str) -> Result<Envelope<AssistantGrant>, ClientError> {
-        self.get(&format!("/v1/client/assistant/grants/{}", percent_encode(id))).await
+        self.get(&format!("/v1/client/assistant/grants/{}", percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id)))).await
     }
     pub async fn assistant_grant_revoke(&self, id: &str) -> Result<Envelope<AssistantGrant>, ClientError> {
-        self.post(&format!("/v1/client/assistant/grants/{}/revoke", percent_encode(id)), &serde_json::json!({})).await
+        self.post(&format!("/v1/client/assistant/grants/{}/revoke", percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id))), &serde_json::json!({})).await
     }
     pub async fn assistant_grant_policy(&self, id: &str, policy: &AssistantGrantPolicy) -> Result<Envelope<AssistantGrant>, ClientError> {
-        self.post(&format!("/v1/client/assistant/grants/{}/policy", percent_encode(id)), policy).await
+        self.post(&format!("/v1/client/assistant/grants/{}/policy", percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id))), policy).await
     }
     pub async fn assistant_grant_read_trust(&self, id: &str, trust: &AssistantReadTrustRequest) -> Result<Envelope<AssistantGrant>, ClientError> {
-        self.post(&format!("/v1/client/assistant/grants/{}/read-trust", percent_encode(id)), trust).await
+        self.post(&format!("/v1/client/assistant/grants/{}/read-trust", percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id))), trust).await
     }
     /// One approval-once read. The proof must already name this projection, these exact decoded
     /// query parameters, and this response budget; the SDK never signs and never retries.

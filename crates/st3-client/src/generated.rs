@@ -3833,6 +3833,8 @@ pub struct AssistantPairingBegin {
     pub expires_in_seconds: Option<u64>,
     pub disclosure_consent: bool,
     pub consent_evidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimal_read_mode: Option<AssistantMinimalReadMode>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]

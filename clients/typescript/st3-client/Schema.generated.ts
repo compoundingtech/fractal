@@ -1295,6 +1295,7 @@ export const AssistantPairingBegin = /*#__PURE__*/ (() => Schema.Struct({
   "device_name": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(120)),
   "disclosure_consent": Schema.Literal(true),
   "expires_in_seconds": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(2592000))),
+  "minimal_read_mode": optionalKey(AssistantMinimalReadMode),
   "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique())
 }).annotate({ identifier: "AssistantPairingBegin" }))()
 export type AssistantPairingBegin = typeof AssistantPairingBegin.Type

@@ -2834,7 +2834,7 @@ impl Client {
     pub async fn assistant_grant(&self, id: &str) -> Result<Envelope<AssistantGrant>, ClientError> {
         self.get(&format!(
             "/v1/client/assistant/grants/{}",
-            percent_encode(id)
+            percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id))
         ))
         .await
     }
@@ -2843,7 +2843,10 @@ impl Client {
         id: &str,
     ) -> Result<Envelope<AssistantGrant>, ClientError> {
         self.post(
-            &format!("/v1/client/assistant/grants/{}/revoke", percent_encode(id)),
+            &format!(
+                "/v1/client/assistant/grants/{}/revoke",
+                percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id))
+            ),
             &serde_json::json!({}),
         )
         .await
@@ -2854,7 +2857,10 @@ impl Client {
         policy: &AssistantGrantPolicy,
     ) -> Result<Envelope<AssistantGrant>, ClientError> {
         self.post(
-            &format!("/v1/client/assistant/grants/{}/policy", percent_encode(id)),
+            &format!(
+                "/v1/client/assistant/grants/{}/policy",
+                percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id))
+            ),
             policy,
         )
         .await
@@ -2867,7 +2873,7 @@ impl Client {
         self.post(
             &format!(
                 "/v1/client/assistant/grants/{}/read-trust",
-                percent_encode(id)
+                percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id))
             ),
             trust,
         )

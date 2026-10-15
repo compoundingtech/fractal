@@ -32,8 +32,11 @@ pub(in crate::api) struct AssistantPairingBegin {
     expires_in_seconds: u64,
     disclosure_consent: bool,
     consent_evidence: String,
+    #[serde(default = "default_read_mode")]
+    minimal_read_mode: String,
 }
 fn default_expiry() -> u64 { 3600 }
+fn default_read_mode() -> String { "approval-once".into() }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -163,6 +166,9 @@ async fn begin_inner(state: AppState, session: ClientSession,
     let issuer = trusted_issuer(&state, &session)?;
     validate_policy(&request.api_version, &request.scopes, request.expires_in_seconds,
                     request.disclosure_consent, &request.consent_evidence)?;
+    if !matches!(request.minimal_read_mode.as_str(), "approval-once" | "caller-bound-allow") {
+        return Err(forbidden("unsupported assistant read mode"));
+    }
     if request.assistant_id != PRINCIPAL || request.device_name.trim().is_empty()
         || request.device_name.len() > 120 {
         return Err(validation("invalid assistant principal or device name"));
@@ -182,7 +188,7 @@ async fn begin_inner(state: AppState, session: ClientSession,
         "issuer":issuer,"device_name":request.device_name,"scopes":scopes,
         "expires_at_unix_ms":expires,"challenge_expires_at_unix_ms":now + 300_000,
         "code_hash":credential_digest(&code),"policy_revision":1,
-        "minimal_read_mode":"approval-once","recipient_allowlist":[],
+        "minimal_read_mode":request.minimal_read_mode,"recipient_allowlist":[],
         "disclosure_consent":true,"consent_evidence":request.consent_evidence,
         "transport":session.transport,"timestamp":client_timestamp(now),"outcome":"created"
     }), None)?;
@@ -190,7 +196,7 @@ async fn begin_inner(state: AppState, session: ClientSession,
     Ok(Json(json!({"kind":"pairing-challenge","pairing_id":format!("pairing/{id}"),
         "code":code,"expires_at":client_timestamp(now + 300_000),"grant_kind":"assistant",
         "grant_id":grant_id,"principal":PRINCIPAL,"grant_expires_at":client_timestamp(expires),
-        "policy_revision":1,"minimal_read_mode":"approval-once"})))
+        "policy_revision":1,"minimal_read_mode":request.minimal_read_mode})))
 }
 
 async fn complete_inner(state: &AppState, id: &str, request: &PairingComplete,

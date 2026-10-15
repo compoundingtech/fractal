@@ -9423,6 +9423,7 @@ async fn run_devices(
                     expires_in_seconds: Some(terms.expires_in_seconds),
                     disclosure_consent: true,
                     consent_evidence: terms.consent_evidence,
+                    minimal_read_mode: Some(AssistantMinimalReadMode::CallerBoundAllow),
                 }))
                 .await?;
             print_client_value(&response, json_output)?;
