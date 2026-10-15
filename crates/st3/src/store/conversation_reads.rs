@@ -414,6 +414,27 @@ impl Store {
 mod tests {
     use super::*;
 
+    /// Synthetic historical SQL rows exercise legacy kinds/shapes that current admission
+    /// correctly rejects. The admitted scaffold supplies real batch/replica ordering metadata;
+    /// rewriting this fixture is not evidence that these rows can be admitted or replicated.
+    fn synthetic_owner_history_row(
+        tx: &Transaction<'_>,
+        origin: &str,
+        subject: &str,
+        kind: &str,
+        body: &Value,
+        predecessors: &[String],
+    ) -> Result<ClaimRecord> {
+        let mut claim = append_claim_tx(tx, origin, subject, "runtime.observed", None,
+            &json!({"fields":{"status":"running","runtime_id":"pty/ada",
+                "incarnation_id":"ada-fixture"}}), predecessors, None)?;
+        tx.execute("UPDATE claims SET kind=?1,body=?2 WHERE id=?3",
+            params![kind, body.to_string(), claim.id])?;
+        claim.kind = kind.into();
+        claim.body = body.clone();
+        Ok(claim)
+    }
+
     #[test]
     fn conversation_subject_owner_resource_attribution_does_not_replace_identity() {
         let store = Store::open_memory("tester").unwrap();
@@ -427,8 +448,8 @@ mod tests {
                             "runtime_id":"pty/reviewer","incarnation_id":null,
                             "facts":{"opened_by":"person/alex","number":1}});
                         let body = if wrapped { json!({"fields":fields}) } else { fields };
-                        append_claim_tx(tx, "reviewer", "agent/ada", "resource.observed",
-                            None, &body, &[], None)?;
+                        synthetic_owner_history_row(tx, "reviewer", "agent/ada",
+                            "resource.observed", &body, &[])?;
                         Ok(())
                     }).unwrap().unwrap();
                     let through = store.index().unwrap();
@@ -453,7 +474,7 @@ mod tests {
             let rival = append_claim_tx(tx, "reviewer", "agent/ada", "runtime.observed",
                 None, &json!({"fields":{"status":"running","runtime_id":"pty/reviewer"}}), &[], None)?;
             let bridge = append_claim_tx(tx, "tester", "agent/ada", "harness.observed",
-                None, &json!({"fields":{"status":"working"}}), &[rival.id], None)?;
+                None, &json!({"fields":{"state":"working"}}), &[rival.id], None)?;
             append_claim_tx(tx, "tester", "agent/ada", "runtime.observed",
                 None, &json!({"fields":{"status":"running","runtime_id":"pty/ada",
                     "incarnation_id":"ada-1"}}), std::slice::from_ref(&bridge.id), None)?;
@@ -558,8 +579,8 @@ mod tests {
                     let origin = if (seed % 4 == 0 && kind == "runtime.observed")
                         || random & 32 == 0 { "tester" } else { "reviewer" };
                     let predecessors = if random & 64 == 0 { ids.clone() } else { Vec::new() };
-                    let claim = append_claim_tx(tx, origin, subject, kind, None,
-                        &body, &predecessors, None)?;
+                    let claim = synthetic_owner_history_row(tx, origin, subject, kind,
+                        &body, &predecessors)?;
                     // Numeric boundaries, equal-time canonical ties, and arrival/canonical
                     // disagreement are deliberate; none may change a pinned answer.
                     let accepted = [9, 10, 99, 100][((random >> 16) % 4) as usize];

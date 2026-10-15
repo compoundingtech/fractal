@@ -1790,8 +1790,16 @@ fn conversation_owner_history_cost(other_origin: bool) {
             evidence: vec![],
             expected_subject: None,
             idempotency_key: None,
-        }).unwrap();
+        }).unwrap()
     };
+    let historical_resource = |store: &Store, fields: Value| {
+        // Current admission correctly rejects resource observations on agent subjects.
+        // Reserve canonical batch/claim metadata with an admitted scaffold; install its
+        // historical mixed-kind body only after replication, outside all measurements.
+        let scaffold = append(store, "runtime.observed", json!({"status": "running"}));
+        (scaffold.id, json!({"fields": fields}).to_string())
+    };
+    let mut historical_resources = Vec::new();
     append(&store, "runtime.observed", json!({
         "status": "running", "incarnation_id": "ada", "runtime_id": "tester",
     }));
@@ -1806,20 +1814,20 @@ fn conversation_owner_history_cost(other_origin: bool) {
         }));
         // Ordinary resource observations participate in the actual-state field fold;
         // their presence alone must not force a historical owner reduction.
-        append(&store, "resource.observed", json!({
+        historical_resources.push(historical_resource(&store, json!({
             "kind": "custom.tester", "facts": {"opened_by": "person/alex"},
-        }));
+        })));
         if other_origin {
             append(&reviewer, "runtime.reconcile-decision", json!({
                 "decision": "hold", "reason": "historical observation",
             }));
             // Opener attribution receipts are not runtime identity, even if their
             // recorded fields look like a different managed session.
-            append(&reviewer, "resource.observed", json!({
+            historical_resources.push(historical_resource(&reviewer, json!({
                 "kind": "vcs.issue", "attribution_only": true,
                 "facts": {"opened_by": "person/alex", "number": history},
                 "incarnation_id": "reviewer", "runtime_id": "reviewer",
-            }));
+            })));
         }
         if !matches!(history, 100 | 1000) {
             continue;
@@ -1827,6 +1835,7 @@ fn conversation_owner_history_cost(other_origin: bool) {
         if other_origin {
             sync(&reviewer, "reviewer", &store);
         }
+        install_historical_owner_resources(root.path(), &mut historical_resources);
         let frontier = store.index().unwrap();
         // The full status fold is the semantic oracle, outside the measured owner lookup.
         let status = store.status_at(Some("agent/ada"), None, Some(frontier)).unwrap();
@@ -1862,6 +1871,22 @@ fn conversation_owner_history_cost(other_origin: bool) {
         "owner indexed row work grew with subject history: {small:?} -> {large:?}");
     assert!(large.fullscan_steps <= small.fullscan_steps + 8,
         "owner scanned subject history: {small:?} -> {large:?}");
+}
+
+fn install_historical_owner_resources(root: &Path, resources: &mut Vec<(String, String)>) {
+    // This fixture models historical records, not newly admitted resource claims. Preserve
+    // their canonical ordering metadata and origin; no modified envelope is sent to a peer.
+    // These folds read claims directly, so no projection rebuild or production rule changes.
+    let mut setup = rusqlite::Connection::open(root.join("tester.sqlite3")).unwrap();
+    let transaction = setup.transaction().unwrap();
+    for (id, body) in resources.drain(..) {
+        let changed = transaction.execute(
+            "UPDATE claims SET kind='resource.observed', body=?2 WHERE id=?1",
+            rusqlite::params![id, body],
+        ).unwrap();
+        assert_eq!(changed, 1, "the historical fixture scaffold must exist");
+    }
+    transaction.commit().unwrap();
 }
 
 /// `METHOD /path` for every `.route(...)` in the router's source.

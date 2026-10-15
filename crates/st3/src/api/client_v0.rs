@@ -1223,9 +1223,9 @@ fn conversation_owner_host(
     managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<Option<String>, ApiError> {
     let remote = managed
-        .and_then(|(_, _, origin)| origin.clone())
-        .filter(|origin| origin != state.store.origin())
-        .map(|origin| client_host_id(&origin));
+        .and_then(|(_, _, origin)| origin.as_deref())
+        .filter(|origin| *origin != state.store.origin())
+        .map(client_host_id);
     if let Some(owner) = &remote {
         if !acting_party(session) {
             return Err(forbidden(
@@ -19034,10 +19034,41 @@ mission "example/zero-run" state="ready" {
             .unwrap();
         let session_id = managed_session_id(agent, incarnation);
         assert_eq!(conversation_session_id(&owner, agent).unwrap(), session_id);
-        let before_alias = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get);
-        assert_eq!(conversation_session_id(&owner, agent).unwrap(), session_id);
-        let alias_queries = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get) - before_alias;
-        assert!(alias_queries <= 3, "a warm agent alias must not reduce fleet history: {alias_queries}");
+        let frontier = owner.store.index().unwrap();
+        let before_subject = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get);
+        let subject_owner = owner.store.conversation_owner_at(agent, frontier).unwrap().unwrap();
+        let subject_queries = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get) - before_subject;
+        let canonical_owner = super::super::managed_session_owner_at(&owner.store, frontier, &session_id).unwrap();
+        assert_eq!(canonical_owner, Some((
+            subject_owner.subject, subject_owner.incarnation, subject_owner.origin,
+        )));
+        // The alias may do no more SQL than the direct subject read, even after unrelated
+        // agent history advances the frontier and invalidates a warm fleet-map cache.
+        for grow_fleet in [false, true] {
+            if grow_fleet {
+                for subject in ["agent/tester", "agent/reviewer", "agent/operator", "agent/alex"] {
+                    for _ in 0..32 {
+                        owner.store.append_claim(&ClaimInput {
+                            subject: subject.into(), kind: "runtime.observed".into(),
+                            actor: Some(subject.into()),
+                            fields: BTreeMap::from([
+                                ("status".into(), json!("running")),
+                                ("runtime_id".into(), json!(subject)),
+                            ]),
+                            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                        }).unwrap();
+                    }
+                }
+            }
+            let before_alias = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get);
+            assert_eq!(conversation_session_id(&owner, agent).unwrap(), session_id);
+            let alias_queries = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get) - before_alias;
+            assert!(alias_queries <= subject_queries,
+                "an agent alias must stay within one subject read: {alias_queries} > {subject_queries}");
+            assert_eq!(super::super::managed_session_owner_for_subject_at(
+                &owner.store, owner.store.index().unwrap(), &session_id, agent,
+            ).unwrap(), canonical_owner);
+        }
         let session = ClientSession::local(Some("person/example")).unwrap();
         let origin = super::super::managed_session_owner_at(
             &follower.store,
