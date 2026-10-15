@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Correct terminal-date fixture seat ownership.",
+  "schema": {
+    "status": "none",
+    "detail": "Fixture declarations only: the unsubmitted parent uses a distinct person seat so child work obeys queue order. All work, status, immutable input, date, lease and digest assertions remain."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Fixture declarations only: the unsubmitted parent uses a distinct person seat so child work obeys queue order. All work, status, immutable input, date, lease and digest assertions remain."
+  },
+  "replay": {
+    "status": "none",
+    "detail": "Fixture declarations only: the unsubmitted parent uses a distinct person seat so child work obeys queue order. All work, status, immutable input, date, lease and digest assertions remain."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Fixture declarations only: the unsubmitted parent uses a distinct person seat so child work obeys queue order. All work, status, immutable input, date, lease and digest assertions remain."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Fixture declarations only: the unsubmitted parent uses a distinct person seat so child work obeys queue order. All work, status, immutable input, date, lease and digest assertions remain."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Fixture declarations only: the unsubmitted parent uses a distinct person seat so child work obeys queue order. All work, status, immutable input, date, lease and digest assertions remain."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Fixture declarations only: the unsubmitted parent uses a distinct person seat so child work obeys queue order. All work, status, immutable input, date, lease and digest assertions remain."
+  }
+}
