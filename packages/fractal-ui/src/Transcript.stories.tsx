@@ -900,7 +900,7 @@ export const ScopedToolTargets: Story = {
     await canvas.findByTestId('work-log')
     for (const example of scopedToolCases) {
       const row = canvasElement.querySelector<HTMLElement>(`[data-item-id="scoped/${example.kind}"][data-tool-status]`)!
-      await expect(row.querySelector('[data-tool-kind]')).toHaveTextContent(example.kind)
+      await expect(row.querySelector('[data-tool-kind]')).toHaveAttribute('data-tool-kind', example.kind)
       await expect(within(row).getByText(example.target, { exact: true })).toBeVisible()
       await expect(row.querySelector(':scope > button')).toHaveAttribute('aria-expanded', 'false')
       await expect(row.querySelectorAll('[data-testid="tool-detail-preview"]')).toHaveLength(0)

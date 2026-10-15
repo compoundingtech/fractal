@@ -69,9 +69,9 @@ test('successful output is never automatically previewed and human titles are no
 })
 
 const settled = { kind: 'read', title: 'read', argsSummary: 'src/rows.ts', status: 'success', startedAt: '2026-01-15T12:00:00Z', endedAt: '2026-01-15T12:00:01Z' }
-const workLog = async calls => {
+const workLog = async (calls, renderCallDetail) => {
   const { WorkLogV1 } = await server.ssrLoadModule('/src/assistant-ui/taste/WorkLogV1.tsx')
-  return renderToStaticMarkup(React.createElement(WorkLogV1, { turn: { calls, foldable: false, running: false, failed: false, interrupted: false } }))
+  return renderToStaticMarkup(React.createElement(WorkLogV1, { turn: { calls, foldable: false, running: false, failed: false, interrupted: false }, renderCallDetail }))
 }
 
 test('a settled silent row carries no absent-output placeholder', async () => {
@@ -86,6 +86,43 @@ test('row expandability follows rendered text, not raw empty or image-only resul
   // Control: the same row with readable text output is expandable.
   const readable = await workLog([{ ...settled, id: 'call/text', input: {}, output: [{ type: 'text', text: 'Observed read result.' }] }])
   assert.match(readable, /data-row-disclosure="closed"/)
+})
+
+test('host renderer presence and empty raw input do not make silent rows inspectable', async () => {
+  for (const output of [undefined, [], [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }]]) {
+    for (const rawInput of [undefined, '', ' \n ']) {
+      for (const hostContent of [undefined, null, false, '']) {
+        const markup = await workLog([{ ...settled, id: 'call/silent', input: {}, rawInput, output }], () => hostContent)
+        assert.doesNotMatch(markup, /data-row-disclosure|Show raw input and output|No output recorded/)
+      }
+    }
+  }
+})
+
+test('readable output, non-empty raw input and actual host content each earn a disclosure', async () => {
+  for (const [fields, hostContent] of [
+    [{ output: 'Readable output' }, undefined],
+    [{ rawInput: '{"path":"src/rows.ts"}' }, undefined],
+    [{}, React.createElement('p', null, 'Host-owned detail')],
+  ]) {
+    const markup = await workLog([{ ...settled, id: 'call/inspectable', input: {}, ...fields }], () => hostContent)
+    assert.match(markup, /data-row-disclosure="closed"/)
+  }
+})
+
+test('Transcript default renderer preserves silent rows, while real host content remains inspectable', () => {
+  for (const output of [undefined, [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }]]) {
+    for (const hostContent of [undefined, React.createElement('p', null, 'Host detail')]) {
+      const item = { _tag: 'ToolCall', id: 'call/silent', callId: 'native/silent', name: 'read', input: {}, status: 'success', at: prompt.at }
+      const toolTurn = { ...turn, items: [item], work: { ...turn.work, foldable: false, calls: [{ ...settled, id: item.id, input: {}, output }] } }
+      const element = React.createElement(EmbraceRuntimeProvider, {
+        options: { messages: [prompt, item], isRunning: false, onNew: async () => {} },
+      }, React.createElement(Transcript, { turns: [toolTurn], title: 'Silent rows', sync: { _tag: 'Live', since: now }, now, observedAt: now, renderToolDetail: () => hostContent }))
+      const markup = renderToStaticMarkup(element)
+      assert.equal(markup.includes('data-row-disclosure="closed"'), hostContent !== undefined)
+      assert.doesNotMatch(markup, /No output recorded/)
+    }
+  }
 })
 
 test('an input-bearing call with empty output shows its input without an empty output block', async () => {

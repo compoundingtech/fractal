@@ -164,7 +164,8 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onO
   const tools = React.useMemo(() => turn.items.filter((item): item is Extract<ConversationItem, { _tag: 'ToolCall' }> => item._tag === 'ToolCall'), [turn.items])
   const detail = React.useCallback((call: WorkLogCall) => {
     const item = tools.find(item => item.id === call.id)
-    return (item === undefined ? undefined : renderToolDetail?.(item)) ?? <ToolDetailPreview call={call} onOpen={onOpenTool} />
+    const hostDetail = item === undefined ? undefined : renderToolDetail?.(item)
+    return hostDetail ?? (renderedToolOutput(call) !== undefined || (call.rawInput?.trim().length ?? 0) > 0 ? <ToolDetailPreview call={call} onOpen={onOpenTool} /> : undefined)
   }, [tools, renderToolDetail, onOpenTool])
   const reasoning = turn.items.filter(item => item._tag === 'Reasoning')
   return <section data-testid="transcript-turn" data-item-id={turn.id} {...stylex.props(styles.turn)}>

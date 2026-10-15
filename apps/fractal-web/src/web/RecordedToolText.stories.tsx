@@ -2,10 +2,10 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
-import { RecordedToolText, toolPreviewLines } from '../../../apps/fractal-web/src/web/RecordedToolText.tsx'
-import { liveLegacyTheme } from '../../../apps/fractal-web/src/ui-compat/live-theme.stylex.ts'
-import { assistantDarkTheme, liveAccentTheme, liveComposerDarkTheme, compositionLightTheme } from './assistant-ui/shell.ts'
-import { colorVars as c } from './assistant-ui/composition-tokens.stylex.ts'
+import { RecordedToolText, toolPreviewLines } from './RecordedToolText.tsx'
+import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
+import { assistantDarkTheme, liveAccentTheme, liveComposerDarkTheme, compositionLightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/shell.ts'
+import { colorVars as c } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const recordedJson = JSON.stringify({ path: 'src/catalog.ts', content: Array.from({ length: 200 }, (_, index) => `export const row${index} = "a readable catalog row with several fields";`).join('\n'), complete: true })
 const PreviewSurface = ({ scheme = 'dark', width = 1440, unclamped = false }: { readonly scheme?: 'dark' | 'light'; readonly width?: number; readonly unclamped?: boolean }) => <div data-recorded-preview-story="" data-unclamped={unclamped} {...stylex.props(liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)} style={{ backgroundColor: c.canvas, color: c.fg, width: Math.min(width, window.innerWidth), padding: 24, boxSizing: 'border-box' }}>
@@ -40,4 +40,6 @@ export const Light900: Story = { args: { scheme: 'light', width: 900 }, play: pr
 export const Dark440: Story = { args: { scheme: 'dark', width: 440 }, play: previewPlay }
 export const Light440: Story = { args: { scheme: 'light', width: 440 }, play: previewPlay }
 /** Same predicate and payload, with the physical preview bound deliberately removed. */
-export const UnclampedControl: Story = { args: { width: 440, unclamped: true }, play: previewPlay }
+export const ExpectedFailureHarness: Story = { args: { width: 440, unclamped: true }, play: async context => {
+  await expect(previewPlay(context)).rejects.toThrow()
+} }

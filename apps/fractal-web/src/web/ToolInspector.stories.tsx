@@ -2,14 +2,14 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import type { WorkLogCall } from './assistant-ui/taste/work-log.ts'
-import { ConversationPane } from '../../../apps/fractal-web/src/web/ConversationPane.tsx'
-import { LiveToolInspector, ToolInspectorContent } from '../../../apps/fractal-web/src/web/ToolInspector.tsx'
-import { DataSourceProvider } from '../../../apps/fractal-web/src/data/react.tsx'
-import { createToolInspectorFixture, inspectorFixtureRef } from '../../../apps/fractal-web/src/data/toolInspectorFixture.ts'
-import { liveLegacyTheme } from '../../../apps/fractal-web/src/ui-compat/live-theme.stylex.ts'
-import { assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from './assistant-ui/shell.ts'
-import { colorVars as c } from './assistant-ui/composition-tokens.stylex.ts'
+import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui/work-log'
+import { ConversationPane } from './ConversationPane.tsx'
+import { LiveToolInspector, ToolInspectorContent } from './ToolInspector.tsx'
+import { DataSourceProvider } from '../data/react.tsx'
+import { createToolInspectorFixture, inspectorFixtureRef } from '../data/toolInspectorFixture.ts'
+import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
+import { assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/shell.ts'
+import { colorVars as c } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const InspectorSurface = ({ scheme = 'dark', width = 1440, inspector = true, manageFocus = true }: { readonly scheme?: 'dark' | 'light'; readonly width?: number; readonly inspector?: boolean; readonly manageFocus?: boolean }) => {
   const fixture = React.useMemo(createToolInspectorFixture, [])
@@ -105,15 +105,25 @@ const escapePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   await waitFor(() => expect(opener).toHaveFocus())
 }
 
+// Like the kit's row-name negative control, the harness must reject the broken state.
+const expectedFailure = (play: typeof inspectorPlay): typeof inspectorPlay => async context => {
+  await expect(play(context)).rejects.toThrow()
+}
 const meta = { title: 'Fractal/App/Transcript/Tool inspector', component: InspectorSurface, parameters: { layout: 'fullscreen' } } satisfies Meta<typeof InspectorSurface>
 export default meta
 type Story = StoryObj<typeof meta>
 export const Dark1440: Story = { args: { scheme: 'dark', width: 1440 }, play: inspectorPlay }
-export const UnmanagedFocusControl: Story = { args: { manageFocus: false }, play: inspectorPlay }
 export const Light1440: Story = { args: { scheme: 'light', width: 1440 }, play: inspectorPlay }
 export const Dark900: Story = { args: { scheme: 'dark', width: 900 }, play: inspectorPlay }
 export const Light900: Story = { args: { scheme: 'light', width: 900 }, play: inspectorPlay }
-export const MissingInspectorControl: Story = { args: { inspector: false }, play: inspectorPlay }
 export const EscapeDismissal: Story = { play: escapePlay }
-export const EscapeUnmanagedFocusControl: Story = { args: { manageFocus: false }, play: escapePlay }
 export const AllStates: Story = { render: () => <><InspectorSurface width={900} /><InspectorSurface width={900} scheme="light" /></> }
+/** Broken hosts live only in this expected-failure harness, never as success-matrix plays. */
+export const ExpectedFailureHarness: Story = {
+  render: () => <><section data-negative-control="missing"><InspectorSurface inspector={false} /></section><section data-negative-control="focus"><InspectorSurface manageFocus={false} /></section><section data-negative-control="escape"><InspectorSurface manageFocus={false} /></section></>,
+  play: async ({ canvasElement }) => {
+    for (const [control, play] of [['missing', inspectorPlay], ['focus', inspectorPlay], ['escape', escapePlay]] as const) {
+      await expectedFailure(play)({ canvasElement: canvasElement.querySelector<HTMLElement>(`[data-negative-control="${control}"]`)! })
+    }
+  },
+}
