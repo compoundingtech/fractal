@@ -4,6 +4,26 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('terminal refusal and unconfirmed send envelopes preserve their applied answers', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const decode = Rich.decodeUnknownSync(Rich.ErrorEnvelope);
+    for (const [code, applied, refusal] of [
+        ['recipient-retired', 'none', { variant: 'Retired', recipient: 'agent/example/worker' }],
+        ['lifecycle-unavailable', 'none', { variant: 'LifecycleUnavailable', recipient: 'agent/example/worker', reason: 'conflict' }],
+        ['message-send-unconfirmed', 'unknown', undefined],
+    ]) {
+        const wire = { api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/example',
+            code, message: 'The send outcome', retryable: false, applied,
+            details: { applied, scope: 'control.messages', future_detail: { version: 2 }, ...(refusal ? { refusal } : {}) } };
+        const roundTrip = Schema.encodeSync(Rich.ErrorEnvelope)(decode(wire));
+        assert.equal(roundTrip.applied, applied);
+        assert.equal(roundTrip.details.applied, applied);
+        assert.equal(roundTrip.details.scope, 'control.messages');
+        assert.deepEqual(roundTrip.details.future_detail, { version: 2 });
+        if (refusal) assert.deepEqual(roundTrip.details.refusal, refusal);
+    }
+});
+
 test('directive notes decode metadata and expiry without becoming gate evidence', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = require('../../../docs/st3/client-v0/fixtures/directive-notes.json').value;
@@ -400,4 +420,20 @@ test('phone observation schema keeps histogram pairs and live-share as separate 
         [{...report.samples[1],kind:'latency'}],
         [{...report.samples[1],carrier:'unknown'}],
     ]) assert.throws(()=>decode({...report,samples}));
+});
+
+test('exchange carrier additions preserve legacy absence and future carrier values', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = { host_id: 'host/birch', peer_only_envelopes: 5, local_only_envelopes: 0, last_exchange_at: null, estimated_catch_up_seconds: null, diverged_since: null };
+    const decode = Rich.decodeUnknownSync(Rich.SyncPeer, 'strict');
+    assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(wire)), wire);
+    const observed = {
+        ...wire,
+        last_successful_exchange: { at: '2026-10-13T12:00:00.000Z', carrier: 'loopback' },
+        last_failed_exchange: { at: '2026-10-13T11:59:00.000Z', carrier: 'fabric', fabric_route: 'unknown' },
+    };
+    assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(observed)), observed);
+    const future = { ...observed, last_successful_exchange: { ...observed.last_successful_exchange, carrier: 'future-carrier' } };
+    assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(future)), future);
+    assert.throws(() => decode({ ...observed, last_failed_exchange: { carrier: 'fabric' } }));
 });

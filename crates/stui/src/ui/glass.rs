@@ -2207,50 +2207,8 @@ impl Ui {
                 Hit::PaletteSection(1),
             );
             spans.push(Span::styled(working_text, bar(theme::fg(theme::WORKING))));
-            // Missions with work open: running, waiting their turn, or waiting on someone.
-            // The count comes from the mission rows: with the window not followed there is no count to
-            // show, and the bar says so rather than a stale number.
-            let followed = self.world.missions_followed && self.world.missions.ready().is_some();
-            let counted = |keep: fn(Word) -> bool| {
-                followed.then(|| {
-                    screens::mission_order(&self.world, false)
-                        .iter()
-                        .filter(|mission| keep(mission.word))
-                        .count()
-                })
-            };
-            let active = counted(Word::is_active);
-            let stuck = counted(Word::is_stuck).filter(|stuck| *stuck > 0);
-            spans.push(Span::styled(" · ", bar(theme::dim())));
-            x = area.x + Line::from(spans.clone()).width() as u16;
-            let active_text = match active.or(self.world.active_missions) {
-                Some(active) => format!("◇ {active} active"),
-                None => "◇ missions".to_owned(),
-            };
-            self.hit(
-                Rect {
-                    x,
-                    width: text::width(&active_text) as u16,
-                    ..area
-                },
-                Hit::PaletteSection(2),
-            );
-            spans.push(Span::styled(active_text, bar(theme::fg(theme::SAPPHIRE))));
-            // Stuck runs are not active, and not hidden: they are named beside the count.
-            if let Some(stuck) = stuck {
-                spans.push(Span::styled(" · ", bar(theme::dim())));
-                x = area.x + Line::from(spans.clone()).width() as u16;
-                let stuck_text = format!("▲ {stuck} stuck");
-                self.hit(
-                    Rect {
-                        x,
-                        width: text::width(&stuck_text) as u16,
-                        ..area
-                    },
-                    Hit::PaletteSection(2),
-                );
-                spans.push(Span::styled(stuck_text, bar(theme::fg(theme::FAULT))));
-            }
+            // No mission counts here (Nathan, 2026-10-12: until they become more meaningful); the
+            // missions list keeps them.
             let machines = self.world.machines.items();
             machines_shown = !machines.is_empty();
             if machines_shown {
@@ -2350,9 +2308,25 @@ impl Ui {
             let needs = pane.is_some_and(|pane| self.pane_needs_person(&pane));
             (title, needs)
         });
-        for (shown, (title, needs)) in tabs.enumerate() {
-            let label = format!(" {}{title} ", if needs { "◆ " } else { "" });
-            let label = text::truncate(&label, 28);
+        let labels: Vec<(String, bool)> = tabs
+            .map(|(title, needs)| {
+                let label = format!(" {}{title} ", if needs { "◆ " } else { "" });
+                (text::truncate(&label, 28), needs)
+            })
+            .collect();
+        let widths: Vec<u16> = labels.iter().map(|(label, _)| text::width(label) as u16).collect();
+        let (first, last) = visible_tabs(&widths, group.current, area.width.saturating_sub(x - area.x));
+        // Tabs that do not fit are not lost: the strip scrolls to keep the one in front on
+        // screen, and a marker at each end counts the hidden ones and shows the nearest.
+        if first > 0 {
+            let marker = format!("‹{} ", first);
+            let width = text::width(&marker) as u16;
+            buf.set_stringn(x, area.y, &marker, width as usize, theme::fg(theme::PERSON).bg(strip));
+            self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, first - 1));
+            x += width;
+        }
+        for (shown, (label, needs)) in labels.iter().enumerate().take(last + 1).skip(first) {
+            let needs = *needs;
             let style = match (shown == group.current, focused) {
                 (true, true) => Style::default()
                     .fg(theme::CRUST)
@@ -2363,12 +2337,17 @@ impl Ui {
                 (_, true) => theme::fg(theme::SUBTEXT0).bg(strip),
                 _ => theme::fg(theme::OVERLAY0).bg(strip),
             };
-            let width = text::width(&label) as u16;
-            if x + width > area.x + area.width {
-                break;
-            }
-            buf.set_stringn(x, area.y, &label, width as usize, style);
+            // A tab wider than the strip (it alone fits nowhere) is cut, not dropped.
+            let width = widths[shown].min((area.x + area.width).saturating_sub(x));
+            buf.set_stringn(x, area.y, label, width as usize, style);
             self.hit(Rect { x, width, ..area }, Hit::GlassTab(index, shown));
+            x += width + 1;
+        }
+        if last + 1 < labels.len() {
+            let marker = format!(" {}›", labels.len() - 1 - last);
+            let width = text::width(&marker) as u16;
+            buf.set_stringn(x, area.y, &marker, width as usize, theme::fg(theme::PERSON).bg(strip));
+            self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, last + 1));
             x += width + 1;
         }
         if x + 3 <= area.x + area.width {
@@ -2810,16 +2789,15 @@ impl Ui {
             KeyCode::Char('e') if control && conversation.is_some() => self.toggle_all_tools(),
             KeyCode::Char('p') if control && conversation.is_some() => self.toggle_simple(),
             KeyCode::Char('d') if control && conversation.is_some() => self.toggle_details(),
-            // Ctrl+R sends a message st never had again; with none to send it speaks into the box,
-            // as it does once the box is open (Nathan, 2026-10-05: it did nothing until a letter
-            // had opened the box).
+            // Ctrl+R tries again: it sends a message st never had again. Speaking into the box is
+            // Ctrl+Y, with the box open or not (Nathan, 2026-10-05: it did nothing until a letter
+            // had opened the box; 2026-10-14: Ctrl+R means retry, so voice moved off it).
             KeyCode::Char('r') if control && conversation.is_some() && self.live => {
                 if let Some(entry) = self.undelivered() {
                     self.effects.push(Effect::Resend { entry });
-                } else {
-                    self.start_voice();
                 }
             }
+            KeyCode::Char('y') if control && conversation.is_some() && self.live => self.start_voice(),
             // Backspace takes a message st never had back into the box, to change or delete.
             KeyCode::Backspace
                 if quiet
@@ -4160,6 +4138,34 @@ fn home_popover_rect(body: Rect) -> Rect {
     }
 }
 
+/// The first and last tab that fit in `room` cells, the one in front always among them: the
+/// strip stays where it is until the tab in front passes its end, then moves just enough. Each
+/// tab takes its width and a gap; the markers for hidden tabs are reserved from `room`.
+fn visible_tabs(widths: &[u16], current: usize, room: u16) -> (usize, usize) {
+    const MARKER: u16 = 4;
+    let count = widths.len();
+    if count == 0 {
+        return (0, 0);
+    }
+    let current = current.min(count - 1);
+    let fits = |first: usize, last: usize| {
+        let tabs: u16 = widths[first..=last].iter().map(|width| width + 1).sum();
+        let before = if first > 0 { MARKER } else { 0 };
+        let after = if last + 1 < count { MARKER } else { 0 };
+        tabs + before + after <= room
+    };
+    let mut first = 0;
+    // Move the start on until the front tab fits (it always shows, even alone and cut short).
+    while first < current && !fits(first, current) {
+        first += 1;
+    }
+    let mut last = current;
+    while last + 1 < count && fits(first, last + 1) {
+        last += 1;
+    }
+    (first, last)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4238,6 +4244,18 @@ mod tests {
         mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), to.0, to.1);
         mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), to.0, to.1);
         assert!(ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(write) if matches!(&write.operations[..], [st3_client::ArrangementOperation::FolderMove { id, key, .. }] if id == &second && key.as_str() < "a0"))));
+    }
+
+    #[test]
+    fn a_retired_reserved_sidebar_is_never_created_again() {
+        use resource_sidebar::PaletteMode as Mode;
+        let mut ui = glass();
+        // st refused a create because the person retired their Sidebar, and none older exists.
+        ui.resource_sidebar.reserved_retired = true;
+        ui.open_sidebar_palette(Mode::New { subject: None }); typed(&mut ui, "Builds");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(_))), "nothing creates a retired subject");
+        assert_eq!(ui.flash.as_ref().map(|(text, _)| text.as_str()), Some(resource_sidebar::SIDEBAR_RETIRED));
     }
 
     #[test]
@@ -4376,7 +4394,7 @@ mod tests {
             first.contains("alerts") && first.contains("working") && first.contains("main"),
             "{first}"
         );
-        assert!(!first.contains("⌂") && first.contains("active"), "{first}");
+        assert!(!first.contains("⌂") && !first.contains("active") && !first.contains("stuck"), "{first}");
         // A glass with nothing open shows Home, under a bar for starting things.
         assert!(shown.contains("New terminal") && !shown.contains("New agent"), "{shown}");
         assert!(shown.contains("ctrl+k open"));
@@ -4667,6 +4685,60 @@ mod tests {
     }
 
     #[test]
+    fn tabs_that_do_not_fit_scroll_into_view_and_a_marker_reaches_the_hidden_ones() {
+        // Nathan, 2026-10-14: with too many tabs to show, the others could never be reached.
+        let mut ui = glass();
+        for n in 0..14 {
+            ui.open_in_glass(
+                Pane::Mission(Some(format!("mission/fleet/example/m{n:02}"))),
+                Open::Tab,
+            );
+        }
+        let (_, current, all) = tabs(&ui);
+        let last = all[0].len() - 1;
+        assert_eq!(current, last, "the newest tab is in front");
+        let shown = screen(&ui);
+        assert!(shown.contains("example/m13"), "the front tab is on screen: {shown}");
+        assert!(shown.contains('‹'), "the tabs before it are counted: {shown}");
+        assert!(!shown.contains('›'), "nothing is hidden after the last tab");
+        // Back at the first tab, the others are counted after it, and the marker shows the next.
+        ui.show_tab(0);
+        let shown = screen(&ui);
+        assert!(shown.contains('›'), "{shown}");
+        assert!(!shown.contains('‹'), "{shown}");
+        let more = ui
+            .frame
+            .borrow()
+            .hits
+            .iter()
+            .find_map(|(_, hit)| match hit {
+                Hit::GlassTabMore(0, tab) => Some(*tab),
+                _ => None,
+            })
+            .expect("a marker for the hidden tabs");
+        assert!(more > 1, "it names the first hidden tab, not a visible one");
+        ui.click(Hit::GlassTabMore(0, more));
+        assert_eq!(tabs(&ui).1, more, "the marker shows that tab");
+        assert!(screen(&ui).contains(&format!("example/m{:02}", more - 1)), "and it is on screen");
+    }
+
+    #[test]
+    fn the_strip_keeps_still_until_the_front_tab_passes_its_end() {
+        let widths = [10u16; 8];
+        // Room for three tabs and a marker: 3 × 11 + 4 = 37. In the middle both ends need a
+        // marker (8 cells), so only two tabs fit.
+        assert_eq!(visible_tabs(&widths, 0, 37), (0, 2));
+        assert_eq!(visible_tabs(&widths, 2, 37), (0, 2));
+        assert_eq!(visible_tabs(&widths, 3, 37), (2, 3));
+        assert_eq!(visible_tabs(&widths, 7, 37), (5, 7));
+        // Everything fits: no scrolling.
+        assert_eq!(visible_tabs(&widths, 7, 200), (0, 7));
+        // A strip too small for even one tab still shows the front one.
+        assert_eq!(visible_tabs(&widths, 5, 5), (5, 5));
+        assert_eq!(visible_tabs(&[], 0, 50), (0, 0));
+    }
+
+    #[test]
     fn a_group_a_tab_was_dragged_out_of_still_shows_one_of_its_tabs() {
         // Nathan, 2026-10-04: after dragging a tab to a new place, the group with the other tabs
         // showed none of them.
@@ -4743,7 +4815,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_r_speaks_in_a_conversation_without_the_box_open_first() {
+    fn ctrl_y_speaks_in_a_conversation_without_the_box_open_first() {
         let mut ui = glass();
         ui.live = true;
         ui.open_in_glass(
@@ -4751,12 +4823,12 @@ mod tests {
             Open::Tab,
         );
         assert!(!ui.editing, "the box is closed");
-        ctrl(&mut ui, 'r');
+        ctrl(&mut ui, 'y');
         // Without a speech helper (this test has none) it says so; before, it did nothing.
         let flash = ui.flash.as_ref().map(|(message, _)| message.as_str());
         assert!(
             flash.is_some_and(|message| message.contains("voice")),
-            "ctrl+r reached voice: {flash:?}"
+            "ctrl+y reached voice: {flash:?}"
         );
     }
 
@@ -5198,7 +5270,7 @@ mod tests {
         ctrl(&mut ui, 'a');
         assert_eq!(ui.popover.as_deref(), Some("actions:agent/example/atlas/builder"));
         let shown = screen(&ui);
-        for action in ["Restart", "Suspend", "Retire", "Copy id", "ACTIONS · ESC CLOSES"] {
+        for action in ["Restart", "Suspend", "Stop", "Copy id", "ACTIONS · ESC CLOSES"] {
             assert!(shown.contains(action), "{action}: {shown}");
         }
         // Restart asks first; Esc would keep it, y restarts.
@@ -5220,6 +5292,14 @@ mod tests {
         press(&mut ui, KeyCode::Char('x'), KeyModifiers::NONE);
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(ui.effects.is_empty());
+    }
+
+    #[test]
+    fn a_retired_identity_has_no_start_resume_or_runtime_actions() {
+        let agent = Agent { state: AgentState::Retired, terminal: false, ..glass().world.agents.items()[0].clone() };
+        let keys = screens::agent_actions(&agent).iter().map(|action| action.key).collect::<String>();
+        for key in ['s','u','r','x','p','t'] { assert!(!keys.contains(key), "{keys}"); }
+        assert_eq!(screens::agent_word(agent.state), "retired");
     }
 
     #[test]
@@ -5893,11 +5973,6 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             })
         };
-        let active = hit_at(&ui, Hit::PaletteSection(2));
-        click(&mut ui, active);
-        assert_eq!(section(&ui), Some(2), "active opens the missions");
-        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
-        screen(&ui);
         let need = hit_at(&ui, Hit::Home);
         click(&mut ui, need);
         assert!(ui.home_open());
@@ -6380,9 +6455,24 @@ mod tests {
     }
 
     #[test]
+    fn a_lowercase_r_types_into_the_box_while_the_link_is_down() {
+        // Nathan, 2026-10-14: with the link stale he could not type a lowercase r (the key was
+        // taken to mean reconnect); R worked. Letters are letters, link or no link.
+        let mut ui = glass();
+        ui.world.link = Link::Offline("No member reachable · reconnecting · Ctrl+R retry now".into());
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".into())),
+            Open::Tab,
+        );
+        typed(&mut ui, "rare");
+        let draft = ui.conversation_state.drafts.get("agent/example/atlas/builder");
+        assert_eq!(draft.map(String::as_str), Some("rare"));
+    }
+
+    #[test]
     fn the_connection_word_is_clickable_and_says_what_is_known() {
         let mut ui = glass();
-        ui.world.link = Link::Offline("Last connected at 10:02 · reconnecting · r retry now".into());
+        ui.world.link = Link::Offline("Last connected at 10:02 · reconnecting · Ctrl+R retry now".into());
         screen(&ui);
         let rect = {
             let info = ui.frame.borrow();
@@ -6670,19 +6760,6 @@ mod tests {
     }
 
     #[test]
-    fn the_top_bar_says_missions_instead_of_a_count_it_does_not_have() {
-        let mut ui = glass();
-        let top = |ui: &Ui| screen(ui).lines().next().unwrap().to_owned();
-        assert!(top(&ui).contains("active"), "{}", top(&ui));
-        ui.world.missions_followed = false;
-        let bar = top(&ui);
-        assert!(bar.contains("◇ missions") && !bar.contains("active"), "{bar}");
-        // st's own count stands in for the rows it does not send.
-        ui.world.active_missions = Some(57);
-        assert!(top(&ui).contains("◇ 57 active"), "{}", top(&ui));
-    }
-
-    #[test]
     fn opened_alerts_read_as_a_pane_with_a_title_bar_a_bar_per_alert_and_a_rule_between() {
         let agent = "agent/example/atlas/builder";
         let mut ui = glass();
@@ -6713,49 +6790,12 @@ mod tests {
         ui.world.settled = false;
         ui.world.attention = Load::Ready(vec![]);
         let bar = top(&ui);
-        for word in ["working", "active", "nothing running", "alert", "Ctrl+K"] {
+        for word in ["working", "nothing running", "alert", "Ctrl+K"] {
             assert!(!bar.contains(word), "{word}: {bar}");
         }
         assert!(bar.contains("live"), "{bar}");
         ui.world.settled = true;
         assert!(top(&ui).contains("working"), "{}", top(&ui));
-    }
-
-    #[test]
-    fn the_top_bar_counts_only_missions_that_are_running_and_names_the_stuck_ones() {
-        let mut ui = glass();
-        let words = [
-            Word::Working,
-            Word::Queued,
-            Word::Decision,
-            Word::Stalled,
-            Word::Unstaffed,
-            Word::Unclaimed,
-            Word::Watching,
-            Word::Held,
-            Word::Idle,
-            Word::Done,
-            Word::Failed,
-            Word::Cancelled,
-        ];
-        if let Load::Ready(missions) = &mut ui.world.missions {
-            let template = missions[0].clone();
-            *missions = words
-                .iter()
-                .enumerate()
-                .map(|(index, word)| Mission {
-                    id: format!("mission/example/m{index}"),
-                    title: format!("Mission {index}"),
-                    word: *word,
-                    system: false,
-                    updated_at: chrono::Local::now().to_rfc3339(),
-                    ..template.clone()
-                })
-                .collect();
-        }
-        let bar = screen(&ui).lines().next().unwrap().to_owned();
-        assert!(bar.contains("◇ 2 active"), "{bar}");
-        assert!(bar.contains("▲ 3 stuck"), "{bar}");
     }
 
     #[test]
