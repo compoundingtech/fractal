@@ -785,8 +785,9 @@ pub struct Store {
     /// Admission took in claims whose verdicts the next projection pass judges.
     pub verdicts_due: AtomicBool,
     pub origin: String,
-    /// The database file, or the shared-memory URI of an in-memory store. A checkpoint proof
-    /// opens its own connection here to copy the store.
+    /// SQLite's resolved database filename, or the shared-memory URI of an in-memory store.
+    /// Readers, checkpoint copies and sidecars must use the opened target, not a caller alias.
+    /// This does not protect against concurrent replacement of that target or its parents.
     pub path: PathBuf,
     pub shared_memory: bool,
     /// Where the next trim stops, as a crash would, and how many envelopes it deletes per
@@ -846,6 +847,7 @@ impl Store {
         }
         let mut connection = Connection::open(path)
             .with_context(|| format!("open st database {}", path.display()))?;
+        let path = crate::sqlite::opened_database_path(&connection, path)?;
         let has_meta: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
             [],
@@ -879,12 +881,12 @@ impl Store {
             runtime.open_projections(&transaction, false)?;
             transaction.commit()?;
         }
-        let readers = ReadPool::new(path, false)?;
+        let readers = ReadPool::new(&path, false)?;
         Self::from_connection(
             connection,
             readers,
             origin,
-            path.to_path_buf(),
+            path,
             false,
             runtime,
         )
@@ -971,6 +973,11 @@ impl Store {
         shared_memory: bool,
         runtime: Arc<dyn Runtime>,
     ) -> Result<Self> {
+        let path = crate::sqlite::opened_database_path(&connection, &path)?;
+        anyhow::ensure!(
+            readers.path == path && readers.shared_memory == shared_memory,
+            "st database writer and read pool must use the same opened database path and mode"
+        );
         // Batch rowids are the sealing frontier. Checkpoint adoption can remove the highest
         // rows, so SQLite's default rowid allocator cannot be used: it reuses those keys and
         // leaves new local batches behind the frontier. Persist the allocation high water.
