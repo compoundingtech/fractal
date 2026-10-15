@@ -1,9 +1,16 @@
 // The host owns decoded facts and the clock.
-import type { SyncStatus } from './sync-status'
+import type { SyncStatus, SyncFailureCause } from './sync-status'
 export type { SyncStatus, SyncStage, StaleReason, SyncFailureCause } from './sync-status'
 export interface SyncLineValue { readonly text: string; readonly tone: 'neutral' | 'warning' | 'error'; readonly animate: boolean; readonly announce: string }
 export interface SyncLineInput { readonly status: SyncStatus; readonly label: string; readonly now: number; readonly observedAt: number; readonly gateway?: string; readonly socket?: boolean }
 export interface SyncObservation { readonly status: SyncStatus; readonly observedAt: number }
+/** Permissions and unsupported resources cannot be recovered by repeating the same request. */
+export const canRetrySyncFailure = (cause: SyncFailureCause): boolean =>
+  !(cause._tag === 'Server' && (cause.code === 'forbidden' || cause.code === 'unsupported'))
+export const syncFailureRecovery = (cause: SyncFailureCause): string =>
+  cause._tag === 'Server' && cause.code === 'forbidden' ? 'Ask an administrator.'
+    : cause._tag === 'Server' && cause.code === 'unsupported' ? 'These details are not available here.'
+      : 'Retry to load details.'
 /** Client-only transition clock, kept outside the generated wire union. Same-stage progress frames retain it. */
 export function observeSyncStatus(previous: SyncObservation | undefined, status: SyncStatus, now: number): SyncObservation {
   const key = status._tag === 'Progress' ? `${status._tag}/${status.stage}` : status._tag === 'Stale' ? `${status._tag}/${status.reason._tag}` : status._tag
