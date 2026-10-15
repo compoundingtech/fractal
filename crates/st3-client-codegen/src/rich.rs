@@ -11,6 +11,7 @@ const KEYWORDS: &[&str] = &[
     "$comment",
     "description",
     "title",
+    "default",
     "examples",
     "type",
     "properties",
@@ -160,7 +161,7 @@ fn literal_values(test: &Value) -> Option<Vec<Value>> {
         .or_else(|| test.get("enum").and_then(Value::as_array).cloned())
 }
 
-/// Inline `allOf`, distribute an `allOf` base over a sibling `oneOf`, and expand `if`/`then` on one
+/// Inline `allOf`, distribute object siblings over `oneOf`, and expand `if`/`then` on one
 /// enum property into a `oneOf` of complete branches. An open discriminator adds one fallback
 /// branch whose tag is `{ type: string, not: { enum: known } }`.
 /// Predicates on independent properties stay as object relationship assertions instead.
@@ -192,8 +193,18 @@ fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
         };
         node.insert(key.clone(), child);
     }
-    let Some(all_of) = node.remove("allOf") else {
-        return Ok(Value::Object(node));
+    let all_of = match node.remove("allOf") {
+        Some(parts) => parts,
+        None
+            if node.contains_key("oneOf")
+                && (node.get("type").and_then(Value::as_str) == Some("object")
+                    || ["properties", "required", "additionalProperties"]
+                        .iter()
+                        .any(|key| node.contains_key(*key))) =>
+        {
+            json!([])
+        }
+        None => return Ok(Value::Object(node)),
     };
     let parts = all_of.as_array().context("allOf")?;
     let (conditionals, plain): (Vec<&Value>, Vec<&Value>) =
@@ -534,6 +545,7 @@ fn emit(value: &Value, cx: &mut Cx) -> Result<String> {
     let Some(object) = value.as_object() else {
         return match value {
             Value::Bool(true) => Ok("Schema.Unknown".into()),
+            Value::Bool(false) => Ok("Schema.Never".into()),
             other => bail!("unsupported schema {other}"),
         };
     };
@@ -1090,7 +1102,7 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
     })
 }
 
-/// The single-const discriminator shared by every branch, if all values are unique.
+/// The required single-const discriminator shared by every branch, if all values are unique.
 fn tagged_by(branches: &[Value], cx: &Cx) -> Option<String> {
     let resolved: Vec<&Value> = branches
         .iter()
@@ -1103,6 +1115,12 @@ fn tagged_by(branches: &[Value], cx: &Cx) -> Option<String> {
     first
         .keys()
         .find(|key| {
+            if !resolved.iter().all(|branch| {
+                branch.get("required").and_then(Value::as_array)
+                    .is_some_and(|required| required.iter().any(|name| name.as_str() == Some(key.as_str())))
+            }) {
+                return false;
+            }
             let values: Option<Vec<&Value>> = resolved
                 .iter()
                 .map(|branch| branch.get("properties")?.get(key.as_str())?.get("const"))
@@ -1152,6 +1170,9 @@ fn is_object(value: &Value) -> bool {
 fn recursive_type(value: &Value, encoded: bool) -> Result<String> {
     if value == &Value::Bool(true) {
         return Ok("unknown".into());
+    }
+    if value == &Value::Bool(false) {
+        return Ok("never".into());
     }
     let object = value.as_object().context("recursive schema")?;
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
@@ -1584,6 +1605,39 @@ pub fn models(schema: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disjoint_object_unions_support_forbidden_fields_and_documented_defaults() {
+        let schema = json!({
+            "x-st-integers": "json-safe",
+            "$defs": {
+                "Duration": { "type": "integer", "minimum": 1, "maximum": 86400, "default": 3600 },
+                "Challenge": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": { "kind": { "const": "pairing-challenge" }, "grant_kind": { "enum": ["person", "assistant"] }, "person_id": { "type": "string" } },
+                    "oneOf": [
+                        { "required": ["person_id"], "properties": { "grant_kind": { "const": "person" } } },
+                        { "required": ["grant_kind"], "properties": { "grant_kind": { "const": "assistant" }, "person_id": false } }
+                    ]
+                }
+            }
+        });
+        let normalized = normalize(&schema["$defs"]["Challenge"], &Map::new()).unwrap();
+        for branch in normalized["oneOf"].as_array().unwrap() {
+            assert_eq!(branch["properties"]["kind"], json!({ "const": "pairing-challenge" }));
+            assert!(branch["required"].as_array().unwrap().contains(&json!("kind")));
+            assert_eq!(branch["additionalProperties"], json!(false));
+        }
+        let mut with_all_of = schema["$defs"]["Challenge"].clone();
+        with_all_of["allOf"] = json!([]);
+        assert_eq!(normalize(&with_all_of, &Map::new()).unwrap(), normalized);
+        let rendered = models(&schema).unwrap();
+        assert!(rendered.contains("Schema.Never"));
+        assert!(rendered.contains("Schema.Union"));
+        assert!(!rendered.contains("Schema.toTaggedUnion(\"grant_kind\")"));
+        assert_eq!(recursive_type(&Value::Bool(false), false).unwrap(), "never");
+    }
 
     fn conditional_schema() -> Value {
         json!({

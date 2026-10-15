@@ -199,6 +199,9 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     // Pairing and fleet membership change who may talk to the daemon; their tests cover them.
     ("POST /v1/client/pairings", "pairs a device"),
     ("POST /v1/client/pairings/{id}/complete", "pairs a device"),
+    ("GET /v1/client/assistant/grants/{id}", "requires trusted-local owner provenance and an issued grant; assistant tests cover indexed grant inspection"),
+    ("POST /v1/client/assistant/grants/{id}/policy", "changes owner-issued assistant permissions; assistant tests cover policy history and consent"),
+    ("POST /v1/client/assistant/grants/{id}/revoke", "revokes owner-issued assistant permissions; assistant tests cover exact revocation"),
     ("POST /v1/internal/fleet/invites", "fleet membership"),
     ("POST /v1/internal/fleet/invites/revoke", "fleet membership"),
     ("POST /v1/internal/fleet/redeem", "fleet membership"),
@@ -1395,6 +1398,7 @@ mission "cost/history" state="ready" {
         }).unwrap();
     }
     let app = st3::api::router(AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -2064,6 +2068,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     })
     .unwrap();
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
