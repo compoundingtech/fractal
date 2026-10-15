@@ -34,12 +34,15 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
   if (disabledReason !== undefined) {
     // A natively disabled button leaves the tab order and receives no pointer events, so its reason would be
     // unreachable. The disabled Pressable consumes a surrounding trigger's press (DialogTrigger, MenuTrigger) and
-    // fires nothing; Focusable hands hover and focus to the kit tooltip.
+    // fires nothing; Focusable hands hover and focus to the kit tooltip. A MenuTrigger also puts its own key
+    // handler on the button, which opens on Enter, Space and the arrows unless the event is default-prevented,
+    // so the capture phase prevents those keys before any trigger sees them. Tab and Escape still pass.
     return <>
       <Tooltip label={`${label} · ${disabledReason}`} placement={tooltipPlacement}>
         <Focusable>
           <Pressable isDisabled>
             <button
+              onKeyDownCapture={event => { if (triggerKeys[event.key] === true) event.preventDefault() }}
               type="button"
               aria-label={label}
               aria-disabled="true"
@@ -67,6 +70,9 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
     </Button>
   </Tooltip>
 }
+
+/** Keys a React Aria trigger acts on; a control with a reason swallows them. */
+const triggerKeys: Record<string, true> = { Enter: true, ' ': true, ArrowDown: true, ArrowUp: true }
 
 const styles = stylex.create({
   control: {
