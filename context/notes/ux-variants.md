@@ -15,18 +15,19 @@ Start with the intended target selected and the relevant surface focused.
 Count a shortcut chord as one gesture, not separate physical key presses.
 Navigation to the target, corrections and retries are not included. An
 agent note here means a person writes with audience `agent`, not an agent author.
-All four composers open with audience `self`.
+New, unrelated drafts default to audience `self`; reopening preserves the draft's audience.
 
 | Variant | Entry | Text | Self toggle | Confirm | Self total | Agent toggle | Agent total |
 |---|---|---|---|---|---|---|---|
-| V1 Web inline | 1 click on **Add note**, or Enter on the focused button | N | 0 | 1 Enter | `1 + N + 0 + 1 = N + 2` | 1 Alt+A / Option+A | `1 + N + 1 + 1 = N + 3` |
-| V2 Web popover | 1 unmodified lowercase `n` outside a text field | N | 0 | 1 Enter | `N + 2` | 1 Alt+A / Option+A | `N + 3` |
+| V1 Web inline | 1 click on **Add note**, or Enter on the focused button | N | 0 | 1 Enter | `N + 2` | Navigate to labelled audience control, select with Space/arrows (or one pointer click) | Depends on focus path; not N+3 |
+| V2 Web popover | 1 enabled unmodified lowercase `n` outside editable fields/menus/dialogs, or pointer entry | N | 0 | 1 Enter | `N + 2` | Navigate to labelled audience control, select with Space/arrows (or one pointer click) | Depends on focus path; not N+3 |
 | T1 TUI inline row | 1 `n` from the selected agent or mission row | N | 0 | 1 Enter | `N + 2` | 1 Tab | `N + 3` |
 | T2 TUI bottom bar | 1 `n` with the subject's drawer focused | N | 0 | 1 Enter | `N + 2` | 1 Tab | `N + 3` |
 
-Web also permits one click on **Shared with agent** instead of the audience
-shortcut. Clicking **Add note** confirms instead of Enter. Returning focus
-to the text after a pointer toggle adds an extra click if Enter is used there.
+Web exposes **Only me** / **Shared with the agent (people can see it too)**.
+Tab navigates without changing audience; Space selects the focused control.
+Clicking **Add note** confirms instead of Enter. Returning focus to the text
+after pointer audience selection adds a click if Enter is used there.
 T2's count excludes opening and focusing the drawer. V2's count excludes
 selecting a different row; focus alone does not change its selected target.
 
@@ -39,10 +40,10 @@ Width examples: `--light440`, `--light1440`, `--dark1440`.
 |---|---|
 | Entry | **Add note** below the detail pane's Notes list; button starts focused in the story. |
 | Focus | Opening focuses the textarea. Successful add closes the composer and focuses the remounted **Add note** button. |
-| Escape | From the textarea, an empty draft closes; a nonempty draft stays open with its text. |
-| After add | Full text becomes the newest list item. The target header badge updates its count and newest one-line preview. |
-| Audience | Composer: **Only me** / robot glyph + **Shared with agent**. List: the same labels, robot only for agent audience. Badge: robot only when the newest note is agent-audience; self has no visible audience label. |
-| Weaknesses | Entry is below the list and may need scrolling. Open composer takes detail space. Empty-only Escape differs from V2 and the TUI. A self note can remove the badge's robot even if older agent notes remain. |
+| Escape | Closes without sending; text, audience and fixed target are retained per target for reopening. **Discard draft** is explicit. |
+| After add | Only successful creation resets the draft. Failure retains exact text, audience and target, focuses input, announces an actionable error and offers **Retry**. Full text becomes the newest list item on success. |
+| Audience | Explicit labelled selection: **Only me** / **Shared with the agent (people can see it too)**. Tab navigates; Space selects. Badge aggregate marker means any current note is agent-shared; newest preview audience is labelled separately. Sharing is not a delivery acknowledgement. Mission copy says shared notes reach agents currently working on the mission. |
+| Weaknesses | Entry below the list may require scrolling; the open composer occupies detail space. Complete correction/retry/retrieval tasks matter more than base input counts. |
 
 ## Web V2 — keyboard `n` popover
 
@@ -51,17 +52,18 @@ Width examples: `--light440`, `--light1440`, `--dark1440`.
 
 | Aspect | Behavior |
 |---|---|
-| Entry | Unmodified lowercase `n` opens a popover anchored to the selected row. A visible **Press N** hint and row `aria-keyshortcuts` expose the shortcut. Uppercase Shift+N does not open it. |
-| Focus | Opening focuses the textarea. Successful add closes and returns focus to the selected row. Typing `n` in an input, textarea or editable field does not open it. |
-| Escape | Cancels the popover even with a draft; focus returns to the row. A refused create keeps the popover, text and audience, focuses the input and announces an error until dismissal. |
-| After add | The selected row badge updates count and newest text preview. This story does not show a full note list or a badge action to open one. |
-| Audience | Same composer labels and robot glyph as V1. Badge robot describes only the newest note; the accessible name also names that audience. Full newest text is available in a focus/hover tooltip. |
-| Weaknesses | No pointer-only entry control. Selection can differ from focus; the shortcut acts on selection. The popover obscures nearby content. New text is only a truncated preview until its tooltip is read. Escape can discard text. |
+| Entry | Enabled, unmodified lowercase `n` opens a popover anchored to the selected row; pointer entry is also available. A labelled control disables the single-letter shortcut. Uppercase Shift+N does not open it. |
+| Focus | Opening focuses the textarea; closing returns focus to its trigger. The shared app editable-field guard excludes inputs, textareas, selects, contenteditable and role=textbox fields; open menus/dialogs and IME composition also block the shortcut. |
+| Escape | Closes without sending and retains exact text, audience and fixed target per target. Reopening restores the draft. Only **Discard draft** clears it before success. |
+| After add | Success resets the draft and updates the row badge. Failure keeps draft and target with an announced actionable error and **Retry**. This variant does not show a full note list. |
+| Audience | Same labelled control and scope as V1. Aggregate badge sharing is independent of the separately labelled newest audience; no delivery acknowledgement is implied. Full newest text remains available without hover in the accessible name and focus tooltip. |
+| Weaknesses | Selection may differ from focus; the shortcut acts on selection. The popover obscures nearby content. Retrieval beyond the newest preview still needs the full notes surface. |
 
-The planner target deliberately refuses creation in V2. This is an error
-fixture, not a rule about which agents accept notes. Both web variants use
-`NoteComposer`: Enter adds, Shift+Enter inserts a newline, Alt+A changes
-audience, and a successful submission resets audience to self.
+Both web variants use `NoteComposer`: Enter adds, Shift+Enter inserts a newline,
+pasted newlines and exact draft text are preserved, and the 1024-byte UTF-8 limit
+is visible. Audience, pending, error and success are announced. New drafts use
+the single `defaultNoteAudience` constant (`self`, pending Johannes's default
+audience decision); success resets to it, never failure or dismissal.
 
 ## TUI T1 — inline row composer
 
@@ -212,8 +214,8 @@ source, story assertions and stored artifacts; they are not new runtime tests.
 
 | Variant | Input overhead | Discoverability | Visibility after add | Risk of wrong audience | Keyboard-only use | Works at 440 px |
 |---|---|---|---|---|---|---|
-| V1 | Self N+2; agent N+3; may need scroll to entry | Explicit **Add note** | Full list + newest badge | Self default is quiet; explicit labels; badge only describes newest | Yes, from focused button; no global `n` | Stored 440 px view shows list and entry; composer footer wraps by source |
-| V2 | Self N+2; agent N+3; row selection is extra | Visible N hint; no pointer entry | Count + truncated newest preview/tooltip | Same default; hidden composer until entry; newest-only badge | Yes; lowercase `n` only outside fields | Stored 440 px view shows rows; popover width is viewport-bounded by source; open popover not shown in artifact |
+| V1 | Self N+2; shared audience cost depends on focus path; may need scroll | Explicit **Add note** | Full list + aggregate-sharing badge and labelled newest preview | Self default; explicit people-visible scope; retained target/audience on failure and close | Yes; Tab navigation, labelled audience selection; no global `n` | 440 px stories cover wrapped composer and open state |
+| V2 | Self N+2; shared audience cost depends on focus path; selection extra | Visible hint, disable-able shortcut and pointer entry | Aggregate-sharing badge + labelled newest preview/tooltip | Same default/scope; per-target drafts; no delivery implication | Yes; guarded lowercase `n`, pointer entry, focus return on close | 440 px stories cover open popover and viewport-bounded layout |
 | T1 | Self N+2; agent N+3 | Help/binding; inline hints may not fit | Count/any-agent arrow; text in drawer | Self default; short chips; aggregate arrow can refer to an older note | Yes; Tab is audience, not focus navigation | Not established: terminal uses columns, not CSS pixels; narrow row clips draft and hides hints |
 | T2 | Self N+2; agent N+3; drawer setup is extra | Drawer `[n] note`; bottom-bar hints if space | Count/any-agent arrow + open drawer text | Same self default and chips; reopened failed draft resets audience | Yes; same bindings as T1 | Not established in pixels; wider input line than T1, but target and hints consume columns |
 
@@ -221,13 +223,13 @@ source, story assertions and stored artifacts; they are not new runtime tests.
 
 | Area | Web stories | TUI behavior |
 |---|---|---|
-| Audience shortcut | Alt+A / Option+A; Tab navigates controls | Tab toggles audience and stays in editor |
-| Escape | V1 protects a nonempty textarea draft; V2 cancels it | Both T1 and T2 discard it |
-| Add completion | Waits for create resolution; failure keeps open editor, text and audience | Closes on Enter before worker result; pending marker/list entry appears; failed text is saved and `n` reopens it with default self audience |
-| Delivery marker | Robot refers to newest badge note | Arrow means any counted note reaches the agent |
+| Audience control | Labelled group; Tab navigates, Space selects; no Alt+A accelerator | Tab toggles audience and stays in editor |
+| Escape | Both close without sending and retain text/audience/target per target; explicit discard only | Both T1 and T2 discard it |
+| Add completion | Failure retains exact draft, audience and target with actionable Retry; pending/error/success announced; reset only after success | Closes on Enter before worker result; pending marker/list entry appears; failed text is saved and `n` reopens it with default self audience |
+| Sharing marker | Aggregate includes any agent-shared current note; newest preview audience labelled separately; not delivery acknowledgement | Arrow means any counted note reaches the agent |
 | Text visibility | V1 full list; V2 newest preview/tooltip | Row has no preview; drawer newest text is capped at three lines |
-| Text editing | Shift+Enter adds a newline | One-line editor; no equivalent multiline affordance |
-| Target model in examples | Agent detail or selected agent row | Agent and mission rows; mission summary also includes run/step notes |
+| Text editing | Enter submits; Shift+Enter and pasted newlines preserved; visible 1024-byte limit | One-line editor; no equivalent multiline affordance |
+| Target model in examples | Agent detail/selected agent row; controlled target retained with draft; mission scope described as agents currently working on the mission | Agent and mission rows; mission summary also includes run/step notes |
 
 ## Local web review artifacts
 
@@ -253,7 +255,7 @@ Supporting story IDs: `fractal-plugins-notes-note-badge--all-states`,
 
 | Question | Options | Evidence to compare, without a decision |
 |---|---|---|
-| **DQ3: default audience?** | Self; agent | All prototypes default to self: N+2 for a private reminder, N+3 for agent context. Agent default reverses that cost but can send an intended private reminder to the agent. The spec's retirement example can be a private reminder. Ask which intent is more frequent and which mistake is worse. |
+| **DQ3: default audience?** | Self; agent | New drafts default to self. Web shared selection cost depends on focus navigation, not an assumed N+3. Agent default can share an intended private reminder with agents and other people; ask which intent is more frequent and which mistake is worse. |
 | **DQ5: tags?** | Plain text only; optional tags such as `retire`, `watch`, `context` | All four prototypes require only text. No prototype supplies a tag control or measures its cost. Ask whether filtering by tag is needed, and whether an optional tag must be reachable without adding a required step to CR01. |
 | **Web surface choice?** | V1 inline detail; V2 selected-row popover | Same base count. V1 has visible entry and full post-add text; V2 avoids opening detail but needs shortcut knowledge and shows only a badge. Compare frequent list work, pointer use and 440 px entry. |
 | **TUI surface choice?** | T1 row; T2 bottom bar; retain both by focus context | Same base count. T1 stays near the target but clips text and hides hints; T2 has more width and an open notes list but needs drawer focus. These are two entry contexts in the same implementation, not a selectable preference. |
