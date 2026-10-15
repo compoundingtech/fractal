@@ -449,7 +449,7 @@ fn admit_with_the_old_function(store: &Store) {
     };
     let mut outcome = ReplicationAdmission::default();
     let mut connection = store.connection.write();
-    let transaction = connection.transaction().unwrap();
+    let mut transaction = connection.transaction().unwrap();
     for envelope in &envelopes {
         let savepoint = transaction.savepoint().unwrap();
         match legacy_validate_and_admit_envelope_tx(

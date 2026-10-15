@@ -3748,9 +3748,10 @@ pub const REPLICATION_EXCHANGE_ENVELOPE_LIMIT: usize = 512;
 /// Maximum envelopes admitted per writer transaction. Admission can take several milliseconds
 /// per envelope on a populated store; leave room for queued write acknowledgements below 50 ms.
 pub const ADMISSION_CHUNK_ENVELOPES: usize = 8;
-/// Payload bytes admission prepares ahead of its loans. Decoded envelopes wait in memory for the
-/// loan that admits them, next to their payloads, so the set can hold about twice this; one
-/// envelope larger than this is prepared alone.
+/// Payload bytes admission prepares ahead of its loans: a budget on payload, not a bound on
+/// resident memory. Decoded envelopes wait for the loan that admits them next to their payloads,
+/// so the set holds roughly twice this plus its structures, and one envelope larger than this is
+/// prepared alone.
 pub const ADMISSION_PREPARED_BYTES: usize = 16 * 1024 * 1024;
 
 /// Stop a chunk before starting another envelope once its writer work reaches this budget.
@@ -6318,11 +6319,11 @@ impl Store {
                 // bounded by payload bytes as well as count. One envelope above the budget is
                 // prepared alone, as admission always decoded one at a time.
                 let mut prepared_bytes = ready.values().map(|prepared| prepared.bytes).sum::<usize>();
-                for index in next..(next + ADMISSION_CHUNK_ENVELOPES).min(pending.len()) {
+                let ahead = (next + ADMISSION_CHUNK_ENVELOPES).min(pending.len());
+                for (index, (envelope, row)) in pending.iter().enumerate().take(ahead).skip(next) {
                     if ready.contains_key(&index) {
                         continue;
                     }
-                    let (envelope, row) = &pending[index];
                     let bytes = envelope.payload.bytes().map_or(0, <[u8]>::len);
                     if prepared_bytes > 0 && prepared_bytes + bytes > ADMISSION_PREPARED_BYTES {
                         break;
