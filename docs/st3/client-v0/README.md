@@ -760,6 +760,38 @@ the normalized `tool_output` block's optional open `metadata`, preserving `wallT
 `source_record` block. Legacy tool-result blocks inside message content remain supported and
 use the same block metadata shape.
 
+When a native user turn retains an exact delivery identity, the graph message and its content
+remain the canonical timeline entries; the native echo and its parts are suppressed. The graph
+entries keep their IDs, sequences, and `message_id` across pages, stream updates, and reconnects.
+The conversation cursor still advances past suppressed native entries. Correlation uses the
+existing delivery marker at the beginning of a user prompt, or a persisted native client ID
+bound to the exact thread and recipient. No content-text, adjacency, or queue-order matching is
+used. Extension-based harnesses retain both entries: exact correlation requires their delivery
+API to propagate a delivery token to the native user-message event.
+
+A transcript without a supported delivery identity retains both entries. This does not alter
+timeline ordering or sequence allocation, and no client idempotency-key field is exposed. If
+the native read sees a send beyond its graph snapshot, its echo is withheld until the next graph
+delta supplies the canonical rows. Post-snapshot client-ID reconciliation reads at most 256
+indexed conversation rows; if that window is exhausted without establishing correlation, the
+torn read requests a full conversation resync rather than guessing.
+Native keyset pages refill bounded batches after suppressing exact echoes, retaining their
+authenticated ordering boundary and source-generation fence. OPEN and change replay carry
+the suppressed native high-water without exposing the private correlation hint.
+A page examines at most 4096 native entries (the scan budget) while omitting echoes. Past the
+budget with visible entries it is a short page: fewer than `limit` items with `has_more: true`
+and its last visible entry as the boundary, so the next page reads on with a fresh budget. When
+that many consecutive entries are all suppressed echoes and none is visible, the read answers
+`page-cursor-expired` (HTTP 410, no `full_resync`) on a continuation, on the header's head read
+and on change replay; it is not `cursor-gap`, because reloading the newest page would meet the
+same prefix. OPEN keeps its established stored-timeline fallback in that case, and a following
+stream waits 1.5 s before it re-opens after such a refusal. While 4096 or more echoes sit at the head, each
+change to the conversation therefore costs one refused replay and one stored-timeline re-OPEN per
+1.5 s at most, until a visible entry is appended. A transcript with
+more than 4096 consecutive correlated delivery echoes therefore cannot be paged past by cursor,
+and while its newest 4096 entries are all echoes its native entries cannot be shown; this is an
+accepted, known limit.
+
 Native block `view` and `metadata` (including assistant text/reasoning metadata) use
 the same bounded open-value display convention on full reads and native keyset pages:
 the outer object and its keys survive, oversized strings gain the visible
