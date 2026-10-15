@@ -892,8 +892,8 @@ async fn restart_refuses_an_unidentifiable_runtime_without_stopping_it() {
 
 fn restart_environment(member: &MemberSpec) -> (Option<&str>, Option<&str>) {
     (
-        member.environment.get("ST3_RESTART_NATIVE_SESSION").map(String::as_str),
-        member.environment.get("ST3_RESTART_FRESH_CONTEXT").map(String::as_str),
+        member.environment.get(st3::suspension::RESUME_ENV).map(String::as_str),
+        member.environment.get(st3::suspension::CONTINUE_PATH_ENV).map(String::as_str),
     )
 }
 
@@ -927,9 +927,10 @@ async fn bind_native_session(fixture: &Fixture, subject: &str, session: &str, av
     let _: ClaimRecord = fixture
         .client()
         .post(
-            "/v1/claims/harness-session-binding",
+            "/v1/agents/native-session",
             &json!({
-                "agent": subject,
+                "subject": subject,
+                "actor": subject,
                 "harness": "omp",
                 "session_id": session,
                 "resume_available": available,
@@ -1002,7 +1003,7 @@ async fn person_restart_resumes_only_a_saved_conversation_and_fresh_overrides_it
     wait_for_starts(&fixture, &subject, 4).await;
     assert_eq!(
         restart_environment(&fixture.runtime.starts.lock().unwrap()[3]),
-        (None, Some("1"))
+        (Some(""), None)
     );
 }
 

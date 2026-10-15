@@ -759,7 +759,6 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
             get(get_delivery_hold).post(post_delivery_hold),
         )
         .route("/v1/claims", get(list_claims).post(post_claim))
-        .route("/v1/claims/harness-session-binding", post(post_harness_session_binding))
         .route("/v1/usage", get(get_usage))
         .route("/v1/slo", get(get_slo))
         .route("/v1/slo/history", get(get_slo_history))
@@ -7261,13 +7260,12 @@ async fn guard_bound_request(
     {
         return Ok(request);
     }
-    let native_binding = path == "/v1/claims/harness-session-binding";
     let (parts, body) = request.into_parts();
     let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024)
         .await
         .map_err(ApiError::internal)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-        for key in ["actor", "requester"].into_iter().chain(native_binding.then_some("agent")) {
+        for key in ["actor", "requester"] {
             if let Some(actor) = value.get(key).and_then(Value::as_str)
                 && actor != bound_agent
             {
@@ -12064,6 +12062,10 @@ struct NativeSessionReport {
     session_id: String,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    resume_available: Option<bool>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 /// A seat's driver reports the native session its harness bound for one incarnation. Only the
@@ -12079,47 +12081,94 @@ async fn report_native_session(
             "a seat reports only its own native session",
         )));
     }
-    if request.session_id.is_empty() || request.incarnation_id.is_empty() {
+    if request.session_id.is_empty() || request.incarnation_id.is_empty()
+        || !matches!(request.harness.as_str(), "claude" | "codex" | "omp" | "pi" | "opencode")
+    {
         return Err(ApiError::bad(St3Error::new(
             "invalid-native-session",
-            "a native session report needs a session ID and an incarnation",
+            "a native session report needs a supported harness, session ID and an incarnation",
         )));
     }
-    let mut fields = BTreeMap::from([
-        ("harness".into(), Value::String(request.harness)),
-        (
-            "session_id".into(),
-            Value::String(request.session_id.clone()),
-        ),
-        ("agent".into(), Value::String(subject.clone())),
-        (
-            "incarnation_id".into(),
-            Value::String(request.incarnation_id.clone()),
-        ),
-        ("status".into(), Value::String("active".into())),
-    ]);
-    if let Some(path) = request.path {
-        fields.insert("path".into(), Value::String(path));
-    }
-    if let Some(account) = request.account_ref.filter(|name| !name.is_empty()) {
-        fields.insert("account_ref".into(), Value::String(account));
-    }
-    let claim = state
-        .store
-        .append_claim(&ClaimInput {
+    let store = state.store.clone();
+    let (claim, appended) = blocking_action(move || {
+        let internal = |error: anyhow::Error| St3Error::new("internal", error.to_string());
+        let status = store.status(Some(&subject)).map_err(internal)?;
+        let current = status.subjects.iter().find(|item| item.subject == subject)
+            .ok_or_else(|| St3Error::new("missing-agent", "the native report has no current seat"))?;
+        let incarnation = current.actual.as_ref()
+            .map(|actual| actual.get("fields").unwrap_or(actual))
+            .and_then(|fields| fields.get("incarnation_id")).and_then(Value::as_str);
+        if incarnation != Some(request.incarnation_id.as_str())
+            || current.actual_origin.as_deref() != Some(store.origin())
+        {
+            return Err(St3Error::new(
+                "stale-incarnation", "the native report does not name this host's current incarnation",
+            ));
+        }
+        let desired = store.desired_subject_with_writer(&subject).map_err(internal)?
+            .map(|(desired, _)| desired)
+            .filter(|desired| desired.kind == "agent")
+            .ok_or_else(|| St3Error::new("binding-not-declared", "the seat has no active native declaration"))?;
+        if !current.conflicts.is_empty()
+            || desired.member.as_ref().and_then(|member| member.driver.as_deref())
+                != Some(request.harness.as_str())
+        {
+            return Err(St3Error::new(
+                "binding-driver-mismatch", "the native report must match the seat's declared harness",
+            ));
+        }
+        let mut fields = BTreeMap::from([
+            ("harness".into(), json!(request.harness)),
+            ("session_id".into(), json!(request.session_id)),
+            ("agent".into(), json!(subject)),
+            ("incarnation_id".into(), json!(request.incarnation_id)),
+            ("status".into(), json!("active")),
+            // Existing callers report a bound saved session without an availability field.
+            ("resume_available".into(), json!(request.resume_available.unwrap_or(true))),
+        ]);
+        if let Some(path) = request.path {
+            fields.insert("path".into(), json!(path));
+        }
+        if let Some(account) = request.account_ref.filter(|name| !name.is_empty()) {
+            fields.insert("account_ref".into(), json!(account));
+        }
+        // Availability and selected-session changes are new observations, not per-session replays.
+        let key = match request.idempotency_key {
+            Some(key) => key,
+            None => {
+                let latest = store.latest_claim(&subject, Some("harness.session-file"))
+                    .map_err(internal)?;
+                let previous_id = match latest {
+                    Some(claim) => {
+                        if claim.body.get("fields").and_then(Value::as_object).is_some_and(|previous| {
+                            previous.len() == fields.len()
+                                && fields.iter().all(|(key, value)| previous.get(key) == Some(value))
+                        }) {
+                            return Ok((claim, false));
+                        }
+                        claim.id
+                    },
+                    None => String::new(),
+                };
+                let digest = hex::encode(Sha256::digest(
+                    serde_json::to_vec(&fields).map_err(|error| internal(error.into()))?,
+                ));
+                format!("native-session:{subject}:{previous_id}:{digest}")
+            },
+        };
+        store.append_claim_outcome(&ClaimInput {
             subject: subject.clone(),
             kind: "harness.session-file".into(),
-            actor: Some(subject.clone()),
+            actor: Some(subject),
             fields,
             evidence: Vec::new(),
             expected_subject: None,
-            idempotency_key: Some(format!(
-                "native-session:{subject}:{}:{}",
-                request.incarnation_id, request.session_id
-            )),
+            idempotency_key: Some(key),
         })
-        .map_err(ApiError::bad)?;
-    signal_changed(&state);
+    }).await?;
+    if appended {
+        signal_changed(&state);
+    }
     Ok(Json(claim))
 }
 
@@ -12542,89 +12591,6 @@ async fn post_delivery_hold(
         store.append_claim_outcome(&input)
     })
     .await?;
-    if appended {
-        signal_visible_change(&state);
-    }
-    Ok(Json(claim))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HarnessSessionBindingRequest {
-    agent: String,
-    harness: String,
-    session_id: String,
-    resume_available: bool,
-    path: Option<String>,
-    #[serde(default)]
-    account_ref: Option<String>,
-    incarnation_id: String,
-    idempotency_key: String,
-}
-
-/// A managed native wrapper can bind only its own current runtime, never import a session.
-async fn post_harness_session_binding(
-    State(state): State<AppState>,
-    Json(request): Json<HarnessSessionBindingRequest>,
-) -> Result<Json<ClaimRecord>, ApiError> {
-    if !request.agent.starts_with("agent/")
-        || request.session_id.is_empty()
-        || request.incarnation_id.is_empty()
-        || !matches!(request.harness.as_str(), "claude" | "codex" | "omp" | "pi" | "opencode")
-    {
-        return Err(ApiError::bad(St3Error::new(
-            "invalid-native-session-binding",
-            "a native binding requires an agent, supported harness, session ID and incarnation",
-        )));
-    }
-    let store = state.store.clone();
-    let (claim, appended) = blocking_action(move || {
-        let internal = |error: anyhow::Error| St3Error::new("internal", error.to_string());
-        let status = store.status(Some(&request.agent)).map_err(internal)?;
-        let current = status.subjects.iter().find(|item| item.subject == request.agent)
-            .ok_or_else(|| St3Error::new("missing-agent", "the native binding has no current seat"))?;
-        let incarnation = current.actual.as_ref()
-            .map(|actual| actual.get("fields").unwrap_or(actual))
-            .and_then(|fields| fields.get("incarnation_id")).and_then(Value::as_str);
-        if incarnation != Some(request.incarnation_id.as_str())
-            || current.actual_origin.as_deref() != Some(store.origin())
-        {
-            return Err(St3Error::new(
-                "stale-incarnation", "the native binding does not name this host's current incarnation",
-            ));
-        }
-        let desired = store.desired_subject_with_writer(&request.agent).map_err(internal)?
-            .map(|(desired, _)| desired)
-            .filter(|desired| desired.kind == "agent")
-            .ok_or_else(|| St3Error::new("binding-not-declared", "the seat has no active native declaration"))?;
-        if !current.conflicts.is_empty()
-            || desired.member.as_ref().and_then(|member| member.driver.as_deref())
-                != Some(request.harness.as_str())
-        {
-            return Err(St3Error::new(
-                "binding-driver-mismatch", "the native binding must match the seat's declared harness",
-            ));
-        }
-        let mut fields = BTreeMap::from([
-            ("agent".into(), json!(request.agent)),
-            ("harness".into(), json!(request.harness)),
-            ("session_id".into(), json!(request.session_id)),
-            ("resume_available".into(), json!(request.resume_available)),
-            ("path".into(), json!(request.path)),
-            ("incarnation_id".into(), json!(request.incarnation_id)),
-        ]);
-        if let Some(account) = request.account_ref.filter(|name| !name.is_empty()) {
-            fields.insert("account_ref".into(), json!(account));
-        }
-        store.append_claim_outcome(&ClaimInput {
-            subject: request.agent.clone(),
-            kind: "harness.session-file".into(),
-            actor: Some(request.agent.clone()),
-            fields,
-            evidence: vec![],
-            expected_subject: None,
-            idempotency_key: Some(request.idempotency_key),
-        })
-    }).await?;
     if appended {
         signal_visible_change(&state);
     }
@@ -28314,7 +28280,7 @@ version 2
     }
 
     #[tokio::test]
-    async fn native_session_binding_admits_only_current_own_declared_harness() {
+    async fn native_session_endpoint_owns_availability_and_current_harness_admission() {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
         let agent = "agent/example/binding";
@@ -28342,21 +28308,27 @@ version 2
             },
         ));
         let binding = json!({
-            "agent": agent, "harness": "codex", "session_id": "exact-thread",
-            "incarnation_id": "current", "path": null, "idempotency_key": "native-binding-current",
-            "resume_available": true,
+            "subject": agent, "actor": agent, "harness": "codex", "session_id": "exact-thread",
+            "incarnation_id": "current", "path": null,
         });
         // The transport guard rejects foreign agents before the router adds its envelope.
         let mut foreign = binding.clone();
-        foreign["agent"] = json!("agent/foreign");
+        foreign["actor"] = json!("agent/foreign");
         let response = app.clone().oneshot(Request::builder().method("POST")
-            .uri("/v1/claims/harness-session-binding").header("content-type", "application/json")
+            .uri("/v1/agents/native-session").header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&foreign).unwrap())).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body: Value = serde_json::from_slice(
             &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
         ).unwrap();
         assert_eq!(body["code"], "foreign-agent-actor");
+        let mut foreign_subject = binding.clone();
+        foreign_subject["subject"] = json!("agent/foreign");
+        let (status, refused) = json_request(
+            app.clone(), "/v1/agents/native-session", foreign_subject,
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+        assert_eq!(refused["code"], "foreign-agent-actor");
         for (field, value, code, expected_status) in [
             ("incarnation_id", "old", "stale-incarnation", StatusCode::CONFLICT),
             ("harness", "omp", "binding-driver-mismatch", StatusCode::UNPROCESSABLE_ENTITY),
@@ -28364,24 +28336,74 @@ version 2
             let mut invalid = binding.clone();
             invalid[field] = json!(value);
             let (status, body) = json_request(
-                app.clone(), "/v1/claims/harness-session-binding", invalid,
+                app.clone(), "/v1/agents/native-session", invalid,
             ).await;
             assert_eq!(status, expected_status, "{body}");
             assert_eq!(body["code"], code);
         }
         assert!(state.store.latest_claim(agent, Some("harness.session-file")).unwrap().is_none());
         let (status, accepted) = json_request(
-            app.clone(), "/v1/claims/harness-session-binding", binding.clone(),
+            app.clone(), "/v1/agents/native-session", binding.clone(),
         ).await;
         assert_eq!(status, StatusCode::OK, "{accepted}");
         assert_eq!(accepted["actor"], agent);
         assert_eq!(accepted["body"]["fields"]["session_id"], "exact-thread");
         assert_eq!(accepted["body"]["fields"]["incarnation_id"], "current");
         let (status, replay) = json_request(
-            app.clone(), "/v1/claims/harness-session-binding", binding,
+            app.clone(), "/v1/agents/native-session", binding.clone(),
         ).await;
         assert_eq!(status, StatusCode::OK, "{replay}");
         assert_eq!(replay["id"], accepted["id"]);
+        assert_eq!(accepted["body"]["fields"]["resume_available"], true);
+        assert_eq!(restart_native_session(&state.store, agent, "current", Some("codex"), None)
+            .unwrap().unwrap().0, "exact-thread");
+        let saved_index = state.store.index().unwrap();
+        let mut unsaved = binding.clone();
+        unsaved["resume_available"] = json!(false);
+        let (status, unavailable) = json_request(
+            app.clone(), "/v1/agents/native-session", unsaved.clone(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{unavailable}");
+        assert_ne!(unavailable["id"], accepted["id"]);
+        assert!(restart_native_session(&state.store, agent, "current", Some("codex"), None)
+            .unwrap().is_none());
+        assert_eq!(restart_native_session(
+            &state.store, agent, "current", Some("codex"), Some(saved_index),
+        ).unwrap().unwrap().0, "exact-thread");
+        assert!(restart_native_session(&state.store, agent, "old", Some("codex"), None)
+            .unwrap().is_none());
+        let (status, saved_again) = json_request(
+            app.clone(), "/v1/agents/native-session", binding.clone(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{saved_again}");
+        assert_ne!(saved_again["id"], accepted["id"]);
+        assert_eq!(restart_native_session(&state.store, agent, "current", Some("codex"), None)
+            .unwrap().unwrap().0, "exact-thread");
+        unsaved["session_id"] = json!("unsaved-switch");
+        let (status, switched) = json_request(
+            app.clone(), "/v1/agents/native-session", unsaved.clone(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{switched}");
+        assert_eq!(switched["body"]["fields"]["session_id"], "unsaved-switch");
+        assert!(restart_native_session(&state.store, agent, "current", Some("codex"), None)
+            .unwrap().is_none());
+        unsaved["resume_available"] = json!(true);
+        unsaved["idempotency_key"] = json!("explicit-availability-update");
+        let (status, explicit) = json_request(
+            app.clone(), "/v1/agents/native-session", unsaved.clone(),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{explicit}");
+        let (status, replay) = json_request(
+            app.clone(), "/v1/agents/native-session", unsaved,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay["id"], explicit["id"]);
+        assert_eq!(restart_native_session(&state.store, agent, "current", Some("codex"), None)
+            .unwrap().unwrap().0, "unsaved-switch");
+        let (status, removed) = json_request(
+            app.clone(), "/v1/claims/harness-session-binding", binding,
+        ).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{removed}");
         // Imported/requester claims remain unavailable through generic publication.
         let (status, forbidden) = json_request(app, "/v1/claims", json!({
             "subject": agent, "kind": "harness.session-file", "actor": agent,

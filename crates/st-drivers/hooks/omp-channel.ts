@@ -963,11 +963,11 @@ export default function (pi: ExtensionAPI) {
   on("session_start", async (_event, ctx) => {
     // Awaited before the session's first turn, which is what makes restored context reach the boot
     // prompt rather than the turn after it.
-    const expected = process.env.ST_RESTART_EXPECTED_NATIVE_SESSION;
+    const expected = process.env.ST3_NATIVE_RESUME_SESSION;
     if (expected && ctx.sessionManager.getSessionId() !== expected) {
       throw new Error(`st: omp restart bound ${ctx.sessionManager.getSessionId()}, expected ${expected}`);
     }
-    delete process.env.ST_RESTART_EXPECTED_NATIVE_SESSION;
+    delete process.env.ST3_NATIVE_RESUME_SESSION;
     const restored = await open(ctx);
     const opened = state.child;
     if (opened) {

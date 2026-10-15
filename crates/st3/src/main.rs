@@ -19456,9 +19456,9 @@ async fn run_driver(client: &Client, args: DriverArgs, catalog: Option<&Path>) -
         let sessions = paths.session_dir.join("provider-sessions");
         if let Some(session) = st3::native_seed::first_launch(
             client, subject, &incarnation, &args.driver, args.seed.as_deref(), &sessions,
-            st3::native_resume::requested().is_some(),
+            st3::native_resume::requested().is_some() || st3::native_resume::fresh(),
         ).await? {
-            argv = st3::native_resume::pi_family_argv("omp", argv, &sessions, &session)
+            argv = st3::native_resume::pi_family_argv("omp", argv, &sessions, &session, None)
                 .map_err(|refusal| anyhow::anyhow!("{}: {}", refusal.code, refusal.reason))?;
         }
         if let (Some(message), Some(id)) = (&args.initial_message, &args.initial_message_id) {
@@ -19481,9 +19481,9 @@ async fn run_driver(client: &Client, args: DriverArgs, catalog: Option<&Path>) -
     let (program, arguments) = args.argv.split_first().context("driver argv is empty")?;
     let mut child = tokio::process::Command::new(program)
         .args(arguments)
-        .env_remove(st_drivers::restart_context::NATIVE_SESSION_ENV)
-        .env_remove(st_drivers::restart_context::FRESH_CONTEXT_ENV)
-        .env_remove(st_drivers::restart_context::EXPECTED_SESSION_ENV)
+        .env_remove(st3::suspension::RESUME_ENV)
+        .env_remove(st3::suspension::CONTINUE_ENV)
+        .env_remove(st3::suspension::CONTINUE_PATH_ENV)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -19567,7 +19567,7 @@ async fn run_st2_native_driver(
         )
     })
     .await?;
-    let select = |argv: Vec<String>, session: &str| -> Result<_> {
+    let select_driver_native_resume = |argv: Vec<String>, session: &str| -> Result<_> {
         Ok(match driver {
             "claude" => st3::native_resume::claude_argv(
                 argv,
@@ -19580,6 +19580,9 @@ async fn run_st2_native_driver(
                 argv,
                 &paths.session_dir.join("provider-sessions"),
                 session,
+                st3::native_resume::requested()
+                    .and_then(|_| std::env::var_os(st3::suspension::CONTINUE_PATH_ENV))
+                    .map(PathBuf::from).as_deref(),
             ),
             "opencode" => st3::native_resume::opencode_argv(
                 argv,
@@ -19596,7 +19599,8 @@ async fn run_st2_native_driver(
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     let argv = if let Some(session) = st3::native_resume::requested() {
         if driver == "claude" {
-            let path = std::env::var_os(st3::rollout::RESUME_PATH_ENV).map(PathBuf::from);
+            let path = std::env::var_os(st3::suspension::CONTINUE_PATH_ENV)
+                .or_else(|| std::env::var_os(st3::rollout::RESUME_PATH_ENV)).map(PathBuf::from);
             if let Err(refusal) = st3::native_resume::claude_carry_transcript(
                 &session,
                 &std::env::current_dir()?,
@@ -19613,7 +19617,7 @@ async fn run_st2_native_driver(
                 .await);
             }
         }
-        match select(argv, &session)? {
+        match select_driver_native_resume(argv, &session)? {
             Ok(argv) => {
                 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
                 selected_session = Some(session);
@@ -19636,7 +19640,7 @@ async fn run_st2_native_driver(
                 path.as_deref(),
             );
         }
-        match select(argv.clone(), &session)? {
+        match select_driver_native_resume(argv.clone(), &session)? {
             Ok(argv) => {
                 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
                 selected_session = Some(session);
@@ -20135,10 +20139,6 @@ fn verify_first_native_session(
     Ok(())
 }
 
-fn requested_restart_session() -> Option<String> {
-    std::env::var(st_drivers::restart_context::NATIVE_SESSION_ENV).ok()
-        .filter(|id| !id.is_empty())
-}
 
 async fn refuse_restart_session_mismatch(
     client: &Client,
@@ -20161,21 +20161,22 @@ async fn publish_native_session_binding(
     published: &mut Option<NativeSessionBinding>,
 ) -> Result<()> {
     verify_first_native_session(
-        requested_restart_session().as_deref(), &binding.session_id, published.is_some(),
+        st3::native_resume::requested().as_deref(), &binding.session_id, published.is_some(),
     )?;
     if published.as_ref() == Some(binding) {
         return Ok(());
     }
-    let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(binding)?));
-    let _: ClaimRecord = client.post("/v1/claims/harness-session-binding", &json!({
-        "agent": subject,
+    // The endpoint fingerprints transitions against its newest binding, so A -> B -> A
+    // is a new report rather than replaying a historical per-binding idempotency key.
+    let _: ClaimRecord = client.post("/v1/agents/native-session", &json!({
+        "subject": subject,
+        "actor": subject,
         "harness": driver,
         "session_id": binding.session_id,
         "resume_available": binding.resume_available,
         "path": binding.path,
         "incarnation_id": incarnation,
         "account_ref": std::env::var("ST3_ACCOUNT").ok().filter(|name| !name.is_empty()),
-        "idempotency_key": format!("native-session:{subject}:{incarnation}:{fingerprint}"),
     })).await?;
     *published = Some(binding.clone());
     Ok(())
@@ -20416,7 +20417,6 @@ async fn drive_st2_native(
     let mut delivery = NativeDeliverySupervisor::resumed(loop_state.delivery_episode);
     let mut replacement = DriverReplacement::new();
     let mut binding_watch = ClaudeBindingWatch::default();
-    let mut reported_session = None;
     let native_binding_path = match driver {
         "claude" => Some(agent_dir.join("claude-native-session")),
         "opencode" => Some(agent_dir.join("opencode-native-session")),
@@ -20592,35 +20592,6 @@ async fn drive_st2_native(
                     None
                 }
                 };
-                let bound = match driver {
-                    // Claude writes the transcript a resume needs only with its first turn.
-                    "claude" => provider_incarnation
-                        .as_deref()
-                        .and_then(|token| st3::hooks::claude_binding(&agent_dir, token))
-                        .filter(|session| {
-                            let workspace = std::env::current_dir().unwrap_or_default();
-                            st3::native_resume::claude_home().is_some_and(|home| {
-                                st3::native_resume::claude_transcript(&home, &workspace, session)
-                                    .is_file()
-                            })
-                        }),
-                    "opencode" => st3::native_resume::opencode_bound_session(&agent_dir),
-                    _ => None,
-                };
-                if let Some(session) = bound
-                    && let Err(error) = report_native_session(
-                        client,
-                        subject,
-                        &incarnation,
-                        driver,
-                        &session,
-                        None,
-                        &mut reported_session,
-                    )
-                    .await
-                {
-                    note_driver_tick_failure(subject, error, &mut last_control_warning);
-                }
                 if driver == "claude"
                     && let Some(reason) = binding_watch.overdue(
                         &agent_dir,
@@ -22046,49 +22017,6 @@ async fn skip_native_continue(
     }
 }
 
-/// Report the native session the harness bound for this incarnation, once per session.
-async fn report_native_session(
-    client: &Client,
-    subject: &str,
-    incarnation: &str,
-    harness: &str,
-    session: &str,
-    path: Option<&Path>,
-    reported: &mut Option<String>,
-) -> Result<()> {
-    if reported.as_deref() == Some(session) {
-        return Ok(());
-    }
-    let _: ClaimRecord = client
-        .post(
-            "/v1/agents/native-session",
-            &json!({
-                "subject": subject,
-                "actor": subject,
-                "incarnation_id": incarnation,
-                "harness": harness,
-                "session_id": session,
-                "path": path.map(|path| path.to_string_lossy().into_owned()),
-                "account_ref": std::env::var("ST3_ACCOUNT").ok(),
-            }),
-        )
-        .await?;
-    *reported = Some(session.to_owned());
-    Ok(())
-}
-
-/// The thread a Codex wrapper bound in `binding.json` since `prior` was read at launch.
-fn codex_bound_thread(state_dir: &Path, prior: Option<&Vec<u8>>) -> Option<String> {
-    let bytes = fs::read(state_dir.join("binding.json")).ok()?;
-    if Some(&bytes) == prior {
-        return None;
-    }
-    let binding: Value = serde_json::from_slice(&bytes).ok()?;
-    binding["threadId"]
-        .as_str()
-        .filter(|thread| !thread.is_empty())
-        .map(str::to_owned)
-}
 
 /// A `harness.observed` claim's fields with the driver's quiescence report added.
 fn with_quiescence(mut fields: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
@@ -22180,7 +22108,7 @@ fn accept_managed_channel_frame(
         && let Some(actual) = frame.get("sessionId").and_then(Value::as_str)
     {
         verify_first_native_session(
-            requested_restart_session().as_deref(), actual,
+            st3::native_resume::requested().as_deref(), actual,
             state.pending.published_native_session.is_some(),
         )?;
     }
@@ -23654,7 +23582,6 @@ async fn drive_codex_native(
         .then(|| codex_continued_thread(&argv))
         .flatten();
     let mut task = spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start);
-    let mut reported_session = None;
     // The Codex control pump keeps the subagent ledger; this driver records it on the seat.
     let mut subagents = st3::subagents::Publisher::start(
         subject,
@@ -23726,7 +23653,7 @@ async fn drive_codex_native(
                 // A resume that ended before its thread bound was refused by Codex itself, such
                 // as a thread with no rollout. The wrapper can end cleanly and leave the reason in
                 // its harness record. The refusal goes first, so nothing after it can delay it.
-                if reported_session.is_none() && st3::native_resume::requested().is_some() {
+                if loop_state.published_native_session.is_none() && st3::native_resume::requested().is_some() {
                     let reason = match &outcome {
                         Err(error) => format!("{error:#}"),
                         Ok(()) => st_drivers::harness_state::read(&harness_state_path, None)
@@ -23738,7 +23665,7 @@ async fn drive_codex_native(
                         reason: reason.chars().take(2_000).collect(),
                     };
                     let _ = refuse_native_resume(client, subject, &incarnation, "codex", refusal).await;
-                } else if reported_session.is_none()
+                } else if loop_state.published_native_session.is_none()
                     && let Some(thread) = &continued
                 {
                     // The next relaunch starts a new thread instead of trying this one again.
@@ -23852,20 +23779,6 @@ async fn drive_codex_native(
                             idempotency_key: Some(format!("codex-ready:{subject}:{incarnation}")),
                         }).await?;
                         loop_state.ready = true;
-                    }
-                    if let Some(thread) = codex_bound_thread(&state_dir, prior_binding.as_ref())
-                        && let Err(error) = report_native_session(
-                            client,
-                            subject,
-                            &incarnation,
-                            "codex",
-                            &thread,
-                            None,
-                            &mut reported_session,
-                        )
-                        .await
-                    {
-                        note_driver_tick_failure(subject, error, &mut last_control_warning);
                     }
                     if observations.enabled {
                         if let Some(wrapper) = observations.provider_incarnation.as_deref()
@@ -27749,6 +27662,53 @@ mod tests {
         assert!(verify_first_native_session(Some("captured"), "switched", true).is_ok());
         assert!(verify_first_native_session(None, "ordinary", false).is_ok());
     }
+
+    #[tokio::test]
+    async fn native_publisher_uses_one_endpoint_for_availability_and_repeated_session_switches() {
+        use axum::{Json, Router, routing::post};
+        use tokio::sync::Mutex;
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let store = Arc::new(Store::open_memory("native-publisher").unwrap());
+        let app = Router::new().route("/v1/agents/native-session", post({
+            let captured = captured.clone();
+            move |Json(request): Json<Value>| {
+                let captured = captured.clone();
+                let store = store.clone();
+                async move {
+                    captured.lock().await.push(request.clone());
+                    let record = store.append_claim(&ClaimInput {
+                        subject: request["subject"].as_str().unwrap().into(),
+                        actor: Some(request["actor"].as_str().unwrap().into()),
+                        kind: "harness.session".into(),
+                        fields: serde_json::from_value(request).unwrap(),
+                        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                    }).unwrap();
+                    Json(json!({"api_version":"st3.v1", "value":record}))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::new(Endpoint::Http(format!("http://{address}")));
+        let unsaved = NativeSessionBinding { session_id: "native-one".into(), path: None, resume_available: false };
+        let saved = NativeSessionBinding { resume_available: true, ..unsaved.clone() };
+        let switched = NativeSessionBinding { session_id: "native-two".into(), ..saved.clone() };
+        let mut published = None;
+        for binding in [&unsaved, &unsaved, &saved, &switched, &saved] {
+            publish_native_session_binding(&client, "agent/publisher", "omp", "incarnation", binding, &mut published).await.unwrap();
+        }
+        let requests = captured.lock().await;
+        assert_eq!(requests.len(), 4, "only the identical current binding is suppressed");
+        assert_eq!(requests.iter().map(|r| r["session_id"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["native-one", "native-one", "native-two", "native-one"]);
+        assert_eq!(requests.iter().map(|r| r["resume_available"].as_bool().unwrap()).collect::<Vec<_>>(),
+            [false, true, true, true]);
+        assert!(requests.iter().all(|r| r["actor"] == r["subject"] && r["incarnation_id"] == "incarnation" && r.get("idempotency_key").is_none()));
+        assert_eq!(published.as_ref(), Some(&saved));
+        server.abort();
+    }
+
 
     #[test]
     fn restart_context_binding_requires_exact_provider_incarnation_and_saved_evidence() {

@@ -128,11 +128,7 @@ pub fn run_with_paths(
         !opencode_argv.is_empty(),
         "opencode driver '{runtime_id}' has no provider argv"
     );
-    let opencode_argv = if matches!(&control, SessionControl::Graph(_)) {
-        crate::restart_context::Context::from_env().apply_argv("opencode", opencode_argv)?
-    } else {
-        opencode_argv
-    };
+    // The st3 launcher has already applied native argv selection.
     let admission =
         crate::harness_admission::admit(&opencode_argv[0], DiagnosticDriver::OpenCode, None);
     let version_ok = admission.passed();
@@ -209,9 +205,8 @@ pub fn run_with_paths(
                 delivery.pinned_session = selected_session(&argv);
                 // A predecessor's record names the predecessor's session, never this one's.
                 let _ = std::fs::remove_file(&delivery.binding_path);
-                if matches!(&delivery.control, SessionControl::Graph(_)) {
-                    delivery.restart_context = crate::restart_context::Context::from_env();
-                }
+                delivery.fresh_session = matches!(&delivery.control, SessionControl::Graph(_))
+                    && std::env::var_os("ST3_NATIVE_RESUME_SESSION").is_some_and(|id| id.is_empty());
                 delivery
             },
             diagnostics,
@@ -516,10 +511,10 @@ fn run_session(mut session: Session, child: &mut ProviderProcess, agent_dir: &Pa
             sse_started = true;
         }
         if api_ok
-            && !matches!(session.delivery.restart_context, crate::restart_context::Context::Ordinary)
-            && let Err(error) = session.delivery.select_restart_session(&session.client)
+            && session.delivery.fresh_session
+            && let Err(error) = session.delivery.select_fresh_session(&session.client)
         {
-            let _ = session.writer.ended("restart-context-error");
+            let _ = session.writer.ended("fresh-session-error");
             let _ = stop_provider_group(child);
             break Err(error);
         }
@@ -670,7 +665,7 @@ fn spawn_provider(argv: &[String], password: &str) -> Result<Child> {
         .split_first()
         .context("opencode provider argv is empty")?;
     let mut command = std::process::Command::new(program);
-    crate::restart_context::remove_launch_environment(&mut command);
+    command.env_remove("ST3_NATIVE_RESUME_SESSION").env_remove("ST3_NATIVE_CONTINUE_SESSION").env_remove("ST3_NATIVE_CONTINUE_PATH");
     command
         .args(args)
         .env("OPENCODE_SERVER_PASSWORD", password)
@@ -1748,7 +1743,7 @@ struct Delivery {
     observed_session: Option<String>,
     next_attempt: Instant,
     next_pin_check: Instant,
-    restart_context: crate::restart_context::Context,
+    fresh_session: bool,
 }
 
 impl Delivery {
@@ -1784,7 +1779,7 @@ impl Delivery {
             observed_session: None,
             next_attempt: Instant::now(),
             next_pin_check: Instant::now(),
-            restart_context: crate::restart_context::Context::Ordinary,
+            fresh_session: false,
         }
     }
 
@@ -1824,28 +1819,16 @@ impl Delivery {
         }
     }
 
-    fn select_restart_session(&mut self, client: &Client) -> Result<()> {
-        let native_id = match &self.restart_context {
-            crate::restart_context::Context::Ordinary => return Ok(()),
-            crate::restart_context::Context::Resume { id: expected, .. } => {
-                let native = client.get_json(&format!("/session/{expected}"))?;
-                let id = native.get("id").and_then(Value::as_str)
-                    .context("OpenCode resumed session has no native id")?;
-                crate::restart_context::verify_native_session(Some(expected), id)?;
-                id.to_owned()
-            }
-            crate::restart_context::Context::Fresh => {
-                let (status, body) = client.request("POST", "/session", Some(&json!({})))?;
-                anyhow::ensure!((200..300).contains(&status), "OpenCode fresh session returned HTTP {status}");
-                serde_json::from_slice::<Value>(&body)?.get("id").and_then(Value::as_str)
-                    .filter(|id| !id.is_empty()).context("OpenCode fresh session has no native id")?.to_owned()
-            }
-        };
+    fn select_fresh_session(&mut self, client: &Client) -> Result<()> {
+        let (status, body) = client.request("POST", "/session", Some(&json!({})))?;
+        anyhow::ensure!((200..300).contains(&status), "OpenCode fresh session returned HTTP {status}");
+        let native_id = serde_json::from_slice::<Value>(&body)?.get("id").and_then(Value::as_str)
+            .filter(|id| !id.is_empty()).context("OpenCode fresh session has no native id")?.to_owned();
         let status = client.post_json("/tui/select-session", &json!({"sessionID": native_id}))?;
         anyhow::ensure!((200..300).contains(&status), "OpenCode session selection returned HTTP {status}");
         self.pinned_session = Some(native_id.clone());
         self.saw_session(&native_id);
-        self.restart_context = crate::restart_context::Context::Ordinary;
+        self.fresh_session = false;
         Ok(())
     }
 
@@ -3144,8 +3127,8 @@ mod tests {
         let client = Client::new(server.port, "pw");
         let (mut delivery, _) = delivery_fixture(tmp.path(), tmp.path().join("ledger.json"));
         delivery.target_session = Some("ses_old".into());
-        delivery.restart_context = crate::restart_context::Context::Fresh;
-        delivery.select_restart_session(&client).unwrap();
+        delivery.fresh_session = true;
+        delivery.select_fresh_session(&client).unwrap();
         delivery.saw_session("ses_old");
         delivery.pump(&client);
         assert_eq!(delivery.ledger.binding(), Some("ses_created"));
@@ -3161,13 +3144,13 @@ mod tests {
         server.listed_sessions.lock().extend(["ses_exact".into(), "ses_other".into()]);
         let client = Client::new(server.port, "pw");
         let (mut delivery, _) = delivery_fixture(tmp.path(), tmp.path().join("ledger.json"));
-        delivery.restart_context = crate::restart_context::Context::Resume { id: "ses_exact".into(), path: None };
-        delivery.select_restart_session(&client).unwrap();
+        delivery.pinned_session = Some("ses_exact".into());
+        delivery.confirm_pinned(&client);
         delivery.saw_session("ses_other");
         delivery.pump(&client);
         assert_eq!(delivery.ledger.binding(), Some("ses_exact"));
         assert_eq!(delivery.observed_session.as_deref(), Some("ses_exact"));
-        assert_eq!(server.selected_sessions.lock().as_slice(), ["ses_exact"]);
+        assert!(server.selected_sessions.lock().is_empty());
         assert_eq!(server.listed_sessions.lock().as_slice(), ["ses_exact", "ses_other"]);
     }
 
@@ -3179,8 +3162,8 @@ mod tests {
         let client = Client::new(server.port, "pw");
         let (mut delivery, _) = delivery_fixture(tmp.path(), tmp.path().join("ledger.json"));
         delivery.observed_session = None;
-        delivery.restart_context = crate::restart_context::Context::Resume { id: "ses_missing".into(), path: None };
-        assert!(delivery.select_restart_session(&client).is_err());
+        delivery.pinned_session = Some("ses_missing".into());
+        delivery.confirm_pinned(&client);
         assert!(delivery.observed_session.is_none());
         assert!(server.selected_sessions.lock().is_empty());
     }

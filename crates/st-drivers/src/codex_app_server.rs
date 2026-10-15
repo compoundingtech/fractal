@@ -2880,8 +2880,7 @@ pub fn run_controlled_paths(
     } else {
         codex_argv
     };
-    let restart = crate::restart_context::Context::from_env();
-    let codex_argv = restart.apply_argv("codex", codex_argv)?;
+    // st3 has already applied the single native resume selector.
     // Install before any protocol preflight child exists, exactly as the catalog entry point does.
     crate::provider_session::install_signal_handler();
     let producer_version = ensure_supported_protocol(&codex_argv[0])?;
@@ -2916,11 +2915,8 @@ pub fn run_controlled_paths(
         &runtime_id,
         false,
     )?;
-    let resume_thread = match restart {
-        crate::restart_context::Context::Ordinary => resume_thread.or(retired),
-        crate::restart_context::Context::Fresh => None,
-        crate::restart_context::Context::Resume { id: thread, .. } => Some(thread),
-    };
+    let fresh = std::env::var_os("ST3_NATIVE_RESUME_SESSION").is_some_and(|id| id.is_empty());
+    let resume_thread = if fresh { None } else { resume_thread.or(retired) };
     if let Some(thread) = &resume_thread {
         anyhow::ensure!(
             resume_insertion_index(&codex_argv[1..])?.is_some(),
@@ -3419,7 +3415,7 @@ fn spawn_controlled_app_server(
     log: &File,
 ) -> Result<OwnedProcessGroup> {
     let mut command = Command::new(codex);
-    crate::restart_context::remove_launch_environment(&mut command);
+    command.env_remove("ST3_NATIVE_RESUME_SESSION").env_remove("ST3_NATIVE_CONTINUE_SESSION").env_remove("ST3_NATIVE_CONTINUE_PATH");
     command
         .args(args)
         .stdin(Stdio::null())
@@ -3435,7 +3431,7 @@ const CONTROLLED_TUI_OVERRIDES: [&str; 2] = ["-c", "check_for_update_on_startup=
 
 fn controlled_tui_command(codex: &str, args: &[String]) -> Command {
     let mut command = Command::new(codex);
-    crate::restart_context::remove_launch_environment(&mut command);
+    command.env_remove("ST3_NATIVE_RESUME_SESSION").env_remove("ST3_NATIVE_CONTINUE_SESSION").env_remove("ST3_NATIVE_CONTINUE_PATH");
     command.args(CONTROLLED_TUI_OVERRIDES).args(args);
     command
 }
@@ -4549,7 +4545,7 @@ fn preflight_hook_trust(
 ) -> Result<Option<HookTrustProjection>> {
     diagnostics.record("hookTrustPreflightStarting", json!({}))?;
     let mut server_command = Command::new(codex);
-    crate::restart_context::remove_launch_environment(&mut server_command);
+    server_command.env_remove("ST3_NATIVE_RESUME_SESSION").env_remove("ST3_NATIVE_CONTINUE_SESSION").env_remove("ST3_NATIVE_CONTINUE_PATH");
     server_command
         .args(server_args)
         .stdin(Stdio::null())

@@ -148,8 +148,7 @@ pub fn run_controlled_paths(
         !claude_argv.is_empty(),
         "Claude driver '{runtime_id}' has no provider argv"
     );
-    let restart = crate::restart_context::Context::from_env();
-    let mut claude_argv = restart.apply_argv("claude", claude_argv)?;
+    let mut claude_argv = claude_argv;
     let workspace = std::env::current_dir().context("reading the Claude driver workspace")?;
     if let Some(mode) = crate::access::AccessMode::from_environment()? {
         let boundary = claude_argv.iter().position(|arg| arg == "--").unwrap_or(claude_argv.len());
@@ -172,11 +171,8 @@ pub fn run_controlled_paths(
         ("ST_CLAUDE_IDENTITY".to_string(), identity.clone()),
     ];
     env.extend(paths.environment(&identity));
-    if let Some(expected) = restart.native_session() {
-        env.push((
-            crate::restart_context::EXPECTED_SESSION_ENV.into(),
-            expected.into(),
-        ));
+    if let Ok(expected) = std::env::var("ST3_NATIVE_RESUME_SESSION") {
+        env.push(("ST3_NATIVE_RESUME_SESSION".into(), expected));
     }
     // An st3 seat never carries an st2 residency fence, so an inherited one must not reach hooks.
     run_provider_with_env_removals(
@@ -187,7 +183,7 @@ pub fn run_controlled_paths(
         &[
             EXPECTED_NATIVE_SESSION_ENV,
             RESUME_GENERATION_ENV,
-            crate::restart_context::EXPECTED_SESSION_ENV,
+            "ST3_NATIVE_RESUME_SESSION",
             "CATALOG",
             "ST_ROOT",
         ],
@@ -1350,15 +1346,15 @@ fn observe_payload(
         })
         .transpose()?;
     if event == "SessionStart" {
-        let expected_restart = var(crate::restart_context::EXPECTED_SESSION_ENV);
+        let expected_restart = var("ST3_NATIVE_RESUME_SESSION").filter(|id| !id.is_empty());
         let already_bound = fs::read(agent_dir.join("claude-native-session")).ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .is_some_and(|binding| binding["incarnation"].as_str() == exported_session.as_deref());
         if !already_bound {
-            crate::restart_context::verify_native_session(
-                expected_restart.as_deref(),
-                payload.get("session_id").and_then(serde_json::Value::as_str).unwrap_or_default(),
-            )?;
+            if let Some(expected) = expected_restart.as_deref() {
+                let actual = payload.get("session_id").and_then(serde_json::Value::as_str).unwrap_or_default();
+                anyhow::ensure!(actual == expected, "native resume bound session {actual:?}, expected {expected:?}");
+            }
         }
         let binding = match (runtime_id, exported_session.as_deref()) {
             (Some(runtime_id), Some(runtime_incarnation)) => Some(record_session_start_binding(
@@ -2286,7 +2282,7 @@ mod tests {
         let var = |key: &str| match key {
             SESSION_ENV => Some("wrapper-current".into()),
             SESSION_SEQ_ENV => Some(seq.to_string()),
-            crate::restart_context::EXPECTED_SESSION_ENV => Some("native-exact".into()),
+            "ST3_NATIVE_RESUME_SESSION" => Some("native-exact".into()),
             _ => None,
         };
         let observe = |native: &str| observe_payload(

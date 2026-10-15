@@ -6915,24 +6915,29 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .insert(crate::suspension::CONTINUE_PATH_ENV.into(), path);
             }
         }
-        launch_member.environment.remove("ST3_RESTART_NATIVE_SESSION");
-        launch_member.environment.remove("ST3_RESTART_NATIVE_SESSION_PATH");
-        launch_member.environment.remove("ST3_RESTART_FRESH_CONTEXT");
+        if restart_context.is_some()
+            && let crate::model::LaunchSpec::Argv(argv) = &mut launch_member.launch
+            && let Some(driver) = member.driver.as_deref()
+        {
+            let boundary = argv.iter().position(|arg| arg == "--").map_or(0, |index| index + 1);
+            let provider = argv.split_off(boundary);
+            argv.extend(crate::native_resume::strip_selection(driver, provider));
+        }
         match restart_context {
             Some(RestartContext::Resume { session, path }) => {
                 launch_member
                     .environment
-                    .insert("ST3_RESTART_NATIVE_SESSION".into(), session.into());
+                    .insert(crate::suspension::RESUME_ENV.into(), session.into());
                 if let Some(path) = path {
                     launch_member
                         .environment
-                        .insert("ST3_RESTART_NATIVE_SESSION_PATH".into(), path.into());
+                        .insert(crate::suspension::CONTINUE_PATH_ENV.into(), path.into());
                 }
             }
             Some(RestartContext::Fresh) => {
                 launch_member
                     .environment
-                    .insert("ST3_RESTART_FRESH_CONTEXT".into(), "1".into());
+                    .insert(crate::suspension::RESUME_ENV.into(), String::new());
             }
             None => {}
         }

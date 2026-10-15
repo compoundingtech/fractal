@@ -142,7 +142,6 @@ pub fn omit_seed_for_native_resume(member: &mut crate::model::MemberSpec) {
             crate::suspension::RESUME_ENV,
             crate::suspension::CONTINUE_ENV,
             crate::suspension::CONTINUE_PATH_ENV,
-            "ST3_RESTART_NATIVE_SESSION",
         ]
         .iter()
         .any(|variable| member.environment.contains_key(*variable))

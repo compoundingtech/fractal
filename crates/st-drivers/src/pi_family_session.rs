@@ -147,12 +147,7 @@ pub(crate) fn run_for_paths(
         !provider_argv.is_empty(),
         "{label} driver '{runtime_id}' has no provider argv"
     );
-    let restart = if legacy_presence {
-        crate::restart_context::Context::Ordinary
-    } else {
-        crate::restart_context::Context::from_env()
-    };
-    let provider_argv = restart.apply_argv(label, provider_argv)?;
+    // Native selection is applied by st3 before entering the provider wrapper.
     // Before the claim on purpose: an unadmitted provider must fail without taking ownership of
     // the seat's observed record, so a refused launch leaves the predecessor's state alone.
     let admitted_set = if let Some(verify_version) = kind.verify_version {
@@ -185,8 +180,8 @@ pub(crate) fn run_for_paths(
             env.retain(|(name, _)| name != kind.catalog_env);
         }
         env.extend_from_slice(additional_env);
-        if let Some(expected) = restart.native_session() {
-            env.push((crate::restart_context::EXPECTED_SESSION_ENV.into(), expected.into()));
+        if let Ok(expected) = std::env::var("ST3_NATIVE_RESUME_SESSION") {
+            env.push(("ST3_NATIVE_RESUME_SESSION".into(), expected));
         }
         env.extend(offline_defaults(|key| std::env::var_os(key).is_some()));
         if label == "omp" {
