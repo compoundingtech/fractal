@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use anyhow::{Context as _, Result};
@@ -535,6 +536,8 @@ pub struct Keyring {
     keys: RwLock<BTreeMap<String, HeldKey>>,
     /// The public key each principal signs claims with.
     signing: RwLock<BTreeMap<String, String>>,
+    /// Moves after every change to the node key or the held keys.
+    generation: AtomicU64,
 }
 
 impl Keyring {
@@ -554,6 +557,13 @@ impl Keyring {
 
     pub fn set_node(&self, key: Option<Arc<MemberKey>>) {
         *self.node.write().unwrap_or_else(PoisonError::into_inner) = key;
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Changes after the keys this keyring signs with change. Read before signing, it shows
+    /// whether a signature made since could differ from one made now.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     pub fn node(&self) -> Option<Arc<MemberKey>> {
@@ -595,6 +605,7 @@ impl Keyring {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(public, held);
+        self.generation.fetch_add(1, Ordering::Release);
     }
 
     fn key_path(directory: &Path, public: &str) -> PathBuf {
