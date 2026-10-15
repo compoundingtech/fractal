@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Existing person wire shapes and profile semantics remain unchanged. Generated SDK person callers use PersonPairingBegin/PersonPairedSession; general pairing uses untagged unions. Assistant grants require assistant.grants.v1 and never fall back to person pairing."
+    "detail": "Existing person wire shapes and profile semantics remain unchanged. The TypeScript SDK is a source break for general pairing callers: PairingBegin and PairedSession become untagged unions (PersonPairingBegin | AssistantPairingBegin and PersonPairedSession | AssistantPairedSession), so generic callers must narrow before reading person_id, and person_id becomes optional on shared projections; Rust person variants keep deny_unknown_fields. Generated SDK person callers use PersonPairingBegin/PersonPairedSession. Assistant grants require assistant.grants.v1 and never fall back to person pairing."
   },
   "downtime": {
     "status": "none",

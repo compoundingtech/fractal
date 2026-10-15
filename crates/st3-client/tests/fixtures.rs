@@ -226,13 +226,13 @@ fn assistant_pairing_is_disjoint_from_person_delegation() {
     ];
     assert_eq!(request.scopes, scopes);
     assert!(request.disclosure_consent);
-    assert_eq!(request.consent_evidence, "axe:igubz7");
+    assert_eq!(request.consent_evidence, "axe decision ask recorded by the owning person");
     assert_eq!(request.expires_in_seconds, Some(3600));
     let policy: AssistantGrantPolicy = decode("assistant-grant-policy.json");
     assert_eq!(policy.minimal_read_mode, AssistantMinimalReadMode::ApprovalOnce);
     assert_eq!(policy.scopes, scopes);
     assert!(policy.disclosure_consent);
-    assert_eq!(policy.consent_evidence, "axe:igubz7");
+    assert_eq!(policy.consent_evidence, "axe decision ask recorded by the owning person");
 
     let challenge: Envelope<PairingChallenge> = decode("assistant-pairing-challenge.json");
     assert_eq!(challenge.value.grant_kind.as_deref(), Some("assistant"));
@@ -247,7 +247,7 @@ fn assistant_pairing_is_disjoint_from_person_delegation() {
     assert_eq!(session.scopes, scopes);
     assert_eq!(session.grant.scopes, scopes);
     assert!(session.grant.disclosure_consent);
-    assert_eq!(session.grant.consent_evidence, "axe:igubz7");
+    assert_eq!(session.grant.consent_evidence, "axe decision ask recorded by the owning person");
     assert!(session.grant.recipient_allowlist.is_empty());
     let public = serde_json::to_value(&session.grant).unwrap();
     assert!(public.get("credential").is_none());

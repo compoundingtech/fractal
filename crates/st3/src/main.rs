@@ -32674,7 +32674,7 @@ mod tests {
             "read.assistant.attention",
             "--disclose-to-openai",
             "--consent-evidence",
-            "axe:igubz7",
+            "axe decision ask recorded by the owning person",
         ]))
         .unwrap();
         let Command::Devices(DevicesArgs {
@@ -32694,7 +32694,7 @@ mod tests {
         assert_eq!(grant.expires_in, Some(3_600));
         let sealed = SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), grant).unwrap();
         assert_eq!(sealed.scopes.len(), 2);
-        assert_eq!(sealed.consent_evidence, "axe:igubz7");
+        assert_eq!(sealed.consent_evidence, "axe decision ask recorded by the owning person");
 
         for rejected in [
             argv(&["--expires-in", "0"]),
@@ -32712,7 +32712,7 @@ mod tests {
             expires_in: None,
             scopes,
             disclose_to_openai: consent,
-            consent_evidence: Some("axe:igubz7".into()),
+            consent_evidence: Some("axe decision ask recorded by the owning person".into()),
         };
         let summary = parse_assistant_scope("read.assistant.summary").unwrap();
         assert!(SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), terms(vec![], true)).is_err());

@@ -3,6 +3,6 @@
   "scopes": ["read.assistant.summary", "read.assistant.attention", "read.assistant.missions", "read.assistant.agents"],
   "expires_in_seconds": 3600,
   "disclosure_consent": true,
-  "consent_evidence": "axe:igubz7",
+  "consent_evidence": "axe decision ask recorded by the owning person",
   "minimal_read_mode": "approval-once"
 }

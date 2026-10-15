@@ -446,7 +446,8 @@ impl AssistantDevice {
                 && grant.kind == "assistant-grant"
                 && grant.policy_revision >= 1
                 && grant.disclosure_consent
-                && grant.consent_evidence == "axe:igubz7"
+                && !grant.consent_evidence.trim().is_empty()
+                && grant.consent_evidence.len() <= 512
                 && grant.recipient_allowlist.is_empty()
                 && !grant.revoked,
             "Invalid assistant session or grant"

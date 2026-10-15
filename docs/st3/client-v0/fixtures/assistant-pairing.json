@@ -23,7 +23,7 @@
       "scopes": ["read.assistant.summary", "read.assistant.attention", "read.assistant.missions", "read.assistant.agents"],
       "expires_at": "2026-10-11T13:00:00Z", "policy_revision": 1,
       "minimal_read_mode": "approval-once", "recipient_allowlist": [],
-      "disclosure_consent": true, "consent_evidence": "axe:igubz7", "revoked": false
+      "disclosure_consent": true, "consent_evidence": "axe decision ask recorded by the owning person", "revoked": false
     }
   }
 }

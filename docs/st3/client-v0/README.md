@@ -1180,7 +1180,7 @@ gateway completion; remote callers cannot select or replace it. Assistant client
 the issuer's concrete person shape from that gateway response without person grant proofs
 or a fixed named-owner check. The baseline fixture scopes are exactly
 `read.assistant.summary`, `read.assistant.attention`, `read.assistant.missions`, and
-`read.assistant.agents`; disclosure consent and `consent_evidence: "axe:igubz7"` remain required.
+`read.assistant.agents`; disclosure consent and non-empty `consent_evidence` (1-512 bytes, the recorded owner consent) remain required.
 
 Pairing completion, authenticated assistant requests, renewal/policy change and revocation
 must reach the authoritative grant-issuer member. A replicated claim on another member

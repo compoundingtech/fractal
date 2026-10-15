@@ -63,8 +63,10 @@ fn validate_policy(version: &str, scopes: &[String], seconds: u64, consent: bool
         || SCOPES[..4].iter().any(|scope| !scopes.iter().any(|item| item == scope)) {
         return Err(validation("assistant scopes must explicitly include the four minimal scopes and no unrelated scopes"));
     }
-    if !consent || evidence != "axe:igubz7" {
-        return Err(forbidden("assistant issuance requires explicit disclosure to OpenAI and axe:igubz7 consent evidence"));
+    if !consent || evidence.trim().is_empty() || evidence.len() > 512 {
+        return Err(forbidden(
+            "assistant issuance requires explicit disclosure to OpenAI and consent evidence (1-512 bytes)",
+        ));
     }
     Ok(())
 }
@@ -333,6 +335,10 @@ async fn update_policy_inner(State(state): State<AppState>, Extension(session): 
     }
     if latest(&state, &subject, REVOKED)?.is_some() { return Err(forbidden("assistant grant was revoked")); }
     let previous = effective(&state, &granted)?;
+    // Policy changes must not revive an expired grant: fail closed instead of extending it.
+    if fields(&granted)?["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= client_now_ms() {
+        return Err(forbidden("assistant grant expired; begin a new grant instead of renewing it"));
+    }
     let mut value = fields(&previous)?.clone();
     value["scopes"] = json!(request.scopes.into_iter().collect::<BTreeSet<_>>());
     value["expires_at_unix_ms"] = json!(client_now_ms() + u128::from(request.expires_in_seconds) * 1000);
@@ -388,7 +394,7 @@ mod tests {
     fn state(root: &Path) -> AppState { super::super::tests::test_state_named(root, "assistant-tests") }
     fn request() -> AssistantPairingBegin { serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
         "device_name":"assistant","assistant_id":PRINCIPAL,"scopes":SCOPES[..4],
-        "expires_in_seconds":3600,"disclosure_consent":true,"consent_evidence":"axe:igubz7"})).unwrap() }
+        "expires_in_seconds":3600,"disclosure_consent":true,"consent_evidence":"axe decision ask recorded by the owning person"})).unwrap() }
     async fn paired(state: &AppState) -> Value {
         let Json(challenge) = begin(state.clone(), ClientSession::local(Some(ISSUER)).unwrap(), request()).await.unwrap();
         let request: PairingComplete = serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
@@ -486,7 +492,7 @@ mod tests {
         assert!(session.actor.starts_with("assistant/chatgpt/session/assistant-grant/"));
         assert!(paired.get("device_key_chain").is_none()); assert!(paired.get("person_id").is_none());
         assert!(!serde_json::to_string(&paired["grant"]).unwrap().contains("credential"));
-        assert_eq!(paired["grant"]["consent_evidence"],"axe:igubz7");
+        assert_eq!(paired["grant"]["consent_evidence"],"axe decision ask recorded by the owning person");
         assert!(state.store.claims_for_kind_at("principal.key-granted",None,true,10).unwrap().claims.is_empty());
         assert!(capabilities(&state,&session).iter()
             .filter(|capability| capability["id"].as_str().is_some_and(|id| id.starts_with("message.")))
@@ -588,7 +594,7 @@ mod tests {
         let id=paired["grant"]["id"].as_str().unwrap().to_owned();
         let policy=|| serde_json::from_value::<AssistantGrantPolicy>(json!({
             "api_version":CLIENT_API_VERSION,"scopes":SCOPES,"expires_in_seconds":86400,
-            "disclosure_consent":true,"consent_evidence":"axe:igubz7","minimal_read_mode":"approval-once"})).unwrap();
+            "disclosure_consent":true,"consent_evidence":"axe decision ask recorded by the owning person","minimal_read_mode":"approval-once"})).unwrap();
         for (actor,transport) in [(ISSUER,"fabric-loopback"),("agent/test","unix"),("person/other","unix")] {
             let session=ClientSession::for_tests(actor,actor,transport);
             assert_eq!(update_policy(State(state.clone()),Extension(session.clone()),AxumPath(id.clone()),Json(policy())).await.unwrap_err().status,StatusCode::FORBIDDEN);
@@ -600,6 +606,22 @@ mod tests {
         assert!(session.allows("read.assistant.terminal")); assert!(!session.allows("control.messages"));
         let mut allow=policy(); allow.minimal_read_mode="caller-bound-allow".into();
         assert_eq!(update_policy(State(state),Extension(ClientSession::local(Some(ISSUER)).unwrap()),AxumPath(id),Json(allow)).await.unwrap_err().status,StatusCode::FORBIDDEN);
+    }
+    #[tokio::test]
+    async fn assistant_policy_update_cannot_revive_an_expired_or_revoked_grant() {
+        let root=tempfile::tempdir().unwrap(); let state=state(root.path()); let paired=paired(&state).await;
+        let id=paired["grant"]["id"].as_str().unwrap().to_owned();
+        let policy=|| serde_json::from_value::<AssistantGrantPolicy>(json!({
+            "api_version":CLIENT_API_VERSION,"scopes":SCOPES,"expires_in_seconds":86400,
+            "disclosure_consent":true,"consent_evidence":"axe decision ask recorded by the owning person","minimal_read_mode":"approval-once"})).unwrap();
+        let granted=latest(&state,&subject(&id).unwrap(),GRANTED).unwrap().unwrap();
+        let mut expired=fields(&granted).unwrap().clone(); expired["expires_at_unix_ms"]=json!(1);
+        append(&state,granted.subject.clone(),POLICY,ISSUER,expired,Some(&granted)).unwrap();
+        assert_eq!(update_policy(State(state.clone()),Extension(ClientSession::local(Some(ISSUER)).unwrap()),
+            AxumPath(id.clone()),Json(policy())).await.unwrap_err().status,StatusCode::FORBIDDEN);
+        append(&state,granted.subject.clone(),REVOKED,ISSUER,fields(&granted).unwrap().clone(),None).unwrap();
+        assert_eq!(update_policy(State(state),Extension(ClientSession::local(Some(ISSUER)).unwrap()),
+            AxumPath(id),Json(policy())).await.unwrap_err().status,StatusCode::FORBIDDEN);
     }
     #[tokio::test]
     async fn assistant_missing_or_changed_owner_configuration_fails_closed() {

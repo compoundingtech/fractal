@@ -2365,7 +2365,7 @@
         "minimal_read_mode": { "$ref": "#/$defs/AssistantMinimalReadMode" },
         "recipient_allowlist": { "type": "array", "maxItems": 0, "items": { "type": "string", "pattern": "^agent/.+$" } },
         "disclosure_consent": { "type": "boolean" },
-        "consent_evidence": { "const": "axe:igubz7" },
+        "consent_evidence": { "type": "string", "minLength": 1, "maxLength": 512 },
         "revoked": { "type": "boolean" }
       }
     },
@@ -2378,7 +2378,7 @@
         "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/AssistantScope" } },
         "expires_in_seconds": { "type": "integer", "minimum": 1, "maximum": 86400, "default": 3600 },
         "disclosure_consent": { "const": true },
-        "consent_evidence": { "const": "axe:igubz7" },
+        "consent_evidence": { "type": "string", "minLength": 1, "maxLength": 512 },
         "minimal_read_mode": { "$ref": "#/$defs/AssistantMinimalReadMode" }
       }
     },
@@ -2393,7 +2393,7 @@
         "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/AssistantScope" } },
         "expires_in_seconds": { "type": "integer", "minimum": 1, "maximum": 86400, "default": 3600 },
         "disclosure_consent": { "const": true },
-        "consent_evidence": { "const": "axe:igubz7" }
+        "consent_evidence": { "type": "string", "minLength": 1, "maxLength": 512 }
       }
     },
     "PairingBegin": {
