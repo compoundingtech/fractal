@@ -7,11 +7,18 @@
 //! Pure decoded content (U1) is separate and does not require mutable publication evidence.
 #![allow(dead_code)] // Private source checkpoint; producer/native adapters are not approved.
 
+pub(crate) use super::transaction_finalizer::{
+    ResolutionKnowledge, RollbackResolution, ValidatedCommitOutcome as CommitKnowledge,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Fixed-size identity of a producer-owned, non-reused mutation. No such universal marker is
+/// Fixed-size storage-issued, producer-carried non-reused mutation identity. No such marker is
 /// installed by this module. A rowid/timestamp, claim index or process-local counter alone is
 /// not sufficient. The producer must qualify lifetime/reopen/ABA and every mutation path.
+/// Coverage includes logical visibility/generation/mask changes at the same index, not just
+/// physical row writes. Inactive staging/hidden reclamation require separate exact predicate
+/// domains: neither global invalidation of unrelated logical facts nor skipped invalidation
+/// of actual physical consumers is certified here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MutationToken(pub [u8; 32]);
 
@@ -34,19 +41,24 @@ pub(crate) struct SourceIdentity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Fact {
     Present {
-        mutation: Option<MutationToken>,
+        mutation: MutationToken,
         value: [u8; 32],
     },
     /// The token covers insertion, removal and ABA for the whole predicate, not just rows
     /// currently present. An absent row cannot supply its own mutation history.
-    Absent { mutation: Option<MutationToken> },
+    Absent { mutation: MutationToken },
 }
 
 impl Fact {
-    fn has_mutation(&self) -> bool {
-        match self {
-            Self::Present { mutation, .. } | Self::Absent { mutation } => mutation.is_some(),
-        }
+    /// Fallible boundary for an incomplete source observation; accepted facts never contain
+    /// an optional token. This does not manufacture a storage-issued token or certify it.
+    pub(crate) fn absent(
+        key: &PredicateKey,
+        mutation: Option<MutationToken>,
+    ) -> Result<Self, Refusal> {
+        mutation
+            .map(|mutation| Self::Absent { mutation })
+            .ok_or_else(|| Refusal::MissingMutation(key.clone()))
     }
 }
 
@@ -79,9 +91,6 @@ impl ReadSet {
         }
         let mut facts = BTreeMap::new();
         for (key, fact) in observed {
-            if !fact.has_mutation() {
-                return Err(Refusal::MissingMutation(key));
-            }
             if facts.insert(key.clone(), fact).is_some() {
                 return Err(Refusal::DuplicatePredicate(key));
             }
@@ -102,7 +111,9 @@ impl ReadSet {
             return Err(Refusal::SourceChanged);
         }
         for (key, expected) in &self.facts {
-            let actual = current.facts.get(key)
+            let actual = current
+                .facts
+                .get(key)
                 .ok_or_else(|| Refusal::MissingPredicate(key.clone()))?;
             if expected != actual {
                 return Err(Refusal::Stale(key.clone()));
@@ -139,29 +150,9 @@ impl<P> PreparedPublication<P> {
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum CommitKnowledge {
-    NotAttempted,
-    Committed,
-    /// Reserved for an explicit successful native rollback, not a generic commit error.
-    RolledBack,
-    Unknown(anyhow::Error),
-}
-
-impl CommitKnowledge {
-    /// COMMIT/finalizer errors share the current managed Result surface. Preserve uncertainty;
-    /// caller cancellation, channel loss and failed observers do not undo a landed commit.
-    pub(crate) fn from_managed_result(result: anyhow::Result<()>) -> Self {
-        match result {
-            Ok(()) => Self::Committed,
-            Err(error) => Self::Unknown(error),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CompletionGap {
-    NotCommitted,
+    NoCommittedAuthorityReceipt,
     /// No executor-owned committed-authority completion receipt is wired here.
     AuthorityUnobserved,
 }
@@ -173,7 +164,7 @@ impl CommitKnowledge {
     pub(crate) fn acknowledgement(&self) -> Result<(), CompletionGap> {
         match self {
             Self::Committed => Err(CompletionGap::AuthorityUnobserved),
-            _ => Err(CompletionGap::NotCommitted),
+            _ => Err(CompletionGap::NoCommittedAuthorityReceipt),
         }
     }
 }
@@ -194,9 +185,9 @@ pub(crate) enum NativeObligation {
 }
 
 impl UncertifiedCompletion {
-    pub(crate) fn after_managed_result(result: anyhow::Result<()>) -> Self {
+    pub(crate) fn after_validated_commit(commit: CommitKnowledge) -> Self {
         Self {
-            commit: CommitKnowledge::from_managed_result(result),
+            commit,
             missing: BTreeSet::from([
                 NativeObligation::SynchronousAuthority,
                 NativeObligation::PhysicalQueueReturn,
