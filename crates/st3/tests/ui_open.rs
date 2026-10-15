@@ -434,3 +434,18 @@ async fn an_alert_a_seat_raises_for_itself_shows_above_the_input_and_is_dismisse
         .await;
     server.abort();
 }
+
+/// The request the bundled guide tells a seat to raise for itself is one the daemon accepts.
+/// (Lives here, not in `onboarding.rs`, because that file is compiled into the binary too, where
+/// the daemon's modules are reached as `st3::…`.)
+#[test]
+fn the_guides_alert_request_is_one_the_daemon_accepts() {
+    const GUIDE: &str = include_str!("../../../docs/st3/onboarding-guide.md");
+    let start = GUIDE.find("<<'JSON'\n").expect("the alert request") + "<<'JSON'\n".len();
+    let json = &GUIDE[start..];
+    let json = &json[..json.find("\nJSON\n").expect("the end of the request")];
+    let value: serde_json::Value = serde_json::from_str(json).unwrap();
+    let (request, _) = st3::person_request::StructuredRequest::parse(&value).unwrap();
+    request.validate().unwrap();
+    assert_eq!(request.answers.len(), 2, "one tap to dismiss, either way");
+}
