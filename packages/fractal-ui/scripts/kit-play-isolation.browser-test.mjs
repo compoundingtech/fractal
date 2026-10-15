@@ -111,6 +111,23 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
   const previous = await worker.newPage(pageOptions)
   await previous.goto(base)
   await seedState(previous)
+  await previous.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce' })
+  await previous.evaluate(() => {
+    localStorage.setItem('storybook-globals', JSON.stringify({ theme: 'dark' }))
+    sessionStorage.setItem('storybook-theme', 'dark')
+    window.__STORYBOOK_GLOBALS__ = { theme: 'dark' }
+    document.documentElement.dataset.theme = 'dark'
+    document.documentElement.classList.add('previous-theme')
+    window.__previousMediaListener = 0
+    matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', () => { window.__previousMediaListener++ })
+  })
+  await previous.emulateMedia({ reducedMotion: 'no-preference' })
+  await previous.waitForFunction(() => window.__previousMediaListener > 0)
+  await previous.emulateMedia({ reducedMotion: 'reduce' })
+  // Negative control: the old realm is observably contaminated until reset.
+  assert.equal(await previous.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), true)
+  assert.equal(await previous.evaluate(() => localStorage.getItem('storybook-globals')), '{"theme":"dark"}')
+  assert.equal(await previous.evaluate(() => document.documentElement.classList.contains('previous-theme')), true)
   assert.deepEqual(await readState(previous), {
     global: 'must not survive', local: 'local', session: 'session', cookie: 'previous-case=cookie',
     databases: ['previous-case'], caches: ['previous-case'],
@@ -184,6 +201,18 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
   assert.notEqual(await next.evaluate(() => fetch('/sw-proof').then(response => response.text())), 'controlled by previous case')
   assert.deepEqual(next.viewportSize(), { width: 1440, height: 900 })
   assert.equal(await next.evaluate(() => matchMedia('(prefers-color-scheme: light)').matches), true)
+  assert.deepEqual(await next.evaluate(() => ({
+    reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+    localTheme: localStorage.getItem('storybook-globals'),
+    sessionTheme: sessionStorage.getItem('storybook-theme'),
+    globals: window.__STORYBOOK_GLOBALS__ ?? null,
+    theme: document.documentElement.dataset.theme ?? null,
+    previousClass: document.documentElement.classList.contains('previous-theme'),
+    previousListener: window.__previousMediaListener ?? null,
+  })), { reducedMotion: false, localTheme: null, sessionTheme: null, globals: null, theme: null, previousClass: false, previousListener: null })
+  await next.emulateMedia({ reducedMotion: 'reduce' })
+  await next.emulateMedia({ reducedMotion: 'no-preference' })
+  assert.equal(await next.evaluate(() => window.__previousMediaListener ?? null), null, 'old matchMedia listener cannot run in a fresh document')
   assert.equal(await next.evaluate(async () => (await navigator.permissions.query({ name: 'geolocation' })).state), 'prompt')
   assert.equal(await next.evaluate(() => fetch('/asset').then(response => response.text())), 'immutable asset')
   assert.equal(assetRequests, 1, 'HTTP asset cache survives storage reset')

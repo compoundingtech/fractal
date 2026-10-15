@@ -39,7 +39,7 @@ await new Promise((accept, reject) => {
 })
 const base = `http://127.0.0.1:${server.address().port}`
 const started = performance.now()
-const rows = []
+const rows = [], readinessControls = []
 const workers = Math.min(6, availableParallelism())
 let ids = [], browser, fatalError
 await mkdir(outputDirectory, { recursive: true })
@@ -54,6 +54,11 @@ const writeReceipt = async () => {
     }
   }
   const phaseMeanMilliseconds = Object.fromEntries([...phaseTotals].map(([name, { sum, count }]) => [name, sum / count]))
+  const phaseDistributionMilliseconds = Object.fromEntries([...phaseTotals.keys()].map(name => {
+    const values = rows.map(row => row.timings?.[name]).filter(Number.isFinite).sort((a, b) => a - b)
+    const percentile = fraction => values[Math.ceil(values.length * fraction) - 1]
+    return [name, { count: values.length, p50: percentile(0.5), p90: percentile(0.9), max: values.at(-1) }]
+  }))
   const receipt = {
     pass: !fatalError && ids.length > 0 && rows.length === ids.length * 4 && rows.every(row => row.pass),
     stories: ids.length, expectedCases: ids.length * 4, cases: rows.length, workers,
@@ -61,7 +66,10 @@ const writeReceipt = async () => {
     elapsedSeconds, fatalError, rows: rows.toSorted((a, b) => a.id.localeCompare(b.id) || a.scheme.localeCompare(b.scheme) || a.width - b.width),
     effectiveWorkerSecondsPerCase: rows.length ? elapsedSeconds * workers / rows.length : null,
     meanCaseSeconds: rows.length ? rows.reduce((sum, row) => sum + row.elapsedSeconds, 0) / rows.length : null,
-    phaseMeanMilliseconds,
+    phaseMeanMilliseconds, phaseDistributionMilliseconds,
+    finiteAnimationsFinishedCases: rows.filter(row => row.readiness?.finiteAnimationsFinished > 0).length,
+    finiteAnimationsFinished: rows.reduce((sum, row) => sum + (row.readiness?.finiteAnimationsFinished ?? 0), 0),
+    readinessControls,
   }
   await writeFile(join(outputDirectory, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n')
   const { rows: _rows, ...summary } = receipt
@@ -76,16 +84,16 @@ try {
   browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {})
   const cases = ids.flatMap(id => ['dark', 'light'].flatMap(scheme => [440, 1440].map(width => ({ id, scheme, width }))))
   let nextCase = 0
-  const runCase = async (worker, { id, scheme, width }) => {
+  const runCase = async (worker, { id, scheme, width }, { finishFiniteAnimations = true, pauseAtMidpoint = false, control = false } = {}) => {
     const caseStarted = performance.now()
     const { resetMilliseconds } = await worker.reset()
     const createStarted = performance.now()
     const page = await worker.newPage({ viewport: { width, height: 900 }, colorScheme: scheme })
     const pageCreated = performance.now()
-    const guard = await strictStoryGuard(page, base)
+    const guard = await strictStoryGuard(page, base, { finishFiniteAnimations })
     const guardReady = performance.now()
     const row = {
-      id, scheme, width, height: 900, pass: false,
+      id, scheme, width, height: 900, pass: false, finishFiniteAnimations, pauseAtMidpoint,
       timings: {
         resetMilliseconds, pageCreateMilliseconds: pageCreated - createStarted,
         guardMilliseconds: guardReady - pageCreated,
@@ -95,7 +103,8 @@ try {
     page.once('domcontentloaded', () => { domLoaded = performance.now() })
     try {
       // The guard awaits strict storyFinished; unrelated network idleness is not play readiness.
-      await page.goto(`${base}/iframe.html?id=${encodeURIComponent(id)}&viewMode=story&args=${encodeURIComponent(`scheme:${scheme}`)}`, { waitUntil: 'domcontentloaded' })
+      const args = `scheme:${scheme}${pauseAtMidpoint ? ';pauseAtMidpoint:!true' : ''}`
+      await page.goto(`${base}/iframe.html?id=${encodeURIComponent(id)}&viewMode=story&args=${encodeURIComponent(args)}`, { waitUntil: 'domcontentloaded' })
       const storyReady = performance.now()
       row.timings.navigationToDomMilliseconds = domLoaded - guardReady
       row.timings.readinessAfterDomMilliseconds = storyReady - domLoaded
@@ -110,6 +119,19 @@ try {
       row.events = await page.evaluate(() => window.__dt10StrictEvents ?? []).catch(() => [])
     } finally {
       row.strict = guard.records
+      row.readiness = await page.evaluate(() => window.__dt10Readiness).catch(() => undefined)
+      if (row.readiness) {
+        const phases = row.readiness.phases.filter(phase => phase.storyId === id)
+        const at = name => phases.find(phase => phase.phase === name)?.milliseconds
+        const interval = (name, start, end) => {
+          if (Number.isFinite(start) && Number.isFinite(end)) row.timings[name] = end - start
+        }
+        interval('beforePlayAfterDomMilliseconds', row.readiness.domContentLoaded, at('playing') ?? at('completing'))
+        interval('playMilliseconds', at('playing'), at('played'))
+        interval('animationSettleMilliseconds', at('completing'), at('completed'))
+        interval('afterEachMilliseconds', at('afterEach'), at('finished'))
+        interval('fontsAfterDomMilliseconds', row.readiness.domContentLoaded, row.readiness.fontsReady)
+      }
       // Keep the original elapsed definition (before page.close) for comparison.
       row.elapsedSeconds = (performance.now() - caseStarted) / 1000
       const closeStarted = performance.now()
@@ -121,10 +143,12 @@ try {
         throw error
       } finally {
         row.timings.closeMilliseconds = performance.now() - closeStarted
-        rows.push(row)
+        if (control) readinessControls.push(row)
+        else rows.push(row)
         console.log(JSON.stringify(row))
       }
     }
+    return row
   }
   const results = await Promise.allSettled(Array.from({ length: workers }, async () => {
     const worker = await createIsolatedKitWorker(browser, base)
@@ -136,6 +160,32 @@ try {
   }))
   const rejected = results.filter(result => result.status === 'rejected')
   if (rejected.length) throw new AggregateError(rejected.map(result => result.reason), 'Kit play workers failed')
+  // Real Storybook + axe, not a replacement lifecycle. The ordinary matrix
+  // also runs this indexed story; these three additional controls prove that
+  // accelerating a 3s fade reaches the same endpoint and rejects a pause.
+  const controlId = 'fractal-ui-readiness-controls--finite-fade'
+  if (!ids.includes(controlId)) throw new Error('Missing finite-animation readiness control story')
+  const controlWorker = await createIsolatedKitWorker(browser, base)
+  try {
+    const fixture = { id: controlId, scheme: 'light', width: 440 }
+    const baseline = await runCase(controlWorker, fixture, { finishFiniteAnimations: false, control: true })
+    const accelerated = await runCase(controlWorker, fixture, { control: true })
+    const intermediate = await runCase(controlWorker, fixture, { pauseAtMidpoint: true, control: true })
+    const axePassed = row => row.strict.some(record => record.finished.some(event =>
+      event.payload.reporters?.some(reporter => reporter.type === 'a11y' && reporter.status === 'passed')))
+    if (!baseline.pass || !accelerated.pass || !axePassed(baseline) || !axePassed(accelerated) ||
+        baseline.readiness?.finiteAnimationsFinished !== 0 || accelerated.readiness?.finiteAnimationsFinished !== 1 ||
+        intermediate.pass || !intermediate.error?.includes('strict-storybook-readiness')) {
+      throw new Error('Finite-animation readiness controls failed')
+    }
+    const baselineWait = baseline.timings.animationSettleMilliseconds
+    const acceleratedWait = accelerated.timings.animationSettleMilliseconds
+    if (!(baselineWait > 2000 && acceleratedWait < baselineWait - 1000)) {
+      throw new Error('Finite-animation control did not remove its real completion wait')
+    }
+  } finally {
+    await controlWorker.close()
+  }
 } catch (error) {
   fatalError = String(error)
 } finally {

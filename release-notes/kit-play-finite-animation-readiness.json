@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Finish finite animations after kit story plays, before accessibility checks, and report the post-DOM readiness phases without weakening strict lifecycle or isolation controls.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "All indexed stories and four viewport/theme cases remain required. Fresh page realms and cleared storage are retained. Finite animations reach their endpoints after play; infinite animations and Storybook's accessibility and strict storyFinished checks remain unchanged. Real fade endpoint and deliberately paused-state controls run through Storybook and axe, and isolation controls cover reduced motion and persisted theme globals." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

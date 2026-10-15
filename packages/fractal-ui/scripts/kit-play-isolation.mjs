@@ -54,11 +54,11 @@ export async function createIsolatedKitWorker(browser, base) {
       // Its Web Storage snapshot is captured before app scripts, and goto
       // awaits that exact snapshot. Later within-case navigation may preserve
       // storage. Attach strictStoryGuard after newPage, before navigation.
-      async newPage({ viewport, colorScheme }) {
+      async newPage({ viewport, colorScheme, reducedMotion = 'no-preference' }) {
         const page = await context.newPage()
         try {
           await page.setViewportSize(viewport)
-          await page.emulateMedia({ colorScheme })
+          await page.emulateMedia({ colorScheme, reducedMotion })
           let captureSnapshot, captured = false
           const firstSnapshot = new Promise(resolve => { captureSnapshot = resolve })
           await page.exposeBinding('__kitIsolationDocumentSnapshot', ({ frame }, snapshot) => {
