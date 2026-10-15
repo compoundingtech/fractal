@@ -49,8 +49,8 @@ fn restore_pair(root: &Path, bytes: &[u8], header: &Header) {
     for name in ["old", "stage"] {
         let archive = root.join(format!("{name}.jsonl"));
         fs::write(&archive, bytes).unwrap();
-        backup::verify_file(&archive).unwrap();
-        let report = backup::restore(&archive, &root.join(name).join("claims.sqlite3")).unwrap();
+        crate::backup::verify_file(&archive).unwrap();
+        let report = crate::backup::restore(&archive, &root.join(name).join("claims.sqlite3")).unwrap();
         assert!(report.projections_match);
         assert_eq!(report.graph_digest, header.graph_digest);
         assert_eq!(report.log_digest, header.log_digest);
@@ -265,7 +265,7 @@ fn read_only_sink_error_ends_the_actual_snapshot_and_preserves_the_stage() {
     assert_eq!(fs::read(&path).unwrap(), before);
     let archive = root.path().join("complete.jsonl");
     fs::write(&archive, good).unwrap();
-    backup::verify_file(&archive).unwrap();
+    crate::backup::verify_file(&archive).unwrap();
 }
 
 #[test]
@@ -313,7 +313,7 @@ fn a_body_changed_after_header_is_omitted_by_both_writers_and_reported_on_restor
     assert_eq!(staged.bytes, old.bytes);
     let archive = root.path().join("changed-body.jsonl");
     fs::write(&archive, staged.bytes).unwrap();
-    let report = backup::restore(&archive, &root.path().join("restored/claims.sqlite3")).unwrap();
+    let report = crate::backup::restore(&archive, &root.path().join("restored/claims.sqlite3")).unwrap();
     assert!(report.projections_match);
     assert_eq!(report.message_bodies_referenced, 1);
     assert_eq!(report.message_bodies_restored, 0);
