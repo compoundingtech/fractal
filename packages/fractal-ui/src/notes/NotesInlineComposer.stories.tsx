@@ -4,9 +4,9 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button as AriaButton } from 'react-aria-components'
 import type { SubjectNote } from '@smalltalk/st3-client/schema'
-import { NoteBadge, NoteComposer, NoteList, defaultNoteAudience, type NoteAudienceChoice, type NoteDraft } from './index'
+import { NoteBadge, NoteComposer, NoteList } from './index'
 import { agentNote, diffNote, plannerNote, plannerTarget, publishedNote, target, viewer } from './notes-fixtures'
-import { NotesFrame, expectVisibleAgentMarker, notesFrameArgTypes, notesFrameArgs, notesStoryStyles as frame, type NotesFrameArgs } from './notes-story-frame'
+import { NotesFrame, expectNoAudiencePresentation, notesFrameArgTypes, notesFrameArgs, notesStoryStyles as frame, type NotesFrameArgs } from './notes-story-frame'
 import { Button } from '../assistant-ui/composition/Controls'
 import { Icon } from '../assistant-ui/composition/Icons'
 import { greenFindings } from '../assistant-ui/composition/no-green-assertion'
@@ -14,21 +14,20 @@ import { accentVars as accent, borderVars as border, geometryVars as g, radiusVa
 
 const targets = [target, plannerTarget] as const
 type Target = typeof targets[number]
-const emptyDraft: NoteDraft = { text: '', audience: defaultNoteAudience }
 /** The planner refuses its first two creates, so failure, target switches and Retry stay reachable. */
 const plannerRefusals = 2
 
 /**
  * UX variant A — inline quick composer. The detail pane keeps its notes in place; Add note opens
  * the composer under the list, Enter adds, and focus returns to Add note. Each agent keeps its
- * own draft, audience and open state, so switching agents never moves text to another target.
+ * own draft and open state, so switching agents never moves text to another target.
  * Escape closes and keeps the draft; only Discard draft clears it.
  */
 function InlineQuickComposerStory({ scheme, width, negativeControl }: NotesFrameArgs) {
   const [notes, setNotes] = React.useState<Readonly<Record<Target, readonly SubjectNote[]>>>({ [target]: [diffNote, agentNote], [plannerTarget]: [plannerNote] })
   const [selected, setSelected] = React.useState<Target>(target)
   const [open, setOpen] = React.useState<Readonly<Partial<Record<Target, boolean>>>>({})
-  const [drafts, setDrafts] = React.useState<Readonly<Partial<Record<Target, NoteDraft>>>>({})
+  const [drafts, setDrafts] = React.useState<Readonly<Partial<Record<Target, string>>>>({})
   // Opening focuses the composer and closing focuses Add note; switching agents keeps focus on the switcher.
   const [focusOnMount, setFocusOnMount] = React.useState(false)
   // Persistent announcement: the composer's own success status unmounts when it closes.
@@ -39,15 +38,15 @@ function InlineQuickComposerStory({ scheme, width, negativeControl }: NotesFrame
     setFocusOnMount(true)
     setOpen(current => ({ ...current, [to]: false }))
   }
-  const submitTo = (to: Target) => async (text: string, audience: NoteAudienceChoice) => {
+  const submitTo = (to: Target) => async (text: string) => {
     await Promise.resolve()
     if (to === plannerTarget && refusals.current > 0) {
       refusals.current -= 1
       throw new Error('synthetic create refusal')
     }
     // Negative control: the host never publishes the created note.
-    if (!negativeControl) setNotes(current => ({ ...current, [to]: [publishedNote(text, audience, to), ...current[to]] }))
-    setDrafts(current => ({ ...current, [to]: emptyDraft }))
+    if (!negativeControl) setNotes(current => ({ ...current, [to]: [publishedNote(text, to), ...current[to]] }))
+    setDrafts(current => ({ ...current, [to]: '' }))
     setAnnouncement(`Note added to ${to}.`)
     closeOn(to)
   }
@@ -55,7 +54,7 @@ function InlineQuickComposerStory({ scheme, width, negativeControl }: NotesFrame
     <ul aria-label="Agents" {...stylex.props(styles.agents)}>
       {targets.map(ref => <li key={ref}>
         <AriaButton aria-pressed={ref === selected} data-testid={`inline-agent-${ref}`} onPress={() => { setFocusOnMount(false); setSelected(ref) }} {...stylex.props(styles.agent, ref === selected && styles.agentSelected)}>
-          {ref}{(drafts[ref]?.text ?? '') !== '' && <span {...stylex.props(styles.draftCue)}> · draft</span>}
+          {ref}{(drafts[ref] ?? '') !== '' && <span {...stylex.props(styles.draftCue)}> · draft</span>}
         </AriaButton>
       </li>)}
     </ul>
@@ -71,7 +70,7 @@ function InlineQuickComposerStory({ scheme, width, negativeControl }: NotesFrame
           ? <NoteComposer
             key={selected}
             target={selected}
-            draft={drafts[selected] ?? emptyDraft}
+            draft={drafts[selected] ?? ''}
             onDraftChange={draft => setDrafts(current => ({ ...current, [selected]: draft }))}
             onSubmit={submitTo(selected)}
             onClose={() => closeOn(selected)}
@@ -92,33 +91,30 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
-const agentLabel = 'Shared with the agent (people can see it too)'
-
 const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const input = () => canvas.getByTestId('note-composer-input')
   const composer = () => canvas.getByTestId('note-composer')
   const addNote = () => canvas.getByTestId('inline-add-note')
   const badge = canvas.getByTestId('note-badge')
-  await expectVisibleAgentMarker(badge)
-  await expectVisibleAgentMarker(canvas.getAllByTestId('note-row')[0]!)
+  await expectNoAudiencePresentation(canvasElement)
   await expect(badge).toHaveAttribute('data-note-count', '2')
 
   // One click, the text, one confirm; the host status outlives the composer.
   await userEvent.click(addNote())
   await waitFor(() => expect(input()).toHaveFocus())
   await expect(composer()).toHaveTextContent(`Target: ${target}.`)
+  await expect(canvas.getByTestId('note-composer-reach')).toHaveTextContent('Notes reach the agent as context.')
   await userEvent.keyboard('Hand off before the evening run{Enter}')
   await waitFor(() => expect(canvas.queryByTestId('note-composer')).toBeNull())
   const rows = canvas.getAllByTestId('note-row')
   await expect(rows).toHaveLength(3)
   await expect(within(rows[0]!).getByTestId('note-text')).toHaveTextContent('Hand off before the evening run')
-  await expect(within(rows[0]!).getByTestId('note-audience')).toHaveTextContent('Only me')
   await expect(canvas.getByTestId('note-badge')).toHaveAttribute('data-note-count', '3')
   await expect(canvas.getByTestId('inline-status')).toHaveTextContent(`Note added to ${target}.`)
   await waitFor(() => expect(addNote()).toHaveFocus())
 
-  // Multiline: Shift+Enter and pasted newlines survive. Tab reaches the audience control without changing it.
+  // Multiline: Shift+Enter and pasted newlines survive. Tab leaves the field for Add note.
   await userEvent.keyboard('{Enter}')
   await waitFor(() => expect(input()).toHaveFocus())
   await userEvent.keyboard('Context:{Shift>}{Enter}{/Shift}')
@@ -126,15 +122,10 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const multiline = 'Context:\nfirst line\nsecond line'
   await expect(input()).toHaveValue(multiline)
   await userEvent.tab()
-  await waitFor(() => expect(canvas.getByTestId('note-audience-self')).toHaveFocus())
-  await expect(composer()).toHaveAttribute('data-note-audience', 'self')
-  await userEvent.keyboard('{ArrowRight}')
-  await waitFor(() => expect(composer()).toHaveAttribute('data-note-audience', 'agent'))
-  await expect(canvas.getByTestId('note-composer-status')).toHaveTextContent(`Audience: ${agentLabel}.`)
-  await userEvent.keyboard(' ')
-  await expect(composer()).toHaveAttribute('data-note-audience', 'agent')
+  await waitFor(() => expect(canvas.getByTestId('note-composer-submit')).toHaveFocus())
+  await expectNoAudiencePresentation(composer())
 
-  // Escape closes without sending or discarding; reopening restores text and audience.
+  // Escape closes without sending or discarding; reopening restores the text.
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(canvas.queryByTestId('note-composer')).toBeNull())
   await waitFor(() => expect(addNote()).toHaveFocus())
@@ -142,24 +133,21 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await userEvent.keyboard('{Enter}')
   await waitFor(() => expect(input()).toHaveFocus())
   await expect(input()).toHaveValue(multiline)
-  await expect(composer()).toHaveAttribute('data-note-audience', 'agent')
 
-  // Another agent starts its own private draft; a refusal keeps text, audience and target.
+  // Another agent starts its own empty draft; a refusal keeps text and target.
   await userEvent.click(canvas.getByTestId(`inline-agent-${plannerTarget}`))
   await expect(canvas.queryByTestId('note-composer')).toBeNull()
   await userEvent.click(addNote())
   await waitFor(() => expect(input()).toHaveFocus())
   await expect(input()).toHaveValue('')
-  await expect(composer()).toHaveAttribute('data-note-audience', 'self')
   await expect(composer()).toHaveTextContent(`Target: ${plannerTarget}.`)
   await userEvent.keyboard('Budget{Enter}')
-  await expect(await canvas.findByRole('alert')).toHaveTextContent("Couldn't add the note. Your text, audience and target are kept.")
+  await expect(await canvas.findByRole('alert')).toHaveTextContent("Couldn't add the note. Your text and target are kept.")
   await expect(input()).toHaveValue('Budget')
 
   // Switching back and forth keeps each agent's open composer and draft on its own target.
   await userEvent.click(canvas.getByTestId(`inline-agent-${target}`))
   await expect(input()).toHaveValue(multiline)
-  await expect(composer()).toHaveAttribute('data-note-audience', 'agent')
   await expect(composer()).toHaveTextContent(`Target: ${target}.`)
   await userEvent.click(canvas.getByTestId(`inline-agent-${plannerTarget}`))
   await expect(input()).toHaveValue('Budget')
@@ -176,21 +164,19 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(canvas.getByTestId('inline-status')).toHaveTextContent(`Note added to ${plannerTarget}.`)
   await waitFor(() => expect(addNote()).toHaveFocus())
 
-  // The reviewer's shared multiline draft is still there and adds with its newlines and audience.
+  // The reviewer's multiline draft is still there and adds with its newlines.
   await userEvent.click(canvas.getByTestId(`inline-agent-${target}`))
   await userEvent.click(input())
   await userEvent.keyboard('{Enter}')
   await waitFor(() => expect(canvas.queryByTestId('note-composer')).toBeNull())
-  const shared = canvas.getAllByTestId('note-row')[0]!
-  await expect(within(shared).getByTestId('note-text').textContent).toBe(multiline)
-  await expect(within(shared).getByTestId('note-audience')).toHaveTextContent(agentLabel)
+  const added = canvas.getAllByTestId('note-row')[0]!
+  await expect(within(added).getByTestId('note-text').textContent).toBe(multiline)
   await waitFor(() => expect(addNote()).toHaveFocus())
 
-  // Only Discard draft clears a draft; the next one starts private.
+  // Only Discard draft clears a draft.
   await userEvent.keyboard('{Enter}')
   await waitFor(() => expect(input()).toHaveFocus())
   await expect(input()).toHaveValue('')
-  await expect(composer()).toHaveAttribute('data-note-audience', 'self')
   await userEvent.keyboard('scrap{Escape}')
   await waitFor(() => expect(addNote()).toHaveFocus())
   await userEvent.keyboard('{Enter}')
@@ -202,6 +188,7 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(addNote()).toHaveFocus())
 
+  await expectNoAudiencePresentation(canvasElement)
   await expect(greenFindings(canvasElement)).toEqual([])
 }
 

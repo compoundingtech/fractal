@@ -36,33 +36,39 @@ describe('independent subject notes projection and generated writes', () => {
     expect(rows[0]).toBe(older)
     expect(notesByTarget([]).size).toBe(0)
   })
-  it('creates with the chosen audience and archives using the encoded generated route', async () => {
+  it('creates without an audience and archives using the encoded generated route', async () => {
     const { actions, requests } = makePort()
-    await actions.create(note.target, note.text, 'self')
+    await actions.create(note.target, note.text)
     await actions.archive(note)
     expect(requests).toEqual([
-      { path: '/v1/subject-notes', method: 'POST', body: { target: note.target, text: note.text, audience: 'self' } },
+      { path: '/v1/subject-notes', method: 'POST', body: { target: note.target, text: note.text } },
       { path: `/v1/subject-notes/${encodeURIComponent(note.id)}`, method: 'PUT', body: { text: null } },
     ])
   })
-  it('preserves exact multiline text, audience and target when retrying a refused create', async () => {
+  it('preserves exact multiline text and target when retrying a refused create', async () => {
     let refuse = true
     const { actions, requests } = makePort({ response: () => refuse
       ? Response.json({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'forbidden',
         message: 'Notes control is not granted.', retryable: false, request_id: 'request/example', details: {} }, { status: 403 })
       : Response.json({ api_version: 'st3.client.v0', snapshot: {}, value: { id: note.id, note: null } }) })
-    const draft = { target: 'mission/example', text: '  Keep this line\nand this pasted line.  ', audience: 'agent' as const }
-    await expect(actions.create(draft.target, draft.text, draft.audience)).rejects.toThrow('Notes control is not granted.')
+    const draft = { target: 'mission/example', text: '  Keep this line\nand this pasted line.  ' }
+    await expect(actions.create(draft.target, draft.text)).rejects.toThrow('Notes control is not granted.')
     refuse = false
-    await actions.create(draft.target, draft.text, draft.audience)
+    await actions.create(draft.target, draft.text)
     expect(requests.map(request => request.body)).toEqual([draft, draft])
   })
-  it('only sends agent-audience notes for an agent author', async () => {
-    const { actions, requests } = makePort({ actor: 'agent/example/planner' })
-    await expect(actions.create(note.target, note.text, 'self')).rejects.toThrow('must be shared')
+  it('sends the same audience-free create for person and agent authors', async () => {
+    for (const actor of ['person/example', 'agent/example/planner']) {
+      const { actions, requests } = makePort({ actor })
+      await actions.create(note.target, note.text)
+      expect(requests.map(request => request.body)).toEqual([{ target: note.target, text: note.text }])
+    }
+  })
+  it('refuses creating before the signed-in identity is known', async () => {
+    const requests: unknown[] = []
+    const client = new St3Client({ baseUrl: 'https://gateway.invalid', fetchImpl: async (input) => { requests.push(input); return Response.json({}) } })
+    await expect(gatewayNoteActions({ client, actor: () => undefined }).create(note.target, note.text)).rejects.toThrow('signed-in identity')
     expect(requests).toHaveLength(0)
-    await actions.create(note.target, note.text, 'agent')
-    expect(requests[0]?.body).toMatchObject({ audience: 'agent' })
   })
   it('refuses archiving another author before posting', async () => {
     const { actions, requests } = makePort({ actor: 'agent/example/planner' })
@@ -74,7 +80,7 @@ describe('independent subject notes projection and generated writes', () => {
       api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'forbidden',
       message: 'Notes control is not granted.', retryable: false, request_id: 'request/example', details: {},
     }, { status: 403 }) })
-    await expect(refused.actions.create(note.target, note.text, 'agent')).rejects.toThrow('Notes control is not granted.')
+    await expect(refused.actions.create(note.target, note.text)).rejects.toThrow('Notes control is not granted.')
     const malformed = makePort({ response: () => Response.json({ api_version: 'st3.client.v0', snapshot: {}, value: {} }) })
     await expect(malformed.actions.archive(note)).rejects.toThrow('could not be confirmed')
   })

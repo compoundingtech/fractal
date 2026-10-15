@@ -3,9 +3,9 @@
   "summary": "Add reactive notes and quick input to Fractal web agent conversations",
   "replay": { "status": "none", "detail": "Presentation-only change; existing note claims remain authoritative." },
   "schema": { "status": "none", "detail": "Uses generated SubjectNote and the independent notes collection without adding agent or mission fields." },
-  "rules": { "status": "none", "detail": "Existing author and audience rules apply. Person input defaults to private reminders with a one-key audience toggle and visible agent-context marker. Only own notes offer archive." },
+  "rules": { "status": "none", "detail": "Every note reaches its target agent as context, with no audience choice or audience-specific badge. Only own notes offer archive." },
   "compatibility": { "status": "changed", "detail": "Fractal web follows notes and forwards generated note write routes through the authenticated gateway. Unsupported gateways show explicit unavailability." },
   "downtime": { "status": "none", "detail": "No migration or service interruption." },
-  "manual": { "status": "changed", "detail": "Enter a note in an agent conversation and confirm. Use the audience shortcut to share agent context. Expand the badge to read notes and archive your own. Storybook compares inline and keyboard-popover input in narrow/wide light/dark views." },
+  "manual": { "status": "changed", "detail": "Enter plain text in an agent conversation and confirm to send agent context. Enter sends and Shift+Enter adds a line; the visible counter measures the 1024-byte limit. Escape and failed writes keep the draft for retry. Expand the notes badge to read notes and archive your own. Storybook compares inline and keyboard-popover input in narrow/wide light/dark views." },
   "recovery": { "status": "none", "detail": "Failed writes retain the draft. The notes stream publishes changes and archives; the UI never polls or fabricates counts from conversation rows." }
 }

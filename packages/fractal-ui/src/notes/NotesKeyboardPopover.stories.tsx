@@ -4,9 +4,9 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button as AriaButton, Dialog, DialogTrigger, Heading, Input, Label, Menu, MenuItem, MenuTrigger, Modal, ModalOverlay, Popover, Switch, TextField } from 'react-aria-components'
 import type { SubjectNote } from '@smalltalk/st3-client/schema'
-import { NoteBadge, NoteComposer, defaultNoteAudience, shortcutContextBlocked, type NoteAudienceChoice, type NoteDraft } from './index'
+import { NoteBadge, NoteComposer, shortcutContextBlocked } from './index'
 import { agentNote, diffNote, plannerNote, plannerTarget, publishedNote, target } from './notes-fixtures'
-import { NotesFrame, expectVisibleAgentMarker, notesFrameArgTypes, notesFrameArgs, notesStoryStyles as frame, type NotesFrameArgs } from './notes-story-frame'
+import { NotesFrame, expectNoAudiencePresentation, notesFrameArgTypes, notesFrameArgs, notesStoryStyles as frame, type NotesFrameArgs } from './notes-story-frame'
 import { Button, Tooltip } from '../assistant-ui/composition/Controls'
 import { ThemePortal } from '../assistant-ui/taste/ThemePortal'
 import { greenFindings } from '../assistant-ui/composition/no-green-assertion'
@@ -14,14 +14,13 @@ import { accentVars as accent, borderVars as border, elevationVars as elevation,
 
 const targets = [target, plannerTarget] as const
 type Target = typeof targets[number]
-const emptyDraft: NoteDraft = { text: '', audience: defaultNoteAudience }
 /** The planner refuses its first two creates, so failure, reopen and Retry stay reachable. */
 const plannerRefusals = 2
 
 /**
  * UX variant B — keyboard `n` popover. `n` (or Add note) opens a composer anchored to the selected
  * row and locked to that target while it is open. Escape closes without sending and keeps the
- * draft and audience per target; only Discard draft clears it. Focus returns to the trigger.
+ * draft per target; only Discard draft clears it. Focus returns to the trigger.
  * `n` never fires while a field, editor, menu, dialog or IME owns the keyboard, and the visible
  * switch turns the shortcut off.
  */
@@ -30,7 +29,7 @@ function KeyboardPopoverStory({ scheme, width, negativeControl }: NotesFrameArgs
   const [selected, setSelected] = React.useState<Target>(target)
   // The target is captured when the composer opens; selection cannot retarget an open draft.
   const [composing, setComposing] = React.useState<Target | undefined>(undefined)
-  const [drafts, setDrafts] = React.useState<Readonly<Partial<Record<Target, NoteDraft>>>>({})
+  const [drafts, setDrafts] = React.useState<Readonly<Partial<Record<Target, string>>>>({})
   const [shortcutOn, setShortcutOn] = React.useState(true)
   const [commandLine, setCommandLine] = React.useState('')
   // Persistent announcement: the composer's own success status unmounts with the popover.
@@ -52,14 +51,14 @@ function KeyboardPopoverStory({ scheme, width, negativeControl }: NotesFrameArgs
     document.addEventListener('keydown', listener, true)
     return () => document.removeEventListener('keydown', listener, true)
   }, [negativeControl, selected, shortcutOn])
-  const submitTo = (to: Target) => async (text: string, audience: NoteAudienceChoice) => {
+  const submitTo = (to: Target) => async (text: string) => {
     await Promise.resolve()
     if (to === plannerTarget && refusals.current > 0) {
       refusals.current -= 1
       throw new Error('synthetic create refusal')
     }
-    setNotes(current => ({ ...current, [to]: [publishedNote(text, audience, to), ...current[to]] }))
-    setDrafts(current => ({ ...current, [to]: emptyDraft }))
+    setNotes(current => ({ ...current, [to]: [publishedNote(text, to), ...current[to]] }))
+    setDrafts(current => ({ ...current, [to]: '' }))
     setAnnouncement(`Note added to ${to}.`)
     close()
   }
@@ -107,7 +106,7 @@ function KeyboardPopoverStory({ scheme, width, negativeControl }: NotesFrameArgs
                     <Heading id="notes-shortcuts-title" slot="title" {...stylex.props(styles.modalTitle)}>Keyboard shortcuts</Heading>
                     <dl {...stylex.props(styles.shortcuts)}>
                       <dt><kbd {...stylex.props(styles.kbd)}>N</kbd></dt><dd {...stylex.props(styles.shortcutText)}>Add a note to the selected agent (switchable)</dd>
-                      <dt><kbd {...stylex.props(styles.kbd)}>Tab</kbd></dt><dd {...stylex.props(styles.shortcutText)}>Move to the audience control; arrows or Space choose</dd>
+                      <dt><kbd {...stylex.props(styles.kbd)}>Enter</kbd></dt><dd {...stylex.props(styles.shortcutText)}>Add the note</dd>
                       <dt><kbd {...stylex.props(styles.kbd)}>Shift+Enter</kbd></dt><dd {...stylex.props(styles.shortcutText)}>New line</dd>
                       <dt><kbd {...stylex.props(styles.kbd)}>Esc</kbd></dt><dd {...stylex.props(styles.shortcutText)}>Close and keep the draft</dd>
                     </dl>
@@ -144,7 +143,7 @@ function KeyboardPopoverStory({ scheme, width, negativeControl }: NotesFrameArgs
           <NoteComposer
             key={composing}
             target={composing}
-            draft={drafts[composing] ?? emptyDraft}
+            draft={drafts[composing] ?? ''}
             onDraftChange={draft => setDrafts(current => ({ ...current, [composing]: draft }))}
             onSubmit={submitTo(composing)}
             onClose={close}
@@ -163,8 +162,6 @@ const meta = {
 } satisfies Meta<typeof KeyboardPopoverStory>
 export default meta
 type Story = StoryObj<typeof meta>
-
-const agentStatus = 'Audience: Shared with the agent (people can see it too).'
 
 const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const canvas = within(canvasElement)
@@ -185,7 +182,7 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   }
   const reviewer = canvas.getByTestId(`row-${target}`)
   const planner = canvas.getByTestId(`row-${plannerTarget}`)
-  await expectVisibleAgentMarker(canvas.getByTestId(`badge-${target}`))
+  await expectNoAudiencePresentation(canvasElement)
   await expect(canvas.getByTestId('popover-hint')).toHaveTextContent('Press N to add a note')
 
   // Fields, editors, custom textboxes, open menus, open dialogs and IME composition keep their n.
@@ -234,60 +231,55 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   // n opens on the selected row, announcing the target; Enter adds, closes and restores focus.
   const dialog = await openOn(reviewer, target)
   await expect(dialog).toHaveTextContent(`Target: ${target}.`)
+  await expect(within(dialog).getByTestId('note-composer-reach')).toHaveTextContent('Notes reach the agent as context.')
   await expect(within(dialog).getByTestId('note-composer-input')).toHaveValue('')
-  await expect(within(dialog).getByTestId('note-composer')).toHaveAttribute('data-note-audience', 'self')
+  await expectNoAudiencePresentation(dialog)
   await userEvent.keyboard('Ship after review{Enter}')
   await waitFor(() => expect(noteDialog()).toBeNull())
   await expect(count(target)).toBe('3')
   await expect(canvas.getByTestId('popover-status')).toHaveTextContent(`Note added to ${target}.`)
   await waitFor(() => expect(reviewer).toHaveFocus())
 
-  // Tab only moves to the labelled audience control; arrows choose and announce, Space keeps the choice.
+  // Tab leaves the field for the actions; there is no audience stop.
   let plannerDialog = await openOn(planner, plannerTarget)
   await expect(plannerDialog).toHaveAttribute('data-compose-target', plannerTarget)
-  const composer = () => within(noteDialog()!).getByTestId('note-composer')
   const input = () => within(noteDialog()!).getByTestId('note-composer-input')
+  await userEvent.keyboard('x')
   await userEvent.tab()
-  await waitFor(() => expect(within(plannerDialog).getByTestId('note-audience-self')).toHaveFocus())
-  await expect(composer()).toHaveAttribute('data-note-audience', 'self')
-  await userEvent.keyboard('{ArrowRight}')
-  await waitFor(() => expect(composer()).toHaveAttribute('data-note-audience', 'agent'))
-  await expect(within(plannerDialog).getByTestId('note-composer-status')).toHaveTextContent(agentStatus)
-  await userEvent.keyboard(' ')
-  await expect(composer()).toHaveAttribute('data-note-audience', 'agent')
+  await waitFor(() => expect(within(plannerDialog).getByTestId('note-composer-submit')).toHaveFocus())
+  await userEvent.click(input())
+  await userEvent.keyboard('{Backspace}')
+  await expect(input()).toHaveValue('')
 
-  // Multiline: Shift+Enter and pasted newlines survive; a refusal keeps text, audience and target.
+  // Multiline: Shift+Enter and pasted newlines survive; a refusal keeps text and target.
   await userEvent.click(input())
   await userEvent.keyboard('Budget{Shift>}{Enter}{/Shift}')
   await userEvent.paste('line two\nline three')
   const multiline = 'Budget\nline two\nline three'
   await expect(input()).toHaveValue(multiline)
   await userEvent.keyboard('{Enter}')
-  await expect(await within(plannerDialog).findByRole('alert')).toHaveTextContent("Couldn't add the note. Your text, audience and target are kept.")
+  await expect(await within(plannerDialog).findByRole('alert')).toHaveTextContent("Couldn't add the note. Your text and target are kept.")
   await expect(input()).toHaveValue(multiline)
-  await expect(composer()).toHaveAttribute('data-note-audience', 'agent')
   await expect(within(plannerDialog).getByRole('button', { name: 'Retry' })).toBeVisible()
 
-  // Escape closes without sending or discarding; the other target starts its own private draft.
+  // Escape closes without sending or discarding; the other target starts its own empty draft.
   await escapeTo(planner)
   await expect(count(plannerTarget)).toBe('1')
   await openOn(reviewer, target)
   await expect(input()).toHaveValue('')
-  await expect(composer()).toHaveAttribute('data-note-audience', 'self')
   await userEvent.keyboard('Reviewer draft')
   await escapeTo(reviewer)
 
   // Reopening the planner restores its draft; a second refusal offers Retry, which adds it.
   plannerDialog = await openOn(planner, plannerTarget)
   await expect(input()).toHaveValue(multiline)
-  await expect(composer()).toHaveAttribute('data-note-audience', 'agent')
   await userEvent.keyboard('{Enter}')
   await within(plannerDialog).findByRole('alert')
   await userEvent.click(within(plannerDialog).getByRole('button', { name: 'Retry' }))
   await waitFor(() => expect(noteDialog()).toBeNull())
   await expect(count(plannerTarget)).toBe('2')
   await expect(canvas.getByTestId('popover-status')).toHaveTextContent(`Note added to ${plannerTarget}.`)
-  await expectVisibleAgentMarker(canvas.getByTestId(`badge-${plannerTarget}`))
+  await expectNoAudiencePresentation(canvasElement)
   await waitFor(() => expect(planner).toHaveFocus())
 
   // The reviewer draft survived the planner's whole round trip; only Discard draft clears it.
@@ -302,10 +294,9 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(input()).toHaveValue('')
   await escapeTo(reviewer)
 
-  // A successful create resets the planner to an empty private draft.
+  // A successful create resets the planner to an empty draft.
   await openOn(planner, plannerTarget)
   await expect(input()).toHaveValue('')
-  await expect(composer()).toHaveAttribute('data-note-audience', 'self')
   await escapeTo(planner)
 
   // Pointer entry: Add note opens on the selection and focus returns to Add note.

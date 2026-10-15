@@ -2,7 +2,7 @@ import * as React from 'react'
 import { useAtomValue } from '@effect/atom-react'
 import * as Atom from 'effect/reactivity/Atom'
 import * as stylex from '@stylexjs/stylex'
-import { NoteBadge, NoteComposer, NoteList, defaultNoteAudience, type NoteDraft } from '../../../../packages/fractal-ui/src/notes/index.ts'
+import { NoteBadge, NoteComposer, NoteList } from '../../../../packages/fractal-ui/src/notes/index.ts'
 import { accentVars, geometryVars, spaceVars, textVars, typeVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource, useSubjectNotes } from '../data/react.tsx'
 
@@ -22,7 +22,7 @@ export const AgentNotes = ({ agentRef }: { readonly agentRef: string }) => {
   const feed = useSubjectNotes(agentRef)
   const actor = useAtomValue(source.notesActor ?? noActor)
   const actions = source.noteActions
-  const [drafts, setDrafts] = React.useState<Readonly<Record<string, NoteDraft>>>({})
+  const [drafts, setDrafts] = React.useState<Readonly<Record<string, string>>>({})
   if (source.notes === undefined) return null
   const disabledReason = actions === undefined ? 'This source cannot write notes.'
     : actor === undefined ? 'Waiting for your signed-in identity.'
@@ -39,12 +39,12 @@ export const AgentNotes = ({ agentRef }: { readonly agentRef: string }) => {
         {feed.freshness === 'stale' && <p role="status" {...stylex.props(styles.status)}>Notes are out of date. Waiting for the connection.</p>}
         {feed.coverage?._tag === 'Partial' && <p role="status" {...stylex.props(styles.status)}>Showing notes in the current window.</p>}
       </> : <p role="status" {...stylex.props(styles.status)}>{feed._tag === 'Waiting' ? 'Loading notes…' : 'Notes are not available from this gateway.'}</p>}
-      <NoteComposer key={agentRef} target={agentRef} agentAuthor={actor?.startsWith('agent/')} disabledReason={disabledReason}
-        draft={drafts[agentRef] ?? { text: '', audience: actor?.startsWith('agent/') ? 'agent' : defaultNoteAudience }}
+      <NoteComposer key={agentRef} target={agentRef} disabledReason={disabledReason}
+        draft={drafts[agentRef] ?? ''}
         onDraftChange={draft => setDrafts(current => ({ ...current, [agentRef]: draft }))}
-        onSubmit={async (text, audience) => {
+        onSubmit={async (text) => {
           if (actions === undefined || disabledReason !== undefined) throw new Error(disabledReason ?? 'This source cannot write notes.')
-          await actions.create(agentRef, text, audience)
+          await actions.create(agentRef, text)
         }} />
     </div>
   </section>

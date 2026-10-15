@@ -4,8 +4,8 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import type { SubjectNote } from '@smalltalk/st3-client/schema'
 import { NoteList } from './NoteList'
-import { agentNote, allNotes, diffNote, futureAudience, futureNote, longNote, newestFirstIds, retireNote, target, viewer } from './notes-fixtures'
-import { NotesFrame, expectVisibleAgentMarker, notesFrameArgTypes, notesFrameArgs, notesStoryStyles as styles, type NotesFrameArgs } from './notes-story-frame'
+import { agentNote, allNotes, diffNote, futureNote, longNote, newestFirstIds, retireNote, target, viewer } from './notes-fixtures'
+import { NotesFrame, expectNoAudiencePresentation, notesFrameArgTypes, notesFrameArgs, notesStoryStyles as styles, type NotesFrameArgs } from './notes-story-frame'
 import { greenFindings } from '../assistant-ui/composition/no-green-assertion'
 import { Button } from '../assistant-ui/composition/Controls'
 
@@ -24,8 +24,8 @@ function NoteListStory({ scheme, width, negativeControl }: NotesFrameArgs) {
     <section aria-label="Notes on the reviewer" {...stylex.props(styles.section)}>
       <h2 {...stylex.props(styles.heading)}>{target}</h2>
       <NoteList notes={notes} author={viewer} onArchive={onArchive} />
-      {/* Negative control: a host label regression that leaks the raw audience value. */}
-      {negativeControl && <span>{futureAudience}</span>}
+      {/* Negative control: a host regression that reintroduces an audience label beside the rows. */}
+      {negativeControl && <span>Only me</span>}
     </section>
     <span><Button variant="outline" onPress={publish} data-testid="deliver-update">Deliver list update</Button></span>
     <section aria-label="Read-only notes" {...stylex.props(styles.section)}>
@@ -42,7 +42,7 @@ function NoteListStory({ scheme, width, negativeControl }: NotesFrameArgs) {
 const meta = {
   title: 'Fractal/Plugins/Notes/Note list', component: NoteListStory, parameters: { layout: 'fullscreen' },
   args: notesFrameArgs,
-  argTypes: notesFrameArgTypes('Leak the raw future audience next to the list: the neutral-label assertion must fail.'),
+  argTypes: notesFrameArgTypes('Render a retired audience label beside the list: the no-audience assertion must fail.'),
 } satisfies Meta<typeof NoteListStory>
 export default meta
 type Story = StoryObj<typeof meta>
@@ -53,19 +53,11 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const rowOf = (id: string) => main.querySelector<HTMLElement>(`[data-note-id="${id}"]`)!
   await expect([...main.querySelectorAll('[data-testid="note-row"]')].map(row => row.getAttribute('data-note-id'))).toEqual(newestFirstIds)
 
-  // Audience: one mapping, agent marker as SVG, neutral label for future values. The agent label
-  // states that people can read shared notes too, and no audience copy claims delivery.
-  await expect(within(rowOf(retireNote.id)).getByTestId('note-audience')).toHaveTextContent('Only me')
-  await expect(within(rowOf(diffNote.id)).getByTestId('note-audience')).toHaveTextContent('Shared with the agent (people can see it too)')
-  await expect(within(rowOf(diffNote.id)).getByTestId('note-audience').getAttribute('aria-description')).toMatch(/other people/)
-  await expectVisibleAgentMarker(rowOf(diffNote.id))
-  await expect(rowOf(retireNote.id).querySelector('svg[data-note-agent-marker]')).toBeNull()
-  await expect(within(rowOf(retireNote.id)).getByTestId('note-audience')).toHaveAttribute('aria-description', 'Only you can read this note.')
-  await expect(within(rowOf(futureNote.id)).getByTestId('note-audience')).toHaveTextContent('Other audience')
-  for (const forbidden of [futureAudience, 'Unknown']) await expect(main.textContent).not.toContain(forbidden)
-  for (const audience of main.querySelectorAll('[data-testid="note-audience"]')) {
-    await expect(`${audience.textContent} ${audience.getAttribute('aria-description') ?? ''}`).not.toMatch(/deliver|receiv|acknowledg|has read|next turn/i)
-  }
+  // Rows stored as `self`, `agent` and a future value render alike: no audience label, marker, hook
+  // or raw stored value, and every row keeps author, time and text.
+  await expectNoAudiencePresentation(main)
+  await expect(main.querySelector('svg[data-note-agent-marker]')).toBeNull()
+  for (const note of [retireNote, diffNote, futureNote]) await expect(within(rowOf(note.id)).getByTestId('note-text')).toHaveTextContent(note.text)
 
   // Attribution, session scope, expiry.
   await expect(within(rowOf(retireNote.id)).getByTestId('note-author')).toHaveTextContent('You')

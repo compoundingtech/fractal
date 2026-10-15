@@ -17,11 +17,9 @@ export const gatewayNoteActions = ({ client, actor }: {
     }
   }
   return {
-    create: async (target, text, audience) => {
-      const author = actor()
-      if (author === undefined) throw new Error('Wait for your signed-in identity before adding a note.')
-      if (author.startsWith('agent/') && audience !== 'agent') throw new Error('Agent-authored notes must be shared with the agent.')
-      await submit(() => client.subjectNotesCreate({ target, text, audience }))
+    create: async (target, text) => {
+      if (actor() === undefined) throw new Error('Wait for your signed-in identity before adding a note.')
+      await submit(() => client.subjectNotesCreate({ target, text }))
     },
     archive: async (note) => {
       if (note.author !== actor()) throw new Error('You can only archive your own notes.')

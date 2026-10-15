@@ -1,6 +1,9 @@
 import { SubjectNote, decodeUnknownSync } from '@smalltalk/st3-client/schema'
 
-/** Synthetic story fixtures: wire-shaped notes decoded through the generated client schema. */
+/**
+ * Synthetic story fixtures: wire-shaped notes decoded through the generated client schema. Stored
+ * audiences stay mixed (`self`, `agent`, a future value) to prove readers present every note alike.
+ */
 export const notesNow = Date.parse('2026-10-14T16:30:00Z')
 export const notesZone = { locale: 'en-GB', timeZone: 'UTC' }
 export const viewer = 'person/example'
@@ -28,7 +31,7 @@ const wire = (fields: { readonly author: string; readonly text: string; readonly
 export const retireNote = wire({ author: viewer, audience: 'self', text: 'this agent session should be retired soon', session: 'incarnation/example', created_at: '2026-10-14T16:20:00Z' })
 export const diffNote = wire({ author: viewer, audience: 'agent', text: 'Prefer the smaller diff; the reviewer wants one pull request.', created_at: '2026-10-14T15:00:00Z', expires_at: '2026-10-15T09:00:00Z' })
 export const agentNote = wire({ author: target, audience: 'agent', text: 'Waiting on the schema regeneration before the next push.', created_at: '2026-10-14T12:00:00Z' })
-/** A future audience: the kit must show its neutral label, never this raw value. */
+/** A future stored audience: readers present it like any other note and never show this raw value. */
 export const futureAudience = 'mission-crew'
 export const futureNote = wire({ author: 'agent/example/planner', audience: futureAudience, text: 'Crew-wide context for the next run.', created_at: '2026-10-14T09:00:00Z' })
 export const longNote = wire({
@@ -41,8 +44,8 @@ export const allNotes = [agentNote, longNote, retireNote, futureNote, diffNote] 
 export const newestFirstIds = [retireNote, diffNote, agentNote, futureNote, longNote].map(note => note.id)
 
 
-/** A note as the host would publish it after a successful create, stamped at the fixed story clock. */
-export const publishedNote = (text: string, audience: string, onTarget: string = target) =>
-  wire({ author: viewer, audience, text, target: onTarget, created_at: new Date(notesNow).toISOString() })
+/** A note as the host would publish it after a successful create, stamped at the fixed story clock. New notes are always `agent`. */
+export const publishedNote = (text: string, onTarget: string = target) =>
+  wire({ author: viewer, audience: 'agent', text, target: onTarget, created_at: new Date(notesNow).toISOString() })
 export const plannerTarget = 'agent/example/planner'
 export const plannerNote = wire({ author: viewer, audience: 'self', target: plannerTarget, text: 'Check the run budget before the next mission step.', created_at: '2026-10-14T14:10:00Z' })

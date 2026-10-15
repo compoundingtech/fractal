@@ -4,7 +4,7 @@ import { HumanClockProvider, fixedClock } from '../time/HumanTime'
 import { baselineTheme } from '../assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from '../assistant-ui/composition-theme'
 import { geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as text, typeVars as t } from '../assistant-ui/composition-tokens.stylex'
-import { notesNow, notesZone } from './notes-fixtures'
+import { futureAudience, notesNow, notesZone } from './notes-fixtures'
 import type { ArgTypes } from '@storybook/react-vite'
 import { expect } from 'storybook/test'
 
@@ -19,6 +19,20 @@ export const expectVisibleAgentMarker = async (scope: Element) => {
   await expect(style.visibility).toBe('visible')
   await expect(style.display).not.toBe('none')
   await expect(style.stroke).not.toMatch(/^(none|transparent|rgba\(0, 0, 0, 0\))$/)
+}
+
+/** Copy and hooks of the retired audience presentation; none may render, whatever the stored audience. */
+const audienceCopy = /only me|shared with the agent|audience|unknown/i
+const audienceHooks = '[data-note-audience], [data-testid^="note-audience"], [data-testid="note-badge-agent-shared"], [data-testid="note-badge-newest-audience"], [data-note-agent-shared]'
+
+/** No audience label, choice, badge or hook in visible text or accessible names; the raw stored value never leaks. */
+export const expectNoAudiencePresentation = async (scope: Element) => {
+  await expect(scope.querySelectorAll(audienceHooks)).toHaveLength(0)
+  const named = [scope, ...scope.querySelectorAll('[aria-label], [aria-description], [title]')]
+    .flatMap(element => ['aria-label', 'aria-description', 'title'].map(name => element.getAttribute(name) ?? ''))
+  const exposed = [scope.textContent ?? '', ...named].join('\n')
+  await expect(exposed).not.toMatch(audienceCopy)
+  await expect(exposed).not.toContain(futureAudience)
 }
 
 /** Shared args for notes stories: scheme, polish width and the per-surface negative control. */

@@ -262,9 +262,9 @@ export interface DataSource {
   /** Independent notes window; target summaries derive from these rows, never agent fields. */
   readonly notes?: Atom.Atom<Feed<readonly SubjectNote[]>>
   readonly notesActor?: Atom.Atom<string | undefined>
-  /** Generated note operations, admitted by the same authenticated gateway as message sends. */
+  /** Generated note operations, admitted by the same authenticated gateway as message sends. Every new note is agent context; the daemon writes the audience. */
   readonly noteActions?: {
-    readonly create: (target: string, text: string, audience: 'self' | 'agent') => Promise<void>
+    readonly create: (target: string, text: string) => Promise<void>
     readonly archive: (note: SubjectNote) => Promise<void>
   }
   readonly proposed?: Readonly<Record<string, ProposedMissionFields>>

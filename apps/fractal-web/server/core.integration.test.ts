@@ -381,7 +381,7 @@ it('forwards note create and archive using gateway-owned authorization', async (
   const setup = await fixture()
   const noteId = 'note/person/example/0192'
   for (const [path, method, body] of [
-    ['/v1/subject-notes', 'POST', { target: 'agent/example/planner', text: 'Keep the handoff short.', audience: 'self' }],
+    ['/v1/subject-notes', 'POST', { target: 'agent/example/planner', text: 'Keep the handoff short.' }],
     [`/v1/subject-notes/${encodeURIComponent(noteId)}`, 'PUT', { text: null }],
   ] as const) {
     const response = await fetch(`${setup.base}${path}`, {

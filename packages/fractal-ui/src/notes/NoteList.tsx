@@ -6,8 +6,6 @@ import { DateTime, Option } from 'effect'
 import { Button } from '../assistant-ui/composition/Controls'
 import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as text, typeVars as t } from '../assistant-ui/composition-tokens.stylex'
 import { HumanTime } from '../time/HumanTime'
-import { AgentMarker } from './AgentMarker'
-import { audiencePresentation } from './audience'
 import { newestFirst } from './order'
 
 export interface NoteListProps {
@@ -22,7 +20,7 @@ export interface NoteListProps {
 /** `accepted`: the archive resolved; the row stays until the host's next publication removes it. */
 type ArchiveState = { readonly _tag: 'pending' } | { readonly _tag: 'accepted' } | { readonly _tag: 'failed'; readonly detail: string | undefined }
 
-/** Presentational list of the current notes on a target; the host owns data and mutations. */
+/** Presentational list of the current notes on a target; the host owns data and mutations. Every current note is agent context, so rows carry no audience label. */
 export function NoteList({ notes, author, onArchive }: NoteListProps) {
   const [archive, setArchive] = React.useState<ReadonlyMap<string, ArchiveState>>(() => new Map())
   const [announcement, setAnnouncement] = React.useState('')
@@ -67,24 +65,17 @@ export function NoteList({ notes, author, onArchive }: NoteListProps) {
 
 function NoteRow({ note, own, state, onArchive }: { readonly note: SubjectNote; readonly own: boolean; readonly state: ArchiveState | undefined; readonly onArchive: (() => void) | undefined }) {
   const textId = React.useId()
-  const audience = audiencePresentation(note.audience)
   const expiresAt = Option.getOrUndefined(note.expires_at)
   const pending = state?._tag === 'pending'
   const accepted = state?._tag === 'accepted'
   return <li
     data-testid="note-row"
     data-note-id={note.id}
-    data-note-audience={audience.kind}
     data-archive-state={state?._tag}
     aria-busy={pending || accepted || undefined}
     {...stylex.props(styles.row, (pending || accepted) && styles.pendingRow)}
   >
     <div {...stylex.props(styles.meta)}>
-      <span data-testid="note-audience" aria-description={audience.description} {...stylex.props(styles.audience, audience.kind === 'agent' && styles.agentAudience)}>
-        {audience.kind === 'agent' && <AgentMarker />}
-        {audience.label}
-      </span>
-      <span aria-hidden="true">·</span>
       <span data-testid="note-author" {...stylex.props(styles.author)}>{own ? 'You' : note.author}</span>
       <span aria-hidden="true">·</span>
       <HumanTime at={DateTime.toEpochMillis(note.created_at)} aria-label="Added" />
@@ -117,8 +108,6 @@ const styles = stylex.create({
     display: 'flex', flexWrap: 'wrap', alignItems: 'center', columnGap: s.sm, rowGap: s.xs2, minWidth: 0, minHeight: g.controlSm,
     fontSize: t.metaSize, lineHeight: t.metaLeading, color: text.fgMuted,
   },
-  audience: { display: 'inline-flex', alignItems: 'center', gap: s.xs },
-  agentAudience: { color: text.fg },
   author: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: g.crumbMax },
   chip: { paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.keyboard, fontSize: t.denseSize },
   action: { marginInlineStart: 'auto' },
