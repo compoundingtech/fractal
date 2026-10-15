@@ -71,7 +71,7 @@ fn metadata(state: &AppState, question: &HarnessQuestion) -> Value {
         "observed_at":question.observed_at_unix_ms,"resolution":resolution(question),"answer":capability})
 }
 fn held(state: &AppState, id: &str) -> Result<HarnessQuestion, ApiError> {
-    state.store.harness_question(id, unix_ms()).map_err(ApiError::internal)?
+    state.store.harness_question(id, client_now_ms()).map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("st holds no such harness question"))
 }
 pub(in crate::api) async fn list(State(state): State<AppState>, Extension(snapshot): Extension<ClientSnapshot>,
@@ -81,8 +81,9 @@ pub(in crate::api) async fn list(State(state): State<AppState>, Extension(snapsh
     let mut items = Vec::new();
     if query.cursor.is_none() {
         let status = state.store.status_for_claim_kind_at(OBSERVED, None, false).map_err(ApiError::internal)?;
+        let now = client_now_ms();
         for subject in status.subjects {
-            if let Some(question) = state.store.harness_question(&subject.subject, unix_ms()).map_err(ApiError::internal)? {
+            if let Some(question) = state.store.harness_question(&subject.subject, now).map_err(ApiError::internal)? {
                 items.push(metadata(&state, &question));
             }
         }
@@ -162,9 +163,10 @@ pub(super) async fn answer(state: &AppState, session: &ClientSession, request: &
     // question is a conflict too; expiry removes the receipt together with its question.
     let resolved = state.store.status_for_claim_kind_at(st3_schema::harness_questions::RESOLVED, None, false)
         .map_err(ApiError::internal)?;
+    let now = client_now_ms();
     for subject in resolved.subjects {
         if subject.subject == id { continue; }
-        if let Some(other) = state.store.harness_question(&subject.subject, unix_ms()).map_err(ApiError::internal)?
+        if let Some(other) = state.store.harness_question(&subject.subject, now).map_err(ApiError::internal)?
             && other.resolution.as_ref().and_then(|resolution| resolution.receipt.as_ref())
                 .is_some_and(|receipt| receipt.actor_key == actor_key) {
             return Err(ApiError { status: StatusCode::CONFLICT, code:"idempotency-conflict".into(),

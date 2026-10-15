@@ -10342,7 +10342,7 @@ fn validate_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
                 .find(|item| item["id"] == *subject)
                 .and_then(|item| item["revision"].as_str().map(str::to_owned))
         } else if subject.starts_with("harness-question/") {
-            state.store.harness_question(subject, unix_ms())
+            state.store.harness_question(subject, client_now_ms())
                 .map_err(ApiError::internal)?
                 .map(|question| question.revision)
         } else if let Some(id) = subject.strip_prefix("launch/") {
