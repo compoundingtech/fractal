@@ -741,9 +741,11 @@ pub(crate) fn linux_rss_bytes() -> Option<u64> {
     pages.checked_mul(page_size)
 }
 
-/// One sleep per second measures wakeup lateness; the SDK also samples an overdue pending wake.
-fn register_runtime_lag(provider: &SdkMeterProvider) -> tokio::task::JoinHandle<()> {
+/// In a Tokio runtime, one sleep per second measures wakeup lateness, including a pending overdue wake.
+fn register_runtime_lag(provider: &SdkMeterProvider) -> Option<tokio::task::JoinHandle<()>> {
     use opentelemetry::metrics::MeterProvider as _;
+    // Synchronous storage-only telemetry has no scheduler to measure.
+    let runtime = tokio::runtime::Handle::try_current().ok()?;
     let period = Duration::from_secs(1);
     let sample = std::sync::Arc::new(std::sync::Mutex::new((Instant::now() + period, Duration::ZERO)));
     let observed = sample.clone();
@@ -753,7 +755,7 @@ fn register_runtime_lag(provider: &SdkMeterProvider) -> tokio::task::JoinHandle<
             let (expected, lag) = *observed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             observer.observe(lag.max(Instant::now().saturating_duration_since(expected)).as_secs_f64(), &[]);
         }).build();
-    tokio::spawn(async move {
+    Some(runtime.spawn(async move {
         loop {
             let expected = sample.lock().unwrap_or_else(std::sync::PoisonError::into_inner).0;
             tokio::time::sleep_until(tokio::time::Instant::from_std(expected)).await;
@@ -761,7 +763,7 @@ fn register_runtime_lag(provider: &SdkMeterProvider) -> tokio::task::JoinHandle<
             *sample.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
                 (actual + period, actual.saturating_duration_since(expected));
         }
-    })
+    }))
 }
 
 pub struct Telemetry {
@@ -860,7 +862,7 @@ impl Telemetry {
                         .build();
                     if matches!(unit, Unit::Daemon) {
                         register_daemon_memory_metrics(&provider);
-                        telemetry.runtime_lag = Some(register_runtime_lag(&provider));
+                        telemetry.runtime_lag = register_runtime_lag(&provider);
                     }
                     opentelemetry::global::set_meter_provider(provider.clone());
                     METRICS_ENABLED.store(true, Ordering::Relaxed);
@@ -1342,6 +1344,13 @@ mod tests {
         provider.shutdown().unwrap();
     }
 
+    #[test]
+    fn runtime_lag_without_a_scheduler_does_not_register() {
+        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder().build();
+        assert!(super::register_runtime_lag(&provider).is_none());
+        provider.shutdown().unwrap();
+    }
+
     #[tokio::test]
     async fn runtime_lag_reports_pending_scheduler_delay() {
         use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
@@ -1349,7 +1358,7 @@ mod tests {
         let exporter = InMemoryMetricExporter::default();
         let provider = SdkMeterProvider::builder()
             .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
-        let task = super::register_runtime_lag(&provider);
+        let task = super::register_runtime_lag(&provider).expect("this test runs inside Tokio");
         // Block this single-thread runtime beyond its expected wake; collection runs independently.
         std::thread::sleep(std::time::Duration::from_millis(1020));
         provider.force_flush().unwrap();

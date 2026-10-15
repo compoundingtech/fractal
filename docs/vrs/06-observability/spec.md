@@ -636,6 +636,7 @@ The daemon exports `st.runtime.lag` as an observable gauge in seconds with no in
 attributes. One Tokio sleep per second measures expected-versus-actual wakeup delay;
 the SDK samples the maximum of the last delay and an overdue pending wakeup, so a
 stalled runtime remains visible before the sampling task resumes.
+Synchronous storage-only telemetry registers no lag instrument when no Tokio runtime exists.
 
 A scoped thread-local `Option<Arc<WriterWait>>` shares a request accumulator across
 handler, store, action, and API blocking sections. Two relaxed atomics sum writer ACK
