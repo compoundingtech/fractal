@@ -762,6 +762,19 @@ pub(super) fn prepare_one(
             }
         }
     }
+    // Plain Codex content also carries internal source-record blocks. Preserve a
+    // separate continuation to its text body rather than exposing the raw record.
+    if session.conversation_blocks && original["body"]["media_type"] == "text/plain"
+        && original["body"]["text"].as_str().is_some_and(|text| text.len() > VALUE_BYTES)
+        && body.get("blocks").and_then(Value::as_array)
+            .is_none_or(|blocks| blocks.iter().all(|block| block["kind"] == "source_record"))
+    {
+        let blocks = body.entry("blocks").or_insert_with(|| json!([])).as_array_mut().expect("blocks array");
+        blocks.push(json!({"id":format!("{}/text",original["id"].as_str().unwrap_or("content")),
+            "kind":"raw_text","source_type":"content","payload":{"body_ref":true},
+            "continuation":continuation(reference(source,basis,session_id,&original,"/body"),
+                "application/json",None,"size-limit")}));
+    }
     // Error/status fallback fields use the same clipped display convention as
     // text/arguments/content. A negotiated body_ref continuation fetches the
     // complete original body; legacy clients receive the visible marker only.

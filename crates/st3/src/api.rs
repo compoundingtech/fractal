@@ -661,6 +661,11 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
             get(client_v0::collection_stream),
         )
         .route("/v1/client/actions", post(client_v0::action))
+        .route("/v1/client/assistant/propose", post(client_v0::assistant::propose))
+        .route("/v1/client/assistant/attention-content", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/attention-rich", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/missions-rich", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/agents-rich", get(client_v0::assistant::read_projection))
         .route(
             "/v1/client/blobs",
             post(client_blobs::upload).layer(DefaultBodyLimit::max(client_blobs::UPLOAD_BODY_LIMIT)),
@@ -673,6 +678,10 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/client/assistant/grants/{id}", get(client_v0::assistant::inspect))
         .route("/v1/client/assistant/grants/{id}/revoke", post(client_v0::assistant::revoke))
         .route("/v1/client/assistant/grants/{id}/read-trust", post(client_v0::assistant::pin_read_trust))
+        .route("/v1/client/assistant/grants/assistant-grant/{id}", get(client_v0::assistant::inspect))
+        .route("/v1/client/assistant/grants/assistant-grant/{id}/revoke", post(client_v0::assistant::revoke))
+        .route("/v1/client/assistant/grants/assistant-grant/{id}/read-trust", post(client_v0::assistant::pin_read_trust))
+        .route("/v1/client/assistant/grants/assistant-grant/{id}/policy", post(client_v0::assistant::update_policy))
         .route("/v1/client/assistant/summary", get(client_v0::assistant::read_projection))
         .route("/v1/client/assistant/attention", get(client_v0::assistant::read_projection))
         .route("/v1/client/assistant/missions", get(client_v0::assistant::read_projection))
@@ -13858,6 +13867,7 @@ fn check_device_signature(
     Ok(())
 }
 
+#[cfg(test)]
 fn accept_message(
     state: &AppState,
     request: MessageSendRequest,
@@ -13876,7 +13886,7 @@ fn accept_message_receipt(
     session_id: Option<String>,
     device_signature: Option<smallclaims::principal::ClaimSignature>,
 ) -> Result<MessageSendReceipt, ApiError> {
-    accept_message_receipt_with_upload_owner(state, request, session_id, device_signature, None)
+    accept_message_receipt_with_upload_owner(state, request, session_id, device_signature, None, None)
 }
 
 fn accept_message_receipt_with_upload_owner(
@@ -13885,6 +13895,7 @@ fn accept_message_receipt_with_upload_owner(
     session_id: Option<String>,
     device_signature: Option<smallclaims::principal::ClaimSignature>,
     upload_owner: Option<&str>,
+    assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
 ) -> Result<MessageSendReceipt, ApiError> {
     if request.from.starts_with("external/") && upload_owner.is_none() {
         return Err(ApiError::bad(St3Error::new(
@@ -14118,7 +14129,10 @@ fn accept_message_receipt_with_upload_owner(
     // A repeated key returns the first claim and says it appended nothing.
     let (record, appended) = match &device_signature {
         Some(signature) => state.store.append_signed_message(&input, signature),
-        None => state.store.append_claim_outcome(&input),
+        None => match assistant_authorization {
+            Some(authorization) => state.store.append_assistant_claim_outcome(&input, authorization),
+            None => state.store.append_claim_outcome(&input),
+        },
     }
     .map_err(|error| {
         if let Some(staged) = staged.as_ref() {
@@ -14181,6 +14195,9 @@ fn accept_message_receipt_with_upload_owner(
             body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
             body_bytes: body.as_ref().map(|body| body.size),
             body_origin: body.map(|body| body.origin),
+            // Provenance markers never originate on the ordinary send path.
+            sender_class: None,
+            assistant_grant_id: None,
         },
         idempotency_key: request.idempotency_key,
         already_sent: !appended,

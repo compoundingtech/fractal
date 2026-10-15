@@ -21,6 +21,7 @@ Approved reads disclose data to the external model provider. A compromised execu
 - "Owner" authority here means same-UID trusted-local socket access: the daemon's configured owning person acts through the local Unix client, and any process already running as the daemon's UID is trusted the same way. The `/proc` ancestry check distinguishes local from remote callers; it is not a security boundary against a hostile same-UID process, and A does not claim it to be one. The host's UID isolation is the boundary.
 - Administrative reads validate server-established harness and native-peer provenance, not just `x-st3-person`. Bound agents and harness peers cannot inspect grants or enumerate owner assistant devices with a forged owner header; ordinary agent projection reads remain available. Paired person devices are not trusted-local grant administrators, even over Unix.
 - Begin uses the existing five-minute, single-use challenge flow. Scopes, identity, and the configured owner as issuer are sealed at begin; remote completion supplies only the challenge code and device key, never scopes, issuer, or actor selection. Assistant completion must not enroll the key in a person signing chain.
+- `st devices pair --assistant` explicitly seals `minimal_read_mode: "caller-bound-allow"` with the supplied scopes, expiry, and disclosure consent in the challenge. Completion preserves that mode atomically; fresh CLI grants can read without a policy-update call. Wire callers that omit the mode retain `approval-once`. Grant management accepts either the printed `assistant-grant/<hex>` identifier or its bare hexadecimal suffix.
 - `expires_in_seconds` defaults to 3600, must be positive, and cannot exceed 86400. Challenge expiry and grant expiry are independent. There is no automatic renewal. Policy update or renewal increments the policy revision; creation starts at revision 1.
 - Each request rechecks the authoritative grant, revocation, expiry, and current policy. Revocation targets the exact grant, not a shared device actor. Restart must not revive a revoked or expired grant.
 - Completion, authenticated assistant requests, renewal/policy changes, and revocation must reach the authoritative grant-issuer member. Replicated grants cannot establish current revocation/policy authority or enable cross-member proof replay.
@@ -37,7 +38,7 @@ Completion returns the normal snapshot envelope. `PairedSession` is a disjoint u
 
 Assistant clients validate that the issuer is a concrete `PersonId` returned by the selected trusted gateway completion, not that it equals a named deployment owner. They do not accept caller-selected issuers or use person grant/signing-chain proofs as assistant authority. The daemon enforces configured-owner issuance and preserves the sealed issuer.
 
-`AssistantGrant` returns `kind: "assistant-grant"`, ID, principal, sender class, session actor, device ID, key ID, issuer as the daemon-configured owning person's concrete `PersonId`, exact scopes, RFC 3339 expiry, integer policy revision, minimal read mode, recipient allowlist, disclosure consent, consent evidence, and revoked status. The key ID is the SHA-256 hexadecimal digest of the canonical public-key string, not a credential digest. The recipient allowlist is empty in A/B. Only `approval-once` is supported; `caller-bound-allow` is rejected pending an explicit caller-binding/disclosure decision.
+`AssistantGrant` returns `kind: "assistant-grant"`, ID, principal, sender class, session actor, device ID, key ID, issuer as the daemon-configured owning person's concrete `PersonId`, exact scopes, RFC 3339 expiry, integer policy revision, minimal read mode, recipient allowlist, disclosure consent, consent evidence, and revoked status. The key ID is the SHA-256 hexadecimal digest of the canonical public-key string, not a credential digest. Pairing starts with an empty recipient allowlist. Read mode is either `approval-once` or explicitly sealed `caller-bound-allow`; the CLI selects the latter.
 
 Trusted-local management routes are:
 
@@ -47,7 +48,7 @@ Trusted-local management routes are:
 | POST | `/v1/client/assistant/grants/{id}/revoke` | `AssistantGrant` |
 | POST | `/v1/client/assistant/grants/{id}/policy` | `AssistantGrant` |
 
-Policy requests contain `api_version`, explicit scopes, optional duration with the same default/maximum, disclosure consent, consent evidence, and `minimal_read_mode: "approval-once"`. These operations use the existing envelope/error conventions and advertise `assistant.grants.v1`. Device and capabilities projections distinguish assistant metadata from a person delegator; assistant device rows must not synthesize `person_id`.
+Policy requests contain `api_version`, explicit scopes, optional duration with the same default/maximum, disclosure consent, consent evidence, and `minimal_read_mode` (`approval-once` or `caller-bound-allow`). These operations use the existing envelope/error conventions and advertise `assistant.grants.v1`. Device and capabilities projections distinguish assistant metadata from a person delegator; assistant device rows must not synthesize `person_id`.
 
 ### Acceptance
 
@@ -67,7 +68,7 @@ The attention, missions, and agents pages retain the optional native `sync` noti
 | `conversation-content` | `read.assistant.conversation` | Exact agent/session/reference/range, bounded text, revision, returned bytes, truncation/next-range |
 | `terminal-content` | `read.assistant.terminal` | Exact agent/terminal/incarnation/screen revision, bounded text, returned bytes, truncation |
 
-The baseline grant contains only the first four minimal scopes: `read.assistant.summary`, `read.assistant.attention`, `read.assistant.missions`, and `read.assistant.agents`. The configured owning person may explicitly add content scopes, but content is always approval-gated. Metadata is an allowlisted ID/enum/count projection, not a free-text summary; filters cannot select another person. All six reads require approval-once authorization until an independently recorded policy decision admits verified owner caller-bound minimal reads. Bearer possession alone must not authorize a projection.
+The baseline grant contains only the first four minimal scopes: `read.assistant.summary`, `read.assistant.attention`, `read.assistant.missions`, and `read.assistant.agents`. The configured owning person may explicitly add content scopes. `approval-once` grants require a proof for each read; explicitly sealed `caller-bound-allow` grants admit reads within the exact grant scopes, expiry, consent, caller binding, and response budget. The adapter's rich projections remain bounded and do not grant unrelated person authority.
 
 `ScgReadAuthorization` must bind verified issuer/key and identity `chatgpt`, assistant principal, grant and policy revision, approval/execution IDs, exact projection/filter/cursor or content resource/revision/range, response-byte maximum, request digest, expiry, and a one-use nonce. st verifies a separately pinned attestor key and consumes the authorization atomically. A new page or range needs a new approval. Exact retries may recover the same bounded receipt inside the protected executor, but cached/status/private-result re-delivery to the external model requires fresh authorization.
 
@@ -94,7 +95,7 @@ The response budget covers the entire JSON envelope. Without a query budget, the
 
 ### Read trust
 
-Every read is denied until the configured owning person pins trust for the exact grant at its authoritative origin:
+For `approval-once` grants, every read is denied until the configured owning person pins trust for the exact grant at its authoritative origin. Explicitly sealed `caller-bound-allow` grants instead use their consent, scopes, expiry, and caller binding without a separate read-trust or policy call:
 
 ```sh
 st devices --as person/operator grant read-trust GRANT --issuer person/operator \

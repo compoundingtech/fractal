@@ -47,6 +47,18 @@ pub(super) async fn project(
             summary(state).await
         }
         "attention" => page(state, snapshot, "assistant.attention", parameters, max_bytes, attention_rows).await,
+        "attention-rich" => page(state, snapshot, "assistant.attention", parameters, max_bytes, attention_rich_rows).await,
+        "missions-rich" => page(state, snapshot, "assistant.missions", parameters, max_bytes, mission_rich_rows).await,
+        "agents-rich" => page(state, snapshot, "assistant.agents", parameters, max_bytes, agent_rich_rows).await,
+        "attention-content" => {
+            allow(parameters, &["alert_id","max_response_bytes"], max_bytes)?;
+            let id = required(parameters, "alert_id")?;
+            let item = state.store.attention_items(Some(&owner(state)?)).map_err(ApiError::internal)?
+                .into_iter().find(|item| item.subject == id || client_attention_id(&item.subject,&item.person,&item.episode).ok().as_deref() == Some(id))
+                .ok_or_else(|| ApiError::not_found("owner alert absent"))?;
+            Ok((snapshot.clone(), json!({"id":item.subject,"episode":item.episode,"kind":item.kind,
+                "title":item.title,"detail":item.detail,"request":item.request})))
+        },
         "missions" => page(state, snapshot, "assistant.missions", parameters, max_bytes, mission_rows).await,
         "agents" => page(state, snapshot, "assistant.agents", parameters, max_bytes, agent_rows).await,
         "conversation-content" => Ok((snapshot.clone(), conversation(state, parameters, max_bytes).await?)),
@@ -256,6 +268,38 @@ fn attention_rows(state: &AppState, person: &str, _index: u64, now: u128) -> any
             "waiting_since": client_timestamp(item.requested_at_unix_ms),
         }));
     }
+    Ok(rows)
+}
+
+fn attention_rich_rows(state: &AppState, person: &str, index: u64, now: u128) -> anyhow::Result<Vec<Value>> {
+    let mut rows = attention_rows(state,person,index,now)?;
+    let items = state.store.attention_snapshot(Some(person),now)?;
+    for row in &mut rows {
+        for item in &items {
+            if row["episode"] == item.episode {
+                row["title"] = json!(item.title);
+                row["detail"] = json!(item.detail);
+                row["request"] = json!(item.request);
+                row["target_id"] = json!(item.subject);
+                row["evidence"] = json!(item.targets);
+            }
+        }
+    }
+    Ok(rows)
+}
+fn mission_rich_rows(state: &AppState, person: &str, index: u64, now: u128) -> anyhow::Result<Vec<Value>> {
+    let mut rows = mission_rows(state,person,index,now)?;
+    let source = mission_resources(&state.store,index,false,None)?;
+    for row in &mut rows {
+        if let Some(mission) = source.iter().find(|mission| mission["id"] == row["id"]) {
+            row["title"] = mission["title"].clone();
+        }
+    }
+    Ok(rows)
+}
+fn agent_rich_rows(state: &AppState, person: &str, index: u64, now: u128) -> anyhow::Result<Vec<Value>> {
+    let mut rows = agent_rows(state,person,index,now)?;
+    for row in &mut rows { row["title"] = json!(row["id"].as_str().unwrap_or("").trim_start_matches("agent/")); }
     Ok(rows)
 }
 

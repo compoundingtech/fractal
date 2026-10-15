@@ -12,6 +12,9 @@ const USED: &str = "custom.client.assistant.v1.read-used";
 const OUTCOME: &str = "custom.client.assistant.v1.read-outcome";
 const ROUTES: &[(&str, &str)] = &[
     ("summary", "read.assistant.summary"), ("attention", "read.assistant.attention"),
+    ("attention-content", "read.assistant.attention"),
+    ("attention-rich", "read.assistant.attention"), ("missions-rich", "read.assistant.missions"),
+    ("agents-rich", "read.assistant.agents"),
     ("missions", "read.assistant.missions"), ("agents", "read.assistant.agents"),
     ("conversation-content", "read.assistant.conversation"),
     ("terminal-content", "read.assistant.terminal"),
@@ -129,13 +132,15 @@ pub(in crate::api) async fn pin(State(state): State<AppState>, Extension(session
 }
 
 pub(super) fn route(session: &ClientSession, request: &Request<Body>) -> Result<(), ApiError> {
+    if request.uri().path() == "/v1/client/assistant/propose" && request.method() == axum::http::Method::POST {
+        return Ok(());
+    }
     let projection = request.uri().path().strip_prefix("/v1/client/assistant/");
     let Some((_, scope)) = ROUTES.iter().find(|(route, _)| projection == Some(*route))
         else { return Err(forbidden("assistants may access only explicit proof-bearing read projections")) };
     if request.method() != axum::http::Method::GET || !session.allows(scope)
-        || request.headers().contains_key(axum::http::header::UPGRADE)
-        || !request.headers().get(HEADER).is_some_and(|value| value.len() <= 16384) {
-        return Err(forbidden("assistant read requires its exact scope and SCG approval proof"));
+        || request.headers().contains_key(axum::http::header::UPGRADE) {
+        return Err(forbidden("assistant read requires its exact scope"));
     }
     Ok(())
 }
@@ -245,6 +250,31 @@ pub(in crate::api) async fn read(State(state): State<AppState>, Extension(sessio
 async fn read_inner(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                         Extension(snapshot): Extension<ClientSnapshot>, OriginalUri(uri): OriginalUri,
                         headers: HeaderMap) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
+    let grant_subject = session.pairing_grant.as_deref().ok_or_else(|| forbidden("assistant grant absent"))?;
+    let granted = latest(&state, grant_subject, GRANTED)?.ok_or_else(|| forbidden("assistant grant absent"))?;
+    let policy = effective(&state, &granted)?;
+    if fields(&policy)?["minimal_read_mode"] == "caller-bound-allow" {
+        let parameters = parameters(&uri)?;
+        let requested = parameters.get("max_response_bytes").map(|v| v.parse::<usize>())
+            .transpose().map_err(|_| validation("response budget must be an integer"))?.unwrap_or(DEFAULT_RESPONSE_BYTES);
+        if requested == 0 || requested > MAX_RESPONSE_BYTES { return Err(validation("response budget must be 1..16384")); }
+        let current = super::session(&state, &granted, session.transport)?;
+        let projection = uri.path().strip_prefix("/v1/client/assistant/").ok_or_else(|| forbidden("invalid projection"))?;
+        let (_, scope) = ROUTES.iter().find(|(p,_)| *p == projection).ok_or_else(|| forbidden("invalid projection"))?;
+        if !current.allows(scope) { return Err(forbidden("assistant projection scope is not granted")); }
+        let receipt_subject = format!("custom/client/assistant-v1-read-{}", uuid::Uuid::new_v4());
+        let consumed = append(&state, receipt_subject.clone(), USED, &current.actor, json!({
+            "grant_id": fields(&policy)?["grant_id"], "mode":"caller-bound-allow",
+            "projection":projection, "request_digest":request_digest(uri.path(), &parameters)?,
+            "max_response_bytes":requested, "timestamp":client_timestamp(client_now_ms())
+        }), None)?;
+        let receipt = ReadReceipt { subject:receipt_subject, consumed_claim:consumed.id,
+            grant_subject:grant_subject.into(), actor:current.actor, transport:session.transport,
+            policy_revision:fields(&policy)?["policy_revision"].as_u64().unwrap_or(0),
+            proof_expiry:fields(&policy)?["expires_at_unix_ms"].as_u64().unwrap_or(0), max_response_bytes:requested };
+        let (snapshot,value) = super::reads::project(&state,&snapshot,projection,&parameters,requested).await?;
+        return Ok((Extension(receipt),Extension(snapshot),Json(value)));
+    }
     let authorization = proof(&headers)?;
     let parameters = parameters(&uri)?;
     let _transition = TRANSITIONS.lock().await;

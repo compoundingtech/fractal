@@ -4426,6 +4426,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "st-chatgpt"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "libc",
+ "reqwest",
+ "rmcp",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "st-drivers"
 version = "0.1.0"
 dependencies = [

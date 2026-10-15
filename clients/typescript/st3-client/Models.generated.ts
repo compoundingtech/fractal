@@ -3,9 +3,6 @@
 
 export const API_VERSION = 'st3.client.v0' as const;
 
-/** Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043). */
-export const SIDEBAR_ARRANGEMENT_UUID = "00000000-0000-7000-8000-000000000001" as const;
-
 export type ActionCommon = {
   api_version: "st3.client.v0";
   fence: Fence;
@@ -470,7 +467,7 @@ export type AssistantConversationContentRequest = {
 };
 
 export type AssistantGrant = {
-  consent_evidence: "axe:igubz7";
+  consent_evidence: string;
   device_id: Id;
   disclosure_consent: boolean;
   expires_at: Timestamp;
@@ -491,14 +488,15 @@ export type AssistantGrant = {
 
 export type AssistantGrantPolicy = {
   api_version: "st3.client.v0";
-  consent_evidence: "axe:igubz7";
+  consent_evidence: string;
   disclosure_consent: true;
   expires_in_seconds?: number;
   minimal_read_mode: AssistantMinimalReadMode;
+  recipient_allowlist?: Array<string>;
   scopes: Array<AssistantScope>;
 };
 
-export type AssistantMinimalReadMode = "approval-once";
+export type AssistantMinimalReadMode = "approval-once" | "caller-bound-allow";
 
 export type AssistantMissionItem = {
   agent_ids: Array<string>;
@@ -547,10 +545,11 @@ export type AssistantPairedSession = {
 export type AssistantPairingBegin = {
   api_version: "st3.client.v0";
   assistant_id: AssistantPrincipal;
-  consent_evidence: "axe:igubz7";
+  consent_evidence: string;
   device_name: string;
   disclosure_consent: true;
   expires_in_seconds?: number;
+  minimal_read_mode?: AssistantMinimalReadMode;
   scopes: Array<AssistantScope>;
 };
 
@@ -579,7 +578,7 @@ export type AssistantReadTrustRequest = {
 
 export type AssistantResponseBytes = number;
 
-export type AssistantScope = "read.assistant.summary" | "read.assistant.attention" | "read.assistant.missions" | "read.assistant.agents" | "read.assistant.conversation" | "read.assistant.terminal";
+export type AssistantScope = "read.assistant.summary" | "read.assistant.attention" | "read.assistant.missions" | "read.assistant.agents" | "read.assistant.conversation" | "read.assistant.terminal" | "write.assistant.messages" | "write.assistant.custom-reply";
 
 export type AssistantSenderClass = "external-assistant";
 
@@ -1053,7 +1052,7 @@ export type Envelope = {
   value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog);
 };
 
-export type ErrorCode = ("recipient-retired" | "lifecycle-unavailable" | "retirement-upgrade-required" | "attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "suspend-authored-session-selection" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "internal" | "response-budget-exceeded" | "content-not-text" | string);
+export type ErrorCode = ("attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "response-budget-exceeded" | "content-not-text" | "internal" | string);
 
 export type ErrorEnvelope = {
   api_version: "st3.client.v0";
@@ -2234,6 +2233,7 @@ export type TimelineErrorBody = {
 };
 
 export type TimelineMessageBody = {
+  assistant_grant_id?: string;
   attachments?: Array<Attachment>;
   blocks?: Array<TimelineBlock>;
   body_bytes?: number;
@@ -2241,6 +2241,7 @@ export type TimelineMessageBody = {
   message_id: string;
   provenance?: MessageProvenance;
   reply_to?: string | null;
+  sender_class?: "external-assistant";
   tags?: Array<string>;
   title?: string;
   to?: ParticipantRef;

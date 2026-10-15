@@ -3,6 +3,8 @@ use super::*;
 use rusqlite::OptionalExtension as _;
 mod authorization;
 mod reads;
+mod native;
+pub(in crate::api) use native::propose;
 pub(in crate::api) use authorization::{ReadReceipt, finish as finish_read, pin as pin_read_trust, read as read_projection};
 
 pub(super) const PRINCIPAL: &str = "assistant/chatgpt";
@@ -13,6 +15,7 @@ const REVOKED: &str = "custom.client.assistant.v1.revoked";
 const SCOPES: &[&str] = &[
     "read.assistant.summary", "read.assistant.attention", "read.assistant.missions",
     "read.assistant.agents", "read.assistant.conversation", "read.assistant.terminal",
+    "write.assistant.messages", "write.assistant.custom-reply",
 ];
 // Serializes code consumption and grant policy transitions. Subject fences also protect
 // against concurrent writers in the authoritative store.
@@ -29,8 +32,11 @@ pub(in crate::api) struct AssistantPairingBegin {
     expires_in_seconds: u64,
     disclosure_consent: bool,
     consent_evidence: String,
+    #[serde(default = "default_read_mode")]
+    minimal_read_mode: String,
 }
 fn default_expiry() -> u64 { 3600 }
+fn default_read_mode() -> String { "approval-once".into() }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +48,8 @@ pub(in crate::api) struct AssistantGrantPolicy {
     disclosure_consent: bool,
     consent_evidence: String,
     minimal_read_mode: String,
+    #[serde(default)]
+    recipient_allowlist: Vec<String>,
 }
 
 fn owning_person(state: &AppState) -> Result<&str, ApiError> {
@@ -59,8 +67,8 @@ pub(super) fn trusted_issuer<'a>(state: &'a AppState, session: &ClientSession) -
 }
 fn validate_policy(version: &str, scopes: &[String], seconds: u64, consent: bool,
                    evidence: &str) -> Result<(), ApiError> {
-    if version != CLIENT_API_VERSION || seconds == 0 || seconds > 86400 {
-        return Err(validation("assistant expiry must be positive and at most 24 hours"));
+    if version != CLIENT_API_VERSION || seconds == 0 || seconds > 2_592_000 {
+        return Err(validation("assistant expiry must be positive and at most 30 days"));
     }
     if scopes.is_empty() || scopes.iter().any(|scope| !SCOPES.contains(&scope.as_str()))
         || SCOPES[..4].iter().any(|scope| !scopes.iter().any(|item| item == scope)) {
@@ -160,6 +168,9 @@ async fn begin_inner(state: AppState, session: ClientSession,
     let issuer = trusted_issuer(&state, &session)?;
     validate_policy(&request.api_version, &request.scopes, request.expires_in_seconds,
                     request.disclosure_consent, &request.consent_evidence)?;
+    if !matches!(request.minimal_read_mode.as_str(), "approval-once" | "caller-bound-allow") {
+        return Err(forbidden("unsupported assistant read mode"));
+    }
     if request.assistant_id != PRINCIPAL || request.device_name.trim().is_empty()
         || request.device_name.len() > 120 {
         return Err(validation("invalid assistant principal or device name"));
@@ -179,7 +190,7 @@ async fn begin_inner(state: AppState, session: ClientSession,
         "issuer":issuer,"device_name":request.device_name,"scopes":scopes,
         "expires_at_unix_ms":expires,"challenge_expires_at_unix_ms":now + 300_000,
         "code_hash":credential_digest(&code),"policy_revision":1,
-        "minimal_read_mode":"approval-once","recipient_allowlist":[],
+        "minimal_read_mode":request.minimal_read_mode,"recipient_allowlist":[],
         "disclosure_consent":true,"consent_evidence":request.consent_evidence,
         "transport":session.transport,"timestamp":client_timestamp(now),"outcome":"created"
     }), None)?;
@@ -187,7 +198,7 @@ async fn begin_inner(state: AppState, session: ClientSession,
     Ok(Json(json!({"kind":"pairing-challenge","pairing_id":format!("pairing/{id}"),
         "code":code,"expires_at":client_timestamp(now + 300_000),"grant_kind":"assistant",
         "grant_id":grant_id,"principal":PRINCIPAL,"grant_expires_at":client_timestamp(expires),
-        "policy_revision":1,"minimal_read_mode":"approval-once"})))
+        "policy_revision":1,"minimal_read_mode":request.minimal_read_mode})))
 }
 
 async fn complete_inner(state: &AppState, id: &str, request: &PairingComplete,
@@ -279,7 +290,7 @@ fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
     if latest(state, &granted.subject, REVOKED)?.is_some()
         || source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= client_now_ms()
         || source["principal"] != PRINCIPAL || source["issuer"] != owning_person(state)?
-        || source["minimal_read_mode"] != "approval-once" || source["disclosure_consent"] != true {
+        || !matches!(source["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow")) || source["disclosure_consent"] != true {
         return Err(forbidden("assistant grant was revoked, expired, or has invalid policy"));
     }
     let scopes = source["scopes"].as_array().ok_or_else(|| forbidden("assistant scopes absent"))?
@@ -289,6 +300,7 @@ fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         .ok_or_else(|| forbidden("assistant actor absent"))?.into(), authority_actor: PRINCIPAL.into(),
         pairing_grant: Some(granted.subject.clone()),
         grant_expires_at: source["expires_at_unix_ms"].as_u64().map(u128::from), transport, custom_forms:false,
+        assistant_write: None,
         conversation_blocks:false, local_peer:false, scopes })
 }
 
@@ -328,8 +340,8 @@ async fn update_policy_inner(State(state): State<AppState>, Extension(session): 
     let issuer = trusted_issuer(&state, &session)?;
     validate_policy(&request.api_version, &request.scopes, request.expires_in_seconds,
                     request.disclosure_consent, &request.consent_evidence)?;
-    if request.minimal_read_mode != "approval-once" {
-        return Err(forbidden("caller-bound allow requires a separately recorded and implemented caller-auth decision"));
+    if !matches!(request.minimal_read_mode.as_str(), "approval-once" | "caller-bound-allow") {
+        return Err(forbidden("unsupported assistant read mode"));
     }
     let _transition = TRANSITIONS.lock().await;
     let subject = subject(&id)?;
@@ -341,11 +353,16 @@ async fn update_policy_inner(State(state): State<AppState>, Extension(session): 
     if latest(&state, &subject, REVOKED)?.is_some() { return Err(forbidden("assistant grant was revoked")); }
     let previous = effective(&state, &granted)?;
     // Policy changes must not revive an expired grant: fail closed instead of extending it.
-    if fields(&granted)?["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= client_now_ms() {
+    if fields(&previous)?["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= client_now_ms() {
         return Err(forbidden("assistant grant expired; begin a new grant instead of renewing it"));
     }
     let mut value = fields(&previous)?.clone();
     value["scopes"] = json!(request.scopes.into_iter().collect::<BTreeSet<_>>());
+    value["minimal_read_mode"] = json!(request.minimal_read_mode);
+    if request.recipient_allowlist.iter().any(|id| !id.starts_with("agent/") || id.len() > 256 || id.chars().any(char::is_whitespace)) {
+        return Err(validation("message recipient allowlist must contain exact agent IDs"));
+    }
+    value["recipient_allowlist"] = json!(request.recipient_allowlist);
     value["expires_at_unix_ms"] = json!(client_now_ms() + u128::from(request.expires_in_seconds) * 1000);
     value["policy_revision"] = json!(value["policy_revision"].as_u64().unwrap_or(0) + 1);
     value["transport"] = json!(session.transport);
@@ -386,7 +403,7 @@ pub(super) fn device_resources(state: &AppState, snapshot: &ClientSnapshot) -> R
             "principal":PRINCIPAL,"sender_class":"external-assistant","grant_kind":"assistant",
             "grant_id":source["grant_id"],"session_actor":source["session_actor"],"state":state,
             "scopes":source["scopes"],"expires_at":client_timestamp(expires),
-            "policy_revision":source["policy_revision"],"minimal_read_mode":"approval-once",
+            "policy_revision":source["policy_revision"],"minimal_read_mode":source["minimal_read_mode"],
             "operational":{"layer":if state=="active" {"current"} else {"history"},
                 "actionable":state=="active","reasons":if state=="active" {Vec::<&str>::new()} else {vec![state]}}}))
     }).collect()
@@ -482,7 +499,7 @@ mod tests {
     #[tokio::test]
     async fn assistant_issuance_rejects_expiry_scope_and_consent_escalation() {
         let root = tempfile::tempdir().unwrap(); let state = state(root.path());
-        for seconds in [0,86401] { let mut req=request(); req.expires_in_seconds=seconds;
+        for seconds in [0,2_592_001] { let mut req=request(); req.expires_in_seconds=seconds;
             assert!(begin(state.clone(),ClientSession::local(Some(ISSUER)).unwrap(),req).await.is_err()); }
         let mut req=request(); req.scopes.push("control.messages".into());
         assert!(begin(state.clone(),ClientSession::local(Some(ISSUER)).unwrap(),req).await.is_err());
@@ -610,7 +627,8 @@ mod tests {
         let session=authenticate(&state,&credential_digest(paired["credential"].as_str().unwrap()),"fabric-loopback").unwrap().unwrap();
         assert!(session.allows("read.assistant.terminal")); assert!(!session.allows("control.messages"));
         let mut allow=policy(); allow.minimal_read_mode="caller-bound-allow".into();
-        assert_eq!(update_policy(State(state),Extension(ClientSession::local(Some(ISSUER)).unwrap()),AxumPath(id),Json(allow)).await.unwrap_err().status,StatusCode::FORBIDDEN);
+        let Json(updated)=update_policy(State(state),Extension(ClientSession::local(Some(ISSUER)).unwrap()),AxumPath(id),Json(allow)).await.unwrap();
+        assert_eq!(updated["minimal_read_mode"],"caller-bound-allow");
     }
     #[tokio::test]
     async fn assistant_policy_update_cannot_revive_an_expired_or_revoked_grant() {

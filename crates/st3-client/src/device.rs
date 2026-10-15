@@ -448,7 +448,7 @@ impl AssistantDevice {
                 && grant.disclosure_consent
                 && !grant.consent_evidence.trim().is_empty()
                 && grant.consent_evidence.len() <= 512
-                && grant.recipient_allowlist.is_empty()
+                && grant.recipient_allowlist.iter().all(|id| id.starts_with("agent/") && !id.chars().any(char::is_whitespace))
                 && !grant.revoked,
             "Invalid assistant session or grant"
         );

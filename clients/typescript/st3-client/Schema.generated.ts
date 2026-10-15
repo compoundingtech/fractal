@@ -1183,7 +1183,7 @@ export const AssistantContentRequest = /*#__PURE__*/ (() => Schema.Union([
 export type AssistantContentRequest = typeof AssistantContentRequest.Type
 export type AssistantContentRequestEncoded = typeof AssistantContentRequest.Encoded
 
-export const AssistantMinimalReadMode = /*#__PURE__*/ (() => Schema.Literals(["approval-once"]).annotate({ identifier: "AssistantMinimalReadMode" }))()
+export const AssistantMinimalReadMode = /*#__PURE__*/ (() => Schema.Literals(["approval-once","caller-bound-allow"]).annotate({ identifier: "AssistantMinimalReadMode" }))()
 export type AssistantMinimalReadMode = typeof AssistantMinimalReadMode.Type
 export type AssistantMinimalReadModeEncoded = typeof AssistantMinimalReadMode.Encoded
 
@@ -1211,7 +1211,7 @@ export const AssistantReadTrust = /*#__PURE__*/ (() => Schema.Struct({
 export type AssistantReadTrust = typeof AssistantReadTrust.Type
 export type AssistantReadTrustEncoded = typeof AssistantReadTrust.Encoded
 
-export const AssistantScope = /*#__PURE__*/ (() => Schema.Literals(["read.assistant.summary","read.assistant.attention","read.assistant.missions","read.assistant.agents","read.assistant.conversation","read.assistant.terminal"]).annotate({ identifier: "AssistantScope" }))()
+export const AssistantScope = /*#__PURE__*/ (() => Schema.Literals(["read.assistant.summary","read.assistant.attention","read.assistant.missions","read.assistant.agents","read.assistant.conversation","read.assistant.terminal","write.assistant.messages","write.assistant.custom-reply"]).annotate({ identifier: "AssistantScope" }))()
 export type AssistantScope = typeof AssistantScope.Type
 export type AssistantScopeEncoded = typeof AssistantScope.Encoded
 
@@ -1220,7 +1220,7 @@ export type AssistantSenderClass = typeof AssistantSenderClass.Type
 export type AssistantSenderClassEncoded = typeof AssistantSenderClass.Encoded
 
 export const AssistantGrant = /*#__PURE__*/ (() => Schema.Struct({
-  "consent_evidence": Schema.Literal("axe:igubz7"),
+  "consent_evidence": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(512)),
   "device_id": Id,
   "disclosure_consent": Schema.Boolean,
   "expires_at": Timestamp,
@@ -1235,7 +1235,7 @@ export const AssistantGrant = /*#__PURE__*/ (() => Schema.Struct({
   "principal": AssistantPrincipal,
   /** Owner-provisioned public pins for SCG read proofs. Absent means every assistant read is denied. */
   "read_trust": optionalKey(AssistantReadTrust),
-  "recipient_allowlist": Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u")))).check(Schema.isMaxLength(0)),
+  "recipient_allowlist": Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u")))),
   "revoked": Schema.Boolean,
   "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique()),
   "sender_class": AssistantSenderClass,
@@ -1246,10 +1246,11 @@ export type AssistantGrantEncoded = typeof AssistantGrant.Encoded
 
 export const AssistantGrantPolicy = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
-  "consent_evidence": Schema.Literal("axe:igubz7"),
+  "consent_evidence": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(512)),
   "disclosure_consent": Schema.Literal(true),
-  "expires_in_seconds": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(86400))),
+  "expires_in_seconds": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(2592000))),
   "minimal_read_mode": AssistantMinimalReadMode,
+  "recipient_allowlist": optionalKey(Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u"))))),
   "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique())
 }).annotate({ identifier: "AssistantGrantPolicy" }))()
 export type AssistantGrantPolicy = typeof AssistantGrantPolicy.Type
@@ -1312,10 +1313,11 @@ export type AssistantPairedSessionEncoded = typeof AssistantPairedSession.Encode
 export const AssistantPairingBegin = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
   "assistant_id": AssistantPrincipal,
-  "consent_evidence": Schema.Literal("axe:igubz7"),
+  "consent_evidence": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(512)),
   "device_name": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(120)),
   "disclosure_consent": Schema.Literal(true),
-  "expires_in_seconds": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(86400))),
+  "expires_in_seconds": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(2592000))),
+  "minimal_read_mode": optionalKey(AssistantMinimalReadMode),
   "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique())
 }).annotate({ identifier: "AssistantPairingBegin" }))()
 export type AssistantPairingBegin = typeof AssistantPairingBegin.Type
@@ -2994,6 +2996,8 @@ export type MessageProvenance = typeof MessageProvenance.Type
 export type MessageProvenanceEncoded = typeof MessageProvenance.Encoded
 
 export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
+  /** The assistant grant that authorized the send, with sender_class. */
+  "assistant_grant_id": optionalKey(Schema.String).annotate({ description: "The assistant grant that authorized the send, with sender_class." }),
   "attachments": optionalKey(Schema.Array(Attachment)),
   "blocks": optionalKey(Schema.Array(TimelineBlock)),
   "body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
@@ -3001,6 +3005,8 @@ export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
   "message_id": Schema.String,
   "provenance": optionalKey(MessageProvenance),
   "reply_to": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text. */
+  "sender_class": optionalKey(Schema.Literals(["external-assistant"])).annotate({ description: "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text." }),
   "tags": optionalKey(Schema.Array(Schema.String)),
   "title": optionalKey(Schema.String),
   "to": optionalKey(ParticipantRef)
@@ -3338,8 +3344,8 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
 
-/** Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
-export const ErrorCode = /*#__PURE__*/ (() => openEnum(["recipient-retired","lifecycle-unavailable","retirement-upgrade-required","attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","suspend-authored-session-selection","stale-fence","cursor-gap","page-cursor-expired","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","projection-detail-too-large","projection-detail-invalid-source","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","message-too-large","message-store-full","long-message-signature-unsupported","internal","response-budget-exceeded","content-not-text"]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
+/** Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
+export const ErrorCode = /*#__PURE__*/ (() => openEnum(["attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","stale-fence","cursor-gap","page-cursor-expired","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","projection-detail-too-large","projection-detail-invalid-source","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","message-too-large","message-store-full","long-message-signature-unsupported","response-budget-exceeded","content-not-text","internal"]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
 export type ErrorCode = typeof ErrorCode.Type
 export type ErrorCodeEncoded = typeof ErrorCode.Encoded
 
