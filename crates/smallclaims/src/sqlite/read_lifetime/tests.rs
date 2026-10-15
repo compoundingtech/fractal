@@ -336,7 +336,9 @@ fn ordinary_reuse_and_reporting_add_no_sql_per_checkout() {
     assert_eq!(pool.live_read_report().live_checkouts, 0);
 }
 
-/// Each test runs in its own process under nextest, so these are the only loans in the table.
+/// The live-read table is process-wide. The route assertions look only at this test's routes,
+/// so they hold beside other tests' loans; the `(other)` check also needs this test's routes to
+/// be the only ones, which nextest gives by running each test in its own process.
 #[test]
 fn loans_are_grouped_by_route_with_their_oldest_checkout_and_confirmed_snapshot() {
     let (_directory, _writer, pool) = file_pool();
@@ -352,7 +354,13 @@ fn loans_are_grouped_by_route_with_their_oldest_checkout_and_confirmed_snapshot(
     let messages =
         crate::read_budget::ReadBudget::new("/test-loans/messages", std::time::Duration::ZERO);
     let late = crate::read_budget::with(Some(messages), || pool.get());
-    let routes = loans_by_route(8);
+    let mine = || {
+        loans_by_route(usize::MAX)
+            .into_iter()
+            .filter(|loans| loans.route.starts_with("/test-loans/"))
+            .collect::<Vec<_>>()
+    };
+    let routes = mine();
     assert_eq!(routes.len(), 2, "{routes:#?}");
     let (oldest, newer) = (&routes[0], &routes[1]);
     assert_eq!(oldest.route, "/test-loans/export");
@@ -374,7 +382,7 @@ fn loans_are_grouped_by_route_with_their_oldest_checkout_and_confirmed_snapshot(
         .execute_batch("BEGIN; SELECT * FROM payload")
         .unwrap();
     pending.snapshot_started(reader.connection.as_ref().unwrap());
-    let confirmed = &loans_by_route(8)[0];
+    let confirmed = &mine()[0];
     assert!(
         confirmed.oldest_snapshot_confirmed_age_ms.is_some(),
         "{confirmed:#?}"
@@ -386,5 +394,5 @@ fn loans_are_grouped_by_route_with_their_oldest_checkout_and_confirmed_snapshot(
     assert_eq!(limited[1].route, "(other)");
     assert_eq!((limited[1].checkouts, limited[1].expired), (1, 1));
     drop((held, reader, pending, late));
-    assert!(loans_by_route(8).is_empty());
+    assert!(mine().is_empty());
 }

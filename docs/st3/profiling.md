@@ -95,7 +95,13 @@ Three more fields show what keeps the WAL from recycling:
   `deferred_ms`, how long checkpoints have been deferred or failing since one last settled.
 - `snapshot_build` gives windows for the three phases of building a replication snapshot:
   `wait` for the build lock, which one build holds at a time; `inventory` for reading the
-  envelope inventory; and `digest` for hashing its digests.
+  envelope inventory; and `digest` for hashing its digests. A build that fails partway still
+  records the phases it reached, so these are not only successful builds.
+
+Waiting for a reader, the writer's queue, commits and checkpoints are measured as OpenTelemetry
+histograms when export is on: `db.client.connection.wait_time` (read admission),
+`st.db.writer.queue.duration` (writer admission), `st.db.writer.commit.duration` and
+`st.db.wal.checkpoint.duration`.
 
 The `database` row is this member's store: `max_live_gb` for the pages in use (the file less its
 free pages, which SQLite reuses before the file grows) and `max_growth_mb_per_day` for their net
