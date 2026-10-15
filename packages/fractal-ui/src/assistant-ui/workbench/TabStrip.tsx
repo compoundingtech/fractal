@@ -1,6 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { TabList, Tab, TooltipTrigger, Tooltip, Focusable } from 'react-aria-components'
+import { useFocusVisible } from 'react-aria'
 import { Icon, type IconName } from '../composition/Icons'
 import { surfaceVars as sf, textVars as tx, accentVars as ac, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, geometryNumbers as geo } from '../composition-tokens.stylex'
 import { paneKey, paneKind, type WorkbenchPane } from './workbench-model'
@@ -174,15 +175,26 @@ function ResourceTab({ item, selected }: { item: TabStripItem; selected: boolean
   const handlersRef = React.useRef<React.HTMLAttributes<Element> | null>(null)
   const focusFrame = React.useRef<number | undefined>(undefined)
   React.useEffect(() => () => { if (focusFrame.current !== undefined) cancelAnimationFrame(focusFrame.current) }, [])
+  // RAC's interaction modality: its keyboard reveal and focus tooltips follow it, including synthetic key events.
+  const { isFocusVisible } = useFocusVisible()
+  const keyboardFocus = React.useRef(isFocusVisible)
+  React.useLayoutEffect(() => { keyboardFocus.current = isFocusVisible }, [isFocusVisible])
   const characters = Array.from(item.label)
   const minimum = characters.length > 4 ? `${characters.slice(0, 4).join('')}…` : item.label
   const triggerHandlers = React.useMemo<React.HTMLAttributes<Element>>(() => ({
     onFocus: event => {
       // Reveal/snap happens before focus disclosure. RAC closes overlays on native
-      // scroll events; opening after that pre-paint scroll avoids immediately closing it.
+      // scroll events, so every reveal scroll must be dispatched before the tooltip
+      // opens. The strip's own snap scrolls pre-paint. RAC reveals a keyboard-focused
+      // item in the window (scrollIntoViewport) from a later frame callback; when that
+      // scrolls the document or an ancestor, its event can arrive after disclosure and
+      // close it. Perform the same native reveal now (RAC skips it on a scroll-locked
+      // root, so do we): its event precedes this frame callback and RAC's reveal is a no-op.
+      const tab = event.currentTarget
+      if (keyboardFocus.current && getComputedStyle(document.scrollingElement ?? document.documentElement).overflow !== 'hidden') tab.scrollIntoView({ block: 'nearest', inline: 'nearest' })
       if (focusFrame.current !== undefined) cancelAnimationFrame(focusFrame.current)
       // React clears currentTarget after dispatch; RAC's focus filter needs it.
-      const focusEvent = { ...event, currentTarget: event.currentTarget }
+      const focusEvent = { ...event, currentTarget: tab }
       focusFrame.current = requestAnimationFrame(() => {
         focusFrame.current = undefined
         if (triggerRef.current === document.activeElement) handlersRef.current?.onFocus?.(focusEvent)

@@ -70,6 +70,8 @@ async function rejectsControl(reason: string, assertion: () => void | Promise<vo
 }
 async function frames(count = 3) { for (let index = 0; index < count; index++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve())) }
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+/** A pane wider than its window has no product host: header-clip sweeps mount only widths the viewport can show, so 520 runs in the 1440 rows. */
+const hosted = (canvas: HTMLElement, candidates: readonly number[]) => candidates.filter(width => width <= canvas.ownerDocument.defaultView!.innerWidth)
 function element<T extends HTMLElement = HTMLElement>(root: ParentNode, selector: string): T { const found = root.querySelector<T>(selector); requireContract(found !== null, `Missing recovery element: ${selector}`); return found }
 const paneFor = (canvas: HTMLElement) => element(canvas, '[data-testid="details-pane"]')
 const headFor = (pane: HTMLElement) => element(pane.closest('[data-testid="tab-group"]')!, '[data-pane-header]')
@@ -202,7 +204,7 @@ function assertPresentation(pane: HTMLElement) {
 }
 async function anchorPlay({ canvasElement: canvas }: Play) {
   const measurements = []
-  for (const width of widths) for (const state of states) {
+  for (const width of hosted(canvas, widths)) for (const state of states) {
     const pane = await start(canvas, width, variants[defaultVariant]!, state)
     assertHeader(pane); assertPresentation(pane)
     measurements.push({ width, state, header: rectOf(headFor(pane)) })
@@ -295,7 +297,7 @@ function assertFailureGeometry(before: RecoveryGeometry, pane: HTMLElement) {
 }
 async function failurePlay({ canvasElement: canvas }: Play) {
   const measurements = []
-  for (const width of widths) for (const variant of representative) for (const initial of ['loading', 'busy'] as const) {
+  for (const width of hosted(canvas, widths)) for (const variant of representative) for (const initial of ['loading', 'busy'] as const) {
     const pane = await start(canvas, width, variant, initial), before = geometry(pane)
     for (const edge of ['failed', 'busy'] as const) {
       const shifts = observeShifts()
@@ -426,7 +428,7 @@ function assertSpoken(spoken: readonly string[], phase: string, expected: number
 }
 async function feedbackPlay({ canvasElement: canvas }: Play) {
   const measurements = []
-  for (const width of [118, 160, 240, 520]) {
+  for (const width of hosted(canvas, [118, 160, 240, 520])) {
     const pane = await start(canvas, width, variants[defaultVariant]!, 'busy'), head = headFor(pane), initial = rectOf(head)
     const initialTabLeft = element(head, '[role="tab"]').getBoundingClientRect().left
     assertHeader(pane); assertPhase(pane, 'live'); assertAnnouncer(head)

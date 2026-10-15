@@ -49,9 +49,11 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
     .map(section => section.title === 'Subagents' ? { ...section, ...traceSubagentSection(trace) } : section.title === 'History' ? { ...section, ...traceHistorySection(trace) } : section)
     .filter(section => !hidden.has(section.title))
   const hasSubagentEvidence = hasObservedSubagents || hasNoTracedSubagents || trace.subagentCount._tag === 'Known'
-  const unreported = empty === 'E3' && state !== 'new' && state !== 'loading'
+  const unreported = empty === 'E3' && state !== 'new'
     ? candidates.filter(section => !section.pending && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence))
     : []
+  // Pane-level loading keeps the settled footprint: the Not supplied line is reserved, unpainted and inert, so recovery never grows the slot.
+  const reserveUnreported = state === 'loading'
   const sections = candidates
     // First reads stay pending, never masquerading as settled unavailable data.
     .filter(section => section.pending === true || state !== 'new' || empty !== 'E3' || (section.items._tag === 'Known' && section.items.value.length > 0) || (section.title === 'Subagents' && hasObservedSubagentRows))
@@ -81,7 +83,7 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
         </div>}
       </section>
     })}
-    {unreported.length > 0 && <p data-details-unreported-sections {...stylex.props(styles.metaLine, styles.allHidden)}>Not supplied: {unreported.map((section, index) => <React.Fragment key={section.title}>{index > 0 && ', '}<TooltipTrigger delay={0}><AriaButton data-details-unreported-section={section.title} {...stylex.props(styles.unreportedTrigger)}>{section.title}</AriaButton><AriaTooltip {...stylex.props(styles.tooltip)}>{unavailableReason(section, trace, empty)}</AriaTooltip></TooltipTrigger></React.Fragment>)}.</p>}
+    {unreported.length > 0 && <p data-details-unreported-sections={reserveUnreported ? undefined : true} data-details-unreported-reserved={reserveUnreported || undefined} aria-hidden={reserveUnreported || undefined} inert={reserveUnreported} {...stylex.props(styles.metaLine, styles.allHidden, reserveUnreported && styles.skeletonHidden)}>Not supplied: {unreported.map((section, index) => <React.Fragment key={section.title}>{index > 0 && ', '}<TooltipTrigger delay={0}><AriaButton data-details-unreported-section={reserveUnreported ? undefined : section.title} {...stylex.props(styles.unreportedTrigger)}>{section.title}</AriaButton><AriaTooltip {...stylex.props(styles.tooltip)}>{unavailableReason(section, trace, empty)}</AriaTooltip></TooltipTrigger></React.Fragment>)}.</p>}
     {sections.length === 0 && unreported.length === 0 && state !== 'error' && !(state === 'new' && empty === 'E3') && <p {...stylex.props(styles.metaLine, styles.allHidden)}>Every section is empty or hidden.</p>}
   </div>
 }

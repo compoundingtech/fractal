@@ -16,7 +16,8 @@ const items: readonly TabStripItem[] = [
   { key: 'notes', label: 'Release notes', icon: 'copy', kind: 'document' },
 ]
 const width = 640
-const styles = stylex.create({ root: { backgroundColor: surface.canvas } })
+// The themed surface spans the 640px fixture even in a narrower viewport, so overflowing tabs never paint over the bare page.
+const styles = stylex.create({ root: { backgroundColor: surface.canvas, width: 'max-content', minWidth: '100%' } })
 interface Args extends React.ComponentProps<typeof TabStrip> { scenario: 'resize' | 'scroll'; scheme: 'dark' | 'light' }
 
 const meta = {
