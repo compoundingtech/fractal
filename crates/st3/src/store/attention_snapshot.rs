@@ -1756,14 +1756,20 @@ pub(super) fn validate_delegated_denial(
         return Err(refused());
     }
     let started = running_since(connection, seat).map_err(internal)?;
+    let last = last_turn_or_end(connection, seat).map_err(internal)?;
     if started.is_none_or(|(started, _)| (denial.store_index as i64) < started)
+        || moved_on(
+            last.as_ref(),
+            denial.store_index as i64,
+            denial.accepted_at_unix_ms,
+        )
         || native_prompt_answer(connection, &proof.episode)
             .map_err(internal)?
             .is_some()
     {
         return Err(St3Error::new(
             "stale-fence",
-            "the denial was answered or the runtime changed",
+            "the denial was answered, the seat moved on, or the runtime changed",
         ));
     }
     Ok(())

@@ -255,6 +255,98 @@ fn close_item_never_authorizes_allow_kind_or_an_unproved_generic_harness_answer(
 }
 
 #[test]
+fn a_denial_cleared_after_validation_is_refused_again_inside_the_writer() {
+    for state in ["working", "ended"] {
+        let (store, denial, proof) = denial_fixture(&["close-item"]);
+        let mut fields = BTreeMap::from([
+            ("code".into(), json!("native-prompt-answered")),
+            ("status".into(), json!("dismiss")),
+            ("driver".into(), json!("claude")),
+        ]);
+        delegation::add_fields(&mut fields, &proof);
+        let mut evidence = vec![denial.id.clone()];
+        store.delegation_evidence(&mut evidence, &proof).unwrap();
+        // Establish a valid prepared action before the source transition. Reusing
+        // these exact fields after it must not rely on that earlier validation.
+        store
+            .connection
+            .batched(|tx| {
+                delegation::validate_write(
+                    tx,
+                    SEAT,
+                    "harness.diagnostic",
+                    Some(ACTOR),
+                    &fields,
+                    &evidence,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        if state == "working" {
+            // Match the source predicate's strict millisecond boundary, not a
+            // performance oracle. The ended branch has no clock precondition.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let moved = append(
+            &store,
+            SEAT,
+            "harness.observed",
+            SEAT,
+            json!({"state":state,"driver":"claude","incarnation_id":"one"}),
+            "moved-on",
+        );
+        if state == "working" {
+            assert!(
+                moved.body["fields"]["observed_since_ms"].as_u64().unwrap() as u128
+                    > denial.accepted_at_unix_ms
+            );
+        }
+        let before = store.index().unwrap();
+        let body = json!({"fields":fields,"evidence":evidence});
+        let error = store
+            .connection
+            .batched(|tx| {
+                append_receipt_claim_tx(
+                    tx,
+                    &store.origin,
+                    SEAT,
+                    "harness.diagnostic",
+                    Some(ACTOR),
+                    &body,
+                    std::slice::from_ref(&denial.id),
+                    None,
+                    &native_prompt_answer_key(&denial.id),
+                )
+            })
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(claim_append_error(error).code, "stale-fence", "{state}");
+        assert_eq!(store.index().unwrap(), before);
+        assert_eq!(store.prompt_answer(&denial.id).unwrap().answer, None);
+        assert!(store.messages(Some(SEAT), true).unwrap().is_empty());
+        assert!(
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .iter()
+                .all(|item| item.episode != denial.id)
+        );
+        // The public adapter's preflight agrees with the writer's current fence.
+        assert_eq!(
+            store
+                .respond_native_prompt(SEAT, &denial.id, "dismiss", ACTOR, Some(&proof))
+                .unwrap_err()
+                .code,
+            "stale-fence"
+        );
+    }
+    let (store, denial, proof) = denial_fixture(&["close-item"]);
+    store
+        .respond_native_prompt(SEAT, &denial.id, "dismiss", ACTOR, Some(&proof))
+        .unwrap();
+}
+
+#[test]
 fn delegated_dismissal_fences_a_restarted_runtime_and_changed_person() {
     for changed_person in [false, true] {
         let (store, denial, proof) = denial_fixture(&["close-item"]);
