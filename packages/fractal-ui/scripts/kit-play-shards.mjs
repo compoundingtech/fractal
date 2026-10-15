@@ -17,7 +17,26 @@ export function shardStories(ids, index, count) {
   return selected
 }
 
-export function aggregateShards(receipts, count) {
+export function shardArtifactName(receipt) {
+  return `kit-play-${receipt.runId}-${receipt.headSha}-shard-${receipt.shardIndex}-attempt-${receipt.runAttempt}`
+}
+
+export function aggregateShards(candidates, count, provenance) {
+  const { runId, headSha, runAttempt } = provenance
+  if (!/^\d+$/.test(runId) || !/^[0-9a-f]{40}$/.test(headSha) || !Number.isSafeInteger(runAttempt) || runAttempt < 1) throw new Error('Invalid expected workflow provenance')
+  const newest = new Map()
+  const attempts = new Set()
+  for (const receipt of candidates) {
+    if (receipt.runId !== runId || receipt.headSha !== headSha || !Number.isSafeInteger(receipt.runAttempt) || receipt.runAttempt < 1 || receipt.runAttempt > runAttempt) throw new Error('Shard workflow provenance mismatch')
+    if (!Number.isSafeInteger(receipt.shardIndex) || receipt.shardIndex < 0 || receipt.shardIndex >= count) throw new Error('Invalid shard identity')
+    const key = `${receipt.shardIndex}/${receipt.runAttempt}`
+    if (attempts.has(key)) throw new Error('Duplicate shard attempt')
+    attempts.add(key)
+    if (!newest.has(receipt.shardIndex) || newest.get(receipt.shardIndex).runAttempt < receipt.runAttempt) newest.set(receipt.shardIndex, receipt)
+  }
+  // Rerun-failed-jobs retains successful jobs from older attempts of this exact run/head.
+  // Never fall back to an older success when a newer receipt exists for that shard.
+  const receipts = [...newest.values()].sort((a, b) => a.shardIndex - b.shardIndex)
   if (receipts.length !== count) throw new Error(`Expected ${count} shard receipts; got ${receipts.length}`)
   const full = receipts[0].fullIds
   if (!Array.isArray(full)) throw new Error('Missing full index')
@@ -44,6 +63,13 @@ export function aggregateShards(receipts, count) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [directory, count] = process.argv.slice(2)
   const names = await readdir(directory)
-  const receipts = await Promise.all(names.map(async name => JSON.parse(await readFile(join(directory, name, 'receipt.json'), 'utf8'))))
-  console.log(JSON.stringify(aggregateShards(receipts, Number(count))))
+  const receipts = await Promise.all(names.map(async name => {
+    const receipt = JSON.parse(await readFile(join(directory, name, 'receipt.json'), 'utf8'))
+    if (name !== shardArtifactName(receipt)) throw new Error('Artifact name does not match receipt provenance')
+    return receipt
+  }))
+  console.log(JSON.stringify(aggregateShards(receipts, Number(count), {
+    runId: process.env.GITHUB_RUN_ID, headSha: process.env.GITHUB_SHA,
+    runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+  })))
 }

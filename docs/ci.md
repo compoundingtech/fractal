@@ -561,11 +561,20 @@ an app failure from suppressing the kit attempt. App-only changes schedule just 
 The incoming #2958 app play suite belongs inside that shard-0 app subshell, with no
 `KIT_PLAY_SHARD_*` environment (those variables are scoped to the kit invocation).
 
-Every shard publishes `kit-play-shard-<index>/receipt.json` even on a play failure and
+Every shard publishes `receipt.json` in an artifact named
+`kit-play-<run_id>-<github.sha>-shard-<index>-attempt-<run_attempt>`, even on a play failure, and
 adds a `kit i/N` summary row with completed/expected cases, passes, failures and play
 minutes. The semantic `fractal-web` gate requires matrix success **and** all N receipts:
 their full indexes must agree, and the union of unique story/width/theme cases must
 match exactly the full index. Missing, duplicate, failed or unexpected shards fail closed.
+Artifacts and receipts are bound to the workflow run ID, checked-out head SHA
+(`github.sha`, including a PR's tested merge SHA) and attempt. The gate downloads
+only this run/head's artifacts, checks each receipt against its artifact name and
+the current workflow provenance, and selects each shard's newest available attempt.
+An older successful attempt of the **same run and same SHA** is allowed so GitHub's
+“rerun failed jobs” need not rerun successful browser shards. A newer failure cannot
+fall back to an older success; duplicate attempts, future attempts, mixed heads,
+mixed runs and missing shards fail closed. A new head/run cannot reuse old receipts.
 
 Storybook builds once per shard rather than introducing a third, serialized build job
 and transferring the full static asset tree. In [the #2901 baseline web job](https://github.com/compoundingtech/smalltalk/actions/runs/38651083493/job/116150585943),

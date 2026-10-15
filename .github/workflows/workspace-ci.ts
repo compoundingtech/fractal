@@ -562,7 +562,7 @@ export const fractalWebJobs = {
         if: 'always()',
         uses: 'actions/upload-artifact@v4',
         with: {
-          name: 'kit-play-shard-${{ matrix.shard }}',
+          name: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}',
           path: '${{ runner.temp }}/kit-play-receipts/receipt.json',
           'if-no-files-found': 'ignore',
         },
@@ -596,7 +596,8 @@ export const fractalWebJobs = {
       {
         uses: 'actions/download-artifact@v4',
         if: "needs.fractal-web-changes.outputs.kit-inputs == 'true' && needs.fractal-web-changes.outputs.relevant == 'true'",
-        with: { pattern: 'kit-play-shard-*', path: '${{ runner.temp }}/kit-play-receipts' },
+        // Include older attempts only from this exact run/head, for rerun-failed-jobs.
+        with: { pattern: 'kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*', path: '${{ runner.temp }}/kit-play-receipts' },
       },
       {
         name: 'Require every kit shard and exact full-index coverage',

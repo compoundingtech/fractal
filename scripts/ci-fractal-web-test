@@ -337,7 +337,9 @@ print("passed: app/static lanes and controls run once; suite failures propagate 
 # Exercise the production hash/receipt aggregator without a browser.
 subprocess.run(["node", "--input-type=module", "-"], cwd=root, check=True, input=r'''
 import assert from 'node:assert/strict'
-import { shardNumber, shardStories, aggregateShards } from './packages/fractal-ui/scripts/kit-play-shards.mjs'
+import { shardNumber, shardStories, aggregateShards as aggregate, shardArtifactName } from './packages/fractal-ui/scripts/kit-play-shards.mjs'
+const provenance = { runId: '1234', runAttempt: 2, headSha: 'a'.repeat(40) }
+const aggregateShards = (receipts, count) => aggregate(receipts, count, provenance)
 const ids = Array.from({ length: 313 }, (_, i) => `story-${i}`).sort()
 assert.equal(shardNumber('story-0', 2), 1)
 for (const count of [1, 2, 3]) {
@@ -350,7 +352,7 @@ for (const count of [1, 2, 3]) {
   assert.deepEqual(shardStories([...ids].reverse(), 0, count).sort(), shards[0])
   assert.deepEqual(shardStories([...ids, 'new-story'], 0, count).filter(id => id !== 'new-story'), shards[0])
   const receipts = shards.map((selected, shardIndex) => ({
-    pass: true, fullIds: ids, shardIndex, shardCount: count,
+    ...provenance, pass: true, fullIds: ids, shardIndex, shardCount: count,
     rows: selected.flatMap(id => ['dark', 'light'].flatMap(scheme => [440, 1440].map(width => ({ id, scheme, width, pass: true })))),
   }))
   assert.equal(aggregateShards(receipts, count).cases, 1252)
@@ -362,6 +364,24 @@ for (const count of [1, 2, 3]) {
   invalid(copy => { copy[0].rows[0] = copy[0].rows[1] })
   invalid(copy => { copy[0].rows = [] })
   invalid(copy => { copy[0].shardIndex = count })
+  invalid(copy => { copy[0].headSha = 'b'.repeat(40) })
+  invalid(copy => { delete copy[0].headSha })
+  invalid(copy => { copy[0].runId = '9999' })
+  invalid(copy => { copy[0].runAttempt = 3 })
+  invalid(copy => { delete copy[0].runAttempt })
+  // Rerun-failed-jobs: retain an older successful shard of the same run/head.
+  const mixed = structuredClone(receipts)
+  mixed[0].runAttempt = 1
+  assert.equal(aggregateShards(mixed, count).pass, true)
+  assert.throws(() => aggregateShards(mixed.slice(1), count))
+  const newer = { ...receipts[0], runAttempt: 2, pass: false }
+  assert.throws(() => aggregateShards([...mixed, newer], count))
+  assert.throws(() => aggregateShards([newer, ...mixed], count))
+  // A successful rerun supersedes an older failure, independent of listing order.
+  const olderFailed = { ...receipts[0], runAttempt: 1, pass: false }
+  assert.equal(aggregateShards([...receipts, olderFailed], count).pass, true)
+  assert.equal(aggregateShards([olderFailed, ...receipts], count).pass, true)
+  assert.equal(shardArtifactName(receipts[0]), `kit-play-1234-${provenance.headSha}-shard-0-attempt-2`)
   if (count > 1) {
     invalid(copy => { copy[1] = copy[0] })
     invalid(copy => { copy[1].fullIds = ids.slice(1) })
@@ -372,11 +392,13 @@ assert.throws(() => shardStories(['story-0', 'story-2'], 0, 2))
 assert.deepEqual(shardStories(['story-0'], 0, 2), [])
 for (const count of [0, -1, NaN, 1.5]) assert.throws(() => shardStories(ids, 0, count))
 console.log('passed: stable hashes, exact union, configurable count, missing/empty/failed/duplicate shards')
+console.log('passed: workflow provenance, same-head older attempts, newest-attempt precedence')
 ''', text=True)
 assert "fail-fast: false" in execution
 assert "KIT_SHARD_INDEX: ${{ matrix.shard }}" in execution
 assert "KIT_SHARD_COUNT:" in execution
-assert "kit-play-shard-${{ matrix.shard }}" in execution
+assert "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}" in execution
+assert "kit-play-${{ github.run_id }}-${{ github.sha }}-shard-*-attempt-*" in gate_job
 assert "actions/upload-artifact@v4" in execution
 assert "actions/download-artifact@v4" in gate_job
 assert "kit-play-shards.mjs" in gate_job

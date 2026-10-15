@@ -60,6 +60,8 @@ const writeReceipt = async () => {
   const receipt = {
     pass: !fatalError && fullIds.length > 0 && rows.length === ids.length * 4 && rows.every(row => row.pass),
     shardIndex, shardCount, fullIds,
+    runId: process.env.GITHUB_RUN_ID, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+    headSha: process.env.GITHUB_SHA,
     stories: ids.length, expectedCases: ids.length * 4, cases: rows.length, workers,
     passed: rows.filter(row => row.pass).length, failed: rows.filter(row => !row.pass).length,
     playMinutes: elapsedSeconds / 60,
