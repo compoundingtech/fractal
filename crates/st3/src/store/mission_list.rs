@@ -35,6 +35,8 @@ pub(crate) struct MissionRows {
     pub(crate) folded_at_unix_ms: u128,
     /// The first worker lease to end after the fold, if one does.
     pub(crate) next_lease_end_unix_ms: Option<u128>,
+    /// Acceptance time of the publication's graph cut, captured off the request path.
+    pub(crate) time_unix_ms: u128,
     /// The projection frontier at the fold, from [`Store::projection_frontier`].
     pub(crate) frontier: u64,
     /// Every leased step's lease end at the fold. A quiet renewal moves one, and the step's
