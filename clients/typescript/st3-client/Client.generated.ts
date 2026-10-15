@@ -2,7 +2,7 @@
 import { API_VERSION } from './Models.generated.ts';
 import type {
     ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, MessageBody, EnvelopeOf,
-    ResourcesFilter, ResourcesPage, DirectiveNotes,
+    ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion,
     Arrangement, ArrangementId, ArrangementPage,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
@@ -430,6 +430,8 @@ export class St3Client {
         return response;
     }
 
+    async harnessQuestions(): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions'); }
+    async harnessQuestion(id: string): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`); }
     async notesList(): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes'); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options)); }
     async customSubjectsGet(id: string): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`); }
@@ -500,6 +502,7 @@ export class St3Client {
     async arrangementEdit(input: Omit<ActionOf<'arrangement.edit'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'arrangement.edit' } as ActionOf<'arrangement.edit'>); }
     async attentionResolve(input: Omit<ActionOf<'attention.resolve'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'attention.resolve' } as ActionOf<'attention.resolve'>); }
     async customReply(input: Omit<ActionOf<'custom.reply'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'custom.reply' } as ActionOf<'custom.reply'>); }
+    async harnessAnswer(input: Omit<ActionOf<'harness.answer'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'harness.answer' } as ActionOf<'harness.answer'>); }
     async laneApprove(input: Omit<ActionOf<'lane.approve'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.approve' } as ActionOf<'lane.approve'>); }
     async laneJoin(input: Omit<ActionOf<'lane.join'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.join' } as ActionOf<'lane.join'>); }
     async laneLeave(input: Omit<ActionOf<'lane.leave'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.leave' } as ActionOf<'lane.leave'>); }

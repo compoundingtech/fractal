@@ -1637,6 +1637,19 @@ impl Client {
         .await
     }
 
+    pub async fn harness_questions(&self) -> Result<Envelope<Page>, ClientError> {
+        self.get("/v1/client/harness-questions").await
+    }
+    pub async fn harness_question(
+        &self,
+        id: &str,
+    ) -> Result<Envelope<HarnessQuestion>, ClientError> {
+        self.get(&format!(
+            "/v1/client/harness-questions/{}",
+            percent_encode(id)
+        ))
+        .await
+    }
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
     }
@@ -2207,6 +2220,17 @@ impl Client {
         parameters: CustomReplyParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::custom_reply(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn harness_answer(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HarnessAnswerParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::harness_answer(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }

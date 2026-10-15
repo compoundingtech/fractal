@@ -179,7 +179,7 @@ export const ActionCommon = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")),
   "parameters": Schema.Record(Schema.String, Schema.Unknown),
-  "type": Schema.Literals(["arrangement.edit","custom.reply","prompt.respond","attention.resolve","review.approve","review.reject","review.request-changes","message.send","message.read","message.close","launch.create","launch.revise","launch.preview","launch.approve","launch.cancel","mission.start","mission.revise","mission.approve-revision","mission.cancel-revision","mission.cancel","session.import","work.ask","work.done","work.cancel-ask","work.claim","work.renew","work.progress","work.complete","work.fail","work.release","work.retry","work.publish-mission","agent.create","agent.stop","agent.start","agent.suspend","agent.resume","terminal.create","terminal.end","agent.queue-move","lane.join","lane.leave","lane.move","lane.mark","lane.approve","runtime.stop","runtime.restart","runtime.reset","runtime.context-clear","runtime.signal","terminal.input","terminal.resize","terminal.attach","terminal.detach","pairing.revoke"])
+  "type": Schema.Literals(["harness.answer","arrangement.edit","custom.reply","prompt.respond","attention.resolve","review.approve","review.reject","review.request-changes","message.send","message.read","message.close","launch.create","launch.revise","launch.preview","launch.approve","launch.cancel","mission.start","mission.revise","mission.approve-revision","mission.cancel-revision","mission.cancel","session.import","work.ask","work.done","work.cancel-ask","work.claim","work.renew","work.progress","work.complete","work.fail","work.release","work.retry","work.publish-mission","agent.create","agent.stop","agent.start","agent.suspend","agent.resume","terminal.create","terminal.end","agent.queue-move","lane.join","lane.leave","lane.move","lane.mark","lane.approve","runtime.stop","runtime.restart","runtime.reset","runtime.context-clear","runtime.signal","terminal.input","terminal.resize","terminal.attach","terminal.detach","pairing.revoke"])
 }).annotate({ identifier: "ActionCommon" }))()
 export type ActionCommon = typeof ActionCommon.Type
 export type ActionCommonEncoded = typeof ActionCommon.Encoded
@@ -307,6 +307,19 @@ export const DeviceSignature = /*#__PURE__*/ (() => Schema.Struct({
 export type DeviceSignature = typeof DeviceSignature.Type
 export type DeviceSignatureEncoded = typeof DeviceSignature.Encoded
 
+export const HarnessAnswerInput = /*#__PURE__*/ (() => Schema.Struct({
+  "positions": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(4294967295)))
+}).annotate({ identifier: "HarnessAnswerInput" }))()
+export type HarnessAnswerInput = typeof HarnessAnswerInput.Type
+export type HarnessAnswerInputEncoded = typeof HarnessAnswerInput.Encoded
+
+export const HarnessAnswerParameters = /*#__PURE__*/ (() => Schema.Struct({
+  "answers": Schema.Record(Schema.String, HarnessAnswerInput),
+  "question": Id
+}).annotate({ identifier: "HarnessAnswerParameters" }))()
+export type HarnessAnswerParameters = typeof HarnessAnswerParameters.Type
+export type HarnessAnswerParametersEncoded = typeof HarnessAnswerParameters.Encoded
+
 export const RequestAnswerOption = /*#__PURE__*/ (() => Schema.Struct({
   "conditions": optionalKey(Schema.Array(Schema.String)),
   /** What happens next when the person gives this answer. */
@@ -406,6 +419,8 @@ export type TerminalCreateParameters = typeof TerminalCreateParameters.Type
 export type TerminalCreateParametersEncoded = typeof TerminalCreateParameters.Encoded
 
 export const ActionRequest = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": HarnessAnswerParameters, "type": Schema.Literal("harness.answer") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": ArrangementEditParameters, "type": Schema.Literal("arrangement.edit") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": CustomReplyParameters, "type": Schema.Literal("custom.reply") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": PromptRespondParameters, "type": Schema.Literal("prompt.respond") }),
@@ -469,6 +484,29 @@ export const ActionRequest = /*#__PURE__*/ (() => Schema.Union([
 export type ActionRequest = typeof ActionRequest.Type
 export type ActionRequestEncoded = typeof ActionRequest.Encoded
 
+export const HarnessResolvedAnswer = /*#__PURE__*/ (() => Schema.Struct({
+  "positions": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(4294967295))),
+  "timed_out": Schema.Boolean
+}).annotate({ identifier: "HarnessResolvedAnswer" }))()
+export type HarnessResolvedAnswer = typeof HarnessResolvedAnswer.Type
+export type HarnessResolvedAnswerEncoded = typeof HarnessResolvedAnswer.Encoded
+
+export const HarnessQuestionResolution = /*#__PURE__*/ (() => Schema.Struct({
+  "answers": Schema.Record(Schema.String, HarnessResolvedAnswer),
+  "resolved_at": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))),
+  "revision": Revision,
+  "status": Schema.Literals(["answered","answered_elsewhere","expired","cancelled"])
+}).annotate({ identifier: "HarnessQuestionResolution" }))()
+export type HarnessQuestionResolution = typeof HarnessQuestionResolution.Type
+export type HarnessQuestionResolutionEncoded = typeof HarnessQuestionResolution.Encoded
+
+export const HarnessAnswerResult = /*#__PURE__*/ (() => Schema.Struct({
+  "resolution": HarnessQuestionResolution,
+  "status": Schema.Literals(["accepted","already_resolved"])
+}).annotate({ identifier: "HarnessAnswerResult" }))()
+export type HarnessAnswerResult = typeof HarnessAnswerResult.Type
+export type HarnessAnswerResultEncoded = typeof HarnessAnswerResult.Encoded
+
 /** RFC 3339 UTC instant; servers emit millisecond precision with `Z`. */
 export const Timestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso)).annotate({ identifier: "Timestamp", description: "RFC 3339 UTC instant; servers emit millisecond precision with `Z`." }))()
 export type Timestamp = typeof Timestamp.Type
@@ -494,6 +532,7 @@ export const ActionResult = /*#__PURE__*/ (() => Schema.Struct({
   "action_id": Id,
   "affected_ids": Schema.Array(Id).check(Schema.isUnique()),
   "arrangement_revision": optionalKey(Revision),
+  "harness_answer": optionalKey(HarnessAnswerResult),
   "kind": Schema.Literal("action-result"),
   "operation_id": Id,
   "snapshot_id": Id,
@@ -1154,6 +1193,7 @@ export const CanonicalNode: Schema.Codec<CanonicalNode, CanonicalNodeEncoded> = 
 
 export const Capability = /*#__PURE__*/ (() => Schema.Struct({
   "id": Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9.-]+$", "u"))),
+  "reason": optionalKey(Schema.String),
   "state": Schema.Literals(["granted","ungranted","unavailable","unsupported"]),
   "version": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "Capability" }))()
@@ -1325,6 +1365,44 @@ export const Glass = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "Glass" }))()
 export type Glass = typeof Glass.Type
 export type GlassEncoded = typeof Glass.Encoded
+
+export const HarnessQuestionAnswerabilityReason = /*#__PURE__*/ (() => Schema.Literals(["adapter_missing","adapter_unavailable","resolved"]).annotate({ identifier: "HarnessQuestionAnswerabilityReason" }))()
+export type HarnessQuestionAnswerabilityReason = typeof HarnessQuestionAnswerabilityReason.Type
+export type HarnessQuestionAnswerabilityReasonEncoded = typeof HarnessQuestionAnswerabilityReason.Encoded
+
+export const HarnessQuestionAnswerability = /*#__PURE__*/ (() => Schema.Struct({
+  "reason": optionalKey(HarnessQuestionAnswerabilityReason),
+  "state": Schema.Literals(["available","unavailable"])
+}).annotate({ identifier: "HarnessQuestionAnswerability" }))()
+export type HarnessQuestionAnswerability = typeof HarnessQuestionAnswerability.Type
+export type HarnessQuestionAnswerabilityEncoded = typeof HarnessQuestionAnswerability.Encoded
+
+export const HarnessQuestionItem = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Schema.String,
+  "multi": Schema.Boolean,
+  "options": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(4294967295)),
+  "required": Schema.Boolean
+}).annotate({ identifier: "HarnessQuestionItem" }))()
+export type HarnessQuestionItem = typeof HarnessQuestionItem.Type
+export type HarnessQuestionItemEncoded = typeof HarnessQuestionItem.Encoded
+
+export const HarnessQuestion = /*#__PURE__*/ (() => Schema.Struct({
+  "agent": AgentId,
+  "answer": HarnessQuestionAnswerability,
+  "id": Id,
+  "kind": Schema.Literal("harness-question"),
+  "native_id": Schema.String,
+  "observed_at": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))),
+  "operational": optionalKey(Operational),
+  "questions": Schema.Array(HarnessQuestionItem),
+  "resolution": Schema.OptionFromNullOr(HarnessQuestionResolution),
+  "revision": Revision,
+  "runtime_incarnation": Schema.String,
+  "session": Id,
+  "updated_at": Timestamp
+}).annotate({ identifier: "HarnessQuestion" }))()
+export type HarnessQuestion = typeof HarnessQuestion.Type
+export type HarnessQuestionEncoded = typeof HarnessQuestion.Encoded
 
 export const History = /*#__PURE__*/ (() => Schema.Struct({
   "event_type": Schema.String,
@@ -1905,7 +1983,7 @@ export type SummaryEncoded = typeof Summary.Encoded
 
 export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
-  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage"]),
+  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage","harness-question"]),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
@@ -2097,6 +2175,7 @@ export const Resource = /*#__PURE__*/ (() => Schema.Union([
   Glass,
   Arrangement,
   OwnedSet,
+  HarnessQuestion,
   UnknownResource
 ], { mode: "oneOf" }).annotate({ identifier: "Resource" }))()
 export type Resource = typeof Resource.Type
@@ -3015,20 +3094,77 @@ export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
 
 /** Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. */
-export const ErrorCode = /*#__PURE__*/ (() => openEnum(["attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","stale-fence","cursor-gap","page-cursor-expired","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","projection-detail-too-large","projection-detail-invalid-source","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","message-too-large","message-store-full","long-message-signature-unsupported","internal"]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer." }))()
+export const ErrorCode = /*#__PURE__*/ (() => openEnum(["attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","stale-fence","cursor-gap","page-cursor-expired","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","projection-detail-too-large","projection-detail-invalid-source","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","message-too-large","message-store-full","long-message-signature-unsupported","invalid-answer","not-answerable","internal"]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer." }))()
 export type ErrorCode = typeof ErrorCode.Type
 export type ErrorCodeEncoded = typeof ErrorCode.Encoded
 
-export const ErrorEnvelope = /*#__PURE__*/ (() => Schema.Struct({
-  "api_version": Schema.Literal("st3.client.v0"),
-  "code": ErrorCode,
-  "details": Schema.Record(Schema.String, Schema.Unknown),
-  "error_version": Schema.Literal("st3.client.error.v0"),
-  "message": Schema.String,
-  "request_id": Id,
-  "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))),
-  "retryable": Schema.Boolean
-}).annotate({ identifier: "ErrorEnvelope" }))()
+export const HarnessInvalidAnswerReason = /*#__PURE__*/ (() => Schema.Literals(["unknown_option","too_many","required_missing","empty_single","too_long","unknown_question","other_not_allowed","note_not_allowed"]).annotate({ identifier: "HarnessInvalidAnswerReason" }))()
+export type HarnessInvalidAnswerReason = typeof HarnessInvalidAnswerReason.Type
+export type HarnessInvalidAnswerReasonEncoded = typeof HarnessInvalidAnswerReason.Encoded
+
+export const HarnessInvalidAnswerDetails = /*#__PURE__*/ (() => Schema.Struct({
+  "reason": HarnessInvalidAnswerReason
+}).annotate({ identifier: "HarnessInvalidAnswerDetails" }))()
+export type HarnessInvalidAnswerDetails = typeof HarnessInvalidAnswerDetails.Type
+export type HarnessInvalidAnswerDetailsEncoded = typeof HarnessInvalidAnswerDetails.Encoded
+
+export const HarnessNotAnswerableDetails = /*#__PURE__*/ (() => Schema.Struct({
+  "reason": HarnessQuestionAnswerabilityReason
+}).annotate({ identifier: "HarnessNotAnswerableDetails" }))()
+export type HarnessNotAnswerableDetails = typeof HarnessNotAnswerableDetails.Type
+export type HarnessNotAnswerableDetailsEncoded = typeof HarnessNotAnswerableDetails.Encoded
+
+export const ErrorEnvelope = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("attention-migrated"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("arrangement-exists"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("arrangement-folder-exists"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("arrangement-retired"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("arrangement-limit"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("arrangement-folder-deleted"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("arrangement-cycle"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("arrangement-body-too-large"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("arrangement-owner-forbidden"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("invalid-arrangement-subject"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("invalid-arrangement-action"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("invalid-arrangement-operations"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("invalid-arrangement-folder"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("invalid-arrangement-name"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("invalid-arrangement-key"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("invalid-subject-reference"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("not-found"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("forbidden"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("unsupported-capability"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("validation-failed"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("idempotency-conflict"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("issuer-required"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("stale-fence"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("cursor-gap"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("page-cursor-expired"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("rate-limited"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("runtime-not-local"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("runtime-authority-indeterminate"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("remote-unavailable"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("terminal-unavailable"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("terminal-ended"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("timeline-history-incomplete"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("projection-detail-too-large"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("projection-detail-invalid-source"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("conversation-content-invalidated"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("transcript-unavailable"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("blob-too-large"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("unsupported-media-type"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("blob-content-mismatch"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("blob-quota-exceeded"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("blob-not-found"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("blob-expired"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("message-too-large"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("message-store-full"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("long-message-signature-unsupported"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("invalid-answer"), "details": HarnessInvalidAnswerDetails, "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("not-answerable"), "details": HarnessNotAnswerableDetails, "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": Schema.Literal("internal"), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "code": unknownCase(["attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","stale-fence","cursor-gap","page-cursor-expired","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","projection-detail-too-large","projection-detail-invalid-source","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","message-too-large","message-store-full","long-message-signature-unsupported","invalid-answer","not-answerable","internal"]), "details": Schema.Record(Schema.String, Schema.Unknown), "error_version": Schema.Literal("st3.client.error.v0"), "message": Schema.String, "request_id": Id, "retry_after_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))), "retryable": Schema.Boolean })
+], { mode: "oneOf" }).annotate({ identifier: "ErrorEnvelope" }))()
 export type ErrorEnvelope = typeof ErrorEnvelope.Type
 export type ErrorEnvelopeEncoded = typeof ErrorEnvelope.Encoded
 

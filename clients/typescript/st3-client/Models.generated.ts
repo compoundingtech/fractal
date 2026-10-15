@@ -14,13 +14,14 @@ export type ActionCommon = {
   parameters: {
 
 };
-  type: "arrangement.edit" | "custom.reply" | "prompt.respond" | "attention.resolve" | "review.approve" | "review.reject" | "review.request-changes" | "message.send" | "message.read" | "message.close" | "launch.create" | "launch.revise" | "launch.preview" | "launch.approve" | "launch.cancel" | "mission.start" | "mission.revise" | "mission.approve-revision" | "mission.cancel-revision" | "mission.cancel" | "session.import" | "work.ask" | "work.done" | "work.cancel-ask" | "work.claim" | "work.renew" | "work.progress" | "work.complete" | "work.fail" | "work.release" | "work.retry" | "work.publish-mission" | "agent.create" | "agent.stop" | "agent.start" | "agent.suspend" | "agent.resume" | "terminal.create" | "terminal.end" | "agent.queue-move" | "lane.join" | "lane.leave" | "lane.move" | "lane.mark" | "lane.approve" | "runtime.stop" | "runtime.restart" | "runtime.reset" | "runtime.context-clear" | "runtime.signal" | "terminal.input" | "terminal.resize" | "terminal.attach" | "terminal.detach" | "pairing.revoke";
+  type: "harness.answer" | "arrangement.edit" | "custom.reply" | "prompt.respond" | "attention.resolve" | "review.approve" | "review.reject" | "review.request-changes" | "message.send" | "message.read" | "message.close" | "launch.create" | "launch.revise" | "launch.preview" | "launch.approve" | "launch.cancel" | "mission.start" | "mission.revise" | "mission.approve-revision" | "mission.cancel-revision" | "mission.cancel" | "session.import" | "work.ask" | "work.done" | "work.cancel-ask" | "work.claim" | "work.renew" | "work.progress" | "work.complete" | "work.fail" | "work.release" | "work.retry" | "work.publish-mission" | "agent.create" | "agent.stop" | "agent.start" | "agent.suspend" | "agent.resume" | "terminal.create" | "terminal.end" | "agent.queue-move" | "lane.join" | "lane.leave" | "lane.move" | "lane.mark" | "lane.approve" | "runtime.stop" | "runtime.restart" | "runtime.reset" | "runtime.context-clear" | "runtime.signal" | "terminal.input" | "terminal.resize" | "terminal.attach" | "terminal.detach" | "pairing.revoke";
 };
 
 export type ActionResult = {
   action_id: Id;
   affected_ids: Array<Id>;
   arrangement_revision?: Revision;
+  harness_answer?: HarnessAnswerResult;
   kind: "action-result";
   operation_id: Id;
   snapshot_id: Id;
@@ -515,6 +516,7 @@ export type Capabilities = {
 
 export type Capability = {
   id: string;
+  reason?: string;
   state: "granted" | "ungranted" | "unavailable" | "unsupported";
   version: number;
 };
@@ -794,7 +796,7 @@ export type Envelope = {
   value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog);
 };
 
-export type ErrorCode = ("attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "internal" | string);
+export type ErrorCode = ("attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "invalid-answer" | "not-answerable" | "internal" | string);
 
 export type ErrorEnvelope = {
   api_version: "st3.client.v0";
@@ -869,9 +871,75 @@ export type GlassTab = {
 
 export type GoldenResourceSet = Array<Resource>;
 
+export type HarnessAnswerInput = {
+  positions: Array<number>;
+};
+
+export type HarnessAnswerParameters = {
+  answers: {
+  [key: string]: HarnessAnswerInput;
+};
+  question: Id;
+};
+
+export type HarnessAnswerResult = {
+  resolution: HarnessQuestionResolution;
+  status: "accepted" | "already_resolved";
+};
+
+export type HarnessInvalidAnswerDetails = {
+  reason: HarnessInvalidAnswerReason;
+};
+
+export type HarnessInvalidAnswerReason = "unknown_option" | "too_many" | "required_missing" | "empty_single" | "too_long" | "unknown_question" | "other_not_allowed" | "note_not_allowed";
+
+export type HarnessNotAnswerableDetails = {
+  reason: HarnessQuestionAnswerabilityReason;
+};
+
 export type HarnessPhase = {
   name: string;
   tasks: Array<HarnessTask>;
+};
+
+export type HarnessQuestion = ResourceHeader & {
+  agent: AgentId;
+  answer: HarnessQuestionAnswerability;
+  kind: "harness-question";
+  native_id: string;
+  observed_at: number;
+  questions: Array<HarnessQuestionItem>;
+  resolution: (HarnessQuestionResolution | null);
+  runtime_incarnation: string;
+  session: Id;
+};
+
+export type HarnessQuestionAnswerability = {
+  reason?: HarnessQuestionAnswerabilityReason;
+  state: "available" | "unavailable";
+};
+
+export type HarnessQuestionAnswerabilityReason = "adapter_missing" | "adapter_unavailable" | "resolved";
+
+export type HarnessQuestionItem = {
+  id: string;
+  multi: boolean;
+  options: number;
+  required: boolean;
+};
+
+export type HarnessQuestionResolution = {
+  answers: {
+  [key: string]: HarnessResolvedAnswer;
+};
+  resolved_at: number;
+  revision: Revision;
+  status: "answered" | "answered_elsewhere" | "expired" | "cancelled";
+};
+
+export type HarnessResolvedAnswer = {
+  positions: Array<number>;
+  timed_out: boolean;
 };
 
 export type HarnessTask = {
@@ -1497,7 +1565,7 @@ export type RequestSubject = {
   url?: string;
 };
 
-export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet);
+export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet | HarnessQuestion);
 
 export type ResourceHeader = {
   id: Id;
@@ -2484,6 +2552,7 @@ export type ActionRequest =
   reason?: string;
 }; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'custom.reply'; parameters: CustomReplyParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'harness.answer'; parameters: HarnessAnswerParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'lane.approve'; parameters: {
   anchor_id?: Id;
   detail?: string;

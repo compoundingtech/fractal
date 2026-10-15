@@ -61,6 +61,8 @@ pub struct ErrorEnvelope {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ErrorCode {
+    InvalidAnswer,
+    NotAnswerable,
     NotFound,
     Forbidden,
     UnsupportedCapability,
@@ -116,6 +118,8 @@ pub struct Capability {
     pub id: String,
     pub version: u32,
     pub state: CapabilityState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1745,8 +1749,132 @@ pub struct SummaryAgentsAsOf {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct HarnessQuestion {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    pub agent: String,
+    pub session: String,
+    pub native_id: String,
+    pub runtime_incarnation: String,
+    pub questions: Vec<HarnessQuestionItem>,
+    pub observed_at: u64,
+    pub resolution: Option<HarnessQuestionResolution>,
+    pub answer: HarnessQuestionAnswerability,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessQuestionItem {
+    pub id: String,
+    pub options: u32,
+    pub multi: bool,
+    pub required: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessAnswerInput {
+    pub positions: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessResolvedAnswer {
+    pub positions: Vec<u32>,
+    pub timed_out: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessQuestionResolutionStatus {
+    Answered,
+    AnsweredElsewhere,
+    Expired,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessQuestionResolution {
+    pub status: HarnessQuestionResolutionStatus,
+    pub revision: String,
+    pub answers: BTreeMap<String, HarnessResolvedAnswer>,
+    pub resolved_at: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessQuestionAnswerabilityState {
+    Available,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessQuestionAnswerabilityReason {
+    AdapterMissing,
+    AdapterUnavailable,
+    Resolved,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessQuestionAnswerability {
+    pub state: HarnessQuestionAnswerabilityState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<HarnessQuestionAnswerabilityReason>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessAnswerParameters {
+    pub question: String,
+    pub answers: BTreeMap<String, HarnessAnswerInput>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessAnswerStatus {
+    Accepted,
+    AlreadyResolved,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessAnswerResult {
+    pub status: HarnessAnswerStatus,
+    pub resolution: HarnessQuestionResolution,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessInvalidAnswerReason {
+    UnknownOption,
+    TooMany,
+    RequiredMissing,
+    EmptySingle,
+    TooLong,
+    UnknownQuestion,
+    OtherNotAllowed,
+    NoteNotAllowed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessInvalidAnswerDetails {
+    pub reason: HarnessInvalidAnswerReason,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessNotAnswerableDetails {
+    pub reason: HarnessQuestionAnswerabilityReason,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Resource {
+    HarnessQuestion(HarnessQuestion),
     ConnectedClient(ConnectedClient),
     Usage(Usage),
     Summary(Summary),
@@ -1780,6 +1908,7 @@ pub enum Resource {
 
 /// The resource kinds this client models; any other kind reads as [`Resource::Unknown`].
 pub const KNOWN_RESOURCE_KINDS: &[&str] = &[
+    "harness-question",
     "connected-client",
     "usage",
     "summary",
@@ -1847,6 +1976,7 @@ impl<'de> Deserialize<'de> for UnknownResource {
 impl Resource {
     pub fn header(&self) -> &ResourceHeader {
         match self {
+            Self::HarnessQuestion(v) => &v.header,
             Self::ConnectedClient(v) => &v.header,
             Self::Usage(v) => &v.header,
             Self::Summary(v) => &v.header,
@@ -2336,6 +2466,8 @@ pub struct Fence {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ActionType {
+    #[serde(rename = "harness.answer")]
+    HarnessAnswer,
     #[serde(rename = "custom.reply")]
     CustomReply,
     #[serde(rename = "prompt.respond")]
@@ -2601,6 +2733,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::CustomReply,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn harness_answer(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HarnessAnswerParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::HarnessAnswer,
             idempotency_key,
             fence,
             &parameters,
@@ -3638,6 +3784,8 @@ pub struct ActionResult {
     pub terminal_attachment: Option<TerminalAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrangement_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_answer: Option<HarnessAnswerResult>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
