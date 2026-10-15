@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Coalesce schedule-sync retry wakes and discard obsolete timer callbacks",
+  "summary": "Coalesce schedule-sync retry wakes and preserve replacement deadlines",
   "replay": {
     "status": "none",
     "detail": "No replay or projection change."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "No response, wire or client contract changes. Schedule-sync retries retain their earliest pending wake. Other items retain the latest requested deadline. Cancelled or superseded timers no longer wake reconciliation."
+    "detail": "No response, wire or client contract changes. Schedule-sync retries retain their earliest pending wake. Other items retain their existing notifications. An obsolete callback cannot erase a replacement deadline; obsolete schedule-sync callbacks no longer wake reconciliation."
   },
   "downtime": {
     "status": "unknown",

@@ -8387,7 +8387,8 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Coalesce sliding schedule-sync retry requests without postponing their pending wake.
-    /// Other callers retain the latest requested deadline; obsolete callbacks stay silent.
+    /// Other callers retain their existing notifications; obsolete callbacks cannot erase a
+    /// replacement deadline.
     fn arm_restart(&self, subject: &str, until: u128) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             // Keep the incremental clock dependency, but do not register an unspawned timer:
@@ -8417,12 +8418,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             tokio::time::sleep(Duration::from_millis(delay)).await;
             {
                 let mut armed = delayed.lock().unwrap_or_else(PoisonError::into_inner);
-                // An earlier wake may have replaced this one, or the item may have cancelled
-                // it. A stale timer must neither erase its replacement nor wake another pass.
-                if armed.get(&subject) != Some(&until) {
+                if armed.get(&subject) == Some(&until) {
+                    armed.remove(&subject);
+                } else if subject == "stage/schedule-sync" {
+                    // Only this shared catchup retry coalesces notifications too. Other keys
+                    // can carry independent phase deadlines, so retain their previous wakes
+                    // without allowing an obsolete timer to erase a replacement entry.
                     return;
                 }
-                armed.remove(&subject);
             }
             crate::reconcile_telemetry::record_wake(
                 crate::reconcile_telemetry::WakeCause::TimerRestart,
@@ -18758,14 +18761,16 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_changed_item_deadline_keeps_its_later_wake_without_rearming() {
-        // These callers do not share schedule-sync's sliding retry policy. Exercise the
-        // actual timer utility with their keys; no caller re-evaluation is needed here.
+    async fn an_obsolete_item_wake_preserves_its_replacement_without_rearming() {
+        // These callers do not share schedule-sync's sliding retry policy. Their prior
+        // notifications survive, but an old callback must not erase a later pending entry.
+        // This exercises the timer utility, not the callers' effect/eligibility code.
         for subject in [
             "restart-prepare:agent/example/seat",
             "checkout:agent/example/seat",
             "stage/github-watches",
             "stage/subagents",
+            "stop:agent/example/seat",
         ] {
             let notify = Arc::new(Notify::new());
             let reconciler = Reconciler::new(
@@ -18775,19 +18780,26 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 notify.clone(),
             );
             let origin = now_ms();
-            reconciler.arm_restart(subject, origin + 5_000);
+            let early = if subject.starts_with("stop:") {
+                100
+            } else {
+                5_000
+            };
+            reconciler.arm_restart(subject, origin + early);
             reconciler.arm_restart(subject, origin + 15_000);
             assert_eq!(
                 reconciler.delayed_restarts.lock().unwrap().get(subject),
                 Some(&(origin + 15_000)),
             );
-            assert!(
-                tokio::time::timeout(Duration::from_secs(10), notify.notified())
-                    .await
-                    .is_err(),
-                "the superseded early deadline must not wake the item",
-            );
             tokio::time::timeout(Duration::from_secs(6), notify.notified())
+                .await
+                .expect("retain the old notification, including a stop's 100ms poll");
+            assert_eq!(
+                reconciler.delayed_restarts.lock().unwrap().get(subject),
+                Some(&(origin + 15_000)),
+                "the old notification must not erase the later pending deadline",
+            );
+            tokio::time::timeout(Duration::from_secs(16), notify.notified())
                 .await
                 .expect("the later deadline must survive without a caller rearming it");
             assert!(reconciler.delayed_restarts.lock().unwrap().is_empty());
