@@ -5456,12 +5456,22 @@ async fn client_agents(
     if query.min_cut.is_some() && query.cursor.is_some() {
         return Err(client_v0::validation("min_cut is only supported on the first agents page"));
     }
+    if let Some(wanted) = query.min_cut {
+        let head = state.store.index().map_err(ApiError::internal)?;
+        if wanted > head {
+            let mut error = agent_roster_cut_not_ready(wanted);
+            error.details.insert("head".into(), json!(head));
+            return Err(error);
+        }
+    }
     // A daemon's readers never fold the roster: they answer from its refresher's publications.
     if state.store.agent_roster_refresher_running() {
         return client_agents_published(state, snapshot, query).await;
     }
     // A warm request never queues behind a cold projection. Drop the probe's SQLite
     // snapshot before waiting, then recheck all cache fences in the admitted snapshot.
+    // Embedded stores without a refresher build once and reject an unmet cut immediately;
+    // only the daemon's publication path has a refresher to wait for.
     let requested = query.min_cut.unwrap_or(snapshot.store_index);
     let fresh = query.fresh || query.min_cut.is_some();
     let min_cut = query.min_cut;
@@ -26726,6 +26736,29 @@ mission "wake" state="ready" {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn named_roster_future_cut_is_rejected_without_waiting_or_refreshing() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let store = &state.store;
+        let wake = store.start_agent_roster_refresher().unwrap();
+        let head = store.index().unwrap();
+        for history in [false, true] {
+            for fresh in [false, true] {
+                let started = tokio::time::Instant::now();
+                let error = client_agents(State(state.clone()), Extension(new_client_snapshot(&state)),
+                    Query(ClientListQuery { history, fresh, min_cut: Some(u64::MAX),
+                        ..ClientListQuery::default() })).await.unwrap_err();
+                assert_eq!(started.elapsed(), Duration::ZERO);
+                assert_eq!(error.code, "agent-roster-cut-not-ready");
+                assert_eq!(error.details["min_cut"], u64::MAX);
+                assert_eq!(error.details["head"], head);
+            }
+        }
+        assert!(tokio::time::timeout(Duration::from_millis(1), wake.notified()).await.is_err(),
+            "an impossible cut must not request a refresh");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn named_roster_cut_timeout_has_one_timer_even_with_legacy_fresh_and_failure() {
         for history in [false, true] {
             for fresh in [false, true] {
@@ -26743,6 +26776,7 @@ mission "wake" state="ready" {
                 let error = client_agents(State(state.clone()), Extension(new_client_snapshot(&state)),
                     Query(ClientListQuery { history, fresh, min_cut: Some(wanted),
                         ..ClientListQuery::default() })).await.unwrap_err();
+                // This timeout returns before blocking_roster: paused time is exact here.
                 assert_eq!(started.elapsed(), AGENT_ROSTER_READ_WAIT, "one fixed timer");
                 assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
                 assert_eq!(error.code, "agent-roster-cut-not-ready");

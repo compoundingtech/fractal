@@ -1854,7 +1854,9 @@ A caller that needs a strict read-after-write fence passes `min_cut=N`, using th
 `ClaimRecord.store_index` returned by its write on this same host. This is a host-local
 acceptance index, not a replicated sequence: a cut minted on host A must not fence host B.
 The daemon waits at most two seconds for a publication whose served `snapshot.store_index`
-is at least `min_cut`, rechecking the final snapshot after the wait. If that cut is unavailable,
+is at least `min_cut`, rechecking the final snapshot after the wait. A cut above this host's
+current head is refused immediately with the same cut-not-ready error and `min_cut`/`head`
+details; it cannot be a receipt from a write this host already accepted. If that cut is unavailable,
 it returns retryable HTTP 503 with `details.reason: "agent-roster-cut-not-ready"`; failure of a
 refresh never permits an older publication to satisfy this barrier. When both `fresh` and
 `min_cut` are supplied, `min_cut` wins: one named barrier and one two-second timer.
