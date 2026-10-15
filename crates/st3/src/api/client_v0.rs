@@ -20507,8 +20507,18 @@ mission "example/zero-run" state="ready" {
                 reopened += 1;
             }
         }
-        follower.abort();
         assert_eq!(reopened, 0, "re-OPENed within {:?} of the refused replay", COLLECTION_REREAD_INTERVAL / 2);
+        // A refusal did occur: it is what makes the follower re-open, once the wait is over.
+        let deadline = tokio::time::Instant::now() + COLLECTION_REREAD_INTERVAL * 2;
+        let reopened = loop {
+            match tokio::time::timeout_at(deadline, receiver.recv()).await {
+                Ok(Some((_, _, frame))) if frame["replace"] == true => break true,
+                Ok(Some(_)) => {}
+                _ => break false,
+            }
+        };
+        follower.abort();
+        assert!(reopened, "the replay never refused, so nothing was waited on");
     }
 
     /// A transcript for the paged-read tests: `visible` answers, then `hidden` graph sends whose
@@ -20598,7 +20608,7 @@ mission "example/zero-run" state="ready" {
             limit: Some(2), cursor: first["page"]["next_cursor"].as_str().map(str::to_owned),
             ..Default::default()
         };
-        native_slice_page(&state, &snapshot, &session, &session_id, &next, &source).unwrap();
+        let _ = native_slice_page(&state, &snapshot, &session, &session_id, &next, &source).unwrap();
         // Same file and inode, a different last complete record.
         let mut rewritten = (0..5)
             .map(|number| codex_line(&format!("answer-{number}"), "assistant", None, number))

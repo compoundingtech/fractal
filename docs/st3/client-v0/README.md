@@ -784,7 +784,9 @@ that many consecutive entries are all suppressed echoes and none is visible, the
 `page-cursor-expired` (HTTP 410, no `full_resync`) on a continuation, on the header's head read
 and on change replay; it is not `cursor-gap`, because reloading the newest page would meet the
 same prefix. OPEN keeps its established stored-timeline fallback in that case, and a following
-stream waits before it re-opens after such a refusal. A transcript with
+stream waits 1.5 s before it re-opens after such a refusal. While 4096 or more echoes sit at the head, each
+change to the conversation therefore costs one refused replay and one stored-timeline re-OPEN per
+1.5 s at most, until a visible entry is appended. A transcript with
 more than 4096 consecutive correlated delivery echoes therefore cannot be paged past by cursor,
 and while its newest 4096 entries are all echoes its native entries cannot be shown; this is an
 accepted, known limit.
