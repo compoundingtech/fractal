@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "none",
-    "detail": "No database or persisted timer representation changes."
+    "detail": "No database or persisted timer representation changes. Transient registrations retain deadlines separately from weak live-task identity."
   },
   "rules": {
     "status": "none",
