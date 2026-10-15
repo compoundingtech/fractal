@@ -11,7 +11,8 @@ import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConversationItem } from '../conversation/model.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
-import type { AttachmentPort } from '../data/source.ts'
+import type { AttachmentPort, ConversationPortResult } from '../data/source.ts'
+import type { BlobUpload } from '@smalltalk/st3-client/schema'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 import { Markdown, type WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import type * as Kit from '@smalltalk/fractal-ui/assistant-ui'
@@ -45,7 +46,7 @@ const source = vi.hoisted(() => ({
   send: vi.fn<AttachmentPort['send']>(),
   upload: vi.fn<AttachmentPort['upload']>(),
   capabilities: vi.fn<AttachmentPort['capabilities']>(),
-  runtimeOptions: [] as ConversationRuntimeOptions[],
+  submissions: 0,
 }))
 
 vi.mock('../data/react.tsx', async () => {
@@ -77,7 +78,6 @@ vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx', a
     ...kit,
     EmbraceRuntimeProvider: (props: React.ComponentProps<typeof Kit.EmbraceRuntimeProvider>) => {
       source.runtimeItems.push(props.options.messages ?? [])
-      source.runtimeOptions.push(props.options)
       return <kit.EmbraceRuntimeProvider {...props} />
     },
   }
@@ -99,7 +99,10 @@ vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx', 
     ...kit,
     EmbraceComposer: (props: React.ComponentProps<typeof Kit.EmbraceComposer>) => {
       source.composerProps.push(props)
-      return <kit.EmbraceComposer {...props} />
+      return <kit.EmbraceComposer {...props} onSendDraft={props.onSendDraft === undefined ? undefined : draft => {
+        source.submissions += 1
+        props.onSendDraft?.(draft)
+      }} />
     },
   }
 })
@@ -133,8 +136,12 @@ beforeEach(() => {
   source.upload.mockReset()
   source.capabilities.mockReset()
   source.reconnect.mockReset()
-  source.runtimeOptions = []
+  source.submissions = 0
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  vi.stubGlobal('URL', class extends URL {
+    static createObjectURL() { return 'blob:composer-image' }
+    static revokeObjectURL() {}
+  })
   // jsdom has no layout observers; the kit instantiates one while attaching scroll.
   // Test-environment sizing (react-aria renders every row) needs no measured entries.
   vi.stubGlobal('ResizeObserver', class {
@@ -163,6 +170,34 @@ const mount = async (ux?: UxTelemetry) => {
   })
 }
 
+
+// Exercise the actual C1 input, native runtime preparation and DOM actions, not
+// adapter/onNew handoffs: those seams alone miss the submission-clearing contract.
+const editComposer = async (value: string) => {
+  const input = container.querySelector('textarea')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  return input
+}
+const submitComposer = async (method: 'button' | 'enter' | 'form' = 'button') => {
+  const input = container.querySelector('textarea')!
+  await act(async () => {
+    if (method === 'enter') input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
+    else if (method === 'form') input.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    else [...input.closest('form')!.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Send' || button.textContent === 'Send')!.click()
+  })
+}
+const pasteComposerImage = async () => {
+  const file = new File(['x'], 'image.png', { type: 'image/png' })
+  await act(async () => {
+    const paste = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(paste, 'clipboardData', { value: { files: [file] } })
+    container.querySelector('textarea')!.dispatchEvent(paste)
+  })
+  return file
+}
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
@@ -649,64 +684,126 @@ describe('ConversationPane composition activation', () => {
     expect(container.querySelector('textarea')?.getAttribute('aria-label')).toBe('Message to Example Agent (agent/selected) · Session session/active')
   })
 
-  it('routes a prepared native image through the pane to the captured recipient session', async () => {
+  it.each(['button', 'enter', 'form'] as const)('captures the native session before image preparation through %s submission', async method => {
     source.sendEnabled = true
-    source.upload.mockResolvedValue({ _tag: 'Success', value: { blob: `blob/${'a'.repeat(64)}`, media_type: 'image/png', sha256: 'a'.repeat(64), size: 1 } })
-    source.send.mockResolvedValue({ _tag: 'Refused', reason: 'failed', detail: 'Offline fixture' })
-    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false, sessionId: 'session/image' } }
+    const upload = Promise.withResolvers<ConversationPortResult<BlobUpload>>()
+    source.upload.mockReturnValue(upload.promise)
+    source.send.mockResolvedValue({ _tag: 'Refused', reason: 'failed', detail: 'Network fixture' })
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false, sessionId: 'session/original' } }
     await mount()
-    const options = source.runtimeOptions.at(-1)!
-    const adapter = options.adapters!.attachments!
-    const pending = await adapter.add({ file: new File(['x'], 'image.png', { type: 'image/png' }) })
-    if (!('id' in pending)) throw new Error('Expected pending image')
-    const ready = await adapter.send(pending)
-    await act(async () => options.onNew({
-      role: 'user', content: [], attachments: [ready], createdAt: new Date(0),
-      metadata: { custom: {} }, parentId: null, sourceId: null, runConfig: undefined,
-    }))
-    expect(source.send).toHaveBeenCalledWith(expect.objectContaining({ parameters: {
-      to: 'agent/selected', session_id: 'session/image', content: '', tags: [],
+    await pasteComposerImage()
+    expect(container.querySelector('img[alt="image.png"]')).not.toBeNull()
+    expect(container.querySelector('button[aria-label="Remove image.png"]')).not.toBeNull()
+    await submitComposer(method)
+    expect(source.submissions).toBe(1)
+    expect(source.upload).toHaveBeenCalledOnce()
+    expect(source.send).not.toHaveBeenCalled()
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false, sessionId: 'session/changed-during-upload' } }
+    await mount()
+    await act(async () => upload.resolve({ _tag: 'Success', value: { blob: `blob/${'a'.repeat(64)}`, media_type: 'image/png', sha256: 'a'.repeat(64), size: 1 } }))
+    expect(source.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ parameters: {
+      to: 'agent/selected', session_id: 'session/original', content: '', tags: [],
       attachments: [{ blob: `blob/${'a'.repeat(64)}`, media_type: 'image/png', name: 'image.png' }],
     } }))
   })
 
-  it('keeps an offline composer editable without dispatching on reconnect', async () => {
+  it('shows and removes a failed pasted image before a subsequent text-only send', async () => {
+    source.sendEnabled = true
+    source.upload.mockResolvedValue({ _tag: 'Refused', reason: 'failed', detail: 'Upload failed fixture' })
+    source.send.mockResolvedValue({ _tag: 'Refused', reason: 'failed', detail: 'Network fixture' })
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false } }
+    await mount()
+    const file = await pasteComposerImage()
+    await editComposer('Retain this text')
+    await submitComposer()
+    expect(source.upload).toHaveBeenCalledWith({ bytes: file, mediaType: 'image/png' })
+    expect(source.send).not.toHaveBeenCalled()
+    expect(container.querySelector('textarea')!.value).toBe('Retain this text')
+    expect(text()).toContain('Upload failed fixture')
+    const remove = container.querySelector<HTMLButtonElement>('button[aria-label="Remove image.png"]')
+    expect(remove).not.toBeNull()
+    await act(async () => { remove!.click() })
+    expect(container.querySelector('img[alt="image.png"]')).toBeNull()
+    await submitComposer()
+    expect(source.upload).toHaveBeenCalledOnce()
+    expect(source.send).toHaveBeenCalledWith(expect.objectContaining({ parameters: expect.objectContaining({
+      content: 'Retain this text', attachments: [],
+    }) }))
+  })
+
+  it('selects a visible removable image through the native file picker', async () => {
+    source.sendEnabled = true
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false } }
+    await mount()
+    const picker = [...container.querySelectorAll('button')].find(button => button.textContent === 'Attach image')
+    expect(picker).toBeDefined()
+    await act(async () => { picker!.click() })
+    const input = document.body.querySelector<HTMLInputElement>('input[type="file"]')!
+    expect(input.accept).toContain('image/png')
+    await act(async () => {
+      Object.defineProperty(input, 'files', { value: [new File(['x'], 'selected.png', { type: 'image/png' })] })
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(container.querySelector('img[alt="selected.png"]')).not.toBeNull()
+    const remove = container.querySelector<HTMLButtonElement>('button[aria-label="Remove selected.png"]')!
+    await act(async () => { remove.click() })
+    expect(container.querySelector('img[alt="selected.png"]')).toBeNull()
+    expect(source.upload).not.toHaveBeenCalled()
+    expect(source.send).not.toHaveBeenCalled()
+  })
+
+  it.each(['button', 'enter', 'form'] as const)('keeps offline drafts editable through %s submission and reconnect', async method => {
     source.sendEnabled = true
     source.offline = true
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false } }
     await mount()
-    expect(text()).toContain('Your draft stays editable')
-    expect(container.querySelector('textarea')?.readOnly).toBe(false)
-    expect(source.composerProps.at(-1)?.sendDisabled).toBe(true)
-    const reconnect = [...container.querySelectorAll('button')].find(button => button.textContent === 'Reconnect now')
-    expect(reconnect).toBeDefined()
-    await act(async () => { reconnect!.click() })
-    expect(source.reconnect).toHaveBeenCalledOnce()
+    const input = await editComposer('Offline draft')
+    expect(input.disabled).toBe(false)
+    await submitComposer(method)
+    expect(source.submissions).toBe(0)
+    expect(input.value).toBe('Offline draft')
     expect(source.send).not.toHaveBeenCalled()
+    const reconnect = [...container.querySelectorAll('button')].find(button => button.textContent === 'Reconnect now')!
+    await act(async () => { reconnect.click() })
+    expect(source.reconnect).toHaveBeenCalledOnce()
     source.offline = false
     await mount()
-    expect(source.composerProps.at(-1)?.sendDisabled).toBe(false)
+    expect(input.value).toBe('Offline draft')
     expect(source.send).not.toHaveBeenCalled()
   })
 
-  it('distinguishes revoked access and checks the native grant without resending', async () => {
+  it.each(['button', 'enter', 'form'] as const)('keeps revoked drafts editable through %s submission and access recovery', async method => {
     source.sendEnabled = true
     source.send.mockResolvedValue({ _tag: 'Refused', reason: 'ungranted', status: 401, detail: 'Revoked' })
     source.capabilities.mockResolvedValue({ _tag: 'Success', value: { upload: 'granted', send: 'granted', read: 'granted' } })
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false } }
     await mount()
-    await act(async () => source.runtimeOptions.at(-1)!.onNew({
-      role: 'user', content: [{ type: 'text', text: 'hello' }], createdAt: new Date(0),
-      metadata: { custom: {} }, parentId: null, sourceId: null, runConfig: undefined,
-    }))
+    await editComposer('Initial send')
+    await submitComposer()
     expect(text()).toContain('credential was revoked')
-    expect(container.querySelector('textarea')?.readOnly).toBe(false)
-    const check = [...container.querySelectorAll('button')].find(button => button.textContent === 'Check access')
-    expect(check).toBeDefined()
-    await act(async () => { check!.click() })
-    expect(source.capabilities).toHaveBeenCalledOnce()
+    const input = await editComposer('Revoked draft')
+    expect(input.disabled).toBe(false)
+    await submitComposer(method)
+    expect(input.value).toBe('Revoked draft')
+    expect(source.submissions).toBe(1)
     expect(source.send).toHaveBeenCalledOnce()
-    expect(source.composerProps.at(-1)?.sendDisabled).toBe(false)
+    const check = [...container.querySelectorAll('button')].find(button => button.textContent === 'Check access')!
+    await act(async () => { check.click() })
+    expect(source.capabilities).toHaveBeenCalledOnce()
+    expect(input.value).toBe('Revoked draft')
+    expect(source.send).toHaveBeenCalledOnce()
+  })
+
+  it.each([false, true] as const)('renders Retry only for retryable=%s failed outbox rows', async retryable => {
+    source.sendEnabled = true
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [{
+      _tag: 'Text', id: 'pending/terminal-failure', role: 'user', text: 'Failed send', attachments: [], streaming: false, at: at(10),
+      sendState: { _tag: 'Failed', reason: 'failed', detail: 'Native failure', retryable },
+    }], hasOlder: false } }
+    await mount()
+    const failure = container.querySelector('[data-testid="send-failure"]')!
+    expect(failure).not.toBeNull()
+    expect([...failure.querySelectorAll('button')].some(button => button.textContent === 'Retry')).toBe(retryable)
   })
 
   it.each(['running', 'completed'] as const)('renders no unavailable cancel control or raw state text while %s', async status => {

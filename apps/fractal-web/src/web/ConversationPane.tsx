@@ -3,8 +3,9 @@ import { useAtomValue } from '@effect/atom-react'
 import { systemEventsPreference } from './conversationPreferences.ts'
 import { EmbraceComposer } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx'
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
+import { ComposerAttachments } from '../../../../packages/fractal-ui/src/assistant-ui/composer-session/ComposerSession.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
-import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
+import type { ConversationRuntimeOptions, WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNow } from '../data/react.tsx'
 import { createConversationTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, type SendRefusal } from './composerSend.ts'
@@ -119,6 +120,10 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     items: state._tag === 'Observed' ? state.items : [],
     refusal, onRefused: setRefusal,
   })
+  // Native image preparation may outlive this render's session. The composer calls
+  // onSendDraft before preparation and admits one preparing submission at a time.
+  const submission = React.useMemo(() => ({ dispatch: undefined as ConversationRuntimeOptions['onNew'] | undefined }),
+    [agentRef, source.attachments])
   const retryConversation = source.retryConversation
   const renderInlineReference = React.useMemo(() => onOpenDocument === undefined ? undefined : documentReferences(onOpenDocument), [onOpenDocument])
   // A Markdown link to a `doc/…` opens it in a tab instead of following a relative URL.
@@ -137,7 +142,9 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
         ...attachment, id: attachmentAdapter?.nativeId(attachment.id) ?? attachment.id,
       }))
       attachmentAdapter?.submitted(attachments.map(attachment => attachment.id))
-      await binding.runtime.onNew({ ...message, attachments })
+      const dispatch = submission.dispatch ?? binding.runtime.onNew
+      submission.dispatch = undefined
+      await dispatch({ ...message, attachments })
     },
     isRunning: state._tag === 'Observed' && state.isRunning,
   }}>
@@ -177,7 +184,9 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
         {binding.availability._tag === 'Offline' && source.reconnect !== undefined ? <button type="button" onClick={source.reconnect}>Reconnect now</button> : null}
         {binding.availability._tag === 'Revoked' ? <button type="button" onClick={() => { void binding.recover() }}>Check access</button> : null}
       </div> : null}
+      {attachmentAdapter === undefined ? null : <ComposerAttachments />}
       <EmbraceComposer variant="C1" readingColumn targetLabel={`${agentName} (${agentRef})${feed._tag === 'Observed' && feed.value.sessionId !== undefined ? ` · Session ${feed.value.sessionId}` : ''}`}
+        onSendDraft={() => { submission.dispatch = binding.runtime.onNew }}
         sendDisabled={binding.disabledReason !== undefined}
         disabledReason={binding.availability._tag === 'Offline' || binding.availability._tag === 'Revoked' ? undefined : binding.disabledReason} />
     </div>
