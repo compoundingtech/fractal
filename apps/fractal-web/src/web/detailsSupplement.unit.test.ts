@@ -131,9 +131,8 @@ it('keeps elapsed/age acquiring independently and preserves the kit tooltip-only
   expect(pending).not.toContain('Unreported')
   const reason = 'Session start matches the producer snapshot time; elapsed time and age are unreported.'
   const rejected = render(['Managed elapsed', 'Session age'].map(label => ({ label, value: 'Unreported', detail: reason })))
-  expect(rejected.match(/data-details-missing-value/g)).toHaveLength(2)
-  expect(rejected).toContain('aria-label="Managed elapsed: unavailable"')
-  expect(rejected).toContain('aria-label="Session age: unavailable"')
+  expect(rejected.match(/aria-label="Managed elapsed: unavailable"/g)).toHaveLength(1)
+  expect(rejected.match(/aria-label="Session age: unavailable"/g)).toHaveLength(1)
   expect(rejected).not.toContain('Session start matches')
   expect(rejected).not.toContain('data-details-duration-pending')
 })
