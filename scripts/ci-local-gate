@@ -10,7 +10,9 @@ deliberate difference: CI builds the test archive in one job and the shard jobs 
 place (`ci-nextest run --no-run`, then the four partitions of the merge-queue run), so no GitHub artifact is needed.
 A test proves every command below appears in the generated workflow, so the two cannot drift apart.
 On a host whose cargo shim lives at $HOME/.local/bin/cargo (build admission, a builds slice) the dev shell's cargo is run through
-that shim, so the compile is queued and sliced like any other; it is the same compile, and only done at run time.
+that shim, so the compile is queued and sliced like any other, and each stage that builds runs inside ONE ticket of the shim's
+stage slot (`cargo --stage-slot LABEL -- ...`, one stage at a time, stopped after the host's stage limit): the same compile, only
+queued once per stage instead of once per cargo command. Done at run time; not a CI command.
 
 Every stage runs even after a failure (a failing record is information); --fail-fast stops at the first and writes
 no facts. --external NAME=EXIT passes the exit code of a member this script does not run (genie-freshness and
@@ -79,6 +81,18 @@ def admitted(command, shim_dir):
     return NIX + ['bash', '-c', 'export CARGO_REAL=$(command -v cargo); export PATH="$1:$PATH"; shift; exec "$@"', '_', shim_dir, *command[3:]]
 
 
+LIGHT = ('upgrade-impact',)  # no cargo, no nix build: no slot
+
+
+def slot_command(name, shim_dir, base):
+    """Run one whole stage inside ONE host build-queue ticket: `cargo --stage-slot LABEL -- COMMAND` queues once, and the cargo
+    commands inside run without queueing again (each in its own builds.slice scope); the stage is stopped after the host's
+    stage limit (40 minutes). The command is this script, running the stage directly. Without this a stage that runs several
+    cargo commands queues, at the back, for every one of them."""
+    return [str(Path(shim_dir) / 'cargo'), '--stage-slot', f'ci-local-gate-{name}', '--',
+            sys.executable, str(Path(__file__).resolve()), '--direct', '--stage', name, '--base', base]
+
+
 def merge_commit(base, env):
     """CI classifies the merge of the pull request into its base, not the branch's own commits; so do we."""
     def git(*args, **kw):
@@ -141,6 +155,7 @@ def main(argv, table=None, setup=None):
     parser.add_argument('--external', action='append', default=[], metavar='NAME=EXIT')
     parser.add_argument('--facts', metavar='FILE', help='write the aggregate facts here')
     parser.add_argument('--fail-fast', action='store_true')
+    parser.add_argument('--direct', action='store_true', help='run the chosen stages in this process, without the host stage slot (what the slot itself runs)')
     parser.add_argument('--dry-run', action='store_true', help='print the plan and stop')
     args = parser.parse_args(argv)
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._/-]*', args.base):
@@ -165,6 +180,9 @@ def main(argv, table=None, setup=None):
             print(f'ci-local-gate: --external {item!r} must be NAME=EXIT for one of {", ".join(EXTERNAL)}', file=sys.stderr)
             return 2
         external[name] = 'success' if int(code) == 0 else 'failure'
+    if args.direct and args.facts:
+        print('ci-local-gate: --direct runs stages for the stage slot and writes no facts', file=sys.stderr)
+        return 2
     results, failed = {}, False
     real_home = os.environ.get('HOME', '')
     shim_dir = str(Path(real_home) / '.local/bin') if real_home and os.access(Path(real_home) / '.local/bin/cargo', os.X_OK) else None
@@ -178,6 +196,15 @@ def main(argv, table=None, setup=None):
         for name in chosen:
             started = time.monotonic()
             code = 0
+            if shim_dir and table is None and not args.direct and name not in LIGHT and (Path(shim_dir) / 'cargo').exists():
+                # One ticket for the whole stage; the stage runs this script again, directly, inside it.
+                code = subprocess.run(slot_command(name, shim_dir, args.base), env=dict(environment, HOME=real_home)).returncode
+                results[name] = 'success' if code == 0 else 'failure'
+                failed = failed or code != 0
+                print(f'ci-local-gate: {name} {results[name]} in {round(time.monotonic() - started)}s', file=sys.stderr)
+                if code != 0 and args.fail_fast:
+                    return 1
+                continue
             for command, extra in plan[name]:
                 if MERGE in command:
                     command = [merge_commit(args.base, environment) if part == MERGE else part for part in command]

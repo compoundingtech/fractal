@@ -160,6 +160,18 @@ class Shim(unittest.TestCase):
             self.assertTrue(done.stdout.startswith(str(shim) + ':'), done.stdout)
 
 
+class Slot(unittest.TestCase):
+    def test_a_stage_runs_inside_one_stage_slot_ticket_and_runs_itself_directly(self):
+        command = gate.slot_command('linux-clippy', '/home/u/.local/bin', 'origin/main')
+        self.assertEqual(command[:4], ['/home/u/.local/bin/cargo', '--stage-slot', 'ci-local-gate-linux-clippy', '--'])
+        self.assertEqual(command[-5:], ['--direct', '--stage', 'linux-clippy', '--base', 'origin/main'])
+        self.assertTrue(command[5].endswith('ci-local-gate'))
+
+    def test_direct_never_writes_facts_and_the_light_stage_takes_no_slot(self):
+        self.assertEqual(gate.main(['--direct', '--facts', '/dev/null'], table={}), 2)
+        self.assertEqual(gate.LIGHT, ('upgrade-impact',))
+
+
 class Prepared(unittest.TestCase):
     def test_the_environment_is_the_ci_jobs_isolated_home_and_runner_temp(self):
         with tempfile.TemporaryDirectory() as work:
