@@ -1,7 +1,7 @@
 // Chrome controls: thread header, sidebar header, toolbar and footer. Explicit-fact presentation only.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button } from 'react-aria-components'
+import { Button, Focusable, Pressable } from 'react-aria-components'
 import { accentVars as accent, geometryVars as g, motionVars as m, radiusVars as r, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { Icon, type IconName } from './Icons'
 import { Tooltip } from './Controls'
@@ -14,7 +14,10 @@ export interface ChromeControlProps {
   readonly pressed?: boolean
   /** The fill without toggle semantics: a menu trigger whose filter or sort is in effect. The label says what is set. */
   readonly active?: boolean
-  /** Why the control cannot run; it renders disabled, described by the reason, with the reason as the hover title. */
+  /**
+   * Why the control cannot run. It stays in the tab order as an `aria-disabled` button that never presses,
+   * is described by the reason, and shows "label · reason" in the kit tooltip on hover and keyboard focus.
+   */
   readonly disabledReason?: string
   /** Briefly unavailable, e.g. while its own action is in flight. */
   readonly isDisabled?: boolean
@@ -28,18 +31,41 @@ export interface ChromeControlProps {
  */
 export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, tooltipPlacement = 'bottom' }: ChromeControlProps) {
   const reasonId = React.useId()
-  const button = <Button
-    aria-label={label}
-    {...(pressed === undefined ? {} : { 'aria-pressed': pressed })}
-    {...(disabledReason === undefined ? { isDisabled } : { isDisabled: true, 'aria-describedby': reasonId })}
-    {...(onPress === undefined ? {} : { onPress })}
-    {...stylex.props(styles.control, (pressed === true || active) && styles.pressed)}
-  >
-    <Icon name={icon} />
-  </Button>
-  // A disabled button receives no pointer events, so its reason sits on the wrapper's title.
-  if (disabledReason !== undefined) return <span title={disabledReason} {...stylex.props(styles.disabledWrap)}>{button}<span id={reasonId} hidden>{disabledReason}</span></span>
-  return <Tooltip label={label} placement={tooltipPlacement}>{button}</Tooltip>
+  if (disabledReason !== undefined) {
+    // A natively disabled button leaves the tab order and receives no pointer events, so its reason would be
+    // unreachable. The disabled Pressable consumes a surrounding trigger's press (DialogTrigger, MenuTrigger) and
+    // fires nothing; Focusable hands hover and focus to the kit tooltip.
+    return <>
+      <Tooltip label={`${label} · ${disabledReason}`} placement={tooltipPlacement}>
+        <Focusable>
+          <Pressable isDisabled>
+            <button
+              type="button"
+              aria-label={label}
+              aria-disabled="true"
+              aria-describedby={reasonId}
+              {...(pressed === undefined ? {} : { 'aria-pressed': pressed })}
+              {...stylex.props(styles.control, styles.disabled)}
+            >
+              <Icon name={icon} />
+            </button>
+          </Pressable>
+        </Focusable>
+      </Tooltip>
+      <span id={reasonId} hidden>{disabledReason}</span>
+    </>
+  }
+  return <Tooltip label={label} placement={tooltipPlacement}>
+    <Button
+      aria-label={label}
+      {...(pressed === undefined ? {} : { 'aria-pressed': pressed })}
+      isDisabled={isDisabled}
+      {...(onPress === undefined ? {} : { onPress })}
+      {...stylex.props(styles.control, (pressed === true || active) && styles.pressed)}
+    >
+      <Icon name={icon} />
+    </Button>
+  </Tooltip>
 }
 
 const styles = stylex.create({
@@ -54,5 +80,6 @@ const styles = stylex.create({
     ':disabled': { opacity: 0.64, cursor: 'default', backgroundColor: 'transparent', color: ink.fgMuted },
   },
   pressed: { backgroundColor: surface.rowActive, color: ink.fg, ':hover': { backgroundColor: surface.rowActive, color: ink.fg } },
-  disabledWrap: { display: 'inline-flex' },
+  // The aria-disabled twin of `:disabled`: dimmed and inert to hover, but it keeps the focus ring.
+  disabled: { opacity: 0.64, cursor: 'default', ':hover': { backgroundColor: 'transparent', color: ink.fgMuted } },
 })

@@ -1,7 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, waitFor, within } from 'storybook/test'
+import { Dialog, DialogTrigger, Modal } from 'react-aria-components'
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import { ChromeControl } from './assistant-ui/composition/ChromeControl'
 import { ThreadHeader } from './assistant-ui/composition/Shell'
 import { baselineTheme } from './assistant-ui/neutral-theme'
@@ -11,9 +12,10 @@ import { geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as 
 /**
  * The chrome's quiet icon controls in place: the sidebar header and footer, and the thread header with the
  * agent, resources and conversation controls beside the terminal and panel toggles (panel open, so pressed).
- * Below 640px the sidebar strip stacks above the header.
+ * Resources is a dialog trigger, as in the app; with a reason it is disabled. Below 640px the sidebar strip
+ * stacks above the header.
  */
-function ChromeControlsStory({ scheme = 'dark' }: { scheme?: Scheme }) {
+function ChromeControlsStory({ scheme = 'dark', resourcesDisabledReason, onResources }: { scheme?: Scheme; resourcesDisabledReason?: string; onResources?: () => void }) {
   const [collapsed, setCollapsed] = React.useState(false)
   const [panelOpen, setPanelOpen] = React.useState(true)
   const [drawerOpen, setDrawerOpen] = React.useState(false)
@@ -38,7 +40,10 @@ function ChromeControlsStory({ scheme = 'dark' }: { scheme?: Scheme }) {
       <ThreadHeader folder="dev5" title="fractal-web" status="working" statusLabel="working" panelOpen={panelOpen} drawerOpen={drawerOpen} onTogglePanel={() => setPanelOpen(value => !value)} onToggleDrawer={() => setDrawerOpen(value => !value)} terminalAvailable nativeActions={
         <div {...stylex.props(styles.actions)}>
           <ChromeControl icon="person" label="Actions for fractal-web" />
-          <ChromeControl icon="folder" label="Resources" />
+          <DialogTrigger>
+            <ChromeControl icon="folder" label="Resources" {...(resourcesDisabledReason === undefined ? {} : { disabledReason: resourcesDisabledReason })} {...(onResources === undefined ? {} : { onPress: onResources })} />
+            <Modal isDismissable {...stylex.props(styles.modal)}><Dialog aria-label="Agent resources" {...stylex.props(styles.dialog)}>Agent resources</Dialog></Modal>
+          </DialogTrigger>
           <ChromeControl icon="gear" label="Conversation menu" />
         </div>
       } />
@@ -50,7 +55,7 @@ const meta = {
   title: 'Fractal UI/Chrome controls',
   component: ChromeControlsStory,
   parameters: { layout: 'fullscreen' },
-  args: { scheme: 'dark' },
+  args: { scheme: 'dark', onResources: fn() },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
 } satisfies Meta<typeof ChromeControlsStory>
 export default meta
@@ -76,8 +81,8 @@ export const QuietIcons: Story = { play: async ({ canvasElement }) => {
 } }
 export const QuietIconsLight: Story = { ...QuietIcons, args: { scheme: 'light' } }
 
-/** Hover names Resources in the kit tooltip; Tab from Agent lands on Resources with the focus ring and the same tooltip; a toggle press keeps its fill. */
-export const QuietIconsFlow: Story = { play: async ({ canvasElement }) => {
+/** Hover names Resources in the kit tooltip; Tab from Agent lands on Resources with the focus ring and the same tooltip; Enter opens its dialog; a toggle press keeps its fill. */
+export const QuietIconsFlow: Story = { play: async ({ args, canvasElement }) => {
   const scope = within(header(canvasElement))
   const resources = scope.getByRole('button', { name: 'Resources' })
   // The pointer crosses the header on its way to a control; the page's very first hover opens no tooltip.
@@ -93,10 +98,46 @@ export const QuietIconsFlow: Story = { play: async ({ canvasElement }) => {
   await waitFor(() => expect(getComputedStyle(resources).outlineStyle).toBe('solid'))
   await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveTextContent('Resources'))
   await userEvent.keyboard('{Escape}')
+  // The positive twin of DisabledReason: the same wiring presses and opens the dialog when enabled.
+  await userEvent.keyboard('{Enter}')
+  await waitFor(() => expect(within(document.body).getByRole('dialog', { name: 'Agent resources' })).toBeVisible())
+  await expect(args.onResources).toHaveBeenCalledTimes(1)
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(within(document.body).queryByRole('dialog')).toBeNull())
   const terminal = scope.getByRole('button', { name: 'Toggle terminal drawer' })
   await userEvent.click(terminal)
   await expect(terminal).toHaveAttribute('aria-pressed', 'true')
 } }
+
+const resourcesReason = 'Read access to agent resources has not been granted.'
+
+/**
+ * Negative control: Resources with a reason is wired to the same spy and dialog, yet click, Enter and Space
+ * neither press it nor open the dialog. It stays in the tab order, so Tab from Agent reaches it, and focus shows
+ * "Resources · reason" in the kit tooltip; no native title anywhere.
+ */
+export const DisabledReason: Story = { args: { resourcesDisabledReason: resourcesReason }, play: async ({ args, canvasElement }) => {
+  const scope = within(header(canvasElement))
+  const resources = scope.getByRole('button', { name: 'Resources' })
+  await expect(resources).toHaveAttribute('aria-disabled', 'true')
+  await expect(resources).toHaveAccessibleDescription(resourcesReason)
+  await expect(resources.getBoundingClientRect().height).toBe(28)
+  await expect(canvasElement.querySelector('[title]')).toBeNull()
+  await userEvent.click(resources)
+  scope.getByRole('button', { name: 'Actions for fractal-web' }).focus()
+  await userEvent.tab()
+  await expect(resources).toHaveFocus()
+  await waitFor(() => expect(getComputedStyle(resources).outlineStyle).toBe('solid'))
+  await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveTextContent(`Resources · ${resourcesReason}`))
+  await userEvent.keyboard('{Enter}')
+  await userEvent.keyboard(' ')
+  await expect(args.onResources).not.toHaveBeenCalled()
+  await expect(within(document.body).queryByRole('dialog')).toBeNull()
+  await expect(resources).toHaveFocus()
+  await userEvent.tab()
+  await expect(scope.getByRole('button', { name: 'Conversation menu' })).toHaveFocus()
+} }
+export const DisabledReasonLight: Story = { ...DisabledReason, args: { ...DisabledReason.args, scheme: 'light' } }
 
 const styles = stylex.create({
   root: { display: 'flex', flexDirection: { default: 'column', '@media (min-width: 640px)': 'row' }, minHeight: '100vh', boxSizing: 'border-box', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
@@ -105,4 +146,6 @@ const styles = stylex.create({
   push: { flexGrow: 1 },
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0 },
   actions: { display: 'flex', alignItems: 'center', gap: s.xs },
+  modal: { position: 'fixed', inset: 0, display: 'grid', placeItems: 'center' },
+  dialog: { padding: s.lg, backgroundColor: surface.raised, color: ink.fg, outlineStyle: 'none' },
 })
