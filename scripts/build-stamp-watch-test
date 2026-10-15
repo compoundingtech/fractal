@@ -93,4 +93,14 @@ for name, (script, expression) in CASES.items():
         assert 'Compiling stamp-fixture' in build(), f'{name}: a new commit did not rebuild the stamp'
         stamp(binary, name, head_of(work))
         assert 'Compiling' not in build(), name
+
+        # The branch ref moves into packed-refs (git gc / pack-refs): the loose file the build watched is gone, so one more build
+        # is allowed; then a commit creates the loose file again and must still be seen (the directory is watched meanwhile).
+        run('git', 'pack-refs', '--all', cwd=work)
+        build()
+        build()
+        assert 'Compiling' not in build(), f'{name}: an unchanged tree with a packed branch ref rebuilt'
+        run(*GIT, 'commit', '-q', '--allow-empty', '-m', 'After packing', cwd=work)
+        assert 'Compiling stamp-fixture' in build(), f'{name}: a commit on a packed branch did not rebuild the stamp'
+        stamp(binary, name, head_of(work))
 print('build-stamp-watch-test: ok')

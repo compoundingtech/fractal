@@ -20,17 +20,33 @@ fn is_sha(revision: &str) -> bool {
 /// `git rev-parse --git-path refs` names the COMMON directory that every worktree of the repository shares, and Cargo
 /// rescans a watched directory recursively, so any ref updated by anyone (a fetch, a push, a branch in another worktree)
 /// re-ran this script and rebuilt everything that depends on this crate (a whole workspace, ~12 minutes) although this
-/// worktree's HEAD had not moved. HEAD, the one ref HEAD names, packed-refs and the index are the inputs; a path that does
-/// not exist is skipped because Cargo treats a missing watched file as always changed.
+/// worktree's HEAD had not moved. HEAD, the index and the ONE ref HEAD names are the inputs. While that ref is a loose file
+/// only the file is watched; when it exists only in packed-refs (after `git gc` or `git pack-refs`) packed-refs is watched
+/// instead, and so is the directory the loose file will appear in, because a new commit creates it there. A path that does
+/// not exist is skipped: Cargo treats a missing watched file as always changed.
 fn watch_git_inputs() {
-    let mut names = vec!["HEAD".to_owned(), "index".to_owned(), "packed-refs".to_owned()];
-    if let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) {
-        names.push(branch);
+    let path_of = |name: &str| git(&["rev-parse", "--git-path", name]);
+    let watch = |path: &str| {
+        if std::path::Path::new(path).exists() {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    };
+    for name in ["HEAD", "index"] {
+        if let Some(path) = path_of(name) {
+            watch(&path);
+        }
     }
-    for name in names {
-        if let Some(path) = git(&["rev-parse", "--git-path", &name]) {
-            if std::path::Path::new(&path).exists() {
-                println!("cargo:rerun-if-changed={path}");
+    if let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(loose) = path_of(&branch) {
+            if std::path::Path::new(&loose).exists() {
+                watch(&loose);
+            } else {
+                if let Some(packed) = path_of("packed-refs") {
+                    watch(&packed);
+                }
+                if let Some(directory) = std::path::Path::new(&loose).parent().and_then(|p| p.to_str()) {
+                    watch(directory);
+                }
             }
         }
     }
