@@ -699,6 +699,21 @@ different command and extra inputs, while each signer is still held to exactly i
 and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
 `host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only, with `enforce` false.
 
+### Which tree a pull request run asks about
+
+A `pull_request` run checks out GitHub's merge of the head into the CURRENT base, a new tree whenever main moved, so a note for the tree an agent
+built and signed would nearly always miss. The gate therefore asks the verifier about the tree of the **pull request head commit**
+(`github.event.pull_request.head.sha`; GitHub attaches the required checks to that sha) when every one of these holds, and about the merge tree
+otherwise: the head repository is this repository and the pull request is not a draft; the payload head and base are full object ids and the opener,
+actor and triggering actor are known; the head commit is present or fetchable; the checked-out commit is the merge whose second parent is that head
+(or the head itself); the opener, the actor and the triggering actor are on `.st/evidence-authors.json` at the base and every non-merge commit of
+the branch has a listed author and committer (the signing guard's own `check_authors`, loaded from the base's `ci-evidence-signing`); and no
+protected file differs between the branch point and the head, the base, or the current tip of the merge's first parent. The gate, verifier, policy,
+keys and author rule are all taken from the base, never from the checkout. The decision line says which: `tree_of=head|merge`, `pr_head=`,
+`merge_tree=` and `head_tree=used` or `head_tree=fallback:<why>`. A `merge_group` run never uses a head tree: only a note for its own tree can skip
+it, and a head-tree decision on any other event is refused. A skip on a pull request therefore means "the head tree passed on a trusted host", not
+"the merge with today's main passes"; a break caused only by main moving is caught in the merge queue, which still tests the integrated tree.
+
 ### When the gate says skip
 
 `scripts/ci-evidence-gate` takes the verifier from the accepted base and asks it, with the policy,

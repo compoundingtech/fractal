@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A pull request run now looks for the evidence note of the pull request head tree, not of GitHub's merge ref, under strict conditions and with a fall back to the merge tree; nothing is enforced",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or recovery behavior changes; this changes the CI evidence gate, its workflow environment and tests only."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or digest changes. Every check stays enforce false, so no job is skipped because of this change; the decision line gains tree_of, pr_head, merge_tree and head_tree fields."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No command, frame, scope or stored-format change in the product."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup work or expected interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required by this change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent product state changes or new swap-back restrictions."
+  }
+}
