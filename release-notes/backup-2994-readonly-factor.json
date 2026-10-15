@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Share the existing backup archive writer with a private read-only staged-file reader",
+  "compatibility": {
+    "status": "none",
+    "detail": "No CLI, endpoint, record or format change. The private entry is not wired to an operation. Both existing archive versions retain the same writer, framing, ordering and body matching semantics."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No DDL, registry, storage layout or version change. The private reader refuses unsupported or incomplete installed metadata instead of opening a migrating Store."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No signature, chain, checkpoint, retention or admission rule change. A stage with retained claims lacking envelopes refuses without signing or sealing."
+  },
+  "replay": {
+    "status": "none",
+    "detail": "No replay, migration, sealing or repair is performed by the private stage reader."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service or runtime action is attached to this factoring."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No new command or production backup procedure. Online copy, capacity, lifecycle, CLI and resource qualification remain separate work."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No recovery behavior change. This factoring is not a live deadline fix or evidence of the reported predecessor-gap cause."
+  }
+}

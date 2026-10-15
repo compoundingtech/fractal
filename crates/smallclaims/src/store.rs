@@ -2252,33 +2252,8 @@ impl Store {
         &self,
         requests: &[ReplicaEnvelopeId],
     ) -> Result<Vec<crate::claim::ReplicaEnvelopeSignature>> {
-        if requests.is_empty() {
-            return Ok(Vec::new());
-        }
-        let connection = self.readers.get();
-        let mut statement = connection.prepare(
-            "SELECT member_key, signature FROM replica_envelope_signatures
-             WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 ORDER BY member_key",
-        )?;
-        let mut signatures = Vec::new();
-        for request in requests.iter().take(REPLICATION_SIGNATURE_LIMIT) {
-            let rows = statement
-                .query_map(
-                    params![request.writer, request.sequence, request.hash],
-                    |row| {
-                        Ok(crate::claim::ReplicaEnvelopeSignature {
-                            writer: request.writer.clone(),
-                            sequence: request.sequence,
-                            hash: request.hash.clone(),
-                            member_key: row.get(0)?,
-                            signature: row.get(1)?,
-                        })
-                    },
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            signatures.extend(rows);
-        }
-        Ok(signatures)
+        if requests.is_empty() { return Ok(Vec::new()); }
+        replication_signatures_for_at(&self.readers.get(), requests)
     }
 
     /// Envelopes this node admitted before it knew that their writer is keyed or that their
@@ -6131,53 +6106,8 @@ impl Store {
         &self,
         missing: Vec<ReplicaEnvelopeId>,
     ) -> Result<Vec<ReplicaEnvelope>> {
-        if missing.is_empty() {
-            return Ok(Vec::new());
-        }
-        let connection = self.readers.get();
-        // Reuse one preparation for the whole page, including its signature subqueries.
-        let mut statement = connection.prepare_cached(
-            "SELECT envelopes.previous_hash, envelopes.accepted_at_unix_ms, envelopes.payload,
-                        (SELECT member_key FROM replica_envelope_signatures AS signatures
-                         WHERE signatures.writer=envelopes.writer
-                           AND signatures.sequence=envelopes.sequence
-                           AND signatures.envelope_hash=envelopes.envelope_hash
-                         ORDER BY member_key LIMIT 1),
-                        (SELECT signature FROM replica_envelope_signatures AS signatures
-                         WHERE signatures.writer=envelopes.writer
-                           AND signatures.sequence=envelopes.sequence
-                           AND signatures.envelope_hash=envelopes.envelope_hash
-                         ORDER BY member_key LIMIT 1)
-                 FROM replica_envelopes AS envelopes
-                 WHERE envelopes.writer=?1 AND envelopes.sequence=?2 AND envelopes.envelope_hash=?3",
-        )?;
-        let mut envelopes = Vec::with_capacity(missing.len());
-        for identity in missing {
-            // A trim can delete the payload after the snapshot listed the identity. The
-            // tombstone stays in the inventory and the peer never needs the envelope.
-            let envelope = statement.query_row(
-                params![identity.writer, identity.sequence, identity.hash],
-                |row| {
-                    let accepted_at = row.get::<_, String>(1)?;
-                    Ok(ReplicaEnvelope {
-                        writer: identity.writer.clone(),
-                        sequence: identity.sequence,
-                        previous_hash: row.get(0)?,
-                        hash: identity.hash.clone(),
-                        accepted_at_unix_ms: accepted_at.parse().unwrap_or_default(),
-                        payload: row.get(2)?,
-                        member_key: row.get(3)?,
-                        signature: row.get(4)?,
-                    })
-                },
-            )
-            .optional()?;
-            let Some(envelope) = envelope else {
-                continue;
-            };
-            envelopes.push(envelope);
-        }
-        Ok(envelopes)
+        if missing.is_empty() { return Ok(Vec::new()); }
+        replica_envelopes_at(&self.readers.get(), missing)
     }
 
     pub fn receive_replication_exchange(
@@ -8935,6 +8865,94 @@ pub fn append_claim_record_tx(
         predecessors: predecessors.to_vec(),
         accepted_at_unix_ms: now,
     })
+}
+
+/// The same indexed envelope read on an explicitly owned snapshot connection.
+/// It does not install, admit, seal, repair or acquire another connection.
+pub fn replication_signatures_for_at(
+    connection: &Connection,
+    requests: &[ReplicaEnvelopeId],
+) -> Result<Vec<crate::claim::ReplicaEnvelopeSignature>> {
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection.prepare(
+        "SELECT member_key, signature FROM replica_envelope_signatures
+         WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 ORDER BY member_key",
+    )?;
+    let mut signatures = Vec::new();
+    for request in requests.iter().take(REPLICATION_SIGNATURE_LIMIT) {
+        let rows = statement
+            .query_map(
+                params![request.writer, request.sequence, request.hash],
+                |row| {
+                    Ok(crate::claim::ReplicaEnvelopeSignature {
+                        writer: request.writer.clone(),
+                        sequence: request.sequence,
+                        hash: request.hash.clone(),
+                        member_key: row.get(0)?,
+                        signature: row.get(1)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        signatures.extend(rows);
+    }
+    Ok(signatures)
+}
+
+/// The same indexed envelope read on an explicitly owned snapshot connection.
+/// It does not install, admit, seal, repair or acquire another connection.
+pub fn replica_envelopes_at(
+    connection: &Connection,
+    missing: Vec<ReplicaEnvelopeId>,
+) -> Result<Vec<ReplicaEnvelope>> {
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Reuse one preparation for the whole page, including its signature subqueries.
+    let mut statement = connection.prepare_cached(
+        "SELECT envelopes.previous_hash, envelopes.accepted_at_unix_ms, envelopes.payload,
+                    (SELECT member_key FROM replica_envelope_signatures AS signatures
+                     WHERE signatures.writer=envelopes.writer
+                       AND signatures.sequence=envelopes.sequence
+                       AND signatures.envelope_hash=envelopes.envelope_hash
+                     ORDER BY member_key LIMIT 1),
+                    (SELECT signature FROM replica_envelope_signatures AS signatures
+                     WHERE signatures.writer=envelopes.writer
+                       AND signatures.sequence=envelopes.sequence
+                       AND signatures.envelope_hash=envelopes.envelope_hash
+                     ORDER BY member_key LIMIT 1)
+             FROM replica_envelopes AS envelopes
+             WHERE envelopes.writer=?1 AND envelopes.sequence=?2 AND envelopes.envelope_hash=?3",
+    )?;
+    let mut envelopes = Vec::with_capacity(missing.len());
+    for identity in missing {
+        // A trim can delete the payload after the snapshot listed the identity. The
+        // tombstone stays in the inventory and the peer never needs the envelope.
+        let envelope = statement.query_row(
+            params![identity.writer, identity.sequence, identity.hash],
+            |row| {
+                let accepted_at = row.get::<_, String>(1)?;
+                Ok(ReplicaEnvelope {
+                    writer: identity.writer.clone(),
+                    sequence: identity.sequence,
+                    previous_hash: row.get(0)?,
+                    hash: identity.hash.clone(),
+                    accepted_at_unix_ms: accepted_at.parse().unwrap_or_default(),
+                    payload: row.get(2)?,
+                    member_key: row.get(3)?,
+                    signature: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+        let Some(envelope) = envelope else {
+            continue;
+        };
+        envelopes.push(envelope);
+    }
+    Ok(envelopes)
 }
 
 #[cfg(test)]

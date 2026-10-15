@@ -222,105 +222,7 @@ impl Store {
         request: &CheckpointManifestRequest,
         limit: usize,
     ) -> Result<CheckpointManifestPage> {
-        let connection = self.readers.get();
-        // Join a pinned backup snapshot, or start a snapshot for this page alone.
-        let transaction = if connection.is_autocommit() {
-            Some(connection.unchecked_transaction()?)
-        } else {
-            None
-        };
-        let transaction = transaction.as_deref().unwrap_or(&connection);
-        let mut page = CheckpointManifestPage {
-            checkpoint: request.checkpoint.clone(),
-            cut_unix_ms: request.cut_unix_ms,
-            envelopes: Vec::new(),
-            claims: Vec::new(),
-            next: None,
-        };
-        let after_claim = match &request.after {
-            None | Some(CheckpointManifestCursor::Envelope(_)) => {
-                let (writer, sequence, hash) = match &request.after {
-                    Some(CheckpointManifestCursor::Envelope(key)) => (
-                        key.writer.as_str(),
-                        i64::try_from(key.sequence).unwrap_or(i64::MAX),
-                        key.envelope_hash.as_str(),
-                    ),
-                    _ => ("", i64::MIN, ""),
-                };
-                page.envelopes = transaction
-                    .prepare_cached(
-                        "SELECT writer, sequence, envelope_hash, accepted_at_unix_ms
-                         FROM checkpoint_envelopes
-                         WHERE checkpoint<=?1 AND (writer, sequence, envelope_hash) > (?2, ?3, ?4)
-                         ORDER BY writer, sequence, envelope_hash LIMIT ?5",
-                    )?
-                    .query_map(
-                        params![request.checkpoint, writer, sequence, hash, limit + 1],
-                        |row| {
-                            Ok(EnvelopeTombstone {
-                                writer: row.get(0)?,
-                                sequence: row.get(1)?,
-                                envelope_hash: row.get(2)?,
-                                accepted_at_unix_ms: row_millis(row.get(3)?),
-                            })
-                        },
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                if page.envelopes.len() > limit {
-                    page.envelopes.truncate(limit);
-                    let last = page.envelopes.last().expect("the page is not empty");
-                    page.next = Some(CheckpointManifestCursor::Envelope(EnvelopeKey {
-                        writer: last.writer.clone(),
-                        sequence: last.sequence,
-                        envelope_hash: last.envelope_hash.clone(),
-                    }));
-                    return Ok(page);
-                }
-                String::new()
-            }
-            Some(CheckpointManifestCursor::Claim(after)) => after.clone(),
-        };
-        let room = limit - page.envelopes.len();
-        page.claims = transaction
-            .prepare_cached(
-                "SELECT id, writer, sequence, envelope_hash, subject, kind, actor, predecessors,
-                        operation_id, request_digest, accepted_at_unix_ms
-                 FROM checkpoint_claims WHERE checkpoint<=?1 AND id>?2
-                 ORDER BY id LIMIT ?3",
-            )?
-            .query_map(params![request.checkpoint, after_claim, room + 1], |row| {
-                Ok((
-                    ClaimTombstone {
-                        id: row.get(0)?,
-                        writer: row.get(1)?,
-                        sequence: row.get(2)?,
-                        envelope_hash: row.get(3)?,
-                        subject: row.get(4)?,
-                        kind: row.get(5)?,
-                        actor: row.get(6)?,
-                        predecessors: Vec::new(),
-                        operation_id: row.get(8)?,
-                        request_digest: row.get(9)?,
-                        accepted_at_unix_ms: row_millis(row.get(10)?),
-                    },
-                    row.get::<_, String>(7)?,
-                ))
-            })?
-            .map(|row| {
-                let (mut claim, predecessors) = row?;
-                claim.predecessors = serde_json::from_str(&predecessors)?;
-                Ok(claim)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if page.claims.len() > room {
-            page.claims.truncate(room);
-            if let Some(last) = page.claims.last() {
-                page.next = Some(CheckpointManifestCursor::Claim(last.id.clone()));
-            } else {
-                page.next = Some(CheckpointManifestCursor::Claim(after_claim));
-            }
-        }
-        Ok(page)
+        manifest_page_at(&self.readers.get(), request, limit)
     }
 
     /// The whole manifest of a checkpoint, read page by page.
@@ -402,4 +304,111 @@ impl Store {
             })?,
         )
     }
+}
+
+/// Read a manifest page on this actual connection, joining its retained transaction.
+/// No installation, trim or source mutation is performed.
+pub fn manifest_page_at(
+    connection: &Connection,
+    request: &CheckpointManifestRequest,
+    limit: usize,
+) -> Result<CheckpointManifestPage> {
+    // Join a pinned backup snapshot, or start a snapshot for this page alone.
+    let transaction = if connection.is_autocommit() {
+        Some(connection.unchecked_transaction()?)
+    } else {
+        None
+    };
+    let transaction = transaction.as_deref().unwrap_or(connection);
+    let mut page = CheckpointManifestPage {
+        checkpoint: request.checkpoint.clone(),
+        cut_unix_ms: request.cut_unix_ms,
+        envelopes: Vec::new(),
+        claims: Vec::new(),
+        next: None,
+    };
+    let after_claim = match &request.after {
+        None | Some(CheckpointManifestCursor::Envelope(_)) => {
+            let (writer, sequence, hash) = match &request.after {
+                Some(CheckpointManifestCursor::Envelope(key)) => (
+                    key.writer.as_str(),
+                    i64::try_from(key.sequence).unwrap_or(i64::MAX),
+                    key.envelope_hash.as_str(),
+                ),
+                _ => ("", i64::MIN, ""),
+            };
+            page.envelopes = transaction
+                .prepare_cached(
+                    "SELECT writer, sequence, envelope_hash, accepted_at_unix_ms
+                     FROM checkpoint_envelopes
+                     WHERE checkpoint<=?1 AND (writer, sequence, envelope_hash) > (?2, ?3, ?4)
+                     ORDER BY writer, sequence, envelope_hash LIMIT ?5",
+                )?
+                .query_map(
+                    params![request.checkpoint, writer, sequence, hash, limit + 1],
+                    |row| {
+                        Ok(EnvelopeTombstone {
+                            writer: row.get(0)?,
+                            sequence: row.get(1)?,
+                            envelope_hash: row.get(2)?,
+                            accepted_at_unix_ms: row_millis(row.get(3)?),
+                        })
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if page.envelopes.len() > limit {
+                page.envelopes.truncate(limit);
+                let last = page.envelopes.last().expect("the page is not empty");
+                page.next = Some(CheckpointManifestCursor::Envelope(EnvelopeKey {
+                    writer: last.writer.clone(),
+                    sequence: last.sequence,
+                    envelope_hash: last.envelope_hash.clone(),
+                }));
+                return Ok(page);
+            }
+            String::new()
+        }
+        Some(CheckpointManifestCursor::Claim(after)) => after.clone(),
+    };
+    let room = limit - page.envelopes.len();
+    page.claims = transaction
+        .prepare_cached(
+            "SELECT id, writer, sequence, envelope_hash, subject, kind, actor, predecessors,
+                    operation_id, request_digest, accepted_at_unix_ms
+             FROM checkpoint_claims WHERE checkpoint<=?1 AND id>?2
+             ORDER BY id LIMIT ?3",
+        )?
+        .query_map(params![request.checkpoint, after_claim, room + 1], |row| {
+            Ok((
+                ClaimTombstone {
+                    id: row.get(0)?,
+                    writer: row.get(1)?,
+                    sequence: row.get(2)?,
+                    envelope_hash: row.get(3)?,
+                    subject: row.get(4)?,
+                    kind: row.get(5)?,
+                    actor: row.get(6)?,
+                    predecessors: Vec::new(),
+                    operation_id: row.get(8)?,
+                    request_digest: row.get(9)?,
+                    accepted_at_unix_ms: row_millis(row.get(10)?),
+                },
+                row.get::<_, String>(7)?,
+            ))
+        })?
+        .map(|row| {
+            let (mut claim, predecessors) = row?;
+            claim.predecessors = serde_json::from_str(&predecessors)?;
+            Ok(claim)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if page.claims.len() > room {
+        page.claims.truncate(room);
+        if let Some(last) = page.claims.last() {
+            page.next = Some(CheckpointManifestCursor::Claim(last.id.clone()));
+        } else {
+            page.next = Some(CheckpointManifestCursor::Claim(after_claim));
+        }
+    }
+    Ok(page)
 }
