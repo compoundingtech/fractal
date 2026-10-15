@@ -13,11 +13,29 @@ import { gatewayNativeDetails } from '../data/nativeDetailsSource.ts'
 import { gatewaySubjectReads } from '../data/subjectReadPort.ts'
 import { observed, type DataSource, type Feed } from '../data/source.ts'
 import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
-import { useNativeDetails, type NativeDetailsObservation } from './useNativeDetails.ts'
+import { guardedSessionTiming, useNativeDetails, type NativeDetailsObservation } from './useNativeDetails.ts'
 
 const nativeRow = (incarnation: string) => Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Native title', revision: '1', updated_at: '1970-01-01T00:00:05Z', driver: 'claude', state: 'running', reachability: 'local', runtime_ids: [], incarnation_id: incarnation, current_session_id: `session/${incarnation}`, subagents: [], usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 1, output_tokens: 1, cached_tokens: 0, total_tokens: 99999999, context: { used_percent: 42, observed_at_unix_ms: 4000 } } })
 
 describe('native Details mounted hook with real getter adapters', () => {
+  it('keeps a forward-moving session start unknown across stable subsequent polls, and resets only on corrected start or incarnation', () => {
+    const session = (start: number, incarnation = 'first') => Native.decodeUnknownSync(Native.Session)({ id: 'session/example', kind: 'session', owner_id: 'agent/example', runtime_incarnation: incarnation, revision: '1', started_at: new Date(start).toISOString(), updated_at: '1970-01-01T00:00:09Z', state: 'running', timeline_cursor: 'cursor/0' })
+    const input = Atom.make<Feed<Native.Session>>(observed({ value: session(1000) }))
+    const guarded = guardedSessionTiming(input)
+    const registry = AtomRegistry.make()
+    const release = registry.mount(guarded)
+    try {
+      expect(registry.get(guarded)._tag).toBe('Observed')
+      registry.set(input, observed({ value: session(2000) }))
+      expect(registry.get(guarded)._tag).toBe('Unavailable')
+      registry.set(input, observed({ value: session(2000) }))
+      expect(registry.get(guarded)._tag).toBe('Unavailable')
+      registry.set(input, observed({ value: session(500) }))
+      expect(registry.get(guarded)._tag).toBe('Observed')
+      registry.set(input, observed({ value: session(3000, 'second') }))
+      expect(registry.get(guarded)._tag).toBe('Observed')
+    } finally { release(); registry.dispose() }
+  })
   it('mounts selected facts only, fences restarts, and removes its getter demand when hidden', async () => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     const registry = AtomRegistry.make()

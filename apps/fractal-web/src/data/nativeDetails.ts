@@ -55,6 +55,8 @@ export const nativeDetailsTiming = ({ row, session, now }: { readonly row: Nativ
   if (session === undefined || incarnation === undefined || session.id !== Option.getOrUndefined(row.current_session_id) ||
     session.owner_id !== row.id || Option.getOrUndefined(session.runtime_incarnation) !== incarnation) return {}
   const start = DateTime.toEpochMillis(session.started_at)
+  // Replica fallbacks date the session from the current snapshot, not its start.
+  if (start === DateTime.toEpochMillis(session.updated_at) || start === now) return {}
   const ended = Option.getOrUndefined(session.ended_at)
   const end = ended === undefined ? now : DateTime.toEpochMillis(ended)
   if (start > now || end < start || end > now) return {}

@@ -1,5 +1,5 @@
 import { RegistryContext, useAtomValue } from '@effect/atom-react'
-import { Option } from 'effect'
+import { DateTime, Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
 import { useAgent, useAgentRow, useDataSource, useNow } from '../data/react.tsx'
@@ -11,6 +11,23 @@ import type { NativeDeclarations } from '../data/nativeDeclarations.ts'
 export type { NativeDetailsObservation } from '../data/nativeDetails.ts'
 const notReported = Atom.make(unavailable({ reason: 'unsupported', detail: 'The selected native fact is not reported.' }))
 
+/** A session start is immutable within its native incarnation; a forward drift is not a fresh age. */
+export const guardedSessionTiming = (input: Atom.Atom<Feed<Native.Session>>): Atom.Atom<Feed<Native.Session>> => {
+  let earliest: { readonly id: string; readonly incarnation?: string; readonly start: number } | undefined
+  return Atom.make(get => {
+    const feed = get(input)
+    if (feed._tag !== 'Observed') return feed
+    const session = feed.value
+    const start = DateTime.toEpochMillis(session.started_at)
+    const incarnation = Option.getOrUndefined(session.runtime_incarnation)
+    if (earliest === undefined || earliest.id !== session.id || earliest.incarnation !== incarnation || start < earliest.start)
+      earliest = { id: session.id, incarnation, start }
+    return start > earliest.start
+      ? unavailable({ reason: 'failed', detail: 'Session start changed between observations; elapsed time and age are unreported.' })
+      : feed
+  })
+}
+
 /** Mount only with the Details surface: atom lifetimes release every selected getter demand. */
 export const useNativeDetails = ({ agentRef }: { readonly agentRef: string }): NativeDetailsObservation => {
   const source = useDataSource()
@@ -21,7 +38,8 @@ export const useNativeDetails = ({ agentRef }: { readonly agentRef: string }): N
   const selected = row._tag === 'Observed' ? row.value : undefined
   const sessionRef = selected === undefined ? undefined : Option.getOrUndefined(selected.current_session_id)
   const sessionAtom: Atom.Atom<Feed<Native.Session>> = sessionRef === undefined ? notReported : source.subjectReads.session.feed(sessionRef)
-  const session = useAtomValue(sessionAtom)
+  const timingSessionAtom = React.useMemo(() => guardedSessionTiming(sessionAtom), [sessionAtom])
+  const session = useAtomValue(timingSessionAtom)
   const periodAtom: Atom.Atom<Feed<Native.UsagePeriod>> = source.nativeDetails?.usagePeriod ?? notReported
   const period = useAtomValue(periodAtom)
   const declarationAtom: Atom.Atom<Feed<NativeDeclarations>> = selected === undefined ? notReported : source.nativeDetails?.declarations({ agentRef, revision: selected.revision }) ?? notReported
