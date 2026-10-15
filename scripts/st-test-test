@@ -194,6 +194,22 @@ class StTest(unittest.TestCase):
         self.assertFalse(stale.exists())
         self.assertNotIn('st-test-', git(self.work, 'worktree', 'list'))
 
+    def test_a_worktree_whose_pid_belongs_to_another_user_is_treated_as_alive(self):
+        self.commit('b.txt', 'two')
+        other = Path(tempfile.mkdtemp(prefix='st-test-'))
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        (other / 'pid').write_text('4242')
+        git(self.work, 'worktree', 'add', '--detach', '-q', str(other / 'tree'), 'HEAD')
+        real_kill = os.kill
+
+        def kill(pid, sig):
+            if pid == 4242:
+                raise PermissionError
+            return real_kill(pid, sig)
+        with mock.patch('os.kill', side_effect=kill):
+            self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        self.assertTrue((other / 'tree').exists())
+
     def test_a_worktree_of_a_live_run_is_left_alone(self):
         self.commit('b.txt', 'two')
         live = Path(tempfile.mkdtemp(prefix='st-test-'))
@@ -210,7 +226,7 @@ class StTest(unittest.TestCase):
         self.assertEqual(done.returncode, 2)
         done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--check', 'genie-freshness', '--base', 'origin/main'],
                               capture_output=True, text=True, cwd=self.work, env=dict(env, PATH='/nonexistent'))
-        self.assertIn(done.returncode, (1, 2))
+        self.assertEqual(done.returncode, 1, done.stderr)  # the check could not run its command: a failed check, not a refusal
 
     def test_a_base_that_looks_like_a_git_option_is_refused(self):
         self.commit('b.txt', 'two')

@@ -1314,7 +1314,7 @@
               export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
             fi
             # Pushing a branch signs its checks first when they have no evidence yet (scripts/evidence-prepush).
-            if [ -z "''${GITHUB_ACTIONS:-}" ] && [ -x ./scripts/install-git-hooks ]; then
+            if [ -z "''${GITHUB_ACTIONS:-}" ] && [ -z "''${CI:-}" ] && [ -x ./scripts/install-git-hooks ]; then
               ./scripts/install-git-hooks || echo "scripts/install-git-hooks failed: pushes will not sign evidence" >&2
             fi
           '';

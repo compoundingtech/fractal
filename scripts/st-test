@@ -105,6 +105,8 @@ def reap_stale():
         try:
             os.kill(int((scratch / 'pid').read_text()), 0)
             continue  # still running
+        except PermissionError:
+            continue  # alive, and another user's: not ours to reap
         except (OSError, ValueError):
             pass
         git('worktree', 'remove', '--force', str(scratch / 'tree'), check=False)

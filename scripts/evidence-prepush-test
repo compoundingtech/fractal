@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import pty
 import shutil
 import signal
 import subprocess
@@ -26,7 +27,14 @@ if '--status' in sys.argv:
     time.sleep(float(os.environ.get('STUB_STATUS_SLEEP', '0')))
     sys.exit(int(os.environ.get('STUB_STATUS', '3')))
 signal.signal(signal.SIGTERM, lambda *a: (open(os.environ['STUB_LOG'], 'a').write('{"terminated": true}\\n'), sys.exit(143)))
+if os.environ.get('STUB_GRANDCHILD'):
+    import subprocess
+    grand = subprocess.Popen(['sleep', '120'])
+    with open(os.environ['STUB_LOG'], 'a') as log:
+        log.write(json.dumps({'grandchild': grand.pid}) + '\\n')
 time.sleep(float(os.environ.get('STUB_SLEEP', '0')))
+with open(os.environ['STUB_LOG'], 'a') as log:
+    log.write(json.dumps({'done': True}) + '\\n')
 sys.exit(int(os.environ.get('STUB_RUN_EXIT', '0')))
 '''
 
@@ -44,13 +52,15 @@ class Hook(unittest.TestCase):
         tmp = Path(self.tmp.name)
         self.home = tmp / 'home'
         (self.home / '.config/st').mkdir(parents=True)
-        (self.home / '.config/st/evidence-sign.json').write_text('{}')
+        (self.home / '.config/st/evidence-sign.json').write_text(json.dumps({'signer': 'host/box'}))
         git(tmp, 'init', '-q', '--bare', '-b', 'main', str(tmp / 'origin.git'))
         self.work = tmp / 'work'
         git(tmp, 'clone', '-q', str(tmp / 'origin.git'), str(self.work))
         git(self.work, 'checkout', '-q', '-b', 'main')
-        (self.work / 'scripts/git-hooks').mkdir(parents=True)
-        for name in ('evidence-prepush', 'install-git-hooks', 'git-hooks/pre-push'):
+        (self.work / 'scripts').mkdir(parents=True)
+        (self.work / '.st').mkdir()
+        (self.work / '.st/evidence-keys').write_text('host/box namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n')
+        for name in ('evidence-prepush', 'install-git-hooks'):
             shutil.copy(ROOT / 'scripts' / name, self.work / 'scripts' / name)
         (self.work / 'scripts/st-test').write_text(STUB)
         for path in (self.work / 'scripts').rglob('*'):
@@ -65,7 +75,7 @@ class Hook(unittest.TestCase):
         git(self.work, 'add', '.')
         git(self.work, 'commit', '-q', '-m', 'feature')
         self.log = tmp / 'stub.log'
-        self.install()
+        self.assertEqual(self.install().returncode, 0)
 
     def env(self, **extra):
         return dict(CLEAN, HOME=str(self.home), STUB_LOG=str(self.log), **extra)
@@ -74,12 +84,31 @@ class Hook(unittest.TestCase):
         return subprocess.run(['bash', str(self.work / 'scripts/install-git-hooks'), *args], capture_output=True, text=True,
                               env=self.env(), cwd=self.work)
 
-    def calls(self):
+    def entries(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
-    def push(self, *refspec, **env):
-        return subprocess.run(['git', '-C', str(self.work), 'push', 'origin', *(refspec or ('feature',))],
-                              capture_output=True, text=True, env=self.env(**env))
+    def calls(self):
+        return [e for e in self.entries() if 'argv' in e]
+
+    def push(self, *refspec, tty=False, **env):
+        command = ['git', '-C', str(self.work), 'push', 'origin', *(refspec or ('feature',))]
+        if not tty:  # no terminal on stderr: the hook treats this as an agent
+            return subprocess.run(command, capture_output=True, text=True, env=self.env(**env))
+        master, slave = pty.openpty()  # a terminal on stderr: an interactive push
+        done = subprocess.run(command, stdout=subprocess.PIPE, stderr=slave, text=True, env=self.env(**env))
+        os.close(slave)
+        output = b''
+        try:
+            while True:
+                chunk = os.read(master, 65536)
+                if not chunk:
+                    break
+                output += chunk
+        except OSError:
+            pass
+        os.close(master)
+        done.stderr = output.decode(errors='replace').replace('\r\n', '\n')
+        return done
 
     def remote_has(self, ref):
         return subprocess.run(['git', '-C', str(self.work), 'ls-remote', '--exit-code', 'origin', ref], capture_output=True,
@@ -124,11 +153,11 @@ class Hook(unittest.TestCase):
 
     def test_a_run_past_the_time_limit_is_terminated_then_the_push_goes(self):
         started = time.monotonic()
-        done = self.push(STUB_STATUS='3', STUB_SLEEP='60', ST_EVIDENCE_TIME_LIMIT='1')
+        done = self.push(STUB_STATUS='3', STUB_SLEEP='60', ST_EVIDENCE_TIME_LIMIT='1', tty=True)
         self.assertLess(time.monotonic() - started, 30)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn('did not finish', done.stderr)
-        self.assertIn({'terminated': True}, self.calls())  # TERM first, so a real st-test removes its worktree
+        self.assertIn({'terminated': True}, self.entries())  # TERM first, so a real st-test removes its worktree
         self.assertTrue(self.remote_has('refs/heads/feature'))
 
     def test_a_status_that_hangs_does_not_hold_the_push(self):
@@ -212,11 +241,11 @@ class Hook(unittest.TestCase):
         self.assertEqual(self.calls(), [])
         self.assertTrue(self.remote_has('refs/heads/feature'))
 
-    def test_a_remote_given_as_a_url_is_pushed_untouched_with_a_line(self):
+    def test_a_remote_given_as_a_url_is_pushed_untouched(self):
         url = str(Path(self.tmp.name) / 'origin.git')
         done = subprocess.run(['git', '-C', str(self.work), 'push', url, 'feature'], capture_output=True, text=True, env=self.env())
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn('not a configured remote name', done.stderr)
+        self.assertNotIn('evidence:', done.stderr)  # no <url>/main tracking ref: the stub does nothing
         self.assertEqual(self.calls(), [])
 
     def test_an_exception_inside_the_hook_never_blocks_the_push(self):
@@ -232,7 +261,7 @@ class Hook(unittest.TestCase):
         real = lambda name: os.path.realpath(shutil.which(name, path=':'.join(directories)))
         bin_dir = Path(self.tmp.name) / 'bin'
         bin_dir.mkdir()
-        for name in ('bash', 'git', 'dirname', 'readlink'):
+        for name in ('bash', 'git', 'mktemp', 'tar', 'rm', 'cat'):
             (bin_dir / name).symlink_to(real(name))
         done = subprocess.run(['git', '-C', str(self.work), 'push', 'origin', 'feature'], capture_output=True, text=True,
                               env=dict(self.env(), PATH=str(bin_dir)))
@@ -285,12 +314,78 @@ class Hook(unittest.TestCase):
         self.assertIn('core.hooksPath is set', done.stderr)
         self.assertFalse((self.work / '.git/hooks/pre-push').exists())
 
-    def test_a_checkout_without_st_test_pushes_untouched_with_a_line(self):
-        (self.work / 'scripts/st-test').unlink()
-        done = self.push()
+    def test_when_the_base_has_no_hook_files_the_stub_does_nothing_silently(self):
+        git(self.work, 'checkout', '-q', 'main')
+        git(self.work, 'rm', '-q', 'scripts/evidence-prepush', 'scripts/st-test')
+        git(self.work, 'commit', '-q', '-m', 'remove')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+        self.untouched(self.push(), 'refs/heads/feature')
+
+    def test_the_hook_that_runs_is_the_bases_never_the_pushed_trees(self):
+        poison = self.work / 'scripts/evidence-prepush'
+        poison.write_text('#!/usr/bin/env python3\nimport sys\nprint("POISON ran", file=sys.stderr)\nsys.exit(7)\n')
+        (self.work / 'scripts/st-test').write_text('#!/usr/bin/env python3\nimport sys\nprint("POISON st-test", file=sys.stderr)\nsys.exit(7)\n')
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'a branch that tampers with the hook and the runner')
+        done = self.push(STUB_STATUS='0')
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn('not in this checkout', done.stderr)
+        self.assertNotIn('POISON', done.stderr)
+        self.assertEqual([c['argv'][0] for c in self.calls()], ['--status'])  # the base's st-test stub ran, not the branch's
+
+    def test_an_agent_waits_a_bounded_time_then_signing_continues_in_the_background(self):
+        started = time.monotonic()
+        done = self.push(STUB_STATUS='3', STUB_SLEEP='5', ST_AGENT='some-agent', ST_EVIDENCE_AGENT_LIMIT='1')
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('still signing in the background', done.stderr)
         self.assertTrue(self.remote_has('refs/heads/feature'))
+        self.assertNotIn({'done': True}, self.entries())  # not finished when the push went
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and {'done': True} not in self.entries():
+            time.sleep(0.2)
+        self.assertIn({'done': True}, self.entries())  # and it finished by itself afterwards
+        self.assertTrue(list((self.home / '.local/state/st3/evidence-prepush').glob('*.log')))
+
+    def test_an_interactive_push_waits_for_the_whole_limit_not_the_agent_limit(self):
+        done = self.push(STUB_STATUS='3', STUB_SLEEP='3', ST_EVIDENCE_AGENT_LIMIT='1', tty=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('signed; pushing', done.stderr)
+        self.assertIn({'done': True}, self.entries())
+
+    def test_a_timeout_kills_the_grandchildren_too(self):
+        done = self.push(STUB_STATUS='3', STUB_SLEEP='60', STUB_GRANDCHILD='1', ST_EVIDENCE_TIME_LIMIT='2', tty=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        grandchild = next(e['grandchild'] for e in self.entries() if 'grandchild' in e)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(grandchild, 0)
+
+    def test_a_signer_that_the_base_key_list_does_not_name_is_not_run_for_nothing(self):
+        (self.home / '.config/st/evidence-sign.json').write_text(json.dumps({'signer': 'host/other'}))
+        done = self.push(STUB_STATUS='3')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('not listed in .st/evidence-keys on main', done.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertTrue(self.remote_has('refs/heads/feature'))
+
+    def test_the_installer_says_one_line_once_and_does_nothing_in_ci(self):
+        hook = self.work / '.git/hooks/pre-push'
+        hook.unlink()
+        first = self.install()
+        self.assertEqual(first.stdout.strip(), 'evidence pre-push hook installed (ST_SKIP_EVIDENCE=1 skips)')
+        self.assertEqual(self.install().stdout.strip(), '')  # already installed: quiet
+        hook.unlink()
+        for name in ('GITHUB_ACTIONS', 'CI'):
+            done = subprocess.run(['bash', str(self.work / 'scripts/install-git-hooks')], capture_output=True, text=True,
+                                  env=dict(self.env(), **{name: 'true'}), cwd=self.work)
+            self.assertEqual((done.returncode, done.stdout, hook.exists()), (0, '', False), name)
 
 
 if __name__ == '__main__':

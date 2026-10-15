@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# git pre-push hook: make sure the pushed tree has signed evidence. Installed by scripts/install-git-hooks.
-# It never blocks a push (scripts/evidence-prepush); even a missing python3 only prints a line.
-if command -v python3 >/dev/null 2>&1; then
-  python3 "$(cd "$(dirname "$(readlink -f "$0")")" && pwd)/../evidence-prepush" "$@"
-else
-  echo "evidence: python3 is not on PATH; not signing" >&2
-fi
-exit 0
