@@ -32904,7 +32904,9 @@ fn enrich_step_summaries_at(
     let mut visited = BTreeSet::new();
     loop {
         if !visited.insert(subject.clone()) {
-            return Err(rusqlite::Error::InvalidQuery);
+            // Replicated carry links can form a cycle. Keep the reports already
+            // read and stop at the repeated subject, without following it again.
+            break;
         }
         let mut predecessor = None;
         let mut events = statement.query([&subject])?;
@@ -32921,10 +32923,12 @@ fn enrich_step_summaries_at(
                 continue;
             }
             if kind == "step-run.carried" {
-                predecessor = fields
-                    .get("source_step_run")
-                    .and_then(Value::as_str)
-                    .map(|source| (source.to_owned(), accepted));
+                if predecessor.is_none() {
+                    predecessor = fields
+                        .get("source_step_run")
+                        .and_then(Value::as_str)
+                        .map(|source| (source.to_owned(), accepted));
+                }
                 continue;
             }
             if fields.get("handoff_acknowledged").is_some() {
@@ -54215,6 +54219,108 @@ version 2
         successor.attempt = 2;
         enrich_step_summaries_at(&connection, &mut successor, 500).unwrap();
         assert_eq!(successor.progress_summary, None);
+        assert_eq!(successor.completion_summary, None);
+        assert_eq!(successor.submitted_incarnation, None);
+    }
+
+    #[test]
+    fn revise_notes_replicated_carries_choose_the_newest_link_and_stop_at_cycles() {
+        let store = Store::open_memory("node").unwrap();
+        publish_carry(&store, CARRY_SOURCE, "replicated-notes-mission");
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "carry".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/requester".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "replicated-notes-run".into(),
+            })
+            .unwrap();
+        let peer = Store::open_memory("peer").unwrap();
+        peer.import_replication("node", &store.export_replication(0).unwrap())
+            .unwrap();
+        let older = &run.steps[0].subject;
+        let newer = format!("{older}-newer");
+        let mut successor = run.steps[1].clone();
+        let append = |store: &Store, subject: &str, kind: &str, fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: kind.into(),
+                    actor: Some("agent/node.worker".into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        let older_note = append(
+            &store,
+            older,
+            "work.progress",
+            json!({"attempt": 1, "summary": "Older lineage"}),
+        );
+        let older_link = append(
+            &store,
+            &successor.subject,
+            "step-run.carried",
+            json!({"attempt": 1, "source_step_run": older}),
+        );
+        let newer_note = append(
+            &peer,
+            &newer,
+            "work.progress",
+            json!({"attempt": 1, "summary": "Newer lineage"}),
+        );
+        let newer_link = append(
+            &peer,
+            &successor.subject,
+            "step-run.carried",
+            json!({"attempt": 1, "source_step_run": newer}),
+        );
+        let cycle = append(
+            &peer,
+            &newer,
+            "step-run.carried",
+            json!({"attempt": 1, "source_step_run": successor.subject}),
+        );
+        store
+            .import_replication("peer", &peer.export_replication(0).unwrap())
+            .unwrap();
+        assert_eq!(
+            store
+                .claims_for(&successor.subject, Some("step-run.carried"))
+                .unwrap()
+                .len(),
+            2
+        );
+        // Set deterministic snapshot times after replication has preserved both
+        // concurrent links. Equal cutover times make the cycle reachable.
+        for (claim, at) in [
+            (older_note, "100"),
+            (older_link, "200"),
+            (newer_note, "150"),
+            (newer_link, "250"),
+            (cycle, "250"),
+        ] {
+            store
+                .connection
+                .write()
+                .execute(
+                    "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+                    params![claim.id, at],
+                )
+                .unwrap();
+        }
+        let connection = store.readers.get();
+        enrich_step_summaries_at(&connection, &mut successor, 225).unwrap();
+        assert_eq!(successor.progress_summary.as_deref(), Some("Older lineage"));
+        enrich_step_summaries_at(&connection, &mut successor, 300).unwrap();
+        assert_eq!(successor.progress_summary.as_deref(), Some("Newer lineage"));
+        assert_eq!(successor.progress_at_unix_ms, Some(150));
         assert_eq!(successor.completion_summary, None);
         assert_eq!(successor.submitted_incarnation, None);
     }
