@@ -81,16 +81,9 @@ mod mail_backlog;
 pub(crate) mod mission_eligibility_doctor;
 mod read_deadline;
 mod response_body;
-#[cfg(test)]
-mod terminal_gate_evidence;
-#[cfg(test)]
-mod terminal_gate_evidence;
-#[cfg(test)]
-mod terminal_gate_evidence;
-#[cfg(test)]
-mod terminal_gate_evidence;
-#[cfg(test)]
-mod terminal_gate_evidence;
+mod owned_sets;
+mod published_attention;
+mod attention_history;
 pub use published_attention::start_attention_list;
 #[cfg(test)]
 pub(crate) use published_attention::{published_attention_rows, refresh_attention_list};
@@ -2041,6 +2034,7 @@ fn client_page_read(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(state),
         replicated: None,
@@ -5177,6 +5171,7 @@ fn client_work_published_page(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(state),
         replicated: None,
@@ -5295,6 +5290,7 @@ fn client_work_published_continuation(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(cursor.expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(state),
         replicated: None,
@@ -5408,6 +5404,7 @@ async fn client_work_history(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(state),
         replicated: None,
@@ -6567,6 +6564,7 @@ async fn client_history(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(&state),
         replicated: None,

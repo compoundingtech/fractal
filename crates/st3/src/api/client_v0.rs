@@ -4833,6 +4833,7 @@ pub(super) async fn missions(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(&state),
         replicated: None,
@@ -6031,6 +6032,7 @@ fn native_slice_page_at_generation(
         "page": ClientPageInfo {
             limit, has_more, next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
     });
     if let Some(header) = header {

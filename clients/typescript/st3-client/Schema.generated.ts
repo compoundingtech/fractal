@@ -999,7 +999,8 @@ export const PageInfo = /*#__PURE__*/ (() => Schema.Struct({
   "cursor_expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
   "has_more": Schema.Boolean,
   "limit": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200)),
-  "next_cursor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE)
+  "next_cursor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "omitted_items": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE)
 }).annotate({ identifier: "PageInfo" }))()
 export type PageInfo = typeof PageInfo.Type
 export type PageInfoEncoded = typeof PageInfo.Encoded

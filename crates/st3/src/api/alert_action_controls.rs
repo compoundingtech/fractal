@@ -34,6 +34,8 @@ async fn retained_owner_item(
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{history}");
+    let sdk_page: st3_client::Page = serde_json::from_value(history.clone()).unwrap();
+    assert_eq!(sdk_page.page.omitted_items, Some(0));
     let item = history["items"]
         .as_array()
         .unwrap()
@@ -377,4 +379,176 @@ async fn attention_history_sparse_pages_keep_the_cut_and_reject_cursor_tampering
             .iter()
             .any(|item| item["episode"] == later.id)
     );
+}
+
+#[tokio::test]
+async fn attention_history_filters_foreign_missing_sources_before_reporting_omissions() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let (denial, proof) =
+        crate::store::alert_action_controls::seed_denial(&state.store, &["close-item"]);
+    let answer = state
+        .store
+        .respond_native_prompt(
+            &denial.subject,
+            &denial.id,
+            "dismiss",
+            "agent/alder.helper",
+            Some(&proof),
+        )
+        .unwrap();
+    let app = router(state.clone());
+    let (_, original) = owner_get(
+        app.clone(),
+        "/v1/client/attention?history=true",
+        "person/avery",
+    )
+    .await;
+    assert_eq!(original["items"].as_array().unwrap().len(), 1);
+    // An authored partial-replica image, not an admitted signed claim: the answer
+    // identifies another person but its cited original is absent at this cut.
+    let mut body = answer.body.clone();
+    body["fields"]["acted_for"] = json!("person/other");
+    body["fields"]["delegation"]["person"] = json!("person/other");
+    body["fields"]["delegation"]["episode"] = json!("claim/history-missing-original");
+    state
+        .store
+        .connection
+        .batched(|tx| -> anyhow::Result<()> {
+            tx.execute(
+                "UPDATE claims SET body=?1,predecessors=?2 WHERE id=?3",
+                rusqlite::params![
+                    body.to_string(),
+                    json!(["claim/history-missing-original"]).to_string(),
+                    answer.id
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    let index = state.store.index().unwrap();
+    let (status, page) = owner_get(
+        app.clone(),
+        "/v1/client/attention?history=true",
+        "person/avery",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["page"]["omitted_items"], 0);
+    assert_eq!(page["items"], json!([]));
+    let (status, own_missing) = owner_get(
+        app.clone(),
+        "/v1/client/attention?history=true",
+        "person/other",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{own_missing}");
+    assert_eq!(own_missing["page"]["omitted_items"], 1);
+    let path = format!(
+        "/v1/client/attention/{}",
+        urlencoding::encode(&format!("attention/closed/{}", answer.id))
+    );
+    assert_eq!(
+        owner_get(app.clone(), &path, "person/avery").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        owner_get(app, &path, "person/other").await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(state.store.index().unwrap(), index);
+}
+
+#[tokio::test]
+async fn attention_history_omits_wide_and_malformed_rows_and_advances_to_retained_items() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let (denial, proof) =
+        crate::store::alert_action_controls::seed_denial(&state.store, &["close-item"]);
+    state
+        .store
+        .respond_native_prompt(
+            &denial.subject,
+            &denial.id,
+            "dismiss",
+            "agent/alder.helper",
+            Some(&proof),
+        )
+        .unwrap();
+    let filler = state
+        .store
+        .append_claim(&ClaimInput {
+            subject: denial.subject.clone(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(denial.subject.clone()),
+            fields: serde_json::from_value(json!({"code":"history-fixture","severity":"info"}))
+                .unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some("omitted-history-candidate".into()),
+        })
+        .unwrap();
+    let app = router(state.clone());
+    for body in [
+        json!({"fields":{"reason":"x".repeat(1_048_577)}}).to_string(),
+        "{malformed".into(),
+    ] {
+        // Private SQL corruption fixture, never a source claim or a live database.
+        state
+            .store
+            .connection
+            .batched(|tx| -> anyhow::Result<()> {
+                tx.execute(
+                    "UPDATE claims SET body=?1 WHERE id=?2",
+                    rusqlite::params![body, filler.id],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        let index = state.store.index().unwrap();
+        let (status, mut page) = owner_get(
+            app.clone(),
+            "/v1/client/attention?history=true&limit=1",
+            "person/avery",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["page"]["omitted_items"], 1);
+        let sdk_page: st3_client::Page = serde_json::from_value(page.clone()).unwrap();
+        assert_eq!(sdk_page.page.omitted_items, Some(1));
+        assert_eq!(page["items"], json!([]));
+        assert_eq!(page["page"]["has_more"], true);
+        let mut found = false;
+        for _ in 0..10 {
+            if !page["page"]["has_more"].as_bool().unwrap() {
+                break;
+            }
+            let cursor = page["page"]["next_cursor"].as_str().unwrap();
+            let (status, next) = owner_get(
+                app.clone(),
+                &format!(
+                    "/v1/client/attention?history=true&cursor={}",
+                    urlencoding::encode(cursor)
+                ),
+                "person/avery",
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{next}");
+            assert_eq!(next["page"]["omitted_items"], 0);
+            found |= next["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["episode"] == denial.id);
+            page = next;
+        }
+        assert!(
+            found,
+            "readable retained history remains reachable after the omitted row"
+        );
+        assert_eq!(page["page"]["has_more"], false);
+        assert_eq!(state.store.index().unwrap(), index);
+    }
 }

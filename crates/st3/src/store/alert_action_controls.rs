@@ -23,7 +23,7 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
     }
     let before = store.index().unwrap();
     let rows = store
-        .read_snapshot(|cut| store.attention_history_candidates(cut, i64::MAX as u64, 200))
+        .read_snapshot(|cut| store.attention_history_candidates(cut, i64::MAX as u64, 200, None))
         .unwrap();
     assert_eq!(
         rows.len(),
@@ -36,7 +36,7 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
         .unwrap()
         .unwrap();
     // Authored wide-cell fixture, not a valid signed replacement: the read must
-    // refuse it before retrieving/decoding its unbounded body or claiming completeness.
+    // omit it before retrieving/decoding its unbounded body; keep the index and warning.
     let wide = json!({"fields":{"reason":"x".repeat(1_048_577)}}).to_string();
     store
         .connection
@@ -50,11 +50,20 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
         .unwrap()
         .unwrap();
     let before = store.index().unwrap();
+    let rows = store
+        .read_snapshot(|cut| store.attention_history_candidates(cut, i64::MAX as u64, 1, None))
+        .unwrap();
+    assert!(rows[0].omitted);
+    assert!(rows[0].resolution.is_none());
+    assert_eq!(rows[0].store_index, latest.store_index);
     assert!(
-        store
-            .read_snapshot(|cut| store.attention_history_candidates(cut, i64::MAX as u64, 1))
-            .is_err()
+        rows[1].resolution.is_some(),
+        "the following readable candidate survives"
     );
+    let older = store
+        .read_snapshot(|cut| store.attention_history_candidates(cut, rows[0].store_index, 1, None))
+        .unwrap();
+    assert!(older.iter().all(|row| row.store_index < latest.store_index));
     assert_eq!(store.index().unwrap(), before);
     store
         .connection
@@ -69,11 +78,99 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
         .unwrap();
     assert_eq!(
         store
-            .read_snapshot(|cut| store.attention_history_candidates(cut, i64::MAX as u64, 1))
+            .read_snapshot(|cut| store.attention_history_candidates(cut, i64::MAX as u64, 1, None))
             .unwrap()
             .len(),
         2
     );
+}
+
+#[test]
+fn history_query_plan_bounds_each_kind_scan_before_sorting_a_large_fixture() {
+    let (store, denial, _) = denial_fixture(&["close-item"]);
+    // Authored claims-table fixture only, not signed/native evidence. One transaction
+    // creates a busy kind without turning the control into 10,000 source actions.
+    store.connection.batched(|tx| -> Result<()> {
+        tx.execute(r#"WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10000)
+            INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+            SELECT 'history-plan-'||i,?1,?2,'harness.diagnostic','alder',?2,
+            '{"fields":{"code":"history-fixture"}}','[]','1' FROM n"#,
+            params![denial.batch_id, SEAT])?;
+        Ok(())
+    }).unwrap().unwrap();
+    store
+        .read_snapshot(|cut| {
+            let plan = attention_history::candidate_query_plan(&store, cut)?;
+            assert_eq!(
+                plan.iter()
+                    .filter(|(_, _, detail)| detail
+                        .contains("SEARCH claims USING COVERING INDEX claims_kind_index"))
+                    .count(),
+                2,
+                "{plan:?}"
+            );
+            assert!(
+                plan.iter()
+                    .all(|(_, _, detail)| !detail.starts_with("SCAN claims")),
+                "{plan:?}"
+            );
+            // A temporary sort of the <=66 materialized candidates is allowed. A
+            // sort below either kind producer would sort an unbounded kind and fails.
+            for (_, parent, detail) in &plan {
+                if !detail.contains("TEMP B-TREE") {
+                    continue;
+                }
+                let mut parent = *parent;
+                while let Some((_, next, ancestor)) = plan.iter().find(|(id, _, _)| *id == parent) {
+                    assert!(
+                        !matches!(
+                            ancestor.as_str(),
+                            "MATERIALIZE withdrawals" | "MATERIALIZE answers"
+                        ),
+                        "full-kind sort: {plan:?}"
+                    );
+                    if *next == parent {
+                        break;
+                    }
+                    parent = *next;
+                }
+            }
+            assert!(
+                plan.iter()
+                    .any(|(_, _, detail)| detail.contains("SEARCH c USING INTEGER PRIMARY KEY")),
+                "{plan:?}"
+            );
+            assert!(
+                plan.iter()
+                    .any(|(_, _, detail)| detail.contains("SEARCH e USING INDEX")
+                        && detail.contains("(id=?)")),
+                "{plan:?}"
+            );
+            let rows = store.attention_history_candidates(cut, i64::MAX as u64, 32, None)?;
+            assert_eq!(rows.len(), 33);
+            assert!(rows.iter().all(|row| !row.omitted));
+            let expected: usize = store.readers.get().query_row(
+                "SELECT count(*) FROM claims WHERE kind IN ('harness.diagnostic','work.person-cancelled') AND store_index<=?1",
+                [cut], |row| row.get(0))?;
+            let mut before = i64::MAX as u64;
+            let mut scanned = 0usize;
+            let mut pages = 0usize;
+            loop {
+                let mut rows = store.attention_history_candidates(cut, before, 32, None)?;
+                let more = rows.len() > 32;
+                rows.truncate(32);
+                assert!(rows.iter().all(|row| row.store_index < before && !row.omitted));
+                scanned += rows.len();
+                pages += 1;
+                before = rows.last().map_or(before, |row| row.store_index);
+                if !more { break }
+                assert!(pages <= expected.div_ceil(32));
+            }
+            assert_eq!(scanned, expected);
+            assert_eq!(pages, expected.div_ceil(32));
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]

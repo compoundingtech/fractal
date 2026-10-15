@@ -188,6 +188,9 @@ pub struct PageInfo {
     pub next_cursor: Option<String>,
     #[serde(default)]
     pub cursor_expires_at: Option<String>,
+    /// Unreadable history candidates skipped on this page. Nonzero means incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_items: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

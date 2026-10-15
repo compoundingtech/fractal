@@ -1365,6 +1365,7 @@ export type PageInfo = {
   has_more: boolean;
   limit: number;
   next_cursor?: string | null;
+  omitted_items?: number | null;
 };
 
 export type PairedSession = {

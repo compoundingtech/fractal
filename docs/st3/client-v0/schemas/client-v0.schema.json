@@ -156,7 +156,8 @@
         "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
         "has_more": { "type": "boolean" },
         "next_cursor": { "type": ["string", "null"] },
-        "cursor_expires_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] }
+        "cursor_expires_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "omitted_items": { "type": ["integer", "null"], "minimum": 0 }
       }
     },
     "Envelope": {

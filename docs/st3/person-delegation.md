@@ -127,11 +127,42 @@ the original update recipient or the recorded represented person, so a later sea
 cannot take over the previous person's history. A person's authenticated session cannot
 select another person's item or change the cursor's recipient.
 
+A person session is forced to that person's recorded-owner filter. Another person's
+closed detail returns 404. As with the existing attention list, an agent session
+that supplies no `person` filter can read all owners' retained resolutions; this change does
+not invent per-agent privacy or impersonate a person.
+
 History pages scan at most 32 candidates plus one lookahead from the two indexed source
-kinds before recipient/type filtering. An empty page can still carry `next_cursor`; clients
-must follow it. The signed cursor fixes the original cut, recipient and filters for five
-minutes and expires on daemon restart; refresh to see newer resolutions. Detail is a direct
-claim lookup. Reads never write, backfill or rebuild. Existing durable update/message and
-cited-evidence retention keeps the update and the denial's answer/instruction/episode chain;
-this adds no retention expiry or deletion. Oversized stored cells or exhausted read/response
-budgets return an error instead of a truncated successful history result.
+kinds before recipient/type filtering. Each kind producer takes at most 33 indexed entries;
+only their at-most-66-entry union is sorted. An empty page can still carry `next_cursor`:
+clients must follow that cursor, rather than treating an empty `items` array as the end.
+For N relevant-kind candidates in the captured cut, the worst case at limit 32 is
+ceil(N/32) pages even if only one row belongs to the person. Ten thousand such candidates
+therefore require 313 pages; there is no constant-page or guaranteed recent-item density.
+The per-request budget remains 32 processed candidates, 1 MiB per body, 2 MiB cumulative
+body decode and half the existing response byte budget for items. The existing request
+read deadlines still apply. The pagination time budget is the existing five-minute cursor
+lifetime, not an extended read deadline. Ten-thousand-row traversal and the exact index/
+sort plan are authored hosted controls, not measured cost or time evidence. If the cursor
+expires before traversal finishes, clients must report incomplete history and refresh;
+they must not claim an empty or complete history or run an unbounded automatic scan.
+
+`page.omitted_items` is present on this history path, including zero. It counts scanned
+candidates that could not be safely decoded, lacked a linked source at the captured cut,
+or exceeded the per-page decode/item byte budget. The cursor advances past those indices.
+Clients must retain an incomplete-history warning when this count is nonzero, even on the
+last page, and refresh after source replication/repair. Known foreign-owner rows are
+filtered before decoding or source checks and do not increment that person's count. If a
+row is too damaged to establish its owner, only an anonymous omission count is exposed,
+never its identity/text. This count is not a claim that every omitted candidate is an
+attention item. An unreadable exact detail is unavailable (503) only for an authorized or
+unfiltered read; another person's detail stays 404. Existing page paths omit this optional
+field. Older clients can ignore it and cannot present the new completeness guarantee;
+client consumers must honor it before claiming complete history. Rust struct literals
+constructing `PageInfo` also need the new optional `omitted_items` field.
+
+The signed cursor fixes the original cut, recipient and filters for five minutes and
+expires on daemon restart because its HMAC key is process-local; refresh to see newer
+resolutions. Detail is a direct claim lookup. Reads never write, backfill or rebuild.
+Existing durable update/message and cited-evidence retention keeps the update and the
+denial's answer/instruction/episode chain; this adds no retention expiry or deletion.

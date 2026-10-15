@@ -174,7 +174,24 @@ pub(super) async fn detail(
     let (snapshot, item) = blocking_store(move || {
         state.store.read_snapshot(|cut| {
             let snapshot = client_snapshot_at(&state, cut);
-            let row = state.store.attention_history_resolution(&id, cut)?;
+            let row = state
+                .store
+                .attention_history_resolution(&id, cut, person.as_deref())?;
+            if row.as_ref().is_some_and(|row| row.omitted)
+                && person.as_deref().is_some_and(|person| {
+                    row.as_ref().and_then(|row| row.owner.as_deref()) != Some(person)
+                })
+            {
+                // An unavailable source cannot establish this person's authority.
+                return Ok((snapshot, None));
+            }
+            if row.as_ref().is_some_and(|row| row.omitted) {
+                anyhow::bail!(St3Error::new(
+                    "attention-history-not-ready",
+                    "this history item exceeds its read bounds or cannot be decoded"
+                ));
+            }
+            let row = row.and_then(|row| row.resolution);
             if let Some(row) = &row {
                 // With an absent source, only a denial's recorded person can
                 // establish detail authority. Never expose another person's record.
@@ -247,7 +264,7 @@ pub(super) async fn page(
     }
     let reader = state.clone();
     let person = query.person.clone();
-    let (snapshot, items, has_more, before, expires) = blocking_store(move || {
+    let (snapshot, items, has_more, before, expires, omitted) = blocking_store(move || {
         reader.store.read_snapshot(|current| {
             let snapshot = cursor.as_ref().map_or_else(
                 || client_snapshot_at(&reader, current),
@@ -261,29 +278,46 @@ pub(super) async fn page(
                 .as_ref()
                 .and_then(|cursor| cursor.before_index)
                 .unwrap_or(i64::MAX as u64);
-            let mut rows =
-                reader
-                    .store
-                    .attention_history_candidates(snapshot.store_index, before, limit)?;
+            let mut rows = reader.store.attention_history_candidates(
+                snapshot.store_index,
+                before,
+                limit,
+                person.as_deref(),
+            )?;
             let has_more = rows.len() > limit;
             rows.truncate(limit);
-            let before = rows.last().map_or(before, |row| row.claim.store_index);
+            let before = rows.last().map_or(before, |row| row.store_index);
             let mut items = Vec::new();
-            for row in rows {
-                ensure_source(&row)?;
+            let mut omitted = 0usize;
+            let mut response_bytes = 0usize;
+            for candidate in rows {
+                omitted += usize::from(candidate.omitted);
+                let Some(row) = candidate.resolution else {
+                    continue;
+                };
+                // Store filters known foreign owners before decoding. Unknown-source
+                // rows cannot become visible items or make this entire page fail.
+                if ensure_source(&row).is_err() {
+                    omitted += 1;
+                    continue;
+                }
                 if let Some(item) = resource(row, person.as_deref()) {
+                    let size = serde_json::to_vec(&item)?.len();
+                    // Leave room for page/envelope metadata. Refusal is per item,
+                    // and the scanned index still advances past it.
+                    if size > (CLIENT_MAX_RESPONSE_BYTES / 2).saturating_sub(response_bytes) {
+                        omitted += 1;
+                        continue;
+                    }
+                    response_bytes += size;
                     items.push(item);
                 }
             }
-            anyhow::ensure!(
-                serde_json::to_vec(&items)?.len() <= CLIENT_MAX_RESPONSE_BYTES,
-                "attention history page exceeds response limit; use a smaller page"
-            );
             let expires = cursor.map_or_else(
                 || client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS),
                 |cursor| cursor.expires_at_unix_ms,
             );
-            Ok((snapshot, items, has_more, before, expires))
+            Ok((snapshot, items, has_more, before, expires, omitted))
         })
     })
     .await
@@ -324,6 +358,7 @@ pub(super) async fn page(
                 has_more,
                 next_cursor,
                 cursor_expires_at: has_more.then(|| client_timestamp(expires)),
+                omitted_items: Some(omitted),
             },
             sync: client_sync_notice(&state),
             replicated: None,
