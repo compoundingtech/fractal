@@ -259,7 +259,7 @@ pub async fn run(args: SekretsArgs, json_output: bool) -> Result<i32> {
         }
         SekretsCommand::Enable => {
             let connection = identified_connection().await?;
-            let config = crate::config::Config::load_unvalidated(None)?;
+            let config = crate::config::Config::load_client_unvalidated(None)?.0;
             let client =
                 crate::client::Client::new(crate::client::Endpoint::Unix(config.client_socket()));
             let node: Value = client.get("/v1/sekrets/node").await?;
@@ -366,7 +366,7 @@ async fn identified_connection() -> Result<Connection> {
     if let CallerView::Unidentified { .. } = connection.caller
         && std::env::var("ST_AGENT").is_ok_and(|agent| agent.starts_with("agent/"))
     {
-        let config = crate::config::Config::load_unvalidated(None)?;
+        let config = crate::config::Config::load_client_unvalidated(None)?.0;
         let client =
             crate::client::Client::new(crate::client::Endpoint::Unix(config.client_socket()));
         let attestation: Attestation = client

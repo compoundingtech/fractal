@@ -1165,6 +1165,8 @@ pub struct PeerSyncProgress {
     /// settled, so the two projections were comparable.
     pub aligned_comparison: Option<AlignedComparison>,
     pub worker: Option<crate::replication::ReplicationWorkerStatus>,
+    pub last_successful_exchange: Option<crate::replication::ReplicationExchangeTransport>,
+    pub last_failed_exchange: Option<crate::replication::ReplicationExchangeTransport>,
     /// How many envelopes this node held when it took the last measurement.
     pub measured_inventory_envelopes: u64,
 }
@@ -6196,6 +6198,17 @@ impl Store {
         input: &ReplicationExchange,
         asks: bool,
     ) -> Result<ReplicationReceipt, St3Error> {
+        self.receive_replication_exchange_via(relay, fleet_id, input, asks, Default::default())
+    }
+
+    pub fn receive_replication_exchange_via(
+        &self,
+        relay: &str,
+        fleet_id: &str,
+        input: &ReplicationExchange,
+        asks: bool,
+        carrier: crate::replication::ReplicationCarrier,
+    ) -> Result<ReplicationReceipt, St3Error> {
         if input.peer != relay {
             return Err(St3Error::new(
                 "peer-label-mismatch",
@@ -6244,16 +6257,17 @@ impl Store {
         // prepare/finalize/commit boundary, but lets queued foreground requests go first.
         // Immutable signature verification stays outside the writer. The guard returns before
         // any receipt counters, snapshot work or acknowledgement can observe success.
-        let (received, duplicate, signatures) = {
+        let (received, duplicate, signatures, received_at) = {
             let mut connection = self.connection.write_background();
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(internal)?;
-            let counts = (|transaction: &Transaction<'_>| -> Result<(usize, usize, usize), St3Error> {
+            let counts = (|transaction: &Transaction<'_>| -> Result<(usize, usize, usize, u128), St3Error> {
                 let mut received = 0;
                 let mut duplicate = 0;
                 let mut signatures = 0;
-                let now = now_ms().to_string();
+                let received_at = now_ms();
+                let now = received_at.to_string();
                 for (envelope, verified) in input.envelopes.iter().zip(&envelope_signatures) {
                     // A checkpoint dropped this envelope here. Its tombstone already stands for it.
                     if checkpoint::envelope_tombstoned(
@@ -6336,11 +6350,16 @@ impl Store {
                 if asks {
                     transaction.execute("DELETE FROM replication_refusals WHERE peer=?1", [relay]).map_err(internal)?;
                 }
-                Ok((received, duplicate, signatures))
+                Ok((received, duplicate, signatures, received_at))
             })(&transaction)?;
             transaction.commit().map_err(internal)?;
             counts
         };
+        // Only a response to our own dial is carrier evidence for a locally initiated
+        // exchange. Incoming traffic updates last-seen but cannot relabel an earlier dial.
+        if asks {
+            self.record_replication_exchange_transport(relay, true, received_at, carrier);
+        }
         drop(timing);
         self.replication_timers
             .exchanges
@@ -7250,6 +7269,21 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn record_peer_failure_via(
+        &self,
+        peer: &str,
+        status: &str,
+        error: &str,
+        carrier: Option<crate::replication::ReplicationCarrier>,
+    ) -> Result<bool> {
+        let failed_at = now_ms();
+        let changed = self.record_peer_failure(peer, status, error)?;
+        if let Some(carrier) = carrier {
+            self.record_replication_exchange_transport(peer, false, failed_at, carrier);
+        }
+        Ok(changed)
+    }
+
     pub fn record_peer_failure(&self, peer: &str, status: &str, error: &str) -> Result<bool> {
         if status == "refused" {
             self.connection.batched(|transaction| {
@@ -7548,6 +7582,66 @@ impl Store {
             .any(|progress| progress.view(now).is_some_and(|sync| sync.diverged))
     }
 
+    /// Keep two independent observations, using their own exchange time rather than a probe
+    /// or worker phase. Concurrent completion of an older receipt cannot replace newer evidence.
+    pub fn record_replication_exchange_transport(
+        &self,
+        peer: &str,
+        success: bool,
+        at_unix_ms: u128,
+        carrier: crate::replication::ReplicationCarrier,
+    ) {
+        let mut peers = self
+            .replication_sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let progress = peers.entry(peer.to_owned()).or_default();
+        let record = if success {
+            &mut progress.last_successful_exchange
+        } else {
+            &mut progress.last_failed_exchange
+        };
+        if record
+            .as_ref()
+            .is_none_or(|previous| previous.at_unix_ms <= at_unix_ms)
+        {
+            *record = Some(crate::replication::ReplicationExchangeTransport::new(
+                at_unix_ms, carrier,
+            ));
+        }
+    }
+
+    /// Whether this peer's local status is currently visible in a client sync notice.
+    /// This checks one in-memory row, without folding membership or reading the graph.
+    pub fn replication_peer_in_sync_notice(&self, peer: &str) -> bool {
+        self.replication_sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(peer)
+            .and_then(|progress| progress.view(now_ms()))
+            .is_some_and(|sync| sync.catching_up || sync.diverged)
+    }
+
+    pub fn replication_peer_transport(
+        &self,
+        peer: &str,
+    ) -> (
+        Option<crate::replication::ReplicationExchangeTransport>,
+        Option<crate::replication::ReplicationExchangeTransport>,
+    ) {
+        self.replication_sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(peer)
+            .map(|progress| {
+                (
+                    progress.last_successful_exchange.clone(),
+                    progress.last_failed_exchange.clone(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
     /// Update host-local worker status without writing the graph.
     pub fn record_replication_worker(
         &self,
@@ -7691,6 +7785,8 @@ impl Store {
                         let updated_at = row.get::<_, String>(6)?.parse::<u128>().ok();
                         Ok((
                             ReplicationPeerStatus {
+                                last_successful_exchange: None,
+                                last_failed_exchange: None,
                                 worker: None,
                                 peer: peer.clone(),
                                 status: row.get(0)?,
@@ -7718,6 +7814,8 @@ impl Store {
                 .optional()?
                 .unwrap_or((
                     ReplicationPeerStatus {
+                        last_successful_exchange: None,
+                        last_failed_exchange: None,
                         worker: None,
                         peer: peer.clone(),
                         status: "unknown".into(),
@@ -7766,6 +7864,8 @@ impl Store {
                 status.refusal_reason = Some(reason);
                 status.last_error = None;
             }
+            (status.last_successful_exchange, status.last_failed_exchange) =
+                self.replication_peer_transport(peer);
             status.worker = self
                 .replication_sync
                 .lock()
