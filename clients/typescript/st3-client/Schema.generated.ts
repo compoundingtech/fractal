@@ -2971,6 +2971,8 @@ export type MessageProvenance = typeof MessageProvenance.Type
 export type MessageProvenanceEncoded = typeof MessageProvenance.Encoded
 
 export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
+  /** The assistant grant that authorized the send, with sender_class. */
+  "assistant_grant_id": optionalKey(Schema.String).annotate({ description: "The assistant grant that authorized the send, with sender_class." }),
   "attachments": optionalKey(Schema.Array(Attachment)),
   "blocks": optionalKey(Schema.Array(TimelineBlock)),
   "body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
@@ -2978,6 +2980,8 @@ export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
   "message_id": Schema.String,
   "provenance": optionalKey(MessageProvenance),
   "reply_to": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text. */
+  "sender_class": optionalKey(Schema.Literals(["external-assistant"])).annotate({ description: "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text." }),
   "tags": optionalKey(Schema.Array(Schema.String)),
   "title": optionalKey(Schema.String),
   "to": optionalKey(ParticipantRef)

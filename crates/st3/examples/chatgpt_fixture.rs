@@ -3,6 +3,19 @@ use std::{path::PathBuf,sync::Arc};
 use serde_json::json;
 use sha2::{Digest,Sha256};
 use st3::{api::AppState,store::Store,model::{ClaimInput,PersonAskRequest}};
+// Exercise the production DING renderer against the daemon's stored recipient message.
+async fn delivery(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(subject): axum::extract::Path<String>,
+) -> axum::Json<serde_json::Value> {
+    let message = state.store.message(&subject).unwrap().unwrap();
+    let rendered = st_drivers::ding::st3_notification_with_metadata(
+        &message.subject, &message.from, &message.to, message.title.as_deref(),
+        &message.content, &st_drivers::ding::st3_body_sha256(&message.content),
+        &[], message.assistant_metadata().as_ref(),
+    );
+    axum::Json(json!({"value":{"message":message,"rendered":rendered}}))
+}
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let root=PathBuf::from(std::env::args().nth(1).expect("explicit scratch state directory"));
@@ -34,7 +47,9 @@ async fn main() -> anyhow::Result<()> {
     st3::api::start_agent_roster(&state);
     st3::api::start_native_session_discovery(&state);
     let local=root.join("st3.sock");let gateway=root.join("st3-client.sock");
-    let app=st3::api::router(state.clone());let fabric=st3::api::fabric_router(state);
+    let app=st3::api::router(state.clone()).merge(
+        axum::Router::new().route("/prototype/delivery/{*subject}", axum::routing::get(delivery)).with_state(state.clone())
+    );let fabric=st3::api::fabric_router(state);
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     std::fs::write(root.join("fixture.json"),json!({"pairing_url":format!("http://{}",listener.local_addr()?),"ask_id":ask.subject,"expiry_ask_id":expiry_ask.subject,"session_id":format!("session/{}",&hex::encode(Sha256::digest(b"agent/prototype.worker:native-pty:prototype"))[..24])}).to_string())?;
     tokio::try_join!(st3::api::serve_unix(&local,app),st3::api::serve_unix(&gateway,fabric.clone()),async {axum::serve(listener,fabric).await.map_err(anyhow::Error::from)})?;

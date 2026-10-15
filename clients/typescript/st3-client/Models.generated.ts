@@ -2205,6 +2205,7 @@ export type TimelineErrorBody = {
 };
 
 export type TimelineMessageBody = {
+  assistant_grant_id?: string;
   attachments?: Array<Attachment>;
   blocks?: Array<TimelineBlock>;
   body_bytes?: number;
@@ -2212,6 +2213,7 @@ export type TimelineMessageBody = {
   message_id: string;
   provenance?: MessageProvenance;
   reply_to?: string | null;
+  sender_class?: "external-assistant";
   tags?: Array<string>;
   title?: string;
   to?: ParticipantRef;

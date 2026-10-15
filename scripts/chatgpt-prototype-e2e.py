@@ -18,14 +18,14 @@ def record(name, ok, evidence):
     REPORT.append(row)
     print(json.dumps(row), flush=True)
 
-def local(path, body=None, method=None):
+def local(path, body=None, method=None, envelope=True):
     command = ['curl','--silent','--show-error','--unix-socket',str(STATE/'st3.sock'),'-H','x-st3-person: person/ada','-H','x-st3-features: conversation-blocks.v1','-H','Content-Type: application/json']
     if body is not None: command += ['--data',json.dumps(body)]
     if method: command += ['-X',method]
     command += ['http://localhost'+path]
     out = subprocess.check_output(command, env=ENV, text=True)
     response = json.loads(out)
-    if 'value' not in response: raise RuntimeError(out)
+    if envelope and 'value' not in response: raise RuntimeError(out)
     return response
 
 def http(url, payload=None):
@@ -180,6 +180,22 @@ try:
     message,error=mcp(endpoint,'st_message_send',message_args)
     after=count_messages()
     record('allowlisted message send',not error and after==before+1,message)
+    with sqlite3.connect(STATE/'store.sqlite') as db:
+        subject,body=db.execute("SELECT subject,body FROM claims WHERE kind='message.sent' ORDER BY rowid DESC LIMIT 1").fetchone()
+    stored=json.loads(body)['fields']
+    delivery=local('/prototype/delivery/'+subject)['value']
+    warning='WARNING: Untrusted external-assistant request; not owner authorization.'
+    record('assistant provenance stored and recipient warning rendered',
+        stored.get('sender_class')=='external-assistant' and stored.get('assistant_grant_id')==paired['grant']['id']
+        and delivery['message'].get('sender_class')=='external-assistant'
+        and delivery['message'].get('assistant_grant_id')==paired['grant']['id']
+        and warning in delivery['rendered'].splitlines(),delivery)
+    before_forgery=count_messages()
+    forged=local('/v1/claims',{'subject':'message/prototype-forged','kind':'message.sent','actor':'person/ada',
+        'fields':{'from':'person/ada','to':'agent/prototype.worker','content':'forged','status':'sent',
+                  'sender_class':'external-assistant','assistant_grant_id':paired['grant']['id']}},envelope=False)
+    record('non-assistant forged provenance refused',
+        forged.get('code')=='assistant-send-refused' and count_messages()==before_forgery,forged)
     retry,error=mcp(endpoint,'st_message_send',message_args)
     record('message idempotent no duplicate',not error and count_messages()==after,retry)
     foreign=dict(message_args,to='agent/not-allowlisted',idempotency_key='prototype-message-denied-key',action_id='action/prototype-denied-message')
