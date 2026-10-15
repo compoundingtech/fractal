@@ -148,7 +148,13 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         .filter(|mission| {
             !matches!(
                 mission.word,
-                Word::Decision | Word::Done | Word::Failed | Word::Cancelled | Word::NotStarted
+                // A mission st serves no word for is not known to be quiet.
+                Word::Decision
+                    | Word::Done
+                    | Word::Failed
+                    | Word::Cancelled
+                    | Word::NotStarted
+                    | Word::Unknown
             ) && !mission.system
         })
         .count();

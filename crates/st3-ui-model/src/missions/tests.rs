@@ -138,9 +138,10 @@ fn a_row_without_a_presentation_reads_unknown_and_derives_nothing() {
         (missions[0].steps[0].state, &missions[0].steps[0].owner),
         (StepState::Unknown, &None)
     );
-    // A word this client does not know reads unknown too, rather than a guess.
-    let mut served = model.missions.clone();
-    served[0].presentation = Some(json!({"word": "becalmed", "who": {"kind": "nobody"}}));
+    // A word this client does not know reads unknown too, rather than a guess: the presentation
+    // st serves, complete but for its word.
+    let mut served = serve(&model);
+    served[0].presentation.as_mut().unwrap()["word"] = json!("becalmed");
     assert_eq!(read(&model, &served)[0].word, Word::Unknown);
     // The one st serves is the one it reads.
     assert_eq!(project(&model)[0].word, Word::Working);

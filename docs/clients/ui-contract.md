@@ -355,7 +355,7 @@ row's raw `state` with "older st". The summary's count of active missions reads
 
 | Field | Meaning |
 |---|---|
-| `word` | The mission word: one of the thirteen `mission` ids in `words.json`. |
+| `word` | The mission word: one of the thirteen `mission` ids in `words.json` that st serves. The fourteenth, `unknown`, is the client's own, for a row without a presentation it can read. |
 | `system` | The mission is st's own or a standing observer (see [Graph flags](#graph-flags)). |
 | `who` | Who must act now: `{kind, person, agent, label}`. `kind` is `person` (with `person`), `agent` (with `agent`), `st` or `nobody`. Every reader sees the same row; a client says "you" when the person is its reader. |
 | `steps[]` | The steps of the open runs, or of the latest run when none is open, in display order: `{id, path, title, word, owner, note, attempts, blockers[], keep_open}`. The step `word` is one of `needs_you`, `done`, `working`, `ready`, `waiting`, `cancelled`, `failed` or `pending`. `owner` is shaped like `who`. |
