@@ -59,6 +59,8 @@ use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
 mod cli_help;
+mod setup;
+mod onboarding;
 mod change_cli;
 mod directive_note;
 mod completion;
@@ -116,7 +118,7 @@ const DEFAULT_DAEMON_WAIT_SECS: u64 = 30;
 #[derive(Subcommand)]
 enum Command {
     /// Configure this machine and start st, with flags for unattended setup.
-    Setup(st3::setup::SetupArgs),
+    Setup(crate::setup::SetupArgs),
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
     #[command(version = st_drivers::version::display_version())]
     Ui(stui::Args),
@@ -1396,6 +1398,8 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
         config.client_gateway_socket.clone(),
     ];
     paths.extend(st3::startup::paths(&config.socket));
+    paths.push(st3::api::unix_reservation_path(&config.socket));
+    paths.push(st3::api::unix_reservation_path(&config.client_gateway_socket));
     if st2_only_hooks {
         paths.push(st2_state);
     }
@@ -5338,7 +5342,7 @@ fn cli_main() -> ExitCode {
         cli_output::stdout().is_terminal(),
         std::env::var_os("ST_AGENT").is_some(),
     ) {
-        let subject = match st3::setup::prepare_plain_ui() {
+        let subject = match crate::setup::prepare_plain_ui() {
             Ok(subject) => subject,
             Err(error) => {
                 eprintln!("st: {}", plain_error(&error));
@@ -5489,7 +5493,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
     if args.driver == "claude-mcp" {
         return Ok(None);
     }
-    let config = Config::load_unvalidated(None)?;
+    let config = Config::load_client_unvalidated(None)?.0;
     let endpoint = cli
         .endpoint
         .clone()
@@ -5588,6 +5592,9 @@ fn record_daemon_commands(args: &UpArgs) {
     unsafe { std::env::set_var("PATH", path) };
 }
 
+// Writer-bound store work admits before spawn_blocking. A global blocking-thread cap
+// cannot replace that admission: native provider sessions occupy pool threads for their
+// lifetime, and their control callbacks can depend on another blocking worker.
 #[tokio::main]
 async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
     let native_driver = matches!(&cli.command, Command::Driver(_));
@@ -5743,7 +5750,7 @@ async fn run(cli: Cli) -> Result<()> {
     let mission_run = std::env::var("ST_MISSION_RUN").ok();
     guard_mutating_cli_actor(&cli.command, own.as_deref(), mission_run.as_deref())?;
     if let Command::Setup(args) = cli.command {
-        return st3::setup::run(args).await.map(|_| ());
+        return crate::setup::run(args).await.map(|_| ());
     }
     // Completion is a remote device operation. It needs neither a local daemon nor its config.
     if let Command::Devices(DevicesArgs {
@@ -5795,7 +5802,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
-        let code = st3::sekrets::cli::run(args, cli.json).await?;
+        let code = st3::sekrets::cli::run(args, cli.json, cli.endpoint).await?;
         use std::io::Write as _;
         let _ = cli_output::stdout().flush();
         return Err(CommandExit(code as u8).into());
@@ -5837,7 +5844,7 @@ async fn run(cli: Cli) -> Result<()> {
         telemetry.shutdown();
         return result;
     }
-    let config = Config::load_unvalidated(None)?;
+    let (config, unknown_config_keys) = Config::load_client_unvalidated(None)?;
     let endpoint = cli
         .endpoint
         .or_else(|| std::env::var("ST3_ENDPOINT").ok())
@@ -5955,7 +5962,7 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Command::Doctor(args) => run_doctor(&immediate, args, cli.json).await,
+        Command::Doctor(args) => run_doctor(&immediate, args, cli.json, &unknown_config_keys).await,
         Command::Recorder { command } => run_recorder(command, &config, cli.json),
         Command::Repair { command } => run_repair(&client, command, cli.json).await,
         Command::Backup { command } => match command {
@@ -6809,6 +6816,15 @@ async fn run_up(args: UpArgs) -> Result<()> {
     fs::create_dir_all(&config.state_dir)?;
     let startup = Arc::new(st3::startup::Startup::begin(&config.socket)?);
     startup_phases.configuration_ms = phase_elapsed_ms();
+    startup.phase("bind-listeners");
+    let state_socket = config.state_dir.join("run/st3.sock");
+    let (local_reserved, gateway_reserved) = tokio::try_join!(
+        st3::api::reserve_unix_socket(&config.socket, Some(&state_socket)),
+        st3::api::reserve_unix_socket(&config.client_gateway_socket, None),
+    )?;
+    // Only addresses are bound. Until initialization finishes, connections are
+    // refused and clients use the existing live startup-phase observation.
+    let reserved_bind_ms = phase_elapsed_ms();
     startup.phase("install-hooks");
     startup_telemetry.phase("install-hooks");
     st3::hooks::ensure_installed(&st3::hooks::root(&config.state_dir)).context(
@@ -6966,6 +6982,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
     };
+    // Tiles this daemon's user supervises reach it only through their restricted endpoint.
+    #[cfg(target_os = "linux")]
+    st3::api::spawn_tile_endpoints(state.clone());
     st3::gate_check::set_endpoint(config.socket.display().to_string());
     startup_phases.app_state_ms = phase_elapsed_ms();
     let reconciler = Arc::new(Reconciler::native(
@@ -7036,9 +7055,6 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .await;
         }
     });
-    let local_socket = config.socket.clone();
-    let state_socket = config.state_dir.join("run/st3.sock");
-    let client_gateway_socket = config.client_gateway_socket.clone();
     // The first diagnostic report and delayed repair share one operation audit. Later reports
     // audit current state independently; no request waits for this startup report.
     if let Some(audit) = st3::api::start_operation_report(&state) {
@@ -7056,7 +7072,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     return;
                 }
             };
-            match tokio::task::spawn_blocking(move || {
+            match store.connection.write_workers().spawn_blocking(move || {
                 store.repair_operation_projection_drift_from_audit(&drift)
             })
             .await
@@ -7119,7 +7135,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                         .unwrap_or_else(|| "person/operator".into()),
                 });
             tokio::spawn(async move {
-                match tokio::task::spawn_blocking({
+                match activation_store.connection.write_workers().spawn_blocking({
                     let store = activation_store.clone();
                     move || store.complete_replication_activation()
                 })
@@ -7143,7 +7159,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             startup_telemetry.serving();
             let ready_at = Instant::now();
             startup_phases.log_ready(
-                ready_at.duration_since(bind_started_at).as_secs_f64() * 1_000.0,
+                reserved_bind_ms + ready_at.duration_since(bind_started_at).as_secs_f64() * 1_000.0,
                 ready_at.duration_since(started_at).as_secs_f64() * 1_000.0,
             );
             startup.serving();
@@ -7155,13 +7171,13 @@ async fn run_up(args: UpArgs) -> Result<()> {
         }
     };
     tokio::try_join!(
-        st3::api::serve_unix_bound_with_ready(
-            &local_socket,
-            &state_socket,
+        st3::api::serve_reserved_unix_with_ready(
+            local_reserved,
             router(state.clone()),
+            true,
             ready
         ),
-        st3::api::serve_unix_with_ready(&client_gateway_socket, fabric_router(state), ready),
+        st3::api::serve_reserved_unix_with_ready(gateway_reserved, fabric_router(state), false, ready),
     )?;
     telemetry.shutdown();
     Ok(())
@@ -12109,20 +12125,35 @@ async fn doctor_request<T: serde::de::DeserializeOwned>(
     }
 }
 
-async fn run_doctor(client: &Client, args: DoctorArgs, json_output: bool) -> Result<()> {
+async fn run_doctor(
+    client: &Client,
+    args: DoctorArgs,
+    json_output: bool,
+    unknown_config_keys: &[String],
+) -> Result<()> {
+    let config_check = doctor_cli::client_config_check(unknown_config_keys);
     if args.developer {
         let environment = st3::environment::snapshot()?;
         let check = doctor_cli::developer_tools(&environment);
+        let status = doctor_cli::client_config_status(&check.status, config_check.is_some());
         if json_output {
             print_value(
-                &json!({"status": check.status, "scope": "local developer tools", "checks": [check]}),
+                &json!({"status": status, "scope": "local developer tools", "checks":
+                    std::iter::once(&check).chain(config_check.iter()).collect::<Vec<_>>()}),
                 true,
             )?;
         } else {
             println!("{}\t{}\t{}", check.status, check.name, check.message);
+            if let Some(config_check) = &config_check {
+                println!(
+                    "{}\t{}\t{}",
+                    config_check.status, config_check.name, config_check.message
+                );
+            }
         }
+        anyhow::ensure!(status != "fail", "st doctor found a failed check");
         anyhow::ensure!(
-            !args.strict || check.status != "warn",
+            !args.strict || status != "warn",
             "st doctor found a computed warning in strict mode"
         );
         return Ok(());
@@ -12133,6 +12164,9 @@ async fn run_doctor(client: &Client, args: DoctorArgs, json_output: bool) -> Res
         let mut report: Value =
             doctor_request(client, "/v1/performance", readiness.as_ref(), json_output).await?;
         if json_output {
+            if let Some(config_check) = &config_check {
+                report["client_config"] = serde_json::to_value(config_check)?;
+            }
             if let Some(startup) = &readiness {
                 report["startup"] = serde_json::to_value(startup)?;
             }
@@ -12146,11 +12180,23 @@ async fn run_doctor(client: &Client, args: DoctorArgs, json_output: bool) -> Res
             };
             println!("{status}\tstartup\t{}", startup.summary());
         }
+        if let Some(config_check) = &config_check {
+            println!(
+                "{}\t{}\t{}",
+                config_check.status, config_check.name, config_check.message
+            );
+        }
         print!("{}", render_performance(&report));
         return Ok(());
     }
-    let report: DoctorReport =
+    let mut report: DoctorReport =
         doctor_request(client, "/v1/doctor", readiness.as_ref(), json_output).await?;
+    if let Some(config_check) = config_check {
+        report.checks.push(config_check);
+        if report.status == "pass" {
+            report.status = "warn".into();
+        }
+    }
     if json_output {
         let mut value = serde_json::to_value(&report)?;
         if let Some(startup) = &readiness {
@@ -12508,6 +12554,24 @@ fn render_replication_peers(
                 .or(peer.last_error.as_deref())
                 .unwrap_or("")
         );
+        for (label, record) in [
+            ("last successful exchange", &peer.last_successful_exchange),
+            ("last failed exchange", &peer.last_failed_exchange),
+        ] {
+            if let Some(record) = record {
+                let _ = writeln!(
+                    output,
+                    "  {label} {} via {}{}",
+                    relative_time(record.at_unix_ms, now),
+                    record.carrier.as_str(),
+                    record
+                        .fabric_route
+                        .as_ref()
+                        .map(|route| format!(" (Fabric route {route})"))
+                        .unwrap_or_default()
+                );
+            }
+        }
         if let Some(worker) = &peer.worker {
             let _ = writeln!(
                 output,
@@ -13081,8 +13145,8 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
             )
         }
         ServiceCommand::Status => {
-            let mut report = st3::service::status()?;
             let config = Config::load_unvalidated(None)?;
+            let mut report = st3::service::status()?;
             if let Some(startup) = st3::startup::read(&config.client_socket()) {
                 for service in &mut report.services {
                     if service.name == "st3.service" || service.name == "com.compoundingtech.st3" {
@@ -25746,7 +25810,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: st3::config::Li
             continue;
         };
         let pass = store.clone();
-        match tokio::task::spawn_blocking(move || {
+        match pass.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task enforce-account-limits", || {
                 let now = now_ms();
                 let check = pass.account_limits_check(now, policy.fresh_ms)?;
@@ -25853,7 +25917,7 @@ fn retry_projection_contention_observed(
             let Some(attempt) = attempt else { continue };
             // Only this task schedules these attempts. The existing projection mutex also
             // serializes them with receive/wake passes. Store ownership ends at attempt return.
-            let result = tokio::task::spawn_blocking(move || {
+            let result = store.connection.write_workers().spawn_blocking(move || {
                 let result = store.project_replication_backlog_unless_catching_up();
                 (result, store.projection_contention_generation(), store.replication_projection_deferred())
             })
@@ -26380,7 +26444,7 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
 async fn convert_envelope_payloads(store: Arc<Store>) {
     loop {
         let store = store.clone();
-        let result = tokio::task::spawn_blocking(move || store.convert_envelope_payloads()).await;
+        let result = store.connection.write_workers().spawn_blocking(move || store.convert_envelope_payloads()).await;
         match result {
             Ok(Ok(report)) if report.done => return,
             Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(50)).await,
@@ -26397,7 +26461,7 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
 async fn catch_up_coordination_counts(store: Arc<Store>) {
     loop {
         let page_store = store.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = page_store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task coordination-counts-catch-up", || {
                 page_store.advance_coordination_counts()
             })
@@ -26460,7 +26524,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                 }
                 Ok(Ok(false)) => {
                     let page_store = store.clone();
-                    match tokio::task::spawn_blocking(move || {
+                    match page_store.connection.write_workers().spawn_blocking(move || {
                         page_store.advance_publication_evidence()
                     })
                     .await
@@ -26600,7 +26664,7 @@ async fn expire_completed_responses(
         }
         clock_deferred = false;
         let clean_store = store.clone();
-        match tokio::task::spawn_blocking(move || {
+        match clean_store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task expire-completed-responses", || {
                 clean_store.cleanup_idempotency(now)
             })
@@ -26905,7 +26969,7 @@ async fn catch_up_account_limits(store: Arc<Store>, notify: Arc<Notify>) {
     let mut announced = false;
     loop {
         let page_store = store.clone();
-        let more = tokio::task::spawn_blocking(move || {
+        let more = page_store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task account-limits-catch-up", || {
                 page_store.catch_up_account_limits(st3::store::LIMITS_CATCH_UP_PAGE)
             })
@@ -26962,7 +27026,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
     loop {
         let observation_store = store.clone();
         let max_per_subject_kind = observations.max_per_subject_kind;
-        let trimmed = tokio::task::spawn_blocking(move || {
+        let trimmed = observation_store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task trim-local-observations", || {
                 observation_store.trim_local_observations(
                     now_ms().saturating_sub(u128::from(retention_ms)),
@@ -26973,7 +27037,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         })
         .await;
         let usage_store = store.clone();
-        if let Ok(Err(error)) = tokio::task::spawn_blocking(move || {
+        if let Ok(Err(error)) = usage_store.connection.write_workers().spawn_blocking(move || {
             usage_store.trim_usage_responses(
                 now_ms().saturating_sub(st3::store::USAGE_RESPONSE_HORIZON_MS),
                 LOCAL_OBSERVATION_TRIM_CHUNK,
@@ -26991,7 +27055,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         }
         // The database target's sample: after the trims, so it counts what they freed.
         let size_store = store.clone();
-        match tokio::task::spawn_blocking(move || size_store.record_database_size(now_ms())).await {
+        match size_store.connection.write_workers().spawn_blocking(move || size_store.record_database_size(now_ms())).await {
             Ok(Ok(size)) => st3::slo::note_database_size(&size),
             Ok(Err(error)) => eprintln!("st3: database size sample failed: {error:#}"),
             Err(error) => eprintln!("st3: database size sample stopped: {error}"),
@@ -27019,7 +27083,7 @@ async fn run_checkpoints(store: Arc<Store>, context: st3::store::CheckpointConte
             now_unix_ms: now_ms(),
             ..context.clone()
         };
-        match tokio::task::spawn_blocking(move || {
+        match store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task checkpoint", || store.checkpoint_step(&context))
         })
         .await
@@ -27507,6 +27571,8 @@ mod tests {
 
     fn peer_status(peer: &str, digest: Option<&str>) -> st3::model::ReplicationPeerStatus {
         st3::model::ReplicationPeerStatus {
+            last_successful_exchange: None,
+            last_failed_exchange: None,
             worker: None,
             projection_digests: Default::default(),
             differing_tables: Vec::new(),
@@ -29407,6 +29473,8 @@ mod tests {
         let peer =
             |name: &str, graph: Option<&str>, sync: Option<st3::model::ReplicationPeerSync>| {
                 ReplicationPeerStatus {
+                    last_successful_exchange: None,
+                    last_failed_exchange: None,
                     worker: None,
                     projection_digests: BTreeMap::from([("claim_sources".into(), "sample".into())]),
                     differing_tables: Vec::new(),
@@ -29512,6 +29580,8 @@ mod tests {
         page.sync = Some(st3_client::SyncNotice {
             state: "catching-up".into(),
             peers: vec![st3_client::SyncPeer {
+                last_successful_exchange: None,
+                last_failed_exchange: None,
                 host_id: "host/ExampleMac".into(),
                 peer_only_envelopes: 1,
                 local_only_envelopes: 0,

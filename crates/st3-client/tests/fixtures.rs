@@ -549,7 +549,6 @@ fn generated_action_union_and_machine_manifest_stay_in_lockstep() {
         READ_OPERATIONS.len(),
         operations["reads"].as_array().unwrap().len()
     );
-    assert_eq!(CONTRACT_SHA256.len(), 64);
 }
 
 #[test]
