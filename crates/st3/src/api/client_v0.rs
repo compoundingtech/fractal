@@ -10168,11 +10168,10 @@ async fn import_external_session_action(
     // until the exact native process has stopped, so two harnesses never own one native session.
     if let Some(process) = external.process.clone() {
         let driver = external.driver;
-        crate::api::read_deadline::spawn_blocking(move || {
+        super::blocking_external(move || {
             crate::external_sessions::terminate_exact_process(driver, &process)
         })
-        .await
-        .map_err(ApiError::internal)?
+        .await?
         .map_err(ApiError::internal)?;
     }
     state
@@ -22491,6 +22490,22 @@ mission "example/zero-run" state="ready" {
             "silent_since": "2026-10-12T09:30:00.000Z",
             "current_work": [{"id": "step-run/one/build", "state": "claimed"}],
         })
+    }
+
+    #[test]
+    fn a_seat_that_spoke_after_launch_is_down_since_it_last_spoke() {
+        let started = 1_790_000_000_000_u64;
+        let now = started + 3 * 24 * 3_600_000;
+        let heard_ago = 7 * 3_600_000;
+        let mut card = sessionless_card(json!("indeterminate"));
+        overlay_down(&mut card, Some(started), Some(heard_ago), Some("indeterminate"), now);
+        assert_eq!(card["state"], "down");
+        assert_eq!(card["down_since"], client_timestamp(u128::from(now - heard_ago)));
+        assert_eq!(card["current_work"][0]["holder_down_since"], card["down_since"]);
+        // A report older than the launch (a stale carried-over one) never moves it earlier.
+        let mut earlier = sessionless_card(json!("indeterminate"));
+        overlay_down(&mut earlier, Some(started), Some(now - started + 1_000), Some("idle"), now);
+        assert_eq!(earlier["down_since"], client_timestamp(u128::from(started)));
     }
 
     #[test]

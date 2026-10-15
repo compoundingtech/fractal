@@ -195,7 +195,7 @@ where
         let peer = peer.to_owned();
         let fleet_id = fleet_id.to_owned();
         let exchange = exchange.clone();
-        tokio::task::spawn_blocking(move || {
+        self.store().connection.spawn_blocking(move || {
             let store = backend.store();
             if let Some(round_trip) = round_trip {
                 store.record_replication_round_trip(round_trip);
