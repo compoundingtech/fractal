@@ -8,7 +8,6 @@ import { nativeSessionStartReason, projectNativeDetails, type NativeDetailsObser
 import { unavailable, type DataSource, type Feed } from '../data/source.ts'
 import type * as Native from '@smalltalk/st3-client/schema'
 import type { NativeDeclarations } from '../data/nativeDeclarations.ts'
-import { sidebarAttention } from './sidebarAttention.ts'
 
 export type { NativeDetailsObservation } from '../data/nativeDetails.ts'
 const notReported = Atom.make(unavailable({ reason: 'unsupported', detail: 'The selected native fact is not reported.' }))
@@ -73,7 +72,7 @@ export const useNativeDetails = ({ agentRef }: { readonly agentRef: string }): N
   const queue = useAtomValue(queueAtom)
   const subjects = useSubjectList()
   const needsMe = agent._tag === 'Observed' && agent.error?.reason !== 'ungranted' && agent.value !== undefined
-    ? sidebarAttention({ agents: [agent.value], subjects }).has(agentRef) : undefined
+    ? agent.value.status === 'waiting' || subjects.some(subject => subject.ref === agentRef && subject.attention === true) : undefined
   const onRetry = () => {
     const retrySubject = (atom: Atom.Atom<Feed<unknown>>) => {
       const feed = registry.get(atom)

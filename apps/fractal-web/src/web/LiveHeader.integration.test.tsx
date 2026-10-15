@@ -7,6 +7,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { within } from 'storybook/test'
+import { formatRelative } from '@smalltalk/fractal-ui/human-time'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, unavailable, type Feed } from '../data/source.ts'
@@ -84,7 +85,7 @@ describe('live header parity', () => {
     const row = dialog?.querySelector('[aria-label="Observed resources"] li')
     expect(row?.textContent).toContain('filesystem.file')
     expect(row?.textContent).toContain('open')
-    expect(row?.textContent).toContain('2d ago')
+    expect(row?.querySelector('time')?.textContent).toBe(formatRelative(Date.parse('2026-10-04T12:00:00.000Z'), Date.parse('2026-10-06T12:00:00.000Z')))
     expect(row?.querySelector('time')?.getAttribute('datetime')).toBe('2026-10-04T12:00:00.000Z')
     expect(dialog?.textContent).toContain('1 current work item')
     expect(dialog?.textContent).toContain('mission-run/example')

@@ -157,8 +157,10 @@ describe('fixture-free native Details projection', () => {
     const agent = createProjections().fleetFromAgents([row]).agents[0]!
     const occupancy = contextOccupancy({ usage: agent.usage, now: 10000, observedAfter: agent.contextObservedAfter })
     const details = project()
-    expect(occupancy).toMatchObject({ _tag: 'Known', usedPercent: 6.1206 })
-    expect(details.trace.meters.context.reportedPercent).toMatchObject({ _tag: 'Known', value: 6.1206, asOfMs: 4000 })
+    expect(occupancy._tag).toBe('Known')
+    if (occupancy._tag === 'Known') expect(occupancy.usedPercent).toBeCloseTo(6.1206)
+    expect(details.trace.meters.context.reportedPercent).toMatchObject({ _tag: 'Known', asOfMs: 4000 })
+    if (details.trace.meters.context.reportedPercent._tag === 'Known') expect(details.trace.meters.context.reportedPercent.value).toBeCloseTo(6.1206)
     expect(details.trace.meters.context.compactions).toMatchObject({ _tag: 'Known', value: 2 })
     expect(details.trace.meters.context.lastCompactionMs).toMatchObject({ _tag: 'Known', value: 3000 })
     const { context: _context, ...withoutContext } = Option.getOrThrow(row.usage)

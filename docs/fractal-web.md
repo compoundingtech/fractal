@@ -185,8 +185,8 @@ Retained-read error copy is separated from the coverage sentence with punctuatio
 Traced cards expose the reported role/label, known model and full native session identity
 before Open; generic reported roles remain generic, and missing kinds are not invented.
 An omitted role remains explicit as “role unreported” before the full session identity.
-Attention uses the sidebar's pending-ask and attention-subject union, not a runtime
-waiting heuristic. Terminal resources reuse the observed runtime's native navigation
+Attention preserves main's sidebar union of waiting status and observed attention
+subjects; it does not introduce a separate sidebar policy. Terminal resources reuse the observed runtime's native navigation
 reference. Missions / queue mounts the same selected-agent queue reader as Resources;
 grant refusal removes values, while stale retained queues are labelled last observed.
 

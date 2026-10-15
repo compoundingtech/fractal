@@ -320,6 +320,7 @@ describe('conversation import boundary', () => {
     const ux: UxTelemetry = {
       activeSpan: () => undefined,
       traceContext: () => undefined,
+      beginOpen: () => {},
       shellCommitted: () => capture,
       rosterCommitted: () => () => {},
       beginSwitch: () => {},
