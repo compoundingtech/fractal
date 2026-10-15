@@ -2046,6 +2046,9 @@ export type TimelineViewAssistantError = {
   label: string;
   message: string;
   model?: string;
+  native?: {
+  [key: string]: unknown;
+};
   presentation: "full" | "compact-recovered" | "none";
   provider?: string;
   retry?: {
