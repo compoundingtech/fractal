@@ -231,10 +231,15 @@ mod tests {
 
     fn know(store: &Store, person: &str) {
         store.append_claim(&ClaimInput {
-            subject: person.into(),
-            kind: "person.delegation-set".into(),
+            subject: format!("message/known-{}", person.strip_prefix("person/").unwrap()),
+            kind: "message.sent".into(),
             actor: Some(person.into()),
-            fields: BTreeMap::from([("actions".into(), json!([]))]),
+            fields: BTreeMap::from([
+                ("from".into(), json!(person)),
+                ("to".into(), json!("person/alex")),
+                ("content".into(), json!("Identity evidence predates the repair.")),
+                ("status".into(), json!("sent")),
+            ]),
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: Some(format!("known:{person}")),

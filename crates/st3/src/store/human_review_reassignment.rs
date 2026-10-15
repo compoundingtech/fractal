@@ -63,47 +63,54 @@ pub(super) fn pending_requests_sql(filtered: bool) -> String {
          WHERE kind='gate.requested' AND json_extract(body, '$.fields.reviewer') IS NOT NULL
            AND ?1 IS NULL"
     };
-    let episode = |alias: &str| {
+    let episode = |alias: &str, request: &str| {
         ["owner", "reviewer", "attempt", "mission_revision", "step_definition"]
             .map(|field| {
                 format!(
-                    "json_extract({alias}.body, '$.fields.{field}')=json_extract(request.body, '$.fields.{field}')"
+                    "json_extract({alias}.body, '$.fields.{field}')=json_extract({request}.body, '$.fields.{field}')"
                 )
             })
             .join(" AND ")
     };
     let effective_reviewer = reviewer_sql("request", None);
+    // Finish answer/supersession filtering before looking up an episode's first request.
+    // Otherwise SQLite may run that canonical sort for every historical candidate, including
+    // answered episodes that cannot contribute a review or its waiting-since timestamp.
     canonical_sql(&format!(
-        "WITH candidates(id) AS ({candidates})
-         SELECT request.id, request.store_index, request.batch_id, request.subject,
-                request.kind, request.origin, request.actor, request.body,
-                request.predecessors, request.accepted_at_unix_ms,
+        "WITH candidates(id) AS ({candidates}),
+         unresolved AS MATERIALIZED (
+             SELECT request.*
+             FROM candidates
+             JOIN claims request ON request.id=candidates.id
+             WHERE request.kind='gate.requested'
+               AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
+               AND (?1 IS NULL OR {effective_reviewer}=?1)
+               AND NOT EXISTS (
+                   SELECT 1 FROM claims result INDEXED BY claims_human_gate_answer_request_index
+                   WHERE {})
+               AND NOT EXISTS (
+                   SELECT 1 FROM claims newer INDEXED BY claims_human_gate_episode_index
+                   WHERE newer.kind='gate.requested'
+                     AND json_extract(newer.body, '$.fields.reviewer') IS NOT NULL
+                     AND {} AND {})
+         )
+         SELECT pending.id, pending.store_index, pending.batch_id, pending.subject,
+                pending.kind, pending.origin, pending.actor, pending.body,
+                pending.predecessors, pending.accepted_at_unix_ms,
                 first.accepted_at_unix_ms
-         FROM candidates
-         JOIN claims request ON request.id=candidates.id
+         FROM unresolved pending
          JOIN claims first ON first.id=(
              SELECT earliest.id FROM claims earliest INDEXED BY claims_human_gate_episode_index
              WHERE earliest.kind='gate.requested'
                AND json_extract(earliest.body, '$.fields.reviewer') IS NOT NULL
                AND {}
              ORDER BY {} LIMIT 1)
-         WHERE request.kind='gate.requested'
-           AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
-           AND (?1 IS NULL OR {effective_reviewer}=?1)
-           AND NOT EXISTS (
-               SELECT 1 FROM claims result INDEXED BY claims_human_gate_answer_request_index
-               WHERE {})
-           AND NOT EXISTS (
-               SELECT 1 FROM claims newer INDEXED BY claims_human_gate_episode_index
-               WHERE newer.kind='gate.requested'
-                 AND json_extract(newer.body, '$.fields.reviewer') IS NOT NULL
-                 AND {} AND {})
          ORDER BY {}",
-        episode("earliest"),
-        canonical::order_sql("earliest", false),
         reviewer_answer_sql("result"),
-        episode("newer"),
+        episode("newer", "request"),
         canonical::after_sql("newer", "request"),
+        episode("earliest", "pending"),
+        canonical::order_sql("earliest", false),
         canonical::order_sql("first", false),
     ))
 }
@@ -521,6 +528,37 @@ mission "review-repair" state="ready" {
             step.starts_with("SCAN request") || step.starts_with("SCAN result")
                 || step.starts_with("SCAN reassignment") || step.starts_with("SCAN newer")),
             "{plan:?}");
+    }
+
+    #[test]
+    fn answered_episodes_are_filtered_before_first_request_sorting() {
+        let (store, run) = fixture();
+        let pending = request(&store, &run, "pending", "sort-pending", 0);
+        let measure = || {
+            let connection = store.readers.get();
+            let mut statement = connection.prepare(&pending_requests_sql(false)).unwrap();
+            let ids = statement.query_map([None::<&str>], |row| row.get::<_, String>(0))
+                .unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(ids, vec![pending.id.clone()]);
+            statement.get_status(rusqlite::StatementStatus::Sort)
+        };
+        let before = measure();
+        for index in 0..64 {
+            let historical = request(
+                &store, &run, "answered", &format!("sort-history-{index}"), index,
+            );
+            answer(&store, &historical, OLD, &format!("sort-answer-{index}"));
+        }
+        let after = measure();
+        // Each answer may sort its exact-request reassignment lookup, but an answered
+        // episode must not also sort its earliest request merely to be discarded.
+        assert!(after <= before + 64, "answered history added episode sorts: {before} -> {after}");
+
+        let connection = store.readers.get();
+        let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {}", pending_requests_sql(false)))
+            .unwrap().query_map([None::<&str>], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(plan.iter().any(|step| step == "MATERIALIZE unresolved"), "{plan:?}");
     }
 
     #[test]
