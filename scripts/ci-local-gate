@@ -8,7 +8,9 @@ gives it a clean worktree of the merge tree). Each stage is the command its CI j
 job prepares (an isolated HOME, RUNNER_TEMP, the historical messaging channel and the provider components). The one
 deliberate difference: CI builds the test archive in one job and the shard jobs extract it; here nextest builds in
 place (`ci-nextest run --no-run`, then the four partitions of the merge-queue run), so no GitHub artifact is needed.
-A test in tests/ proves every command below appears in the generated workflow, so the two cannot drift apart.
+A test proves every command below appears in the generated workflow, so the two cannot drift apart.
+On a host whose cargo shim lives at $HOME/.local/bin/cargo (build admission, a builds slice) the dev shell's cargo is run through
+that shim, so the compile is queued and sliced like any other; it is the same compile, and only done at run time.
 
 Every stage runs even after a failure (a failing record is information); --fail-fast stops at the first and writes
 no facts. --external NAME=EXIT passes the exit code of a member this script does not run (genie-freshness and
@@ -64,6 +66,17 @@ def stages(base):
         'isolation-vm': [(NIX + ['bash', 'scripts/ci-install-built-hooks'], {}),
                          (['bash', '-c', KVM_PROBE], {}), (['bash', '-c', VM_TESTS], {})],
     }
+
+
+def admitted(command, shim_dir):
+    """Run a dev-shell command with cargo going through the host's cargo shim, when this host has one.
+
+    Inside `nix develop` the dev shell's own cargo comes first on PATH, so a host that queues builds in its cargo shim
+    (build admission, a builds slice) never sees them. The shim is put first, with the dev shell's cargo as the real
+    one, so the compile is the same and only its queueing and slice change. Not a CI command: applied at run time only."""
+    if not shim_dir or command[:3] != NIX:
+        return command
+    return NIX + ['bash', '-c', 'export CARGO_REAL=$(command -v cargo); export PATH="$1:$PATH"; shift; exec "$@"', '_', shim_dir, *command[3:]]
 
 
 def merge_commit(base, env):
@@ -153,8 +166,12 @@ def main(argv, table=None, setup=None):
             return 2
         external[name] = 'success' if int(code) == 0 else 'failure'
     results, failed = {}, False
+    real_home = os.environ.get('HOME', '')
+    shim_dir = str(Path(real_home) / '.local/bin') if real_home and os.access(Path(real_home) / '.local/bin/cargo', os.X_OK) else None
     with tempfile.TemporaryDirectory(prefix='ci-local-gate-') as work:
         environment = dict(os.environ, **(setup or prepare)(work))
+        if shim_dir and os.access(Path(shim_dir) / 'build-admission', os.X_OK):
+            environment.setdefault('BUILD_ADMISSION_BIN', str(Path(shim_dir) / 'build-admission'))  # HOME is isolated below
         needs_shared = any(name not in ('upgrade-impact',) for name in chosen) and table is None
         if needs_shared:
             environment.update(shared_environment(environment))
@@ -164,7 +181,7 @@ def main(argv, table=None, setup=None):
             for command, extra in plan[name]:
                 if MERGE in command:
                     command = [merge_commit(args.base, environment) if part == MERGE else part for part in command]
-                code = subprocess.run(command, env=dict(environment, **extra)).returncode
+                code = subprocess.run(admitted(command, shim_dir if table is None else None), env=dict(environment, **extra)).returncode
                 if code != 0:
                     break
             results[name] = 'success' if code == 0 else 'failure'

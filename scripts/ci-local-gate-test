@@ -138,6 +138,28 @@ class Run(unittest.TestCase):
         self.assertEqual(self.run_gate(self.stub(), '--base=--upload-pack=x'), 2)
 
 
+class Shim(unittest.TestCase):
+    def test_a_dev_shell_command_gets_the_shim_first_and_anything_else_is_untouched(self):
+        command = gate.NIX + ['bash', 'scripts/ci-linux', 'clippy']
+        wrapped = gate.admitted(command, '/home/u/.local/bin')
+        self.assertEqual(wrapped[:3], gate.NIX)
+        self.assertEqual(wrapped[-4:], ['/home/u/.local/bin', 'bash', 'scripts/ci-linux', 'clippy'])
+        self.assertIn('CARGO_REAL=$(command -v cargo)', wrapped[4 + 1])
+        self.assertEqual(gate.admitted(command, None), command)
+        plain = ['python3', 'scripts/release_notes_test.py']
+        self.assertEqual(gate.admitted(plain, '/home/u/.local/bin'), plain)
+
+    def test_the_wrapped_command_runs_the_original_with_the_shim_directory_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shim = Path(tmp, 'bin')
+            shim.mkdir()
+            wrapped = gate.admitted(['nix', 'develop', '-c', 'sh', '-c', 'echo "$PATH"'], str(shim))
+            # Run the rewritten tail directly (without nix): bash -c SCRIPT _ DIR sh -c 'echo $PATH'
+            done = subprocess.run(wrapped[3:], capture_output=True, text=True, env=dict(os.environ))
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertTrue(done.stdout.startswith(str(shim) + ':'), done.stdout)
+
+
 class Prepared(unittest.TestCase):
     def test_the_environment_is_the_ci_jobs_isolated_home_and_runner_temp(self):
         with tempfile.TemporaryDirectory() as work:
