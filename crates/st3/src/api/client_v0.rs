@@ -6018,7 +6018,7 @@ fn native_slice_page_at_generation(
             None
         };
         let head = head.as_ref().unwrap_or(&native);
-        if head.basis != source_basis {
+        if head.basis != source_basis || head.generation != native.generation {
             return Err(client_page_expired("the transcript changed while reading the header"));
         }
         let count = head.items.len().min(CLIENT_MAX_PAGE_ITEMS);
@@ -6048,6 +6048,10 @@ fn native_slice_page_at_generation(
         let take_native = match (native_items.peek(), messages.peek()) {
             (Some((_, native)), Some((_, message))) => native.cmp_in(message, order).is_gt(),
             (Some(_), None) => true,
+            // Natives that stopped short of the transcript's end (the echo scan budget) leave
+            // unexamined native entries; a graph message below them would be emitted ahead of
+            // them and then skipped by the cursor. The next page reads on from the last entry.
+            (None, Some(_)) if native.has_more => break,
             (None, Some(_)) => false,
             (None, None) => break,
         };
@@ -6101,6 +6105,9 @@ fn native_slice_page_at_generation(
 
 /// Refill bounded keyset batches after suppression so an all-echo batch cannot create
 /// an empty page or strand older native entries. Every refill retains the original source fence.
+/// A call examines at most [`NATIVE_ECHO_SCAN_ITEMS`] entries: past that it returns the visible
+/// entries found so far (a short page whose boundary is its last entry, so the next page reads
+/// on with a fresh budget), and refuses only when that many consecutive entries are all hidden.
 #[allow(clippy::too_many_arguments)]
 fn canonical_native_slice(
     state: &AppState,
@@ -6117,11 +6124,24 @@ fn canonical_native_slice(
         source, session, session_id, order, before, limit,
     )?;
     let mut boundary = slice.items.last().map(|item| crate::external_sessions::timeline_key(item, 0));
+    let mut scanned = slice.items.len();
     let mut suppressed = suppress_native_echoes(state, snapshot, session_id, graph, &mut slice.items)?;
     while slice.items.len() < limit && slice.has_more {
+        let budget = NATIVE_ECHO_SCAN_ITEMS.saturating_sub(scanned);
+        if budget == 0 && !slice.items.is_empty() {
+            break;
+        }
+        if budget == 0 {
+            return Err(conversation_replay_gap(
+                session_id, "native-echo-budget",
+                "the correlated native prefix exceeded the bounded keyset read; refresh the conversation",
+            ));
+        }
         let mut next = conversation_blocks::read_slice(
-            source, session, session_id, order, boundary.as_ref(), limit - slice.items.len(),
+            source, session, session_id, order, boundary.as_ref(),
+            (limit - slice.items.len()).min(budget),
         )?;
+        scanned += next.items.len();
         if next.basis != slice.basis || next.generation != slice.generation {
             return Err(client_page_expired("the transcript changed while refilling the page"));
         }
@@ -6134,6 +6154,12 @@ fn canonical_native_slice(
     }
     Ok((slice, suppressed))
 }
+
+/// The most native entries one echo-omitting read examines.
+#[cfg(not(test))]
+const NATIVE_ECHO_SCAN_ITEMS: usize = 4096;
+#[cfg(test)]
+const NATIVE_ECHO_SCAN_ITEMS: usize = 256;
 
 /// The most a timeline page's entries may serialize to, leaving room under a peer's 1 MiB cap on
 /// a remote client read for the envelope and the page header.
@@ -20125,6 +20151,201 @@ mission "example/zero-run" state="ready" {
         assert_eq!(wrong_session.code, "cursor-gap");
         let bounded = state.store.conversation_message_delta_at("agent/cap", None, snapshot.store_index, 2).unwrap();
         assert_eq!(bounded.len(), 2);
+    }
+
+    /// Echo suppression sits before the page limit, `has_more` and boundary are computed: every
+    /// page is full until the last, no hidden entry is ever a boundary, and the walk equals the
+    /// newest page, at any limit. The native echoes are the newest entries, so each small-limit
+    /// page must read past the hidden ones to fill.
+    #[test]
+    fn timeline_send_identity_pages_stay_full_around_omitted_echoes() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "send-identity-pages");
+        let owner = "agent/send-identity-pages";
+        let incarnation = "send-identity-pages-one";
+        let session_id = super::managed_session_id(owner, incarnation);
+        state.store.append_claim(&ClaimInput {
+            subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")), ("runtime_id".into(), json!("send-identity-pages")),
+                ("incarnation_id".into(), json!(incarnation)), ("terminal".into(), json!(true)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let line = |text: &str, role: &str, client_id: Option<String>, minute: u32| {
+            let mut payload = json!({
+                "type":"message", "role":role, "id":text,
+                "content":[{"type": if role == "user" { "input_text" } else { "output_text" }, "text":text}],
+            });
+            if let Some(client_id) = client_id {
+                payload["clientId"] = json!(client_id);
+            }
+            format!("{}\n", json!({
+                "type":"response_item", "timestamp":format!("2099-01-01T00:{minute:02}:00Z"), "payload":payload,
+            }))
+        };
+        let mut transcript = String::new();
+        let mut minute = 0;
+        for number in 1..=3 {
+            let subject = format!("message/send-identity-pages-{number}");
+            state.store.append_claim(&ClaimInput {
+                subject: subject.clone(), kind: "message.sent".into(), actor: Some("person/alex".into()),
+                fields: BTreeMap::from([
+                    ("from".into(), json!("person/alex")), ("to".into(), json!(owner)),
+                    ("session_id".into(), json!(session_id)), ("content".into(), json!(format!("send {number}"))),
+                    ("status".into(), json!("sent")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let client_id = st_drivers::codex_app_server::stable_client_user_message_id(
+                owner, "paging-test", &subject,
+            );
+            minute += 1;
+            transcript += &line(&format!("answer-{number}"), "assistant", None, minute);
+            minute += 1;
+            transcript += &line(&format!("echo-{number}"), "user", Some(client_id), minute);
+        }
+        // A native user turn whose identity names no graph send is not an echo: it is kept.
+        minute += 1;
+        transcript += &line("typed-in-terminal", "user", Some("st:unrelated".into()), minute);
+        for number in 4..=5 {
+            let subject = format!("message/send-identity-pages-{number}");
+            minute += 1;
+            transcript += &line(&format!("echo-{number}"), "user", Some(
+                st_drivers::codex_app_server::stable_client_user_message_id(owner, "paging-test", &subject),
+            ), minute);
+        }
+        let path = root.path().join("pages.jsonl");
+        std::fs::write(&path, transcript).unwrap();
+        let source = page_test_source(&path, &session_id);
+        let snapshot = new_client_snapshot(&state);
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let (newest, _, suppressed) = native_slice_page_at_generation(
+            &state, &snapshot, &session, &session_id,
+            &ClientListQuery { limit: Some(200), ..Default::default() }, &source,
+        ).unwrap();
+        let newest = newest.0;
+        assert!(!newest["page"]["has_more"].as_bool().unwrap());
+        let rendered = newest.to_string();
+        assert!(!rendered.contains("_delivery_correlation"));
+        // Sends 4 and 5 are not in this snapshot, so they are not echoes of a visible send:
+        // only the three graph sends' echoes are omitted, never a heuristic match.
+        for number in 1..=3 {
+            assert!(!rendered.contains(&format!("echo-{number}")), "echo-{number} shown: {rendered}");
+            assert!(rendered.contains(&format!("answer-{number}")));
+            assert!(rendered.contains(&format!("send {number}")));
+        }
+        assert!(rendered.contains("typed-in-terminal"));
+        assert!(suppressed > 0);
+        let items = newest["items"].as_array().unwrap().clone();
+        for limit in 1..=5 {
+            let mut query = ClientListQuery { limit: Some(limit), ..Default::default() };
+            let mut pages = Vec::new();
+            loop {
+                let page = native_slice_page(&state, &snapshot, &session, &session_id, &query, &source)
+                    .unwrap().0;
+                let page_items = page["items"].as_array().unwrap().clone();
+                let has_more = page["page"]["has_more"].as_bool().unwrap();
+                assert!(!page_items.is_empty(), "limit {limit}: empty page");
+                if has_more {
+                    assert_eq!(page_items.len(), limit, "limit {limit}: short page before the end");
+                }
+                pages.push(page_items);
+                query.cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
+                if query.cursor.is_none() {
+                    assert!(!has_more);
+                    break;
+                }
+                assert!(pages.len() <= items.len(), "limit {limit}: pagination does not end");
+            }
+            let walked = pages.into_iter().rev().flatten().collect::<Vec<_>>();
+            let identities = |items: &[Value]| items.iter().map(|item|
+                (item["id"].clone(), item["sequence"].clone())).collect::<Vec<_>>();
+            assert_eq!(identities(&walked), identities(&items), "limit {limit}");
+        }
+    }
+
+    /// Omitting echoes never reads without bound: past the scan budget a page keeps the visible
+    /// entries found so far and its boundary is the last of them; only a prefix of nothing but
+    /// hidden entries as long as the budget is refused, and with a full-resync request.
+    #[test]
+    fn timeline_send_identity_scan_budget_returns_short_page_then_refuses_hidden_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "send-identity-budget");
+        let owner = "agent/send-identity-budget";
+        let incarnation = "send-identity-budget-one";
+        let session_id = super::managed_session_id(owner, incarnation);
+        state.store.append_claim(&ClaimInput {
+            subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")), ("runtime_id".into(), json!("send-identity-budget")),
+                ("incarnation_id".into(), json!(incarnation)), ("terminal".into(), json!(true)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let hidden = NATIVE_ECHO_SCAN_ITEMS + 44;
+        let line = |text: &str, role: &str, client_id: Option<String>, second: usize| {
+            let mut payload = json!({
+                "type":"message", "role":role, "id":text,
+                "content":[{"type": if role == "user" { "input_text" } else { "output_text" }, "text":text}],
+            });
+            if let Some(client_id) = client_id {
+                payload["clientId"] = json!(client_id);
+            }
+            format!("{}\n", json!({
+                "type":"response_item",
+                "timestamp":format!("2099-01-01T{:02}:{:02}:{:02}Z", second / 3600, second / 60 % 60, second % 60),
+                "payload":payload,
+            }))
+        };
+        let echo = |number: usize| {
+            let subject = format!("message/send-identity-budget-{number}");
+            state.store.append_claim(&ClaimInput {
+                subject: subject.clone(), kind: "message.sent".into(), actor: Some("person/alex".into()),
+                fields: BTreeMap::from([
+                    ("from".into(), json!("person/alex")), ("to".into(), json!(owner)),
+                    ("session_id".into(), json!(session_id)), ("content".into(), json!("send")),
+                    ("status".into(), json!("sent")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            st_drivers::codex_app_server::stable_client_user_message_id(owner, "paging-test", &subject)
+        };
+        // Oldest to newest: answer-old, a hidden run longer than the budget, answer-new, 3 hidden.
+        let mut second = 0;
+        let mut transcript = line("answer-old", "assistant", None, second);
+        for number in 0..hidden {
+            second += 1;
+            transcript += &line(&format!("echo-{number}"), "user", Some(echo(number)), second);
+        }
+        second += 1;
+        transcript += &line("answer-new", "assistant", None, second);
+        for number in hidden..hidden + 3 {
+            second += 1;
+            transcript += &line(&format!("echo-{number}"), "user", Some(echo(number)), second);
+        }
+        let path = root.path().join("budget.jsonl");
+        std::fs::write(&path, transcript).unwrap();
+        let source = page_test_source(&path, &session_id);
+        let snapshot = new_client_snapshot(&state);
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let query = ClientListQuery { limit: Some(3), ..Default::default() };
+        let first = native_slice_page(&state, &snapshot, &session, &session_id, &query, &source)
+            .unwrap().0;
+        let rendered = first.to_string();
+        assert!(rendered.contains("answer-new") && !rendered.contains("answer-old"), "{rendered}");
+        assert!(!rendered.contains("echo-"), "{rendered}");
+        // A graph message is older than the unexamined natives, so it cannot lead them.
+        assert!(!rendered.contains("message/send-identity-budget"), "{rendered}");
+        assert_eq!(first["page"]["has_more"], true);
+        let next = ClientListQuery {
+            limit: Some(3), cursor: first["page"]["next_cursor"].as_str().map(str::to_owned),
+            ..Default::default()
+        };
+        let error = native_slice_page(&state, &snapshot, &session, &session_id, &next, &source)
+            .unwrap_err();
+        assert_eq!(error.code, "cursor-gap");
+        assert_eq!(error.details["full_resync"], true);
     }
 
     #[test]
