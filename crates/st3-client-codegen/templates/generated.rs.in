@@ -86,6 +86,7 @@ pub enum ErrorCode {
     ValidationFailed,
     IdempotencyConflict,
     IssuerRequired,
+    SuspendAuthoredSessionSelection,
     StaleFence,
     CursorGap,
     PageCursorExpired,

@@ -34,6 +34,11 @@ pub struct Registry {
     /// `PATH` inside a tile.
     #[serde(default = "default_path")]
     pub path: Vec<PathBuf>,
+    /// The sekrets gateway's socket, which every tile reaches at
+    /// `/run/st-sekrets/gateway.sock`, the client's default. The gateway names a tile's caller
+    /// by its Unix user and cgroup, as this registry does. Unset, a tile reaches no gateway.
+    #[serde(default)]
+    pub sekrets_socket: Option<PathBuf>,
     /// Tiles by name.
     #[serde(default)]
     pub tiles: BTreeMap<String, Tile>,
@@ -112,7 +117,12 @@ impl Registry {
                 );
             }
         }
-        for path in self.read_only.iter().chain(&self.path) {
+        for path in self
+            .read_only
+            .iter()
+            .chain(&self.path)
+            .chain(&self.sekrets_socket)
+        {
             if !path.is_absolute() || path == Path::new("/") {
                 bail!("{} must be an absolute path, not /", path.display());
             }
