@@ -1,0 +1,8 @@
+import type { ChangelogEntrySource } from '../src/changelog/contract.ts'
+
+export default {
+  title: 'Your first conversation opens in about a second',
+  summary: 'The sidebar now lays out all its agents at once instead of one at a time, so a fleet of a hundred agents no longer holds up the first conversation for several seconds.',
+  kind: 'improvement',
+  publicPrUrl: 'https://github.com/compoundingtech/smalltalk/pull/2932',
+} satisfies ChangelogEntrySource
