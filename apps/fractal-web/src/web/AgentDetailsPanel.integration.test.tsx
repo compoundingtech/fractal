@@ -14,7 +14,7 @@ import { observed } from '../data/source.ts'
 import type { Feed } from '../data/source.ts'
 import { AgentDetailsPanel } from './AgentDetailsPanel.tsx'
 
-vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const row = decodeUnknownSync(Agent)({
   kind: 'agent', id: 'agent/synthetic', name: 'Synthetic Details seat', host_id: 'host/synthetic', runtime_ids: [],
   reachability: 'reachable', state: 'running', revision: '1', incarnation_id: 'first', updated_at: '1970-01-01T00:00:04.000Z',

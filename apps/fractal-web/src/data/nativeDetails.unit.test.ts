@@ -221,7 +221,7 @@ describe('fixture-free native Details projection', () => {
     expect(stale.sections.find(item => item.title === 'Declared bindings')?.items._tag).toBe('Unknown')
   })
   it('validates normalized declarations without emitting env, argv, paths or raw KDL', () => {
-    const declaration = Native.decodeUnknownSync(Native.AgentDeclaration)({ id: row.id, revision: '1', revisions: ['1'], kdl: 'never emitted', tree: { name: 'agent', arguments: ['private-seat'], properties: {}, children: [ { name: 'workspace', arguments: ['/private/workspace'] }, { name: 'env', properties: { SECRET: 'sensitive' } }, { name: 'argv', arguments: ['/private/tool'] }, { name: 'harness', arguments: ['omp'], children: [{ name: 'model', arguments: ['declared-model'] }, { name: 'account-pool', arguments: ['private-pool'] }] } ] } })
+    const declaration = Native.decodeUnknownSync(Native.AgentDeclaration)({ id: row.id, revision: '1', revisions: ['1'], kdl: 'never emitted', tree: { name: 'agent', arguments: ['private-seat'], properties: {}, children: [ { name: 'workspace', arguments: ['/private/workspace'] }, { name: 'env', properties: { SAMPLE: 'test' } }, { name: 'argv', arguments: ['/private/tool'] }, { name: 'harness', arguments: ['omp'], children: [{ name: 'model', arguments: ['declared-model'] }, { name: 'account-pool', arguments: ['private-pool'] }] } ] } })
     const projected = projectNativeDeclarations({ declaration })
     expect(projected).toEqual({ agentRef: row.id, revision: '1', declaredModel: 'declared-model', bindings: [{ kind: 'workspace', count: 1 }, { kind: 'harness account-pool', count: 1 }] })
     expect(projectNativeDeclarations({ declaration: { ...declaration, tree: { name: 'agent', children: [{ name: 'env', arguments: {} }] } } })).toBeUndefined()
