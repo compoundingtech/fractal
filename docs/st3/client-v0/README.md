@@ -1041,16 +1041,19 @@ that disappears before launch fails closed rather than creating a file named aft
 Explicit fresh context overrides authored continuation, fork, and session selectors, and
 discards Codex's stale binding; ordinary daemon adoption and residency do not acquire either
 restart override. Missing current native evidence makes `restart_will_resume` false.
+A fresh-context restart also invalidates the old session for later ordinary relaunches,
+even if its replacement crashes or waits at login before publishing a new native binding.
 Other providers may publish a null `harness.session-file.path` when they can resume by exact ID.
 Rust exposes `ActionRequest::agent_restart`; Swift and TypeScript expose `agentRestart`.
 The CLI equivalent is `st agents restart NAME --as person/NAME [--fresh-context]`; it obtains
 the current incarnation and declaration fences before submitting `/v1/agents/restart`,
 using an empty incarnation when none exists. No caller is required to supply an incarnation.
 
-Managed wrappers publish that evidence through `POST /v1/claims/harness-session-binding`,
-with fields `agent`, `harness`, `session_id`, boolean `resume_available`, nullable `path`,
-optional `account_ref`, `incarnation_id`, and `idempotency_key`.
-The daemon derives the claim actor from the agent, rejects another bound harness's agent,
+Managed wrappers publish that evidence through the existing `POST /v1/agents/native-session`,
+with fields `subject`, `actor` (the seat itself), `harness`, `session_id`, `incarnation_id`,
+optional `account_ref`, nullable `path`, optional boolean `resume_available`, and optional
+`idempotency_key`. Reports without the new optional fields retain their existing contract.
+The daemon rejects another bound harness's agent,
 and requires the local current runtime incarnation and the declared supported native driver.
 It accepts no import metadata or arbitrary claim fields. The generic `/v1/claims` endpoint
 still rejects requester-owned `harness.session-file` claims; authorized native-session imports

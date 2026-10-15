@@ -416,7 +416,10 @@ pub fn continue_session(
         .claims_for(subject, Some("runtime.action.requested"))?
         .iter()
         .any(|claim| {
-            claim.store_index > bound.store_index && field(claim, "action") == Some("fresh-context")
+            claim.store_index > bound.store_index
+                && (field(claim, "action") == Some("fresh-context")
+                    || (field(claim, "action") == Some("restart")
+                        && claim.body["fields"]["fresh_context"].as_bool() == Some(true)))
         });
     let legacy_refusal = store.operation_claim(&continue_unavailable_key(subject, &session))?;
     let refusals = store.claims_for(subject, Some("harness.diagnostic"))?;
@@ -700,6 +703,29 @@ mod tests {
         continuation_claim(&store, "harness.diagnostic", json!({"status":"authored-session-selection"}), Some(continue_unavailable_key("agent/example", "native")));
         continuation_claim(&store, "runtime.action.requested", json!({"action":"fresh-context"}), None);
         assert!(continue_session(&store, "agent/example", "omp", None, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn fresh_restart_drops_old_context_until_a_new_native_session_is_bound() {
+        for (action, fresh, clears) in [
+            ("restart", true, true),
+            ("restart", false, false),
+            ("start", true, false),
+        ] {
+            let store = Store::open_memory("node").unwrap();
+            continuation_claim(&store, "harness.session-file",
+                json!({"harness":"omp","session_id":"old-native"}), None);
+            continuation_claim(&store, "runtime.action.requested",
+                json!({"action":action,"fresh_context":fresh}), None);
+            // A crash or login prompt before any new binding must not resurrect the old context.
+            let selected = continue_session(&store, "agent/example", "omp", None, None).unwrap();
+            assert_eq!(selected.as_ref().map(|(id, _)| id.as_str()),
+                if clears { None } else { Some("old-native") });
+            continuation_claim(&store, "harness.session-file",
+                json!({"harness":"omp","session_id":"new-native"}), None);
+            assert_eq!(continue_session(&store, "agent/example", "omp", None, None)
+                .unwrap().unwrap().0, "new-native");
+        }
     }
 
     #[test]
