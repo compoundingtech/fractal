@@ -22,6 +22,8 @@ mod mailbox_lease;
 mod message_send_tests;
 #[cfg(test)]
 mod message_thread_legacy_rank_dependency_tests;
+#[cfg(test)]
+mod actual_state_sorter_tests;
 pub mod owned_sets;
 #[cfg(test)]
 mod owned_sets_tests;
@@ -134,8 +136,9 @@ pub(crate) use roster_admission::AdmissionGuard;
 mod adhoc_work;
 mod attention_snapshot;
 pub(crate) use attention_snapshot::{
-    CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, native_prompt_gone_key, plan_approval,
-    screen_prompt_delivered_key, screen_prompt_gone_key, screen_prompt_undelivered_key,
+    CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
+    plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
+    screen_prompt_undelivered_key,
 };
 pub(crate) mod attention_list;
 pub(crate) mod owner_lists;
@@ -608,9 +611,13 @@ WHERE kind IN ('work.claimed', 'work.progress');
 CREATE INDEX IF NOT EXISTS claims_subagent_appeared_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.appeared';
-CREATE INDEX IF NOT EXISTS claims_subagent_renewed_index
-ON claims(subject, json_extract(body, '$.fields.subagent_id'))
+-- Include the numeric lease so MAX for one live pair seeks its final index entry instead
+-- of folding all its renewals. A new name upgrades existing stores at schema initialization.
+CREATE INDEX IF NOT EXISTS claims_subagent_renewed_max_lease_index
+ON claims(subject, json_extract(body, '$.fields.subagent_id'),
+          CAST(json_extract(body, '$.fields.lease_expires_at_unix_ms') AS INTEGER))
 WHERE kind='subagent.renewed';
+DROP INDEX IF EXISTS claims_subagent_renewed_index;
 CREATE INDEX IF NOT EXISTS claims_subagent_ended_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.ended';
@@ -4542,8 +4549,18 @@ impl Store {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<String>> {
+        self.mission_collection_ids_at(history, offset, limit, now_ms())
+    }
+
+    pub(crate) fn mission_collection_ids_at(
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        at_unix_ms: u128,
+    ) -> Result<Vec<String>> {
         Ok(self
-            .mission_collection_page(history, offset, limit, None)?
+            .mission_collection_page_at(history, offset, limit, None, at_unix_ms)?
             .into_iter()
             .map(|(id, _)| id)
             .collect())
@@ -4556,7 +4573,18 @@ impl Store {
         limit: usize,
         after: Option<&(u128, String)>,
     ) -> Result<Vec<(String, u128)>> {
-        let ended_since = recently_ended_since();
+        self.mission_collection_page_at(history, offset, limit, after, now_ms())
+    }
+
+    pub(crate) fn mission_collection_page_at(
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        after: Option<&(u128, String)>,
+        at_unix_ms: u128,
+    ) -> Result<Vec<(String, u128)>> {
+        let ended_since = at_unix_ms.saturating_sub(RECENTLY_ENDED_MS);
         let connection = self.readers.get();
         let mut statement = connection.prepare(
             "WITH ids AS (
@@ -14894,8 +14922,12 @@ impl Store {
 
     /// Current runs waiting on person steps, human gates or approvals.
     pub fn human_attention_runs(&self) -> Result<BTreeSet<String>> {
+        self.human_attention_runs_at(now_ms())
+    }
+
+    pub(crate) fn human_attention_runs_at(&self, now: u128) -> Result<BTreeSet<String>> {
         let mut items = self.mission_run_attention_items(None)?;
-        items.extend(self.person_attention_items(None, now_ms())?);
+        items.extend(self.person_attention_items(None, now)?);
         Ok(items.into_iter().filter_map(|item| item.mission_run).collect())
     }
 
@@ -19451,6 +19483,14 @@ fn adopt_declared_mission_revision_tx(
             Some(batch_id),
         )
         .map_err(internal)?;
+        if status == "draining" {
+            transaction
+                .execute(
+                    "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
+                    params![run_id, claim.accepted_at_unix_ms.to_string()],
+                )
+                .map_err(internal)?;
+        }
         return Ok((vec![claim.id], true));
     }
 
@@ -23192,8 +23232,11 @@ fn latest_actual_at(
     // Folded in canonical order, so two nodes holding the same claims agree however they
     // received them. `NOT LIKE` also leaves out harness kinds in any letter case, as it always
     // has; the ranges let SQLite seek past the subject's harness reports.
+    // Only the integer identity and canonical keys enter SQLite's sorter. Keep its cursor
+    // open while fetching each body on this same connection: even an unpinned caller then
+    // reads both statements from one SQLite read cut, without retaining history bodies.
     let mut statement = connection.prepare_cached(&format!(
-        "SELECT claims.kind, claims.body
+        "SELECT claims.store_index
          FROM claims INDEXED BY claims_subject_kind_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
@@ -23201,35 +23244,40 @@ fn latest_actual_at(
            AND claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
          ORDER BY {CANONICAL_ORDER}"
     ))?;
-    let rows = statement
-        .query_map(params![subject, at_index], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    fold_latest_actual(rows)
+    let mut rows = statement.query(params![subject, at_index])?;
+    let mut bodies = connection
+        .prepare_cached("SELECT kind, body FROM claims WHERE store_index=?1")?;
+    fold_latest_parsed_values(std::iter::from_fn(|| {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => return None,
+            Err(error) => return Some(Err(error.into())),
+        };
+        Some((|| {
+            let index: u64 = row.get(0)?;
+            let (kind, body): (String, String) =
+                bodies.query_row([index], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok((kind, serde_json::from_str::<Value>(&body)?))
+        })())
+    }))
 }
 
-/// A subject's actual state from its actual-state claims, `(kind, body)` in canonical order.
-fn fold_latest_actual(
-    rows: impl IntoIterator<Item = (String, String)>,
-) -> Result<Option<Value>> {
-    let rows = rows
-        .into_iter()
-        .map(|(kind, body)| Ok((kind, serde_json::from_str::<Value>(&body)?)))
-        .collect::<Result<Vec<_>>>()?;
-    fold_latest_values(rows)
-}
-
-/// [`fold_latest_actual`] of claims already parsed, `(kind, body)` in canonical order. It takes
+/// A subject's actual state from already parsed claims in canonical order. It takes
 /// the bodies, so each field moves into the folded state instead of being copied.
 fn fold_latest_values(rows: impl IntoIterator<Item = (String, Value)>) -> Result<Option<Value>> {
-    let mut rows = rows.into_iter().peekable();
-    if rows.peek().is_none() {
-        return Ok(None);
-    }
+    fold_latest_parsed_values(rows.into_iter().map(Ok))
+}
+
+/// Fold one body at a time, propagating SQL/JSON errors without caching a partial answer.
+fn fold_latest_parsed_values(
+    rows: impl IntoIterator<Item = Result<(String, Value)>>,
+) -> Result<Option<Value>> {
     let mut merged = serde_json::Map::new();
     let registry = st3_schema::registry();
-    for (kind, value) in rows {
+    let mut any = false;
+    for row in rows {
+        let (kind, value) = row?;
+        any = true;
         let source = match value {
             Value::Object(mut body) => match body.remove("fields") {
                 Some(fields) => fields,
@@ -23259,7 +23307,7 @@ fn fold_latest_values(rows: impl IntoIterator<Item = (String, Value)>) -> Result
             }
         }
     }
-    Ok(Some(Value::Object(merged)))
+    Ok(any.then_some(Value::Object(merged)))
 }
 
 /// `columns` of subject `?1`'s claims of one `kind` at or before store index `?2`, newest first
@@ -35659,6 +35707,11 @@ mod tests {
     mod canonical_audit {
         use super::*;
         include!("store/canonical_audit.rs");
+    }
+
+    mod declarative_revision_timestamp_tests {
+        use super::*;
+        include!("store/declarative_revision_timestamp_tests.rs");
     }
 
     mod actual_purity_tests {
@@ -57531,6 +57584,108 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
             NativePromptState::Answered {
                 answer: "deny".into()
             }
+        );
+    }
+
+    /// A call Claude's auto mode classifier denied waits on the seat's person: an alert until they
+    /// answer it, and the answer (allow once, allow its kind, or dismiss) is what the seat's
+    /// `PreToolUse` hook reads; the seat is told, so it runs the call again or leaves it.
+    #[test]
+    fn a_classifier_denial_is_an_alert_whose_answer_the_seat_hears() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "denial-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value, key: Option<&str>| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: key.map(str::to_owned),
+                })
+                .unwrap()
+        };
+        let denied = |call: &str| {
+            append(
+                "harness.diagnostic",
+                json!({"severity":"warning", "status":"Bash", "code":"permission-denied",
+                    "reason":"Irreversible Local Destruction", "driver":"claude",
+                    "session_id":"session-1", "matched_line": json!({"call_id": call}).to_string()}),
+                Some(&format!("claude-permission-denied:{seat}:{call}")),
+            )
+        };
+        let alerts = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .filter(|item| item.kind == "harness-prompt")
+                .collect::<Vec<_>>()
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}), None);
+        let first = denied("toolu_1");
+        let shown = alerts();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].episode, first.id);
+        assert_eq!(shown[0].answers, vec!["approve-once", "approve-kind", "dismiss"]);
+        assert!(shown[0].title.ends_with("needs you to allow a Bash call"));
+        assert!(shown[0].detail.contains("(Irreversible Local Destruction)"), "{}", shown[0].detail);
+        assert_eq!(
+            store.answer_native_prompt(seat, &first.id, "allow", "person/avery").unwrap_err().code,
+            "invalid-answer"
+        );
+        assert_eq!(
+            store.answer_native_prompt(seat, &first.id, "approve-once", "person/other").unwrap_err().code,
+            "forbidden"
+        );
+        assert_eq!(store.prompt_answer(&first.id).unwrap().answer, None);
+        store.answer_native_prompt(seat, &first.id, "approve-once", "person/avery").unwrap();
+        assert_eq!(store.prompt_answer(&first.id).unwrap().answer.as_deref(), Some("approve-once"));
+        assert!(alerts().is_empty(), "an answered denial is no longer an alert");
+        // The seat hears it, from st, and runs the call again.
+        let told = store
+            .claims_for(&format!(
+                "message/{}",
+                &hex::encode(sha2::Sha256::digest(format!("st3-denial-answer:{}", first.id).as_bytes()))[..16]
+            ), Some("message.sent"))
+            .unwrap();
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].body["fields"]["to"], seat);
+        assert!(told[0].body["fields"]["content"].as_str().unwrap().contains("Run that same call again"));
+        assert_eq!(
+            store.answer_native_prompt(seat, &first.id, "dismiss", "person/avery").unwrap_err().code,
+            "stale-fence",
+            "an answer is final"
+        );
+        // A denial from before the seat restarted waits on nobody.
+        let old = denied("toolu_2");
+        assert_eq!(alerts().len(), 1);
+        append("runtime.observed", json!({"status":"exited", "incarnation_id":"one"}), None);
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"two"}), None);
+        assert!(alerts().is_empty());
+        assert_eq!(
+            store.answer_native_prompt(seat, &old.id, "approve-kind", "person/avery").unwrap_err().code,
+            "stale-fence"
         );
     }
 

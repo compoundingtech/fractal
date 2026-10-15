@@ -330,6 +330,14 @@ fn claude_observe(
         answer_permission_from_st(env, &identity, &paths.agent_dir, &raw);
         return 0;
     }
+    if event == "Stop" {
+        report_denials(env, &identity, &paths.agent_dir, &raw);
+        return 0;
+    }
+    if event == "PreToolUse" {
+        allow_approved_call(env, &identity, &paths.agent_dir, &raw);
+        return 0;
+    }
     if !session_start {
         return 0;
     }
@@ -413,6 +421,146 @@ fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path
         println!("{output}");
     }
 }
+
+/// This seat's daemon client, and the seat's subject, for a hook that talks to st.
+fn hook_client(
+    env: &dyn HookEnv,
+    identity: &str,
+) -> Option<(tokio::runtime::Runtime, crate::client::Client, String)> {
+    let endpoint = match env.var("ST3_ENDPOINT") {
+        Some(endpoint) => crate::client::Endpoint::parse(endpoint),
+        None => crate::client::Endpoint::Unix(crate::config::Config::load_unvalidated(None).ok()?.socket),
+    };
+    let subject = env
+        .var("ST3_SUBJECT")
+        .or_else(|| env.var("ST_AGENT"))
+        .unwrap_or_else(|| format!("agent/{identity}"));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    Some((runtime, crate::client::Client::new(endpoint), subject))
+}
+
+/// Raise each call Claude's auto mode classifier denied since the last turn as an alert for the
+/// seat's person (see `st_drivers::claude_denials`): its tool, the classifier's reason, and the
+/// call's id in the seat's conversation, never its input. Fails open: a turn's end is never held.
+fn report_denials(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str) {
+    let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+    let (Some(session), Some(transcript)) = (
+        payload.get("session_id").and_then(Value::as_str),
+        payload.get("transcript_path").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    // Only the session's own transcript, as Claude names it.
+    let transcript = Path::new(transcript);
+    if !transcript.is_absolute()
+        || transcript.extension().is_none_or(|extension| extension != "jsonl")
+        || transcript.file_stem().is_none_or(|stem| stem != session)
+    {
+        return;
+    }
+    let denials = match st_drivers::claude_denials::new_denials(agent_dir, session, transcript) {
+        Ok(denials) if !denials.is_empty() => denials,
+        Ok(_) => return,
+        Err(error) => {
+            eprintln!("st: Claude's denied calls were not read: {error:#}");
+            return;
+        }
+    };
+    let Some((runtime, client, subject)) = hook_client(env, identity) else {
+        return;
+    };
+    for denial in denials {
+        let claim = crate::model::ClaimInput {
+            subject: subject.clone(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(subject.clone()),
+            fields: BTreeMap::from([
+                ("severity".into(), Value::String("warning".into())),
+                ("status".into(), Value::String(denial.tool.clone())),
+                ("code".into(), Value::String(PERMISSION_DENIED_CODE.into())),
+                ("reason".into(), Value::String(denial.reason.clone())),
+                ("driver".into(), Value::String("claude".into())),
+                ("session_id".into(), Value::String(session.into())),
+                (
+                    "matched_line".into(),
+                    Value::String(serde_json::json!({"call_id": denial.call_id}).to_string()),
+                ),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("claude-permission-denied:{subject}:{}", denial.call_id)),
+        };
+        let posted = runtime.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.post::<_, crate::model::ClaimRecord>("/v1/claims", &claim),
+            )
+            .await
+        });
+        match posted {
+            Ok(Ok(record)) => {
+                if let Err(error) =
+                    st_drivers::claude_denials::raised(agent_dir, &denial.call_id, &record.id)
+                {
+                    eprintln!("st: a denied call's alert was not remembered: {error:#}");
+                }
+            }
+            Ok(Err(error)) => eprintln!("st: a denied call was not raised: {error:#}"),
+            Err(_) => eprintln!("st: a denied call was not raised: the st daemon did not answer"),
+        }
+    }
+}
+
+/// Let a call through that Claude's classifier denied and the seat's person then allowed: once
+/// for that exact call, or for its kind on this seat. Claude takes a `PreToolUse` decision of
+/// `allow` before its classifier runs. St is asked only while a denial waits on an answer.
+fn allow_approved_call(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str) {
+    let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+    let Some(tool) = payload.get("tool_name").and_then(Value::as_str) else {
+        return;
+    };
+    let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
+    let mut client = None;
+    let approved = st_drivers::claude_denials::approved(agent_dir, tool, &input, |claim| {
+        if client.is_none() {
+            client = Some(hook_client(env, identity)?);
+        }
+        let (runtime, client, subject) = client.as_ref()?;
+        let path = format!(
+            "/v1/harness-prompts/answer?agent={}&episode={}",
+            urlencoding::encode(subject),
+            urlencoding::encode(claim)
+        );
+        runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    client.get::<crate::store::PromptAnswer>(&path),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+            })
+            .and_then(|answer| answer.answer)
+    });
+    match approved {
+        Ok(true) => println!(
+            "{}",
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "The seat's person allowed this from st after auto mode denied it."}})
+        ),
+        Ok(false) => {}
+        Err(error) => eprintln!("st: an allowed call was not checked: {error:#}"),
+    }
+}
+
+/// The diagnostic code of a call Claude's auto mode classifier denied.
+pub(crate) const PERMISSION_DENIED_CODE: &str = "permission-denied";
 
 /// Poll `state` until the prompt is answered (its answer), gone, or `wait` runs out (none).
 fn wait_for_prompt_answer(

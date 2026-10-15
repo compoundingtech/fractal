@@ -17,6 +17,55 @@ const PERSON_STEPS_QUERY: &str = "SELECT subject FROM step_runs
     AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject";
 
 impl Store {
+    /// The person-attention collection at `now`, with the first instant after `now` at which
+    /// the unchanged collection changes.
+    ///
+    /// The collection only admits items as their waiting time arrives; it has no clock-driven
+    /// removals, so one read of its eventual projection serves both: the rows already waiting,
+    /// in the eventual order, and the earliest admission still ahead. This reuses the same
+    /// recipient, generation, run, declaration and resolution filters, including registered
+    /// custom attention. An ask's waiting time can predate its asking claim (for migrated
+    /// asks), so both gates must open before its row is visible.
+    ///
+    /// Observer/reconcile grace, final-step fault aging, checkpoint waits and runtime faults
+    /// belong to `fault_snapshot`, not this collection. Person attention reads stored step
+    /// state, not effective wake, lease or execution-deadline state. Those clocks therefore
+    /// cannot change this projection without another graph write.
+    pub(crate) fn attention_collection_snapshot(
+        &self,
+        person: Option<&str>,
+        now: u128,
+    ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
+        let eventual = self.attention_snapshot(person, u128::MAX)?;
+        let connection = self.readers.get();
+        let mut starts = Vec::with_capacity(eventual.len());
+        for item in &eventual {
+            let mut starts_at = item.requested_at_unix_ms;
+            if item.kind == "person-step"
+                && let Some(ask) = person_work::request(&connection, &item.subject)?
+            {
+                starts_at = starts_at.max(ask.accepted_at_unix_ms);
+            }
+            starts.push(starts_at);
+        }
+        let mut valid_until = None;
+        let rows = eventual
+            .into_iter()
+            .zip(starts)
+            .filter(|(_, starts_at)| {
+                if *starts_at > now {
+                    valid_until =
+                        Some(valid_until.map_or(*starts_at, |kept: u128| kept.min(*starts_at)));
+                    false
+                } else {
+                    true
+                }
+            })
+            .map(|(item, _)| item)
+            .collect();
+        Ok((rows, valid_until))
+    }
+
     /// The mission context of a person ask a mission step made: its mission, and the step that
     /// waits on the answer with its goal. `None` for a standalone ask or an update, which belong
     /// to no mission of their own.
@@ -105,6 +154,7 @@ impl Store {
             if let Some(item) = self.screen_prompt_item(&connection, &seat, person)? {
                 items.push(item);
             }
+            items.extend(self.denial_items(&connection, &seat, person)?);
             let Some((claim, at, harness)) = newest(&seat, "harness.observed")? else {
                 continue;
             };
@@ -1659,6 +1709,222 @@ impl Store {
     }
 }
 
+/// A native prompt's answer as a waiting hook reads it: the person's answer, once recorded.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptAnswer {
+    pub answer: Option<String>,
+}
+
+/// The answers to a call Claude's auto mode classifier denied: allow that call once, allow calls
+/// of its kind for the seat, or leave it denied.
+const DENIAL_ANSWERS: [&str; 3] = ["approve-once", "approve-kind", "dismiss"];
+
+impl Store {
+    /// The person's answer to the native prompt or denial `episode` recorded, if any.
+    pub fn prompt_answer(&self, episode: &str) -> Result<PromptAnswer> {
+        let connection = self.readers.get();
+        Ok(PromptAnswer {
+            answer: native_prompt_answer(&connection, episode)?,
+        })
+    }
+
+    /// The calls Claude's auto mode classifier denied on `seat` since its running incarnation
+    /// started, that its person has not answered: each an alert, in the seat's conversation.
+    fn denial_items(
+        &self,
+        connection: &Connection,
+        seat: &str,
+        person: Option<&str>,
+    ) -> Result<Vec<AttentionItemView>> {
+        let Some((started, _)) = running_since(connection, seat)? else {
+            return Ok(Vec::new());
+        };
+        let denials = recent_denials(connection, seat)?;
+        if denials.is_empty() || !person_work::declaration_live(connection, seat)? {
+            return Ok(Vec::new());
+        }
+        let Some(owner) = self.agent_person(seat)? else {
+            return Ok(Vec::new());
+        };
+        if person.is_some_and(|person| person != owner) {
+            return Ok(Vec::new());
+        }
+        let mut items = Vec::new();
+        for (claim, index, at, fields) in denials {
+            if index < started || native_prompt_answer(connection, &claim)?.is_some() {
+                continue;
+            }
+            let tool = fields["status"].as_str().unwrap_or("tool");
+            let reason = fields["reason"].as_str().filter(|reason| !reason.is_empty()).unwrap_or("no reason given");
+            items.push(AttentionItemView {
+                episode: claim,
+                priority: "high".into(),
+                kind: "harness-prompt".into(),
+                review_mode: None,
+                subject: seat.to_owned(),
+                person: owner.clone(),
+                requester_id: None,
+                launch_id: None,
+                variant_id: None,
+                message_id: None,
+                answers: DENIAL_ANSWERS.iter().map(|answer| (*answer).to_owned()).collect(),
+                conversation: Some(seat.to_owned()),
+                title: format!("{seat} needs you to allow a {tool} call"),
+                detail: format!(
+                    "Claude's auto mode denied a {tool} call ({reason}), and only you can allow it: it is the denied call in the seat's conversation. Allow it once, allow calls of its kind for this seat, or dismiss it to leave it denied. When you allow it, st tells the seat to run it again and lets it through."
+                ),
+                request: None,
+                mission: None,
+                mission_run: None,
+                step: None,
+                targets: vec![seat.to_owned()],
+                requested_at_unix_ms: at,
+                actions: vec![attention_action(
+                    "Attach to answer",
+                    &["st", "terminals", "attach", seat],
+                )],
+            });
+        }
+        Ok(items)
+    }
+
+    /// Record `actor`'s answer to the call Claude's classifier denied that `episode` raised, and
+    /// tell the seat. `None` when `episode` is no denial of `seat`.
+    fn answer_denial(
+        &self,
+        seat: &str,
+        episode: &str,
+        answer: &str,
+        actor: &str,
+    ) -> std::result::Result<Option<ClaimRecord>, St3Error> {
+        let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
+        let Some(denial) = self.claim_by_id(episode).map_err(internal)? else {
+            return Ok(None);
+        };
+        let fields = &denial.body["fields"];
+        if denial.subject != seat
+            || denial.kind != "harness.diagnostic"
+            || fields["code"] != crate::driver_hook::PERMISSION_DENIED_CODE
+        {
+            return Ok(None);
+        }
+        if !DENIAL_ANSWERS.contains(&answer) {
+            return Err(St3Error::new(
+                "invalid-answer",
+                "answer approve-once, approve-kind or dismiss",
+            ));
+        }
+        let connection = self.readers.get();
+        let started = running_since(&connection, seat).map_err(internal)?;
+        let answered = native_prompt_answer(&connection, episode).map_err(internal)?;
+        drop(connection);
+        if started.is_none_or(|(started, _)| (denial.store_index as i64) < started) || answered.is_some() {
+            return Err(St3Error::new(
+                "stale-fence",
+                "that prompt is no longer waiting: it was answered, or the seat restarted",
+            ));
+        }
+        let tool = fields["status"].as_str().unwrap_or("tool").to_owned();
+        let recorded = self.append_claim(&ClaimInput {
+            subject: seat.to_owned(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(actor.to_owned()),
+            fields: BTreeMap::from([
+                ("code".into(), Value::String("native-prompt-answered".into())),
+                ("status".into(), Value::String(answer.into())),
+                ("driver".into(), Value::String("claude".into())),
+            ]),
+            evidence: vec![episode.to_owned()],
+            expected_subject: None,
+            idempotency_key: Some(native_prompt_answer_key(episode)),
+        })?;
+        // The seat stopped on the denial: say what the person decided, so it acts on it.
+        let content = match answer {
+            "approve-once" => format!(
+                "{actor} allowed the {tool} call auto mode denied, once. Run that same call again: st lets it through this time."
+            ),
+            "approve-kind" => format!(
+                "{actor} allowed the {tool} call auto mode denied, and calls of its kind on this seat. Run it again: st lets it and calls like it through."
+            ),
+            _ => format!("{actor} left the {tool} call auto mode denied as denied. Do not run it, or work around it."),
+        };
+        let message_key = format!("st3-denial-answer:{episode}");
+        let message_id = &hex::encode(sha2::Sha256::digest(message_key.as_bytes()))[..16];
+        self.append_claim(&ClaimInput {
+            subject: format!("message/{message_id}"),
+            kind: "message.sent".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("from".into(), Value::String("daemon/runtime".into())),
+                ("to".into(), Value::String(seat.into())),
+                ("content".into(), Value::String(content)),
+                ("status".into(), Value::String("sent".into())),
+                ("title".into(), Value::String(format!("Your person answered the denied {tool} call"))),
+                ("in_reply_to".into(), Value::Null),
+                ("tags".into(), Value::Array(vec![Value::String(format!("st3-denial:{episode}"))])),
+            ]),
+            evidence: vec![recorded.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some(message_key),
+        })?;
+        Ok(Some(recorded))
+    }
+}
+
+/// Where in the store `seat`'s running incarnation was observed running, and its id; `None` when
+/// it is not running. Store order, not a clock: a denial after it belongs to that incarnation.
+fn running_since(connection: &Connection, seat: &str) -> Result<Option<(i64, String)>> {
+    let row = connection
+        .prepare_cached(&format!(
+            "{} LIMIT 1",
+            newest_claims_of_kind_query("claims.store_index, claims.body", "runtime.observed")
+        ))?
+        .query_row(params![seat, i64::MAX], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?;
+    let Some((index, body)) = row else {
+        return Ok(None);
+    };
+    let body: Value = serde_json::from_str(&body)?;
+    let fields = body.get("fields").unwrap_or(&body);
+    if fields["status"] != "running" {
+        return Ok(None);
+    }
+    Ok(Some((index, fields["incarnation_id"].as_str().unwrap_or_default().to_owned())))
+}
+
+/// The newest few denials `seat`'s hooks raised: their claims, store positions, acceptance times
+/// and fields.
+fn recent_denials(connection: &Connection, seat: &str) -> Result<Vec<(String, i64, u128, Value)>> {
+    connection
+        .prepare_cached(&format!(
+            "{} LIMIT 8",
+            newest_claims_of_kind_query(
+                "claims.id, claims.store_index, claims.accepted_at_unix_ms, claims.body",
+                "harness.diagnostic"
+            )
+            .replace(
+                " ORDER BY",
+                " AND json_extract(claims.body, '$.fields.code')='permission-denied' ORDER BY"
+            )
+        ))?
+        .query_map(params![seat, i64::MAX], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .map(|row| -> Result<(String, i64, u128, Value)> {
+            let (claim, index, at, body) = row?;
+            let body: Value = serde_json::from_str(&body)?;
+            Ok((claim, index, at.parse()?, body.get("fields").cloned().unwrap_or(body)))
+        })
+        .collect()
+}
+
 fn open_screen_prompt(
     connection: &Connection,
     seat: &str,
@@ -2188,6 +2454,9 @@ impl Store {
         if let Some(answered) = self.answer_screen_prompt(seat, episode, answer, actor)? {
             return Ok(answered);
         }
+        if let Some(answered) = self.answer_denial(seat, episode, answer, actor)? {
+            return Ok(answered);
+        }
         if !matches!(answer, "allow" | "deny" | "approve") && question_answers(answer).is_none() {
             return Err(St3Error::new(
                 "invalid-answer",
@@ -2319,23 +2588,56 @@ mod native_prompt_tests {
                 })
                 .unwrap()
         };
-        let waiting = json!({
-            "state":"working", "driver":"claude", "incarnation_id":"one",
-            "blocked_on":"human", "ask":"question", "reason":"AskUserQuestion",
-            "ownership_sequence":1, "transition_sequence":3
-        });
+        // Unchanged live observations are retained locally, not republished to history.
+        // Seed durable historical restatements explicitly: answers fence against the
+        // newest replicated claim, never a local-observation receipt, and this regression
+        // must put the original answer beyond the sixteen-claim history window.
+        let append_harness_history = || {
+            store
+                .connection
+                .batched(|tx| {
+                    append_claim_tx(
+                        tx,
+                        "node",
+                        seat,
+                        "harness.observed",
+                        Some(seat),
+                        &json!({"fields": {
+                            "state":"working", "driver":"claude", "incarnation_id":"one",
+                            "blocked_on":"human", "ask":"question", "reason":"AskUserQuestion",
+                            "ownership_sequence":1, "transition_sequence":3
+                        }}),
+                        &[],
+                        None,
+                    )
+                })
+                .unwrap()
+                .unwrap()
+        };
         append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}), None);
-        let first = append("harness.observed", waiting.clone(), None);
+        let first = append_harness_history();
         let choice = r#"{"0":[1],"1":[0,2]}"#;
         let answered = store
             .answer_native_prompt(seat, &first.id, choice, "person/avery")
             .unwrap();
         assert_eq!(answered.body["fields"]["status"], "answer");
         assert_eq!(answered.body["fields"]["reason"], choice);
-        let mut restated = append("harness.observed", waiting.clone(), None);
+        let mut restated = append_harness_history();
         for _ in 0..20 {
-            restated = append("harness.observed", waiting.clone(), None);
+            restated = append_harness_history();
         }
+        let restatements: u64 = store
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*) FROM claims
+                 WHERE subject=?1 AND kind='harness.observed'
+                   AND store_index>?2 AND store_index<=?3",
+                params![seat, first.store_index, restated.store_index],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restatements, 21, "restatements must exceed the recent-history window");
         let resolve = |index| {
             native_prompt_sequence_resolution(&store.readers.get(), seat, 1, 3, index)
                 .unwrap()
@@ -2357,5 +2659,308 @@ mod native_prompt_tests {
         assert_eq!(resolve(store.index().unwrap()), Some(NativePromptState::Gone));
         assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
         assert_eq!(resolve(answered.store_index), expected);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ClaimInput, PersonStepResponse};
+
+    fn step_back_in_time(store: &Store, subject: &str, accepted_at: &str) {
+        store
+            .connection
+            .lock().expect("fixture writer")
+            .execute(
+                "UPDATE claims SET accepted_at_unix_ms=?2 WHERE subject=?1 AND kind='work.person-asked'",
+                params![subject, accepted_at],
+            )
+            .unwrap();
+    }
+
+    /// The collection snapshot's visible rows must equal a direct read at the same cut, in
+    /// the same order, for every person and boundary.
+    fn parity(store: &Store, person: Option<&str>, now: u128) {
+        let (rows, _) = store.attention_collection_snapshot(person, now).unwrap();
+        let direct = store.attention_snapshot(person, now).unwrap();
+        let keys = |items: &[AttentionItemView]| {
+            items
+                .iter()
+                .map(|item| {
+                    (
+                        item.subject.clone(),
+                        item.episode.clone(),
+                        item.requested_at_unix_ms,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&rows), keys(&direct), "{person:?} at {now}");
+    }
+
+    /// A person ask joins the collection at its asking claim's acceptance, never at the
+    /// waiting time it names: a migrated ask can name a time before it was asked. Fault-only
+    /// clocks (observer state, reconcile faults) never move this collection.
+    #[test]
+    fn person_ask_collection_changes_only_at_the_asks_admission() {
+        let (store, origin, input) = super::super::person_work::tests::fixture();
+        let ask = store.ask_person(&input).unwrap();
+        let admitted = now_ms() + 60_000;
+        store
+            .connection
+            .lock().expect("fixture writer")
+            .execute(
+                "UPDATE claims SET accepted_at_unix_ms=?2,
+                        body=json_set(body, '$.fields.waiting_since', ?3)
+                 WHERE subject=?1 AND kind='work.person-asked'",
+                params![
+                    ask.subject,
+                    admitted.to_string(),
+                    (admitted - 3_600_000).to_string()
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/avery"), admitted - 1)
+                .unwrap()
+                .1,
+            Some(admitted)
+        );
+        assert_eq!(
+            store
+                .attention_collection_snapshot(None, admitted - 1)
+                .unwrap()
+                .1,
+            Some(admitted)
+        );
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/robin"), admitted - 1)
+                .unwrap()
+                .1,
+            None
+        );
+        parity(&store, Some("person/avery"), admitted - 1);
+        parity(&store, None, admitted - 1);
+        parity(&store, Some("person/robin"), admitted - 1);
+        assert!(store
+            .attention_snapshot(Some("person/avery"), admitted - 1)
+            .unwrap()
+            .iter()
+            .all(|item| item.subject != ask.subject));
+        let shown = store.attention_snapshot(Some("person/avery"), admitted).unwrap();
+        let item = shown
+            .iter()
+            .find(|item| item.subject == ask.subject)
+            .expect("the ask joins the collection at its admission");
+        parity(&store, Some("person/avery"), admitted);
+
+        // Fault-collection clocks are not this collection's inputs.
+        for (subject, kind, fields) in [
+            (
+                "observer/issues",
+                "observer.state",
+                json!({"state": "degraded", "reason": "limited"}),
+            ),
+            (
+                origin.subject.as_str(),
+                "reconcile.fault",
+                json!({"scope": "st3.test", "status": "faulted", "reason": "stuck"}),
+            ),
+        ] {
+            store
+                .connection
+                .batched(|tx| -> Result<()> {
+                    append_claim_tx(
+                        tx,
+                        "alder",
+                        subject,
+                        kind,
+                        Some("agent/alder.asker"),
+                        &json!({"fields": fields}),
+                        &[],
+                        None,
+                    )?;
+                    Ok(())
+                })
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/avery"), admitted - 1)
+                .unwrap()
+                .1,
+            Some(admitted)
+        );
+        assert_eq!(
+            store.attention_collection_snapshot(None, admitted - 1).unwrap().1,
+            Some(admitted)
+        );
+        parity(&store, Some("person/avery"), admitted - 1);
+        parity(&store, None, admitted - 1);
+
+        step_back_in_time(&store, &ask.subject, &(now_ms() - 1_000).to_string());
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/avery"), now_ms())
+                .unwrap()
+                .1,
+            None
+        );
+        parity(&store, Some("person/avery"), now_ms());
+        store
+            .finish_person_step(
+                &PersonStepResponse {
+                    delegation: None,
+                    subject: ask.subject.clone(),
+                    actor: "person/avery".into(),
+                    summary: "Friday".into(),
+                    evidence: vec![],
+                    episode: Some(item.episode.clone()),
+                    idempotency_key: "fence-response".into(),
+                    answer: None,
+                },
+                false,
+            )
+            .unwrap();
+        assert!(store
+            .attention_snapshot(Some("person/avery"), now_ms())
+            .unwrap()
+            .iter()
+            .all(|item| item.subject != ask.subject));
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/avery"), now_ms())
+                .unwrap()
+                .1,
+            None
+        );
+        parity(&store, Some("person/avery"), now_ms());
+    }
+
+    /// A ready person step without an ask joins at its activation, and falls back to its
+    /// creation when it was never separately activated.
+    #[test]
+    fn ready_person_step_joins_at_its_activation_and_falls_back_to_its_creation() {
+        let (store, origin, _input) = super::super::person_work::tests::fixture();
+        let review = format!(
+            "step-run/{}/review",
+            origin.generation.trim_start_matches("run-generation/")
+        );
+        store.set_step_state(&review, "ready", None).unwrap();
+        let activated = now_ms() + 120_000;
+        store
+            .connection
+            .lock().expect("fixture writer")
+            .execute(
+                "UPDATE step_runs SET activated_at_unix_ms=?2 WHERE subject=?1",
+                params![review.as_str(), activated.to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/avery"), activated - 1)
+                .unwrap()
+                .1,
+            Some(activated)
+        );
+        parity(&store, Some("person/avery"), activated - 1);
+        assert!(store
+            .attention_snapshot(Some("person/avery"), activated - 1)
+            .unwrap()
+            .iter()
+            .all(|item| item.subject != review));
+        assert!(
+            store
+                .attention_snapshot(Some("person/avery"), activated)
+                .unwrap()
+                .iter()
+                .any(|item| item.subject == review && item.kind == "person-step")
+        );
+        parity(&store, Some("person/avery"), activated);
+        store
+            .connection
+            .lock().expect("fixture writer")
+            .execute(
+                "UPDATE step_runs SET activated_at_unix_ms=NULL WHERE subject=?1",
+                params![review.as_str()],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/avery"), now_ms())
+                .unwrap()
+                .1,
+            None
+        );
+        parity(&store, Some("person/avery"), now_ms());
+        assert!(
+            store
+                .attention_snapshot(Some("person/avery"), now_ms())
+                .unwrap()
+                .iter()
+                .any(|item| item.subject == review)
+        );
+    }
+
+    /// Registered custom attention is admitted with its request, so an active custom card
+    /// leaves no future change, and only its recipient ever sees it.
+    #[test]
+    fn registered_custom_attention_has_no_future_change_once_active() {
+        let store = Store::open_memory("garden").unwrap();
+        let manifest: st3_schema::custom::Manifest = serde_json::from_str(include_str!(
+            "../../../../examples/st3/custom-review.json"
+        ))
+        .unwrap();
+        store
+            .register_custom_kind(&custom::RegistrationRequest {
+                manifest,
+                actor: "agent/garden/seed".into(),
+            })
+            .unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: "custom/garden/review/v1/fence".into(),
+                kind: "custom.garden.review.v1.requested".into(),
+                actor: Some("agent/garden/seed".into()),
+                fields: serde_json::from_value(json!({
+                    "title": "Retain the seed history?",
+                    "detail": "Choose Keep or Discard.",
+                    "recipient": "person/lichen"
+                }))
+                .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        assert!(
+            store
+                .attention_snapshot(Some("person/lichen"), now_ms())
+                .unwrap()
+                .iter()
+                .any(|item| item.subject == "custom/garden/review/v1/fence")
+        );
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/lichen"), now_ms())
+                .unwrap()
+                .1,
+            None
+        );
+        assert_eq!(
+            store.attention_collection_snapshot(None, now_ms()).unwrap().1,
+            None
+        );
+        parity(&store, Some("person/lichen"), now_ms());
+        parity(&store, None, now_ms());
+        parity(&store, Some("person/avery"), now_ms());
+        assert!(store
+            .attention_snapshot(Some("person/avery"), now_ms())
+            .unwrap()
+            .is_empty());
     }
 }

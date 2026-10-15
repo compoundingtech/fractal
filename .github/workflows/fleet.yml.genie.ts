@@ -114,6 +114,54 @@ const linuxStageJob = ({
 })
 
 // Required gate. Label events belong to macos.yml so they never restart or cancel this workflow.
+// Shadow mode: for each required check, ask the verifier from the accepted base whether a trusted note
+// exists for this run's tree and record the outcome in a fixed step name a collector can count.
+// It never skips a check, never fails, and is not itself a required check.
+const evidenceGateChecks = ['linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries']
+const evidenceGateOutcomes = [
+  ['satisfied', 'evidence satisfied by existing note'],
+  ['degraded', 'evidence existing note is degraded'],
+  ['no_note', 'evidence no note'],
+  ['rejected', 'evidence note rejected'],
+  ['unavailable', 'evidence verifier unavailable'],
+] as const
+const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`evidence-gate-${check}`, {
+  name: `evidence-gate-${check}`,
+  'runs-on': 'ubuntu-latest',
+  'timeout-minutes': 5,
+  'continue-on-error': true,
+  permissions: { contents: 'read' },
+  steps: [
+    { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+    {
+      name: 'Look for an existing evidence note',
+      id: 'gate',
+      env: {
+        CHECK: check,
+        REPOSITORY: '${{ github.repository }}',
+        BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}",
+        HEAD_SHA: '${{ github.sha }}',
+        HEAD_REPOSITORY: "${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}",
+        EVENT_NAME: '${{ github.event_name }}',
+        PR_NUMBER: '${{ github.event.pull_request.number }}',
+        RUN_ID: '${{ github.run_id }}',
+        RUN_ATTEMPT: '${{ github.run_attempt }}',
+      },
+      // The gate is taken from the accepted base, like the verifier, so a change cannot rewrite the
+      // script that decides whether it is skipped. No gate at the base, or any failure: run the check.
+      run: `git fetch --no-tags --depth=1 -q origin "$BASE_SHA" && git show "$BASE_SHA:scripts/ci-evidence-gate" > "$RUNNER_TEMP/ci-evidence-gate" && python3 "$RUNNER_TEMP/ci-evidence-gate" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> "$GITHUB_OUTPUT"; echo "evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID"; }`,
+    },
+    ...evidenceGateOutcomes.map(([outcome, name]) => ({
+      name,
+      if: `steps.gate.outputs.outcome == '${outcome}'`,
+      run: `echo ${name}`,
+    })),
+    // Fixed name: a decision to skip was taken. The observer must not record a check whose gate ran
+    // this step as a fresh finished run, or one real run would keep refreshing its own skips.
+    { name: 'evidence skip taken', if: "steps.gate.outputs.skip == 'true'", run: 'echo evidence skip taken' },
+  ],
+}]))
+
 export default githubWorkflow(withQueueWatch(readyPRJobs(auditCaches({
   name: 'Workspace CI',
   on: {
@@ -166,6 +214,7 @@ export default githubWorkflow(withQueueWatch(readyPRJobs(auditCaches({
         },
       ],
     },
+    ...evidenceGateJobs,
     // Start immediately on hosted capacity: no Nix setup, downloads or compilation.
     'upgrade-impact': {
       name: 'upgrade-impact',
@@ -432,8 +481,8 @@ done`,
     'evidence-note-linux-gate': {
       name: 'evidence-note-linux-gate',
       needs: ['linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries', ...evidenceStepNames],
-      // Only the merge queue and main sign; a pull request, even from this repository, never gets the key.
-      if: "${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}",
+      // The merge queue, main and pull requests from this repository sign; a fork never gets the key.
+      if: "${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}",
       'runs-on': 'ubuntu-latest',
       environment: evidenceEnvironment,
       permissions: { contents: 'write' },
@@ -442,6 +491,9 @@ done`,
       env: {
         EVIDENCE_PUSH_TOKEN: '${{ github.token }}',
         PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+        PR_BASE_SHA: '${{ github.event.pull_request.base.sha }}',
+        PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+        PR_USER: '${{ github.event.pull_request.user.login }}',
         NEEDS_JSON: '${{ toJSON(needs) }}',
       },
       steps: [
@@ -583,4 +635,4 @@ printf '| sekrets VM test | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SU
     // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
     ...fractalWebJobs,
   },
-}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing."}))))
+}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-isolation-vm": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-mail-redelivery-canaries": "Verifies Git notes only; builds nothing and never skips a check."}))))
