@@ -1184,8 +1184,12 @@ mod tests {
     mod incident2994 {
         use super::*;
 
-        fn accept(source: &Store, exchange: &ReplicationExchange) {
-            source.receive_replication_exchange("alder", "test-fleet", exchange).unwrap();
+        fn accept(source: &Store, authenticated_peer: &str, exchange: &ReplicationExchange) {
+            // The in-process fixture supplies the known exporting Store's identity,
+            // just as the transport supplies its authenticated relay; do not infer it
+            // from an untrusted envelope writer or bypass the real peer-label guard.
+            assert_eq!(exchange.peer, authenticated_peer);
+            source.receive_replication_exchange(authenticated_peer, "test-fleet", exchange).unwrap();
             let admitted = source.validate_replication_backlog().unwrap();
             assert_eq!(admitted.invalid, 0);
             assert_eq!(admitted.held, 0);
@@ -1210,7 +1214,7 @@ mod tests {
             ).unwrap();
             let first = exchange.envelopes.remove(0);
             let source = Store::open_memory("birch").unwrap();
-            accept(&source, &exchange);
+            accept(&source, "alder", &exchange);
             let unsettled: u64 = source.readers.get().query_row(
                 "SELECT COUNT(*) FROM replica_envelopes WHERE batch_id IS NULL", [],
                 |row| row.get(0),
@@ -1219,7 +1223,7 @@ mod tests {
             assert!(source.check_backup_chains().unwrap_err().to_string().contains("predecessor"));
             assert!(source.write_backup(&mut Vec::new()).is_err());
             exchange.envelopes = vec![first];
-            accept(&source, &exchange);
+            accept(&source, "alder", &exchange);
             source.check_backup_chains().unwrap();
             let root = tempfile::tempdir().unwrap();
             let archive_path = root.path().join("arrived.jsonl");
@@ -1274,7 +1278,7 @@ mod tests {
                 let link = if wrong_sequence { predecessor.batch.hash } else { "ab".repeat(32) };
                 relink(&mut exchange.envelopes[1], if wrong_sequence { 3 } else { 2 }, link);
                 let source = Store::open_memory("birch").unwrap();
-                accept(&source, &exchange);
+                accept(&source, "alder", &exchange);
                 assert_eq!(source.readers.get().query_row(
                     "SELECT COUNT(*) FROM batches WHERE origin='alder'", [],
                     |row| row.get::<_, u64>(0),
@@ -1310,13 +1314,23 @@ mod tests {
             let other_hash = other_payload.batch.hash;
             relink(&mut exchange.envelopes[1], 2, other_hash.clone());
             let source = Store::open_memory("birch").unwrap();
-            accept(&source, &other_exchange);
-            accept(&source, &exchange);
+            accept(&source, "cedar", &other_exchange);
+            accept(&source, "alder", &exchange);
             assert!(source.readers.get().query_row(
                 "SELECT EXISTS(SELECT 1 FROM batches WHERE origin='cedar' AND replica_sequence=1 AND hash=?1)",
                 [&other_hash], |row| row.get::<_, bool>(0),
             ).unwrap(), "the hash is present, but belongs to another writer");
-            assert!(source.check_backup_chains().unwrap_err().to_string().contains("predecessor"));
+            let own_predecessor: String = source.readers.get().query_row(
+                "SELECT hash FROM batches WHERE origin='alder' AND replica_sequence=1", [],
+                |row| row.get(0),
+            ).unwrap();
+            assert_ne!(own_predecessor, other_hash, "both admitted writers retain different real predecessor hashes");
+            let error = source.check_backup_chains().unwrap_err().to_string();
+            assert!(error.contains("predecessor"));
+            for witness in ["writer=\"alder\"", "sequence=2", "predecessor_sequence=1",
+                "retained predecessor wrong hash", "not covered by a checkpoint"] {
+                assert!(error.contains(witness), "missing {witness:?} from {error}");
+            }
         }
 
         #[test]
@@ -1332,7 +1346,7 @@ mod tests {
             ).unwrap();
             exchange.envelopes.remove(0);
             let source = Store::open_memory("birch").unwrap();
-            accept(&source, &exchange);
+            accept(&source, "alder", &exchange);
             let create = source.write_backup(&mut Vec::new()).unwrap_err().to_string();
             rewrite(&archive_path, |records| records.retain(
                 |record| !matches!(record, Record::Envelope(envelope) if envelope.sequence == 1),
