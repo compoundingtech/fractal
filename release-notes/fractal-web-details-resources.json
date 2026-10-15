@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Fractal web's agent inspector opens on a native Details tab built on the Fractal UI DetailsPane, with Changes as its second tab. Details shows identity, mission, status, managed-session timing, context, spend, resources and traced subagents from native observations and names every unreported or ungranted value. Resources opens in a new non-modal Fractal UI SidePanel instead of a modal dialog, lists the agent's Todos first, and prefetches and retains its reads so a reopen shows the last observation.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Additive: Fractal UI exports SidePanel and SidePanelProps from its shell entry. Details reads use existing client read endpoints and request redacted declaration values only. Resources is no longer a dialog; it is a labelled complementary region named by the trigger's aria-controls."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing to recover."
+  }
+}
