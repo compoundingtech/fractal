@@ -1309,6 +1309,15 @@ fleet, see `sync`) or `unverified`, and the `reason` the owner was not asked, su
 `timed-out`. A client renders that as waiting, not as no messages. A list that names no remote
 agent has no `replicated`. Page cursors of a relayed list belong to the owner.
 
+The bounded message paging contract below is capability **`messages-paging` version 2**.
+Clients opt in on each request with `X-St3-Features: messages-paging.v2` (comma-separated
+with any other feature tokens). Capability discovery advertises support but does not opt
+a client in. Requests without that exact token retain the legacy message-list response
+shape and paging behavior, including legacy cursors; they do not receive the new retained
+SQL cuts or byte-bounded paging behavior. Gateways preserve the negotiation when relaying
+message lists. The generated Rust, Swift and TypeScript clients send the opt-in token;
+previously generated clients that omit it keep the old contract unchanged.
+
 Message list pages select the recipient and actor, newest `sent_at` first with ascending message
 ID ties, before loading message bodies. A cursor retains the first page's server-issued cut
 and request time: later writes cannot change the traversal's message fields, current/history

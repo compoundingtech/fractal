@@ -129,6 +129,8 @@ pub enum ClientReadOperation {
         history: bool,
         limit: Option<usize>,
         cursor: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        messages_paging: bool,
     },
 }
 
@@ -1306,12 +1308,14 @@ async fn receive_client_read(
                 history,
                 limit,
                 cursor,
+                messages_paging,
             } => {
                 anyhow::ensure!(
                     limit.is_none_or(|limit| (1..=200).contains(&limit)),
                     "the messages limit is invalid"
                 );
                 let page = client
+                    .with_messages_paging(messages_paging)
                     .messages_list_for_peer(&actor, cursor.as_deref(), limit, history)
                     .await?
                     .value;
@@ -1707,6 +1711,27 @@ pub async fn run_worker(config: Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn messages_paging_relay_preserves_explicit_negotiation_and_legacy_wire_shape() {
+        let legacy = serde_json::json!({
+            "authority_actor":"person/alex",
+            "request":{
+                "operation":"messages", "actor":"agent/owner",
+                "limit":1, "cursor":null
+            }
+        });
+        let mut request: ClientReadRequest = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(matches!(&request.request, ClientReadOperation::Messages { messages_paging: false, .. }));
+        assert_eq!(serde_json::to_value(&request).unwrap(), legacy);
+        if let ClientReadOperation::Messages { messages_paging, .. } = &mut request.request {
+            *messages_paging = true;
+        }
+        let negotiated = serde_json::to_value(&request).unwrap();
+        assert_eq!(negotiated["request"]["messages_paging"], true);
+        let restored: ClientReadRequest = serde_json::from_value(negotiated).unwrap();
+        assert!(matches!(restored.request, ClientReadOperation::Messages { messages_paging: true, .. }));
+    }
 
     #[tokio::test]
     async fn a_read_through_the_relay_marks_its_request_as_a_remote_read() {
@@ -3075,6 +3100,7 @@ mod tests {
                         history: false,
                         limit: Some(20),
                         cursor: None,
+                        messages_paging: false,
                     },
                     relay: Some(ClientReadRoute {
                         target: "host/lag-owner".into(),

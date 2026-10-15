@@ -1,6 +1,178 @@
 use super::*;
 use std::time::Instant;
 
+fn paging_reader(state: &AppState, credential: &str, scopes: &[&str]) {
+    append_fixture_claim(
+        &state.store,
+        &format!("custom/client/{credential}"),
+        "custom.client.pairing-completed",
+        "person/alex",
+        BTreeMap::from([
+            ("credential_hash".into(), json!(hex::encode(Sha256::digest(credential.as_bytes())))),
+            ("session_actor".into(), json!(format!("client/{credential}"))),
+            ("person_id".into(), json!("person/alex")),
+            ("scopes".into(), json!(scopes)),
+            ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
+        ]),
+    );
+}
+
+async fn paging_request(
+    app: Router,
+    uri: &str,
+    credential: Option<&str>,
+    features: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder().uri(uri);
+    if let Some(credential) = credential {
+        request = request.header("authorization", format!("Bearer {credential}"));
+    }
+    if let Some(features) = features {
+        request = request.header("x-st3-features", features);
+    }
+    let response = app.oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+async fn messages_paging_v2_requires_negotiation() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    paging_reader(&state, "paging-reader", &["read.projections"]);
+    paging_reader(&state, "paging-denied", &[]);
+    generated_fixture(&state.store, 12, 0);
+    let app = fabric_router(state);
+    let uri = "/v1/client/messages?history=true&limit=1";
+    for credential in [None, Some("invalid"), Some("paging-denied")] {
+        let (status, body) = paging_request(
+            app.clone(), uri, credential, Some("messages-paging.v2"),
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+    let (status, denied) = paging_request(
+        app.clone(), "/v1/client/messages?person=person%2Frobin",
+        Some("paging-reader"), Some("messages-paging.v2"),
+    ).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, capabilities) = paging_request(
+        app.clone(), "/v1/client/capabilities", Some("paging-reader"), None,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{capabilities}");
+    let (status, legacy) = paging_request(app.clone(), uri, Some("paging-reader"), None).await;
+    assert_eq!(status, StatusCode::OK, "{legacy}");
+    let legacy_cursor = decode_client_cursor(
+        legacy["value"]["page"]["next_cursor"].as_str().unwrap(),
+    ).unwrap();
+    assert!(legacy_cursor.before_index.is_none(), "discovery must not negotiate");
+    assert!(legacy_cursor.after_key.is_none());
+    let (status, bounded) = paging_request(
+        app.clone(), uri, Some("paging-reader"),
+        Some("conversation-blocks.v1, messages-paging.v2"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{bounded}");
+    let cursor = bounded["value"]["page"]["next_cursor"].as_str().unwrap();
+    let cut = decode_client_cursor(cursor).unwrap();
+    assert!(cut.before_index.is_some());
+    assert!(cut.after_key.is_some());
+    assert!(cut.items_digest.starts_with("message-cut/"));
+    let next = format!("{uri}&cursor={}", urlencoding::encode(cursor));
+    let (status, page) = paging_request(
+        app.clone(), &next, Some("paging-reader"), Some("messages-paging.v2"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_ne!(page["value"]["items"][0]["id"], bounded["value"]["items"][0]["id"]);
+    let (status, rejected) = paging_request(app, &next, Some("paging-reader"), None).await;
+    assert_eq!(status, StatusCode::GONE, "{rejected}");
+    assert_eq!(rejected["code"], "page-cursor-expired");
+}
+
+#[tokio::test]
+async fn messages_paging_legacy_shape_without_negotiation() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    paging_reader(&state, "legacy-reader", &["read.projections"]);
+    for index in 0..2 {
+        append_fixture_claim(
+            &state.store, &format!("message/legacy-shape-{index}"), "message.sent",
+            "person/alex",
+            BTreeMap::from([
+                ("from".into(), json!("person/alex")),
+                ("to".into(), json!("person/robin")),
+                ("content".into(), json!(format!("legacy body {index}"))),
+                ("title".into(), json!("x".repeat(600_000))),
+                ("status".into(), json!("sent")),
+            ]),
+        );
+    }
+    let expected = client_message_resources(&state.store, Some("person/alex"), true, None).unwrap();
+    let app = fabric_router(state.clone());
+    let uri = "/v1/client/messages?history=true&limit=2";
+    for features in [None, Some("messages-paging.v1"), Some("messages-paging.v2-extra")] {
+        let (status, legacy) = paging_request(
+            app.clone(), uri, Some("legacy-reader"), features,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{status}");
+        assert_eq!(legacy["value"]["kind"], "page");
+        assert_eq!(legacy["value"]["collection"], "messages");
+        assert_eq!(legacy["value"]["filters"], json!({"history":"all", "person":"person/alex"}));
+        assert_eq!(legacy["value"]["page"], json!({
+            "limit":2, "has_more":false
+        }));
+        assert!(serde_json::to_vec(&legacy).unwrap().len() > CLIENT_MAX_RESPONSE_BYTES);
+        let mut actual = legacy["value"]["items"].as_array().unwrap().clone();
+        let mut oracle = expected.clone();
+        for item in actual.iter_mut().chain(oracle.iter_mut()) {
+            // Delivery age advances with wall time; all other legacy fields are exact.
+            item.as_object_mut().unwrap().remove("delivery");
+        }
+        assert_eq!(actual, oracle);
+    }
+    let (status, bounded) = paging_request(
+        app.clone(), uri, Some("legacy-reader"), Some("messages-paging.v2"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{status}");
+    assert_eq!(bounded["value"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(bounded["value"]["page"]["has_more"], true);
+    assert!(serde_json::to_vec(&bounded).unwrap().len() <= CLIENT_MAX_RESPONSE_BYTES);
+    let (status, legacy) = paging_request(
+        app.clone(), "/v1/client/messages?history=true&limit=1", Some("legacy-reader"), None,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{status}");
+    let cursor = legacy["value"]["page"]["next_cursor"].as_str().unwrap();
+    let decoded = decode_client_cursor(cursor).unwrap();
+    assert!(decoded.before_index.is_none());
+    assert!(decoded.after_key.is_none());
+    let next = format!("/v1/client/messages?history=true&limit=1&cursor={}", urlencoding::encode(cursor));
+    let (status, second) = paging_request(
+        app.clone(), &next, Some("legacy-reader"), None,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{status}");
+    assert_eq!(second["snapshot"], legacy["snapshot"]);
+    assert_eq!(second["value"]["items"][0]["id"], expected[1]["id"]);
+    append_fixture_claim(
+        &state.store, "message/legacy-oversized", "message.sent", "person/alex",
+        BTreeMap::from([
+            ("from".into(), json!("person/alex")), ("to".into(), json!("person/robin")),
+            ("content".into(), json!("oversized legacy envelope")),
+            ("title".into(), json!("x".repeat(CLIENT_MAX_RESPONSE_BYTES))),
+            ("status".into(), json!("sent")),
+        ]),
+    );
+    let oversized = "/v1/client/messages?history=true&actor=person%2Frobin&limit=1";
+    let (status, page) = paging_request(
+        app.clone(), oversized, Some("legacy-reader"), None,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{status}");
+    assert_eq!(page["value"]["items"][0]["id"], "message/legacy-oversized");
+    let (status, error) = paging_request(
+        app, oversized, Some("legacy-reader"), Some("messages-paging.v2"),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "response-too-large");
+}
+
 fn append_fixture_claim(
     store: &Store,
     subject: &str,

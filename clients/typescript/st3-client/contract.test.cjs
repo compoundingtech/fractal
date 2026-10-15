@@ -222,7 +222,7 @@ test('follows terminal screens until the server ends the stream with its error',
     assert.deepEqual(opened, [{
         url: 'wss://example.test/v1/client/terminals/terminal%2Frelease-shell/stream?incarnation=pty-4%3A2026-09-20T11%3A10%3A00Z',
         protocols: ['st3.client.terminal.v0', 'st3.cap.capability-proof'],
-        headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' },
+        headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1, messages-paging.v2' },
     }]);
     socket.onmessage({ data: JSON.stringify(screenFixture) });
     socket.onmessage({ data: JSON.stringify(changedFixture) });
@@ -255,7 +255,7 @@ test('conversation stream opens at a cursor and delivers bounded changes', async
         onChange: change => received.push(change.value),
         socket: (url, protocols, headers) => { opened.push({ url, protocols, headers }); return socket; },
     });
-    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/conversations/example/stream?after=conversation-cursor%2Fowner%2Fexample%2F1.2.3', protocols: ['st3.client.conversation.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
+    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/conversations/example/stream?after=conversation-cursor%2Fowner%2Fexample%2F1.2.3', protocols: ['st3.client.conversation.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1, messages-paging.v2' } }]);
     const change = { kind: 'conversation-changes', session_id: 'session/example', items: [{ id: 'timeline-entry/example', sequence: 4, revision: 1, timestamp: snapshot.created_at, role: 'assistant', type: 'content', final: true, body: { media_type: 'text/plain', text: 'reply' } }], next_cursor: 'conversation-cursor/owner/example/1.3.3' };
     socket.onmessage({ data: JSON.stringify(envelope(change)) });
     assert.deepEqual(received, [change]);
@@ -275,7 +275,7 @@ test('collection stream holds commands until the socket opens and passes frames 
     const ends = [];
     const client = new St3Client({ baseUrl: 'https://example.test/', credential: () => 'secret', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const stream = await client.collectionStream({ onFrame: frame => frames.push(frame), onEnd: error => ends.push(error), onOpen: () => lifecycle.push(['open']), onCommandSent: command => lifecycle.push([command.kind, command.id]), socket: (url, protocols, headers) => { opened.push({ url, protocols, headers }); return socket; } });
-    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/collections/stream', protocols: ['st3.client.collections.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
+    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/collections/stream', protocols: ['st3.client.collections.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1, messages-paging.v2' } }]);
     stream.subscribe('missions', 'missions', 200);
     stream.subscribe('mine', 'attention', 50, { person: 'person/example' });
     assert.deepEqual(socket.sent, []);
@@ -604,7 +604,7 @@ test('owner content chunk route encodes session identities and retains continuat
     } });
     const result = await client.conversationContentChunk('session/native/one', chunk.ref, chunk.offset);
     assert.equal(calls.at(-1).url, `https://example.test/v1/client/conversations/session%2Fnative%2Fone/content/${chunk.ref}/chunk?offset=262144`);
-    assert.equal(calls.at(-1).init.headers['x-st3-features'], 'custom-subjects.v1, conversation-blocks.v1');
+    assert.equal(calls.at(-1).init.headers['x-st3-features'], 'custom-subjects.v1, conversation-blocks.v1, messages-paging.v2');
     assert.deepEqual(result.value, chunk);
 });
 

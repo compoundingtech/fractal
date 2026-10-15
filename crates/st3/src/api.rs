@@ -135,8 +135,8 @@ const CLIENT_PROJECTION_VERSION: &str = "client-projection.v0";
 const CLIENT_DEFAULT_PAGE_ITEMS: usize = 50;
 const CLIENT_MAX_PAGE_ITEMS: usize = 200;
 const CLIENT_MAX_RESPONSE_BYTES: usize = 1_048_576;
-// Other collections retain complete result sets briefly. Message pages retain only
-// issued cursor metadata; either kind expires on restart, eviction, or the TTL.
+// Legacy collections retain complete result sets briefly. Negotiated message pages
+// retain only issued cursor metadata; either expires on restart, eviction, or the TTL.
 pub(crate) const CLIENT_PAGE_TTL_MS: u128 = 300_000;
 const CLIENT_PAGE_CACHE_CAPACITY: usize = 32;
 
@@ -4062,25 +4062,9 @@ fn client_message_resources(
     history: bool,
     peer: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
-    store.read_snapshot(|through| {
-        let now = client_now_ms();
-        let mut after = None;
-        let mut resources = Vec::new();
-        loop {
-            let mut page = store.client_messages_page(person, peer, history, through, after.as_ref(), CLIENT_MAX_PAGE_ITEMS)?;
-            let more = page.len() > CLIENT_MAX_PAGE_ITEMS;
-            page.truncate(CLIENT_MAX_PAGE_ITEMS);
-            for (message, metadata, current) in page {
-                let sent_at = metadata["sent_at"].as_str().unwrap_or("0").parse::<u128>()?;
-                after = Some((sent_at, message.subject.clone()));
-                resources.push(client_message_resource(store, message, &metadata, current, now)?);
-            }
-            if !more { return Ok(resources); }
-        }
-    })
+    client_message_resources_at(store, person, history, peer, client_now_ms())
 }
 
-#[cfg(test)]
 fn client_message_resources_at(
     store: &Store,
     person: Option<&str>,
@@ -6201,7 +6185,9 @@ async fn client_messages(
                     state: "current".into(),
                     reason: None,
                 });
-                client_message_page_size(&snapshot, &page, &request_id)?;
+                if session.messages_paging {
+                    client_message_page_size(&snapshot, &page, &request_id)?;
+                }
                 return Ok((Extension(snapshot), Json(page)));
             }
             Err(error) if error.code == "remote-unavailable" => {
@@ -6222,9 +6208,25 @@ async fn client_messages(
             Err(error) => return Err(error),
         }
     }
-    client_messages_sql_page_with_envelope(
-        &state, snapshot, &effective_query, client_now_ms(), &request_id, replicated,
-    ).await
+    if session.messages_paging {
+        return client_messages_sql_page_with_envelope(
+            &state, snapshot, &effective_query, client_now_ms(), &request_id, replicated,
+        ).await;
+    }
+    let history = query.history;
+    let (snapshot, Json(mut page)) = client_snapshot_page(
+        &state,
+        snapshot,
+        "messages",
+        &effective_query,
+        move |state, _| {
+            client_message_resources(&state.store, person.as_deref(), history, actor.as_deref())
+        },
+    )
+    .await
+    .map(|(Extension(snapshot), page)| (snapshot, page))?;
+    page.replicated = replicated;
+    Ok((Extension(snapshot), Json(page)))
 }
 
 /// SQL pages retain only issued cut metadata, not a materialized JSON collection.
@@ -6502,6 +6504,7 @@ async fn relayed_messages_page(
                     history: query.history,
                     limit: query.limit.map(|limit| limit.clamp(1, 200)),
                     cursor: query.cursor.clone(),
+                    messages_paging: session.messages_paging,
                 },
             },
         )
