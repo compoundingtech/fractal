@@ -136,6 +136,7 @@ impl SmalltalkRuntime {
             None
         };
         resources::create_schema(connection)?;
+        slo_breaches::create_schema(connection)?;
         custom::create_schema(connection)?;
         agent_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
@@ -356,7 +357,8 @@ impl Runtime for SmalltalkRuntime {
         repaired: &str,
         replacement: &str,
     ) -> Result<()> {
-        select_desired_repair_tx(transaction, repaired, replacement)
+        select_desired_repair_tx(transaction, repaired, replacement)?;
+        slo_breaches::repair(transaction, repaired)
     }
 
     fn append_claim_tx(
