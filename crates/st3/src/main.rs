@@ -30131,7 +30131,7 @@ mod tests {
     #[tokio::test]
     async fn renewal_retry_failed_work_read_preserves_the_known_lease_bound() {
         let root = tempfile::tempdir().unwrap();
-        let client = Client::unix(&root.path().join("missing.sock"));
+        let client = Client::unix(root.path().join("missing.sock"));
         let mut retry = st3::client::DriverRetry::default();
         retry.lease_margin(Duration::from_secs(2));
         // Exercise the real request/selection boundary: an error is not an empty response.
