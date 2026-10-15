@@ -20601,7 +20601,12 @@ mission "example/zero-run" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let (state, session_id) = hidden_echo_prefix_fixture(root.path());
         let session = ClientSession::local(Some("person/alex")).unwrap();
-        conversation_blocks::source(&state, &session_id).expect("the managed transcript is bound");
+        let snapshot = new_client_snapshot(&state);
+        let managed = super::super::managed_session_owner_at(
+            &state.store, snapshot.store_index, &session_id,
+        ).unwrap();
+        conversation_blocks::source(&state, &session_id, managed.as_ref())
+            .expect("the managed transcript is bound");
         // OPEN keeps the established stored-timeline fallback, with no native generation.
         let (start, opened) = conversation_open_local(&state, &session, &session_id).unwrap();
         assert!(opened["items"].as_array().unwrap().iter().all(|item|
