@@ -49,10 +49,29 @@ kit_plays() (
 )
 
 app_plays() (
-  local receipt_dir
+  local receipt_dir status=0
   receipt_dir=$(mktemp -d "${TMPDIR:-/tmp}/fractal-app-plays.XXXXXX")
   trap 'rm -rf "$receipt_dir"' EXIT
-  node packages/fractal-ui/scripts/kit-play-gate.mjs apps/fractal-web/storybook-static "$receipt_dir"
+  node packages/fractal-ui/scripts/kit-play-gate.mjs apps/fractal-web/storybook-static "$receipt_dir" || status=$?
+  # Preserve the gate's result, but publish its receipt even when set -e would
+  # otherwise end the lane before its normal elapsed-time row is written.
+  node --input-type=module - "$receipt_dir/receipt.json" "$summary" <<'NODE'
+import { appendFileSync, readFileSync } from 'node:fs'
+const [receiptPath, summaryPath] = process.argv.slice(2)
+const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'))
+const passed = receipt.rows.filter(row => row.pass).length
+const failed = receipt.rows.length - passed
+appendFileSync(summaryPath, [
+  '\n### App strict play results\n',
+  '| Stories | Cases (completed/expected) | Passed | Failed | Result | Minutes (plays only) |',
+  '| --- | --- | --- | --- | --- | --- |',
+  `| ${receipt.stories} | ${receipt.cases}/${receipt.expectedCases} | ${passed} | ${failed} | ${receipt.pass ? 'PASS' : 'FAIL'} | ${(receipt.elapsedSeconds / 60).toFixed(2)} |`,
+  '\n| Lane | Elapsed |',
+  '| --- | --- |',
+  '',
+].join('\n'))
+NODE
+  return "$status"
 )
 lane "Toolchain and Buck root" toolchain
 lane "Frozen install" pnpm install --frozen-lockfile
