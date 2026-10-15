@@ -558,7 +558,10 @@ mission "approvals" state="ready" revisions="human-only" revision-reviewer="pers
         }).unwrap();
         store.append_claim(&ClaimInput {
             subject: closed.subject.clone(), kind: "attention.resolved".into(), actor: Some("person/avery".into()),
-            fields: BTreeMap::from([("outcome".into(), json!("resolved"))]),
+            fields: BTreeMap::from([
+                ("request".into(), json!(closed.request)),
+                ("outcome".into(), json!("resolved")),
+            ]),
             evidence: vec![closed.request], expected_subject: None, idempotency_key: Some("inbox-close".into()),
         }).unwrap();
         let fault = store.record_runtime_failure("inbox-broken-gate", &AttentionRequest {
@@ -580,7 +583,8 @@ mission "approvals" state="ready" revisions="human-only" revision-reviewer="pers
             std::thread::sleep(std::time::Duration::from_millis(2));
             store.append_claim(&ClaimInput {
                 subject: planning_subject.into(), kind: format!("planning-session.{kind}"),
-                actor: Some("person/avery".into()), fields: serde_json::from_value(fields).unwrap(),
+                actor: Some(if kind == "previewed" { "daemon/runtime" } else { "person/avery" }.into()),
+                fields: serde_json::from_value(fields).unwrap(),
                 evidence: Vec::new(), expected_subject: None, idempotency_key: Some(format!("inbox-plan:{kind}")),
             }).unwrap();
         }

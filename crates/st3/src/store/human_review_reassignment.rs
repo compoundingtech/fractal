@@ -58,9 +58,41 @@ pub(super) fn pending_requests_sql(filtered: bool) -> String {
          FROM claims INDEXED BY claims_human_gate_reassignment_reviewer_index
          WHERE kind='gate.reviewer-reassigned' AND json_extract(body, '$.fields.reviewer')=?1"
     } else {
+        // A global attention read must start from live owners, not every historical request.
+        // These are the owner forms accepted by human_review_currency; that function still
+        // decides revision, generation, attempt and root-run currency after hydration.
+        // Loop descendants include the legacy item and round/candidate owner forms.
+        // CROSS JOIN keeps the small owner set outside the indexed claim seeks. Unary +
+        // removes TEXT affinity from owner IDs, as it does for exact request IDs above.
         // Keep the parameter shape identical to the reviewer-filtered query.
-        "SELECT id FROM claims INDEXED BY claims_human_gate_request_index
-         WHERE kind='gate.requested' AND json_extract(body, '$.fields.reviewer') IS NOT NULL
+        "WITH open_steps(subject) AS MATERIALIZED (
+             SELECT step_runs.subject
+             FROM mission_runs INDEXED BY mission_runs_open_index
+             CROSS JOIN step_runs INDEXED BY step_runs_run_index
+               ON step_runs.run_id=mission_runs.id
+             WHERE mission_runs.status NOT IN ('completed','failed','cancelled')
+               AND step_runs.status NOT IN ('completed','failed','cancelled')
+         ), owners(owner) AS (
+             SELECT 'mission-run/' || id FROM mission_runs INDEXED BY mission_runs_open_index
+             WHERE status NOT IN ('completed','failed','cancelled')
+             UNION ALL SELECT subject FROM open_steps
+             UNION ALL SELECT 'loop-run/' || substr(subject,10) FROM open_steps
+         )
+         SELECT request.id
+         FROM owners
+         CROSS JOIN claims request INDEXED BY claims_human_gate_episode_index
+           ON json_extract(request.body, '$.fields.owner')=+owners.owner
+         WHERE request.kind='gate.requested'
+           AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
+           AND ?1 IS NULL
+         UNION
+         SELECT request.id
+         FROM open_steps
+         CROSS JOIN claims request INDEXED BY claims_human_gate_episode_index
+           ON json_extract(request.body, '$.fields.owner')>='loop-run/' || substr(open_steps.subject,10) || '/'
+          AND json_extract(request.body, '$.fields.owner')<'loop-run/' || substr(open_steps.subject,10) || '0'
+         WHERE request.kind='gate.requested'
+           AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
            AND ?1 IS NULL"
     };
     let episode = |alias: &str, request: &str| {
@@ -559,6 +591,50 @@ mission "review-repair" state="ready" {
             .unwrap().query_map([None::<&str>], |row| row.get::<_, String>(3)).unwrap()
             .collect::<Result<Vec<_>, _>>().unwrap();
         assert!(plan.iter().any(|step| step == "MATERIALIZE unresolved"), "{plan:?}");
+    }
+
+    #[test]
+    fn unfiltered_candidates_do_not_scan_unrelated_review_history() {
+        let (store, run) = fixture();
+        let pending = request(&store, &run, "pending", "unfiltered-pending", 0);
+        let measure = || {
+            let connection = store.readers.get();
+            let mut statement = connection.prepare(&pending_requests_sql(false)).unwrap();
+            let ids = statement.query_map([None::<&str>], |row| row.get::<_, String>(0))
+                .unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(ids, vec![pending.id.clone()]);
+            (
+                statement.get_status(rusqlite::StatementStatus::VmStep),
+                statement.get_status(rusqlite::StatementStatus::FullscanStep),
+            )
+        };
+        let before = measure();
+        for index in 0..512 {
+            for answered in [false, true] {
+                let operation = format!("gate-operation/unfiltered-history/{answered}/{index}");
+                let mut fields: BTreeMap<String, Value> =
+                    serde_json::from_value(pending.body["fields"].clone()).unwrap();
+                fields.insert("owner".into(), json!(format!("step-run/unrelated/{answered}/{index}")));
+                fields.insert("operation".into(), json!(operation));
+                let historical = store.append_claim(&ClaimInput {
+                    subject: operation,
+                    kind: "gate.requested".into(),
+                    actor: Some("daemon/runtime".into()),
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                }).unwrap();
+                if answered {
+                    answer(&store, &historical, OLD, &format!("unfiltered-history-answer-{index}"));
+                }
+            }
+        }
+        let after = measure();
+        // Unrelated owners are not live work. Filtering them after a global request
+        // scan can preserve the result and sort count while still growing linearly.
+        assert!(after.0 <= before.0, "unrelated history added VM steps: {before:?} -> {after:?}");
+        assert!(after.1 <= before.1, "unrelated history added full scans: {before:?} -> {after:?}");
     }
 
     #[test]
