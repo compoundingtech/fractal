@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# git pre-push hook: make sure the pushed tree has signed evidence. Installed by scripts/install-git-hooks.
+# It never blocks a push; see scripts/evidence-prepush.
+exec python3 "$(cd "$(dirname "$(readlink -f "$0")")" && pwd)/../evidence-prepush" "$@"

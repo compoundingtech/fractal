@@ -170,6 +170,21 @@ class StTest(unittest.TestCase):
         self.assertIn('does not merge cleanly', str(code))
         self.assertEqual(self.statements(), [])
 
+    def test_status_runs_nothing_and_says_whether_the_merge_tree_is_covered(self):
+        self.commit('b.txt', 'two')
+        code, out, err = self.run_st_test('--check', 'demo', '--status')
+        self.assertEqual((code, self.statements()), (3, []))
+        self.assertIn('not covered', out)
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        code, out, err = self.run_st_test('--check', 'demo', '--status')
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('covered by wrapper', out)
+        # After the base moves the merge tree differs, so the earlier note no longer covers it.
+        self.commit('c.txt', 'main moved', branch='main')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+        self.assertEqual(self.run_st_test('--check', 'demo', '--status')[0], 3)
+
     def test_a_base_that_looks_like_a_git_option_is_refused(self):
         self.commit('b.txt', 'two')
         for bad in ('--upload-pack=x', '-x', 'a b', ''):

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Install the pre-push hook that signs evidence (scripts/evidence-prepush). Idempotent; never replaces a hook it did not write.
+#   scripts/install-git-hooks [--uninstall]
+set -euo pipefail
+cd "$(dirname "$0")/.."
+git rev-parse --git-dir >/dev/null 2>&1 || exit 0   # not a checkout (a source export): nothing to install into
+hooks=$(git rev-parse --git-path hooks)
+mark='# st-evidence-prepush: written by scripts/install-git-hooks'
+hook="$hooks/pre-push"
+if [ "${1:-}" = --uninstall ]; then
+  if [ -f "$hook" ] && grep -qF "$mark" "$hook"; then rm -f "$hook"; echo "removed $hook"; fi
+  exit 0
+fi
+if [ "$(git config --get core.hooksPath || true)" != "" ]; then
+  echo "install-git-hooks: core.hooksPath is set; add scripts/git-hooks/pre-push to that directory yourself" >&2
+  exit 0
+fi
+if [ -e "$hook" ] && ! grep -qF "$mark" "$hook"; then
+  echo "install-git-hooks: $hook exists and is not ours; not replacing it. Call scripts/git-hooks/pre-push from it to enable evidence signing." >&2
+  exit 0
+fi
+mkdir -p "$hooks"
+cat > "$hook.tmp" <<STUB
+#!/usr/bin/env bash
+$mark
+top=\$(git rev-parse --show-toplevel)
+[ -x "\$top/scripts/git-hooks/pre-push" ] || exit 0
+exec "\$top/scripts/git-hooks/pre-push" "\$@"
+STUB
+chmod +x "$hook.tmp"
+mv -f "$hook.tmp" "$hook"
+echo "installed $hook"

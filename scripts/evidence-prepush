@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Pre-push: when the tree about to be tested has no signed evidence, produce it, then let the push go.
+
+Nobody has to remember: pushing a branch you have checked out runs `scripts/st-test --status`; if every check
+that has a local command is covered it says so and the push goes. If not, it runs `scripts/st-test --push REMOTE`
+(the checks run once on this machine, the host's signer records them, the notes are pushed) and then the push goes.
+
+  * It never blocks a push. A failing check is recorded and printed, a timeout is printed, the push goes either way.
+  * ST_SKIP_EVIDENCE=1 skips all of it (work in progress); it says it did not sign and the PR simply runs in CI.
+  * ST_EVIDENCE_TIME_LIMIT=SECONDS bounds the signing run (default 1200); past it the run is stopped, that is
+    printed, and the push goes.
+  * Only a branch under refs/heads/ that is the one checked out, is not being deleted and is not the base branch is
+    looked at; anything else is pushed untouched. Pushing notes from inside the run does not run this hook again.
+"""
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+LIMIT = 1200
+BASE = 'main'
+
+
+def say(message):
+    print(f'evidence: {message}', file=sys.stderr)
+
+
+def run(command, **kwargs):
+    return subprocess.run(command, text=True, **kwargs)
+
+
+def main(argv):
+    if os.environ.get('ST_EVIDENCE_IN_HOOK'):
+        return 0  # the notes push of our own run
+    remote = argv[0] if argv else 'origin'
+    if os.environ.get('ST_SKIP_EVIDENCE') == '1':
+        say('NOT signing (ST_SKIP_EVIDENCE=1); the pull request will run in CI')
+        return 0
+    head = run(['git', 'rev-parse', 'HEAD'], capture_output=True).stdout.strip()
+    pushed = []
+    for line in sys.stdin:
+        fields = line.split()
+        if len(fields) != 4:
+            continue
+        local_ref, local_sha, remote_ref, _ = fields
+        if not remote_ref.startswith('refs/heads/') or re.fullmatch(r'0+', local_sha):
+            continue  # a tag, a note, a delete: untouched
+        if remote_ref == f'refs/heads/{BASE}':
+            continue
+        if local_sha == head:
+            pushed.append(remote_ref)
+    if not pushed:
+        return 0
+    script = Path(__file__).resolve().parent / 'st-test'
+    if not script.exists():
+        say('scripts/st-test is not in this checkout; not signing')
+        return 0
+    base = f'{remote}/{BASE}'
+    status = run([sys.executable, str(script), '--status', '--base', base], capture_output=True)
+    if status.returncode == 0:
+        say('this tree is already covered by signed evidence')
+        return 0
+    if status.returncode != 3:
+        say(f'could not tell whether the tree is covered ({(status.stderr or status.stdout).strip()[-200:]}); not signing, the pull request will run in CI')
+        return 0
+    try:
+        limit = int(os.environ.get('ST_EVIDENCE_TIME_LIMIT', LIMIT))
+    except ValueError:
+        limit = LIMIT
+    say(f'no signed evidence for this tree yet: running the checks here and signing them (at most {limit // 60} min; '
+        'ST_SKIP_EVIDENCE=1 skips this)')
+    # Its own process group, so a timeout stops the nix and pnpm processes under it too.
+    child = subprocess.Popen([sys.executable, str(script), '--base', base, '--push', remote, '--time-limit', str(limit)],
+                             env=dict(os.environ, ST_EVIDENCE_IN_HOOK='1'), stdout=sys.stderr, start_new_session=True)
+    try:
+        child.wait(timeout=limit)
+    except subprocess.TimeoutExpired:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+        say(f'signing did not finish within {max(limit // 60, 1)} minute(s); stopped. Pushing anyway: the pull request will run in CI')
+        return 0
+    done = child
+    if done.returncode == 0:
+        say('signed; pushing')
+    else:
+        say(f'the checks did not all pass or could not be signed (exit {done.returncode}); the failing run is recorded. Pushing anyway')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
