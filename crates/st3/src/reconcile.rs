@@ -7732,7 +7732,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             == observation.incarnation_id.as_deref()
                             && harness.is_ready()
                     })
-                    || (request.body["fields"]["operation"] == "claude-channel-recovery"
+                    || (channel_recovery::automatic_request(&request)
                         && !self.store.claude_channel_attached(
                             &subject.subject,
                             observation.incarnation_id.as_deref().unwrap(),
@@ -7774,12 +7774,30 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &format!("restart blocked: {error:#}"),
                 );
             }
+            // Recheck at the physical automatic-stop boundary, not only in the earlier
+            // recovery pass. A secondary's failure or an old request must never stop a live
+            // authenticated primary. Manual/required deployment intent keeps its old path.
+            if channel_recovery::automatic_request(&request)
+                && observation.incarnation_id.as_deref().is_some_and(|incarnation|
+                    crate::api::claude_channel_attached(&self.store, &subject.subject, incarnation)) {
+                self.store.append_claim(&ClaimInput {
+                    subject: subject.subject.clone(), kind: "runtime.action.succeeded".into(),
+                    actor: request.actor.clone(), fields: BTreeMap::from([
+                        ("action".into(),serde_json::json!("restart")),
+                        ("incarnation_id".into(),serde_json::json!(observation.incarnation_id)),
+                        ("reason".into(),serde_json::json!("the authenticated primary channel attached before automatic stop; the current incarnation is retained")),
+                    ]), evidence: vec![request.id.clone()], expected_subject:None,
+                    idempotency_key:Some(completion),
+                })?;
+                self.signal_changed();
+                return Ok(false);
+            }
             if request.body["fields"]["operation"] != crate::handoff::RESTART_NOW_OPERATION
                 && !self.restart_may_proceed(
                     &subject.subject,
                     observation,
                     &request.id,
-                    if request.body["fields"]["operation"] == "claude-channel-recovery" {
+                    if channel_recovery::automatic_request(&request) {
                         "automatic Claude channel recovery requested a restart"
                     } else {
                         "a restart was requested"
@@ -7818,7 +7836,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject,
                 member,
                 &request,
-                if request.body["fields"]["operation"] == "claude-channel-recovery" {
+                if channel_recovery::automatic_request(&request) {
                     "the automatic Claude channel recovery launch was interrupted before its result was recorded"
                 } else {
                     "the explicit launch attempt was interrupted before its result was recorded"
@@ -7828,7 +7846,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         match self.perform_start_for_request(
             subject,
             member,
-            if request.body["fields"]["operation"] == "claude-channel-recovery" {
+            if channel_recovery::automatic_request(&request) {
                 "automatic Claude channel recovery requested a replacement incarnation"
             } else {
                 "an explicit seat restart was requested"
@@ -7878,7 +7896,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .selected_desired_token(&subject.subject)?
             .as_deref()
             == request.body.pointer("/evidence/0").and_then(Value::as_str);
-        let origin = if request.body["fields"]["operation"] == "claude-channel-recovery" {
+        let origin = if channel_recovery::automatic_request(request) {
             "automatic Claude channel recovery"
         } else {
             "explicit restart"

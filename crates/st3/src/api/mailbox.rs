@@ -4,6 +4,9 @@ use super::*;
 use crate::mailbox::{Fence, Frame, Receipt};
 
 mod authority;
+#[cfg(all(test, target_os = "linux"))]
+mod ownership_process_tests;
+
 
 pub(super) async fn subscribe(
     State(state): State<AppState>,

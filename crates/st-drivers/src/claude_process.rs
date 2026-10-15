@@ -382,7 +382,7 @@ fn prove(
     }
     anyhow::ensure!(
         provider.pid > 1 && provider.parent == wrapper.pid,
-        refused("secondary Claude process cannot act as the launching seat")
+        refused("Claude process chain is unsupported by direct-parent ownership")
     );
     if let Some(expected) = owner.provider {
         anyhow::ensure!(
@@ -391,6 +391,23 @@ fn prove(
         );
     }
     proof.push(provider);
+    Ok(proof)
+}
+
+/// Read-only direct-chain SHAPE snapshot for a legacy daemon diagnostic. Without a provider
+/// witness this does not prove provider/session ownership and must never authorize anything.
+pub fn physical_chain(wrapper: Process, pid: u32, role: Caller<'_>) -> Result<Vec<Process>> {
+    let owner = Owner {
+        version: 1,
+        session: String::new(),
+        sequence: 0,
+        runtime: String::new(),
+        wrapper,
+        provider: None,
+        closed: false,
+    };
+    let proof = prove(&owner, pid, &role, process, arguments)?;
+    validate_proof(&proof, process)?;
     Ok(proof)
 }
 

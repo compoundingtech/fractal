@@ -297,6 +297,19 @@ fn kernel_primary_and_nested_helpers_with_identical_credentials_are_isolated() {
         match role.as_str() {
             "provider" => {
                 use std::io::Read as _;
+                let own = process(std::process::id()).unwrap();
+                assert!(own.birth > 0);
+                assert_eq!(process(own.pid).unwrap(), own);
+                let argv = arguments(own.pid).unwrap();
+                assert!(
+                    argv.iter().any(|arg| arg == TEST),
+                    "real argv parse, including Darwin KERN_PROCARGS2"
+                );
+                // Real startup race: helpers act while the actual wrapper's provider slot is
+                // still None. Parent waits for this acknowledgement before recording spawned.
+                assert!(command("primary").status().unwrap().success());
+                assert!(command("nested").status().unwrap().success());
+                fs::write(dir.join("startup-proof-complete"), b"yes").unwrap();
                 std::io::stdin().read_exact(&mut [0u8; 1]).unwrap();
                 assert!(command("primary").status().unwrap().success());
                 assert!(command("primary-hook").status().unwrap().success());
@@ -347,6 +360,9 @@ fn kernel_primary_and_nested_helpers_with_identical_credentials_are_isolated() {
         .stdin(Stdio::piped())
         .spawn()
         .unwrap();
+    wait_fixture(&dir.path().join("startup-proof-complete"));
+    let before: Owner = serde_json::from_slice(&read_owner(dir.path()).unwrap()).unwrap();
+    assert!(before.provider.is_none());
     spawned(dir.path(), "kernel", seq, child.id()).unwrap();
     use std::io::Write as _;
     child.stdin.take().unwrap().write_all(b"g").unwrap();
@@ -691,4 +707,183 @@ fn early_provider_window_requires_a_non_subreaper_wrapper() {
     );
     // This kernel read is about the isolated test wrapper, never a running agent/provider.
     assert!(!subreaper().unwrap());
+}
+
+#[test]
+fn deeper_launcher_shim_is_a_deliberate_new_direct_child_refusal() {
+    let (owner, mut nodes) = fixture();
+    // This chain can be legitimate under the old any-descendant rule. It is deliberately
+    // unsupported by the stricter shape, never proof that an installed provider is broken.
+    nodes.insert(
+        80,
+        Process {
+            pid: 80,
+            parent: 20,
+            birth: 800,
+        },
+    );
+    nodes.get_mut(&30).unwrap().parent = 80;
+    let error = prove(
+        &owner,
+        30,
+        &Caller::Channel,
+        |pid| read(&nodes, pid),
+        |_| Ok(vec![]),
+    )
+    .unwrap_err();
+    assert_eq!(failure_kind(&error), Some(FailureKind::Refused));
+    assert!(error.to_string().contains("direct-parent ownership"));
+}
+
+fn wait_fixture(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "fixture barrier {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Real kernel exit/reparent/zombie/reexec controls. Children are only this test executable.
+/// Birth-reuse remains an injected mismatch against real captured identities; no PID allocator
+/// or machine setting is changed to force literal PID recycling.
+#[test]
+fn kernel_orphan_zombie_wrapper_exit_and_reexec_keep_generation_fences() {
+    use std::process::{Command, Stdio};
+    const ROLE: &str = "ST_TEST_KERNEL_LIFECYCLE_ROLE";
+    const TEST: &str = "claude_process::tests::kernel_orphan_zombie_wrapper_exit_and_reexec_keep_generation_fences";
+    let command = |role: &str| {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", TEST, "--nocapture"]).env(ROLE, role);
+        cmd
+    };
+    if let Ok(role) = std::env::var(ROLE) {
+        let dir =
+            std::path::PathBuf::from(std::env::var_os("ST_TEST_KERNEL_LIFECYCLE_DIR").unwrap());
+        match role.as_str() {
+            "exit" => {}
+            "wrapper-source" => {
+                let seq = claim(&dir, "fixture", "fixture", "orphan").unwrap();
+                let child = command("orphan-provider").spawn().unwrap();
+                spawned(&dir, "orphan", seq, child.id()).unwrap();
+                // Deliberately exit without ended: this models a wrapper disappearing with
+                // a retained witness. The root reaps this wrapper before releasing the orphan.
+            }
+            "orphan-provider" => {
+                wait_fixture(&dir.join("release-orphan"));
+                let owner: Owner = serde_json::from_slice(&read_owner(&dir).unwrap()).unwrap();
+                assert_ne!(
+                    process(std::process::id()).unwrap().parent,
+                    owner.wrapper.pid
+                );
+                assert!(command("orphan-channel").status().unwrap().success());
+                fs::write(dir.join("orphan-done"), b"yes").unwrap();
+            }
+            "orphan-channel" | "reexec-channel" => {
+                let owner: Owner = serde_json::from_slice(&read_owner(&dir).unwrap()).unwrap();
+                let mut published = false;
+                let result = with_caller(
+                    &dir,
+                    &owner.session,
+                    owner.sequence,
+                    std::process::id(),
+                    None,
+                    Caller::Channel,
+                    |_| {
+                        published = true;
+                        Ok(())
+                    },
+                );
+                if role == "orphan-channel" {
+                    assert!(result.is_err());
+                    assert!(!published);
+                } else {
+                    result.unwrap();
+                    assert!(published);
+                }
+            }
+            "reexec-before" => {
+                let seq = claim(&dir, "fixture", "fixture", "reexec").unwrap();
+                let child = command("held-provider").spawn().unwrap();
+                spawned(&dir, "reexec", seq, child.id()).unwrap();
+                use std::os::unix::process::CommandExt as _;
+                panic!("fixture exec failed: {}", command("reexec-after").exec());
+            }
+            "held-provider" => {
+                wait_fixture(&dir.join("reexec-ready"));
+                assert!(command("reexec-channel").status().unwrap().success());
+                fs::write(dir.join("reexec-proof"), b"yes").unwrap();
+            }
+            "reexec-after" => {
+                let owner: Owner = serde_json::from_slice(&read_owner(&dir).unwrap()).unwrap();
+                assert_eq!(process(std::process::id()).unwrap(), owner.wrapper);
+                let provider = owner.provider.unwrap();
+                assert_eq!(
+                    process(provider.pid).unwrap(),
+                    provider,
+                    "exec retained the exact provider birth"
+                );
+                fs::write(dir.join("reexec-ready"), b"yes").unwrap();
+                wait_fixture(&dir.join("reexec-proof"));
+                let mut status = 0;
+                // SAFETY: this is the direct child recorded before exec, still owned by this
+                // same wrapper PID; waitpid cannot reap a different process on PID reuse.
+                assert_eq!(
+                    unsafe { libc::waitpid(provider.pid as i32, &mut status, 0) },
+                    provider.pid as i32
+                );
+                assert!(libc::WIFEXITED(status));
+                assert_eq!(libc::WEXITSTATUS(status), 0);
+                ended(&dir, &owner.session, owner.sequence).unwrap();
+            }
+            _ => panic!("unknown fixture role"),
+        }
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let spawn = |role: &str| {
+        let mut cmd = command(role);
+        cmd.env("ST_TEST_KERNEL_LIFECYCLE_DIR", dir.path());
+        cmd
+    };
+    // Observe termination without reaping: EOF alone can race the final exit syscall.
+    let mut child = spawn("exit").stdout(Stdio::null()).spawn().unwrap();
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: waitid writes siginfo for this exact direct child. WNOWAIT retains the
+    // zombie for the kernel-source assertion; Child::wait below owns its final reap.
+    assert_eq!(
+        unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id(),
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        },
+        0
+    );
+    assert!(
+        process(child.id()).is_err(),
+        "an unreaped exited child cannot provide a live birth/parent proof"
+    );
+    assert!(child.wait().unwrap().success());
+    let mut wrapper = spawn("wrapper-source").spawn().unwrap();
+    assert!(wrapper.wait().unwrap().success());
+    fs::write(dir.path().join("release-orphan"), b"yes").unwrap();
+    wait_fixture(&dir.path().join("orphan-done"));
+    let execdir = tempfile::tempdir().unwrap();
+    let mut wrapper = command("reexec-before")
+        .env("ST_TEST_KERNEL_LIFECYCLE_DIR", execdir.path())
+        .spawn()
+        .unwrap();
+    assert!(wrapper.wait().unwrap().success());
+    assert!(execdir.path().join("reexec-proof").exists());
+    let owner: Owner = serde_json::from_slice(&read_owner(execdir.path()).unwrap()).unwrap();
+    assert!(
+        owner.closed,
+        "real provider exit closes retained ownership after exec"
+    );
 }
