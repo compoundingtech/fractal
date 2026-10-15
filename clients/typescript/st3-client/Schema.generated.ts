@@ -568,8 +568,7 @@ export type AgentRelationshipEncoded = typeof AgentRelationship.Encoded
 
 export const AgentMailCustody = /*#__PURE__*/ (() => Schema.Struct({
   "successor": Id,
-  "state": Schema.Literal("pending"),
-  "unread_count": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
+  "state": Schema.Literal("pending")
 }).annotate({ identifier: "AgentMailCustody" }))()
 export type AgentMailCustody = typeof AgentMailCustody.Type
 export type AgentMailCustodyEncoded = typeof AgentMailCustody.Encoded

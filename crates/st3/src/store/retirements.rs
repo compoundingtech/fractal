@@ -10,10 +10,6 @@ pub(super) const SCHEMA: &str = "CREATE INDEX IF NOT EXISTS st3_replica_lifecycl
 
 pub const KIND: &str = "agent.retired";
 
-const CUSTODY_UNREAD_COUNT_SQL: &str = "SELECT COUNT(DISTINCT sent.subject) FROM claims sent INDEXED BY claims_message_to_index
-    WHERE sent.kind='message.sent' AND json_extract(sent.body,'$.fields.to') IN (?1,?2)
-      AND NOT EXISTS(SELECT 1 FROM claims terminal INDEXED BY claims_subject_kind_index
-          WHERE terminal.subject=sent.subject AND terminal.kind IN ('message.read','message.closed'))";
 
 pub(super) fn writer_required() -> St3Error {
     St3Error::new(
@@ -469,15 +465,6 @@ impl Store {
         Ok(Some(json!({"successor":successor,"state":"pending"})))
     }
 
-    /// Detail-only count. The first index seek limits work to this one mailbox; the terminal
-    /// lookup is by exact message subject and kind. Roster pages never call this query.
-    pub fn mail_custody_unread_count(&self, recipient: &str) -> Result<u64, St3Error> {
-        let bare = recipient.strip_prefix("agent/").unwrap_or(recipient);
-        self.readers.get().query_row(
-            CUSTODY_UNREAD_COUNT_SQL,
-            params![recipient,bare], |row| row.get(0),
-        ).map_err(internal)
-    }
 }
 
 #[cfg(test)]
@@ -543,7 +530,6 @@ mod tests {
             SUBJECT, ACTOR, "Work finished", &old_token, None, "custody-retire", &[],
             Some("agent/example/successor"),
         ).unwrap().0;
-        assert_eq!(store.mail_custody_unread_count(SUBJECT).unwrap(), 1);
         let lifecycle = |actor: &str, kind: &str, key: &str, custody: bool| ClaimInput {
             subject: sent.subject.clone(), kind: kind.into(), actor: Some(actor.into()),
             fields: [
@@ -563,7 +549,9 @@ mod tests {
         let (repeat, appended) = store.append_claim_outcome(&read).unwrap();
         assert!(!appended);
         assert_eq!(first.id, repeat.id);
-        assert_eq!(store.mail_custody_unread_count(SUBJECT).unwrap(), 0);
+        let mut duplicate = read.clone();
+        duplicate.idempotency_key = Some("successor-read-different-key".into());
+        assert_eq!(store.append_claim(&duplicate).unwrap_err().code, "invalid-message-transition");
         let close = lifecycle("agent/example/successor","message.closed","successor-close",true);
         assert_eq!(store.append_claim(&close).unwrap().body["fields"]["acting_for"], SUBJECT);
         assert_eq!(store.retire_agent("agent/example/successor", ACTOR, "Work finished", &successor_token, None, "custodian-retire", &[]).unwrap_err().code,"custody-pending");
@@ -586,18 +574,79 @@ mod tests {
         assert_eq!(error.code,"idempotency-mismatch");
     }
 
+
     #[test]
-    fn detail_unread_count_uses_recipient_and_subject_kind_indexes() {
+    fn pre_retirement_receipts_import_after_retirement_without_writer_admission() {
+        let owner = Store::open_memory("orchid").unwrap();
+        let peer = Store::open_memory("birch").unwrap();
+        let (token, _) = declare_custody_pair(&owner);
+        let sent = owner.append_claim(&send("late-receipt")).unwrap();
+        peer.import_replication("orchid", &owner.export_replication(0).unwrap()).unwrap();
+        for (kind, status) in [
+            ("message.staged", "staged"),
+            ("message.delivered", "delivered"),
+            ("message.read", "read"),
+        ] {
+            peer.append_claim(&ClaimInput {
+                subject: sent.subject.clone(), kind: kind.into(),
+                actor: Some(SUBJECT.into()),
+                fields: BTreeMap::from([("status".into(), json!(status))]),
+                evidence: vec![], expected_subject: None,
+                idempotency_key: Some(format!("late-receipt-{status}")),
+            }).unwrap();
+        }
+        owner.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token,
+            None, "retire-before-receipt-import", &[], Some("agent/example/successor")).unwrap();
+        assert_eq!(owner.append_claim(&ClaimInput {
+            subject: sent.subject.clone(), kind: "message.read".into(), actor: Some(SUBJECT.into()),
+            fields: BTreeMap::from([("status".into(), json!("read"))]),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("stale-old-after-retire".into()),
+        }).unwrap_err().code, "wrong-message-recipient");
+        owner.import_replication("birch", &peer.export_replication(0).unwrap()).unwrap();
+        assert_eq!(owner.message(&sent.subject).unwrap().unwrap().status, "read");
+    }
+
+    #[test]
+    fn previous_reader_retains_old_mailbox_when_successor_field_is_unknown() {
+        let owner = Store::open_memory("orchid").unwrap();
+        let older = Store::open_memory("birch").unwrap();
+        let (token, _) = declare_custody_pair(&owner);
+        let sent = owner.append_claim(&send("older-reader-mail")).unwrap();
+        owner.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token,
+            None, "older-reader-retirement", &[], Some("agent/example/successor")).unwrap();
+        let mut registry = st3_schema::registry().clone();
+        registry.claims.get_mut(KIND).unwrap().fields.remove("successor");
+        older.set_claim_registry(registry);
+        older.import_replication("orchid", &owner.export_replication(0).unwrap()).unwrap();
+        assert!(older.agent_retirement(SUBJECT).unwrap().is_none());
+        assert!(older.messages(Some(SUBJECT), false).unwrap().iter().any(|message| message.subject == sent.subject));
+        assert!(older.messages(Some("agent/example/successor"), false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn competing_retirements_and_successor_retirement_obey_writer_order() {
+        for first in ["agent/example/retiring", "agent/example/second"] {
+            let store = Store::open_memory("orchid").unwrap();
+            let source = "version 2\nagent \"example/retiring\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/second\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/successor\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+            let intent = crate::parse_intent(source, store.origin()).unwrap();
+            store.apply_internal(&intent, "competing-custody").unwrap();
+            let second = if first == SUBJECT { "agent/example/second" } else { SUBJECT };
+            let first_token = store.selected_desired_token(first).unwrap().unwrap();
+            let second_token = store.selected_desired_token(second).unwrap().unwrap();
+            store.retire_agent_with_successor(first, ACTOR, "Work finished", &first_token,
+                None, &format!("first-{first}"), &[], Some("agent/example/successor")).unwrap();
+            let error = store.retire_agent_with_successor(second, ACTOR, "Work finished", &second_token,
+                None, &format!("second-{second}"), &[], Some("agent/example/successor")).unwrap_err();
+            assert_eq!(error.code, "invalid-custody-successor");
+            assert!(store.agent_retirement(second).unwrap().is_none());
+        }
         let store = Store::open_memory("orchid").unwrap();
-        let connection = store.readers.get();
-        let sql = format!("EXPLAIN QUERY PLAN {CUSTODY_UNREAD_COUNT_SQL}");
-        let mut statement = connection.prepare(&sql).unwrap();
-        let plan = statement.query_map(
-            params![SUBJECT,"example/retiring"], |row| row.get::<_, String>(3),
-        ).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap().join("\n");
-        assert!(plan.contains("claims_message_to_index"), "{plan}");
-        assert!(plan.contains("claims_subject_kind_index"), "{plan}");
-        assert!(!plan.contains("SCAN sent"), "{plan}");
+        let (old_token, successor_token) = declare_custody_pair(&store);
+        store.retire_agent("agent/example/successor", ACTOR, "Work finished",
+            &successor_token, None, "successor-first", &[]).unwrap();
+        let error = store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &old_token,
+            None, "old-second", &[], Some("agent/example/successor")).unwrap_err();
+        assert_eq!(error.code, "invalid-custody-successor");
     }
 
     #[test]

@@ -2825,12 +2825,6 @@ fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyh
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
         for item in items.iter_mut() {
-            if item["state"] == "retired"
-                && let Some(subject) = item["id"].as_str()
-                && let Some(custody) = store.mail_custody_status(subject).map_err(anyhow::Error::new)?
-            {
-                item["mail_custody"] = custody;
-            }
             if item.get("updated_at").and_then(Value::as_str) == Some("") {
                 item["updated_at"] = Value::String(at.to_owned());
             }
@@ -3459,6 +3453,13 @@ fn client_agent_cards_presented(
                     None
                 },
             });
+            // Fold the point read into a cached card. Presentation of a warm roster page
+            // must not repeat one retirement query for every retired row.
+            if state == "retired"
+                && let Some(custody) = store.mail_custody_status(&subject.subject).map_err(anyhow::Error::new)?
+            {
+                value["mail_custody"] = custody;
+            }
             if mailbox_faults.is_none() && fault.is_none() {
                 value["fault"] = previous_faults.get(&subject.subject).cloned()
                     .unwrap_or_else(|| json!("fault status unknown"));
@@ -5862,12 +5863,6 @@ async fn client_agents_detail(
         add_agent_todos(&store, &mut items, snapshot_index)?;
         overlay_agent_resources(&store, &mut items, &created_at)?;
         for item in &mut items {
-            if item.get("mail_custody").is_some()
-                && let Some(subject) = item["id"].as_str()
-            {
-                let unread = store.mail_custody_unread_count(subject).map_err(anyhow::Error::new)?;
-                item["mail_custody"]["unread_count"] = json!(unread);
-            }
             if let Some(subject) = item["id"].as_str()
                 && let Some(operation) = store.runtime_start_for(subject)?
             {
@@ -25049,6 +25044,9 @@ version 2
             "custody-api-retire", &[], Some("agent/example/new"),
         ).unwrap().0;
         let app = router(state.clone());
+        let (status, detail) = get_request(app.clone(), "/v1/client/agents/example/old").await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["mail_custody"], json!({"successor":"agent/example/new","state":"pending"}));
         let (status, denied) = get_request(app.clone(),
             "/v1/messages/page?to=agent/example/old&acting_as=agent/example/wrong&limit=1").await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
@@ -25069,11 +25067,36 @@ version 2
         assert_eq!(read["actor"], "agent/example/new");
         assert_eq!(read["body"]["fields"]["acting_for"], "agent/example/old");
         assert!(read["body"]["evidence"].as_array().unwrap().iter().any(|id| id == &retirement.id));
-        assert_eq!(state.store.mail_custody_unread_count("agent/example/old").unwrap(), 0);
         let (status, closed) = json_request(app, path,
             json!({"lifecycle":"closed","actor":"agent/example/new","idempotency_key":"new-custody-close"})).await;
         assert_eq!(status, StatusCode::OK, "{closed}");
         assert_eq!(closed["body"]["fields"]["acting_for"], "agent/example/old");
+    }
+
+    #[test]
+    fn retired_agent_cached_card_refolds_custody_once_at_new_cut() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+        let intent = crate::parse_intent(source, state.store.origin()).unwrap();
+        state.store.apply_internal(&intent, "custody-card-fixture").unwrap();
+        let index = state.store.index().unwrap();
+        let before = client_agent_resources_cached(&state.store, false, index).unwrap();
+        let old = before.iter().find(|card| card["id"] == "agent/example/old").unwrap();
+        assert!(old.get("mail_custody").is_none());
+        let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
+        state.store.retire_agent_with_successor(
+            "agent/example/old", "person/avery", "Rollover", &token, None,
+            "custody-card-retire", &[], Some("agent/example/new"),
+        ).unwrap();
+        let after_index = state.store.index().unwrap();
+        let after = client_agent_resources_cached(&state.store, false, after_index).unwrap();
+        let old = after.iter().find(|card| card["id"] == "agent/example/old").unwrap();
+        assert_eq!(old["mail_custody"], json!({"successor":"agent/example/new","state":"pending"}));
+        let refolds = state.store.agent_resources_refolded_cards_for_test();
+        let warm = client_agent_resources_cached(&state.store, false, after_index).unwrap();
+        assert_eq!(warm, after);
+        assert_eq!(state.store.agent_resources_refolded_cards_for_test(), refolds);
     }
 
     #[tokio::test]

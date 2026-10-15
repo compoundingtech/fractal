@@ -22417,6 +22417,20 @@ fn validate_message_transition(
     let custody_read = requested == "read"
         && input.fields.contains_key("acting_for")
         && matches!(current, Some("sent" | "staged" | "read"));
+    if custody_read && current == Some("read") {
+        // OLD may have read the mail before retirement. NEW still needs its own signed
+        // receipt, but a different key must not create unlimited duplicate NEW reads.
+        let prior: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+             WHERE subject=?1 AND kind='message.read' AND actor=?2
+               AND json_extract(body,'$.fields.acting_for')=?3)",
+            params![input.subject, input.actor, input.fields.get("acting_for").and_then(Value::as_str)],
+            |row| row.get(0),
+        ).map_err(internal)?;
+        if prior {
+            return Err(St3Error::new("invalid-message-transition", "custody read is already recorded"));
+        }
+    }
     // A person's displayed message has no native harness handoff. Its explicit read receipt
     // is also delivery evidence; only the actual person recipient may skip that boundary.
     let person_read = if requested == "read"

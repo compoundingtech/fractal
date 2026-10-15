@@ -195,7 +195,6 @@ export type AgentRelationship = {
 export type AgentMailCustody = {
   successor: Id;
   state: "pending";
-  unread_count?: number;
 };
 
 export type AgentRepository = {

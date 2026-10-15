@@ -16031,11 +16031,7 @@ fn render_client_agent(
     }
     let _ = writeln!(output, "REACHABILITY {}", agent.reachability);
     if let Some(custody) = &agent.mail_custody {
-        if let Some(unread) = custody.unread_count {
-            let _ = writeln!(output, "MAIL CUSTODY retired; mail held for {}: {unread} unread", custody.successor);
-        } else {
-            let _ = writeln!(output, "MAIL CUSTODY retired; mail held for {}", custody.successor);
-        }
+        let _ = writeln!(output, "MAIL CUSTODY retired; mail held for {}", custody.successor);
     }
     let _ = writeln!(
         output,
@@ -18900,10 +18896,15 @@ async fn read_message_after_lifecycle(
         if !message.to.starts_with("agent/") {
             return Ok(message);
         }
-        let detail: Value = client.get(&format!(
+        let detail: Option<Value> = match client.get(&format!(
             "/v1/client/agents/{}", urlencoding::encode(&message.to),
-        )).await?;
-        if detail["mail_custody"]["successor"].as_str() != Some(actor.as_str()) {
+        )).await {
+            Ok(detail) => Some(detail),
+            Err(GeneratedClientError::Api(ClientErrorCode::NotFound, _, _)) => None,
+            Err(error) => return Err(error.into()),
+        };
+        if detail.as_ref().and_then(|detail| detail["mail_custody"]["successor"].as_str())
+            != Some(actor.as_str()) {
             return Ok(message);
         }
     }
@@ -31867,6 +31868,54 @@ mod tests {
             .unwrap();
         assert_eq!(archived.status, "closed");
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn successor_who_sent_mail_still_signs_one_custody_read() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("st3.sock");
+        let store = Arc::new(Store::open_memory("custody-sender").unwrap());
+        let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+        let intent = st3::parse_intent(source, store.origin()).unwrap();
+        store.apply_internal(&intent, "custody-sender-fixture").unwrap();
+        let message = store.append_claim(&ClaimInput {
+            subject: "message/custody-sender".into(), kind: "message.sent".into(),
+            actor: Some("agent/example/new".into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!("agent/example/new")),
+                ("to".into(), json!("agent/example/old")),
+                ("content".into(), json!("A note before retirement")),
+                ("status".into(), json!("sent")),
+            ]), evidence: vec![], expected_subject: None,
+            idempotency_key: Some("custody-sender-send".into()),
+        }).unwrap();
+        let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
+        store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
+            &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
+        let state = AppState {
+            store: store.clone(), notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
+            state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
+            pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
+            client_relay: None, native_session_home: None,
+            planner_default: PlannerSpec::default(),
+        };
+        let server_socket = socket.clone();
+        let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
+        for _ in 0..100 {
+            if socket.exists() { break; }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert!(socket.exists());
+        let client = Client::unix(&socket);
+        let read = read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
+        assert_eq!(read.status, "read");
+        let signed = store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap();
+        assert_eq!(signed.actor.as_deref(), Some("agent/example/new"));
+        assert_eq!(signed.body["fields"]["acting_for"], "agent/example/old");
+        read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
+        assert_eq!(store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap().id, signed.id);
         server.abort();
     }
 

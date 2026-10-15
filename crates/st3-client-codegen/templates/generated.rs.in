@@ -1146,8 +1146,6 @@ pub struct AgentRelationship {
 pub struct AgentMailCustody {
     pub successor: String,
     pub state: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unread_count: Option<u64>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Agent {

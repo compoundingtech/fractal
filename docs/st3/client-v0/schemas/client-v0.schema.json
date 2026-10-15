@@ -1109,7 +1109,7 @@
         }
       ]
     },
-    "AgentMailCustody": { "type": "object", "additionalProperties": false, "required": ["successor", "state"], "properties": { "successor": { "$ref": "#/$defs/AgentId" }, "state": { "const": "pending" }, "unread_count": { "type": "integer", "minimum": 0 } } },
+    "AgentMailCustody": { "type": "object", "additionalProperties": false, "required": ["successor", "state"], "properties": { "successor": { "$ref": "#/$defs/AgentId" }, "state": { "const": "pending" } } },
     "AgentCheckout": { "type": "object", "additionalProperties": false, "required": ["repository", "base", "branch"], "properties": { "repository": { "type": "string" }, "base": { "type": "string" }, "branch": { "type": "string" } } },
     "AgentTodo": {
       "type": "object",
