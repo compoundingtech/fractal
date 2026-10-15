@@ -139,12 +139,13 @@ class Keygen(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertIn("is not this account's home", done.stderr)
         self.assertFalse((self.home / '.config').exists())
-        self.assertEqual(self.keygen('--home', 'relative', home=False).returncode, 1)
+        self.assertEqual(self.keygen('--name', 'box-1', '--home', 'relative', home=False).returncode, 1)
 
-    def test_the_default_name_is_this_host(self):
+    def test_the_name_is_required_so_a_real_host_name_is_never_printed_by_default(self):
         done = self.keygen()
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertTrue(done.stdout.startswith('host/'), done.stdout)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn('--name', done.stderr)
+        self.assertFalse((self.home / '.config').exists())
 
 
 if __name__ == '__main__':
