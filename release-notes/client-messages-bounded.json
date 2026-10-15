@@ -23,10 +23,10 @@
   },
   "manual": {
     "status": "none",
-    "detail": "No manual migration, identity change or claim-log maintenance is required. Clients restart pagination on page-cursor-expired. Empty-source projection skips require an exact healthy frontier and no pending verdicts; ahead frontiers still run canonical recovery. Deferred replication projection commits leave selector work to its reactive maintenance loan instead of consuming that loan inside projection finalization."
+    "detail": "No manual migration, identity change or claim-log maintenance is required. Clients restart pagination on page-cursor-expired. Empty-source projection skips require an exact healthy frontier and no pending verdicts; ahead frontiers still run canonical recovery. Since commit 5e1b8c2a, a deferred replication-projection commit skips the runtime before_commit finalizer, not merely inline selector maintenance. Source maintenance and source-adapter finalizers still run atomically with that commit."
   },
   "recovery": {
     "status": "changed",
-    "detail": "Binary swap-back cannot restore issued in-memory cursor metadata; clients restart traversals. The authoritative claim log remains intact and older claim-based readers continue to work. A runtime that reintroduces the removed local body version store must recreate and seed it from claims."
+    "detail": "Readers can briefly observe committed source ahead of runtime-derived output after a deferred replication-projection commit skips the runtime finalizer. Durable delta/pending rows remain committed with the source and recover the derived output when subsequent runtime finalization or reactive maintenance consumes them; the deferred commit is not a synchronous derived-output publication guarantee. Binary swap-back cannot restore issued in-memory cursor metadata; clients restart traversals. The authoritative claim log remains intact and older claim-based readers continue to work. A runtime that reintroduces the removed local body version store must recreate and seed it from claims."
   }
 }
