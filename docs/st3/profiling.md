@@ -46,6 +46,43 @@ subtract writer wait or report only a hierarchy component. This is server comple
 network delivery time. Abandoned and still-running requests have no sample. Existing long-poll
 route durations include deliberate waiting.
 
+## Background task CPU
+
+The daemon exports `st.task.cpu_time`, a monotonic counter in seconds, and
+`st.task.polls`, a counter of future polls and blocking invocations, through its
+existing OTel meter provider. Both carry the bounded static attribute `st.task`.
+Two thread-CPU clock reads bracket each future poll, on the thread executing
+that poll; time asleep, queued, or waiting between polls is not CPU. Blocking
+callbacks are measured on their executing thread, not the awaiting Tokio worker.
+These counters do not require file profiling. An unavailable thread CPU clock
+omits that CPU sample rather than recording wall time; polls still count.
+
+For a Prometheus translation that replaces dots with underscores and appends the
+counter suffix, CPU usage in cores is:
+
+```promql
+sum by (st_task) (rate(st_task_cpu_time_total[5m]))
+```
+
+Collectors that add unit suffixes may expose this as
+`st_task_cpu_time_seconds_total`; use the collector's translated name. In Grafana
+dashboards use `$__rate_interval` instead of a fixed range.
+
+Names distinguish `reconcile` and its timers, `published_list.agents`,
+`published_list.missions`, `published_list.work`, replication transport and
+export/receive work, startup warmup, checkpoints/WAL, retention and other
+maintenance. They contain no seat IDs, peer names, collection values from
+requests, or request paths. HTTP handlers and serving tasks remain under their
+existing HTTP instrumentation, not these background-task wrappers. Work done by
+child processes is not included in the parent's thread CPU.
+
+The same static task scopes label background writer submissions when file
+profiling is enabled. A batched writer keeps its first submitter's operation
+entered for transaction setup, finalizers and commit, temporarily entering each
+individual submitter for its savepoint. This prevents batch-level work from
+falling into an unlabeled writer-thread bucket.
+
+
 ## Targets and live windows
 
 [`slo/targets.toml`](../../slo/targets.toml) holds the daemon's targets: reads a person waits on,

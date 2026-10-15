@@ -840,6 +840,14 @@ fn run_write_batch(
     fifo: &crate::fifo::Queue,
 ) -> Option<WriterJob> {
     let (observers, finalizers, mutation_observer, writer_telemetry) = callbacks;
+    // Transaction setup, finalizers and COMMIT belong to the batch's initiating
+    // operation too, not to an unlabeled writer thread. Each job below temporarily
+    // enters its own submitting operation while its savepoint runs.
+    let batch_profile = match &first {
+        WriterJob::Batched { profile, .. } => profile.clone(),
+        _ => None,
+    };
+    let _batch_profile = crate::profile::enter(batch_profile.as_ref());
     let first_origin = match &first {
         WriterJob::Batched { wait, .. } => wait.as_ref().and_then(crate::profile::WriterWait::trace_origin),
         _ => None,

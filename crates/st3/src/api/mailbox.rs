@@ -579,13 +579,11 @@ fn own_post_reactor(state: &AppState, fence: &Fence) -> tokio::sync::mpsc::Sende
     let (sender, mut pending) = tokio::sync::mpsc::channel::<String>(64);
     let state = state.clone();
     let fence = fence.clone();
-    tokio::spawn(async move {
+    tokio::spawn(crate::task_cpu::account("mailbox.own_post", async move {
         while let Some(subject) = pending.recv().await {
             let store = state.store.clone();
             let binding = fence.clone();
-            let result = store.connection.write_workers().spawn_blocking(move || {
-                store.close_mailbox_own_post_wake(&binding, &subject)
-            }).await;
+            let result = store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || { store.close_mailbox_own_post_wake(&binding, &subject) })).await;
             match result {
                 Ok(Ok(true)) => signal_message_changed(&state, "message.closed", false),
                 Ok(Ok(false)) => {},
@@ -596,7 +594,7 @@ fn own_post_reactor(state: &AppState, fence: &Fence) -> tokio::sync::mpsc::Sende
             }
             tokio::task::yield_now().await;
         }
-    });
+    }));
     sender
 }
 
@@ -635,9 +633,7 @@ async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDe
         } => {},
     }
     if native {
-        let _ = state.store.connection.write_workers().spawn_blocking(move || {
-            authority::loss_if_current(&state, &fence, &peer)
-        }).await;
+        let _ = state.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || { authority::loss_if_current(&state, &fence, &peer) })).await;
     }
 }
 
@@ -793,13 +789,11 @@ async fn stream_with_timers_inner<F, S, H>(
             let repaired = if let Some(peer) = peer.clone() {
                 let repair_state = state.clone();
                 let repair_fence = fence.clone();
-                match state.store.connection.write_workers().spawn_blocking(move || {
-                    if repair_state.store.check_mailbox(&repair_fence).is_ok() { return false; }
-                    let _ = authority::loss_if_current(&repair_state, &repair_fence, &peer);
-                    matches!(authority::with_authority(&repair_state, &repair_fence, &peer, |owner, validate| {
-                        repair_state.store.repair_mailbox_checked(&repair_fence, owner, validate)
-                    }), Ok(true))
-                }).await {
+                match state.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || { if repair_state.store.check_mailbox(&repair_fence).is_ok() { return false; }
+                let _ = authority::loss_if_current(&repair_state, &repair_fence, &peer);
+                matches!(authority::with_authority(&repair_state, &repair_fence, &peer, |owner, validate| {
+                    repair_state.store.repair_mailbox_checked(&repair_fence, owner, validate)
+                }), Ok(true)) })).await {
                     Ok(repaired) => repaired,
                     Err(_) => return,
                 }
@@ -948,9 +942,9 @@ async fn stream_with_timers_inner<F, S, H>(
                             let checked_state = state.clone();
                             let binding = fence.clone();
                             let raw = report.to_string();
-                            matches!(state.store.connection.write_workers().spawn_blocking(move || {
+                            matches!(state.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
                                 authority::admit_report(&checked_state, &binding, &peer, &raw)
-                            }).await, Ok(Ok(())))
+                            })).await, Ok(Ok(())))
                         } else { true };
                         // Native refusal discards all report-driven effects, including
                         // capability negotiation and rollout ACKs. Typed presence failure
@@ -988,9 +982,9 @@ async fn stream_with_timers_inner<F, S, H>(
                             let repair_state = state.clone();
                             let binding = fence.clone();
                             let raw = report.to_string();
-                            replay_proven = state.store.connection.write_workers().spawn_blocking(move || {
+                            replay_proven = state.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
                                 authority::repair_proven(&repair_state, &binding, &peer, &raw)
-                            }).await.ok().and_then(Result::ok);
+                            })).await.ok().and_then(Result::ok);
                         }
                         if let Ok(value) = serde_json::from_str::<Value>(&report)
                             && fence.component == "delivery"
