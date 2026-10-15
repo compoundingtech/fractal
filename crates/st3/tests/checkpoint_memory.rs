@@ -62,12 +62,13 @@ fn peak_during<T>(work: impl FnOnce() -> T) -> (T, usize) {
 }
 
 const MIB: usize = 1024 * 1024;
-/// The old capture, which held the set, raised live heap by 14 MiB at `SMALL` claims and 54 MiB
-/// at `LARGE`, so it fails both assertions below.
+/// The old capture, which held the set, raised live heap by 14 MiB at 4,800 claims, which is
+/// `LARGE`, and 54 MiB at four times that, so it fails the budget at `LARGE` and the growth
+/// assertion below.
 const BUDGET: usize = 8 * MIB;
 /// Small enough for a debug build in CI, where the proof and the trim cost milliseconds a claim,
-/// and a whole number of subjects.
-const SMALL: usize = 4_800;
+/// and a whole number of subjects. `LARGE` stays at 4,800 claims, four times this.
+const SMALL: usize = 1_200;
 const LARGE: usize = 4 * SMALL;
 
 /// `claims` diagnostics from one writer, one envelope each, sixteen to a subject and four to a
