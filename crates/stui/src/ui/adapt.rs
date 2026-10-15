@@ -739,6 +739,10 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                     .first()
                     .map(|relation| relation.agent_id.clone()),
                 details: AgentDetails {
+                    mail_custody: agent.mail_custody.as_ref().map(|custody| match custody.unread_count {
+                        Some(unread) => format!("retired; mail held for {}: {unread} unread", custody.successor),
+                        None => format!("retired; mail held for {}", custody.successor),
+                    }),
                     progress: work
                         .and_then(|work| {
                             let reported = step_progress(missions, &work.id);

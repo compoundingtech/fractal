@@ -399,6 +399,7 @@ impl ApiError {
             "recipient-retired"
             | "lifecycle-unavailable"
             | "retirement-upgrade-required"
+            | "custody-pending"
             | "stale-subject"
             | "owned-set-refused"
             | "set-managed-subject"
@@ -1716,6 +1717,8 @@ fn client_error_code(code: Option<&str>) -> String {
         "recipient-retired"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
+        | "invalid-custody-successor"
+        | "custody-pending"
         | "not-found"
         | "forbidden"
         | "attention-migrated"
@@ -2822,6 +2825,12 @@ fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyh
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
         for item in items.iter_mut() {
+            if item["state"] == "retired"
+                && let Some(subject) = item["id"].as_str()
+                && let Some(custody) = store.mail_custody_status(subject).map_err(anyhow::Error::new)?
+            {
+                item["mail_custody"] = custody;
+            }
             if item.get("updated_at").and_then(Value::as_str) == Some("") {
                 item["updated_at"] = Value::String(at.to_owned());
             }
@@ -5853,6 +5862,12 @@ async fn client_agents_detail(
         add_agent_todos(&store, &mut items, snapshot_index)?;
         overlay_agent_resources(&store, &mut items, &created_at)?;
         for item in &mut items {
+            if item.get("mail_custody").is_some()
+                && let Some(subject) = item["id"].as_str()
+            {
+                let unread = store.mail_custody_unread_count(subject).map_err(anyhow::Error::new)?;
+                item["mail_custody"]["unread_count"] = json!(unread);
+            }
             if let Some(subject) = item["id"].as_str()
                 && let Some(operation) = store.runtime_start_for(subject)?
             {
@@ -14226,6 +14241,7 @@ struct MessagesQuery {
 #[derive(Deserialize)]
 struct MessagesPageQuery {
     to: Option<String>,
+    acting_as: Option<String>,
     #[serde(default)]
     include_closed: bool,
     cursor: Option<String>,
@@ -14239,6 +14255,7 @@ struct MessagesPageCursor {
     after: u64,
     through: u64,
     to: Option<String>,
+    acting_as: Option<String>,
     include_closed: bool,
     limit: usize,
 }
@@ -14250,6 +14267,20 @@ async fn list_messages_page(
 ) -> Result<Json<MessagePage>, ApiError> {
     let limit = query.limit.unwrap_or(100).clamp(1, 200);
     let to = query.to.as_deref().map(normalize_message_party);
+    let acting_as = query.acting_as.as_deref().map(normalize_message_party);
+    if let (Some(to), Some(actor)) = (to.as_deref(), acting_as.as_deref()) {
+        let retirement = if to.starts_with("agent/") {
+            state.store.agent_retirement(to).map_err(ApiError::bad)?
+        } else { None };
+        let permitted = if let Some(retirement) = retirement.as_ref() {
+            retirement.body["fields"]["successor"].as_str() == Some(actor)
+        } else { to == actor };
+        if !permitted {
+            return Err(ApiError::bad(St3Error::new("wrong-message-recipient", format!(
+                "`{actor}` has no mail custody for `{to}`"
+            ))));
+        }
+    }
     if let (Some(to), Some(report)) = (to.as_deref(), query.delivery.as_deref()) {
         delivery_presence::record(to, report);
     } else {
@@ -14272,6 +14303,7 @@ async fn list_messages_page(
                 ApiError::bad(St3Error::new("validation-failed", "invalid message cursor"))
             })?;
             if cursor.to != to
+                || cursor.acting_as != acting_as
                 || cursor.include_closed != query.include_closed
                 || cursor.limit != limit
             {
@@ -14311,6 +14343,7 @@ async fn list_messages_page(
                 after,
                 through,
                 to: query.to.as_deref().map(normalize_message_party),
+                acting_as: query.acting_as.as_deref().map(normalize_message_party),
                 include_closed: query.include_closed,
                 limit,
             };
@@ -14436,7 +14469,15 @@ async fn post_message_claim(
             ))
         })?;
         let actor = normalize_message_party(&actor);
-        if actor != message.to
+        let retirement = if message.to.starts_with("agent/") {
+            store.agent_retirement(&message.to).map_err(ApiError::bad)?
+        } else { None };
+        let acting_for = retirement.as_ref().and_then(|claim| {
+            (matches!(kind, "message.read" | "message.closed")
+                && claim.body["fields"]["successor"].as_str() == Some(actor.as_str()))
+                .then(|| message.to.clone())
+        });
+        if acting_for.is_none() && (retirement.is_some() || actor != message.to)
             && !request
                 .delegation
                 .as_ref()
@@ -14453,6 +14494,10 @@ async fn post_message_claim(
         let mut fields =
             BTreeMap::from([("status".into(), Value::String(request.lifecycle.clone()))]);
         let mut evidence = request.evidence;
+        if let Some(acting_for) = acting_for {
+            fields.insert("acting_for".into(), Value::String(acting_for));
+            evidence.push(retirement.as_ref().unwrap().id.clone());
+        }
         if let Some(proof) = &request.delegation {
             crate::store::delegation::add_fields(&mut fields, proof);
             store.delegation_evidence(&mut evidence, proof).map_err(ApiError::bad)?;
@@ -24978,6 +25023,57 @@ version 2
             .await
             .unwrap();
         assert_eq!(legacy.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn retired_mailbox_successor_lists_reads_and_closes_as_itself() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
+        let intent = crate::parse_intent(source, state.store.origin()).unwrap();
+        state.store.apply_internal(&intent, "custody-api-fixture").unwrap();
+        let sent = state.store.append_claim(&ClaimInput {
+            subject: "message/custody-api".into(), kind: "message.sent".into(),
+            actor: Some("person/avery".into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!("person/avery")),
+                ("to".into(), json!("agent/example/old")),
+                ("content".into(), json!("A note kept for the new custodian.")),
+                ("status".into(), json!("sent")),
+            ]), evidence: vec![], expected_subject: None,
+            idempotency_key: Some("custody-api-send".into()),
+        }).unwrap();
+        let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
+        let retirement = state.store.retire_agent_with_successor(
+            "agent/example/old", "person/avery", "Rollover", &token, None,
+            "custody-api-retire", &[], Some("agent/example/new"),
+        ).unwrap().0;
+        let app = router(state.clone());
+        let (status, denied) = get_request(app.clone(),
+            "/v1/messages/page?to=agent/example/old&acting_as=agent/example/wrong&limit=1").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+        let (status, denied) = get_request(app.clone(),
+            "/v1/messages/page?to=agent/example/old&acting_as=agent/example/old&limit=1").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+        let (status, page) = get_request(app.clone(),
+            "/v1/messages/page?to=agent/example/old&acting_as=agent/example/new&limit=1").await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["items"][0]["subject"], sent.subject);
+        let path = "/v1/messages/custody-api/claims";
+        let (status, denied) = json_request(app.clone(), path,
+            json!({"lifecycle":"read","actor":"agent/example/old","idempotency_key":"old-custody-read"})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+        let (status, read) = json_request(app.clone(), path,
+            json!({"lifecycle":"read","actor":"agent/example/new","idempotency_key":"new-custody-read"})).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read["actor"], "agent/example/new");
+        assert_eq!(read["body"]["fields"]["acting_for"], "agent/example/old");
+        assert!(read["body"]["evidence"].as_array().unwrap().iter().any(|id| id == &retirement.id));
+        assert_eq!(state.store.mail_custody_unread_count("agent/example/old").unwrap(), 0);
+        let (status, closed) = json_request(app, path,
+            json!({"lifecycle":"closed","actor":"agent/example/new","idempotency_key":"new-custody-close"})).await;
+        assert_eq!(status, StatusCode::OK, "{closed}");
+        assert_eq!(closed["body"]["fields"]["acting_for"], "agent/example/old");
     }
 
     #[tokio::test]

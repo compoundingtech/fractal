@@ -1142,6 +1142,13 @@ pub struct AgentRelationship {
     pub agent_id: String,
     pub reason: Option<String>,
 }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentMailCustody {
+    pub successor: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_count: Option<u64>,
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Agent {
     #[serde(flatten)]
@@ -1151,6 +1158,8 @@ pub struct Agent {
     pub name: String,
     pub state: String,
     pub reachability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_custody: Option<AgentMailCustody>,
     #[serde(default)]
     pub runtime_ids: Vec<String>,
     #[serde(default)]
@@ -3408,6 +3417,8 @@ pub struct PersonAnswerRecord {
 pub struct AgentRetireParameters {
     pub agent: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

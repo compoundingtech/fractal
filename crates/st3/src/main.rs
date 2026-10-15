@@ -3981,6 +3981,9 @@ struct AgentRetireArgs {
     actor: String,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     reason: String,
+    /// Existing eligible agent identity, bare name or agent/NAME.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    successor: Option<String>,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     idempotency_key: String,
 }
@@ -4883,9 +4886,9 @@ struct MessageListArgs {
     /// Mailbox identity; defaults to the non-empty ST_AGENT value.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     identity: Option<String>,
-    /// The same mailbox identity, spelled like `conversations read --as`.
+    /// Actor reading the mailbox. A retired mailbox requires its signed successor.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", conflicts_with = "identity")]
+    #[arg(long = "as")]
     actor: Option<String>,
     #[arg(long)]
     archive: bool,
@@ -8686,7 +8689,7 @@ async fn publish_text_with_expected(
                 idempotency_key: idempotency(&resolved.kdl, &mission.subject_tokens),
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
-                actor: Some(actor),
+                actor: Some(actor.clone()),
             },
         )
         .await
@@ -14323,6 +14326,7 @@ async fn run_agents(
                     st3_client::AgentRetireParameters {
                         agent: subject.clone(),
                         reason: args.reason,
+                        successor: args.successor.map(|value| if value.starts_with("agent/") { value } else { format!("agent/{value}") }),
                     },
                 )
                 .await?;
@@ -16026,6 +16030,13 @@ fn render_client_agent(
         }
     }
     let _ = writeln!(output, "REACHABILITY {}", agent.reachability);
+    if let Some(custody) = &agent.mail_custody {
+        if let Some(unread) = custody.unread_count {
+            let _ = writeln!(output, "MAIL CUSTODY retired; mail held for {}: {unread} unread", custody.successor);
+        } else {
+            let _ = writeln!(output, "MAIL CUSTODY retired; mail held for {}", custody.successor);
+        }
+    }
     let _ = writeln!(
         output,
         "HARNESS      {} · {}",
@@ -18003,6 +18014,31 @@ async fn for_each_message(
     }
 }
 
+async fn for_each_message_as(
+    client: &Client,
+    recipient: &str,
+    actor: &str,
+    include_closed: bool,
+    mut visit: impl FnMut(MessageView) -> Result<()>,
+) -> Result<()> {
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut path = format!(
+            "/v1/messages/page?include_closed={include_closed}&limit=100&to={}&acting_as={}",
+            urlencoding::encode(recipient), urlencoding::encode(actor),
+        );
+        if let Some(ref cursor) = cursor {
+            path.push_str(&format!("&cursor={}", urlencoding::encode(cursor)));
+        }
+        let page: MessagePage = client.get(&path).await?;
+        for message in page.items { visit(message)?; }
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(()),
+        }
+    }
+}
+
 async fn run_message(
     client: &Client,
     endpoint: &Endpoint,
@@ -18051,10 +18087,11 @@ async fn run_message(
         }
         MessageCommand::Ls(args) => {
             let identity = message_list_identity(
-                args.identity.or(args.actor),
+                args.identity.clone().or(args.actor.clone()),
                 std::env::var("ST_AGENT").ok(),
             )?;
-            reject_foreign_agent_actor(&identity)?;
+            let actor = args.actor.as_deref().map(normalize_message_subject).unwrap_or_else(|| identity.clone());
+            reject_foreign_agent_actor(&actor)?;
             let sender = args.sender.map(|sender| normalize_message_subject(&sender));
             let mut count = 0_u64;
             let mut first = true;
@@ -18062,7 +18099,7 @@ async fn run_message(
             if json_output && !args.count {
                 print!("[");
             }
-            for_each_message(client, Some(&identity), args.archive, |message| {
+            for_each_message_as(client, &identity, &actor, args.archive, |message| {
                 if sender
                     .as_deref()
                     .is_some_and(|sender| sender != message.from)
@@ -18096,6 +18133,7 @@ async fn run_message(
             } else if json_output {
                 println!("]");
             } else {
+                if actor != identity { println!("Mail for {identity}; acting as {actor} on its behalf"); }
                 print!(
                     "{}",
                     render_mailbox(&identity, sender.as_deref(), args.archive, &rows)
@@ -18859,7 +18897,15 @@ async fn read_message_after_lifecycle(
     let actor = normalize_message_subject(actor);
     if actor == message.from && actor != message.to {
         anyhow::ensure!(!archive, "a sender cannot archive the recipient's message");
-        return Ok(message);
+        if !message.to.starts_with("agent/") {
+            return Ok(message);
+        }
+        let detail: Value = client.get(&format!(
+            "/v1/client/agents/{}", urlencoding::encode(&message.to),
+        )).await?;
+        if detail["mail_custody"]["successor"].as_str() != Some(actor.as_str()) {
+            return Ok(message);
+        }
     }
     accept_message(client, &message, &actor).await?;
     if archive {
@@ -18872,17 +18918,11 @@ async fn read_message_after_lifecycle(
 
 async fn accept_message(client: &Client, message: &MessageView, actor: &str) -> Result<()> {
     let actor = normalize_message_subject(actor);
-    anyhow::ensure!(
-        actor == message.to,
-        "message `{}` belongs to `{}`, not `{actor}`",
-        message.subject,
-        message.to
-    );
-    if !matches!(message.status.as_str(), "sent" | "staged" | "delivered") {
+    if !matches!(message.status.as_str(), "sent" | "staged" | "delivered" | "read") {
         return Ok(());
     }
     let reference = message.subject.trim_start_matches("message/");
-    if matches!(message.status.as_str(), "sent" | "staged") {
+    if actor == message.to && matches!(message.status.as_str(), "sent" | "staged") {
         deliver_message(
             client,
             reference,
@@ -18891,18 +18931,25 @@ async fn accept_message(client: &Client, message: &MessageView, actor: &str) -> 
         )
         .await?;
     }
+    if message.status == "read" && actor == message.to {
+        return Ok(());
+    }
     let _: ClaimRecord = client
         .post(
             &format!("/v1/messages/{}/claims", urlencoding::encode(reference)),
             &MessageLifecycleRequest {
                 delegation: None,
                 lifecycle: "read".into(),
-                actor: Some(actor),
+                actor: Some(actor.clone()),
                 transport: None,
                 runtime_id: None,
                 evidence: Vec::new(),
                 expected_subject: None,
-                idempotency_key: format!("message-read:{}", message.subject),
+                idempotency_key: if actor == message.to {
+                    format!("message-read:{}", message.subject)
+                } else {
+                    format!("message-custody-read:{}:{actor}", message.subject)
+                },
             },
         )
         .await?;
@@ -18962,18 +19009,19 @@ async fn stage_message(
 
 async fn close_message(client: &Client, reference: &str, actor: &str) -> Result<ClaimRecord> {
     let reference = normalize_message_reference(reference);
+    let actor = normalize_message_subject(actor);
     client
         .post(
             &format!("/v1/messages/{}/claims", urlencoding::encode(&reference)),
             &MessageLifecycleRequest {
                 delegation: None,
                 lifecycle: "closed".into(),
-                actor: Some(normalize_message_subject(actor)),
+                actor: Some(actor.clone()),
                 transport: None,
                 runtime_id: None,
                 evidence: Vec::new(),
                 expected_subject: None,
-                idempotency_key: format!("message-closed:{reference}"),
+                idempotency_key: format!("message-closed:{reference}:{actor}"),
             },
         )
         .await
