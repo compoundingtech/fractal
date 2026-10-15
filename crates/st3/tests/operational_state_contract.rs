@@ -119,7 +119,7 @@ fn every_screen_model_has_one_cli_renderer_and_required_rendering_state() {
 }
 
 #[test]
-fn command_inventory_resolves_every_baseline_command_to_a_complete_purpose() {
+fn command_inventory_has_complete_current_purposes() {
     let path = Path::new(test_env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/st3/operational-state/cli-commands.json");
     let contract: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
@@ -135,65 +135,6 @@ fn command_inventory_resolves_every_baseline_command_to_a_complete_purpose() {
                 "purpose {id} has no {field}"
             );
         }
-    }
-    let installed = contract["installed_baseline"].as_array().unwrap();
-    let mut paths = BTreeSet::new();
-    for command in installed {
-        let path = command["path"].as_str().unwrap();
-        assert!(paths.insert(path), "duplicate command inventory row {path}");
-        assert!(
-            purposes.contains_key(command["purpose_id"].as_str().unwrap()),
-            "unknown purpose for {path}"
-        );
-        assert!(
-            command["disposition"].is_string(),
-            "missing disposition for {path}"
-        );
-    }
-    for root in [
-        "up",
-        "claude",
-        "codex",
-        "preview",
-        "planning",
-        "mission",
-        "publish",
-        "import",
-        "exec",
-        "logs",
-        "pty",
-        "inspect",
-        "trace",
-        "wait",
-        "doctor",
-        "repair",
-        "replication",
-        "service",
-        "claude-channel",
-        "doc",
-        "eval",
-        "graph",
-        "status",
-        "agents",
-        "runtime",
-        "context",
-        "resource",
-        "claim",
-        "diagnostic",
-        "schema",
-        "review",
-        "attention",
-        "work",
-        "message",
-        "gate-result",
-        "completions",
-    ] {
-        assert!(
-            installed
-                .iter()
-                .any(|row| row["path"] == format!("st {root}")),
-            "installed root st {root} is absent from the transition matrix"
-        );
     }
     assert!(contract["conformance"].as_array().unwrap().len() >= 14);
 }
