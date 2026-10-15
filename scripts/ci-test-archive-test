@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Archive consumers fail closed on source, attempt, tool or artifact mismatches."""
 import copy
+import json
 import importlib.machinery
 import importlib.util
 from pathlib import Path
@@ -161,7 +162,6 @@ print('Archive entry-point controls passed: original selected targets in one arc
 # cannot become successful test inputs. All fixtures here are tiny text files.
 import hashlib
 import io
-import json
 import stat
 import unittest
 from unittest.mock import patch
