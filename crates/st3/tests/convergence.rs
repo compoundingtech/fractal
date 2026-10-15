@@ -77,7 +77,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, st3_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, st3_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v1.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v3.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -95,6 +95,8 @@ fn the_corpus_includes_every_registry_kind() {
 
 /// Kinds a checkpoint rule may drop. Every other kind is kept on every node.
 const RULE_KINDS: &[&str] = &[
+    "harness-question.observed",
+    "harness-question.resolved",
     "harness.observed",
     "harness.timeline",
     "loop.state",

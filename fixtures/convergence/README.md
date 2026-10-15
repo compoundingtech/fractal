@@ -7,6 +7,15 @@ reserved fields. The seeded generator draws kinds and fields from this snapshot;
 each tested revision still admits them through its own native registry and store.
 The corpus conformance test requires every live registry kind to be represented.
 
+`claims-v3.json` is the serialization of the registry from harness-question candidate
+`7935729a8e564c178ac9b83e940d87dcc543c9f2` (registry digest
+`2d3e67b713e9c515b0672761daebbadfe29cc4dc43f6721ed995dd8a2199daa7`).
+It adds `harness-question.observed` and `harness-question.resolved`; v1 remains
+unchanged. Version 2 is reserved for #2436, which lands first. The simulation
+selects its snapshot explicitly, so v3 does not require v2 to exist on this base.
+After #2436 lands, the later-merging harness-question candidate must merge main,
+refresh v3's registry contents and advance its colliding checkpoint rules version.
+
 Keep the snapshot fixed when comparing revisions. For a future schema change,
 create a new version with `serde_json::to_string_pretty(&st3_schema::registry().claims)`
 and deliberately update the simulation's include. Apply identical simulation
