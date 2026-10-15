@@ -73,10 +73,15 @@ TODO codes mean the following concrete work:
 | `trace-statement-and-value-representation` | Resolve the dynamic statement/bind/import source and connect its actual values to a reviewed representation. |
 | `bound-or-reference-values-and-reclamation` | Establish the producer's complete value/key and cleanup costs, then remove the unbounded inline dependency. |
 
-A new exception must explain its actual producer, value columns/keys, reason for
-remaining inline, and next representation or cleanup step. Owner/TODO strings
-alone are not cost, correctness, or storage approval. Link the review to the
-inventory ID; do not replace a TODO with a permanent exemption.
+A new exception's linked review must explain its actual producer, value
+columns/keys, reason for remaining inline, and next representation or cleanup
+step. Record the responsible maintainer and that explanation in the review,
+linked to the inventory ID. The marker's `owner` is a deterministic source-module
+code and its `TODO` is a deterministic work-category code; the guard requires
+those codes to match the source and does not accept free-form reviewer names or
+rationale in their place. It checks neither the linked review's existence nor
+its approval. Owner/TODO strings alone are not cost, correctness, or storage
+approval; do not replace a TODO with a permanent exemption.
 
 ## What the static guard checks
 
