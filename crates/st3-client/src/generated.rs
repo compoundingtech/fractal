@@ -61,6 +61,9 @@ pub struct ErrorEnvelope {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ErrorCode {
+    RecipientRetired,
+    LifecycleUnavailable,
+    RetirementUpgradeRequired,
     NotFound,
     Forbidden,
     UnsupportedCapability,
@@ -83,6 +86,7 @@ pub enum ErrorCode {
     ValidationFailed,
     IdempotencyConflict,
     IssuerRequired,
+    SuspendAuthoredSessionSelection,
     StaleFence,
     CursorGap,
     PageCursorExpired,
@@ -248,7 +252,19 @@ impl SyncNotice {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ExchangeTransport {
+    pub at: String,
+    pub carrier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_route: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SyncPeer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_successful_exchange: Option<ExchangeTransport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failed_exchange: Option<ExchangeTransport>,
     pub host_id: String,
     /// Envelopes the peer holds that this host lacks.
     pub peer_only_envelopes: u64,
@@ -2437,6 +2453,8 @@ pub enum ActionType {
     AgentCreate,
     #[serde(rename = "agent.stop")]
     AgentStop,
+    #[serde(rename = "agent.retire")]
+    AgentRetire,
     #[serde(rename = "agent.start")]
     AgentStart,
     #[serde(rename = "agent.suspend")]
@@ -2550,6 +2568,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::AgentResume,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn agent_retire(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AgentRetireParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::AgentRetire,
             idempotency_key,
             fence,
             &parameters,
@@ -3404,6 +3436,13 @@ pub struct PersonAnswerRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRetireParameters {
+    pub agent: String,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentStopParameters {
@@ -3756,7 +3795,7 @@ pub struct PairingComplete {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum PairedSession {
-    Person(PersonPairedSession),
+    Person(Box<PersonPairedSession>),
     Assistant(Box<AssistantPairedSession>),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
