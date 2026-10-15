@@ -93,12 +93,12 @@ fn act(store: &Store, subject: &str, actor: &str, action: &str, key: &str) {
         .unwrap();
 }
 
-/// Cards as the refresher publishes them, each with its presentation. These tests publish no
-/// agents roster, so the presentations read no agents.
+/// Cards as the refresher publishes them, with their presentations. These tests publish no
+/// agents roster.
 fn presented(store: &Store, mut cards: Vec<Value>) -> anyhow::Result<Vec<Value>> {
     let (_, gates) = store.human_attention()?;
     for card in &mut cards {
-        present(card, &gates, &RosterFleet::default());
+        present(card, &gates, None);
     }
     Ok(cards)
 }
@@ -1601,4 +1601,36 @@ fn gate_and_agent_changes_refold_the_missions_that_read_them() {
         "the missions that queue on, or are claimed by, the agent that stopped"
     );
     assert_eq!(missions_of_changed_agents(&rows, None, Some(&before)).len(), 3, "a first roster presents every card");
+}
+
+/// Before st has published an agents roster, a ready step's word would claim who queues it, so
+/// its card says nothing; once a roster is published, even an empty one, it says.
+#[test]
+fn a_word_that_hinges_on_agent_queues_waits_for_the_first_roster() {
+    let card = |state: &str, step: Value| {
+        json!({
+            "id": "mission/example/ship", "kind": "mission", "revision": "r1",
+            "title": "example/ship", "updated_at": "2026-10-14T10:00:00Z", "state": state,
+            "mission_revision": "r1", "runs": ["mission-run/ship-1"],
+            "run_details": [{
+                "id": "mission-run/ship-1", "requester": "person/avery", "status": state,
+                "phase": "normal", "progress": {"done": 0, "total": 1}, "current_steps": [],
+                "must_act": "agent", "state_since": "2026-10-14T09:00:00Z", "steps": [step],
+            }],
+        })
+    };
+    let step = |state: &str, claimant: Option<&str>| {
+        json!({
+            "id": "step-run/ship-1/build", "path": "build", "state": state, "attempt": 1,
+            "claimant": claimant, "since": "2026-10-14T09:00:00Z",
+        })
+    };
+    let mut ready = card("running", step("ready", None));
+    present(&mut ready, &[], None);
+    assert!(ready.get("presentation").is_none(), "no roster yet: who queues it is unknown");
+    present(&mut ready, &[], Some(&RosterFleet::default()));
+    assert_eq!(ready["presentation"]["word"], "unclaimed", "an empty roster: nobody queues it");
+    let mut working = card("running", step("claimed", Some("agent/example/keeper")));
+    present(&mut working, &[], None);
+    assert_eq!(working["presentation"]["word"], "working", "this word reads no queue");
 }

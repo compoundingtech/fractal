@@ -450,16 +450,26 @@ fn missions_from_nothing(store: &Store) -> anyhow::Result<Publication<MissionRow
     Ok(Publication { cut, published_at_unix_ms: now_ms(), valid_until_unix_ms: None, rows })
 }
 
-/// Put a mission's presentation on its card (docs/clients/ui-contract.md, Mission). A card it
-/// cannot read goes without one; it never fails the fold.
-fn present(card: &mut Value, gates: &[st3_ui_model::missions::Gate], fleet: &RosterFleet) {
+/// Put a mission's presentation on its card (docs/clients/ui-contract.md, Mission), reading the
+/// agents `fleet` names, or none when st has published no agents roster yet. Without a roster
+/// nothing says which agent queues a ready step, so a card whose word hinges on that (unclaimed,
+/// queued or unstaffed) goes without one rather than claim it; an empty published roster is not
+/// that, since then no agent queues anything. A card it cannot read goes without one too; it
+/// never fails the fold.
+fn present(card: &mut Value, gates: &[st3_ui_model::missions::Gate], fleet: Option<&RosterFleet>) {
+    use st3_ui_model::missions::Word;
+    let none = RosterFleet::default();
     let presentation = <st3_client::Mission as serde::Deserialize>::deserialize(&*card)
         .map_err(anyhow::Error::from)
-        .and_then(|mission| {
-            Ok(serde_json::to_value(st3_ui_model::missions::present(&mission, gates, fleet))?)
-        });
+        .map(|mission| st3_ui_model::missions::present(&mission, gates, fleet.unwrap_or(&none)));
     match presentation {
-        Ok(presentation) => card["presentation"] = presentation,
+        Ok(presentation)
+            if fleet.is_none()
+                && matches!(presentation.word, Word::Unclaimed | Word::Queued | Word::Unstaffed) => {}
+        Ok(presentation) => match serde_json::to_value(presentation) {
+            Ok(presentation) => card["presentation"] = presentation,
+            Err(error) => eprintln!("st3: WARN mission {} has no presentation: {error:#}", card["id"]),
+        },
         Err(error) => eprintln!("st3: WARN mission {} has no presentation: {error:#}", card["id"]),
     }
 }
@@ -551,12 +561,9 @@ fn refold(
         }
     }
     let mut cards = client_v0::mission_list_cards_with(store, &shown, now, &rows.attention_runs)?;
-    // Before st has published an agents roster, presentations read no agents: a ready step reads
-    // unclaimed until the first roster refolds every card. A card never goes without one.
-    let none = RosterFleet::default();
-    let fleet = rows.roster.as_deref().unwrap_or(&none);
+    // The first roster refolds every card, so one presented without agents is presented again.
     for card in &mut cards {
-        present(card, &rows.gates, fleet);
+        present(card, &rows.gates, rows.roster.as_deref());
     }
     insert_cards(rows, cards);
     Ok(())
