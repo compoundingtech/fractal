@@ -130,6 +130,7 @@ pub(crate) async fn run_client_message_selectors_observed(
             }
         })
     };
+    let mut previously_pending = false;
     loop {
         // Consume before draining, not after: a commit during the read/drain/wait
         // registration remains unseen and changed() completes without losing the wake.
@@ -145,10 +146,12 @@ pub(crate) async fn run_client_message_selectors_observed(
         }).await;
         let more = match result {
             Ok(Ok((pending, remaining, more))) => {
-                if pending && !remaining {
+                // A source/tail-verdict commit can finish pending work before this loan.
+                if (previously_pending || pending) && !remaining {
                     events.send_modify(|generation| *generation = generation.saturating_add(1));
                     notify.notify_one();
                 }
+                previously_pending = remaining;
                 more
             }
             Ok(Err(error)) => {

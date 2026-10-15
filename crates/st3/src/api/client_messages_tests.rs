@@ -96,10 +96,10 @@ async fn messages_paging_legacy_shape_without_negotiation() {
     for index in 0..2 {
         append_fixture_claim(
             &state.store, &format!("message/legacy-shape-{index}"), "message.sent",
-            "person/alex",
+            "person/robin",
             BTreeMap::from([
-                ("from".into(), json!("person/alex")),
-                ("to".into(), json!("person/robin")),
+                ("from".into(), json!("person/robin")),
+                ("to".into(), json!("person/alex")),
                 ("content".into(), json!(format!("legacy body {index}"))),
                 ("title".into(), json!("x".repeat(600_000))),
                 ("status".into(), json!("sent")),
@@ -107,6 +107,8 @@ async fn messages_paging_legacy_shape_without_negotiation() {
         );
     }
     let expected = client_message_resources(&state.store, Some("person/alex"), true, None).unwrap();
+    assert_eq!(expected.len(), 2, "the paired reader must receive both oversized resources");
+    assert!(expected.iter().all(|item| item["title"].as_str().unwrap().len() == 600_000));
     let app = fabric_router(state.clone());
     let uri = "/v1/client/messages?history=true&limit=2";
     for features in [None, Some("messages-paging.v1"), Some("messages-paging.v2-extra")] {
@@ -152,9 +154,9 @@ async fn messages_paging_legacy_shape_without_negotiation() {
     assert_eq!(second["snapshot"], legacy["snapshot"]);
     assert_eq!(second["value"]["items"][0]["id"], expected[1]["id"]);
     append_fixture_claim(
-        &state.store, "message/legacy-oversized", "message.sent", "person/alex",
+        &state.store, "message/legacy-oversized", "message.sent", "person/robin",
         BTreeMap::from([
-            ("from".into(), json!("person/alex")), ("to".into(), json!("person/robin")),
+            ("from".into(), json!("person/robin")), ("to".into(), json!("person/alex")),
             ("content".into(), json!("oversized legacy envelope")),
             ("title".into(), json!("x".repeat(CLIENT_MAX_RESPONSE_BYTES))),
             ("status".into(), json!("sent")),
