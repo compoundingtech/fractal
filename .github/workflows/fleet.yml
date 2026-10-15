@@ -296,6 +296,251 @@ jobs:
           CACHE_REASON: Retains Git source objects only; builds nothing and has no signing key.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-linux-gate:
+    name: evidence-gate-linux-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: linux-gate
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-typescript-client:
+    name: evidence-gate-typescript-client
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: typescript-client
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-isolation-vm:
+    name: evidence-gate-isolation-vm
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: isolation-vm
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-genie-freshness:
+    name: evidence-gate-genie-freshness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: genie-freshness
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-mail-redelivery-canaries:
+    name: evidence-gate-mail-redelivery-canaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: mail-redelivery-canaries
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   upgrade-impact:
     name: upgrade-impact
     runs-on: ubuntu-latest
@@ -348,7 +593,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner"],"typescript-client":["pick-runner","genie-freshness"],"linux-test-build":["pick-runner"],"linux-tests":["pick-runner","linux-test-build"],"linux-tests-shard-2":["pick-runner","linux-test-build"],"linux-tests-shard-3":["pick-runner","linux-test-build"],"linux-tests-shard-4":["pick-runner","linux-test-build"],"linux-clippy":["pick-runner"],"linux-fleet-compat":["pick-runner"],"mail-redelivery-canaries":["pick-runner","linux-test-build"],"linux-gate":["pick-runner","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm"],"perf-cost":[],"isolation-vm":["pick-runner","linux-test-build"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner"],"typescript-client":["pick-runner","genie-freshness"],"linux-test-build":["pick-runner"],"linux-tests":["pick-runner","linux-test-build"],"linux-tests-shard-2":["pick-runner","linux-test-build"],"linux-tests-shard-3":["pick-runner","linux-test-build"],"linux-tests-shard-4":["pick-runner","linux-test-build"],"linux-clippy":["pick-runner"],"linux-fleet-compat":["pick-runner"],"mail-redelivery-canaries":["pick-runner","linux-test-build"],"linux-gate":["pick-runner","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm"],"perf-cost":[],"isolation-vm":["pick-runner","linux-test-build"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -520,7 +765,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -586,6 +831,9 @@ jobs:
         id: evidence-guard
         env:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
       - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
         continue-on-error: true
@@ -640,7 +888,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.genie-freshness.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     defaults:
       run:
         shell: bash
@@ -690,6 +938,9 @@ jobs:
         id: evidence-guard
         env:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
       - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
         continue-on-error: true
@@ -887,7 +1138,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1012,6 +1263,9 @@ jobs:
         id: evidence-guard
         env:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
       - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
         continue-on-error: true
@@ -1063,7 +1317,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_secondary) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1185,6 +1439,9 @@ jobs:
         id: evidence-guard
         env:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
       - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
         continue-on-error: true
@@ -1236,7 +1493,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1358,6 +1615,9 @@ jobs:
         id: evidence-guard
         env:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
       - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
         continue-on-error: true
@@ -1409,7 +1669,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1531,6 +1791,9 @@ jobs:
         id: evidence-guard
         env:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
       - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
         continue-on-error: true
@@ -1582,7 +1845,7 @@ jobs:
     needs: [pick-runner]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1723,6 +1986,9 @@ jobs:
         id: evidence-guard
         env:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
       - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
         continue-on-error: true
@@ -1774,7 +2040,7 @@ jobs:
     needs: [pick-runner]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1914,6 +2180,9 @@ jobs:
         id: evidence-guard
         env:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
       - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
         continue-on-error: true
@@ -1963,7 +2232,7 @@ jobs:
   mail-redelivery-canaries:
     name: mail-redelivery-canaries
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_mail) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -2125,6 +2394,9 @@ jobs:
         id: evidence-guard
         env:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
       - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
         continue-on-error: true
@@ -2232,9 +2504,9 @@ jobs:
       - genie-freshness
       - typescript-client
       - isolation-vm
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on: ubuntu-latest
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     permissions:
       contents: write
     timeout-minutes: 15
@@ -2244,6 +2516,9 @@ jobs:
     env:
       EVIDENCE_PUSH_TOKEN: ${{ github.token }}
       PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_USER: ${{ github.event.pull_request.user.login }}
       NEEDS_JSON: ${{ toJSON(needs) }}
     steps:
       - name: Check out the tested commit
@@ -2480,7 +2755,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["namespace-profile-linux-x86-64;job.priority={1};github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 60
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     defaults:
       run:
         shell: bash
@@ -2635,6 +2910,9 @@ jobs:
         id: evidence-guard
         env:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
       - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
         continue-on-error: true
