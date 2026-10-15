@@ -44,6 +44,10 @@ pub fn encode(
 /// The longest side an image is kept at. A terminal pane is rarely wider than this in pixels,
 /// and a 6000×4000 photo would otherwise hold 72 MB.
 pub const MAX_EDGE: u32 = 1600;
+/// The largest picture decoded at all, by edge and by memory, before it is scaled to [`MAX_EDGE`]:
+/// a 6000×4000 photo fits, a file declaring 100000×100000 pixels is refused unread.
+const MAX_DECODED_EDGE: u32 = 16_384;
+const MAX_DECODED_BYTES: u64 = 192 * 1024 * 1024;
 /// The rows an inline image reserves under its line.
 pub const IMAGE_ROWS: usize = 12;
 
@@ -92,8 +96,16 @@ impl Fetched {
     /// Decode an image and scale it to [`MAX_EDGE`] before anything holds it.
     pub fn decode(bytes: Vec<u8>) -> Result<Self, String> {
         let size = bytes.len() as u64;
+        // The dimensions an image declares are checked before any pixel is allocated: a small file
+        // may declare a huge picture.
         let decoded = image::guess_format(&bytes).and_then(|format| {
-            image::load_from_memory_with_format(&bytes, format).map(|image| (format, image))
+            let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&bytes), format);
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(MAX_DECODED_EDGE);
+            limits.max_image_height = Some(MAX_DECODED_EDGE);
+            limits.max_alloc = Some(MAX_DECODED_BYTES);
+            reader.limits(limits);
+            reader.decode().map(|image| (format, image))
         });
         drop(bytes);
         let (format, image) = decoded.map_err(|error| format!("Cannot display this image: {error}"))?;
@@ -2177,6 +2189,33 @@ mod tests {
     }
 
     /// An invented picture drawn here: rings over a gradient, `width`×`height`.
+    #[test]
+    fn a_small_file_declaring_a_huge_picture_is_refused_before_decoding() {
+        // A real 4×4 PNG whose header then declares 100000×100000 pixels, its checksum fixed.
+        let mut bytes = drawn_png(4, 4);
+        bytes[16..20].copy_from_slice(&100_000u32.to_be_bytes());
+        bytes[20..24].copy_from_slice(&100_000u32.to_be_bytes());
+        let crc = crc32(&bytes[12..29]);
+        bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+        assert!(bytes.len() < 1024);
+        let Err(error) = Fetched::decode(bytes) else { panic!("a huge declared picture decoded") };
+        assert!(error.starts_with("Cannot display this image"), "{error}");
+        // An ordinary picture still decodes and is scaled.
+        let Ok(Fetched::Image { width, image, .. }) = Fetched::decode(drawn_png(2000, 20)) else { panic!() };
+        assert_eq!((width, image.width()), (2000, MAX_EDGE));
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+
     fn drawn_png(width: u32, height: u32) -> Vec<u8> {
         let picture = image::RgbImage::from_fn(width, height, |x, y| {
             let ring = ((x as i64 - width as i64 / 2).pow(2) + (y as i64 - height as i64 / 2).pow(2))
