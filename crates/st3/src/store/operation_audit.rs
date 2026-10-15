@@ -353,12 +353,13 @@ mod tests {
         for empty in [false, true] {
             let mut slices = 0;
             let mut values = Vec::new();
+            let threshold = if empty { i64::MAX } else { 0 };
             let count = page_with_slice_deadline(
                 &connection,
                 "WITH RECURSIVE input(n) AS (
                     VALUES(1) UNION ALL SELECT n+1 FROM input WHERE n<10000
-                 ) SELECT sum(n) FROM input HAVING NOT ?1",
-                &[&empty],
+                 ) SELECT sum(n) FROM input HAVING sum(n)>?1",
+                &[&threshold],
                 &mut |row| { values.push(row.get::<_, i64>(0)?); Ok(()) },
                 &mut |_| {
                     slices += 1;
