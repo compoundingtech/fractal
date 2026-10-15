@@ -57794,6 +57794,90 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         );
     }
 
+    /// A denied call waits on its person only until the seat moves on: once the seat begins another
+    /// turn or its session ends, the alert goes and an answer is refused. The turn the denial ended
+    /// is still observed working for a moment, and that is no new turn.
+    #[test]
+    fn a_classifier_denial_goes_once_the_seat_moves_on() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "denial-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value, key: Option<&str>| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: key.map(str::to_owned),
+                })
+                .unwrap()
+        };
+        let denied = |call: &str| {
+            append(
+                "harness.diagnostic",
+                json!({"severity":"warning", "status":"Bash", "code":"permission-denied",
+                    "reason":"Production Reads", "driver":"claude",
+                    "session_id":"session-1", "matched_line": json!({"call_id": call}).to_string()}),
+                Some(&format!("claude-permission-denied:{seat}:{call}")),
+            )
+        };
+        let observed = |state: &str, since: u128| {
+            append(
+                "harness.observed",
+                json!({"state": state, "driver": "claude", "blocked_on": "none", "ask": "none",
+                    "observed_since_ms": since as u64}),
+                None,
+            )
+        };
+        let alerts = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .filter(|item| item.kind == "harness-prompt")
+                .map(|item| item.episode)
+                .collect::<Vec<_>>()
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}), None);
+        let first = denied("toolu_1");
+        // The turn that ended in the denial, then the seat at rest: still waiting on the person.
+        observed("working", first.accepted_at_unix_ms - 1_000);
+        observed("idle", first.accepted_at_unix_ms);
+        assert_eq!(alerts(), vec![first.id.clone()]);
+        // Another turn begins: the call waits on nobody.
+        observed("working", first.accepted_at_unix_ms + 1);
+        assert!(alerts().is_empty(), "the seat moved on");
+        assert_eq!(
+            store.answer_native_prompt(seat, &first.id, "approve-once", "person/avery").unwrap_err().code,
+            "stale-fence"
+        );
+        // A session that ends leaves nothing waiting either.
+        let second = denied("toolu_2");
+        assert_eq!(alerts(), vec![second.id.clone()]);
+        observed("ended", second.accepted_at_unix_ms);
+        assert!(alerts().is_empty(), "the session ended");
+    }
+
     /// A Codex approval prompt is answered the same way. The answer names the Codex driver, whose
     /// control connection reads it and answers the app-server; a Codex question stays terminal-only.
     #[test]

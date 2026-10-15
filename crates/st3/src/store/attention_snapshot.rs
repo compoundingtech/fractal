@@ -1749,9 +1749,13 @@ impl Store {
         if person.is_some_and(|person| person != owner) {
             return Ok(Vec::new());
         }
+        let observations = observations_newest_first(connection, seat)?;
         let mut items = Vec::new();
         for (claim, index, at, fields) in denials {
-            if index < started || native_prompt_answer(connection, &claim)?.is_some() {
+            if index < started
+                || moved_on(&observations, index, at)
+                || native_prompt_answer(connection, &claim)?.is_some()
+            {
                 continue;
             }
             let tool = fields["status"].as_str().unwrap_or("tool");
@@ -1817,11 +1821,17 @@ impl Store {
         let connection = self.readers.get();
         let started = running_since(&connection, seat).map_err(internal)?;
         let answered = native_prompt_answer(&connection, episode).map_err(internal)?;
+        let observations = observations_newest_first(&connection, seat).map_err(internal)?;
         drop(connection);
-        if started.is_none_or(|(started, _)| (denial.store_index as i64) < started) || answered.is_some() {
+        let index = denial.store_index as i64;
+        let at = denial.accepted_at_unix_ms;
+        if started.is_none_or(|(started, _)| index < started)
+            || moved_on(&observations, index, at)
+            || answered.is_some()
+        {
             return Err(St3Error::new(
                 "stale-fence",
-                "that prompt is no longer waiting: it was answered, or the seat restarted",
+                "that call is no longer waiting: it was answered, the seat moved on, or it restarted",
             ));
         }
         let tool = fields["status"].as_str().unwrap_or("tool").to_owned();
@@ -1892,6 +1902,45 @@ fn running_since(connection: &Connection, seat: &str) -> Result<Option<(i64, Str
         return Ok(None);
     }
     Ok(Some((index, fields["incarnation_id"].as_str().unwrap_or_default().to_owned())))
+}
+
+/// The newest few harness observations of `seat`, newest first: their store positions and fields.
+fn observations_newest_first(connection: &Connection, seat: &str) -> Result<Vec<(i64, Value)>> {
+    connection
+        .prepare_cached(&format!(
+            "{} LIMIT {MOVED_ON_WINDOW}",
+            newest_claims_of_kind_query("claims.store_index, claims.body", "harness.observed")
+        ))?
+        .query_map(params![seat, i64::MAX], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .map(|row| -> Result<(i64, Value)> {
+            let (index, body) = row?;
+            let body: Value = serde_json::from_str(&body)?;
+            Ok((index, body.get("fields").cloned().unwrap_or(body)))
+        })
+        .collect()
+}
+
+/// How many of a seat's newest observations show whether it moved on since a denial.
+const MOVED_ON_WINDOW: usize = 16;
+
+/// Whether the seat moved on after its hook raised a denial (at store position `index`, accepted
+/// at `at`): it began another turn, its session ended, or it was observed more often than
+/// `observations` holds. The denied call then waits on nobody, so its alert goes. The turn the
+/// denial ended is still observed working for a moment, but that state began before it.
+fn moved_on(observations: &[(i64, Value)], index: i64, at: u128) -> bool {
+    let mut newer = observations.iter().filter(|(observed, _)| *observed > index);
+    if newer.clone().count() == MOVED_ON_WINDOW {
+        return true;
+    }
+    newer.any(|(_, fields)| match fields["state"].as_str() {
+        Some("ended") => true,
+        Some("working") => fields["observed_since_ms"]
+            .as_u64()
+            .is_some_and(|since| u128::from(since) > at),
+        _ => false,
+    })
 }
 
 /// The newest few denials `seat`'s hooks raised: their claims, store positions, acceptance times
