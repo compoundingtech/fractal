@@ -2852,6 +2852,12 @@ fn overlay_down(
     let Some(since) = launch_since.filter(|since| now_ms.saturating_sub(*since) > LAUNCH_WINDOW_MS) else {
         return;
     };
+    // A seat that spoke after it launched has had no session since it last spoke, not since it
+    // launched: days of earlier reports are not time spent down.
+    let since = report_age_ms
+        .map(|age| now_ms.saturating_sub(age))
+        .filter(|heard| *heard > since)
+        .unwrap_or(since);
     let since = client_timestamp(u128::from(since));
     item["state"] = json!("down");
     item["down_since"] = json!(since);
