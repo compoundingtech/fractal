@@ -551,10 +551,12 @@ fn refold(
         }
     }
     let mut cards = client_v0::mission_list_cards_with(store, &shown, now, &rows.attention_runs)?;
-    if let Some(fleet) = &rows.roster {
-        for card in &mut cards {
-            present(card, &rows.gates, fleet);
-        }
+    // Before st has published an agents roster, presentations read no agents: a ready step reads
+    // unclaimed until the first roster refolds every card. A card never goes without one.
+    let none = RosterFleet::default();
+    let fleet = rows.roster.as_deref().unwrap_or(&none);
+    for card in &mut cards {
+        present(card, &rows.gates, fleet);
     }
     insert_cards(rows, cards);
     Ok(())

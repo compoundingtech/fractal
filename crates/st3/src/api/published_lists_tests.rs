@@ -93,12 +93,23 @@ fn act(store: &Store, subject: &str, actor: &str, action: &str, key: &str) {
         .unwrap();
 }
 
+/// Cards as the refresher publishes them, each with its presentation. These tests publish no
+/// agents roster, so the presentations read no agents.
+fn presented(store: &Store, mut cards: Vec<Value>) -> anyhow::Result<Vec<Value>> {
+    let (_, gates) = store.human_attention()?;
+    for card in &mut cards {
+        present(card, &gates, &RosterFleet::default());
+    }
+    Ok(cards)
+}
+
 /// What a missions window folds directly: every shown mission in order, with its card.
 fn oracle(store: &Store) -> (Vec<String>, BTreeMap<String, Value>) {
     store
         .read_snapshot(|_| {
             let ids = store.mission_collection_ids(false, 0, 100_000)?;
             let cards = client_v0::mission_list_cards_with(store, &ids, now_ms(), &store.human_attention_runs()?)?;
+            let cards = presented(store, cards)?;
             let cards = cards
                 .into_iter()
                 .map(|card| (card["id"].as_str().unwrap().to_owned(), card))
@@ -146,7 +157,8 @@ fn fold(store: &Store) -> (Arc<Publication<MissionRows>>, bool) {
                 let mut ids = store.mission_collection_ids(false, 0, limit + 1)?;
                 let mut has_more = ids.len() > limit;
                 ids.truncate(limit);
-                let mut items = client_v0::mission_list_cards_with(store, &ids, now, &store.human_attention_runs()?)?;
+                let items = client_v0::mission_list_cards_with(store, &ids, now, &store.human_attention_runs()?)?;
+                let mut items = presented(store, items)?;
                 has_more |= client_v0::bound_mission_cards(&mut items)?;
                 Ok((items, has_more))
             })

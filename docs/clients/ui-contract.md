@@ -340,8 +340,9 @@ projection within 2 KiB, and an attention projection within 16 KiB including its
 Served on the `missions` collection as `Mission.presentation`, and on `GET /v1/client/missions`
 and `GET /v1/client/missions/{*id}`. The missions refresher computes it with
 `st3-ui-model::missions::present` as it folds each card. A mission detail read copies the
-published card's presentation and computes none. Until st has published an agents roster, cards
-carry no presentation.
+published card's presentation and computes none. Every card carries one: until st has published
+an agents roster, presentations read no agents (a ready step reads `unclaimed`), and the first
+roster refolds every card.
 
 | Field | Meaning |
 |---|---|

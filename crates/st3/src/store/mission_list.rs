@@ -43,7 +43,7 @@ pub(crate) struct MissionRows {
     /// The open human gates, read with `attention_runs`; every card's presentation reads them.
     pub(crate) gates: Vec<st3_ui_model::missions::Gate>,
     /// The agents every card's presentation reads, from the newest published roster. Until a
-    /// roster is published there is none, and cards carry no presentation.
+    /// roster is published there is none, and presentations read no agents.
     pub(crate) roster: Option<Arc<RosterFleet>>,
 }
 
