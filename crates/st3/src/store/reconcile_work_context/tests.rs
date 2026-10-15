@@ -377,12 +377,16 @@ fn batched_work_metadata_keeps_real_person_blockers_and_responses() {
     }
 }
 
+// The identity below is exact for any step count, so the counts only need to cover one chunk,
+// the first count past a chunk boundary and several chunks with a partial last one.
 #[test]
-fn batched_work_metadata_reduces_whole_read_statements_on_128_1000_4200_steps() {
-    for count in [128_usize, 1000, 4200] {
+fn batched_work_metadata_reduces_whole_read_statements_across_chunk_counts() {
+    for count in [CHUNK, CHUNK + 1, 4 * CHUNK + 17] {
         let store = fixture(count);
         let at = now_ms();
         MAX_SNAPSHOT_CALL_NS.with(|maximum| maximum.set(0));
+        // The first pair warms the statement caches and still has to agree; only the warm pair
+        // is measured and asserted.
         let (first_old, first_old_work, first_old_time) =
             measured(|| oracle(&store, ACTOR, at).unwrap());
         let (first_new, first_new_work, first_new_time) =
@@ -391,7 +395,10 @@ fn batched_work_metadata_reduces_whole_read_statements_on_128_1000_4200_steps() 
             serde_json::to_value(first_new).unwrap(),
             serde_json::to_value(first_old).unwrap()
         );
-        parity(&store, ACTOR, at);
+        if count == CHUNK + 1 {
+            // Registered dependency keys do not depend on the count; check them once.
+            parity(&store, ACTOR, at);
+        }
         let (old, old_work, old_time) = measured(|| oracle(&store, ACTOR, at).unwrap());
         let (new, new_work, new_time) = measured(|| read(&store, ACTOR, at).unwrap());
         assert_eq!(
@@ -919,8 +926,10 @@ fn batched_work_support_query_errors_refuse_the_whole_read() {
 }
 
 #[test]
-fn batched_work_support_cost_reports_empty_and_all_present_4200_step_mixes() {
-    let store = fixture(4200);
+fn batched_work_support_cost_reports_empty_and_all_present_step_mixes() {
+    // Three full chunks and a partial last one: the statement counts below are exact in `count`.
+    let count = 3 * CHUNK + 17;
+    let store = fixture(count);
     let at = now_ms();
     let base = read(&store, ACTOR, at).unwrap();
     let connection = store.readers.get();
@@ -954,14 +963,14 @@ fn batched_work_support_cost_reports_empty_and_all_present_4200_step_mixes() {
     let (empty_new, new_work, new_time) = measured(with_proof);
     let (_, proof_work, proof_time) = measured(|| support(&connection, &base).unwrap());
     println!(
-        "4200-step EMPTY helper mix: old={old_work:?} {old_time:?}; proof-only={proof_work:?} {proof_time:?}; proof+helpers={new_work:?} {new_time:?}"
+        "{count}-step EMPTY helper mix: old={old_work:?} {old_time:?}; proof-only={proof_work:?} {proof_time:?}; proof+helpers={new_work:?} {new_time:?}"
     );
     assert_eq!(
         serde_json::to_value(empty_old).unwrap(),
         serde_json::to_value(empty_new).unwrap()
     );
-    assert_eq!(old_work.statements, 8400);
-    assert_eq!(proof_work.statements, 4200_usize.div_ceil(CHUNK) as u64);
+    assert_eq!(old_work.statements, 2 * count as u64);
+    assert_eq!(proof_work.statements, count.div_ceil(CHUNK) as u64);
     assert_eq!(new_work, proof_work);
     assert!(proof_work.vm_steps < old_work.vm_steps);
     assert_eq!(proof_work.fullscan_steps, 0);
@@ -1009,7 +1018,7 @@ fn batched_work_support_cost_reports_empty_and_all_present_4200_step_mixes() {
     let (present_new, new_work, new_time) = measured(with_proof);
     let (_, proof_work, proof_time) = measured(|| support(&connection, &base).unwrap());
     println!(
-        "4200-step ALL-PRESENT helper mix: old={old_work:?} {old_time:?}; proof-only={proof_work:?} {proof_time:?}; proof+helpers={new_work:?} {new_time:?}; added VM={} statements={}",
+        "{count}-step ALL-PRESENT helper mix: old={old_work:?} {old_time:?}; proof-only={proof_work:?} {proof_time:?}; proof+helpers={new_work:?} {new_time:?}; added VM={} statements={}",
         new_work.vm_steps - old_work.vm_steps,
         new_work.statements - old_work.statements
     );
@@ -1017,7 +1026,7 @@ fn batched_work_support_cost_reports_empty_and_all_present_4200_step_mixes() {
         serde_json::to_value(present_old).unwrap(),
         serde_json::to_value(present_new).unwrap()
     );
-    assert_eq!(old_work.statements, 8400);
+    assert_eq!(old_work.statements, 2 * count as u64);
     assert_eq!(
         new_work.statements,
         old_work.statements + proof_work.statements
