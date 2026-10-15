@@ -26,11 +26,13 @@ pub fn phase_spans_enabled() -> bool {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Origin(OriginLabel);
 
-static TASK_ORIGINS: [&str; 11] = [
+static TASK_ORIGINS: [&str; 15] = [
     "other", "task checkpoint", "task migrate-event-payloads", "task expire-completed-responses",
     "task coordination-counts-catch-up", "task account-limits-catch-up",
     "task enforce-account-limits", "task trim-local-observations", "task mailbox-wake-dispatch",
     "task reconcile-pass", "task reconcile-deadline",
+    "task replication-projection-retry", "startup validate-replication-backlog",
+    "startup apply-replication-repairs", "startup project-replication-backlog",
 ];
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -555,8 +557,14 @@ mod tests {
             "task coordination-counts-catch-up", "task account-limits-catch-up",
             "task enforce-account-limits", "task trim-local-observations",
             "task mailbox-wake-dispatch", "task reconcile-pass", "task reconcile-deadline",
+            "task replication-projection-retry", "startup validate-replication-backlog",
+            "startup apply-replication-repairs", "startup project-replication-backlog",
         ] {
             assert_eq!(task_origin(label).attribute("origin").value, opentelemetry::Value::from(label));
+            crate::profile::task(label, || {
+                assert_eq!(current_origin().unwrap().attribute("origin").value,
+                    opentelemetry::Value::from(label));
+            });
         }
         assert_eq!(task_origin("unknown").attribute("origin").value, opentelemetry::Value::from("other"));
     }
@@ -688,12 +696,12 @@ mod tests {
         opentelemetry::global::set_meter_provider(provider.clone());
         let writer = super::super::WriterConnection::new(
             rusqlite::Connection::open_in_memory().unwrap(), Arc::new(AtomicU64::new(0)));
-        let guard = crate::profile::task("task checkpoint", || writer.write());
+        let guard = crate::profile::task("task replication-projection-retry", || writer.write());
         std::thread::sleep(Duration::from_millis(2));
         provider.force_flush().unwrap();
         let origin_matches = |attributes: Vec<&KeyValue>| attributes.iter().any(|attribute|
             attribute.key.as_str() == "st.db.writer.origin"
-                && attribute.value == opentelemetry::Value::from("task checkpoint"));
+                && attribute.value == opentelemetry::Value::from("task replication-projection-retry"));
         let current = |expected_held: bool| {
             let finished = exporter.get_finished_metrics().unwrap();
             let metric = finished.iter().rev().flat_map(|resource| resource.scope_metrics())

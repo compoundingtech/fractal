@@ -623,12 +623,18 @@ Duration buckets are
 
 Every storage metric carries `db.system.name=sqlite`. Writer hold and queue origins reuse
 the bounded writer-span vocabulary: normalized router `MatchedPath` templates prefixed
-by one of nine HTTP methods, the ten fixed `task` names in the storage origin table,
+by one of nine HTTP methods, the fourteen fixed task names in the storage origin table,
 and `other` for unknown origins. No paths, SQL, ids, or raw request URIs are attributes.
 Each batch's hold uses its first queued operation's origin for its entire lifetime;
 loans use the borrowing caller's origin. When multiple stores share an origin, the
 current-hold gauge reports their maximum age, and reports zero for previously seen
 origins after release. Collection does not require storage phase spans to be enabled.
+Receive, admission, repair, and replay retain `POST /v1/internal/replication/receive`
+through the blocking request scope; deferred wake passes retain `POST /v1/internal/replication-wake`.
+The independent contention retry uses `task replication-projection-retry`. Startup uses
+the existing `startup validate-replication-backlog`, `startup apply-replication-repairs`,
+and `startup project-replication-backlog` labels. These are four additional closed values,
+not dynamic task labels or new origin sources.
 Wait and hold histogram boundaries are `0.001`, `0.005`, `0.01`, `0.025`, `0.05`, `0.1`,
 `0.25`, `0.5`, `1`, `2.5`, `5`, `10`, `15`, `30`, `60`, `120`, `300`, `600` seconds.
 Other duration histograms use the seconds buckets above; batch size uses explicit
