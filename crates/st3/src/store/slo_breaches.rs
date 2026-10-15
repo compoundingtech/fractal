@@ -91,6 +91,7 @@ fn pending_form(record: &Record) -> Record {
     record.mission_run = None;
     record.dispatched_at_ms = None;
     record.execution_ready = None;
+    record.owner_blocked_at_dispatch = None;
     record
 }
 
@@ -176,17 +177,20 @@ fn fact_at(connection: &Connection, subject: &str) -> Result<Option<Value>> {
         [episode],|r|r.get(0))?;
     let pending = onset_claim.is_some() && event(connection,episode,Event::Pending)?.is_some();
     let recovered = event(connection,episode,Event::Recovered)?.is_some();
-    let dispatched = event(connection,episode,Event::Dispatched)?
-        .is_some_and(|(_, record)| record.execution_ready == Some(true));
-    let blocked = dispatched && (!person_work::declaration_live(connection, &record.owner)?
-        || (event(connection,episode,Event::OwnerBlocked)?.is_some()
-            && event(connection,episode,Event::OwnerUnblocked)?.is_none()));
+    let dispatched = event(connection,episode,Event::Dispatched)?.is_some();
+    let owner_available = person_work::declaration_live(connection, &record.owner)?;
     let lineage = lineage_valid(connection, &record)?;
     let selected = selected.is_some_and(|(id,ordinal,conflict)| id==episode && ordinal==record.ordinal && !conflict);
-    let state = if conflict || !pending || !lineage || !selected { "unknown" }
-        else if recovered { "recovered" } else if blocked { "owner_unavailable" }
-        else if dispatched { "ready" } else { "pending" };
-    Ok(Some(json!({"facts":{"dispatch_state":state,"episode":episode,"owner":record.owner,
+    let invalid = conflict || !pending || !lineage;
+    let admitted = !invalid && execution_admitted_at(connection, &format!("mission-run/slo/{episode}"))?;
+    let state = if invalid { "unknown" } else if recovered { "recovered" }
+        else if !selected { "unknown" } else if dispatched && !owner_available { "owner_unavailable" }
+        else if admitted { "ready" } else { "pending" };
+    // Execution admission is a durable positive fence. Recovery and a later episode
+    // never withdraw it from ordinary gates that already admitted substantive work.
+    let dispatch_state = if invalid { "unknown" } else if admitted { "ready" } else { "pending" };
+    Ok(Some(json!({"facts":{"dispatch_state":dispatch_state,"status":state,
+        "owner_available":owner_available,"episode":episode,"owner":record.owner,
         "member":record.member,"objective":record.objective}})))
 }
 
@@ -224,7 +228,10 @@ fn execution_admitted_at(connection: &Connection, run: &str) -> Result<bool> {
     let Some((_, dispatched)) = event(connection, episode, Event::Dispatched)? else { return Ok(false); };
     let conflict: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM slo_episode_events WHERE episode=?1 AND conflict<>0)",
         [episode], |row| row.get(0))?;
-    Ok(!conflict && dispatched.execution_ready == Some(true)
+    let owner_admitted = dispatched.owner_blocked_at_dispatch == Some(false)
+        || event(connection, episode, Event::OwnerUnblocked)?
+            .is_some_and(|(_, unblocked)| pending_form(&unblocked) == pending);
+    Ok(!conflict && dispatched.execution_ready == Some(true) && owner_admitted
         && pending_form(&dispatched) == pending && lineage_valid(connection, &pending)?)
 }
 
@@ -348,7 +355,7 @@ impl Store {
             let record=Record{episode:Record::episode_id(&fleet,&self.origin,objective,previous.as_deref()),
                 fleet:fleet.clone(),member:self.origin.clone(),objective:objective.into(),ordinal,
                 previous_recovery:previous,owner:owner.unwrap_or(DEFAULT_OWNER).into(),event:Event::Pending,
-                onset:observation.clone(),onset_witness:witness.clone(),healthy:None,witness:None,mission_run:None,dispatched_at_ms:None,execution_ready:None};
+                onset:observation.clone(),onset_witness:witness.clone(),healthy:None,witness:None,mission_run:None,dispatched_at_ms:None,execution_ready:None,owner_blocked_at_dispatch:None};
             append(tx,&self.origin,&record,&batch)?;
             check_group(tx,&batch)?;
             Ok(Some(record.episode))
@@ -417,6 +424,8 @@ impl Store {
             dispatched.mission_run=Some(run.clone());
             dispatched.dispatched_at_ms=Some(now);
             dispatched.execution_ready=Some(!recovered_before_dispatch);
+            let owner_available = person_work::declaration_live(tx,&source.owner)?;
+            dispatched.owner_blocked_at_dispatch=Some(!owner_available);
             append(tx,&self.origin,&dispatched,&batch)?;
             if recovered_before_dispatch {
                 // This mission never had a positive dispatch fact at any delivery prefix.
@@ -424,7 +433,7 @@ impl Store {
                     &json!({"fields":{"status":"cancelled","phase":"terminal",
                         "reason":"breach recovered before execution admission; no repair performed"}}),&[],Some(&batch))?;
                 project_mission_run_update(tx,&cancelled)?;
-            } else if !person_work::declaration_live(tx,&source.owner)? {
+            } else if !owner_available {
                 let mut blocked=source;
                 blocked.event=Event::OwnerBlocked;
                 append(tx,&self.origin,&blocked,&batch)?;

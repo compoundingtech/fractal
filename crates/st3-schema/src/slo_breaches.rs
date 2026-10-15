@@ -162,6 +162,7 @@ pub struct Record {
     pub dispatched_at_ms: Option<u64>,
     /// Intrinsic dispatch decision, never inferred from the absence of a recovery claim.
     pub execution_ready: Option<bool>,
+    pub owner_blocked_at_dispatch: Option<bool>,
 }
 
 impl Record {
@@ -228,11 +229,12 @@ impl Record {
         }
         if self.event == Event::Dispatched {
             if self.mission_run.as_deref() != Some(format!("mission-run/slo/{}", self.episode).as_str())
-                || self.dispatched_at_ms.is_none_or(|at| at > i64::MAX as u64) || self.execution_ready.is_none()
+                || self.dispatched_at_ms.is_none_or(|at| at > i64::MAX as u64)
+                || self.execution_ready.is_none() || self.owner_blocked_at_dispatch.is_none()
             {
                 return Err("dispatch needs its deterministic mission and rate witness".into());
             }
-        } else if self.mission_run.is_some() || self.dispatched_at_ms.is_some() || self.execution_ready.is_some() {
+        } else if self.mission_run.is_some() || self.dispatched_at_ms.is_some() || self.execution_ready.is_some() || self.owner_blocked_at_dispatch.is_some() {
             return Err("only dispatch names its mission opening".into());
         }
         if serde_json::to_vec(self).map_err(|e| e.to_string())?.len() > MAX_RECORD_BYTES {

@@ -43,7 +43,7 @@ fn claims(store: &Store) -> Vec<ClaimRecord> {
 
 fn fact_state(store: &Store, episode: &str) -> String {
     store.latest_actual_value(&format!("resource/slo-breach/{episode}")).unwrap()
-        .and_then(|value| value["facts"]["dispatch_state"].as_str().map(str::to_owned))
+        .and_then(|value| value["facts"]["status"].as_str().map(str::to_owned))
         .unwrap_or_else(|| "unknown".into())
 }
 
@@ -331,7 +331,8 @@ fn real_field_gate_accepts_only_a_positive_admitted_episode() {
     source.dispatch_slo_mission(source.prepare_slo_missions("/tmp").unwrap().remove(0)).unwrap();
     assert!(crate::reconcile::tests::slo_breach_tests::gate_passes(source.clone(), &episode));
     source.recover_slo_breach(&episode, reading(3_600_000, Some(80.0)), None).unwrap();
-    assert!(!crate::reconcile::tests::slo_breach_tests::gate_passes(source.clone(), &episode));
+    assert!(crate::reconcile::tests::slo_breach_tests::gate_passes(source.clone(), &episode),
+        "recovery must not withdraw an admitted ordinary gate");
 }
 
 #[test]

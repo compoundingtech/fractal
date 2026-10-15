@@ -80,7 +80,11 @@ gate `dispatch_state is ready` on `resource/slo-breach/EPISODE`; its fix depends
 that step. The fact is derived on each node by the episode reducer, never a
 `resource.observed` claim. Gate reads use a short source snapshot and fixed indexed
 point reads. The real work selector and claim path also require the intrinsic
-positive execution-admission receipt for a newly ready fix.
+positive execution-admission receipt for a newly ready fix. Breach status is
+separate from this durable readiness fence. Initial owner absence is encoded in
+the dispatch receipt and needs the first owner-unblock receipt before admission;
+receipt order cannot bypass that block. Once admitted, the gate stays positive
+through healthy recovery, a later episode and ordinary owner availability changes.
 
 If recovery precedes dispatch, the one mission still gets created, with
 `execution_ready=false` intrinsically stored in its dispatch transition and an
