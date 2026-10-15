@@ -99,6 +99,13 @@ export const usePersistedSize = (id: string, fallback: number) => {
   return [size, setSize] as const
 }
 
+/**
+ * Where the observed status and elapsed time sit. `status-with-actions` keeps them in the trailing
+ * action group; `status-beside-title` places them directly after the title and pushes the native
+ * action slot, with every control after it, to the trailing edge. A long title truncates first.
+ */
+export type ThreadHeaderLayout = 'status-with-actions' | 'status-beside-title'
+
 // Controlled header: the host supplies every displayed fact.
 export function ThreadHeader({
   folder,
@@ -121,6 +128,7 @@ export function ThreadHeader({
   onToggleDrawer,
   sidebarCollapsed = false,
   onToggleSidebar,
+  layout = 'status-with-actions',
 }: {
   /** Reported folder for the breadcrumb; omitted entirely when the host knows none. */
   folder?: string
@@ -148,8 +156,10 @@ export function ThreadHeader({
   /** When the sidebar is collapsed its separator is gone; the header carries the expand toggle. */
   sidebarCollapsed?: boolean
   onToggleSidebar?: () => void
+  layout?: ThreadHeaderLayout
 }) {
   const terminalReasonId = React.useId()
+  const besideTitle = layout === 'status-beside-title'
   return (
     <header data-testid="thread-header" {...stylex.props(styles.header)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
@@ -164,10 +174,10 @@ export function ThreadHeader({
         </> : null}
         <span {...stylex.props(styles.crumbTitle)}>{title}</span>
       </nav>
-      <div {...stylex.props(styles.actions)}>
+      <div {...stylex.props(styles.actions, besideTitle && styles.actionsBesideTitle)}>
         {status !== undefined ? <StatusGlyph status={status} statusLabel={statusLabel} statusSince={statusSince} freshness={freshness} now={now} /> : null}
         {elapsed !== undefined ? <span role="timer" aria-label="Current conversation turn elapsed">{elapsed}</span> : null}
-        <div data-testid="native-action-slot" ref={actionPortalRef}>{nativeActions}</div>
+        <div data-testid="native-action-slot" ref={actionPortalRef} {...stylex.props(besideTitle && styles.actionSlotTrailing)}>{nativeActions}</div>
         {onOpen !== undefined && <button type="button" onClick={onOpen} {...stylex.props(styles.outlineXs)}>Open <Icon name="chevron-down" size={12} /></button>}
         {onCommit !== undefined && <button type="button" onClick={onCommit} {...stylex.props(styles.outlineXs)}>Commit <Icon name="chevron-down" size={12} /></button>}
         {terminalAvailable && <button type="button" aria-label="Toggle terminal drawer" title="Toggle terminal drawer" aria-pressed={drawerOpen} onClick={onToggleDrawer} {...stylex.props(styles.ghostMd, drawerOpen && styles.ghostOn)}>
@@ -210,6 +220,9 @@ const styles = stylex.create({
   crumbTitle: { color: c.fg, fontWeight: t.weightMedium, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   actionSlot: { display: 'flex', alignItems: 'center', gap: 8 },
   actions: { marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: 6 },
+  // The group starts right after the title and never shrinks: the title truncates instead.
+  actionsBesideTitle: { marginInlineStart: 0, flexGrow: 1, flexShrink: 0 },
+  actionSlotTrailing: { marginInlineStart: 'auto' },
   outlineXs: { height: g.controlSm, display: 'inline-flex', alignItems: 'center', paddingInline: 6, borderWidth: 1, borderStyle: 'solid', borderColor: c.borderStrong, backgroundColor: 'rgba(255, 255, 255, 0.025)', color: c.fg, borderRadius: r.control, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}`, outlineOffset: 1 } },
   ghostMd: { width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderWidth: 0, backgroundColor: 'transparent', color: c.fgMuted, borderRadius: r.control, cursor: 'pointer', fontSize: t.uiSize, transition: 'background-color 150ms ease, color 150ms ease', ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outline: `2px solid ${c.primary}`, outlineOffset: 1 } },
   ghostOn: { color: c.fg, backgroundColor: c.rowHover },
