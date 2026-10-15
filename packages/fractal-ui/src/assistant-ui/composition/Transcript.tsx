@@ -4,7 +4,7 @@ import { ActionBarPrimitive, MessagePrimitive, ThreadPrimitive, useAui, useAuiSt
 import { Button, Disclosure, DisclosurePanel, ProgressBar } from 'react-aria-components'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
 import { EmbraceVirtualScrollViewport, type VirtualViewportHandle, type VirtualViewportHistory } from '../EmbraceScrollViewport'
-import { RuntimeAdoptedIds, RuntimeVisibleIds } from '../EmbraceRuntime'
+import { RuntimeAdoptedIds, RuntimeSourceItems, RuntimeVisibleIds } from '../EmbraceRuntime'
 import { WorkLogV1 } from '../taste/WorkLogV1'
 import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
 import { SyncLine } from '../st3-views/SyncLine'
@@ -222,14 +222,16 @@ const contentVersion = (item: ConversationItem): string => {
 const WindowedTurn = React.memo(function WindowedTurn(props: React.ComponentProps<typeof PreparedTurn>) {
   const messages = useAuiState(state => state.thread.messages)
   const adoption = React.useContext(RuntimeAdoptedIds)
+  const snapshot = React.useContext(RuntimeSourceItems)
   const held = React.useSyncExternalStore(adoption?.subscribe ?? staticSubscription, adoption?.get ?? (() => undefined), () => undefined)
+  const settled = adoption?.getSource() === snapshot
   const { turn, stranded } = React.useMemo(() => {
     const ids = new Set(messages.map(message => message.id))
     const source = props.turn
     const stranded = new Set<string>()
     const visible = (id: string) => {
       if (ids.has(id)) return true
-      if (held === undefined || held.has(id)) return false
+      if (!settled || held === undefined || held.has(id)) return false
       stranded.add(id)
       return true
     }
@@ -240,7 +242,7 @@ const WindowedTurn = React.memo(function WindowedTurn(props: React.ComponentProp
     if (source.prompt === undefined && items.length === 0) return { turn: undefined, stranded }
     const itemIds = new Set(items.map(item => item.id))
     return { turn: { ...source, items, work: { ...source.work, calls: source.work.calls.filter(call => itemIds.has(call.id)) } }, stranded }
-  }, [messages, props.turn, held])
+  }, [messages, props.turn, held, settled])
   return turn === undefined ? <div data-testid="transcript-row-pending" style={{ minHeight: 160 }} /> : <PreparedTurn {...props} turn={turn} stranded={stranded.size === 0 ? undefined : stranded} />
 })
 const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; now: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {

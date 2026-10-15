@@ -52,3 +52,48 @@ it('unions two real viewport demands, renders settled missing rows, and releases
     vi.unstubAllGlobals()
   }
 })
+
+it('never commits a newly appended answer as stranded against the previous source epoch', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  const appended = { ...missing, id: 'appended', text: 'Newly appended answer' }
+  const nextMessages = [first, appended]
+  const nextTurns: readonly TranscriptTurn[] = [{ ...firstTurns[0]!, items: [appended] }]
+  const strandedCommits: boolean[] = []
+  const promptCommits: (Element | null)[] = []
+  let appending = false
+  const probe: React.ProfilerOnRenderCallback = () => {
+    if (!appending) return
+    strandedCommits.push(container.querySelector('[data-testid="transcript-stranded"][data-item-id="appended"]') !== null)
+    promptCommits.push(container.querySelector('[data-testid="user-message"][data-item-id="first"]'))
+  }
+  const view = (append: boolean) => <React.Profiler id="adoption-commits" onRender={probe}>
+    <EmbraceRuntimeProvider virtualizeMessages options={{ messages: append ? nextMessages : [first], onNew: async () => {} }}>
+      <Transcript title="Append" turns={append ? nextTurns : firstTurns} history={{ _tag: 'Complete' }} sync={{ _tag: 'Live', since: 0 }} now={0} observedAt={0} />
+    </EmbraceRuntimeProvider>
+  </React.Profiler>
+  try {
+    await act(async () => root.render(view(false)))
+    await expect.poll(async () => {
+      await act(async () => {})
+      return container.querySelector('[data-testid="user-message"][data-item-id="first"]') !== null
+    }).toBe(true)
+    const promptNode = container.querySelector('[data-testid="user-message"][data-item-id="first"]')
+    appending = true
+    await act(async () => root.render(view(true)))
+    await expect.poll(async () => {
+      await act(async () => {})
+      return container.querySelector('[data-testid="agent-message"][data-item-id="appended"]')?.textContent
+    }).toContain('Newly appended answer')
+    expect(strandedCommits.length).toBeGreaterThan(0)
+    expect(strandedCommits).not.toContain(true)
+    expect(promptCommits.every(node => node === promptNode)).toBe(true)
+  } finally {
+    await act(async () => root.unmount())
+    container.remove()
+    vi.unstubAllGlobals()
+  }
+})

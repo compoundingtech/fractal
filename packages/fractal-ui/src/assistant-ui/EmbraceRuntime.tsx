@@ -15,16 +15,21 @@ export function useConversationRuntime(options: ConversationRuntimeOptions) {
  */
 export interface RuntimeAdoption {
   readonly get: () => ReadonlySet<string> | undefined
+  readonly getSource: () => readonly ConversationItem[] | undefined
   readonly subscribe: (listener: () => void) => () => void
 }
 export const RuntimeAdoptedIds = React.createContext<RuntimeAdoption | undefined>(undefined)
+/** Source identity lets rows distinguish settled absence from an older adoption publication. */
+export const RuntimeSourceItems = React.createContext<readonly ConversationItem[] | undefined>(undefined)
 function createRuntimeAdoption() {
   let ids: ReadonlySet<string> | undefined
+  let source: readonly ConversationItem[] | undefined
   const listeners = new Set<() => void>()
   return {
     get: () => ids,
+    getSource: () => source,
     subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    publish: (next: ReadonlySet<string>) => { ids = next; for (const listener of listeners) listener() },
+    publish: (next: ReadonlySet<string>, snapshot: readonly ConversationItem[]) => { ids = next; source = snapshot; for (const listener of listeners) listener() },
   }
 }
 const noSubscription = () => () => undefined
@@ -50,7 +55,7 @@ export function EmbraceRuntimeProvider({ options, virtualizeMessages = false, ch
     const requested = new Set(messages.map(item => item.id))
     const ids = new Set(runtime.thread.getState().messages.map(message => message.id))
     for (const item of source) if (!requested.has(item.id)) ids.add(item.id)
-    adoption.publish(ids)
+    adoption.publish(ids, source)
   }, [runtime, source, messages, adoption])
-  return <AssistantRuntimeProvider runtime={runtime}><RuntimeAdoptedIds.Provider value={adoption}><RuntimeVisibleIds.Provider value={virtualizeMessages ? visible : undefined}>{children}</RuntimeVisibleIds.Provider></RuntimeAdoptedIds.Provider></AssistantRuntimeProvider>
+  return <AssistantRuntimeProvider runtime={runtime}><RuntimeSourceItems.Provider value={source}><RuntimeAdoptedIds.Provider value={adoption}><RuntimeVisibleIds.Provider value={virtualizeMessages ? visible : undefined}>{children}</RuntimeVisibleIds.Provider></RuntimeAdoptedIds.Provider></RuntimeSourceItems.Provider></AssistantRuntimeProvider>
 }
