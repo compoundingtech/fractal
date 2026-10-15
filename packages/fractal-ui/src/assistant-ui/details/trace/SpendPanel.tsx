@@ -5,7 +5,7 @@ import { areaPath, baseline, CHART_HEIGHT, CHART_INSET, CHART_WIDTH, clock, line
 import type { ChartScene as AgentTraceScene, ChartLane as Lane } from './adapter.ts'
 import { DetailsInk, DetailsSkeletonPlot } from '../DetailsSkeleton.tsx'
 import type { TraceCostSplit } from '../trace-series.ts'
-import { DetailsUnavailable, MissingDetailsValue } from '../DetailsUnavailable.tsx'
+import { MissingDetailsValue } from '../DetailsUnavailable.tsx'
 type SpendComponents = { readonly input: number; readonly cacheRead: number; readonly cacheWrite: number; readonly output: number }
 const SPEND_COMPONENTS: ReadonlyArray<{ readonly id: keyof SpendComponents; readonly label: string; readonly color: string }> = [
   { id: 'input', label: 'Input', color: accent.primary },
@@ -19,14 +19,13 @@ export interface SpendPanelProps {
   readonly scene?: AgentTraceScene
   readonly lane?: Lane
   readonly componentsKnown?: boolean
-  readonly showUnavailableReasons?: boolean
   readonly showTotals?: boolean
   /** Reported components remain usable even when their historical marks are missing. */
   readonly split?: TraceCostSplit
 }
 
 /** SpendPanel's retained-evidence aggregation and stacked SVG, plus the four-way split bars. */
-export const SpendPanel = ({ lane, componentsKnown = true, showUnavailableReasons = true, showTotals = true, split }: SpendPanelProps): ReactNode => {
+export const SpendPanel = ({ lane, componentsKnown = true, showTotals = true, split }: SpendPanelProps): ReactNode => {
   const componentSamples = lane?.samples.map((sample) => ({ ts: sample.ts, components: sample.cumulativeUsdByComponent })) ?? []
   const attributed = componentsKnown && componentSamples.length > 0 && componentSamples.every(({ components }) => hasComponents(components))
   const cumulativeValues = lane?.cumulativeValues ?? []
@@ -41,11 +40,6 @@ export const SpendPanel = ({ lane, componentsKnown = true, showUnavailableReason
   const lastComponents = attributed ? componentSamples.at(-1)?.components : reportedComponents
   const componentTotals = lastComponents !== undefined && hasComponents(lastComponents) ? SPEND_COMPONENTS.map((component) => ({ ...component, value: lastComponents[component.id] })) : []
   const attributedTotal = componentTotals.reduce((total, component) => total + component.value, 0)
-  const missing = [
-    ...(showTotals && lane?.totalUsd._tag !== 'Known' ? [lane?.totalUsd._tag === 'Unknown' ? lane.totalUsd.detail ?? lane.totalUsd.reason : 'Session spend total was not supplied.'] : []),
-    ...(!hasSeries ? ['Session spend series was not retained.'] : []),
-    ...(componentTotals.length === 0 ? ['Provider does not supply component attribution.'] : []),
-  ]
   return <div {...stylex.props(styles.root)}>
     <div data-details-data-row={showTotals && lane?.totalUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.header)}>{showTotals && <span>Main session <strong>{lane?.totalUsd._tag === 'Known' ? money.format(lane.totalUsd.value) : <MissingDetailsValue label="Main session spend" reason={lane?.totalUsd._tag === 'Unknown' ? lane.totalUsd.detail ?? lane.totalUsd.reason : 'Session spend total was not supplied.'}/>}</strong></span>}<span {...stylex.props(styles.note)}>API-equivalent</span></div>
     {hasSeries ? <>
@@ -67,7 +61,6 @@ export const SpendPanel = ({ lane, componentsKnown = true, showUnavailableReason
       <dd {...stylex.props(styles.value)}>{money.format(component.value)}</dd>
     </div>)}</dl>}
     {partial && hasSeries && <p {...stylex.props(styles.note)}>Chart and split show retained observations; reported accumulation windows may differ.</p>}
-    {showUnavailableReasons && missing.length > 0 && <DetailsUnavailable reason={missing.join(' · ')}/>}
   </div>
 }
 

@@ -163,9 +163,10 @@ observed checkout success or repository state. Metadata without a native navigat
 target opens a read-only dialog rather than fabricating a routable subject.
 Reported spend-window descriptions wrap at narrow pane widths without shortening
 their scope or provenance; monetary amounts keep their intrinsic width.
-Empty and unavailable resource bodies are hidden; unavailable categories are named
-once in a compact “Not supplied” line. Known zero traced or observed st subagent
-counts remain visible evidence, distinct from an unknown count.
+The kit's E3 policy hides empty and unavailable resource bodies; unavailable categories
+are named once in its compact “Not supplied” line with keyboard provenance tooltips.
+User-hidden categories are omitted. Known zero traced or observed st subagent counts
+remain visible evidence, distinct from an unknown count.
 The Subagents heading uses the reported traced-session total for both zero and
 positive counts, never the capped retained list length; unknown totals have no badge.
 Inclusive ledger totals and native self amounts are independently sourced and

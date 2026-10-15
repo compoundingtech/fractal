@@ -12,7 +12,7 @@ import type { DetailsResource, DetailsSection, DetailsState, DetailsValue } from
 import type { TraceSeries, TraceSubagent, TraceUnknownReason } from './trace-series'
 import { DetailsInk } from './DetailsSkeleton'
 import { accumulationParts, TraceCoverageNote } from './DetailsCharts'
-import { DetailsUnavailable, MissingDetailsValue } from './DetailsUnavailable'
+import { DetailsAvailabilityState, DetailsUnavailable, MissingDetailsValue } from './DetailsUnavailable'
 import { traceCoverageState } from './trace-series'
 
 export type DetailsResourceForm = 'R1' | 'R2' | 'R3'
@@ -45,13 +45,17 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
   const hidden = React.useMemo(() => new Set(hiddenSections), [hiddenSections])
   const toggle = React.useCallback((title: string) => setCollapsed(current => ({ ...current, [title]: !current[title] })), [])
   const open = React.useCallback((uri: string, split: boolean) => onOpen(agentPaneKey(uri), split), [onOpen])
-  const sections = state === 'error' ? [] : suppliedSections
+  const candidates = state === 'error' ? [] : suppliedSections
     .map(section => section.title === 'Subagents' ? { ...section, ...traceSubagentSection(trace) } : section.title === 'History' ? { ...section, ...traceHistorySection(trace) } : section)
-    // A first read stays visible as pending; it is neither empty nor unavailable until its feed settles.
-    // A new agent's data-only view offers no empty disclosure, so only observed rows keep Subagents there.
-    .filter(section => section.pending === true || state !== 'new' || empty !== 'E3' || (section.items._tag === 'Known' && section.items.value.length > 0) || (section.title === 'Subagents' && hasObservedSubagentRows))
-    .filter(section => section.pending === true || visible(section.items, empty) || (section.title === 'Subagents' && (hasObservedSubagents || hasNoTracedSubagents)))
     .filter(section => !hidden.has(section.title))
+  const hasSubagentEvidence = hasObservedSubagents || hasNoTracedSubagents || trace.subagentCount._tag === 'Known'
+  const unreported = empty === 'E3' && state !== 'new' && state !== 'loading'
+    ? candidates.filter(section => !section.pending && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence))
+    : []
+  const sections = candidates
+    // First reads stay pending, never masquerading as settled unavailable data.
+    .filter(section => section.pending === true || state !== 'new' || empty !== 'E3' || (section.items._tag === 'Known' && section.items.value.length > 0) || (section.title === 'Subagents' && hasObservedSubagentRows))
+    .filter(section => section.pending === true || visible(section.items, empty) || (section.title === 'Subagents' && hasSubagentEvidence))
   return <div data-details-state={state} data-details-form={form} data-details-empty={empty} {...stylex.props(styles.root, callerStyles)}>
     {sections.map(section => {
       const isCollapsed = collapsed[section.title] === true
@@ -59,6 +63,9 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
       const count = section.title === 'Subagents' ? trace.subagentCount._tag === 'Known' ? trace.subagentCount.value : undefined
         : section.items._tag === 'Known' && section.items.value.length > 0 ? section.items.value.length : undefined
       const pending = state === 'loading' || section.pending === true
+      if (!pending && section.items._tag === 'Unknown' && !(section.title === 'Subagents' && hasSubagentEvidence)) return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} data-details-section-state="unavailable" {...stylex.props(styles.section)}>
+        <div {...stylex.props(styles.header)}><span {...stylex.props(styles.chevronSpace)} /><span data-details-heading {...stylex.props(styles.metaLine)}>{section.title}</span><span {...stylex.props(styles.metaLine)}>·</span><DetailsAvailabilityState subject={section.title} reason={unavailableReason(section, trace, empty)} /></div>
+      </section>
       return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} aria-busy={pending || undefined} {...stylex.props(styles.section)}>
         <div {...stylex.props(styles.header)}>
           <AriaButton aria-expanded={!isCollapsed} onPress={() => toggle(section.title)} {...stylex.props(styles.headerButton)}>
@@ -74,14 +81,15 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
         </div>}
       </section>
     })}
-    {sections.length === 0 && state !== 'error' && !(state === 'new' && empty === 'E3') && <p {...stylex.props(styles.metaLine, styles.allHidden)}>Every section is empty or hidden.</p>}
+    {unreported.length > 0 && <p data-details-unreported-sections {...stylex.props(styles.metaLine, styles.allHidden)}>Not supplied: {unreported.map((section, index) => <React.Fragment key={section.title}>{index > 0 && ', '}<TooltipTrigger delay={0}><AriaButton data-details-unreported-section={section.title} {...stylex.props(styles.unreportedTrigger)}>{section.title}</AriaButton><AriaTooltip {...stylex.props(styles.tooltip)}>{unavailableReason(section, trace, empty)}</AriaTooltip></TooltipTrigger></React.Fragment>)}.</p>}
+    {sections.length === 0 && unreported.length === 0 && state !== 'error' && !(state === 'new' && empty === 'E3') && <p {...stylex.props(styles.metaLine, styles.allHidden)}>Every section is empty or hidden.</p>}
   </div>
 }
 
-/** E1 hides empty and Unknown sections; E3 hides only empty; E2 shows everything. */
+/** E1 and E3 hide empty and Unknown bodies; E3 names settled unavailable categories once. E2 shows everything. */
 function visible(items: DetailsValue<readonly DetailsResource[]>, rule: DetailsEmptyRule): boolean {
   if (rule === 'E2') return true
-  if (items._tag === 'Unknown') return rule === 'E3'
+  if (items._tag === 'Unknown') return false
   return items.value.length > 0
 }
 
@@ -174,7 +182,7 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
 }) {
   const hasObserved = observedSubagents?.items._tag === 'Known'
   // A first-read Subagents section reserves its breakdown; pane-level loading keeps the settled footprint.
-  const showBreakdown = section.pending === true || section.title !== 'Subagents' || visible(section.items, empty) || knownZeroTracedSubagents(trace)
+  const showBreakdown = section.pending === true || section.title !== 'Subagents' || visible(section.items, empty) || trace.subagentCount._tag === 'Known'
   const subagentWindow=section.title==='Subagents'?accumulationParts(trace.subagentsWindow):undefined
   const collectionReason = showBreakdown && section.items._tag === 'Unknown' ? unavailableReason(section, trace, empty) : undefined
   const observedReason = section.title === 'Subagents' && observedSubagents?.items._tag === 'Unknown'
@@ -192,7 +200,16 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
     ? coverage._tag === 'Unavailable' ? `Attribution coverage: ${coverage.reason}.`
       : coverage._tag === 'PartialUnreported' ? 'The attributed fraction is unreported.' : undefined
     : undefined
-  const missingReason = [collectionReason, observedReason, partialNote, windowReason, countReason, coverageReason].filter(reason => reason !== undefined).join(' ')
+  const gaps = [
+    { subject: 'Traced sessions', reason: collectionReason, partial: false },
+    { subject: 'Observed st resources', reason: observedReason, partial: false },
+    { subject: missingStatus ? 'Status' : 'Line counts', reason: partialNote, partial: missingStatus
+      ? observedSubagents?.items._tag === 'Known' && observedSubagents.items.value.some(resource => resource.agent !== undefined && resource.agent.status !== 'unobserved')
+      : section.items._tag === 'Known' && section.items.value.some(resource => resource.file?.added._tag === 'Known' || resource.file?.removed._tag === 'Known') },
+    { subject: 'Traced-session window', reason: windowReason, partial: false },
+    { subject: 'Traced-session total', reason: countReason, partial: false },
+    { subject: 'Attribution', reason: coverageReason, partial: coverage._tag === 'PartialUnreported' },
+  ].filter((gap): gap is { subject: string; reason: string; partial: boolean } => gap.reason !== undefined)
   return <div aria-hidden={pending || undefined} inert={pending} data-details-skeleton={pending ? section.title : undefined} {...stylex.props(styles.contentShell)}>
     <div {...stylex.props(styles.content, pending && styles.skeletonHidden)}>
       {section.title === 'Subagents' && hasObserved && observedSubagents !== undefined && observedSubagents.items._tag === 'Known' && (observedSubagents.items.value.length === 0
@@ -201,16 +218,14 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
       {showBreakdown && <>
         {section.title === 'Subagents' && <SkeletonLine pending={pending}><p data-details-subagent-window {...stylex.props(styles.metaLine)}>Traced sessions · {subagentWindow === undefined ? <MissingDetailsValue label="Traced-session accumulation window" reason={windowReason ?? 'Traced-session accumulation window is unreported.'} /> : subagentWindow.join('')}</p></SkeletonLine>}
         {section.title === 'Subagents' && trace.subagents._tag === 'Known' && <SkeletonLine pending={pending}><p data-details-subagent-count {...stylex.props(styles.metaLine)}>Showing {trace.subagents.value.length} of {trace.subagentCount._tag === 'Known' ? trace.subagentCount.value : <MissingDetailsValue label="Total traced-session count" reason={countReason ?? 'Traced-session total count is unreported.'} />} traced sessions</p></SkeletonLine>}
+        {section.title === 'Subagents' && (coverage._tag === 'Partial' || coverage._tag === 'NotCovered' || coverage._tag === 'PartialUnreported') && <SkeletonLine pending={pending}><TraceCoverageNote trace={trace} /></SkeletonLine>}
         {section.items._tag === 'Unknown'
           ? null
           : section.items.value.length === 0
             ? <SkeletonLine pending={pending}><p {...stylex.props(styles.metaLine)}>None</p></SkeletonLine>
             : <SectionItems section={section} now={now} form={form} open={open} pending={pending} />}
       </>}
-      {partialNote !== undefined && <SkeletonLine pending={pending}><p data-details-partial-note {...stylex.props(styles.metaLine)}><MissingDetailsValue label={`${section.title} metadata`} reason={partialNote} /></p></SkeletonLine>}
-      {section.title === 'Subagents' && (coverage._tag === 'Partial' || coverage._tag === 'NotCovered') && <SkeletonLine pending={pending}><TraceCoverageNote trace={trace} /></SkeletonLine>}
-      {section.title === 'Subagents' && coverage._tag === 'PartialUnreported' && <SkeletonLine pending={pending}><p data-details-coverage {...stylex.props(styles.metaLine)}>Partial · <MissingDetailsValue label="Attributed fraction" reason={coverageReason ?? 'The attributed fraction is unreported.'} /></p></SkeletonLine>}
-      {missingReason !== '' && <SkeletonLine pending={pending}><DetailsUnavailable reason={missingReason} /></SkeletonLine>}
+      {gaps.length > 0 && <SkeletonLine pending={pending}><DetailsUnavailable subjects={gaps.map(gap => gap.subject)} state={gaps.every(gap => gap.partial) ? 'Partial' : 'Unavailable'} reason={gaps.map(gap => gap.reason).join(' ')} /></SkeletonLine>}
     </div>
   </div>
 }
@@ -337,9 +352,11 @@ const styles = stylex.create({
   headerButton: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0, flexGrow: 1, height: g.toolRow, padding: s.zero, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'left', cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: -2 } },
   headerTitle: { color: ink.fg, fontWeight: t.weightSemibold, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   count: { fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted, flexShrink: 0 },
-  body: { display: 'flex', flexDirection: 'column', gap: s.sm, paddingInline: s.xxl, paddingBottom: s.md, minWidth: 0 },
+  body: { display: 'flex', flexDirection: 'column', gap: s.sm, paddingInlineStart: s.xxl, paddingInlineEnd: s.md, paddingBottom: s.md, minWidth: 0 },
   metaLine: { margin: s.zero, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   allHidden: { padding: s.md },
+  chevronSpace: { width: g.icon, flexShrink: 0 },
+  unreportedTrigger: { display: 'inline', padding: s.zero, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'help', ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: -2 } },
   entry: { display: 'flex', flexDirection: 'column', minWidth: 0 },
   agentEntry: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0 },
   agentRow: { flex: 1, minWidth: 0 },
@@ -348,7 +365,7 @@ const styles = stylex.create({
   dense: { display: 'flex', flexDirection: 'column', minWidth: 0 },
   denseEntry: { position: 'relative', display: 'flex', alignItems: 'center', minWidth: 0 },
   denseSplit: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, width: g.toolRow, height: g.toolRow, padding: s.zero, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: -2 } },
-  denseRow: { display: 'flex', alignItems: 'center', gap: s.md, width: '100%', minWidth: 0, flex: 1, boxSizing: 'border-box', minHeight: g.toolRow, paddingInline: s.sm, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'left', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, borderRadius: r.sm, color: ink.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: -2 } },
+  denseRow: { display: 'flex', alignItems: 'center', gap: s.md, width: '100%', minWidth: 0, flex: 1, boxSizing: 'border-box', minHeight: g.toolRow, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'left', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: -2 } },
   resourceIcon: { display: 'inline-flex', flexShrink: 0, color: ink.fgMuted },
   denseLabel: { flexBasis: 0, flexGrow: 1, flexShrink: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   // Identity labels wrap in full (no clamp) with balanced lines: a long branch never leaves one orphaned word beside its badge.

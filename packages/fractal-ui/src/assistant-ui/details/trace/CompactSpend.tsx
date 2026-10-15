@@ -4,17 +4,16 @@ import { accentVars as accent, borderVars as border, spaceVars as space, textVar
 import { clock, money } from './chart.ts'
 import type { ChartLane as Lane, TraceChartProjection } from './adapter.ts'
 import { DetailsInk, DetailsSkeletonPlot } from '../DetailsSkeleton.tsx'
-import { DetailsUnavailable, MissingDetailsValue } from '../DetailsUnavailable.tsx'
+import { MissingDetailsValue } from '../DetailsUnavailable.tsx'
 export interface CompactSpendProps {
   readonly lane: Lane
   /** Role aggregates when the provider cannot attribute marks to individual descendants. */
   readonly descendantSpend: TraceChartProjection['descendantSpend']
-  readonly showUnavailableReasons?: boolean
   readonly showTotals?: boolean
 }
 
 /** Ported CompactSpend: separate self / full-subtree cumulative costs and honest retained marks. */
-export const CompactSpend = ({ lane, descendantSpend, showUnavailableReasons = true, showTotals = true }: CompactSpendProps): ReactNode => {
+export const CompactSpend = ({ lane, descendantSpend, showTotals = true }: CompactSpendProps): ReactNode => {
   const descendantUsd = descendantSpend.totalUsd
   const descendantSeries = [descendantSpend.cumulativeValues]
   const times = [...new Set([...lane.cumulativeValues.map((point) => point.ts), ...descendantSpend.cumulativeValues.map((point) => point.ts)])].toSorted((a, b) => a - b)
@@ -22,23 +21,9 @@ export const CompactSpend = ({ lane, descendantSpend, showUnavailableReasons = t
   const end = times.at(-1) ?? start
   const maximum = Math.max(0.000001, lane.cumulativeValues.at(-1)?.usd ?? 0, descendantSpend.cumulativeValues.at(-1)?.usd ?? 0)
   const path = (series: ReadonlyArray<ReadonlyArray<{ readonly ts: number; readonly usd: number }>>): string => {
-    if (!showUnavailableReasons) return series[0]!.map((point, index) => {
+    return series[0]!.map((point, index) => {
       const x = end === start ? 160 : 4 + ((point.ts - start) / (end - start)) * 312
       const y = 76 - point.usd / maximum * 72
-      return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
-    }).join(' ')
-    const cursors = series.map(() => 0)
-    const values = series.map(() => 0)
-    return times.map((ts, index) => {
-      for (let i = 0; i < series.length; i++) {
-        const points = series[i]!
-        while (cursors[i]! < points.length && points[cursors[i]!]!.ts <= ts) {
-          values[i] = points[cursors[i]!]!.usd
-          cursors[i]!++
-        }
-      }
-      const x = end === start ? 160 : 4 + ((ts - start) / (end - start)) * 312
-      const y = 76 - (values.reduce((total, value) => total + value, 0) / maximum) * 72
       return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
     }).join(' ')
   }
@@ -47,12 +32,6 @@ export const CompactSpend = ({ lane, descendantSpend, showUnavailableReasons = t
   const partial = (lane.totalUsd._tag === 'Known' && Math.abs(retainedRoot - lane.totalUsd.value) > 0.005) || (descendantUsd._tag === 'Known' && Math.abs(retainedDescendants - descendantUsd.value) > 0.005)
   const hasSeries = lane.cumulativeValues.length > 0
   const hasDescendantSeries = descendantSpend.cumulativeValues.length > 0
-  const missing = [
-    ...(showTotals && lane.totalUsd._tag === 'Unknown' ? [lane.totalUsd.detail ?? lane.totalUsd.reason] : []),
-    ...(showTotals && descendantUsd._tag === 'Unknown' ? [descendantUsd.detail ?? descendantUsd.reason] : []),
-    ...(!hasSeries ? ['Session spend series was not retained.'] : []),
-    ...(!hasDescendantSeries ? ['Descendant spend series was not retained.'] : []),
-  ]
   return <div {...stylex.props(styles.root)} aria-label="Session and descendant spend">
     {showTotals && <div data-details-data-row={lane.totalUsd._tag === 'Known' || descendantUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.totals)}><span {...stylex.props(styles.session)}>Main session <strong>{lane.totalUsd._tag === 'Known' ? money.format(lane.totalUsd.value) : <MissingDetailsValue label="Main session spend" reason={lane.totalUsd.detail ?? lane.totalUsd.reason}/>}</strong></span><span {...stylex.props(styles.descendants)}>Subagents <strong>{descendantUsd._tag === 'Known' ? money.format(descendantUsd.value) : <MissingDetailsValue label="Subagent spend" reason={descendantUsd.detail ?? descendantUsd.reason}/>}</strong></span></div>}
     {hasSeries || hasDescendantSeries ? <svg {...stylex.props(styles.chart)} viewBox="0 0 320 80" preserveAspectRatio="none" role="img" aria-label="Cumulative session and descendant API-equivalent spend">
@@ -63,7 +42,6 @@ export const CompactSpend = ({ lane, descendantSpend, showUnavailableReasons = t
     {!hasSeries && hasDescendantSeries && <span {...stylex.props(styles.note)}>Main session series <MissingDetailsValue label="Main session spend series" reason="Session spend series was not retained."/></span>}
     {(hasSeries || hasDescendantSeries) && <div {...stylex.props(styles.axis)}><span>{clock.format(start)}</span><span>UTC</span><span>{clock.format(end)}</span></div>}
     <p {...stylex.props(styles.note)}>API-equivalent · retained role observations{partial ? ' · chart and reported accumulation windows differ' : ''}</p>
-    {showUnavailableReasons && missing.length > 0 && <DetailsUnavailable reason={missing.join(' · ')}/>}
 </div>
 }
 

@@ -104,6 +104,9 @@ function shown(element: HTMLElement) { return !element.closest('[inert],[hidden]
 function assertHuman(pane: HTMLElement) {
   requireContract(!/\bUnknown\b|\b(no-provider|not-covered|not-attributed|out-of-retention)\b|Some values (?:aren't|aren’t) reported|Some details (?:aren't|aren’t) available|Not observed/i.test(pane.innerText), 'Details exposes a tag or generic missing-data value')
   requireContract(!/(?:\+|−)0\b|\b1 compactions\b|claude-opus|claude-sonnet|gpt-\d/i.test(pane.innerText), 'Details exposes zero diff counts, wrong plural or unsanitized model')
+  for (const row of pane.querySelectorAll<HTMLElement>('p,[data-details-unavailable]')) if (shown(row)) {
+    requireContract(!/^(?:—|Unavailable(?:\s+—)?|Partial)$/.test(row.textContent?.trim() ?? '') && (!row.hasAttribute('data-details-unavailable') || !!row.getAttribute('data-details-unavailable-subject')?.trim()), 'Details renders an unlabeled unavailable row')
+  }
   for (const section of pane.querySelectorAll('section')) {
     const notes = [...section.querySelectorAll<HTMLElement>('[data-details-unavailable]')].filter(shown)
     requireContract(notes.length <= 1, 'Section repeats its missing-data explanation')
@@ -168,6 +171,9 @@ async function humanControl(pane: HTMLElement) {
   requireContract(target, 'Human-copy negative control lacks known identity')
   const original = target.textContent
   try { target.textContent = 'Unknown'; await rejectsControl('Details exposes a tag or generic missing-data value', () => assertHuman(pane)) } finally { target.textContent = original }
+  const orphan = document.createElement('p')
+  orphan.textContent = '—'; target.closest('section')!.append(orphan)
+  try { await rejectsControl('Details renders an unlabeled unavailable row', () => assertHuman(pane)) } finally { orphan.remove() }
   assertHuman(pane)
 }
 async function contrastControl(pane: HTMLElement, item: Case) {
@@ -286,9 +292,9 @@ function assertMissions(pane: HTMLElement) {
 }
 function assertChevron(pane: HTMLElement) {
   const columns = [...pane.querySelectorAll('section')].map(section => ({ name: section.getAttribute('aria-label'), svg: section.querySelector('button[aria-expanded] svg') }))
-  for (const name of ['Overview', 'Context', 'Spend', 'Workspace', 'Reviews', 'Files touched', 'Subagents']) requireContract(columns.some(column => column.name === name && column.svg), 'Required section chevron is missing')
+  for (const name of ['Overview', 'Context', 'Spend', 'Workspace', 'Files touched', 'Subagents']) requireContract(columns.some(column => column.name === name && column.svg), 'Required section chevron is missing')
   const reference = columns.find(column => column.name === 'Overview')!.svg!.getBoundingClientRect().x
-  requireContract(columns.every(column => column.svg && Math.abs(column.svg.getBoundingClientRect().x - reference) <= 0.5), 'Section chevrons do not share the Overview column')
+  requireContract(columns.filter(column => column.svg).every(column => Math.abs(column.svg!.getBoundingClientRect().x - reference) <= 0.5), 'Section chevrons do not share the Overview column')
 }
 function assertScope(pane: HTMLElement, trace: TraceSeries) {
   const spend = pane.querySelector<HTMLElement>('section[aria-label="Spend"]')!, label = spend.querySelector('[data-details-token-label]')?.textContent ?? '', period = spend.querySelector('[data-details-token-period]')?.textContent ?? '', meter = trace.meters.spend

@@ -371,6 +371,12 @@ function assertResourceRead(root: HTMLElement, scenario: string, prefix: string)
   requireContract(root.getAttribute('data-details-pane-state') === 'busy' && !root.querySelector('[data-details-skeleton="overview"]'), 'Resource read replaced loaded sibling details')
   for (const title of ['Workspace', 'Declared bindings']) {
     const section = root.querySelector<HTMLElement>(`section[aria-label="${prefix}${title}"]`)
+    if (!firstRead && scenario !== 'knownEmpty') {
+      const absent = root.querySelector(`[data-details-unreported-section="${title}"]`)
+      requireContract(!section && absent, 'Settled absence lost its explicit unavailable reason')
+      requireContract(!absent.hasAttribute('aria-busy'), 'Settled resource stayed pending')
+      continue
+    }
     requireContract(section, 'First-read or settled resource section was filtered out')
     const notes = [...section.querySelectorAll<HTMLElement>('[data-details-unavailable]')]
     if (firstRead) {
@@ -379,14 +385,16 @@ function assertResourceRead(root: HTMLElement, scenario: string, prefix: string)
     } else {
       requireContract(!section.hasAttribute('aria-busy') && !section.querySelector('[data-details-skeleton]'), 'Settled resource stayed pending')
       if (scenario === 'knownEmpty') requireContract(notes.length === 0 && section.querySelector('p')?.textContent === 'None', 'Known-empty resources became unavailable')
-      else requireContract(notes.length === 1 && !notes[0]!.closest('[inert],[aria-hidden="true"]') && within(notes[0]!).queryByRole('button', { name: 'Unavailable observations: unavailable' }), 'Settled absence lost its explicit unavailable reason')
     }
   }
   const reviews = root.querySelector<HTMLElement>(`section[aria-label="${prefix}Reviews"]`)
-  if (scenario !== 'firstReadHideEmpty') {
-    requireContract(reviews && !reviews.hasAttribute('aria-busy') && !reviews.querySelector('[data-details-skeleton]'), 'Static unreported section became pending')
-    if (scenario === 'knownEmpty') requireContract(reviews.querySelector('p')?.textContent === 'None', 'Known-empty resources became unavailable')
-    else requireContract(reviews.querySelector('[data-details-unavailable]') && !reviews.querySelector('[data-details-unavailable]')?.closest('[inert]'), 'Static unreported section lost its explicit absence')
+  if (scenario === 'knownEmpty') {
+    requireContract(reviews && reviews.querySelector('p')?.textContent === 'None', 'Known-empty resources became unavailable')
+  } else if (scenario === 'firstReadShowEmpty') {
+    requireContract(reviews?.getAttribute('data-details-section-state') === 'unavailable' && !reviews.hasAttribute('aria-busy'), 'Static unreported section became pending')
+  } else if (scenario !== 'firstReadHideEmpty') {
+    const absent = root.querySelector('[data-details-unreported-section="Reviews"]')
+    requireContract(!reviews && absent && !absent.hasAttribute('aria-busy'), 'Static unreported section became pending')
   }
 }
 function durationRow(root: HTMLElement, shortLabel: string): HTMLElement {
@@ -532,8 +540,8 @@ export const AllStates: Story = {
     await rejectsControl('Traced heading total became the retained list size',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="boundedCount Subagents"] [data-details-subagent-count]','Showing 1 of 1 traced sessions')))
     await rejectsControl('Traced role, model or identity is hidden behind Open',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="session Subagents"] [data-resource-card] [data-details-resource-title]','Research delegate · native-child')))
     await rejectsControl('First-read resource rendered settled-unavailable instead of a pending skeleton',()=>assertAllStates(mutated(canvasElement,'section[aria-label="firstReadDense Workspace"] [data-details-skeleton]',node=>node.removeAttribute('data-details-skeleton'))))
-    await rejectsControl('Settled absence lost its explicit unavailable reason',()=>assertAllStates(mutated(canvasElement,'section[aria-label="settledUnavailable Workspace"] [data-details-unavailable]',node=>node.remove())))
-    await rejectsControl('Settled resource stayed pending',()=>assertAllStates(mutated(canvasElement,'section[aria-label="settledUnavailable Workspace"]',node=>node.setAttribute('aria-busy','true'))))
+    await rejectsControl('Settled absence lost its explicit unavailable reason',()=>assertAllStates(mutated(canvasElement,'section[aria-label="settledUnavailable"] [data-details-unreported-section="Workspace"]',node=>node.remove())))
+    await rejectsControl('Settled resource stayed pending',()=>assertAllStates(mutated(canvasElement,'section[aria-label="settledUnavailable"] [data-details-unreported-section="Workspace"]',node=>node.setAttribute('aria-busy','true'))))
     await rejectsControl('Known-empty resources became unavailable',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="knownEmpty Workspace"] p','Unavailable')))
     await rejectsControl('First-read timing rendered a settled value',()=>assertAllStates(mutated(canvasElement,'section[aria-label="timing"] [data-details-skeleton="duration"]',node=>node.remove())))
   },
@@ -612,12 +620,11 @@ export const FirstReadResources: Story = {
     const root = pane(canvasElement)
     await waitFor(() => assertResourceRead(root, 'firstRead', ''))
     await rejectsControl('First-read resource rendered settled-unavailable instead of a pending skeleton', () => assertResourceRead(mutated(root, 'section[aria-label="Workspace"] [data-details-skeleton]', node => node.removeAttribute('data-details-skeleton')), 'firstRead', ''))
-    await rejectsControl('First-read resource exposed settled-unavailable copy', () => assertResourceRead(mutated(root, 'section[aria-label="Workspace"]', node => { const note = node.querySelector('[data-details-unavailable]')?.cloneNode(true); if (note) node.append(note) }), 'firstRead', ''))
-    await rejectsControl('Static unreported section became pending', () => assertResourceRead(mutated(root, 'section[aria-label="Reviews"]', node => node.setAttribute('aria-busy', 'true')), 'firstRead', ''))
+    await rejectsControl('First-read resource exposed settled-unavailable copy', () => assertResourceRead(mutated(root, 'section[aria-label="Workspace"]', node => { const note = document.createElement('p'); note.setAttribute('data-details-unavailable', ''); node.append(note) }), 'firstRead', ''))
+    await rejectsControl('Static unreported section became pending', () => assertResourceRead(mutated(root, '[data-details-unreported-section="Reviews"]', node => node.setAttribute('aria-busy', 'true')), 'firstRead', ''))
     await rejectsControl('Resource read replaced loaded sibling details', () => assertResourceRead(mutated(root, '[data-details-content-slot]', node => node.closest('[data-testid="details-pane"]')?.setAttribute('data-details-pane-state', 'loading')), 'firstRead', ''))
     await rejectsControl('First-read or settled resource section was filtered out', () => assertResourceRead(mutated(root, 'section[aria-label="Declared bindings"]', node => node.remove()), 'firstRead', ''))
-    const reviews = root.querySelector<HTMLElement>('section[aria-label="Reviews"]')
-    const trigger = reviews ? within(reviews).getByRole('button', { name: 'Unavailable observations: unavailable' }) : undefined
+    const trigger = root.querySelector<HTMLElement>('[data-details-unreported-section="Reviews"]')
     requireContract(trigger, 'Reviews absence is not keyboard reachable')
     trigger.focus()
     await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')

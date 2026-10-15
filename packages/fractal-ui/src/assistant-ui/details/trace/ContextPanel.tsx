@@ -4,9 +4,9 @@ import { accentVars as accent, borderVars as border, spaceVars as space, statusV
 import { baseline, CHART_HEIGHT, CHART_INSET, CHART_WIDTH, clock, linePath, xFor, yFor } from './chart.ts'
 import type { ChartScene as AgentTraceScene, ChartLane as Lane } from './adapter.ts'
 import { DetailsSkeletonPlot } from '../DetailsSkeleton.tsx'
-import { DetailsUnavailable, MissingDetailsValue } from '../DetailsUnavailable.tsx'
+import { MissingDetailsValue } from '../DetailsUnavailable.tsx'
 
-export interface ContextPanelProps { readonly scene: AgentTraceScene; readonly lane: Lane; readonly compact?: boolean; readonly showUnavailableReasons?: boolean }
+export interface ContextPanelProps { readonly scene: AgentTraceScene; readonly lane: Lane; readonly compact?: boolean }
 
 /** Formatted text is an inert wrap footprint, never a pending observation. */
 export interface ContextPanelFootprint {
@@ -42,13 +42,13 @@ export const contextPanelFootprint = (lane: Lane, compact: boolean): ContextPane
 }
 
 /** Context observations retain their source granularity; buckets are never renamed turns. */
-export const ContextPanel = ({ lane, compact = false, showUnavailableReasons = true }: ContextPanelProps): ReactNode => {
+export const ContextPanel = ({ lane, compact = false }: ContextPanelProps): ReactNode => {
   const turnSamples = lane.turnSamples
   const usesTurns = turnSamples !== undefined && (compact || lane.samples.length === 0)
   const samples = usesTurns ? turnSamples : lane.samples
   const sampleKind = usesTurns ? 'turn' : 'bucket'
   const points = samples.flatMap((sample, index) => sample.contextPercent === null ? [] : [{ ts: sample.ts, index: 'turnIndex' in sample ? sample.turnIndex : index + 1, value: sample.contextPercent, estimated: sample.isContextEstimated }])
-  if (points.length === 0) return <div {...stylex.props(styles.root)}><span {...stylex.props(styles.note)}>Context series <MissingDetailsValue label="Context series" reason={`No ${sampleKind} context samples retained.`}/></span>{showUnavailableReasons && <DetailsUnavailable reason={`No ${sampleKind} context samples retained.`}/>}</div>
+  if (points.length === 0) return <div {...stylex.props(styles.root)}><span {...stylex.props(styles.note)}>Context series <MissingDetailsValue label="Context series" reason={`No ${sampleKind} context samples retained.`}/></span></div>
   const start = points[0]!.ts
   const end = points.at(-1)!.ts
   const maximumPoint = points.reduce((maximum, point) => point.value > maximum.value ? point : maximum, points[0]!)
