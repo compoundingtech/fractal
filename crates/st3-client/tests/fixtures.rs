@@ -739,3 +739,19 @@ fn assistant_read_contract_decodes_fixtures_and_rejects_malformed_shapes() {
     assert!(serde_json::from_value::<AssistantPageRequest>(serde_json::json!({"person": "person/operator"})).is_err());
     assert!(serde_json::from_value::<AssistantSummaryRequest>(serde_json::json!({"cursor": "c"})).is_err());
 }
+
+#[test]
+fn queued_mission_deadlines_decode_for_stui() {
+    let mut wire: serde_json::Value =
+        serde_json::from_slice(&fixture("person-ask-mission.json")).unwrap();
+    wire["run_details"][0]["after"] = serde_json::json!("mission-run/predecessor");
+    wire["run_details"][0]["deadline"] = serde_json::Value::Null;
+    let queued: Mission = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(queued.run_details[0].deadline, None);
+    wire["run_details"][0]["deadline"] = serde_json::json!("2026-09-20T11:05:00Z");
+    let admitted: Mission = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        admitted.run_details[0].deadline.as_deref(),
+        Some("2026-09-20T11:05:00Z")
+    );
+}

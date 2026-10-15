@@ -727,6 +727,28 @@ dependence:** a skip now depends on state outside the pull request. The same hea
 agent has signed and pushed the note, or the reverse if a note is later superseded by a failing record; a skip is the decision at that run, not a property of the sha. A skip on a pull request therefore means "the head tree passed on a trusted host", not
 "the merge with today's main passes"; a break caused only by main moving is caught in the merge queue, which still tests the integrated tree.
 
+### Host keys
+
+Our own machines are trusted to sign what they run. `scripts/evidence-keygen` makes a host's key, a scratch
+repository and the signer configuration under `~/.config/st`, all owned by the running user, and prints one
+line, `host/ALIAS namespaces="git" ssh-ed25519 ...`. The alias is required and is not the machine's name: the line goes into a
+public file that must not carry real host names, so keep the alias-to-machine mapping somewhere private (revoking a key needs it). Adding that line to `.st/evidence-keys` is a pull request
+like any other: the file is read from the accepted base (main), so a change cannot vouch for its own key, and
+removing a line stops every record that key signed from counting. The principal's first part, `host`, is the
+trust level; a check's policy admits it for the `wrapper` kind only (the per-kind `trust_levels` override above),
+never for `observed`. Notes signed under the `host` level do not satisfy the merge queue until the key is shown to be isolated
+from the code under test; they can cover pull requests only. No root, no `sekrets` grant and no pinned program is needed. The root-owned hardening of `scripts/evidence-sign` (tool
+directories closed to the account) does not apply to a user-owned key, because the account is the one that runs code under test.
+The script itself refuses symlinks, other owners and loose modes, creates files under `umask 077`, derives the printed line
+from the private key, and refuses to run as root or with a `HOME` that is not the account's.
+
+What this does not give, stated so nobody assumes it: anything that runs as the same user can read the key and
+sign a result it never ran, and a signer that is not isolated from the code under test is only as honest as that
+code. This is cooperative trust in the host. It is bounded: a record is keyed to a tree, a failing run is a
+record too, the latest record decides, the merge queue still tests the integrated tree (a host-signed note never
+covers it), and sampled real runs compare a note with the job. The root-installed, hash-pinned signer
+(`scripts/evidence-sign` behind a `sekrets` grant) stays supported for a host that wants it.
+
 ### Running the checks locally (`scripts/st-test`)
 
 `scripts/st-test` runs each required check that has a local command (today `genie-freshness` and
@@ -759,7 +781,7 @@ a slow fetch, a signer that `.st/evidence-keys` on main does not list, a missing
 other branches and the base branch are pushed untouched, and the notes push inside the run does not run the hook again. A new tree always takes the slow
 path (the checks run once); so does every fixup that changes the tree; a tree that already has notes is instant.
 
-It runs `nix develop` and `pnpm install` from the tree under test, on the signing host as its user: code in that tree runs
+The checks run without the agent seat's identity and session variables (`ST_*`, `ST2_*`, `ST3_*`, `CLAUDE*`, `ANTHROPIC_*`; `ST_AGENT`, `ST_SKIP_EVIDENCE` and the `ST_EVIDENCE*` switches stay, by exact name: that list in `scripts/st-test` is the only exception mechanism, and `ST_AGENT` stays visible to the checks because the `nix` wrapper that needs it starts them), as on a CI runner: tests that read them fail or behave differently under a seat. Tests that bind a request to the seat by process ancestry still do, so a trustworthy full run of the Linux gate must be started detached from any seat. It runs `nix develop` and `pnpm install` from the tree under test, on the signing host as its user: code in that tree runs
 there with the key within reach (cooperative trust, see Host keys). It changes no policy: a check skips only where `enforce` is true.
 
 ### When the gate says skip

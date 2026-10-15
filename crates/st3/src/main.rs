@@ -5900,7 +5900,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
-        let code = st3::sekrets::cli::run(args, cli.json).await?;
+        let code = st3::sekrets::cli::run(args, cli.json, cli.endpoint).await?;
         use std::io::Write as _;
         let _ = cli_output::stdout().flush();
         return Err(CommandExit(code as u8).into());
@@ -7112,7 +7112,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // The policy reads `[limits]` again on every pass, so an edit applies without a restart.
     st3::config::set_daemon_config(args_config.as_deref());
     tokio::spawn(enforce_account_limits(store.clone(), config.limits.clone(), reconciler));
-    recycle_idle_wal(config.state_dir.join("claims.sqlite3"), Arc::downgrade(&store));
+    recycle_idle_wal(store.path.clone(), Arc::downgrade(&store));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(convert_envelope_payloads(store.clone()));
     tokio::spawn(migrate_event_payloads(store.clone()));
@@ -27906,6 +27906,7 @@ mod tests {
             last_failed_exchange: None,
             worker: None,
             projection_digests: Default::default(),
+            incompatible_projection_tables: Vec::new(),
             differing_tables: Vec::new(),
             projection_comparison_waiting: false,
             projection_comparison_waiting_reason: None,
@@ -27918,6 +27919,8 @@ mod tests {
             last_failure_at_unix_ms: None,
             refusal_reason: None,
             schema_digest: None,
+            projection_registry_digest: None,
+            projection_versions: Default::default(),
             authority_digest: digest.map(str::to_owned),
             graph_digest: None,
             sync: None,
@@ -29817,6 +29820,7 @@ mod tests {
                     last_failed_exchange: None,
                     worker: None,
                     projection_digests: BTreeMap::from([("claim_sources".into(), "sample".into())]),
+                    incompatible_projection_tables: Vec::new(),
                     differing_tables: Vec::new(),
                     projection_comparison_waiting: false,
                     projection_comparison_waiting_reason: None,
@@ -29829,6 +29833,8 @@ mod tests {
                     last_failure_at_unix_ms: None,
                     refusal_reason: None,
                     schema_digest: None,
+                    projection_registry_digest: None,
+                    projection_versions: Default::default(),
                     authority_digest: None,
                     graph_digest: graph.map(str::to_owned),
                     sync,
