@@ -51,9 +51,11 @@ public struct ErrorEnvelope: Codable, Error, Sendable {
 }
 
 public enum ErrorCode: Codable, Sendable, Equatable {
+    case recipientRetired, lifecycleUnavailable, retirementUpgradeRequired
     case notFound, forbidden, unsupportedCapability, validationFailed, idempotencyConflict
     case attentionMigrated
     case issuerRequired
+    case suspendAuthoredSessionSelection
     case arrangementExists
     case arrangementFolderExists, arrangementRetired, arrangementLimit, arrangementFolderDeleted
     case arrangementCycle, arrangementBodyTooLarge, arrangementOwnerForbidden
@@ -69,10 +71,12 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = switch raw {
+        case "recipient-retired": .recipientRetired; case "lifecycle-unavailable": .lifecycleUnavailable; case "retirement-upgrade-required": .retirementUpgradeRequired
         case "attention-migrated": .attentionMigrated; case "not-found": .notFound; case "forbidden": .forbidden
         case "unsupported-capability": .unsupportedCapability; case "validation-failed": .validationFailed
         case "idempotency-conflict": .idempotencyConflict; case "stale-fence": .staleFence
         case "issuer-required": .issuerRequired
+        case "suspend-authored-session-selection": .suspendAuthoredSessionSelection
         case "arrangement-exists": .arrangementExists
         case "arrangement-folder-exists": .arrangementFolderExists
         case "arrangement-retired": .arrangementRetired; case "arrangement-limit": .arrangementLimit
@@ -97,10 +101,12 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     }
     public func encode(to encoder: Encoder) throws {
         let raw = switch self {
+        case .recipientRetired: "recipient-retired"; case .lifecycleUnavailable: "lifecycle-unavailable"; case .retirementUpgradeRequired: "retirement-upgrade-required"
         case .attentionMigrated: "attention-migrated"; case .notFound: "not-found"; case .forbidden: "forbidden"
         case .unsupportedCapability: "unsupported-capability"; case .validationFailed: "validation-failed"
         case .idempotencyConflict: "idempotency-conflict"; case .staleFence: "stale-fence"
         case .issuerRequired: "issuer-required"
+        case .suspendAuthoredSessionSelection: "suspend-authored-session-selection"
         case .arrangementExists: "arrangement-exists"
         case .arrangementFolderExists: "arrangement-folder-exists"
         case .arrangementRetired: "arrangement-retired"; case .arrangementLimit: "arrangement-limit"
@@ -457,7 +463,8 @@ public struct ResourcesPage: Codable, Sendable {
 public struct ResourcePage: Codable, Sendable { public let kind: String; public let collection: String; public let filters: [String: String]; public let items: [Resource]; public let page: PageInfo; public let sync: SyncNotice?; public let replicated: ReplicatedNotice? }
 public struct ReplicatedNotice: Codable, Sendable { public let ownerHostID: String; public let source: String; public let complete: Bool; public let state: String; public let reason: String?; enum CodingKeys: String, CodingKey { case ownerHostID = "owner_host_id", source, complete, state, reason } }
 public struct SyncNotice: Codable, Sendable { public let state: String; public let peers: [SyncPeer] }
-public struct SyncPeer: Codable, Sendable { public let hostID: String; public let peerOnlyEnvelopes, localOnlyEnvelopes: UInt64; public let lastExchangeAt: String?; public let estimatedCatchUpSeconds: UInt64?; public let divergedSince: String?; enum CodingKeys: String, CodingKey { case hostID = "host_id", peerOnlyEnvelopes = "peer_only_envelopes", localOnlyEnvelopes = "local_only_envelopes", lastExchangeAt = "last_exchange_at", estimatedCatchUpSeconds = "estimated_catch_up_seconds", divergedSince = "diverged_since" } }
+public struct ExchangeTransport: Codable, Sendable { public let at: String; public let carrier: String; public let fabricRoute: String?; enum CodingKeys: String, CodingKey { case at, carrier, fabricRoute = "fabric_route" } }
+public struct SyncPeer: Codable, Sendable { public let lastSuccessfulExchange, lastFailedExchange: ExchangeTransport?; public let hostID: String; public let peerOnlyEnvelopes, localOnlyEnvelopes: UInt64; public let lastExchangeAt: String?; public let estimatedCatchUpSeconds: UInt64?; public let divergedSince: String?; enum CodingKeys: String, CodingKey { case lastSuccessfulExchange = "last_successful_exchange", lastFailedExchange = "last_failed_exchange", hostID = "host_id", peerOnlyEnvelopes = "peer_only_envelopes", localOnlyEnvelopes = "local_only_envelopes", lastExchangeAt = "last_exchange_at", estimatedCatchUpSeconds = "estimated_catch_up_seconds", divergedSince = "diverged_since" } }
 
 public enum TimelineRole: String, Codable, Sendable { case system, user, assistant, tool }
 public enum TimelineType: String, Codable, Sendable { case message, content, toolCall = "tool_call", toolResult = "tool_result", status, error, usage, redaction, truncation }
@@ -529,6 +536,7 @@ public struct ActionRequest: Codable, Sendable {
     public static func agentCreate(id: String, idempotencyKey: String, fence: Fence, parameters: AgentCreateParameters) throws -> Self { try .init(id: id, type: .agentCreate, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func agentQueueMove(id: String, idempotencyKey: String, fence: Fence, parameters: AgentQueueMoveParameters) throws -> Self { try .init(id: id, type: .agentQueueMove, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func agentResume(id: String, idempotencyKey: String, fence: Fence, parameters: AgentResumeParameters) throws -> Self { try .init(id: id, type: .agentResume, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func agentRetire(id: String, idempotencyKey: String, fence: Fence, parameters: AgentRetireParameters) throws -> Self { try .init(id: id, type: .agentRetire, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func agentStart(id: String, idempotencyKey: String, fence: Fence, parameters: AgentStartParameters) throws -> Self { try .init(id: id, type: .agentStart, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func agentStop(id: String, idempotencyKey: String, fence: Fence, parameters: AgentStopParameters) throws -> Self { try .init(id: id, type: .agentStop, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func agentSuspend(id: String, idempotencyKey: String, fence: Fence, parameters: AgentSuspendParameters) throws -> Self { try .init(id: id, type: .agentSuspend, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
@@ -595,6 +603,7 @@ public struct PersonAnswerInput: Codable, Sendable { public var id, text: String
 public struct PersonAnswer: Codable, Sendable { public let type, outcome: String; public let id, label, text: String? }
 public struct PersonAnswerRecord: Codable, Sendable { public let ask, status, summary, respondent: String; public let actedFor: String?; public let answeredAtUnixMS: UInt64; public let answer: PersonAnswer?; public let evidence: [String]?; enum CodingKeys: String, CodingKey { case ask, status, summary, respondent, actedFor = "acted_for", answer, evidence, answeredAtUnixMS = "answered_at_unix_ms" } }
 public struct TargetParameters: Codable, Sendable { public var targetID: String; public var reason: String?; public var summary: String?; public var evidence: [String]; public init(targetID: String, reason: String? = nil, summary: String? = nil, evidence: [String] = []) { self.targetID = targetID; self.reason = reason; self.summary = summary; self.evidence = evidence }; enum CodingKeys: String, CodingKey { case targetID = "target_id", reason, summary, evidence } }
+public struct AgentRetireParameters: Codable, Sendable { public var agent: String; public var reason: String; public init(agent: String, reason: String) { self.agent = agent; self.reason = reason } }
 public struct AgentStopParameters: Codable, Sendable { public var agent: String; public var reason: String?; public init(agent: String, reason: String? = nil) { self.agent = agent; self.reason = reason } }
 public struct AgentStartParameters: Codable, Sendable { public var agent: String; public init(agent: String) { self.agent = agent } }
 public struct AgentSuspendParameters: Codable, Sendable { public var agent: String; public var reason: String?; public init(agent: String, reason: String? = nil) { self.agent = agent; self.reason = reason } }

@@ -358,7 +358,8 @@ enum Fetched {
         reason: String,
     },
     /// st answered a glass write: the glass, the write's key, and the revision it accepted.
-    SidebarSaved { write: super::resource_sidebar::Write, outcome: Result<(), String> },
+    /// An error carries whether st refused it because the Sidebar was retired.
+    SidebarSaved { write: super::resource_sidebar::Write, outcome: Result<(), (String, bool)> },
     GlassSaved {
         id: String,
         key: String,
@@ -1036,7 +1037,15 @@ pub fn run(context: Context) -> Result<()> {
                 },
                 Fetched::SidebarSaved { write, outcome } => {
                     ui.resource_sidebar.saved(&write, outcome.is_ok());
-                    if let Err(error) = outcome { ui.flash(format!("Sidebar edit not done: {error}")); }
+                    match outcome {
+                        Ok(()) => {}
+                        // The reserved Sidebar is retired: never create it again.
+                        Err((_, true)) if write.creating => {
+                            ui.resource_sidebar.reserved_retired = true;
+                            ui.flash(super::resource_sidebar::SIDEBAR_RETIRED);
+                        }
+                        Err((error, _)) => ui.flash(format!("Sidebar edit not done: {error}")),
+                    }
                 }
                 Fetched::Observations { generation, outcome } => {
                     resources_reading = false;
@@ -1405,7 +1414,13 @@ pub fn run(context: Context) -> Result<()> {
                 } else {
                     let client = client.clone(); let tx = fetched_tx.clone(); let person = person.clone(); let model = model.clone();
                     runtime.spawn(async move {
-                        let outcome = perform_steadily(&client, &person, &model, effect, None).await.map(|_| ()).map_err(|error| plain(&error));
+                        let outcome = perform_steadily(&client, &person, &model, effect, None).await.map(|_| ()).map_err(|error| {
+                            let retired = error.chain().any(|cause| matches!(
+                                cause.downcast_ref::<st3_client::ClientError>(),
+                                Some(st3_client::ClientError::Api(st3_client::ErrorCode::ArrangementRetired, ..))
+                            ));
+                            (plain(&error), retired)
+                        });
                         let _ = tx.send(Fetched::SidebarSaved { write, outcome });
                     });
                 }
@@ -1934,11 +1949,7 @@ pub fn run(context: Context) -> Result<()> {
             |input| {
                 cancel_initial_subject(&mut initial_subject, &input);
                 match input {
-                    Event::Key(key)
-                        if !extras.live
-                            && key.code == crossterm::event::KeyCode::Char('r')
-                            && !ui.editing =>
-                    {
+                    Event::Key(key) if reconnect_key(&key, extras.live) => {
                         let _ = commands.send(Command::Reconnect);
                         true
                     }
@@ -2073,6 +2084,16 @@ const FILL_ROWS: usize = 200;
 const FILL_PAGES: usize = 7;
 
 /// A page st took this long to give is a sign it is busy: no more pages are read on their own.
+/// Ctrl+R asks to reconnect while there is no live link. A bare `r` is a letter like any other:
+/// it must reach the message box, link or no link (Nathan, 2026-10-14: a lowercase r could not be
+/// typed while the link was stale).
+fn reconnect_key(key: &crossterm::event::KeyEvent, live: bool) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    !live
+        && key.code == KeyCode::Char('r')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 const FILL_SLOW: Duration = Duration::from_millis(1500);
 
 fn slow_page(took: Duration) -> bool {
@@ -3097,6 +3118,18 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn only_ctrl_r_reconnects_and_never_a_letter() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        let ctrl_r = key(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        let plain_r = key(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(reconnect_key(&ctrl_r, false), "Ctrl+R retries a link that is down");
+        assert!(!reconnect_key(&ctrl_r, true), "Ctrl+R is left to the conversation when live");
+        assert!(!reconnect_key(&plain_r, false), "a lowercase r is typed, never taken");
+        assert!(!reconnect_key(&key(KeyCode::Char('R'), KeyModifiers::SHIFT), false));
+    }
 
     #[test]
     fn initial_subject_waits_for_live_inventory_and_opens_only_once() {

@@ -6,6 +6,7 @@ import { webfractalGateway } from './scripts/vite-gateway.mjs'
 import { extensionBuild } from './scripts/extensions-build.mjs'
 import { fractalContentSecurityPolicy } from './scripts/vite-csp.mjs'
 import { fractalCssAssets } from './scripts/vite-css-assets.mjs'
+
 export default defineConfig({
   root: 'src/web',
   plugins: [
