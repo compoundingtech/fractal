@@ -28,6 +28,9 @@ assert.equal(agentWord('compacting'), 'compacting');
 assert.equal(agentWord('needs-you'), 'alert');
 assert.equal(agentState({ state: 'waiting', harness_state: 'starting' }), 'starting');
 assert.equal(agentState({ state: 'stopped' }), 'stopped');
+assert.equal(agentState({ state: 'retired', fault: 'old failure', delivery: { state: 'stale' } }), 'retired');
+assert.equal(agentWord('retired'), 'retired');
+assert.deepEqual(agentSections(agentRows([agent('example/retired', { state: 'retired' })], [], 'example-linux', now)).map(section => section.title), ['retired']);
 assert.equal(agentState({ state: 'failed' }), 'fault');
 
 // Grouped and sorted like stui: waiting on you, broken, working, idle, stopped, and sessions st
@@ -85,7 +88,7 @@ assert.equal(agentModel({ usage: null }), null);
 assert.equal(agentModel({}), null);
 
 // Signed out of its provider: needs login, said how, and it clears once signed in again.
-import { agentState as stateOf, loginGuidance } from './agentsView.ts';
+import { agentGroup, agentState as stateOf, loginGuidance } from './agentsView.ts';
 assert.equal(stateOf({ state: 'waiting', harness_state: 'unauthenticated', fault: null, delivery: null }), 'needs-login');
 assert.equal(stateOf({ state: 'waiting', harness_state: 'idle', reason: 'providerAuth', fault: null, delivery: null }), 'needs-login');
 assert.equal(stateOf({ state: 'running', harness_state: 'idle', fault: null, delivery: null }), 'idle');
@@ -96,6 +99,11 @@ assert.equal(stateOf({ state: 'waiting', harness_state: 'indeterminate', observa
 assert.equal(stateOf({ state: 'waiting', harness_state: 'indeterminate', observation: 'current', reachability: 'reachable', fault: null, delivery: null }), 'starting');
 assert.equal(stateOf({ state: 'waiting', harness_state: 'indeterminate', observation: null, reachability: 'reachable', fault: null, delivery: null }), 'starting');
 assert.equal(stateOf({ state: 'waiting', harness_state: 'indeterminate', observation: 'stale', reachability: 'unreachable', fault: null, delivery: null }), 'starting');
+
+// A seat with no session is down, whatever its stale harness says; st decides, the app only shows it.
+assert.equal(stateOf({ state: 'down', harness_state: 'indeterminate', observation: 'stale', reachability: 'reachable', fault: null, delivery: null }), 'down');
+assert.equal(agentWord('down'), 'down');
+assert.equal(agentGroup({ state: 'down', unmanaged: false }), 'broken');
 
 // st's additive harness_error_state names a login outright, even when the harness state is stale.
 assert.equal(stateOf({ state: 'waiting', harness_state: 'indeterminate', observation: 'stale', reachability: 'reachable', harness_error_state: 'needs-login', fault: null, delivery: null }), 'needs-login');

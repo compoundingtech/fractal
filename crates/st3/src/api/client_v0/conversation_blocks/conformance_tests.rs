@@ -2,11 +2,10 @@ use super::*;
 use crate::external_sessions::{ExternalDriver, TimelineOrder};
 
 fn validator() -> jsonschema::Validator {
-    let mut schema: Value = serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/st3/client-v0/schemas/client-v0.schema.json"
-    )))
-    .unwrap();
+    let schema_path = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/st3/client-v0/schemas/client-v0.schema.json");
+    let mut schema: Value =
+        serde_json::from_str(&std::fs::read_to_string(schema_path).unwrap()).unwrap();
     schema.as_object_mut().unwrap().remove("$id");
     schema.as_object_mut().unwrap().remove("oneOf");
     schema["$ref"] = json!("#/$defs/TimelineEntry");

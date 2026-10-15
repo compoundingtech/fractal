@@ -1,7 +1,7 @@
 # Get started with Smalltalk
 
 Download Smalltalk and run `st`. The first run sets up your machine and opens a
-conversation with the built-in expert, when a coding harness is available. The expert
+conversation with the built-in Smalltalk Assistant, when a coding harness is available. The Assistant
 helps you give agents a mission and follow its progress in the terminal interface.
 
 Start with one machine. Each person currently runs their own fleet; a phone, another
@@ -38,25 +38,51 @@ The default is ad-hoc signing, which can require renewed OS approvals after an u
 Native installer and Darwin archive tests run in CI; clean-machine real-app, launchd
 and TCC permission setup remain a separate manual rehearsal.
 
-## 2. Answer the first-run questions
+## 2. Answer the first-run screen
 
-Choose your person name and a persistent machine name. `ada` and `studio` are invented
-examples; use your own names. Names use lowercase letters, digits, hyphens and
-underscores, and the machine name `local` is reserved. Setup merges these names into
-`~/.config/st3/config.toml` without replacing unrelated settings.
+In a terminal, `st setup` (and the first plain `st`) shows one screen instead of asking
+questions one at a time. It says in a few lines what Smalltalk is and that your first
+agent runs on your own Claude or Codex account and uses its usage. Then it lists
+everything to choose:
 
-Keep the default background-service option to run agents after closing the terminal.
-Setup installs a user service and starts the daemon. If a user service manager is
-unavailable, it explains the detached-daemon fallback; that fallback does not survive
-a reboot. On Linux, if lingering cannot be enabled automatically, setup prints the
-`loginctl` command needed to keep the user service running after logout. On macOS,
-follow the permission instructions in [daemon details](#daemon-details).
+- **Your name and this machine's name.** `ada` and `studio` are invented examples; use
+  your own. Names use lowercase letters, digits, hyphens and underscores, and the
+  machine name `local` is reserved. Setup merges them into `~/.config/st3/config.toml`
+  without replacing unrelated settings.
+- **Start st when I log in**, ticked. This installs a user service (no administrator
+  rights) and the screen says where it goes and how to remove it. On Linux, **Keep
+  running after I log out** appears when lingering is off and can be turned on for you.
+  If a user service manager is unavailable, setup explains the detached-daemon fallback;
+  it does not survive a reboot. On macOS, follow the permission instructions in
+  [daemon details](#daemon-details).
+- **Every supported agent**: Claude Code, Codex, OpenCode, Pi and Omp. Those found on the
+  daemon's login PATH are ticked and you can untick them. Each row keeps four facts
+  apart: whether its program was found, whether it is selected, whether st's integration
+  is ready, and whether you are signed in (or that setup cannot tell). Each row says what
+  setup does for it and the exact local paths it touches. An agent that is not installed
+  says how to get it; install it, then press `r` to look again.
+- **Let Codex work without asking**, only when Codex is found, ticked by default. Ticked,
+  Codex gets the same access mode as every agent st starts (see
+  [Managed harness access](st3/harness-access.md)). Unticked, Codex asks. The choice is
+  saved as `codex_work_without_asking` in the config.
 
-Setup checks for Claude Code, Codex, OpenCode, Pi and Omp on the daemon's login PATH.
-It asks you to choose only when several are available. Install and sign in to a
-supported harness using its own instructions. An installed executable does not prove
-that its account is logged in. With no supported harness, setup creates no expert or
-onboarding run and still opens the interface. After installing one, make the command available in this shell and run:
+One consent line sits above the two buttons: *Set up st for the selected agents, adding
+its local integrations and required workspace configuration?* **Set up** does it for
+every ticked agent at once; **Skip for now** sets up st itself and no agent. Signing in
+and trusting a folder are never part of that consent, and setup asks no permission-mode question. Each
+agent ends **ready**, **needs you to sign in**, or **failed**, with the whole error on
+screen, and one agent's failure never undoes another's setup. If an agent has not
+finished its own first launch (Claude's theme and sign-in, a Codex or OpenCode login),
+setup hands you the terminal for it and carries on when you leave it. **Retry** runs only
+the rows that did not finish. The first agent that is ready starts the Assistant while the
+screen is still up.
+
+Pipes, `--yes` and anything that is not a terminal keep the line-mode setup: flags
+supply the answers and nothing is asked. `st setup --help` lists them.
+
+An installed program does not prove that its account is signed in. With no supported
+agent, setup starts no onboarding run and still opens the interface. After installing
+one, make the command available in this shell and run:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -69,7 +95,7 @@ the development-channel flag and st handles its admission dialog. Provider or
 organization restrictions can still block the channel. Smalltalk never asks for or
 types a password; optional machine policy, GitHub login and `gh` do not block setup.
 
-Before expecting a Claude expert to be ready, run `claude` in a normal terminal as
+Before expecting a Claude Assistant to be ready, run `claude` in a normal terminal as
 the same user and with the same profile (`CLAUDE_CONFIG_DIR`, if set) used by the
 daemon. Complete Claude's native welcome, text style/theme selection and account
 login or explicit API-key confirmation. Successful `claude auth status` or a print
@@ -78,8 +104,8 @@ this setup is complete. Complete any native permission-bypass consent required f
 unattended operation too. See
 [Claude's authentication instructions](https://code.claude.com/docs/en/authentication#authentication-precedence).
 
-If `agent/st/expert` is already waiting at those screens, complete native Claude
-setup first, then run `st agents restart agent/st/expert --as person/ada` to retry
+If `agent/st/assistant` is already waiting at those screens, complete native Claude
+setup first, then run `st agents restart agent/st/assistant --as person/ada` to retry
 the existing seat (replace `ada` with your configured person). Keep its
 original onboarding run; do not use `st setup --onboarding` while that run is active.
 
@@ -96,20 +122,22 @@ waits for you. The setting is `access_mode` in `~/.config/st3/config.toml`. An e
 without the key stays on `bypass` until you ask for a change. See
 [Managed harness access](st3/harness-access.md) for what each mode does.
 
-## 3. Work with the expert
+## 3. Work with the Smalltalk Assistant
 
 When a usable harness is available, the first run, the one that creates your configuration,
-asks before it starts anything. It says that the built-in expert is an agent that runs on your
+asks before it starts anything. It says that the built-in Smalltalk Assistant is an agent that runs on your
 own harness account, so it uses that harness's usage and quota, and which access mode it
-runs in, then asks `Start the built-in expert now?` (default yes). `--yes` answers yes and
-`--expert false` declines; a decline prints `Not started. Run st setup --onboarding when you
-want it.` On yes, setup creates `agent/st/expert` and starts `mission/st/onboarding`, and says
-what it created and how to stop it. When setup publishes the expert during a plain `st`
-launch, the interface opens that conversation. You can also find it under Agents.
-Follow its guidance for your first mission; the expert stays available afterward.
+runs in, then asks `Start the built-in Smalltalk Assistant now?` (default yes). `--yes` answers yes and
+`--assistant false` declines; a decline prints `Not started. Run st setup --onboarding when you
+want it.` On yes, setup creates `agent/st/assistant` and starts `mission/st/onboarding`, and says
+what it created and how to stop it. When setup publishes the Assistant during a plain `st`
+launch, the interface opens that conversation. You can also open its conversation from the sidebar or **Ctrl+K**.
+Follow its guidance for your first mission; the Assistant stays available afterward.
+The follow-on [mission guide](missions-in-practice.md) explains how to declare
+the `garden/worker` seat used in its examples.
 
-Home shows questions, decisions and failures that need you. Agents shows conversations
-and transcripts; Missions shows work and results. **Ctrl+K** opens the palette and
+**Now** shows questions, decisions and failures that need you. Open an agent
+conversation or a mission from the sidebar or **Ctrl+K**; **Ctrl+H** returns to Now.
 **Ctrl+Q** quits the interface while agents keep working.
 
 After quitting, make the installed commands available in this shell and reopen st:
@@ -123,20 +151,20 @@ If setup reported that the login PATH lacks `~/.local/bin`, add that export to y
 shell's startup file so new terminals can find `st` too. The installer can open st
 using its full path even before that PATH change.
 
-You can also send the expert a question from the shell. This example assumes you
+You can also send the Assistant a question from the shell. This example assumes you
 chose `ada`; replace `person/ada` with your configured person:
 
 ```sh
-st conversations send agent/st/expert --from person/ada \
+st conversations send agent/st/assistant --from person/ada \
   --subject 'Getting started' --body 'Help me make my first mission.'
 st
 ```
 
-Setup starts the expert on its own only on that first run. On a machine that already has a
+Setup starts the Assistant on its own only on that first run. On a machine that already has a
 configuration, plain `st` and `st setup` start nothing and, for `st setup`, say so. To begin
 (or begin again) deliberately, finish or cancel any active onboarding run, then use
 `st setup --onboarding`. That command skips the question because it is the request, can
-restore a stopped expert and starts a distinct onboarding run; it refuses when the running
+restore a stopped Assistant and starts a distinct onboarding run; it refuses when the running
 daemon is too old to report onboarding history. It does not cancel an existing run for you.
 Use `st setup --help` for scripted answers and other options.
 

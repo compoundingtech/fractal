@@ -156,3 +156,148 @@ fn cancelled_real_blocking_queue_cannot_begin_pass_sql_or_reserve_start_history(
         assert!(task.await.unwrap_err().is_cancelled());
     });
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuiescenceTraffic {
+    None,
+    Unrelated,
+    Deduplication,
+    StartCompletion,
+    OwnEffects,
+}
+
+async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
+    const SUBJECTS: usize = 3;
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let workspace = tempfile::tempdir().unwrap();
+    let mut source = String::from("version 2\n");
+    for subject in 0..SUBJECTS {
+        source.push_str(&format!(
+            "exec \"quiet-{subject}\" {{ workspace \"{}\"; command \"true\"; restart \"never\" }}\n",
+            workspace.path().display()
+        ));
+    }
+    apply_source(&store, &source, "quiescence");
+    assert_eq!(store.desired_subjects().unwrap().len(), SUBJECTS);
+    let runtime = Arc::new(FakeRuntime::default());
+    let mut reconciler = Reconciler::new(
+        store.clone(),
+        runtime.clone(),
+        "node".into(),
+        Arc::new(Notify::new()),
+    );
+    reconciler.set_max_passes_per_minute(600).unwrap();
+    // Settle the fixture's own effects before measuring the startup wake.
+    for _ in 0..4 {
+        reconciler.reconcile_once().unwrap();
+    }
+    let before = store.index().unwrap();
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(store.index().unwrap(), before);
+    let local_fields = BTreeMap::from([
+        ("reason".into(), Value::String("already recorded".into())),
+    ]);
+    if traffic == QuiescenceTraffic::Deduplication {
+        reconciler.record_once("exec/unrelated", "runtime.action.succeeded", local_fields.clone()).unwrap();
+        let claim = store.latest_observation("exec/unrelated", "runtime.action.succeeded").unwrap().unwrap();
+        assert!(crate::store::local_observation_position(&claim).is_some());
+    }
+    let (wakes, mut wake_rx) = mpsc::unbounded_channel();
+    reconciler.background_wake_hook = Some(Arc::new(move |passes| {
+        let _ = wakes.send(passes);
+    }));
+    let reconciler = Arc::new(reconciler);
+    let snapshots = Arc::new(AtomicUsize::new(0));
+    *runtime.before_snapshot.lock().unwrap() = Some(Box::new({
+        let snapshots = snapshots.clone();
+        let reconciler = Arc::downgrade(&reconciler);
+        move || {
+            let pass = snapshots.fetch_add(1, Ordering::SeqCst);
+            if traffic == QuiescenceTraffic::Unrelated && pass < 64 {
+                // Write on another thread, as replication does. Join makes the write land
+                // strictly between the pass's before/after readings, without timing races.
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    store.append_claim(&ClaimInput {
+                        subject: format!("message/unrelated-{pass}"),
+                        kind: "message.sent".into(),
+                        actor: Some("person/test".into()),
+                        fields: BTreeMap::from([
+                            ("from".into(), Value::String("person/test".into())),
+                            ("to".into(), Value::String("person/other".into())),
+                            ("content".into(), Value::String("unrelated".into())),
+                            ("status".into(), Value::String("sent".into())),
+                        ]),
+                        evidence: vec![],
+                        expected_subject: None,
+                        idempotency_key: None,
+                    }).unwrap();
+                }).join().unwrap();
+            }
+            if traffic == QuiescenceTraffic::Deduplication {
+                let before = smallclaims::touched::writes();
+                reconciler.upgrade().unwrap()
+                    .record_once("exec/unrelated", "runtime.action.succeeded", local_fields.clone()).unwrap();
+                assert_eq!(smallclaims::touched::writes(), before);
+            }
+            if traffic == QuiescenceTraffic::OwnEffects && pass < 64 {
+                let mut fields = local_fields.clone();
+                fields.insert("reason".into(), Value::String(format!("pass {pass}")));
+                reconciler.upgrade().unwrap()
+                    .record_once("exec/unrelated", "runtime.action.succeeded", fields).unwrap();
+            }
+        }
+    }));
+    let task = tokio::spawn(reconciler.clone().run());
+    let first = receive(&mut wake_rx).await;
+    let mut counts = vec![first];
+    if traffic == QuiescenceTraffic::StartCompletion {
+        let reconciler = reconciler.clone();
+        tokio::task::spawn_blocking(move || {
+            let subject = reconciler.store.desired_subjects().unwrap().into_iter()
+                .find(|subject| subject.subject == "exec/quiet-0").unwrap();
+            let before = smallclaims::touched::writes();
+            // Complete only after the initial pass rests. This real start path's
+            // signal_changed must supply the next wake; the test never calls notify.
+            reconciler.perform_start(
+                &subject, subject.member.as_ref().unwrap(), "helper completed start",
+            ).unwrap();
+            assert!(smallclaims::touched::writes() > before);
+        }).await.unwrap();
+    }
+    if first == 64 || traffic == QuiescenceTraffic::StartCompletion {
+        // The cap or the helper's real signal_changed must supply this notification.
+        counts.push(receive(&mut wake_rx).await);
+    }
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    eprintln!("traffic={traffic:?}: passes_per_wake={counts:?}");
+    counts
+}
+
+#[tokio::test]
+async fn background_quiesces_without_concurrent_writes() {
+    assert_eq!(quiescence_pass_counts(QuiescenceTraffic::None).await, vec![1]);
+}
+
+#[tokio::test]
+async fn background_quiesces_under_unrelated_claim_writes() {
+    let counts = quiescence_pass_counts(QuiescenceTraffic::Unrelated).await;
+    assert!(counts.len() == 1 && counts[0] <= 2, "passes_per_wake={counts:?}");
+}
+
+#[tokio::test]
+async fn background_quiesces_after_deduping_local_only_observations() {
+    assert_eq!(quiescence_pass_counts(QuiescenceTraffic::Deduplication).await, vec![1]);
+}
+
+#[tokio::test]
+async fn background_start_completion_on_a_helper_thread_wakes_a_quiet_pass() {
+    // The completion wakes a pass, which records the new observation and confirms it once.
+    assert_eq!(quiescence_pass_counts(QuiescenceTraffic::StartCompletion).await, vec![1, 2]);
+}
+
+#[tokio::test]
+async fn background_own_local_effects_keep_the_64_pass_cap_and_self_notify() {
+    assert_eq!(quiescence_pass_counts(QuiescenceTraffic::OwnEffects).await, vec![64, 1]);
+}

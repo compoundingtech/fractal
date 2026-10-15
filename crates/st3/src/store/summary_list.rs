@@ -6,6 +6,8 @@
 //! attention rows, the same rows its attention window shows. A window names the person it
 //! selects. A selection the refresher cannot serve (more selections than it keeps, or one whose
 //! shared counts cannot be computed) is not published, and its windows read for themselves.
+//! The machines the shared counts count are the costliest part to read and few claims change
+//! them, so they are read again only when one may have (`summary_machines_hold`).
 //! Volatile cache state, cleared by `forget_views`.
 
 use super::*;
@@ -14,6 +16,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 /// At most this many selections are published; a busy fleet has a handful of people. Windows of
 /// any further selection read for themselves.
 const SELECTIONS: usize = 64;
+
+/// More claims than this since the machines were read reads them again rather than every claim.
+const MACHINES_DELTA_LIMIT: usize = 10_000;
+
+/// More runtimes than this with claims since the machines were read reads them again rather
+/// than reducing each of them.
+const MACHINES_RUNTIMES_LIMIT: usize = 64;
 
 /// One selection's published row.
 #[derive(Clone)]
@@ -46,6 +55,21 @@ pub(crate) struct SummaryInputs {
     pub(crate) period: u128,
 }
 
+/// The machines the shared counts were counted from and what they were read under: the graph
+/// cut, the clock period, the count of conflicting operations and the fleet's membership. Kept
+/// past their cut, the machines' hosts, states and transports still hold; their runtimes, work
+/// and update times may not, and the counts read none of those.
+#[derive(Clone)]
+pub(crate) struct SummaryMachines {
+    pub(crate) cut: u64,
+    pub(crate) period: u128,
+    pub(crate) conflicts: u64,
+    pub(crate) fleet: smallclaims::fleet::FleetView,
+    pub(crate) machines: Arc<Vec<Value>>,
+    /// The host each current runtime runs on, by runtime subject.
+    pub(crate) runtimes: Arc<BTreeMap<String, String>>,
+}
+
 #[derive(Default)]
 struct Selection {
     /// When a window last read it, in Unix ms.
@@ -59,14 +83,17 @@ struct Selection {
 struct Lists {
     selections: HashMap<Option<String>, Selection>,
     shared: Option<(Arc<SummaryShared>, SummaryInputs)>,
+    machines: Option<SummaryMachines>,
 }
 
 #[derive(Default)]
 pub(crate) struct SummaryList {
     lists: Mutex<Lists>,
     forgotten: AtomicU64,
-    /// The shared counts were computed (or tried) once since the store opened.
+    /// The shared counts were computed once since the store opened.
     started: AtomicBool,
+    /// The newest attempt to compute the shared counts failed.
+    failing: AtomicBool,
 }
 
 impl SummaryList {
@@ -74,6 +101,7 @@ impl SummaryList {
         let mut lists = self.lists.lock().unwrap_or_else(PoisonError::into_inner);
         self.forgotten.fetch_add(1, AtomicOrdering::AcqRel);
         lists.shared = None;
+        lists.machines = None;
         for selection in lists.selections.values_mut() {
             selection.row = None;
         }
@@ -152,10 +180,17 @@ impl Store {
             .clone()
     }
 
-    /// Whether the shared counts were never computed since the store opened: as the daemon
-    /// starts they are, before any window asks. Marks them started.
-    pub(crate) fn start_summary_shared(&self) -> bool {
-        !self.smalltalk.summary_list.started.swap(true, AtomicOrdering::AcqRel)
+    /// Mark the shared counts computed once since the store opened. Until they are (the
+    /// complete roster they count agents from may not be published yet), the refresher keeps
+    /// computing them with no window asking, so the first window is served at once.
+    pub(crate) fn start_summary_shared(&self) {
+        self.smalltalk.summary_list.started.store(true, AtomicOrdering::Release);
+    }
+
+    /// Note whether an attempt to compute the shared counts failed. Returns whether this begins
+    /// a run of failures: the refresher retries every pass, and says so once per run.
+    pub(crate) fn note_summary_shared_failed(&self, failed: bool) -> bool {
+        self.smalltalk.summary_list.failing.swap(failed, AtomicOrdering::AcqRel) != failed && failed
     }
 
     /// Whether the shared counts are still to be computed as the daemon starts.
@@ -227,5 +262,109 @@ impl Store {
         selection.failed = false;
         selection.row = Some(row);
         changed
+    }
+
+    /// The machines the shared counts were last counted from, if any.
+    pub(crate) fn summary_machines(&self) -> Option<SummaryMachines> {
+        self.smalltalk
+            .summary_list
+            .lists
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .machines
+            .clone()
+    }
+
+    /// Keep the machines read, or found to still hold, at `machines.cut`. A read that began
+    /// before views were forgotten (`generation` is stale), or one older than the newest, keeps
+    /// nothing.
+    pub(crate) fn keep_summary_machines(&self, generation: u64, machines: SummaryMachines) {
+        let list = &self.smalltalk.summary_list;
+        let mut lists = list.lists.lock().unwrap_or_else(PoisonError::into_inner);
+        if list.forgotten.load(AtomicOrdering::Acquire) != generation
+            || lists.machines.as_ref().is_some_and(|newest| newest.cut > machines.cut)
+        {
+            return;
+        }
+        lists.machines = Some(machines);
+    }
+
+    /// How many operations conflict. A conflict changes the status of the subjects its claims
+    /// are about without a claim of their own.
+    pub(crate) fn conflicting_operations(&self) -> Result<u64> {
+        Ok(self
+            .readers
+            .get()
+            .prepare_cached("SELECT COUNT(*) FROM operations WHERE state='conflict'")?
+            .query_row([], |row| row.get(0))?)
+    }
+
+    /// Whether the machines read at `after` may still hold at `through`, read in the snapshot at
+    /// `through`: `None` when a claim admitted between them may change one, else the runtimes
+    /// whose claims did, which may have started, stopped or moved to another host. A machine is
+    /// a configured, fleet or current runtime's host with that host's own status. A runtime is a
+    /// subject with a runtime observation; whether it is current, and where it runs, come from
+    /// the claims about it or that it acted in, other than its harness reports without a live
+    /// status (`CURRENT_VIEW_CLAIM`), and from the claims about the run and generation that own
+    /// it. So only claims about hosts, runs and generations change machines, and claims about
+    /// runtimes change only those runtimes; the rest, most of a busy host's claims (harness
+    /// reports, messages, documents), change none. Conflicting operations, fleet membership and
+    /// replication successes change machines without a claim: the caller compares those.
+    pub(crate) fn summary_machines_hold(
+        &self,
+        after: u64,
+        through: u64,
+    ) -> Result<Option<BTreeSet<String>>> {
+        if through < after {
+            return Ok(None);
+        }
+        let connection = self.readers.get();
+        let runtime = |of: &str| {
+            format!(
+                "EXISTS(SELECT 1 FROM claims AS runtime INDEXED BY claims_runtime_subject_index
+                        WHERE runtime.kind='runtime.observed' AND runtime.subject=claims.{of}
+                          AND runtime.store_index<=?2)"
+            )
+        };
+        let mut statement = connection.prepare_cached(&format!(
+            "SELECT subject, actor, kind, {CURRENT_VIEW_CLAIM}, {}, {}
+             FROM claims WHERE store_index>?1 AND store_index<=?2 ORDER BY store_index LIMIT ?3",
+            runtime("subject"),
+            runtime("actor"),
+        ))?;
+        let claims = statement
+            .query_map(params![after, through, MACHINES_DELTA_LIMIT as u64 + 1], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<bool>>(3)?.unwrap_or(false),
+                    row.get::<_, bool>(4)?,
+                    row.get::<_, Option<bool>>(5)?.unwrap_or(false),
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if claims.len() > MACHINES_DELTA_LIMIT {
+            return Ok(None);
+        }
+        let mut runtimes = BTreeSet::new();
+        for (subject, actor, kind, live, subject_runtime, actor_runtime) in claims {
+            if subject.starts_with("host/")
+                || subject.starts_with("mission-run/")
+                || subject.starts_with("run-generation/")
+            {
+                return Ok(None);
+            }
+            if kind.starts_with("harness.") && !live {
+                continue;
+            }
+            if subject_runtime {
+                runtimes.insert(subject);
+            }
+            if actor_runtime && let Some(actor) = actor {
+                runtimes.insert(actor);
+            }
+        }
+        Ok((runtimes.len() <= MACHINES_RUNTIMES_LIMIT).then_some(runtimes))
     }
 }
