@@ -16437,7 +16437,7 @@ subscription "watch/source" {
             let exchange = edge.export_replication_exchange(FLEET, &inventory).unwrap();
             state
                 .store
-                .receive_replication_exchange("edge", FLEET, &exchange)
+                .receive_replication_exchange_asking("edge", FLEET, &exchange, true)
                 .unwrap();
             exchange.envelopes.len() as u64
         };
@@ -16461,6 +16461,19 @@ subscription "watch/source" {
         );
         let json = serde_json::to_value(page(&state)).unwrap();
         assert_eq!(json["sync"]["peers"][0]["host_id"], "host/edge");
+        assert_eq!(
+            json["sync"]["peers"][0]["last_successful_exchange"]["carrier"],
+            "unknown"
+        );
+        assert_eq!(
+            json["sync"]["peers"][0]["last_successful_exchange"]["at"],
+            json["sync"]["peers"][0]["last_exchange_at"]
+        );
+        assert!(
+            json["sync"]["peers"][0]
+                .get("last_failed_exchange")
+                .is_none()
+        );
 
         // Once the rest fits in one exchange, pages stop carrying the notice.
         pull(&state);

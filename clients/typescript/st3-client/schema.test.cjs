@@ -422,6 +422,22 @@ test('phone observation schema keeps histogram pairs and live-share as separate 
     ]) assert.throws(()=>decode({...report,samples}));
 });
 
+test('exchange carrier additions preserve legacy absence and future carrier values', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = { host_id: 'host/birch', peer_only_envelopes: 5, local_only_envelopes: 0, last_exchange_at: null, estimated_catch_up_seconds: null, diverged_since: null };
+    const decode = Rich.decodeUnknownSync(Rich.SyncPeer, 'strict');
+    assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(wire)), wire);
+    const observed = {
+        ...wire,
+        last_successful_exchange: { at: '2026-10-13T12:00:00.000Z', carrier: 'loopback' },
+        last_failed_exchange: { at: '2026-10-13T11:59:00.000Z', carrier: 'fabric', fabric_route: 'unknown' },
+    };
+    assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(observed)), observed);
+    const future = { ...observed, last_successful_exchange: { ...observed.last_successful_exchange, carrier: 'future-carrier' } };
+    assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(future)), future);
+    assert.throws(() => decode({ ...observed, last_failed_exchange: { carrier: 'fabric' } }));
+});
+
 
 test('message provenance retains its serving model and reads historical absence strictly', async () => {
     const [{ Schema }, Rich] = await modules;
