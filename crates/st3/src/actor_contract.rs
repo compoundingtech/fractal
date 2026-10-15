@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn actor_contract_has_no_unclassified_commands() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let path = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/st3/actor-contract.json");
         let published: Value = serde_json::from_slice(
             &std::fs::read(path).expect("generate with st actor-contract --json"),
