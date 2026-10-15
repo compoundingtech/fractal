@@ -8,7 +8,9 @@ use sha2::{Digest as _, Sha256};
 fn actor_argument(command: &clap::Command) -> Option<&clap::Arg> {
     command.get_arguments().find(|argument| {
         argument.get_long() == Some("as")
-            || argument.get_all_aliases().is_some_and(|aliases| aliases.contains(&"as"))
+            || argument
+                .get_all_aliases()
+                .is_some_and(|aliases| aliases.contains(&"as"))
     })
 }
 
@@ -16,7 +18,11 @@ fn actor_argument(command: &clap::Command) -> Option<&clap::Arg> {
 // This describes CLI syntax, not the authority a daemon will grant to a caller.
 fn accepts_person(argument: &clap::Arg) -> bool {
     clap::Command::new("actor-probe")
-        .arg(clap::Arg::new("actor").long("as").value_parser(argument.get_value_parser().clone()))
+        .arg(
+            clap::Arg::new("actor")
+                .long("as")
+                .value_parser(argument.get_value_parser().clone()),
+        )
         .try_get_matches_from(["actor-probe", "--as", "person/contract-probe"])
         .is_ok()
 }
@@ -32,7 +38,9 @@ fn implicit_person(path: &str) -> bool {
 }
 
 fn walk(command: &clap::Command, path: &str, commands: &mut BTreeMap<String, Value>) {
-    let has_children = command.get_subcommands().any(|child| child.get_name() != "help");
+    let has_children = command
+        .get_subcommands()
+        .any(|child| child.get_name() != "help");
     if path != "st" && (!has_children || !command.is_subcommand_required_set()) {
         let argument = actor_argument(command);
         let requirement = match argument {
@@ -44,7 +52,9 @@ fn walk(command: &clap::Command, path: &str, commands: &mut BTreeMap<String, Val
             || argument.is_some_and(|argument| argument.get_id() == "ignored_actor");
         let document_name = path == "st documents put";
         let person = argument.is_some_and(accepts_person);
-        let alternate_actor = command.get_arguments().find(|argument| argument.get_long() == Some("actor"));
+        let alternate_actor = command
+            .get_arguments()
+            .find(|argument| argument.get_long() == Some("actor"));
         commands.insert(path.to_owned(), json!({
             "actor": requirement,
             "accepts_person": person,
@@ -58,7 +68,10 @@ fn walk(command: &clap::Command, path: &str, commands: &mut BTreeMap<String, Val
             "ignores_actor": ignored,
         }));
     }
-    for child in command.get_subcommands().filter(|child| child.get_name() != "help") {
+    for child in command
+        .get_subcommands()
+        .filter(|child| child.get_name() != "help")
+    {
         walk(child, &format!("{path} {}", child.get_name()), commands);
     }
 }
@@ -82,7 +95,10 @@ pub(super) fn generate(mut command: clap::Command) -> Value {
         "commands": commands,
         "aliases": inventory["aliases"],
     });
-    let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&contract).expect("contract JSON")));
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&contract).expect("contract JSON"))
+    );
     json!({"contract": contract, "contract_sha256": digest})
 }
 
@@ -117,31 +133,60 @@ mod tests {
         assert_eq!(commands["st missions show"]["can_carry_person"], false);
         assert_eq!(commands["st work show"]["can_carry_person"], false);
         assert_eq!(commands["st note"]["alternate_actor_option"], "actor");
-        for path in ["st note", "st note set", "st note clear", "st setup", "st changes sync"] {
+        for path in [
+            "st note",
+            "st note set",
+            "st note clear",
+            "st setup",
+            "st changes sync",
+        ] {
             assert_eq!(commands[path]["can_carry_person"], true, "{path}");
         }
-        for path in ["st changes list", "st changes show", "st agents handoff write", "st agents handoff ready", "st agents handoff show"] {
+        for path in [
+            "st changes list",
+            "st changes show",
+            "st agents handoff write",
+            "st agents handoff ready",
+            "st agents handoff show",
+        ] {
             assert_eq!(commands[path]["can_carry_person"], false, "{path}");
         }
         assert!(st3::handoff::document_name("person/contract-probe").is_none());
-        assert!(super::super::configured_human(Some("person/contract-probe"), None, "contract").is_ok());
-        assert!(super::super::configured_actor(Some("person/contract-probe"), None, "contract").is_ok());
+        assert!(
+            super::super::configured_human(Some("person/contract-probe"), None, "contract").is_ok()
+        );
+        assert!(
+            super::super::configured_actor(Some("person/contract-probe"), None, "contract").is_ok()
+        );
     }
 
     #[test]
     fn actor_contract_has_no_unclassified_commands() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/st3/actor-contract.json");
-        let published: Value = serde_json::from_slice(&std::fs::read(path).expect("generate with st actor-contract --json")).unwrap();
-        assert_eq!(generate(super::super::Cli::command()), published,
-            "the CLI actor surface changed; review every changed command and regenerate docs/st3/actor-contract.json with st actor-contract --json");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/st3/actor-contract.json");
+        let published: Value = serde_json::from_slice(
+            &std::fs::read(path).expect("generate with st actor-contract --json"),
+        )
+        .unwrap();
+        assert_eq!(
+            generate(super::super::Cli::command()),
+            published,
+            "the CLI actor surface changed; review every changed command and regenerate docs/st3/actor-contract.json with st actor-contract --json"
+        );
     }
 
     #[test]
     fn actor_contract_new_command_invalidates_published_classification() {
         let original = generate(super::super::Cli::command());
-        let changed = generate(super::super::Cli::command().subcommand(clap::Command::new("unclassified-probe")));
+        let changed = generate(
+            super::super::Cli::command().subcommand(clap::Command::new("unclassified-probe")),
+        );
         assert_ne!(original, changed);
-        assert!(changed["contract"]["commands"].get("st unclassified-probe").is_some());
+        assert!(
+            changed["contract"]["commands"]
+                .get("st unclassified-probe")
+                .is_some()
+        );
     }
 
     #[test]
@@ -152,32 +197,61 @@ mod tests {
                 argv.extend(["--as", "person/contract-probe"]);
                 let actual = super::super::Cli::command().try_get_matches_from(argv);
                 if entry["actor"] == "none" {
-                    assert_eq!(actual.unwrap_err().kind(), clap::error::ErrorKind::UnknownArgument, "{path}");
+                    assert_eq!(
+                        actual.unwrap_err().kind(),
+                        clap::error::ErrorKind::UnknownArgument,
+                        "{path}"
+                    );
                 } else if let Err(error) = actual {
-                    assert_ne!(error.kind(), clap::error::ErrorKind::UnknownArgument, "{path}: {error}");
+                    assert_ne!(
+                        error.kind(),
+                        clap::error::ErrorKind::UnknownArgument,
+                        "{path}: {error}"
+                    );
                 }
                 // Keep the real argument's required bit and value parser. Remove unrelated
                 // arguments so a missing positional or conflicting option cannot hide --as.
                 let mut parser = clap::Command::new("probe");
                 if let Some(argument) = actor_argument(command) {
-                    parser = parser.arg(clap::Arg::new("actor").long("as")
-                        .required(argument.is_required_set())
-                        .value_parser(argument.get_value_parser().clone()));
+                    parser = parser.arg(
+                        clap::Arg::new("actor")
+                            .long("as")
+                            .required(argument.is_required_set())
+                            .value_parser(argument.get_value_parser().clone()),
+                    );
                 }
-                let supplied = parser.clone().try_get_matches_from(["probe", "--as", "person/contract-probe"]);
+                let supplied =
+                    parser
+                        .clone()
+                        .try_get_matches_from(["probe", "--as", "person/contract-probe"]);
                 if entry["actor"] == "none" {
-                    assert_eq!(supplied.unwrap_err().kind(), clap::error::ErrorKind::UnknownArgument, "{path}");
+                    assert_eq!(
+                        supplied.unwrap_err().kind(),
+                        clap::error::ErrorKind::UnknownArgument,
+                        "{path}"
+                    );
                 } else {
-                    assert_eq!(supplied.is_ok(), entry["accepts_person"].as_bool().unwrap(), "{path}");
+                    assert_eq!(
+                        supplied.is_ok(),
+                        entry["accepts_person"].as_bool().unwrap(),
+                        "{path}"
+                    );
                     let absent = parser.try_get_matches_from(["probe"]);
                     if entry["actor"] == "required" {
-                        assert_eq!(absent.unwrap_err().kind(), clap::error::ErrorKind::MissingRequiredArgument, "{path}");
+                        assert_eq!(
+                            absent.unwrap_err().kind(),
+                            clap::error::ErrorKind::MissingRequiredArgument,
+                            "{path}"
+                        );
                     } else {
                         assert!(absent.is_ok(), "{path}");
                     }
                 }
             }
-            for child in command.get_subcommands().filter(|child| child.get_name() != "help") {
+            for child in command
+                .get_subcommands()
+                .filter(|child| child.get_name() != "help")
+            {
                 check(child, &format!("{path} {}", child.get_name()), contract);
             }
         }
