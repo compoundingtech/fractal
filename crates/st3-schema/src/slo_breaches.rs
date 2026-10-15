@@ -9,6 +9,7 @@ pub const MAX_GROUP_BYTES: usize = 32 * 1024;
 pub const MAX_RECORD_BYTES: usize = 8 * 1024;
 /// Conservative sub-ceiling: full groups plus transition receipts stay below the approved daily ceilings.
 pub const MAX_DAILY_OPENINGS: usize = 700;
+pub const MAX_DAILY_ONSETS: usize = 832;
 pub const DEFAULT_OWNER: &str = "agent/fleet/smalltalk/speed";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -25,6 +26,7 @@ pub struct Check {
 pub struct Observation {
     pub member: String,
     pub epoch: String,
+    pub epoch_started_ms: u64,
     pub sequence: u64,
     pub predecessor_cut: Option<String>,
     pub version: String,
@@ -68,13 +70,19 @@ impl Observation {
         if missing || self.checks.is_empty() { Decision::Unknown } else { Decision::Met }
     }
 
+    pub fn same_policy(&self, other: &Self) -> bool {
+        self.version == other.version && self.population == other.population && self.window_ms == other.window_ms
+            && self.checks.len() == other.checks.len()
+            && self.checks.iter().zip(&other.checks).all(|(a,b)| a.unit == b.unit && a.target == b.target && a.minimum == b.minimum)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.member.is_empty() || self.member.len() > 128 || self.epoch.is_empty() || self.epoch.len() > 128
             || self.sequence == 0 || self.predecessor_cut.as_ref().is_some_and(|cut| cut.is_empty() || cut.len() > 128)
             || self.version.is_empty() || self.version.len() > 128
             || self.population.is_empty() || self.population.len() > 128
             || self.source_cut.is_empty() || self.source_cut.len() > 128
-            || self.start_ms >= self.end_ms || self.end_ms > self.observed_at_ms
+            || self.epoch_started_ms > self.start_ms || self.start_ms >= self.end_ms || self.end_ms > self.observed_at_ms
             || self.window_ms == 0 || self.observed_at_ms > i64::MAX as u64
             || self.covered_ms > self.end_ms - self.start_ms
             || (self.complete && (self.covered_ms != self.window_ms || self.end_ms-self.start_ms != self.window_ms))
@@ -134,6 +142,11 @@ pub struct ProcessDelta {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthyWitness {
+    pub source_cut: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// Zero-worker topology is not qualified by this source seam.
+    pub expected_workers: u8,
     pub monotonic_start_ns: u64,
     pub monotonic_end_ns: u64,
     pub boundary_uncertainty_ns: u64,
@@ -157,6 +170,8 @@ pub struct Record {
     pub onset: Observation,
     pub onset_witness: Option<HealthyWitness>,
     pub healthy: Option<Observation>,
+    pub latest_miss: Option<Observation>,
+    pub recovery_floor_ms: Option<u64>,
     pub witness: Option<HealthyWitness>,
     pub mission_run: Option<String>,
     pub dispatched_at_ms: Option<u64>,
@@ -197,15 +212,17 @@ impl Record {
         if self.event == Event::Recovered {
             let healthy = self.healthy.as_ref().ok_or("recovery needs its actual healthy window")?;
             healthy.validate()?;
-            if healthy.member != self.member || healthy.source_cut == self.onset.source_cut
-                || healthy.predecessor_cut.as_deref() != Some(self.onset.source_cut.as_str())
-                || (healthy.epoch == self.onset.epoch && healthy.sequence <= self.onset.sequence)
-                || healthy.decision() != Decision::Met || healthy.start_ms < self.onset.end_ms
-                || healthy.window_ms != self.onset.window_ms
-                || healthy.version != self.onset.version || healthy.population != self.onset.population
-                || healthy.checks.len() != self.onset.checks.len()
-                || healthy.checks.iter().zip(&self.onset.checks).any(|(a,b)|
-                    a.unit != b.unit || a.target != b.target || a.minimum != b.minimum)
+            let latest = self.latest_miss.as_ref().ok_or("recovery needs the latest qualified missed cut")?;
+            latest.validate()?;
+            let floor = self.recovery_floor_ms.ok_or("recovery needs the current coverage floor")?;
+            if latest.member != self.member || latest.decision() != Decision::Missed
+                || latest.end_ms < self.onset.end_ms || !latest.same_policy(&self.onset)
+                || floor < latest.end_ms || floor < healthy.epoch_started_ms
+                || healthy.member != self.member || healthy.source_cut == latest.source_cut
+                || healthy.predecessor_cut.as_deref() != Some(latest.source_cut.as_str())
+                || (healthy.epoch == latest.epoch && healthy.sequence <= latest.sequence)
+                || healthy.decision() != Decision::Met || healthy.start_ms < floor
+                || !healthy.same_policy(&self.onset)
             {
                 return Err("partial, stale or unknown evidence cannot recover a breach".into());
             }
@@ -224,7 +241,7 @@ impl Record {
                     }
                 }
             }
-        } else if self.healthy.is_some() || self.witness.is_some() {
+        } else if self.healthy.is_some() || self.witness.is_some() || self.latest_miss.is_some() || self.recovery_floor_ms.is_some() {
             return Err("only recovery carries a healthy witness".into());
         }
         if self.event == Event::Dispatched {
@@ -246,20 +263,23 @@ impl Record {
 
 /// Coverage and arithmetic are validated by every reducer. The OS counters remain
 /// the authenticated origin's attestation, not independently measured remote truth.
-fn validate_cpu_window(objective: &str, reading: &Observation, witness: Option<&HealthyWitness>) -> Result<(), String> {
+pub fn validate_cpu_window(objective: &str, reading: &Observation, witness: Option<&HealthyWitness>) -> Result<(), String> {
     if objective != "cpu" && objective != "cpu/idle" {
         return if witness.is_none() { Ok(()) } else { Err("non-CPU reading carries a CPU witness".into()) };
     }
     let witness = witness.ok_or("CPU evidence needs the complete process witness")?;
-    if !witness.complete_cohort || witness.processes.is_empty() || witness.processes.len() > 9
+    if witness.source_cut != reading.source_cut || witness.start_ms != reading.start_ms || witness.end_ms != reading.end_ms
+        || witness.source_cut.len() > 128 || witness.expected_workers == 0 || witness.expected_workers > 8
+        || !witness.complete_cohort || witness.processes.is_empty() || witness.processes.len() > 9
         || witness.monotonic_end_ns <= witness.monotonic_start_ns
-        || reading.window_ms < 3_600_000
+        || (objective == "cpu/idle" && reading.window_ms < 3_600_000)
         || (objective == "cpu/idle" && !witness.positively_idle)
     {
         return Err("CPU coverage or idle eligibility is UNKNOWN".into());
     }
     let mut identities = std::collections::BTreeSet::new();
     let mut daemons = 0;
+    let mut workers = 0;
     let mut cpu_ns = 0u128;
     for process in &witness.processes {
         if !matches!(process.role.as_str(), "daemon" | "replication-worker")
@@ -269,10 +289,18 @@ fn validate_cpu_window(objective: &str, reading: &Observation, witness: Option<&
             return Err("invalid or duplicate process role/birth/counter".into());
         }
         daemons += usize::from(process.role == "daemon");
+        workers += usize::from(process.role == "replication-worker");
         cpu_ns += u128::from(process.cpu_end_ns - process.cpu_start_ns);
     }
-    if daemons != 1 { return Err("CPU witness needs exactly one daemon".into()); }
+    if daemons != 1 || workers != usize::from(witness.expected_workers) {
+        return Err("CPU witness omits a required worker or has an invalid daemon cohort".into());
+    }
     let elapsed = witness.monotonic_end_ns - witness.monotonic_start_ns;
+    // UTC endpoints have millisecond resolution. The counter interval must be
+    // that same window, not an independently longer averaging interval.
+    if elapsed / 1_000_000 != reading.end_ms - reading.start_ms {
+        return Err("CPU wall and monotonic counter windows differ".into());
+    }
     let certain = elapsed.checked_sub(witness.boundary_uncertainty_ns)
         .filter(|certain| *certain >= reading.window_ms.saturating_mul(1_000_000))
         .ok_or("uncertain CPU boundaries do not cover the full window")?;

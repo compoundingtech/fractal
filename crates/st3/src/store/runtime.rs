@@ -8,6 +8,8 @@ use super::*;
 /// the graph for the caches its reads use.
 #[derive(Default)]
 pub struct SmalltalkRuntime {
+    /// Source-owned observation fencing only; no canonical sample log or timer.
+    pub(super) slo_source: Mutex<slo_breaches::SourceState>,
     /// Committed launch-source invalidation, independent of append frontiers.
     pub(crate) publication_cache_epoch: Mutex<Option<(i64, bool)>>,
     pub(crate) publication_cache_observer: Mutex<Option<smallclaims::sqlite::CommitObserver>>,

@@ -2,17 +2,36 @@
 //! No timer, measurement collector, profile, network read or production activation lives here.
 use super::*;
 pub use st3_schema::slo_breaches::{Check, Decision, Event, HealthyWitness, Observation, Record};
-use st3_schema::slo_breaches::{DEFAULT_OWNER, KIND, MAX_GROUP_BYTES, MAX_GROUP_CLAIMS, MAX_OBJECTIVES, MAX_DAILY_OPENINGS};
+use st3_schema::slo_breaches::{DEFAULT_OWNER, KIND, MAX_GROUP_BYTES, MAX_GROUP_CLAIMS, MAX_OBJECTIVES, MAX_DAILY_OPENINGS, MAX_DAILY_ONSETS};
+
+pub(super) struct SourceState {
+    epoch: String,
+    started_ms: u64,
+    cuts: BTreeMap<(String,String), LocalCut>,
+    invalidated: BTreeSet<(String,String)>,
+}
+
+struct LocalCut {
+    latest: Observation,
+    missed: Option<Observation>,
+    coverage_after_ms: u64,
+    conflicted: bool,
+}
+
+impl Default for SourceState {
+    fn default() -> Self {
+        Self { epoch: Uuid::now_v7().simple().to_string(), started_ms: u64::try_from(now_ms()).unwrap_or(u64::MAX), cuts: BTreeMap::new(), invalidated: BTreeSet::new() }
+    }
+}
 
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch("CREATE TABLE IF NOT EXISTS slo_episode_events (
         episode TEXT NOT NULL,event TEXT NOT NULL,member TEXT NOT NULL,fleet TEXT NOT NULL,
         objective TEXT NOT NULL,ordinal INTEGER NOT NULL,claim_id TEXT NOT NULL,body TEXT NOT NULL,
-        conflict INTEGER NOT NULL DEFAULT 0,dispatched_at_ms INTEGER,
+        conflict INTEGER NOT NULL DEFAULT 0,dispatched_at_ms INTEGER,recorded_at_ms INTEGER NOT NULL,
         PRIMARY KEY(episode,event));
         CREATE INDEX IF NOT EXISTS slo_objective_events ON slo_episode_events(fleet,member,objective,ordinal DESC,episode);
-        CREATE INDEX IF NOT EXISTS slo_dispatch_rate ON slo_episode_events(member,dispatched_at_ms)
-            WHERE event='dispatched';
+        CREATE INDEX IF NOT EXISTS slo_transition_rate ON slo_episode_events(member,event,recorded_at_ms);
         CREATE TABLE IF NOT EXISTS slo_episode_heads (
         fleet TEXT NOT NULL,member TEXT NOT NULL,objective TEXT NOT NULL,episode TEXT NOT NULL,
         ordinal INTEGER NOT NULL,conflict INTEGER NOT NULL DEFAULT 0,
@@ -38,16 +57,17 @@ pub(super) fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
     let record: Record = serde_json::from_value(claim.body["fields"]["record"].clone())?;
     let body = serde_json::to_string(&record)?;
     tx.execute("INSERT INTO slo_episode_events
-        (episode,event,member,fleet,objective,ordinal,claim_id,body,dispatched_at_ms)
-        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+        (episode,event,member,fleet,objective,ordinal,claim_id,body,dispatched_at_ms,recorded_at_ms)
+        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
         ON CONFLICT(episode,event) DO UPDATE SET
         conflict=MAX(conflict,body<>excluded.body),
         body=CASE WHEN excluded.claim_id<claim_id THEN excluded.body ELSE body END,
         ordinal=MAX(ordinal,excluded.ordinal),
         dispatched_at_ms=CASE WHEN excluded.claim_id<claim_id THEN excluded.dispatched_at_ms ELSE dispatched_at_ms END,
+        recorded_at_ms=CASE WHEN excluded.claim_id<claim_id THEN excluded.recorded_at_ms ELSE recorded_at_ms END,
         claim_id=MIN(claim_id,excluded.claim_id)",
         params![record.episode,record.event.name(),record.member,record.fleet,record.objective,
-            record.ordinal,claim.id,body,record.dispatched_at_ms])?;
+            record.ordinal,claim.id,body,record.dispatched_at_ms,u64::try_from(claim.accepted_at_unix_ms)?])?;
     tx.execute("INSERT INTO slo_episode_heads(fleet,member,objective,episode,ordinal)
         VALUES(?1,?2,?3,?4,?5) ON CONFLICT(fleet,member,objective) DO UPDATE SET
         conflict=CASE WHEN excluded.ordinal=ordinal AND excluded.episode<>episode THEN 1
@@ -87,6 +107,8 @@ fn pending_form(record: &Record) -> Record {
     let mut record = record.clone();
     record.event = Event::Pending;
     record.healthy = None;
+    record.latest_miss = None;
+    record.recovery_floor_ms = None;
     record.witness = None;
     record.mission_run = None;
     record.dispatched_at_ms = None;
@@ -204,7 +226,8 @@ fn lineage_valid(connection: &Connection, record: &Record) -> Result<bool> {
     let prior: Record = serde_json::from_value(serde_json::from_str::<Value>(&body)?["fields"]["record"].clone())?;
     Ok(prior.event == Event::Recovered && prior.fleet == record.fleet && prior.member == record.member
         && prior.objective == record.objective && prior.ordinal.checked_add(1) == Some(record.ordinal)
-        && prior.healthy.as_ref().is_some_and(|healthy| record.onset.start_ms >= healthy.end_ms
+        && prior.healthy.as_ref().is_some_and(|healthy| record.onset.end_ms > healthy.end_ms
+            && (record.onset.epoch != healthy.epoch || record.onset.sequence > healthy.sequence)
             && record.onset.predecessor_cut.as_deref() == Some(healthy.source_cut.as_str()))
         && event(connection, &prior.episode, Event::Recovered)?.is_some_and(|(id, _)| id == *previous))
 }
@@ -271,7 +294,7 @@ pub struct PreparedSloMission {
     mission: MissionSpec,
 }
 
-fn prepare_mission(record: &Record) -> Result<MissionSpec> {
+fn prepare_mission(record: &Record, onset_claim: &str) -> Result<MissionSpec> {
     let id = format!("slo/{}",record.episode);
     let goal = format!("Repair {} on {}; onset {} at cut {}. Recovery is not evidence of a code fix.",
         record.objective,record.member,record.onset.observed_at_ms,record.onset.source_cut).replace("${","$${");
@@ -279,6 +302,9 @@ fn prepare_mission(record: &Record) -> Result<MissionSpec> {
         completion {{ when \"all-steps-exhausted\" }}
         goal {goal:?}
         step \"dispatch-ready\" {{ agentless
+            gate \"this build admitted the immutable episode source\" {{
+                field \"record.episode\" {:?} is {:?}
+            }}
             gate \"this exact episode was admitted for execution\" {{
                 field \"dispatch_state\" {:?} is \"ready\"
             }}
@@ -286,12 +312,19 @@ fn prepare_mission(record: &Record) -> Result<MissionSpec> {
         step \"fix\" {{ depends-on {{ step \"dispatch-ready\" completed }}
             assigned-to {:?}; goal {goal:?}
         }}
-    }}",record.subject(),record.owner);
+    }}",format!("{}@{onset_claim}",record.subject()),record.episode,record.subject(),record.owner);
     crate::graph::parse_internal_intent(&source,&record.member)?.missions.remove(&id)
         .context("prepared SLO mission missing")
 }
 
 impl Store {
+    /// A fresh evaluator/store incarnation must warm a full new window. This is
+    /// a local producer fence, never historical closure evidence on a replica.
+    pub fn slo_source_epoch(&self) -> (String,u64) {
+        let source = self.smalltalk.slo_source.lock().unwrap_or_else(PoisonError::into_inner);
+        (source.epoch.clone(),source.started_ms)
+    }
+
     fn slo_member(&self) -> Result<(String,String,i64)> {
         let fleet = self.bound_fleet()?.context("SLO observations need an authenticated fleet")?;
         let key = self.member_public_key().context("SLO observations need this member's signing key")?;
@@ -325,22 +358,59 @@ impl Store {
     /// Private source seam only; no daemon task calls this in this change. UNKNOWN/partial
     /// windows create no false breach or recovery. Accepted onsets survive restart/replay.
     pub fn record_slo_miss(&self, objective: &str, owner: Option<&str>, observation: Observation, witness: Option<HealthyWitness>) -> Result<Option<String>> {
-        observation.validate().map_err(anyhow::Error::msg)?;
+        let invalid = observation.validate().err();
+        anyhow::ensure!(!objective.is_empty() && objective.len()<=128 && !objective.chars().any(char::is_control), "invalid SLO objective identity");
         anyhow::ensure!(observation.member == self.origin, "relabelled remote SLO reading");
-        if observation.decision()!=Decision::Missed { return Ok(None); }
         let (fleet,key,generation) = self.slo_member()?;
         let batch = Uuid::now_v7().simple().to_string();
         self.connection.batched(|tx| {
             self.slo_authority_at(tx, &fleet, &key, generation)?;
             let current = head(tx,&fleet,&self.origin,objective)?;
+            let decision = observation.decision();
+            let mut local = self.smalltalk.slo_source.lock().unwrap_or_else(PoisonError::into_inner);
+            anyhow::ensure!(observation.epoch == local.epoch && observation.epoch_started_ms == local.started_ms
+                && observation.start_ms >= local.started_ms && u128::from(observation.observed_at_ms) <= now_ms(),
+                "SLO observation belongs to a stale, future or unknown source epoch");
+            let key = (fleet.clone(), objective.to_owned());
+            if let Some(error) = invalid {
+                if local.invalidated.len()<MAX_OBJECTIVES || local.invalidated.contains(&key) { local.invalidated.insert(key); }
+                anyhow::bail!("invalid current SLO cut invalidates this source epoch: {error}");
+            }
+            anyhow::ensure!(!local.invalidated.contains(&key), "SLO source coverage is invalid in this epoch");
+            anyhow::ensure!(local.cuts.contains_key(&key) || local.cuts.len()<MAX_OBJECTIVES,
+                "SLO local observer already has 64 objective slots");
+            if let Some(previous) = local.cuts.get_mut(&key) {
+                anyhow::ensure!(!previous.conflicted, "SLO source epoch has conflicting equal-sequence cuts");
+                if observation.sequence == previous.latest.sequence && observation != previous.latest {
+                    previous.conflicted = true;
+                    anyhow::bail!("SLO source epoch has conflicting equal-sequence cuts");
+                }
+                anyhow::ensure!(observation.sequence >= previous.latest.sequence && observation.end_ms >= previous.latest.end_ms,
+                    "out-of-order SLO observation cannot replace the current cut");
+            }
+            let evidence = if decision != Decision::Unknown {
+                st3_schema::slo_breaches::validate_cpu_window(objective, &observation, witness.as_ref())
+            } else { Ok(()) };
+            let entry = local.cuts.entry(key).or_insert_with(|| LocalCut {
+                latest: observation.clone(), missed: None, coverage_after_ms: observation.epoch_started_ms, conflicted: false });
+            entry.latest = observation.clone();
+            if decision == Decision::Unknown || evidence.is_err() {
+                entry.coverage_after_ms = entry.coverage_after_ms.max(observation.end_ms);
+            }
+            evidence.map_err(anyhow::Error::msg)?;
+            if decision == Decision::Missed { entry.missed = Some(observation.clone()); }
+            drop(local);
+            if decision != Decision::Missed { return Ok(None); }
+
             let (ordinal,previous) = if let Some((episode,ordinal,conflict))=current {
                 anyhow::ensure!(!conflict,"conflicting SLO lineage is UNKNOWN");
                 if let Some((id,recovery))=event(tx,&episode,Event::Recovered)? {
-                    // A recovered obligation must still get its one mission before a later
-                    // episode can replace it. Late observations cannot start a new episode.
-                    if event(tx,&episode,Event::Dispatched)?.is_none() { return Ok(Some(episode)); }
+                    // Preserve any older undispatched obligation independently. A
+                    // genuinely later rolling window can start a new episode even
+                    // when its start overlaps the last healthy window.
                     let healthy = recovery.healthy.as_ref().context("recovery window missing")?;
-                    anyhow::ensure!(observation.start_ms >= healthy.end_ms
+                    anyhow::ensure!(observation.end_ms > healthy.end_ms
+                        && (observation.epoch != healthy.epoch || observation.sequence > healthy.sequence)
                         && observation.predecessor_cut.as_deref() == Some(healthy.source_cut.as_str()),
                         "stale or unlinked miss predates recovery");
                     (ordinal.checked_add(1).context("SLO ordinal overflow")?,Some(id))
@@ -352,10 +422,14 @@ impl Store {
                 anyhow::ensure!(count<MAX_OBJECTIVES,"SLO member already has 64 objective slots");
                 (1,None)
             };
+            let recent_onsets: usize = tx.query_row("SELECT COUNT(*) FROM (SELECT 1 FROM slo_episode_events
+                WHERE member=?1 AND event='pending' AND recorded_at_ms>=?2 LIMIT 832)",
+                params![self.origin,u64::try_from(now_ms())?.saturating_sub(86_400_000)], |row| row.get(0))?;
+            anyhow::ensure!(recent_onsets<MAX_DAILY_ONSETS, "SLO canonical intake daily budget exhausted");
             let record=Record{episode:Record::episode_id(&fleet,&self.origin,objective,previous.as_deref()),
                 fleet:fleet.clone(),member:self.origin.clone(),objective:objective.into(),ordinal,
                 previous_recovery:previous,owner:owner.unwrap_or(DEFAULT_OWNER).into(),event:Event::Pending,
-                onset:observation.clone(),onset_witness:witness.clone(),healthy:None,witness:None,mission_run:None,dispatched_at_ms:None,execution_ready:None,owner_blocked_at_dispatch:None};
+                onset:observation.clone(),onset_witness:witness.clone(),healthy:None,latest_miss:None,recovery_floor_ms:None,witness:None,mission_run:None,dispatched_at_ms:None,execution_ready:None,owner_blocked_at_dispatch:None};
             append(tx,&self.origin,&record,&batch)?;
             check_group(tx,&batch)?;
             Ok(Some(record.episode))
@@ -370,7 +444,9 @@ impl Store {
         let connection=self.readers.get();
         let rows=connection.prepare_cached("SELECT pending.body,pending.onset_claim FROM slo_pending pending
             JOIN slo_episode_heads heads ON heads.fleet=pending.fleet AND heads.member=pending.member
-                AND heads.objective=pending.objective AND heads.episode=pending.episode AND heads.conflict=0
+                AND heads.objective=pending.objective AND heads.conflict=0
+                AND (heads.episode=pending.episode OR EXISTS(SELECT 1 FROM slo_episode_events recovered
+                    WHERE recovered.episode=pending.episode AND recovered.event='recovered' AND recovered.conflict=0))
             WHERE pending.member=?1 AND pending.mission_run IS NULL AND pending.onset_claim IS NOT NULL
                 AND NOT EXISTS(SELECT 1 FROM slo_episode_events events WHERE events.episode=pending.episode AND events.conflict<>0)
             ORDER BY pending.onset_end_ms,pending.episode LIMIT 2")?.query_map([&self.origin],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
@@ -378,7 +454,7 @@ impl Store {
         drop(connection);
         rows.into_iter().map(|(body,onset_claim)| {
             let record:Record=serde_json::from_str(&body)?;
-            let mission=prepare_mission(&record)?;
+            let mission=prepare_mission(&record,&onset_claim)?;
             Ok(PreparedSloMission{record,onset_claim,member_key:key.clone(),authority_generation:generation,workspace:workspace.into(),mission})
         }).collect()
     }
@@ -398,20 +474,27 @@ impl Store {
             anyhow::ensure!(id==prepared.onset_claim && source==prepared.record,"SLO prepared onset changed");
             anyhow::ensure!(lineage_valid(tx, &source)?, "SLO predecessor lineage is UNKNOWN");
             let selected=head(tx,&source.fleet,&source.member,&source.objective)?;
-            anyhow::ensure!(selected==Some((episode.clone(),source.ordinal,false)),"SLO lineage changed during preparation");
+            anyhow::ensure!(selected==Some((episode.clone(),source.ordinal,false))
+                || (selected.is_some_and(|(_, _, conflict)| !conflict) && event(tx,episode,Event::Recovered)?.is_some()),
+                "SLO lineage changed during preparation");
             let now=u64::try_from(now_ms())?;
             let recent:usize=tx.query_row("SELECT COUNT(*) FROM (SELECT 1 FROM slo_episode_events
-                WHERE member=?1 AND event='dispatched' AND dispatched_at_ms>=?2 LIMIT 2)",
+                WHERE member=?1 AND event='dispatched' AND recorded_at_ms>=?2 LIMIT 2)",
                 params![self.origin,now.saturating_sub(60_000)],|r|r.get(0))?;
             anyhow::ensure!(recent<2,"SLO dispatch rate: at most two mission openings per minute");
             let daily: usize = tx.query_row("SELECT COUNT(*) FROM (SELECT 1 FROM slo_episode_events
-                WHERE member=?1 AND event='dispatched' AND dispatched_at_ms>=?2 LIMIT 700)",
+                WHERE member=?1 AND event='dispatched' AND recorded_at_ms>=?2 LIMIT 700)",
                 params![self.origin,now.saturating_sub(86_400_000)],|r|r.get(0))?;
             anyhow::ensure!(daily<MAX_DAILY_OPENINGS,"SLO daily storage budget exhausted; durable obligation remains pending");
             let recovered_before_dispatch=event(tx,episode,Event::Recovered)?.is_some();
             let mission=&prepared.mission;
+            // Existing evidence retention also keeps a non-minimum onset ID
+            // pinned by this mission if a duplicate later wins event selection.
+            let mut mission_body=serde_json::to_value(mission)?;
+            mission_body.as_object_mut().context("mission body is not an object")?
+                .insert("evidence".into(),json!([prepared.onset_claim]));
             let published=append_claim_tx(tx,&self.origin,&mission.subject,"mission.published",Some("daemon/runtime"),
-                &serde_json::to_value(mission)?,&[],Some(&batch))?;
+                &mission_body,&[],Some(&batch))?;
             select_replicated_mission(tx,&published,published.store_index)?;
             let run=format!("mission-run/slo/{episode}");
             let declaration=MissionRunDeclaration{subject:run.clone(),creation:Some(MissionRunCreation{
@@ -453,7 +536,21 @@ impl Store {
             anyhow::ensure!(record.member==self.origin,"only the observing member recovers its episode");
             anyhow::ensure!(head(tx,&record.fleet,&record.member,&record.objective)?==Some((episode.into(),record.ordinal,false)),
                 "stale health cannot recover an obsolete episode");
+            let local = self.smalltalk.slo_source.lock().unwrap_or_else(PoisonError::into_inner);
+            anyhow::ensure!(healthy.epoch == local.epoch && healthy.epoch_started_ms == local.started_ms
+                && healthy.start_ms >= local.started_ms && u128::from(healthy.observed_at_ms) <= now_ms(),
+                "SLO recovery needs a complete fresh window after source restart/warmup");
+            anyhow::ensure!(!local.invalidated.contains(&(fleet.clone(),record.objective.clone())), "SLO source coverage is invalid in this epoch");
+            let cut = local.cuts.get(&(fleet.clone(),record.objective.clone()));
+            if let Some(cut) = cut {
+                anyhow::ensure!(!cut.conflicted && healthy.sequence >= cut.latest.sequence
+                    && (healthy.sequence != cut.latest.sequence || healthy == cut.latest),
+                    "late or conflicting healthy cut is older than current coverage");
+            }
+            let latest = cut.and_then(|cut| cut.missed.as_ref()).unwrap_or(&record.onset).clone();
+            let floor = cut.map_or(local.started_ms, |cut| cut.coverage_after_ms).max(latest.end_ms);
             record.event=Event::Recovered; record.healthy=Some(healthy); record.witness=witness;
+            record.latest_miss=Some(latest); record.recovery_floor_ms=Some(floor);
             append(tx,&self.origin,&record,&batch)?;
             check_group(tx,&batch)
         }).map_err(anyhow::Error::msg)?
@@ -466,11 +563,14 @@ impl Store {
         let batch=Uuid::now_v7().simple().to_string();
         self.connection.batched(|tx| {
             self.slo_authority_at(tx, &fleet, &key, generation)?;
-            if event(tx,episode,Event::OwnerUnblocked)?.is_some()
-                || event(tx,episode,Event::Recovered)?.is_some() { return Ok(()); }
+            if event(tx,episode,Event::OwnerUnblocked)?.is_some() { return Ok(()); }
             let (_,mut record)=event(tx,episode,Event::OwnerBlocked)?.context("SLO owner block missing")?;
             anyhow::ensure!(record.member==self.origin && person_work::declaration_live(tx,&record.owner)?,
                 "exact SLO owner remains unavailable");
+            let recent: usize = tx.query_row("SELECT COUNT(*) FROM (SELECT 1 FROM slo_episode_events
+                WHERE member=?1 AND event='owner_unblocked' AND recorded_at_ms>=?2 LIMIT 700)",
+                params![self.origin,u64::try_from(now_ms())?.saturating_sub(86_400_000)], |row| row.get(0))?;
+            anyhow::ensure!(recent<MAX_DAILY_OPENINGS, "SLO first-unblock daily budget exhausted");
             record.event=Event::OwnerUnblocked;
             append(tx,&self.origin,&record,&batch)?;
             check_group(tx,&batch)
