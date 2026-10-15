@@ -8,6 +8,25 @@ prototypes, not a surface or audience decision.
 | [Smalltalk #2867](https://github.com/compoundingtech/smalltalk/pull/2867) (draft) | Web kit stories in `packages/fractal-ui/src/notes/` |
 | [dotfiles #5916](https://github.com/schickling/dotfiles/pull/5916) (draft) | Fractal TUI in `flakes/fractal/crates/fractal/src/` |
 
+## Interview outcome
+
+Johannes decided on 2026-10-15:
+
+- **No audience choice (DQ3):** Every note is context for its target's
+  resolved agents, delivered through the non-waking digest. The initial
+  "only me" selection (q1, Axe answer `5pio7m`) explicitly allowed agent
+  visibility; q2 (Axe answer `4r5oi6`) superseded that default by removing
+  the choice. Remove the audience control from every composer. The schema
+  keeps its open enum for possible stricter levels later.
+- **Plain text only (DQ5):** Up to 1024 UTF-8 bytes; metadata supplies the
+  structure. No tags (q3, Axe request `aa3i68`, answer `qwkr79`).
+
+The comparison, input counts and interview prompts below preserve the
+prototype evidence, including its audience controls; they are not the target
+design. Those controls and filters still exist in the prototype until the
+implementation cutover described in [Implementation status](./spec.md#implementation-status).
+These decisions do not choose between the web or TUI surface variants.
+
 ## Input count
 
 Start with the intended target selected and the relevant surface focused.

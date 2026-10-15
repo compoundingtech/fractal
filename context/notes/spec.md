@@ -2,7 +2,7 @@
 
 This document specifies st notes: short authored texts that a person or an
 agent attaches to one st subject, shown in stui, the Fractal TUI and Fractal
-web, and delivered as agent context when the audience includes the agent. Terms
+web, and delivered as context to the agents that the target resolves to. Terms
 are defined in [ontology.md](./ontology.md).
 
 ## Status
@@ -10,6 +10,17 @@ are defined in [ontology.md](./ontology.md).
 Draft. `vision.md` and `requirements.md` do not exist yet. They become
 authoritative only after Johannes confirms them in the interview. The
 candidate requirements below are input for that interview, not constraints.
+
+### Implementation status
+
+This spec records the target design from Johannes's 2026-10-15 interview
+(DQ3/DQ5). The prototype still has `self`/`agent` audience choices, person
+defaults, audience-based read filtering and digest selection, and composer
+controls. Those behaviors do not implement the interview outcome. The CLI
+`--for` option, read/digest filters and audience controls in every composer
+(stui, Fractal TUI and Fractal web) must be removed in the implementation
+cutover; the schema's open audience enum stays. This documentation change
+does not change the prototype.
 
 ## Scope
 
@@ -29,14 +40,15 @@ specified in `docs/st3/schema.md`.
 - **CR02 Visible where the target is shown:** Clients subscribe to the `notes`
   window and derive note counts and newest-note previews alongside targets,
   without adding note fields to agent or mission collection rows.
-- **CR03 Agent context:** A current `agent`-audience note reaches each resolved
-  agent at its next turn and at every session start, including the first
-  incarnation, through a notes digest.
+- **CR03 Agent context:** Every current note reaches each resolved agent at
+  its next turn and at every session start, including the first incarnation,
+  through a notes digest.
 - **CR04 Inform only:** A note and its daemon-origin digest never assign work,
   approve a gate, wake an agent by themselves, or grant authority.
 - **CR05 Shared schema:** stui, the Fractal TUI and Fractal web read notes
   through one generated client schema; no client defines its own note shape.
-- **CR06 Short:** Note text is at most 1024 UTF-8 bytes.
+- **CR06 Short plain text:** Note content is plain text, at most 1024 UTF-8
+  bytes. Metadata supplies the structure; there are no tags.
 - **CR07 Reactive:** Clients see a new note through their existing collection
   subscription, not through polling.
 
@@ -61,11 +73,18 @@ annotations. Examples: `note/person/example/0192…` and
 immutable. The new `note` family has `client_writable=true`; the existing
 `arrangement` family has `client_writable=false`.
 
-`audience` uses the existing codegen open-enum convention
+`audience` retains the existing codegen open-enum convention
 (`crates/st3-client-codegen/src/rich.rs:132–154,584–588`), not a closed
-string enum (`rich.rs:593–596`). Further audiences (for example a mission's
-whole crew, see `DQ4`) do not break the schema. Readers render unrecognized
-audiences as a neutral label, never the word 'Unknown'.
+string enum (`rich.rs:593–596`). Known wire values remain `self` and `agent`,
+but all new notes use `agent`, regardless of author. Audience is not a user
+choice or an active privacy boundary: every current note, including an
+existing `self` note, is context for its resolved agents. The open enum
+preserves room for stricter levels later; it does not introduce them now.
+Readers render unrecognized values as a neutral label, never 'Unknown',
+and do not exclude them from agent context on the basis of audience.
+
+Text has no tag field, tag parsing or tag picker. Author, target, optional
+session, timestamps and archived state supply the structure (DQ5).
 
 Wire shape (client-v0, generated into Rust, TypeScript and Swift):
 
@@ -75,7 +94,7 @@ Wire shape (client-v0, generated into Rust, TypeScript and Swift):
   "target": "agent/compoundingtech/st-notes",
   "author": "person/example",
   "text": "this agent session should be retired soon",
-  "audience": "self",
+  "audience": "agent",
   "session": "1682111:2026-10-14T15:57:40.016Z",
   "created_at": "2026-10-14T16:20:00Z",
   "updated_at": "2026-10-14T16:20:00Z",
@@ -89,7 +108,7 @@ Wire shape (client-v0, generated into Rust, TypeScript and Swift):
 | Actor | May create notes on | May edit or archive |
 |---|---|---|
 | `person/example` | any target it can read | own notes |
-| `agent/<org>/<name>` | itself; mission runs and step runs it is assigned to; agents write audience `agent` only | own notes |
+| `agent/<org>/<name>` | itself; mission runs and step runs it is assigned to | own notes |
 
 The new `SubjectEncodedAuthor` write policy requires the claim actor to equal
 the author encoded in the note subject. This rule is stateless, analogous to
@@ -99,19 +118,21 @@ the author encoded in the note subject. This rule is stateless, analogous to
 Target access and agent assignment restrictions require graph state and are
 enforced only at local API admission. Replicated admission does not enforce
 these restrictions; see `DQ8`.
-Local API admission also rejects `self`-audience writes by agent authors.
-Self notes are a person's private reminders; agent-authored notes stay visible
-to persons. The schema retains an open audience enum.
+Person- and agent-authored notes follow the same audience rule: new notes use
+`agent`; neither author type can create a private `self` note. Existing
+`self` notes are not hidden from agents. The schema retains the open enum
+for possible stricter levels, not a private-note mode (DQ3/DQ9).
 
 ### Read access
 
-| Audience | Author (person) | Other persons | Resolved agents |
+| Current note | Author | Other persons with target access | Resolved agents |
 |---|---|---|---|
-| `self` | yes | no | no, including an agent author |
-| `agent` | yes | yes | yes |
+| Any audience value | yes | yes | yes |
 
-Agents never read `self`-audience notes through lists, windows or digests.
-Agent authors can read their own `agent`-audience notes.
+Lists and collection windows apply note currency and target access, not an
+audience filter. Digests include every current note resolving to the
+recipient. Agent authors can read their own notes; no author has a separate
+private-note mode.
 
 Publication is gated by a `daemon.started` feature flag
 (`features.subject_notes=1`) on every active member, using the same
@@ -155,27 +176,28 @@ Runtime-state changes invalidate session-scoped note currency.
 ## CLI
 
 ```
-st note add TARGET TEXT [--for me|agent] [--session current|ID] [--expires-at T]
+st note add TARGET TEXT [--session current|ID] [--expires-at T]
 st note ls [TARGET]           # notes on TARGET, or notes by the actor
 st note archive NOTE_ID
 st note                       # unchanged: person directive notes
 st note set|clear             # unchanged: person directive notes
 ```
 
-`--for` defaults to `me` for a person and `agent` for an agent (DQ3/DQ9).
-`--session current` resolves the target agent's current incarnation.
+There is no `--for` option or audience default to choose: every note is agent
+context, including notes authored by a person. `--session current` resolves
+the target agent's current incarnation.
 
 ## Agent context delivery
 
 ```
-current agent-audience notes + recipient/runtime changes
+all current notes + recipient/runtime changes
   ──► resolve current notes per agent ──► daemon-origin, non-waking notes digest
 every session start (including first incarnation) ──► same digest path
 ```
 
-The daemon emits a digest when the set of current agent-audience notes
-resolving to an agent changes: note creation, update, archive, expiry, session
-end, or recipient-set changes such as a step assignee or `lease_owner` change.
+The daemon emits a digest when the set of current notes resolving to an
+agent changes: note creation, update, archive, expiry, session end, or
+recipient-set changes such as a step assignee or `lease_owner` change.
 It also emits a digest at every session start of every incarnation, including
 the first, when the agent has at least one current note. Digest delivery is
 idempotent per `(agent, incarnation, sorted note revisions)`.
@@ -231,6 +253,13 @@ SDKs after these updates; schema JSON alone does not generate those models.
   `SubjectNote` type as props; `apps/fractal-web` wires them to the client.
   The kit imports no app code.
 
+Every composer (stui, Fractal TUI and Fractal web) accepts plain text only,
+up to 1024 UTF-8 bytes, without an audience control or tag picker. Every
+note is context for the agents resolved from its target, so there is no
+**Only me** / **Shared with the agent** choice. Audience-specific badges and
+previews must not imply that some current notes are withheld from agents;
+agent-context visibility is not a delivery acknowledgement.
+
 ## Registration checklist
 
 A note kind registration includes:
@@ -252,26 +281,33 @@ A note kind registration includes:
   a `session` field on agent-targeted notes. An alternative is a new
   `session/…` family. Resolved by whether other features need sessions as
   first-class subjects.
-- **DQ3 Default audience:** `self` (safe, quiet) or `agent` (more useful,
-  reaches the agent)? Johannes's example, "this agent session should be
-  retired soon", reads as `self`. Resolved by the interview.
-- **DQ4 Further targets and audiences:** `resource/…`, `custom/…`, `doc/…`
-  targets and a mission-crew audience. Resolved after first use.
-- **DQ5 Structure beyond text:** "Structured" may mean an optional tag
-  (for example `retire`, `watch`, `context`) that clients can filter and
-  render. Not in the draft; resolved by the interview.
+- **DQ3 Audience choice — resolved (2026-10-15):** No audience choice; every
+  note is context for its target's resolved agents. Johannes initially
+  selected "only me" but said notes need not be hidden from agents (q1,
+  Axe answer `5pio7m`). He then chose no audiences and removal of the
+  composer control (q2, Axe answer `4r5oi6`), superseding q1's default.
+  Keep the open enum so stricter levels can be introduced if needed.
+- **DQ4 Further targets and stricter levels:** `resource/…`, `custom/…`,
+  `doc/…` targets and possible stricter audience levels remain questions
+  for later use. No additional level is defined by DQ3.
+- **DQ5 Structure beyond text — resolved (2026-10-15):** Plain text up to
+  1024 UTF-8 bytes; metadata is the structure. No tags, inline tag parsing
+  or tag picker (q3, Axe request `aa3i68`, answer `qwkr79`).
 - **DQ6 Shared subject-ref shape with annotations:** Resolved with
   `agent/dotfiles/annotations`: Agent Provenance reuses the st graph ref shape
   for st subjects, as notes do; artifacts outside st use typed sha256
   references owned by that spec. No second subject-ref shape exists.
-- **DQ7 Text limit:** 1024 bytes (CR06) versus the directive note's 4096.
+- **DQ7 Text limit — resolved:** 1024 UTF-8 bytes, confirmed by q3 (DQ5),
+  rather than the directive note's 4096.
 - **DQ8 Replicated target restrictions:** Must replicated admission enforce
   agent target/assignment restrictions too? This requires
   `AuthorizedParticipant` with ownership evidence; the draft enforces these
   graph-state restrictions only at local API admission.
   The generic claim API (`POST /v1/claims`, `st claim`) applies only
-  `SubjectEncodedAuthor`; target restrictions and the agent-self prohibition
-  apply only through the note API.
-- **DQ9 Agent privacy:** Should agents get a private `self` audience? The
-  prototype rejects agent-authored `self` notes at local API admission; agents
-  write `agent` audience only, while the schema remains open.
+  `SubjectEncodedAuthor`; target restrictions apply only through the note
+  API.
+- **DQ9 Agent privacy — moot under DQ3:** No private audience exists for
+  either author type. Agents and persons create `agent` notes; all current
+  notes are agent context regardless of their stored audience. The
+  prototype's rejection of agent-authored `self` writes is not a separate
+  privacy design decision.
