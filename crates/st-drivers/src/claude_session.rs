@@ -1323,6 +1323,23 @@ fn observe_payload(
     raw: &str,
     var: &dyn Fn(&str) -> Option<String>,
 ) -> Result<()> {
+    if native || crate::claude_process::recorded(agent_dir)? {
+        let session = var(SESSION_ENV).unwrap_or_default();
+        let sequence = var(SESSION_SEQ_ENV).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let command = format!("\"$ST_HOOKS/claude-observe.sh\" {event}");
+        return crate::claude_process::with_caller(agent_dir, &session, sequence,
+            std::process::id(), None, crate::claude_process::Caller::Hook { trampoline: &command }, |_| {
+                observe_payload_owned(session_dir, agent_dir, native, identity, runtime_id, event, raw, var)
+            });
+    }
+    observe_payload_owned(session_dir, agent_dir, native, identity, runtime_id, event, raw, var)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_payload_owned(
+    session_dir: &Path, agent_dir: &Path, native: bool, identity: &str,
+    runtime_id: Option<&str>, event: &str, raw: &str, var: &dyn Fn(&str) -> Option<String>,
+) -> Result<()> {
     // Counted only once the invocation has its application target: a hook for an undeclared
     // agent errors out before any state is applied and must not inflate `hook_invocations_total`.
     crate::metrics::record_hook_invocation("claude-observe", event);
@@ -1806,6 +1823,18 @@ fn record_statusline_paths(
     raw: &[u8],
     native: bool,
 ) -> Result<()> {
+    if native || crate::claude_process::recorded(agent_dir)? {
+        let session = crate::contracts::env(SESSION_ENV).unwrap_or_default();
+        let sequence = crate::contracts::env(SESSION_SEQ_ENV).and_then(|v| v.parse().ok()).unwrap_or(0);
+        return crate::claude_process::with_caller(agent_dir, &session, sequence,
+            std::process::id(), None, crate::claude_process::Caller::Hook {
+                trampoline: "\"$ST_HOOKS/claude-statusline.sh\"",
+            }, |_| record_statusline_owned(agent_dir, identity, raw, native));
+    }
+    record_statusline_owned(agent_dir, identity, raw, native)
+}
+
+fn record_statusline_owned(agent_dir: &Path, identity: &str, raw: &[u8], native: bool) -> Result<()> {
     let payload: serde_json::Value = serde_json::from_slice(raw).unwrap_or(serde_json::Value::Null);
     // Deliberately uncounted. The tee builds no telemetry pipeline at all (`DQ-C13`, see
     // `main`), so a `record_hook_invocation` here could never reach a collector — and a metric

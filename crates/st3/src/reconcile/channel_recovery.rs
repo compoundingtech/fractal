@@ -6,6 +6,7 @@ use serde_json::json;
 
 const MAX_ATTEMPTS: usize = 3;
 const RECHECK_BACKOFF_MS: u128 = 10_000;
+const ATTEMPT_WINDOW_MS: u128 = 6 * 60 * 60 * 1_000;
 const RECOVERY: &str = "claude-channel-recovery";
 
 impl<R: RuntimeControl> Reconciler<R> {
@@ -39,59 +40,53 @@ impl<R: RuntimeControl> Reconciler<R> {
                     && claim.body.pointer("/evidence/0").and_then(Value::as_str) == Some(&token)
             })
             .collect();
-        // An operator restart or a verified successful replacement starts a new recovery budget.
-        // A late attachment claim from an old incarnation cannot reset it.
-        let successes = self
-            .store
-            .claims_for(&subject.subject, Some("runtime.action.succeeded"))?;
+        // An explicitly requested restart starts a new recovery budget. Automatic replacement
+        // success proves a replacement, not stable channel ownership: nested channels can attach
+        // briefly and disappear. Keep its attempt history across those successes and daemon
+        // restarts. A stable-success reset needs its own continuity proof; this policy does not
+        // infer one from a single recovered diagnostic. Attempts expire from their persisted
+        // acceptance time after six hours, so unrelated losses weeks apart do not accumulate.
         let reset = restarts
             .iter()
             .filter(|claim| claim.body["fields"]["operation"] != RECOVERY)
             .map(|claim| claim.store_index)
-            .chain(
-                successes
-                    .iter()
-                    .filter(|claim| {
-                        claim.body["fields"]["action"] == "restart"
-                            && restarts.iter().any(|request| {
-                                claim.body.pointer("/evidence/0").and_then(Value::as_str)
-                                    == Some(&request.id)
-                            })
-                    })
-                    .map(|claim| claim.store_index),
-            )
             .max()
             .unwrap_or(0);
         let attempts: Vec<_> = restarts
             .iter()
             .filter(|claim| {
                 claim.store_index > reset && claim.body["fields"]["operation"] == RECOVERY
+                    && now.saturating_sub(claim.accepted_at_unix_ms) < ATTEMPT_WINDOW_MS
             })
             .collect();
+        let episode = restarts.iter().filter(|claim| claim.store_index <= reset
+            || now.saturating_sub(claim.accepted_at_unix_ms) >= ATTEMPT_WINDOW_MS)
+            .map(|claim| claim.store_index).max().unwrap_or(0);
         let parked = self
             .store
             .claims_for(&subject.subject, Some("runtime.action.failed"))?
             .into_iter()
             .rev()
             .find(|claim| {
-                claim.store_index > reset
+                attempts.len() >= MAX_ATTEMPTS && claim.store_index > reset
                     && claim.body["fields"]["action"] == RECOVERY
                     && claim.body["fields"]["desired_token"] == token
+                    && claim.body["evidence"].as_array().is_some_and(|ids| ids.len() >= MAX_ATTEMPTS
+                        && ids.iter().all(|id| attempts.iter().any(|attempt| id.as_str() == Some(&attempt.id))))
             });
         if let Some(parked) = parked {
-            if let Some(observation) = observation.filter(|item| item.status == "running") {
+            if let Some(observation) = observation.filter(|item| item.status == "running"
+                && item.incarnation_id.as_deref() == claim_incarnation(&parked)) {
                 self.record_member(subject, observation, true)?;
-            }
-            self.reconcile_runtime_stop(
+                self.reconcile_runtime_stop(
                 &subject.subject,
                 &member.runtime_id,
                 member.terminal,
-                observation
-                    .and_then(|item| item.incarnation_id.as_deref())
-                    .or_else(|| claim_incarnation(&parked)),
+                observation.incarnation_id.as_deref(),
                 member.shutdown_timeout_ms,
-                observation,
-            )?;
+                Some(observation),
+                )?;
+            }
             anyhow::bail!(
                 "{}",
                 parked.body["fields"]["reason"].as_str().unwrap_or(RECOVERY)
@@ -180,7 +175,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.store.owned_desired_guard(subject)?;
         if attempts.len() >= MAX_ATTEMPTS {
             let reason = format!(
-                "claude-channel-unattached: automatic channel recovery failed after {MAX_ATTEMPTS} restarts; the seat is parked and mail remains held. Check the Claude plugin and channel, then restart the seat."
+                "claude-channel-unattached: automatic channel recovery failed after {MAX_ATTEMPTS} restarts within six hours; the seat is parked and mail remains held. Check the Claude plugin and channel, then restart the seat."
             );
             self.store.append_claim(&ClaimInput {
                 subject: subject.subject.clone(),
@@ -195,7 +190,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 evidence: attempts.iter().map(|claim| claim.id.clone()).collect(),
                 expected_subject: None,
                 idempotency_key: Some(format!(
-                    "{RECOVERY}:park:{}:{token}:{incarnation}",
+                    "{RECOVERY}:park:{}:{token}:{incarnation}:{episode}",
                     subject.subject
                 )),
             })?;
@@ -211,7 +206,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     ("reason".into(), json!(format!("Automatic Claude channel recovery attempt {} of {MAX_ATTEMPTS}: the channel remained unattached during recheck; restart and continue the native session", attempts.len() + 1))),
                 ]),
                 evidence: vec![token.clone(), harness.claim], expected_subject: None,
-                idempotency_key: Some(format!("{RECOVERY}:restart:{}:{token}:{incarnation}:{}", subject.subject, harness.since_unix_ms)),
+                idempotency_key: Some(format!("{RECOVERY}:restart:{}:{token}:{incarnation}:{}:{episode}", subject.subject, harness.since_unix_ms)),
             })?;
         }
         self.signal_changed();

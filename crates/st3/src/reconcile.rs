@@ -7820,7 +7820,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         match self.perform_start_for_request(
             subject,
             member,
-            "an explicit seat restart was requested",
+            if request.body["fields"]["operation"] == "claude-channel-recovery" {
+                "automatic Claude channel recovery requested a replacement incarnation"
+            } else {
+                "an explicit seat restart was requested"
+            },
             Some(&request),
         ) {
             Ok(false) => return Ok(true), // Placement or an automatic hold still defers this start.

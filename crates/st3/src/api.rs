@@ -9018,6 +9018,9 @@ fn doctor_report_with_operation_drift(
                 .iter()
                 .filter(|agent| {
                     agent.pointer("/delivery/state").and_then(Value::as_str) == Some("stale")
+                        || (agent.pointer("/delivery/state").and_then(Value::as_str) == Some("legacy")
+                            && agent.pointer("/delivery/reason").and_then(Value::as_str)
+                                == Some("legacy ownership: unprotected until next natural restart"))
                 })
                 .map(|agent| {
                     format!(

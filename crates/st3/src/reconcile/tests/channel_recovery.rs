@@ -330,7 +330,7 @@ fn channel_recovery_budget_and_parking_survive_daemon_restarts() {
 }
 
 #[test]
-fn a_verified_recovery_resets_the_budget_for_a_later_channel_loss() {
+fn a_brief_automatic_recovery_does_not_reset_the_durable_attempt_budget() {
     let (store, runtime, reconciler, desired) = setup();
     let since = attachment(&store, "orchid-one", false);
     recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap();
@@ -354,11 +354,66 @@ fn a_verified_recovery_resets_the_budget_for_a_later_channel_loss() {
         "node".into(),
         Arc::new(Notify::new()),
     );
-    assert!(recover(&fresh, &desired, "orchid-two", since + 10_000).unwrap());
+    assert!(!recover(&fresh, &desired, "orchid-two", since + 10_000).unwrap());
+    assert!(recover(&fresh, &desired, "orchid-two", since + 20_000).unwrap());
     assert!(
         attempts(&store).last().unwrap().body["fields"]["reason"]
             .as_str()
             .unwrap()
-            .contains("attempt 1 of 3")
+            .contains("attempt 2 of 3")
     );
+}
+
+#[test]
+fn channel_recovery_attempts_expire_after_six_hours_without_a_quick_attach_reset() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+    let first = attempts(&store).pop().unwrap();
+    // Expiry is based on the retained claim's accepted time, not daemon uptime or attach count.
+    let expired = first.accepted_at_unix_ms + 6 * 60 * 60 * 1_000;
+    let fresh = Reconciler::new(store.clone(),runtime,"node".into(),Arc::new(Notify::new()));
+    attachment(&store,"orchid-two",false);
+    assert!(recover(&fresh,&desired,"orchid-two",expired).unwrap());
+    let requests=attempts(&store);
+    assert_eq!(requests.len(),2);
+    assert!(requests[1].body["fields"]["reason"].as_str().unwrap().contains("attempt 1 of 3"));
+    assert_ne!(requests[0].id,requests[1].id);
+}
+
+#[test]
+fn automatic_replacement_success_cannot_reopen_a_parked_budget() {
+    let (store, runtime, reconciler, desired)=setup();
+    for (index, backoff) in [10_000,20_000,40_000].into_iter().enumerate() {
+        let incarnation=format!("orchid-{index}");
+        let since=attachment(&store,&incarnation,false);
+        assert!(recover(&reconciler,&desired,&incarnation,since+backoff).unwrap());
+        let request=attempts(&store).pop().unwrap();
+        attachment(&store,&format!("orchid-{}",index+1),true);
+        store.append_claim(&ClaimInput {
+            subject:SEAT.into(), kind:"runtime.action.succeeded".into(), actor:request.actor,
+            fields:BTreeMap::from([("action".into(),json!("restart"))]),evidence:vec![request.id],
+            expected_subject:None,idempotency_key:None,
+        }).unwrap();
+    }
+    let since=attachment(&store,"orchid-last",false);
+    assert!(recover(&reconciler,&desired,"orchid-last",since).unwrap());
+    let fresh=Reconciler::new(store.clone(),runtime,"node".into(),Arc::new(Notify::new()));
+    assert!(recover(&fresh,&desired,"orchid-last",since+1).unwrap_err().to_string().contains("parked"));
+    assert_eq!(attempts(&store).len(),3);
+}
+
+#[test]
+fn a_parked_recovery_never_stops_an_unrelated_new_incarnation() {
+    let (store,runtime,reconciler,desired)=setup();
+    for (i,backoff) in [10_000,20_000,40_000].into_iter().enumerate() {
+        let incarnation=format!("orchid-{i}");
+        let since=attachment(&store,&incarnation,false);
+        assert!(recover(&reconciler,&desired,&incarnation,since+backoff).unwrap());
+    }
+    let since=attachment(&store,"orchid-parked",false);
+    assert!(recover(&reconciler,&desired,"orchid-parked",since).unwrap());
+    attachment(&store,"orchid-independent",true);
+    assert!(recover(&reconciler,&desired,"orchid-independent",since+1).is_err());
+    assert!(runtime.stops.lock().unwrap().is_empty());
 }

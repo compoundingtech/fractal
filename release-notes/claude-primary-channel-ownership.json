@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Isolate a Claude seat's channel and hooks from nested Claude processes, and retain automatic channel-recovery attempts across brief replacement success.",
+  "replay": {"status": "none", "detail": "No claim replay or projection rebuild."},
+  "schema": {"status": "none", "detail": "No database schema, replicated claim format or migration changes. New controlled Claude generations retain an additive local process-generation witness alongside their existing harness ownership."},
+  "rules": {"status": "none", "detail": "No claim vocabulary or admission-rule change. Existing fenced runtime actions and mailbox epochs remain in use."},
+  "compatibility": {"status": "changed", "detail": "Nested channels serve an unscoped MCP protocol and cannot bind a protected primary seat; nested hooks cannot publish its native-session or observation state. Existing wrapper generations without a witness retain legacy admission until a natural authorized restart, visibly unprotected. Old daemons ignore the additive witness. The automatic replacement start reason now identifies automatic recovery instead of explicit intent."},
+  "manual": {"status": "none", "detail": "No agent conduct, environment stripping, configuration or tool restrictions are required."},
+  "recovery": {"status": "changed", "detail": "Automatic success does not erase attempts. Three attempts within a persisted rolling six-hour window park channel recovery with its existing owner-visible fault; explicit authorized restart or expiry reopens the budget. Parking targets only its recorded incarnation. Existing explicit restart and required deployment paths remain available."},
+  "downtime": {"status": "unknown", "detail": "Source qualification does not authorize interrupting an active seat or establish installed-process remediation. Kernel and synthetic controls require ordinary hosted qualification."}
+}

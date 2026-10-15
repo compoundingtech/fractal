@@ -138,7 +138,16 @@ pub fn run(
                     return 0;
                 }
             };
-            if env.var("ST3_MAILBOX_TRANSPORT").as_deref() == Some("push") {
+            let primary = st_drivers::claude_process::with_caller(
+                &paths.agent_dir,
+                &hook_var(env, st_drivers::claude_session::SESSION_ENV).unwrap_or_default(),
+                hook_var(env, st_drivers::claude_session::SESSION_SEQ_ENV)
+                    .and_then(|v| v.parse().ok()).unwrap_or(0),
+                std::process::id(), None, st_drivers::claude_process::Caller::Hook {
+                    trampoline: "\"$ST_HOOKS/claude-statusline.sh\"",
+                }, |_| Ok(()),
+            ).is_ok();
+            if primary && env.var("ST3_MAILBOX_TRANSPORT").as_deref() == Some("push") {
                 // Every render reads graph authority; no display-name environment snapshot.
                 if let Ok(label) = live_claude_label(env, &identity) {
                     use std::io::Write as _;
@@ -300,6 +309,19 @@ fn claude_observe(
     }
     let runtime_id = hook_var(env, st_drivers::claude_session::RUNTIME_ID_ENV)
         .unwrap_or_else(|| identity.clone());
+    if env.raw_var(st_drivers::driver_paths::ROOT_ENV).is_some()
+        || st_drivers::claude_process::recorded(&paths.agent_dir).unwrap_or(true) {
+        let session = hook_var(env, st_drivers::claude_session::SESSION_ENV).unwrap_or_default();
+        let sequence = hook_var(env, st_drivers::claude_session::SESSION_SEQ_ENV)
+            .and_then(|v| v.parse().ok()).unwrap_or(0);
+        let command = format!("\"$ST_HOOKS/claude-observe.sh\" {event}");
+        if let Err(error) = st_drivers::claude_process::with_caller(&paths.agent_dir, &session,
+            sequence, std::process::id(), None,
+            st_drivers::claude_process::Caller::Hook { trampoline: &command }, |_| Ok(())) {
+            eprintln!("st: secondary Claude hook cannot observe the launching seat: {error}");
+            return 0;
+        }
+    }
     let observed = if env.raw_var(st_drivers::driver_paths::ROOT_ENV).is_some() {
         st_drivers::claude_session::run_observe_payload_paths(
             &paths,
@@ -325,6 +347,12 @@ fn claude_observe(
             return 1;
         }
         eprintln!("st: Claude {event} was not recorded: {error:#}");
+        return if session_start {
+            match session_start_binding(&paths.agent_dir, env, &raw) {
+                Ok(()) => 0,
+                Err(reason) => unbound(env, report, &reason),
+            }
+        } else { 0 };
     }
     if event == "PermissionRequest" {
         answer_permission_from_st(env, &identity, &paths.agent_dir, &raw);

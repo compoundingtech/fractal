@@ -267,7 +267,11 @@ impl SessionObserver {
         session: String,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(!session.is_empty(), "provider session incarnation is empty");
-        let seq = harness_state::claim(agent_dir, identity, harness, &session)?;
+        let seq = if harness == "claude" {
+            crate::claude_process::claim(agent_dir, identity, pty_session, &session)?
+        } else {
+            harness_state::claim(agent_dir, identity, harness, &session)?
+        };
         Ok(Self {
             seq,
             agent_dir: agent_dir.to_path_buf(),
@@ -561,11 +565,22 @@ pub(crate) fn run_provider_observed_with_env_removals(
         Ok(child) => child,
         Err(error) => {
             if let Some(observed) = observed {
+                if observed.harness == "claude" {
+                    let _ = crate::claude_process::ended(&observed.agent_dir, &observed.session, observed.seq);
+                }
                 observed.launch_error();
             }
             return Err(error).with_context(|| format!("starting {provider} provider {program}"));
         }
     };
+    if let Some(observed) = observed.filter(|observer| observer.harness == "claude") {
+        if let Err(error) = crate::claude_process::spawned(
+            &observed.agent_dir, &observed.session, observed.seq, child.id(),
+        ) {
+            let _ = crate::claude_process::ended(&observed.agent_dir, &observed.session, observed.seq);
+            tracing::error!("Claude primary process registration refused: {error:#}");
+        }
+    }
     supervise_provider(
         provider,
         status_path,
@@ -611,6 +626,19 @@ fn supervise_provider(
     detach: &AtomicBool,
     observed: Option<&SessionObserver>,
 ) -> Result<ProviderOutcome> {
+    struct ClosePrimary<'a> { observer: Option<&'a SessionObserver>, detached: bool }
+    impl Drop for ClosePrimary<'_> {
+        fn drop(&mut self) {
+            if !self.detached {
+                if let Some(observer) = self.observer.filter(|o| o.harness == "claude") {
+                    if let Err(error) = crate::claude_process::ended(
+                        &observer.agent_dir, &observer.session, observer.seq,
+                    ) { tracing::warn!("closing Claude primary ownership: {error:#}"); }
+                }
+            }
+        }
+    }
+    let mut primary = ClosePrimary { observer: observed, detached: false };
     let mut next_refresh = Instant::now();
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -621,6 +649,7 @@ fn supervise_provider(
             if let Some(exit) = child.try_wait().ok().flatten() {
                 return Ok(ProviderOutcome::Exited(exit));
             }
+            primary.detached = true;
             return Ok(ProviderOutcome::Detached(child.id()));
         }
         match child.try_wait() {

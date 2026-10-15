@@ -64,6 +64,7 @@ struct Presence {
     image: Option<String>,
     beats: Mutex<HashMap<String, Beat>>,
     monitors: Mutex<HashMap<String, Beat>>,
+    ownership: Mutex<HashMap<String, (String, bool)>>,
 }
 
 fn presence() -> &'static Presence {
@@ -73,6 +74,7 @@ fn presence() -> &'static Presence {
         image: st_drivers::reexec::running_identity().map(|identity| identity.token()),
         beats: Mutex::new(HashMap::new()),
         monitors: Mutex::new(HashMap::new()),
+        ownership: Mutex::new(HashMap::new()),
     })
 }
 
@@ -142,6 +144,24 @@ pub(super) fn attachment(recipient: &str, incarnation: &str) -> Option<crate::ma
         && beat.report.channel.as_ref().is_some_and(|channel|
             channel.age_ms.is_some_and(|age| age <= CHANNEL_STALE_AFTER_MS)))
     .then(|| fence.clone())
+}
+
+/// Admission metadata is set by the daemon, not a helper's readiness claim. It grants no
+/// health or mailbox custody, and a legacy delivery generation is visible even on old helpers.
+pub(super) fn record_ownership(fence: &crate::mailbox::Fence, legacy: bool) {
+    if fence.component == "delivery" {
+        if let Ok(mut ownership) = presence().ownership.lock() {
+            ownership.insert(fence.subject.clone(), (fence.incarnation.clone(), legacy));
+        }
+    }
+}
+
+fn ownership_warning(mut assessment: Assessment, legacy: bool) -> Assessment {
+    if legacy && matches!(assessment.state, "current" | "outdated" | "legacy") {
+        assessment.state = "legacy";
+        assessment.reason = Some("legacy ownership: unprotected until next natural restart".into());
+    }
+    assessment
 }
 
 /// A metadata-free poll from a Unix peer proven to be this seat's native delivery process.
@@ -232,7 +252,7 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
     {
         beat = Some(captured(monitor));
     }
-    assess_beat(
+    let assessment = assess_beat(
         presence.started.elapsed(),
         presence.image.as_deref(),
         beat.map(|(at, mut report)| {
@@ -244,7 +264,11 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
             (at.elapsed(), report)
         }),
         driver,
-    )
+    );
+    let legacy = driver == "claude" && presence.ownership.lock().ok().is_some_and(|rows|
+        rows.get(recipient).is_some_and(|(owner,legacy)| *legacy && incarnation == Some(owner.as_str())));
+    ownership_warning(assessment, legacy)
+
 }
 
 /// A message view may include a local poll when one exists; absent remote evidence stays absent.
@@ -330,6 +354,11 @@ fn assess_beat(
         return stale(report.reason.clone().unwrap_or_else(|| {
             "the channel is polling but has not received the provider's initial idle proof".into()
         }));
+    }
+    if driver == "claude" && report.reason.as_deref()
+        == Some("legacy ownership: unprotected until next natural restart") {
+        return Assessment { state: "legacy", reason: report.reason,
+            polled_seconds_ago: Some(age.as_secs()), transport: report.transport };
     }
     let current_image = |image: Option<&str>| match (image, daemon_image) {
         (Some(image), Some(daemon)) => image == daemon,
@@ -527,6 +556,19 @@ mod tests {
         );
         assert_eq!(assessment.state, "current", "{assessment:?}");
         assert_eq!(assessment.transport.as_deref(), Some("claude-channel"));
+    }
+
+    #[test]
+    fn legacy_process_ownership_warns_without_losing_delivery_or_faking_recovery() {
+        let mut legacy=report(Some("new"),Some((Some("new"),0)));
+        legacy.reason=Some("legacy ownership: unprotected until next natural restart".into());
+        let current=assess_beat(Duration::from_secs(60),DAEMON,
+            Some((Duration::from_secs(1),legacy.clone())),"claude");
+        assert_eq!(current.state,"legacy"); assert!(!current.stale());
+        assert!(reason(&current).contains("unprotected until next natural restart"));
+        legacy.ready=Some(false);
+        assert!(assess_beat(Duration::from_secs(60),DAEMON,
+            Some((Duration::from_secs(1),legacy)),"claude").stale());
     }
 
     #[test]
