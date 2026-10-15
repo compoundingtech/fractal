@@ -44059,12 +44059,25 @@ version 2
             controller.set_step_state(&child.steps[0].subject, "ready", None).unwrap();
         }
         let worker = Store::open_memory("worker").unwrap();
-        receive_and_project(
-            &worker,
-            "controller",
-            &exchange_from(&controller, &ReplicationInventory::default()),
-        );
+        replicate_fully(&controller, &worker);
         (controller, worker, root, children)
+    }
+
+    /// Exchange from `controller` to `worker` until the worker holds every claim: an export
+    /// sends one bounded page, so a large tree takes several.
+    fn replicate_fully(controller: &Store, worker: &Store) {
+        for _ in 0..64 {
+            let exchange = exchange_from(controller, &worker.replication_inventory().unwrap());
+            if exchange.envelopes.is_empty() {
+                break;
+            }
+            receive_and_project(worker, "controller", &exchange);
+        }
+        assert_eq!(
+            worker.replication_inventory().unwrap().digest,
+            controller.replication_inventory().unwrap().digest,
+            "the worker caught up"
+        );
     }
 
     /// One late claim about one child of a standing root rebuilds that child alone, not the
@@ -44165,6 +44178,185 @@ version 2
         assert_eq!(RUN_PART_RUNS.with(std::cell::Cell::get), 1 + children.len());
         assert_eq!(graph_digest(&transaction).unwrap(), replayed);
         transaction.rollback().unwrap();
+    }
+
+    /// The shapes a standing tree holds besides children started from the root's steps, made on
+    /// the controller and replicated to the worker: a grandchild started from a child's step, a
+    /// run a subscription delivers straight under the root, and a person ask owned by the root
+    /// and one owned by a child.
+    struct TreeShapes {
+        controller: Store,
+        worker: Store,
+        root: MissionRunView,
+        children: Vec<MissionRunView>,
+        grandchild: MissionRunView,
+        delivered: MissionRunView,
+        root_ask: StepRunView,
+        child_ask: StepRunView,
+    }
+
+    fn tree_shapes() -> TreeShapes {
+        let (controller, worker, root, children) = replicated_run_tree(4);
+        // Only a declared agent's live work can ask a person.
+        let agents = crate::graph::parse_internal_intent(
+            r#"version 2
+agent "desk.one" { workspace "/tmp"; command "true"; restart always; }
+agent "worker.one" { workspace "/tmp"; command "true"; restart always; }
+"#,
+            "controller",
+        )
+        .unwrap();
+        controller.apply_internal(&agents, "tree-shape-agents").unwrap();
+        let request = |key: &str| MissionRunRequest {
+            mission: "request".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        };
+        let grandchild = controller
+            .create_child_mission_run(
+                &request("grandchild"),
+                &children[1],
+                &children[1].steps[0].subject,
+                None,
+            )
+            .unwrap();
+        let delivered = controller
+            .create_child_mission_run(
+                &request("delivered"),
+                &root,
+                "subscription/front-desk-intake",
+                None,
+            )
+            .unwrap();
+        for run in [&root, &grandchild, &delivered] {
+            controller.set_step_state(&run.steps[0].subject, "ready", None).unwrap();
+        }
+        let ask = |step: &str, actor: &str, key: &str| {
+            controller
+                .work_action(
+                    step,
+                    "claim",
+                    &WorkRequest {
+                        wait_ms: None,
+                        actor: Some(actor.into()),
+                        incarnation: Some(format!("{key}-incarnation")),
+                        summary: None,
+                        reason: None,
+                        evidence: Vec::new(),
+                        idempotency_key: format!("{key}-claim"),
+                    },
+                )
+                .unwrap();
+            controller
+                .ask_person(&crate::model::PersonAskRequest {
+                    legacy_request: None,
+                    person: "person/test".into(),
+                    title: "Choose a date".into(),
+                    reason: "Reply with a date.".into(),
+                    actor: actor.into(),
+                    step: Some(step.into()),
+                    new_run: None,
+                    incarnation: Some(format!("{key}-incarnation")),
+                    request: None,
+                    idempotency_key: key.into(),
+                })
+                .unwrap()
+        };
+        let root_ask = ask(&root.steps[0].subject, "agent/desk.one", "root-ask");
+        // The worker's seat queue takes its oldest ready step first.
+        let child_ask = ask(&children[0].steps[0].subject, "agent/worker.one", "child-ask");
+        replicate_fully(&controller, &worker);
+        TreeShapes {
+            controller,
+            worker,
+            root,
+            children,
+            grandchild,
+            delivered,
+            root_ask,
+            child_ask,
+        }
+    }
+
+    /// The worker projects a later claim about one child; `late` then writes claims on the
+    /// controller dated before it. Returns how many runs the projection rebuilt as parts, after
+    /// checking the graph against a full replay.
+    fn late_claim_matches_a_replay(shapes: &TreeShapes, late: impl FnOnce(&Store)) -> usize {
+        let now = now_ms();
+        shapes.worker.set_write_clock_at(now + 2_000).unwrap();
+        shapes
+            .worker
+            .set_step_state(
+                &shapes.children[3].steps[0].subject,
+                "blocked",
+                Some("waits on a person"),
+            )
+            .unwrap();
+        shapes.controller.set_write_clock_at(now + 1_000).unwrap();
+        late(&shapes.controller);
+        RUN_PART_RUNS.with(|runs| runs.set(0));
+        assert!(!projection_replayed(&shapes.worker, "controller", &shapes.controller));
+        let parts = RUN_PART_RUNS.with(std::cell::Cell::get);
+        let incremental = graph_digest_of(&shapes.worker);
+        shapes.worker.replay_replication_graph().unwrap();
+        assert_eq!(incremental, graph_digest_of(&shapes.worker), "the projection matches a replay");
+        parts
+    }
+
+    /// The tree's runs: the root, its children, the grandchild, the delivered run and two asks.
+    const TREE_SHAPE_RUNS: usize = 1 + 4 + 1 + 1 + 2;
+
+    #[test]
+    fn a_late_claim_about_a_grandchild_rebuilds_its_child_part_and_matches_a_replay() {
+        let shapes = tree_shapes();
+        let step = shapes.grandchild.steps[0].subject.clone();
+        let parts = late_claim_matches_a_replay(&shapes, |controller| {
+            controller.set_step_state(&step, "blocked", Some("blocked early")).unwrap();
+        });
+        assert!((1..TREE_SHAPE_RUNS).contains(&parts), "{parts} runs rebuilt as parts");
+    }
+
+    #[test]
+    fn a_late_claim_about_a_delivered_run_rebuilds_its_part_and_matches_a_replay() {
+        let shapes = tree_shapes();
+        let step = shapes.delivered.steps[0].subject.clone();
+        let parts = late_claim_matches_a_replay(&shapes, |controller| {
+            controller.set_step_state(&step, "blocked", Some("blocked early")).unwrap();
+        });
+        assert!((1..TREE_SHAPE_RUNS).contains(&parts), "{parts} runs rebuilt as parts");
+    }
+
+    #[test]
+    fn late_claims_about_asks_owned_by_the_root_and_by_a_child_match_a_replay() {
+        for owned_by_root in [true, false] {
+            let shapes = tree_shapes();
+            let ask = if owned_by_root { &shapes.root_ask } else { &shapes.child_ask };
+            let ask = ask.subject.clone();
+            let parts = late_claim_matches_a_replay(&shapes, |controller| {
+                controller.set_step_state(&ask, "blocked", Some("blocked early")).unwrap();
+            });
+            assert!(
+                (1..TREE_SHAPE_RUNS).contains(&parts),
+                "{parts} runs rebuilt as parts (owned by the root: {owned_by_root})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_late_claim_in_the_batch_that_ends_the_root_matches_a_replay() {
+        let shapes = tree_shapes();
+        let step = shapes.children[2].steps[0].subject.clone();
+        let root = shapes.root.id.clone();
+        late_claim_matches_a_replay(&shapes, |controller| {
+            controller.set_step_state(&step, "blocked", Some("blocked early")).unwrap();
+            controller
+                .set_mission_run_state(&root, "cancelled", "terminal", Some("the desk closes"))
+                .unwrap();
+        });
     }
 
     #[test]
