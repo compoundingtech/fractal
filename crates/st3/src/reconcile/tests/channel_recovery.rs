@@ -417,3 +417,102 @@ fn a_parked_recovery_never_stops_an_unrelated_new_incarnation() {
     assert!(recover(&reconciler,&desired,"orchid-independent",since+1).is_err());
     assert!(runtime.stops.lock().unwrap().is_empty());
 }
+
+#[test]
+fn same_episode_keys_dedupe_across_two_daemon_recreations() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+    let first = attempts(&store).pop().unwrap();
+    for _ in 0..2 {
+        let fresh = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        assert!(!recover(&fresh, &desired, "orchid-one", since + 10_001).unwrap());
+        assert_eq!(attempts(&store).len(), 1);
+        assert_eq!(attempts(&store)[0].id, first.id);
+    }
+    for (index, backoff) in [20_000, 40_000].into_iter().enumerate() {
+        let incarnation = format!("orchid-{}", index + 2);
+        let since = attachment(&store, &incarnation, false);
+        assert!(recover(&reconciler, &desired, &incarnation, since + backoff).unwrap());
+    }
+    let since = attachment(&store, "orchid-parked", false);
+    assert!(recover(&reconciler, &desired, "orchid-parked", since).unwrap());
+    let failures = || {
+        store
+            .claims_for(SEAT, Some("runtime.action.failed"))
+            .unwrap()
+    };
+    let park = failures().pop().unwrap();
+    for _ in 0..2 {
+        let fresh = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        assert!(
+            recover(&fresh, &desired, "orchid-parked", since + 1)
+                .unwrap_err()
+                .to_string()
+                .contains("parked")
+        );
+        let recorded = failures();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].id, park.id);
+        assert_eq!(attempts(&store).len(), 3);
+    }
+}
+
+#[test]
+fn automatic_and_person_requested_restart_failures_preserve_their_initiator() {
+    let (store, _, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+    let automatic = attempts(&store).pop().unwrap();
+    let reason = reconciler
+        .record_requested_restart_failure(
+            &desired,
+            desired.member.as_ref().unwrap(),
+            &automatic,
+            "fixture refusal",
+        )
+        .unwrap();
+    assert!(reason.starts_with("the automatic Claude channel recovery failed"));
+    assert!(!reason.contains("explicit"));
+    let manual = store
+        .append_claim(&ClaimInput {
+            subject: SEAT.into(),
+            kind: "runtime.action.requested".into(),
+            actor: Some("person/eval".into()),
+            fields: BTreeMap::from([("action".into(), json!("restart"))]),
+            evidence: vec![store.selected_desired_token(SEAT).unwrap().unwrap()],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let reason = reconciler
+        .record_requested_restart_failure(
+            &desired,
+            desired.member.as_ref().unwrap(),
+            &manual,
+            "fixture refusal",
+        )
+        .unwrap();
+    assert!(reason.starts_with("the explicit restart failed"));
+    let failures = store
+        .claims_for(SEAT, Some("runtime.action.failed"))
+        .unwrap();
+    for request in [&automatic, &manual] {
+        let failure = failures
+            .iter()
+            .find(|claim| claim.body["evidence"][0] == request.id)
+            .unwrap();
+        assert_eq!(failure.actor, request.actor);
+        assert_eq!(failure.body["fields"]["action"], "restart");
+    }
+}

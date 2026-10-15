@@ -46,6 +46,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         // restarts. A stable-success reset needs its own continuity proof; this policy does not
         // infer one from a single recovered diagnostic. Attempts expire from their persisted
         // acceptance time after six hours, so unrelated losses weeks apart do not accumulate.
+        // This is the store's persisted accepted_at, not daemon uptime. A backward clock
+        // step saturates the age to zero (keeps the bound); a forward step can expire it.
+        // No monotonic elapsed-time or stable attachment proof is inferred from wall time.
         let reset = restarts
             .iter()
             .filter(|claim| claim.body["fields"]["operation"] != RECOVERY)

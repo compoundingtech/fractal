@@ -177,8 +177,13 @@ pub(super) fn with_claude_primary<T>(
         Ok((value, Some(wrapper)))
     })
     .map_err(|e| {
-        e.downcast::<St3Error>()
-            .unwrap_or_else(|e| refused(e.to_string()))
+        e.downcast::<St3Error>().unwrap_or_else(|e| {
+            if claude_process::failure_kind(&e) == Some(claude_process::FailureKind::Unavailable) {
+                unavailable(claude_process::diagnostic(&e))
+            } else {
+                refused(claude_process::diagnostic(&e))
+            }
+        })
     })
 }
 

@@ -7668,7 +7668,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     "{}",
                     result.body["fields"]["reason"]
                         .as_str()
-                        .unwrap_or("the explicit restart failed and the seat is parked")
+                        .unwrap_or("the requested restart failed and the seat is parked")
                 );
             }
             return Ok(false);
@@ -7779,7 +7779,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &subject.subject,
                     observation,
                     &request.id,
-                    "a restart was requested",
+                    if request.body["fields"]["operation"] == "claude-channel-recovery" {
+                        "automatic Claude channel recovery requested a restart"
+                    } else {
+                        "a restart was requested"
+                    },
                 )?
             {
                 return Ok(true);
@@ -7814,7 +7818,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject,
                 member,
                 &request,
-                "the explicit launch attempt was interrupted before its result was recorded",
+                if request.body["fields"]["operation"] == "claude-channel-recovery" {
+                    "the automatic Claude channel recovery launch was interrupted before its result was recorded"
+                } else {
+                    "the explicit launch attempt was interrupted before its result was recorded"
+                },
             );
         }
         match self.perform_start_for_request(
@@ -7870,10 +7878,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             .selected_desired_token(&subject.subject)?
             .as_deref()
             == request.body.pointer("/evidence/0").and_then(Value::as_str);
-        let reason = if current {
-            format!("the explicit restart failed and the seat is parked again: {detail}")
+        let origin = if request.body["fields"]["operation"] == "claude-channel-recovery" {
+            "automatic Claude channel recovery"
         } else {
-            format!("the explicit restart was superseded by a declaration change: {detail}")
+            "explicit restart"
+        };
+        let reason = if current {
+            format!("the {origin} failed and the seat is parked again: {detail}")
+        } else {
+            format!("the {origin} was superseded by a declaration change: {detail}")
         };
         let park = if member.driver.as_deref() == Some("codex") {
             "codex-crash-loop"

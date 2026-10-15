@@ -1796,7 +1796,11 @@ pub fn run_statusline(catalog_root: &Path, identity: &str) -> Result<()> {
     let mut raw = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut raw);
     if let Err(error) = record_statusline(catalog_root, identity, &raw) {
-        tracing::warn!("st claude-statusline: recording failed; chaining anyway: {error:#}");
+        if crate::claude_process::failure_kind(&error).is_some() {
+            eprintln!("st: {}", crate::claude_process::diagnostic(&error));
+        } else {
+            tracing::warn!("st claude-statusline: recording failed; chaining anyway: {error:#}");
+        }
     }
     chain_statusline(&raw)
 }
@@ -1812,7 +1816,11 @@ pub fn run_statusline_paths(agent_dir: &Path, identity: &str) -> Result<()> {
     let mut raw = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut raw);
     if let Err(error) = record_statusline_paths(agent_dir, identity, &raw, true) {
-        tracing::warn!("st claude-statusline: recording failed; chaining anyway: {error:#}");
+        if crate::claude_process::failure_kind(&error).is_some() {
+            eprintln!("st: {}", crate::claude_process::diagnostic(&error));
+        } else {
+            tracing::warn!("st claude-statusline: recording failed; chaining anyway: {error:#}");
+        }
     }
     chain_statusline(&raw)
 }

@@ -3,7 +3,11 @@
 //! not a security boundary against a same-user process rewriting all of st's local state.
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 const FILE: &str = "claude-primary-process.json";
 const LOCK: &str = "claude-primary-process.lock";
@@ -39,6 +43,82 @@ pub enum Admission {
     Legacy,
 }
 
+/// A mismatch is affirmative refusal; unavailable proof never grants custody and is not
+/// evidence that the caller is secondary. Diagnostics contain no supplied path or payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureKind {
+    Refused,
+    Unavailable,
+}
+
+#[derive(Debug)]
+struct Failure {
+    kind: FailureKind,
+    reason: &'static str,
+}
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason)
+    }
+}
+impl std::error::Error for Failure {}
+fn refused(reason: &'static str) -> Failure {
+    Failure {
+        kind: FailureKind::Refused,
+        reason,
+    }
+}
+fn unavailable(error: anyhow::Error) -> anyhow::Error {
+    error.context(Failure {
+        kind: FailureKind::Unavailable,
+        reason: "Claude process proof is unavailable",
+    })
+}
+pub fn failure_kind(error: &anyhow::Error) -> Option<FailureKind> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Failure>().map(|failure| failure.kind))
+}
+pub fn diagnostic(error: &anyhow::Error) -> &'static str {
+    match failure_kind(error) {
+        Some(FailureKind::Refused) => "Claude ownership refused: process or generation mismatch",
+        _ => "Claude ownership unavailable after a bounded recheck; publication withheld",
+    }
+}
+
+// The new proof adds no blocking flock. A transient unavailable capture gets at most one
+// recheck, before the 25ms proof budget expires, with 5ms maximum intentional waiting.
+// This bounds added lock waiting, not OS filesystem/proc latency or existing action work.
+const PROOF_BUDGET: Duration = Duration::from_millis(25);
+const RECHECK_PAUSE: Duration = Duration::from_millis(5);
+fn proof_with_recheck<T>(capture: impl FnMut() -> Result<T>) -> Result<T> {
+    let start = Instant::now();
+    proof_with_recheck_clock(
+        capture,
+        || start.elapsed(),
+        || std::thread::sleep(RECHECK_PAUSE),
+    )
+}
+fn proof_with_recheck_clock<T>(
+    mut capture: impl FnMut() -> Result<T>,
+    elapsed: impl Fn() -> Duration,
+    pause: impl FnOnce(),
+) -> Result<T> {
+    match capture() {
+        Err(error)
+            if failure_kind(&error) == Some(FailureKind::Unavailable)
+                && elapsed().saturating_add(RECHECK_PAUSE) < PROOF_BUDGET =>
+        {
+            pause();
+            if elapsed() >= PROOF_BUDGET {
+                return Err(error);
+            }
+            capture()
+        }
+        result => result,
+    }
+}
+
 pub fn recorded(dir: &Path) -> Result<bool> {
     Ok(dir.join(FILE).try_exists()?)
 }
@@ -52,11 +132,14 @@ fn read_owner(dir: &Path) -> Result<Vec<u8>> {
     let file = fs::File::open(dir.join(FILE))?;
     anyhow::ensure!(
         file.metadata()?.is_file(),
-        "Claude witness is not a regular file"
+        refused("Claude witness is not a regular file")
     );
     let mut bytes = Vec::new();
     file.take(4097).read_to_end(&mut bytes)?;
-    anyhow::ensure!(bytes.len() <= 4096, "Claude witness exceeds the byte limit");
+    anyhow::ensure!(
+        bytes.len() <= 4096,
+        refused("Claude witness exceeds the byte limit")
+    );
     Ok(bytes)
 }
 
@@ -69,6 +152,13 @@ fn lock(dir: &Path, create: bool) -> Result<crate::flock::FileLock> {
     Ok(FileLock::hold_blocking(file, Mode::Exclusive)?)
 }
 
+fn try_lock(dir: &Path) -> Result<crate::flock::FileLock> {
+    use crate::flock::{self, FileLock, Mode, Open, Wait};
+    let file = flock::open(&dir.join(LOCK), Open::Existing)?;
+    FileLock::hold(file, Mode::Exclusive, Wait::Now)?
+        .ok_or_else(|| unavailable(std::io::Error::from(std::io::ErrorKind::WouldBlock).into()))
+}
+
 fn write(dir: &Path, owner: &Owner) -> Result<()> {
     crate::harness_state::write_json_atomic(&dir.join(FILE), owner, dir, ".claude-primary-process")
 }
@@ -76,6 +166,10 @@ fn write(dir: &Path, owner: &Owner) -> Result<()> {
 /// Claim the harness and record its actual wrapper generation BEFORE spawning the provider.
 /// Lock order is process-owner, then harness-state; helper publications use the same order.
 pub(crate) fn claim(dir: &Path, identity: &str, runtime: &str, session: &str) -> Result<u64> {
+    // Before the early SessionStart window, assert that this wrapper cannot adopt orphaned
+    // nested descendants as direct children. No production path sets CHILD_SUBREAPER; a future
+    // caller changing that must settle this protocol rather than silently widening its proof.
+    ensure_no_subreaper(subreaper()?)?;
     fs::create_dir_all(dir)?;
     let _guard = lock(dir, true)?;
     let wrapper = process(std::process::id())?;
@@ -145,44 +239,113 @@ pub fn with_caller<T>(
     role: Caller<'_>,
     action: impl FnOnce(Admission) -> Result<T>,
 ) -> Result<T> {
-    let path = dir.join(FILE);
-    // A legacy wrapper never minted the lock or record. Do not create either from a helper.
-    if !path.try_exists()? {
-        return action(Admission::Legacy);
-    }
-    let _guard = lock(dir, false)?;
-    let bytes = read_owner(dir)?;
-    let owner: Owner = serde_json::from_slice(&bytes)?;
-    anyhow::ensure!(
-        owner.version == 1
-            && !owner.closed
-            && owner.session == session
-            && owner.sequence == sequence,
-        "Claude primary ownership is closed or superseded"
-    );
-    if let Some(expected) = expected_wrapper {
+    let mut protected = expected_wrapper.is_some();
+    let (admission, _guard) = proof_with_recheck(|| {
+        let path = dir.join(FILE);
+        // Only proven absence is legacy. Helpers never create either record or lock.
+        if !path.try_exists().map_err(|e| unavailable(e.into()))? {
+            anyhow::ensure!(!protected, refused("protected Claude witness disappeared"));
+            return Ok((Admission::Legacy, None));
+        }
+        // A recheck must not turn disappearance of a witnessed generation into legacy.
+        protected = true;
+        let guard = try_lock(dir).map_err(unavailable)?;
+        let bytes = read_owner(dir).map_err(classify_read)?;
+        let owner: Owner = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::Error::new(e).context(refused("malformed Claude witness")))?;
         anyhow::ensure!(
-            expected == owner.wrapper,
-            "Claude ownership disagrees with the physical wrapper"
+            owner.version == 1
+                && !owner.closed
+                && owner.session == session
+                && owner.sequence == sequence,
+            refused("Claude primary ownership is closed or superseded")
         );
+        if let Some(expected) = expected_wrapper {
+            anyhow::ensure!(
+                expected == owner.wrapper,
+                refused("Claude ownership disagrees with the physical wrapper")
+            );
+        }
+        let current = crate::harness_state::try_current_ownership(dir, session, sequence)
+            .map_err(classify_read)?
+            .ok_or_else(|| {
+                unavailable(std::io::Error::from(std::io::ErrorKind::WouldBlock).into())
+            })?;
+        anyhow::ensure!(current, refused("harness ownership was superseded"));
+        check_processes(&owner, &bytes, pid, &role, process, arguments, || {
+            read_owner(dir)
+        })?;
+        Ok((Admission::Primary, Some(guard)))
+    })?;
+    // Publication is outside the retry: an action error can never replay a write or binding.
+    action(admission)
+}
+
+fn classify_read(error: anyhow::Error) -> anyhow::Error {
+    if failure_kind(&error).is_some() {
+        error
+    } else if error.chain().any(|e| e.is::<std::io::Error>()) {
+        unavailable(error)
+    } else {
+        error.context(refused("Claude ownership record is malformed"))
     }
-    crate::harness_state::with_current_ownership(dir, session, sequence, || Ok(()))?;
-    let proof = prove(&owner, pid, &role, process, arguments)?;
-    // Check before the publication and after capture; a reparented or reused process is not
-    // admitted. Holding our lock prevents wrapper replacement during the actual publication.
-    validate_proof(&proof, process)?;
+}
+
+fn check_processes(
+    owner: &Owner,
+    bytes: &[u8],
+    pid: u32,
+    role: &Caller<'_>,
+    read: impl Fn(u32) -> Result<Process>,
+    args: impl Fn(u32) -> Result<Vec<String>>,
+    reread: impl FnOnce() -> Result<Vec<u8>>,
+) -> Result<()> {
+    let proof = prove(owner, pid, role, &read, args)?;
+    validate_proof(&proof, read)?;
     anyhow::ensure!(
-        read_owner(dir)? == bytes,
-        "Claude process witness changed during admission"
+        reread().map_err(classify_read)? == bytes,
+        refused("Claude process witness changed during admission")
     );
-    action(Admission::Primary)
+    Ok(())
+}
+
+// macOS reparents orphans to launchd, never this wrapper. Linux subreaper is per-process and
+// not inherited by forked wrappers. Reexec retains it, so every new claim checks it again.
+#[cfg(target_os = "linux")]
+fn subreaper() -> Result<bool> {
+    let mut value: libc::c_int = 0;
+    // SAFETY: PR_GET_CHILD_SUBREAPER writes one c_int into a live local value.
+    let result = unsafe {
+        libc::prctl(
+            libc::PR_GET_CHILD_SUBREAPER,
+            &mut value as *mut libc::c_int,
+            0,
+            0,
+            0,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(value != 0)
+}
+#[cfg(not(target_os = "linux"))]
+fn subreaper() -> Result<bool> {
+    Ok(false)
+}
+fn ensure_no_subreaper(value: bool) -> Result<()> {
+    anyhow::ensure!(
+        !value,
+        refused("Claude wrapper must not adopt orphaned descendants")
+    );
+    Ok(())
 }
 
 fn validate_proof(proof: &[Process], read: impl Fn(u32) -> Result<Process>) -> Result<()> {
     for captured in proof {
         anyhow::ensure!(
-            read(captured.pid)? == *captured,
-            "Claude process parent or birth changed during admission"
+            read(captured.pid).map_err(unavailable)? == *captured,
+            refused("Claude process parent or birth changed during admission")
         );
     }
     Ok(())
@@ -195,33 +358,36 @@ fn prove(
     read: impl Fn(u32) -> Result<Process>,
     args: impl Fn(u32) -> Result<Vec<String>>,
 ) -> Result<Vec<Process>> {
-    let wrapper = read(owner.wrapper.pid)?;
+    let wrapper = read(owner.wrapper.pid).map_err(unavailable)?;
     anyhow::ensure!(
         wrapper == owner.wrapper && wrapper.pid > 1,
-        "Claude wrapper generation is not live"
+        refused("Claude wrapper generation is not live")
     );
-    let caller = read(pid)?;
+    let caller = read(pid).map_err(unavailable)?;
     if matches!(role, Caller::Wrapper) {
-        anyhow::ensure!(caller == wrapper, "this is not the primary Claude wrapper");
+        anyhow::ensure!(
+            caller == wrapper,
+            refused("this is not the primary Claude wrapper")
+        );
         return Ok(vec![wrapper]);
     }
     let mut proof = vec![wrapper, caller];
-    let mut provider = read(caller.parent)?;
+    let mut provider = read(caller.parent).map_err(unavailable)?;
     if let Caller::Hook { trampoline } = role {
-        let argv = args(provider.pid)?;
+        let argv = args(provider.pid).map_err(unavailable)?;
         if exact_trampoline(&argv, trampoline) {
             proof.push(provider);
-            provider = read(provider.parent)?;
+            provider = read(provider.parent).map_err(unavailable)?;
         }
     }
     anyhow::ensure!(
         provider.pid > 1 && provider.parent == wrapper.pid,
-        "secondary Claude process cannot act as the launching seat"
+        refused("secondary Claude process cannot act as the launching seat")
     );
     if let Some(expected) = owner.provider {
         anyhow::ensure!(
             provider == expected,
-            "Claude primary provider generation changed"
+            refused("Claude primary provider generation changed")
         );
     }
     proof.push(provider);

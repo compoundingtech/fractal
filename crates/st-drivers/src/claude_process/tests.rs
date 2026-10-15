@@ -406,3 +406,289 @@ fn startup_and_reexec_keep_the_exact_primary_and_never_admit_a_nested_candidate(
         .is_err()
     );
 }
+
+#[test]
+fn hooks_never_create_ownership_files_and_oversize_never_becomes_legacy() {
+    let dir = tempfile::tempdir().unwrap();
+    let admit = || {
+        with_caller(
+            dir.path(),
+            "hook",
+            1,
+            std::process::id(),
+            None,
+            Caller::Hook {
+                trampoline: "\"$ST_HOOKS/claude-observe.sh\" SessionStart",
+            },
+            Ok,
+        )
+    };
+    assert_eq!(admit().unwrap(), Admission::Legacy);
+    assert!(!dir.path().join(FILE).exists());
+    assert!(!dir.path().join(LOCK).exists());
+    let mut published = false;
+    let error = with_caller(
+        dir.path(),
+        "hook",
+        1,
+        std::process::id(),
+        Some(process(std::process::id()).unwrap()),
+        Caller::Wrapper,
+        |_| {
+            published = true;
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert_eq!(failure_kind(&error), Some(FailureKind::Refused));
+    assert!(
+        !published,
+        "known protected generation cannot downgrade during admission"
+    );
+    assert!(!dir.path().join(FILE).exists());
+    assert!(!dir.path().join(LOCK).exists());
+    fs::write(dir.path().join(FILE), b"{}").unwrap();
+    assert_eq!(
+        failure_kind(&admit().unwrap_err()),
+        Some(FailureKind::Unavailable)
+    );
+    assert!(
+        !dir.path().join(LOCK).exists(),
+        "a hook cannot mint even the lock"
+    );
+    drop(lock(dir.path(), true).unwrap());
+    fs::write(dir.path().join(FILE), vec![b' '; 4097]).unwrap();
+    assert_eq!(
+        failure_kind(&admit().unwrap_err()),
+        Some(FailureKind::Refused)
+    );
+}
+
+#[test]
+fn witness_replacement_after_kernel_proof_and_unreadable_hook_birth_never_publish() {
+    let (owner, nodes) = fixture();
+    let bytes = serde_json::to_vec(&owner).unwrap();
+    let mut replacement = owner.clone();
+    replacement.provider = None;
+    let changed = serde_json::to_vec(&replacement).unwrap();
+    let replace_dir = tempfile::tempdir().unwrap();
+    fs::write(replace_dir.path().join(FILE), &bytes).unwrap();
+    let mut called = false;
+    let result = check_processes(
+        &owner,
+        &bytes,
+        30,
+        &Caller::Hook {
+            trampoline: "generated",
+        },
+        |pid| read(&nodes, pid),
+        |_| Ok(vec!["claude".into()]),
+        || {
+            let next = replace_dir.path().join("replacement");
+            fs::write(&next, &changed)?;
+            fs::rename(next, replace_dir.path().join(FILE))?;
+            read_owner(replace_dir.path())
+        },
+    );
+    if result.is_ok() {
+        called = true;
+    }
+    assert_eq!(
+        failure_kind(&result.unwrap_err()),
+        Some(FailureKind::Refused)
+    );
+    assert!(!called);
+    let result = check_processes(
+        &owner,
+        &bytes,
+        30,
+        &Caller::Hook {
+            trampoline: "generated",
+        },
+        |pid| {
+            if pid == 30 {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into())
+            } else {
+                read(&nodes, pid)
+            }
+        },
+        |_| Ok(vec![]),
+        || Ok(bytes.clone()),
+    );
+    assert_eq!(
+        failure_kind(&result.unwrap_err()),
+        Some(FailureKind::Unavailable)
+    );
+    // A real unavailable kernel caller on a recorded generation must not run the callback.
+    let dir = tempfile::tempdir().unwrap();
+    let seq = claim(dir.path(), "fixture", "fixture", "hook").unwrap();
+    let error = with_caller(
+        dir.path(),
+        "hook",
+        seq,
+        u32::MAX,
+        None,
+        Caller::Hook {
+            trampoline: "generated",
+        },
+        |_| {
+            called = true;
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert_eq!(failure_kind(&error), Some(FailureKind::Unavailable));
+    assert!(!called);
+}
+
+#[test]
+fn only_unavailable_proof_gets_one_recheck_and_publication_is_never_retried() {
+    let mut captures = 0;
+    let result = proof_with_recheck_clock(
+        || {
+            captures += 1;
+            if captures == 1 {
+                Err(unavailable(
+                    std::io::Error::from(std::io::ErrorKind::Interrupted).into(),
+                ))
+            } else {
+                Ok(Admission::Primary)
+            }
+        },
+        || Duration::ZERO,
+        || {},
+    );
+    assert_eq!(result.unwrap(), Admission::Primary);
+    assert_eq!(captures, 2);
+    captures = 0;
+    let error = proof_with_recheck_clock::<()>(
+        || {
+            captures += 1;
+            Err(refused("secondary fixture").into())
+        },
+        || Duration::ZERO,
+        || {},
+    )
+    .unwrap_err();
+    assert_eq!(failure_kind(&error), Some(FailureKind::Refused));
+    assert_eq!(captures, 1);
+    captures = 0;
+    let error = proof_with_recheck_clock::<()>(
+        || {
+            captures += 1;
+            Err(unavailable(
+                std::io::Error::from(std::io::ErrorKind::Interrupted).into(),
+            ))
+        },
+        || Duration::ZERO,
+        || {},
+    )
+    .unwrap_err();
+    assert_eq!(captures, 2);
+    assert_eq!(failure_kind(&error), Some(FailureKind::Unavailable));
+    assert!(diagnostic(&error).len() < 128);
+    captures = 0;
+    let mut paused = false;
+    let error = proof_with_recheck_clock::<()>(
+        || {
+            captures += 1;
+            Err(unavailable(
+                std::io::Error::from(std::io::ErrorKind::Interrupted).into(),
+            ))
+        },
+        || PROOF_BUDGET,
+        || {
+            paused = true;
+        },
+    )
+    .unwrap_err();
+    assert_eq!(captures, 1, "expired budget cannot admit another capture");
+    assert!(!paused);
+    assert_eq!(failure_kind(&error), Some(FailureKind::Unavailable));
+    let dir = tempfile::tempdir().unwrap();
+    let seq = claim(dir.path(), "fixture", "fixture", "hook").unwrap();
+    let mut writes = 0;
+    let error = with_caller::<()>(
+        dir.path(),
+        "hook",
+        seq,
+        std::process::id(),
+        None,
+        Caller::Wrapper,
+        |_| {
+            writes += 1;
+            Err(unavailable(
+                std::io::Error::from(std::io::ErrorKind::Interrupted).into(),
+            ))
+        },
+    )
+    .unwrap_err();
+    assert_eq!(failure_kind(&error), Some(FailureKind::Unavailable));
+    assert_eq!(
+        writes, 1,
+        "even a typed action error must never replay publication"
+    );
+}
+
+#[test]
+fn process_and_harness_lock_contention_is_bounded_unavailable_not_secondary() {
+    let dir = tempfile::tempdir().unwrap();
+    let seq = claim(dir.path(), "fixture", "fixture", "hook").unwrap();
+    for held in [
+        dir.path().join(LOCK),
+        dir.path().join(".harness-state.lock"),
+    ] {
+        let guard = crate::flock::FileLock::hold_blocking(
+            crate::flock::open(&held, crate::flock::Open::Existing).unwrap(),
+            crate::flock::Mode::Exclusive,
+        )
+        .unwrap();
+        let started = Instant::now();
+        let mut wrote = false;
+        let error = with_caller(
+            dir.path(),
+            "hook",
+            seq,
+            std::process::id(),
+            None,
+            Caller::Wrapper,
+            |_| {
+                wrote = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "new proof cannot queue on a live holder"
+        );
+        assert_eq!(failure_kind(&error), Some(FailureKind::Unavailable));
+        assert!(diagnostic(&error).contains("publication withheld"));
+        assert!(!wrote);
+        drop(guard);
+        assert_eq!(
+            with_caller(
+                dir.path(),
+                "hook",
+                seq,
+                std::process::id(),
+                None,
+                Caller::Wrapper,
+                Ok
+            )
+            .unwrap(),
+            Admission::Primary
+        );
+    }
+}
+
+#[test]
+fn early_provider_window_requires_a_non_subreaper_wrapper() {
+    assert!(ensure_no_subreaper(false).is_ok());
+    assert_eq!(
+        failure_kind(&ensure_no_subreaper(true).unwrap_err()),
+        Some(FailureKind::Refused)
+    );
+    // This kernel read is about the isolated test wrapper, never a running agent/provider.
+    assert!(!subreaper().unwrap());
+}

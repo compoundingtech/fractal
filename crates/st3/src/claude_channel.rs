@@ -51,8 +51,14 @@ pub async fn run(
             true
         }
         Err(error) => {
-            eprintln!("st: secondary Claude channel is unscoped: {error}");
-            return run_idle().await;
+            eprintln!("st: {}", st_drivers::claude_process::diagnostic(&error));
+            if st_drivers::claude_process::failure_kind(&error)
+                == Some(st_drivers::claude_process::FailureKind::Refused) {
+                return run_idle().await;
+            }
+            // Unavailable proof is not proof of secondary ownership. Report startup failure
+            // rather than silently parking a legitimate primary in the unscoped protocol.
+            return Err(error);
         }
     };
     let ledger_path = agent_dir.join("native-channel-handoffs.json");
