@@ -11,19 +11,23 @@
 //! with the same error as before, ahead of any write, so the two halves together admit exactly
 //! what the single pass did.
 //!
+//! A preparation owns what it was made from: the envelope's key and the runtime that classified
+//! it. Admission takes nothing else, so it cannot write one envelope's records under another's
+//! key or apply one runtime's classification under another.
+//!
 //! An envelope's key names its bytes (the hash covers the payload), so a preparation can never
-//! describe other content than the row it was made from. Admission still checks, under the
-//! writer, that the row it prepared is the row that is there (see [`EnvelopeRow`]), and skips an
-//! envelope whose row changed: it stays pending and is prepared again on a later pass, off the
-//! writer.
+//! describe other content than the row it was made from. Admission also compares, under the
+//! writer, the row it prepared from with the row that is there (see [`EnvelopeRow`]); an envelope
+//! whose row is seen to differ stays pending and is prepared again on a later pass, off the
+//! writer. Every mutable fact is read again under the writer either way.
 
 use super::*;
 
 /// The `replica_envelopes` row a preparation was made from: its rowid and receipt time. A row
-/// deleted and received again after preparation usually differs in both. Neither is a token that
-/// can never repeat (SQLite can reuse the largest rowid, and two receipts can share a
-/// millisecond), so this is evidence of a stale preparation, not proof of a fresh one. The
-/// content is bound by the envelope hash either way.
+/// deleted and received again after preparation usually differs in one or both, but neither is
+/// a token that can never repeat (SQLite can reuse the largest rowid, and two receipts can share
+/// a millisecond). A difference proves the preparation stale; equality does not prove it fresh.
+/// Only pure content is reused, and the envelope hash binds that either way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnvelopeRow {
     pub rowid: i64,
@@ -31,12 +35,25 @@ pub struct EnvelopeRow {
 }
 
 /// One envelope, prepared for admission without the store.
-pub struct PreparedEnvelope {
+pub struct PreparedEnvelope<'r> {
+    writer: String,
+    sequence: u64,
+    hash: String,
+    /// The runtime that classified it, and that classifies under the writer what it could not.
+    runtime: &'r dyn Runtime,
     /// The row this was prepared from, when the caller read one.
     pub row: Option<EnvelopeRow>,
     /// Time spent decoding, hashing, encoding and classifying.
     pub verify: std::time::Duration,
+    /// The envelope's payload bytes, which its decoded content roughly doubles while it waits.
+    pub bytes: usize,
     content: Result<PreparedPayload, St3Error>,
+}
+
+struct EnvelopeKey {
+    writer: String,
+    sequence: u64,
+    hash: String,
 }
 
 struct PreparedPayload {
@@ -70,16 +87,21 @@ enum ClaimCheck {
 }
 
 /// Decode, verify, encode and classify `envelope` without the store.
-pub fn prepare_envelope(
+pub fn prepare_envelope<'r>(
     envelope: &ReplicaEnvelope,
-    runtime: &dyn Runtime,
+    runtime: &'r dyn Runtime,
     row: Option<EnvelopeRow>,
-) -> PreparedEnvelope {
+) -> PreparedEnvelope<'r> {
     let started = std::time::Instant::now();
     let content = prepare_payload(envelope, runtime);
     PreparedEnvelope {
+        writer: envelope.writer.clone(),
+        sequence: envelope.sequence,
+        hash: envelope.hash.clone(),
+        runtime,
         row,
         verify: started.elapsed(),
+        bytes: envelope.payload.bytes().map_or(0, <[u8]>::len),
         content,
     }
 }
@@ -222,20 +244,33 @@ fn finish_claim_check(
 }
 
 /// Admit a prepared envelope: the reads of stored state and the writes, in the order
-/// `validate_and_admit_envelope_tx` has always made them. `outcome.verify` is not charged here;
-/// the caller adds `prepared.verify` where it prepared.
+/// `validate_and_admit_envelope_tx` has always made them, under the key and with the runtime it
+/// was prepared from. `outcome.verify` is not charged for the preparation here; the caller adds
+/// `prepared.verify` where it prepared.
 pub fn admit_prepared_envelope_tx(
     transaction: &Connection,
-    envelope: &ReplicaEnvelope,
-    prepared: PreparedEnvelope,
-    runtime: &dyn Runtime,
+    prepared: PreparedEnvelope<'_>,
     outcome: &mut ReplicationAdmission,
 ) -> Result<(), St3Error> {
+    let PreparedEnvelope {
+        writer,
+        sequence,
+        hash: envelope_hash,
+        runtime,
+        content,
+        ..
+    } = prepared;
+    // The writes below name the envelope as the old body did, by these three fields.
+    let envelope = EnvelopeKey {
+        writer,
+        sequence,
+        hash: envelope_hash,
+    };
     let PreparedPayload {
         payload,
         blobs,
         claims,
-    } = prepared.content?;
+    } = content?;
     let batch = &payload.batch;
     let now = now_ms().to_string();
     let mut degraded = false;

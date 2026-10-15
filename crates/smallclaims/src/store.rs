@@ -1552,7 +1552,8 @@ pub struct ReplicationAdmission {
     pub held: usize,
     pub changed: bool,
     /// Time spent decoding envelopes, checking their hashes and claim schemas, and looking up
-    /// their stored signatures.
+    /// their stored signatures. Most of it is spent preparing envelopes before admission takes
+    /// the writer; the writer's own holds are recorded by `windows::holds`.
     pub verify: std::time::Duration,
 }
 
@@ -3747,6 +3748,9 @@ pub const REPLICATION_EXCHANGE_ENVELOPE_LIMIT: usize = 512;
 /// Maximum envelopes admitted per writer transaction. Admission can take several milliseconds
 /// per envelope on a populated store; leave room for queued write acknowledgements below 50 ms.
 pub const ADMISSION_CHUNK_ENVELOPES: usize = 8;
+/// Payload bytes admission prepares ahead of its loans. Decoded envelopes wait in memory for the
+/// loan that admits them; one envelope larger than this is prepared alone.
+pub const ADMISSION_PREPARED_BYTES: usize = 16 * 1024 * 1024;
 
 /// Stop a chunk before starting another envelope once its writer work reaches this budget.
 /// An envelope and the commit are indivisible; this does not preempt either one.
@@ -4865,7 +4869,7 @@ pub fn validate_and_admit_envelope_tx(
 ) -> Result<(), St3Error> {
     let prepared = prepared_envelope::prepare_envelope(envelope, runtime, None);
     outcome.verify += prepared.verify;
-    prepared_envelope::admit_prepared_envelope_tx(transaction, envelope, prepared, runtime, outcome)
+    prepared_envelope::admit_prepared_envelope_tx(transaction, prepared, outcome)
 }
 
 impl Store {
@@ -6304,23 +6308,32 @@ impl Store {
             let mut next = 0;
             // Each chunk's envelopes are decoded, hashed and encoded before the loan that admits
             // them. One the loan does not reach waits here for the next.
-            let mut ready = BTreeMap::new();
+            let mut ready = BTreeMap::<usize, prepared_envelope::PreparedEnvelope>::new();
             while next < pending.len() {
                 if membership.is_none() {
                     membership = Some(self.prepare_admission_membership()?);
                 }
+                // Prepared envelopes hold their decoded payloads until their loan, so the set is
+                // bounded by payload bytes as well as count. One envelope above the budget is
+                // prepared alone, as admission always decoded one at a time.
+                let mut prepared_bytes = ready.values().map(|prepared| prepared.bytes).sum::<usize>();
                 for index in next..(next + ADMISSION_CHUNK_ENVELOPES).min(pending.len()) {
-                    if let std::collections::btree_map::Entry::Vacant(entry) = ready.entry(index) {
-                        let (envelope, row): &(ReplicaEnvelope, prepared_envelope::EnvelopeRow) =
-                            &pending[index];
-                        let prepared = prepared_envelope::prepare_envelope(
-                            envelope,
-                            &*self.runtime,
-                            Some(row.clone()),
-                        );
-                        outcome.verify += prepared.verify;
-                        entry.insert(prepared);
+                    if ready.contains_key(&index) {
+                        continue;
                     }
+                    let (envelope, row) = &pending[index];
+                    let bytes = envelope.payload.bytes().map_or(0, <[u8]>::len);
+                    if prepared_bytes > 0 && prepared_bytes + bytes > ADMISSION_PREPARED_BYTES {
+                        break;
+                    }
+                    let prepared = prepared_envelope::prepare_envelope(
+                        envelope,
+                        &*self.runtime,
+                        Some(row.clone()),
+                    );
+                    prepared_bytes += prepared.bytes;
+                    outcome.verify += prepared.verify;
+                    ready.insert(index, prepared);
                 }
                 #[cfg(test)]
                 BEFORE_ADMISSION_LOAN.with(|hook| {
@@ -6348,18 +6361,20 @@ impl Store {
                         break;
                     }
                     let (envelope, _) = &pending[next];
-                    let prepared = ready
-                        .remove(&next)
-                        .expect("each envelope is prepared before its loan");
+                    // The byte budget can stop preparation short of the chunk.
+                    let Some(prepared) = ready.remove(&next) else {
+                        break;
+                    };
                     next += 1;
                     // A checkpoint/repair may have removed the captured source while this
                     // background loan waited. Never restore records from that stale payload.
                     let Some(row) = admission_envelope_row(&pass, envelope)? else {
                         continue;
                     };
-                    // The row was deleted and received again since it was prepared. Its bytes are
-                    // the same (the hash names them), but leave it pending: a later pass prepares
-                    // it again off the writer rather than trusting this preparation's row.
+                    // The row is seen to have changed since it was prepared (deleted and received
+                    // again). Its bytes are the same, since the hash names them, but leave it
+                    // pending: the receipt that changed it runs its own admission pass after this
+                    // one, which prepares it again off the writer.
                     if prepared.row.as_ref() != Some(&row) {
                         continue;
                     }
@@ -6372,13 +6387,8 @@ impl Store {
                         continue;
                     }
                     let mut savepoint = pass.savepoint()?;
-                    let result = prepared_envelope::admit_prepared_envelope_tx(
-                        &savepoint,
-                        envelope,
-                        prepared,
-                        &*self.runtime,
-                        &mut outcome,
-                    );
+                    let result =
+                        prepared_envelope::admit_prepared_envelope_tx(&savepoint, prepared, &mut outcome);
                     match result {
                         Ok(()) => {
                             savepoint

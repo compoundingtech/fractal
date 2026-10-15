@@ -130,9 +130,11 @@ classifies without the store (st3's does), classifies its kinds and fields. The 
 only for the checks that read stored state and the writes: the envelope row is still there and
 not dropped by a checkpoint, membership and signatures still admit it, earlier record states
 (a `repaired` record stays repaired), tombstones and blobs. The envelope hash names its bytes,
-so a preparation always describes the row's content; an envelope deleted and received again
-after it was prepared is left `pending` and prepared again by a later pass, never re-prepared
-under the writer. This is a partial move of admission's cost, not a bound on its hold: the
+so a preparation always describes the row's content. Admission also compares the row's rowid and
+receipt time with those it prepared from; an envelope whose row is seen to differ (deleted and
+received again) is left `pending` for the admission pass that its new receipt runs, and is never
+re-prepared under the writer. The comparison can miss a reused rowid received in the same
+millisecond; only the pure content is reused then, and the hash binds it. This is a partial move of admission's cost, not a bound on its hold: the
 stored-state reads and writes still grow with the envelope's claims and bytes.
 
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
