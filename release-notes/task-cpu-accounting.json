@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Attribute daemon background CPU and poll counts to static task names, and keep writer batch setup and commit labeled with their submitting task",
+  "summary": "Attribute daemon background CPU and poll counts to static task names, buffer hot-task metrics, and label writer batch phases without losing individual submitters' accounting",
   "replay": {"status": "none", "detail": "No replay or projection changes."},
   "schema": {"status": "none", "detail": "CPU counters and task scopes are in memory only."},
   "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},

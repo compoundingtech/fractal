@@ -1,8 +1,9 @@
 //! Thread CPU consumed by daemon tasks, excluding time parked between polls.
+use std::cell::Cell;
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::Counter;
@@ -35,33 +36,86 @@ fn thread_cpu() -> Option<Duration> {
     Some(Duration::new(time.tv_sec.try_into().ok()?, time.tv_nsec.try_into().ok()?))
 }
 
-struct Sample<'a> {
-    started: Option<Duration>,
-    attributes: &'a [KeyValue; 1],
-    metrics: &'a Instruments,
+thread_local! {
+    static MEASURING: Cell<bool> = const { Cell::new(false) };
 }
 
-impl Drop for Sample<'_> {
+/// One accumulator travels with its future, even if Tokio changes worker threads.
+struct Accumulator<'a> {
+    cpu: Duration,
+    polls: u64,
+    attributes: [KeyValue; 1],
+    metrics: &'a Instruments,
+    flushed: Instant,
+}
+
+impl<'a> Accumulator<'a> {
+    fn new(name: &'static str, metrics: &'a Instruments) -> Self {
+        Self { cpu: Duration::ZERO, polls: 0, attributes: [KeyValue::new("st.task", name)],
+            metrics, flushed: Instant::now() }
+    }
+
+    fn flush(&mut self) {
+        if self.polls == 0 {
+            return;
+        }
+        self.metrics.polls.add(self.polls, &self.attributes);
+        if !self.cpu.is_zero() {
+            self.metrics.cpu.add(self.cpu.as_secs_f64(), &self.attributes);
+        }
+        self.cpu = Duration::ZERO;
+        self.polls = 0;
+        self.flushed = Instant::now();
+    }
+}
+
+impl Drop for Accumulator<'_> {
     fn drop(&mut self) {
-        let ended = thread_cpu();
-        self.metrics.polls.add(1, self.attributes);
+        self.flush();
+    }
+}
+
+struct Sample<'a, 'm> {
+    started: Option<Duration>,
+    nested: bool,
+    accumulator: &'a mut Accumulator<'m>,
+}
+
+impl<'a, 'm> Sample<'a, 'm> {
+    fn start(accumulator: &'a mut Accumulator<'m>) -> Self {
+        let nested = MEASURING.with(|active| active.replace(true));
+        Self { started: (!nested).then(thread_cpu).flatten(), nested, accumulator }
+    }
+}
+
+impl Drop for Sample<'_, '_> {
+    fn drop(&mut self) {
+        let ended = (!self.nested).then(thread_cpu).flatten();
+        MEASURING.with(|active| active.set(self.nested));
+        self.accumulator.polls += 1;
         if let Some(elapsed) = self.started.zip(ended).and_then(|(start, end)| end.checked_sub(start)) {
-            self.metrics.cpu.add(elapsed.as_secs_f64(), self.attributes);
+            self.accumulator.cpu += elapsed;
+        }
+        if self.accumulator.flushed.elapsed() >= Duration::from_secs(1) {
+            self.accumulator.flush();
         }
     }
 }
 
 /// Measure each poll on its current thread; never retain a clock sample across an await.
 /// The name must describe an operation, never an instance, seat, peer, or request.
+/// Samples accumulate with the future and reach OTel at most once a second while
+/// polling, plus a final flush on completion or cancellation. Nested wrappers on
+/// the same thread count polls but leave their CPU to the outermost wrapper.
 pub async fn account<F: Future>(name: &'static str, future: F) -> F::Output {
     measured(name, future, &METRICS).await
 }
 
 async fn measured<F: Future>(name: &'static str, future: F, metrics: &Instruments) -> F::Output {
-    let attributes = [KeyValue::new("st.task", name)];
+    let mut accumulator = Accumulator::new(name, metrics);
     let mut future = pin!(future);
     poll_fn(|cx| {
-        let _sample = Sample { started: thread_cpu(), attributes: &attributes, metrics };
+        let _sample = Sample::start(&mut accumulator);
         let _origin = crate::sqlite::telemetry::enter_task_origin(name);
         crate::profile::profiled_task(name, || future.as_mut().poll(cx))
     }).await
@@ -69,9 +123,8 @@ async fn measured<F: Future>(name: &'static str, future: F, metrics: &Instrument
 
 /// Measure one blocking invocation, and label any writer work it performs.
 pub fn blocking<T>(name: &'static str, work: impl FnOnce() -> T) -> T {
-    let attributes = [KeyValue::new("st.task", name)];
-    let metrics = &*METRICS;
-    let _sample = Sample { started: thread_cpu(), attributes: &attributes, metrics };
+    let mut accumulator = Accumulator::new(name, &METRICS);
+    let _sample = Sample::start(&mut accumulator);
     crate::profile::task(name, work)
 }
 
@@ -117,5 +170,43 @@ mod tests {
                 _ => None,
             }).expect("poll counter is exported");
         assert!(polls.data_points().map(|point| point.value()).sum::<u64>() >= 3);
+    }
+
+    #[test]
+    fn samples_batch_locally_and_nested_scopes_do_not_double_count() {
+        let metrics = instruments(&opentelemetry::global::meter("task-cpu-nesting-test"));
+        let mut outer = Accumulator::new("test.outer", &metrics);
+        let mut inner = Accumulator::new("test.inner", &metrics);
+        // Prevent scheduler delays from turning this local-buffer test into a timed flush.
+        outer.flushed = Instant::now() + Duration::from_secs(60);
+        inner.flushed = outer.flushed;
+        {
+            let _outer = Sample::start(&mut outer);
+            let _inner = Sample::start(&mut inner);
+            let started = thread_cpu().unwrap();
+            while thread_cpu().unwrap().saturating_sub(started) < Duration::from_millis(20) {
+                std::hint::spin_loop();
+            }
+        }
+        assert!(outer.cpu >= Duration::from_millis(20));
+        assert_eq!(inner.cpu, Duration::ZERO);
+        assert_eq!(outer.polls, 1);
+        assert_eq!(inner.polls, 1);
+        assert!(!MEASURING.with(Cell::get));
+        outer.flush();
+        assert_eq!(outer.cpu, Duration::ZERO);
+        assert_eq!(outer.polls, 0);
+    }
+
+    #[test]
+    fn unwinding_restores_thread_sampling_scope() {
+        let metrics = instruments(&opentelemetry::global::meter("task-cpu-unwind-test"));
+        let mut accumulator = Accumulator::new("test.unwind", &metrics);
+        let _panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _sample = Sample::start(&mut accumulator);
+            panic!("exercise sample unwinding");
+        }));
+        assert!(!MEASURING.with(Cell::get));
+        assert_eq!(accumulator.polls, 1);
     }
 }

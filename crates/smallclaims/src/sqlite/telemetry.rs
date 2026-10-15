@@ -58,6 +58,7 @@ static TASK_ORIGINS: &[&str] = &[
     "replication.settings", "replication.tailnet", "replication.worker",
     "slo.export", "slo.history", "terminal.socket", "terminal.tunnel",
     "terminal.view_dispatch", "terminal.view_watch", "tile.endpoint", "tile.endpoints",
+    "writer.batch.setup", "writer.batch.commit",
 ];
 
 #[derive(Clone)]

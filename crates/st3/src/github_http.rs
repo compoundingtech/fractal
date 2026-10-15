@@ -236,17 +236,19 @@ impl TokenCache {
     async fn acquire_file(self: &Arc<Self>, path: &Path) -> Result<GithubAuth> {
         let mut state = self.0.lock().await;
         let path = path.to_owned();
-        let (file, version) = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("github.auth", || -> Result<_> { let file = open_token_file(&path)?;
-        let metadata = file.metadata().context("inspect GitHub token file")?;
-        let version = FileVersion {
-            modified: metadata
-                .modified()
-                .context("read GitHub token file mtime")?,
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            length: metadata.len(),
-        };
-        Ok((file, version)) }))
+        let (file, version) = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("github.auth", || -> Result<_> {
+            let file = open_token_file(&path)?;
+            let metadata = file.metadata().context("inspect GitHub token file")?;
+            let version = FileVersion {
+                modified: metadata
+                    .modified()
+                    .context("read GitHub token file mtime")?,
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                length: metadata.len(),
+            };
+            Ok((file, version))
+        }))
         .await??;
         if state.file_version.as_ref() != Some(&version) {
             state.token = None;

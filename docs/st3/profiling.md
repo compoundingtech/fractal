@@ -56,6 +56,11 @@ that poll; time asleep, queued, or waiting between polls is not CPU. Blocking
 callbacks are measured on their executing thread, not the awaiting Tokio worker.
 These counters do not require file profiling. An unavailable thread CPU clock
 omits that CPU sample rather than recording wall time; polls still count.
+Each future keeps CPU and poll totals locally, flushing to OTel at most once a
+second while polling and once when it completes or is dropped. A parked task's
+remaining sample is flushed when it next polls or is dropped; there is no timer
+task per wrapper. Nested wrappers on the same thread count their polls but leave
+CPU to the outermost wrapper, so adding their rates does not count that CPU twice.
 
 For a Prometheus translation that replaces dots with underscores and appends the
 counter suffix, CPU usage in cores is:
@@ -77,10 +82,11 @@ existing HTTP instrumentation, not these background-task wrappers. Work done by
 child processes is not included in the parent's thread CPU.
 
 The same static task scopes label background writer submissions when file
-profiling is enabled. A batched writer keeps its first submitter's operation
-entered for transaction setup, finalizers and commit, temporarily entering each
-individual submitter for its savepoint. This prevents batch-level work from
-falling into an unlabeled writer-thread bucket.
+profiling is enabled. Each batched savepoint runs under its own submitter's
+operation. Shared transaction setup and finalizers/commit run under dedicated
+`writer.batch.setup` and `writer.batch.commit` scopes rather than charging other
+submitters to the first job. All accounting scopes finish before completed jobs
+are acknowledged, so their caller cannot finish profiling before samples arrive.
 
 
 ## Targets and live windows

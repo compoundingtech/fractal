@@ -7017,18 +7017,24 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(st3::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
     spawn_response_expiry(store.clone());
-    tokio::spawn(st3::task_cpu::account("observations.trim", trim_local_observations(store.clone(),
-    config.observations.clone(),)));
+    tokio::spawn(st3::task_cpu::account("observations.trim", trim_local_observations(
+        store.clone(),
+        config.observations.clone(),
+    )));
     tokio::spawn(st3::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
     {
         let store = store.clone();
-        tokio::spawn(st3::task_cpu::account("slo.history", st3::slo_history::run(st3::slo_history::dir(&config.state_dir),
-        move || st3::api::slo_rows(&store),)));
+        tokio::spawn(st3::task_cpu::account("slo.history", st3::slo_history::run(
+            st3::slo_history::dir(&config.state_dir),
+            move || st3::api::slo_rows(&store),
+        )));
     }
-    tokio::spawn(st3::task_cpu::account("recorder.receipts", st3::recorder_receipts::run(store.clone(),
-    st3::recorder::receipt_path(&config.state_dir),
-    notify.clone(),
-    event_notify.clone(),)));
+    tokio::spawn(st3::task_cpu::account("recorder.receipts", st3::recorder_receipts::run(
+        store.clone(),
+        st3::recorder::receipt_path(&config.state_dir),
+        notify.clone(),
+        event_notify.clone(),
+    )));
     if let Some(otlp) = &config.observations.otlp {
         let exporter = st3::otlp::OtlpExporter::new(otlp, &config.node)?;
         eprintln!(
@@ -7068,7 +7074,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     return;
                 }
             };
-            match store.connection.write_workers().spawn_blocking(move || { st3::task_cpu::blocking("operations.repair_drift", || store.repair_operation_projection_drift_from_audit(&drift)) })
+            match store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("operations.repair_drift", || {
+                store.repair_operation_projection_drift_from_audit(&drift)
+            }))
             .await
             {
                 Ok(Ok(true)) => eprintln!("st3: rebuilt an operation projection that drifted"),
@@ -26492,7 +26500,9 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                 }
                 Ok(Ok(false)) => {
                     let page_store = store.clone();
-                    match page_store.connection.write_workers().spawn_blocking(move || { st3::task_cpu::blocking("publication.advance_evidence", || page_store.advance_publication_evidence()) })
+                    match page_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("publication.advance_evidence", || {
+                        page_store.advance_publication_evidence()
+                    }))
                     .await
                     {
                         Ok(Ok(_)) => tokio::task::yield_now().await,
@@ -26542,7 +26552,10 @@ fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
             changed.send_replace(());
         }
     });
-    tokio::spawn(st3::task_cpu::account("maintenance.response_expiry", async move { let _observer = observer; expire_completed_responses(store, receiver).await; }))
+    tokio::spawn(st3::task_cpu::account("maintenance.response_expiry", async move {
+        let _observer = observer;
+        expire_completed_responses(store, receiver).await;
+    }))
 }
 
 async fn expire_completed_responses(
@@ -26594,7 +26607,9 @@ async fn expire_completed_responses(
             continue;
         }
         let clock_store = store.clone();
-        let clock_limit = match tokio::task::spawn_blocking(move || { st3::task_cpu::blocking("maintenance.response_expiry_clock", || clock_store.idempotency_clock_limit()) })
+        let clock_limit = match tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.response_expiry_clock", || {
+            clock_store.idempotency_clock_limit()
+        }))
         .await
         {
             Ok(Ok(limit)) => limit,
@@ -26998,8 +27013,12 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         })
         .await;
         let usage_store = store.clone();
-        if let Ok(Err(error)) = usage_store.connection.write_workers().spawn_blocking(move || { st3::task_cpu::blocking("observations.trim_usage_responses", || usage_store.trim_usage_responses(now_ms().saturating_sub(st3::store::USAGE_RESPONSE_HORIZON_MS),
-        LOCAL_OBSERVATION_TRIM_CHUNK,)) })
+        if let Ok(Err(error)) = usage_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.trim_usage_responses", || {
+            usage_store.trim_usage_responses(
+                now_ms().saturating_sub(st3::store::USAGE_RESPONSE_HORIZON_MS),
+                LOCAL_OBSERVATION_TRIM_CHUNK,
+            )
+        }))
         .await
         {
             eprintln!("st3: usage response trim failed: {error:#}");
