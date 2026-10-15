@@ -14,6 +14,11 @@ bucket/projection copies and their serialization. The comparison, push-on-error 
 notifications and scheduling are unchanged. No persistent cache or additional writer capacity
 is introduced. Invalid or undecodable digest replies are errors, not a reason to suppress a push.
 
+The compact path does not query signature requests or the advertised checkpoint. If only one
+of those omitted full-summary queries would have failed, the compact call can now succeed;
+it still suppresses a push only when its validated fresh authority digest equals the offer.
+This intentionally removes an irrelevant full-summary error dependency from the guard.
+
 The existing `/v1/performance` meter records two fixed labels:
 
 - `replication/authority-guard`: completed summary store calls marked by the guard, including errors.

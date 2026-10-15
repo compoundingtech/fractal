@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "Snapshot/read/decode/digest errors leave a push requested. No stale digest cache, retry waiver or new recovery procedure."
+    "detail": "Snapshot/read/decode/digest errors leave a push requested. No stale digest cache, retry waiver or new recovery procedure. Full-summary-only signature-request or advertised-checkpoint query failures no longer affect the compact guard; a successful digest must still match the inbound offer to skip."
   }
 }
