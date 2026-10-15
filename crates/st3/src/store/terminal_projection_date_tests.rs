@@ -309,7 +309,7 @@ async fn work_completed_child_dates_survive_later_parent_terminal_projection() {
         r#"version 2
 mission "work-date-root" state="ready" {
   goal "Keep a completed child's dates."
-  step "child" { assigned-to "person/parent-reviewer" }
+  step "child" { assigned-to "person/alex" }
 }
 mission "work-date-child" state="ready" {
   goal "Finish by submitting actual work."
