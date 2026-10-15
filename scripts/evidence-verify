@@ -21,7 +21,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 sys.dont_write_bytecode = True
 
@@ -31,7 +31,9 @@ NOTES = 'refs/notes/evidence/'
 STATEMENT_TYPE = 'https://in-toto.io/Statement/v1'
 PREDICATE_TYPE = 'https://smalltalk.dev/evidence/gate/v1'
 KEYS_PATH = '.st/evidence-keys'
+POLICY_PATH = '.st/evidence-skip-policy.json'
 KINDS = ('nix', 'wrapper', 'sekrets', 'observed')
+FUTURE_SKEW = timedelta(minutes=2)
 
 
 class Failure(Exception):
@@ -56,6 +58,69 @@ def git(repo, *args, stdin=None, config=()):
     if done.returncode != 0:
         raise Failure('error', f'git {args[0]}: {done.stderr.decode(errors="replace").strip()}')
     return done.stdout
+
+
+POLICY_KEYS = {'version', 'checks'}
+CHECK_KEYS = {'kinds', 'trust_levels', 'max_age_s'}
+KIND_KEYS = {'command', 'runner_prefix', 'required_inputs', 'bind_inputs', 'trust_levels'}
+
+
+def policy_rules(text, check, repository):
+    """The rules for one check from the repository's skip policy, strictly validated.
+
+    Unknown keys are refused so a typo can never silently weaken a rule. Placeholders
+    {repository} and {check} are filled in. Anything wrong is a refusal, not a pass."""
+    try:
+        doc = json.loads(text)
+    except ValueError as error:
+        raise Failure('error', f'skip policy is not valid JSON: {error}')
+    if not isinstance(doc, dict) or set(doc) != POLICY_KEYS or doc['version'] != 1 or not isinstance(doc['checks'], dict):
+        raise Failure('error', 'skip policy must be {"version": 1, "checks": {...}}')
+    if check not in doc['checks']:
+        raise Failure('no_policy', f'the skip policy has no entry for check {check}')
+    entry = doc['checks'][check]
+    if not isinstance(entry, dict) or set(entry) - CHECK_KEYS or not {'kinds', 'trust_levels'} <= set(entry):
+        raise Failure('error', f'skip policy for {check} needs kinds and trust_levels, and nothing unknown')
+    levels = entry['trust_levels']
+    if not (isinstance(levels, list) and levels and all(isinstance(v, str) and v for v in levels)):
+        raise Failure('error', f'skip policy for {check}: trust_levels must be a nonempty list of names')
+    max_age = entry.get('max_age_s')
+    if max_age is not None and (isinstance(max_age, bool) or not isinstance(max_age, int) or max_age <= 0):
+        raise Failure('error', f'skip policy for {check}: max_age_s must be null or a positive integer')
+    if not (isinstance(entry['kinds'], dict) and entry['kinds']):
+        raise Failure('error', f'skip policy for {check}: kinds must name at least one kind')
+
+    def fill(value):
+        return value.replace('{repository}', repository).replace('{check}', check)
+
+    kinds = {}
+    for kind, rule in entry['kinds'].items():
+        if kind not in KINDS or not isinstance(rule, dict) or set(rule) - KIND_KEYS or 'command' not in rule:
+            raise Failure('error', f'skip policy for {check}: kind {kind!r} is not valid')
+        command = rule['command']
+        if not (isinstance(command, list) and command and all(isinstance(v, str) and v for v in command)):
+            raise Failure('error', f'skip policy for {check}/{kind}: command must be a nonempty list of strings')
+        required = rule.get('required_inputs', [])
+        bind = rule.get('bind_inputs', {})
+        prefix = rule.get('runner_prefix')
+        kind_levels = rule.get('trust_levels')
+        if kind_levels is not None and not (isinstance(kind_levels, list) and kind_levels
+                                            and all(isinstance(v, str) and v for v in kind_levels)):
+            raise Failure('error', f'skip policy for {check}/{kind}: trust_levels must be a nonempty list of names')
+        if not (isinstance(required, list) and all(isinstance(v, str) and v for v in required)
+                and isinstance(bind, dict) and all(isinstance(k, str) and k and isinstance(v, str) and v
+                                                   for k, v in bind.items())
+                and (prefix is None or (isinstance(prefix, str) and prefix))):
+            raise Failure('error', f'skip policy for {check}/{kind}: malformed inputs or runner_prefix')
+        kinds[kind] = {'command': [fill(v) for v in command],
+                       'runner_prefix': fill(prefix) if prefix else None,
+                       # Binding an input also requires it, so the list can never be shorter than the binding.
+                       'required_inputs': sorted(set(required) | set(bind)),
+                       'bind_inputs': dict(bind),
+                       # A kind may name its own signer levels; otherwise it uses the check's. Naming them
+                       # per kind is what lets a weaker signer satisfy `wrapper` without ever satisfying `observed`.
+                       'trust_levels': tuple(kind_levels) if kind_levels else None}
+    return {'kinds': kinds, 'trust_levels': tuple(levels), 'max_age_s': max_age}
 
 
 def kind_of(runner):
@@ -166,7 +231,8 @@ def signature(repo, commit, keys, revocations):
     return status, principal
 
 
-def verify(repo, tree, check, keys, command, kinds=KINDS, bind=()):
+def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
+           trust_levels=None, now=None, rules=None):
     with tempfile.NamedTemporaryFile() as revocations:
         everything = note_refs(repo)
         hits = with_note_for(repo, everything, tree)
@@ -213,9 +279,38 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=()):
     if predicate['tier'] != 'full':
         raise Failure('untrusted_tier', f'latest record has tier {predicate["tier"]}, not full', attempts=attempts)
     kind = kind_of(observed['runner'])
+    required_inputs = ()
+    if rules is not None:
+        # The repository's skip policy decides everything about this record, by its kind.
+        rule = rules['kinds'].get(kind) if kind else None
+        kinds = (kind,) if rule else ()
+        if rule:
+            command, runner_prefix, bind = rule['command'], rule['runner_prefix'], list(rule['bind_inputs'].items())
+            required_inputs = rule['required_inputs']
+        trust_levels = (rule['trust_levels'] if rule and rule['trust_levels'] else rules['trust_levels'])
+        max_age = rules['max_age_s']
     if kind is None or kind not in kinds:
         raise Failure('unsupported_kind', f'runner {observed["runner"]!r} is not one of {", ".join(kinds)}',
                       attempts=attempts)
+    level = principal.split('/', 1)[0]
+    if trust_levels is not None and level not in trust_levels:
+        raise Failure('untrusted_level', f'signer trust level {level!r} is not accepted for this check',
+                      attempts=attempts)
+    if runner_prefix is not None and not observed['runner'].startswith(runner_prefix):
+        raise Failure('wrong_runner', 'record is for a different repository or producer', attempts=attempts)
+    # A future-dated record is refused whether or not an age limit is set: otherwise a trusted
+    # signer's future-dated pass would stay the latest record and hide every later real failure.
+    moment = parse_time(predicate['observed_at'])
+    current = now or datetime.now(timezone.utc)
+    if moment > current + FUTURE_SKEW:
+        raise Failure('future_dated', 'record claims to be observed in the future', attempts=attempts)
+    if max_age is not None and current - moment > timedelta(seconds=max_age):
+        raise Failure('too_old', f'record is older than {max_age} seconds', attempts=attempts)
+    inputs = observed.get('inputs', {})
+    for key in required_inputs:
+        value = inputs.get(key)
+        if not isinstance(value, str) or not value:
+            raise Failure('missing_input', f'record lacks required input {key}', attempts=attempts)
     if result['exit_code'] != 0:
         raise Failure('check_failed', f'latest record for check {check} exited {result["exit_code"]}',
                       attempts=attempts)
@@ -232,9 +327,10 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=()):
                           attempts=attempts)
     return {
         'satisfied': True, 'tree': tree, 'check': check, 'record': commit,
-        'kind': kind, 'signer': principal, 'trust_level': principal.split('/', 1)[0],
+        'kind': kind, 'signer': principal, 'trust_level': level,
         'tier': predicate['tier'], 'observed_at': predicate['observed_at'],
-        'command': result['command'], 'inputs': inputs, 'attempts': attempts,
+        'command': result['command'], 'inputs': inputs, 'attempts': attempts, 'policy': rules is not None,
+        'max_age_s': rules['max_age_s'] if rules is not None else max_age,
     }
 
 
@@ -300,6 +396,13 @@ def main(argv):
     source.add_argument('--keys-from', help=f'read {KEYS_PATH} from this commit (the accepted base)')
     parser.add_argument('--command', help='JSON argument vector the record must have run')
     parser.add_argument('--kinds', help=f'comma-separated record kinds this check accepts (default: {",".join(KINDS)})')
+    parser.add_argument('--policy-from', metavar='COMMIT',
+                        help=f'apply the skip policy {POLICY_PATH} read from this accepted base (needs --repository)')
+    parser.add_argument('--repository', help='OWNER/NAME, filled into the skip policy placeholders')
+    parser.add_argument('--max-age', type=int, metavar='SECONDS',
+                        help='reject a record observed longer ago than this, or claiming a future time')
+    parser.add_argument('--runner-prefix', help='the record runner must start with this (e.g. github:org/repo/)')
+    parser.add_argument('--trust-levels', help='comma-separated signer trust levels this check accepts')
     parser.add_argument('--bind-input', action='append', default=[], metavar='KEY=PATH',
                         help="require the record's input KEY to equal the sha256 of PATH in the verified tree")
     try:
@@ -320,6 +423,25 @@ def main(argv):
         kinds = tuple(k for k in args.kinds.split(',') if k)
         if not kinds or not set(kinds) <= set(KINDS):
             print(f'--kinds must be a comma-separated subset of {",".join(KINDS)}', file=sys.stderr)
+            return 2
+    if args.policy_from is not None:
+        loose = [args.command, args.kinds, args.runner_prefix, args.trust_levels, args.max_age,
+                 args.bind_input or None]
+        if args.repository is None or any(v is not None for v in loose):
+            print('--policy-from needs --repository and replaces --command, --kinds, --runner-prefix, '
+                  '--trust-levels, --max-age and --bind-input', file=sys.stderr)
+            return 2
+    elif args.repository is not None:
+        print('--repository is only used with --policy-from', file=sys.stderr)
+        return 2
+    if args.max_age is not None and args.max_age <= 0:
+        print('--max-age must be a positive number of seconds', file=sys.stderr)
+        return 2
+    trust_levels = None
+    if args.trust_levels is not None:
+        trust_levels = tuple(level for level in args.trust_levels.split(',') if level)
+        if not trust_levels:
+            print('--trust-levels must name at least one level', file=sys.stderr)
             return 2
     bind = []
     for item in args.bind_input:
@@ -344,12 +466,24 @@ def main(argv):
             keys = os.path.abspath(args.keys)
             if not os.path.isfile(keys):
                 raise Failure('error', f'key list {args.keys} not found')
-        result = verify(args.repo, tree, args.check, keys, command, kinds, bind)
+        rules = None
+        if args.policy_from:
+            try:
+                text = git(args.repo, 'show', '--end-of-options', f'{args.policy_from}:{POLICY_PATH}').decode()
+            except (Failure, UnicodeDecodeError):
+                raise Failure('no_policy', f'no readable skip policy at {args.policy_from}:{POLICY_PATH}')
+            rules = policy_rules(text, args.check, args.repository)
+        result = verify(args.repo, tree, args.check, keys, command, kinds, bind, args.max_age, args.runner_prefix,
+                        trust_levels, rules=rules)
         print(json.dumps(result, indent=2))
         return 0
     except Failure as failure:
         print(json.dumps({'satisfied': False, 'reason': failure.reason, 'check': args.check,
                           'detail': failure.detail, **failure.extra}, indent=2))
+        return 1
+    except Exception as error:  # any surprise is a refusal with a reason, never a traceback or a pass
+        print(json.dumps({'satisfied': False, 'reason': 'error', 'check': args.check,
+                          'detail': f'{type(error).__name__}: {error}'}, indent=2))
         return 1
     finally:
         if keyfile is not None:
