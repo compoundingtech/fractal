@@ -745,3 +745,22 @@ fn adopting_the_window_never_spends_historical_requests_or_uses_their_park_fault
         );
     }
 }
+
+#[test]
+fn ownership_launch_choice_comes_only_from_the_install_and_defaults_off() {
+    for configured in [None, Some(false), Some(true)] {
+        let (_, _, mut reconciler, _) = setup();
+        if let Some(enabled) = configured {
+            reconciler = reconciler.with_claude_primary_ownership(enabled);
+        }
+        let key = st_drivers::claude_process::ENFORCEMENT_ENV;
+        for declared in ["0", "1"] {
+            let mut member = BTreeMap::from([(key.into(), declared.into())]);
+            overlay_runtime_environment(SEAT, &mut member, &reconciler.runtime_environment);
+            assert_eq!(
+                member[key],
+                if configured == Some(true) { "1" } else { "0" }
+            );
+        }
+    }
+}

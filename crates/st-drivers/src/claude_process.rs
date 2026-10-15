@@ -11,6 +11,9 @@ use std::{
 
 const FILE: &str = "claude-primary-process.json";
 const LOCK: &str = "claude-primary-process.lock";
+/// Private launch transport of the owning daemon's install setting, not an auth credential.
+/// The daemon always overrides a seat declaration's value; only a fresh claim samples it.
+pub const ENFORCEMENT_ENV: &str = "ST3_CLAUDE_PRIMARY_OWNERSHIP";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Process {
@@ -163,6 +166,35 @@ fn write(dir: &Path, owner: &Owner) -> Result<()> {
     crate::harness_state::write_json_atomic(&dir.join(FILE), owner, dir, ".claude-primary-process")
 }
 
+/// Apply the owning install's default-off choice at a FRESH wrapper claim only. Adoption
+/// never calls this. Off preserves the original harness claim and does no kernel proof.
+pub(crate) fn claim_configured(
+    dir: &Path,
+    identity: &str,
+    runtime: &str,
+    session: &str,
+    enabled: bool,
+) -> Result<u64> {
+    if enabled {
+        return claim(dir, identity, runtime, session);
+    }
+    if !recorded(dir)? {
+        return crate::harness_state::claim(dir, identity, "claude", session);
+    }
+    // A previous protected generation may have left a closed witness. A newly claimed off
+    // generation must not inherit its restriction. Fence old publications with the ordinary
+    // harness claim before retiring that witness, under the same ownership lock. Never unlink
+    // the lock inode. This runs only at an authorized new wrapper launch, not on config reload.
+    let _guard = lock(dir, true)?;
+    let sequence = crate::harness_state::claim(dir, identity, "claude", session)?;
+    match fs::remove_file(dir.join(FILE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(sequence)
+}
+
 /// Claim the harness and record its actual wrapper generation BEFORE spawning the provider.
 /// Lock order is process-owner, then harness-state; helper publications use the same order.
 pub(crate) fn claim(dir: &Path, identity: &str, runtime: &str, session: &str) -> Result<u64> {
@@ -193,6 +225,9 @@ pub(crate) fn claim(dir: &Path, identity: &str, runtime: &str, session: &str) ->
 /// SessionStart may precede this write: only the kernel-proven direct child of this wrapper can
 /// publish during that window. The wrapper performs no other spawns after claim and before this.
 pub(crate) fn spawned(dir: &Path, session: &str, sequence: u64, pid: u32) -> Result<()> {
+    if !recorded(dir)? {
+        return Ok(()); // Default-off/legacy generation: no new ownership proof or record.
+    }
     let _guard = lock(dir, false)?;
     let mut owner: Owner = serde_json::from_slice(&read_owner(dir)?)?;
     anyhow::ensure!(

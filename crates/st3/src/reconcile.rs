@@ -1218,8 +1218,12 @@ fn overlay_runtime_environment(
     member: &mut BTreeMap<String, String>,
     runtime: &BTreeMap<String, String>,
 ) {
+    // This install choice ALWAYS overrides inherited/declaration values, including off.
+    let primary = st_drivers::claude_process::ENFORCEMENT_ENV;
+    member.insert(primary.into(), runtime.get(primary).cloned().unwrap_or_else(|| "0".into()));
     for (key, value) in runtime {
-        if key == st_drivers::access::MODE_ENV || key == st_drivers::access::CODEX_ASKS_ENV {
+        if key == st_drivers::access::MODE_ENV || key == st_drivers::access::CODEX_ASKS_ENV
+            || key == primary {
             member.insert(key.clone(), value.clone());
         } else {
             member.entry(key.clone()).or_insert_with(|| value.clone());
@@ -1247,6 +1251,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         if asks {
             self.runtime_environment.insert(st_drivers::access::CODEX_ASKS_ENV.into(), "1".into());
         }
+        self
+    }
+
+    /// Install-wide opt-in for future Claude claims. Off is emitted too, so declarations
+    /// and inherited environment cannot turn enforcement on for a default-off install.
+    pub fn with_claude_primary_ownership(mut self, enabled: bool) -> Self {
+        self.runtime_environment.insert(st_drivers::claude_process::ENFORCEMENT_ENV.into(),
+            if enabled { "1" } else { "0" }.into());
         self
     }
 

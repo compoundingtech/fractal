@@ -144,6 +144,15 @@ pub fn run_controlled_paths(
     runtime_id: String,
     claude_argv: Vec<String>,
 ) -> Result<()> {
+    run_controlled_paths_with_primary_ownership(paths, identity, runtime_id, claude_argv, false)
+}
+
+/// A native control plane supplies its explicit install choice, sampled once at fresh claim.
+/// Existing callers remain default-off; adopting a driver never reclaims or changes its choice.
+pub fn run_controlled_paths_with_primary_ownership(
+    paths: &crate::driver_paths::Paths, identity: String, runtime_id: String,
+    claude_argv: Vec<String>, primary_ownership: bool,
+) -> Result<()> {
     anyhow::ensure!(
         !claude_argv.is_empty(),
         "Claude driver '{runtime_id}' has no provider argv"
@@ -162,7 +171,8 @@ pub fn run_controlled_paths(
     crate::pretrust::pretrust_claude(std::slice::from_ref(&workspace))
         .with_context(|| format!("admitting Claude driver workspace {}", workspace.display()))?;
     install_signal_handler();
-    let observer = SessionObserver::new(&paths.agent_dir, &identity, "claude", &runtime_id)?;
+    let observer = SessionObserver::new_claude_with_primary_ownership(
+        &paths.agent_dir, &identity, &runtime_id, primary_ownership)?;
     let mut env = vec![
         ("DISABLE_AUTOUPDATER".into(), "1".into()),
         (RUNTIME_ID_ENV.to_string(), runtime_id.clone()),

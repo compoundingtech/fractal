@@ -266,9 +266,42 @@ impl SessionObserver {
         pty_session: &str,
         session: String,
     ) -> anyhow::Result<Self> {
+        Self::with_session_policy(agent_dir, identity, harness, pty_session, session, false)
+    }
+
+    pub(crate) fn new_claude_with_primary_ownership(
+        agent_dir: &Path,
+        identity: &str,
+        pty_session: &str,
+        enabled: bool,
+    ) -> anyhow::Result<Self> {
+        Self::with_session_policy(
+            agent_dir,
+            identity,
+            "claude",
+            pty_session,
+            harness_state::session_token(),
+            enabled,
+        )
+    }
+
+    fn with_session_policy(
+        agent_dir: &Path,
+        identity: &str,
+        harness: &'static str,
+        pty_session: &str,
+        session: String,
+        primary_ownership: bool,
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(!session.is_empty(), "provider session incarnation is empty");
         let seq = if harness == "claude" {
-            crate::claude_process::claim(agent_dir, identity, pty_session, &session)?
+            crate::claude_process::claim_configured(
+                agent_dir,
+                identity,
+                pty_session,
+                &session,
+                primary_ownership,
+            )?
         } else {
             harness_state::claim(agent_dir, identity, harness, &session)?
         };
@@ -975,6 +1008,77 @@ mod tests {
             .inherited_descriptors(),
             [11]
         );
+    }
+
+    #[test]
+    fn primary_ownership_is_off_until_the_install_opts_a_fresh_generation_in() {
+        use crate::claude_process::{self, Admission, Caller};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let legacy = SessionObserver::new(dir, "fixture", "claude", "runtime").unwrap();
+        assert!(!claude_process::recorded(dir).unwrap());
+        assert!(!dir.join("claude-primary-process.lock").exists());
+        // An impossible kernel caller still reaches the EXACT old admission callback. Off
+        // does not run a new physical gate, allocate a witness or fabricate primary proof.
+        let old_response = b"unchanged old admission".to_vec();
+        let response = claude_process::with_caller(
+            dir,
+            legacy.session(),
+            legacy.seq(),
+            0,
+            None,
+            Caller::Channel,
+            |admission| {
+                assert_eq!(admission, Admission::Legacy);
+                Ok(old_response.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(response, old_response);
+        claude_process::spawned(dir, legacy.session(), legacy.seq(), 0).unwrap();
+        claude_process::ended(dir, legacy.session(), legacy.seq()).unwrap();
+        assert!(!claude_process::recorded(dir).unwrap());
+        // True is provided by the install-owning native entry, never sampled by hooks.
+        let protected =
+            SessionObserver::new_claude_with_primary_ownership(dir, "fixture", "runtime", true)
+                .unwrap();
+        assert!(claude_process::recorded(dir).unwrap());
+        let bytes = std::fs::read(dir.join("claude-primary-process.json")).unwrap();
+        let _adopted = SessionObserver::adopt(
+            dir,
+            "fixture",
+            "claude",
+            "runtime",
+            protected.session(),
+            protected.seq(),
+        );
+        assert_eq!(
+            std::fs::read(dir.join("claude-primary-process.json")).unwrap(),
+            bytes,
+            "reexec/adoption never samples a toggle or rewrites its generation"
+        );
+        // A subsequent authorized fresh launch with off retires the prior generation's
+        // witness, but never the lock inode. This is NOT a live config-toggle migration.
+        let off =
+            SessionObserver::new_claude_with_primary_ownership(dir, "fixture", "runtime-next", false)
+                .unwrap();
+        assert!(!claude_process::recorded(dir).unwrap());
+        assert!(dir.join("claude-primary-process.lock").exists());
+        assert!(off.seq() > protected.seq());
+        let current =
+            crate::harness_state::read(&crate::harness_state::harness_state_path(dir), None).unwrap();
+        assert_eq!(current.evidence_incarnation.as_deref(), Some(off.session()));
+        let response = claude_process::with_caller(
+            dir,
+            off.session(),
+            off.seq(),
+            0,
+            None,
+            Caller::Channel,
+            |_| Ok(old_response.clone()),
+        )
+        .unwrap();
+        assert_eq!(response, old_response);
     }
 
     #[test]

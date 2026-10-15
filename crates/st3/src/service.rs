@@ -1385,6 +1385,7 @@ mod tests {
         let config = Config {
             node: "node-a".into(),
             access_mode: None,
+            claude_primary_ownership: None,
             seat_priority: None,
             person: None,
             fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
