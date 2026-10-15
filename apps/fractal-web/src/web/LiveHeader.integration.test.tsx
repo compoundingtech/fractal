@@ -79,7 +79,7 @@ describe('live header parity', () => {
   }, 20_000)
   it('opens real resources and queue observations, and closes their inspector', async () => {
     await click('Resources')
-    const dialog = document.querySelector('[role="dialog"][aria-label="Agent resources"]')
+    const dialog = document.querySelector('aside[aria-label="Agent resources"]')
     expect(dialog?.textContent).toContain('Observed project notes')
     const row = dialog?.querySelector('[aria-label="Observed resources"] li')
     expect(row?.textContent).toContain('filesystem.file')
@@ -89,7 +89,7 @@ describe('live header parity', () => {
     expect(dialog?.textContent).toContain('1 current work item')
     expect(dialog?.textContent).toContain('mission-run/example')
     await click('Close resources')
-    expect(document.querySelector('[role="dialog"][aria-label="Agent resources"]')).toBeNull()
+    expect(document.querySelector('aside[aria-label="Agent resources"]')).toBeNull()
   })
   it('opens Details first and reaches successful change captures through the Changes tab', async () => {
     const timeline = new LiveTimeline()

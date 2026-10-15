@@ -100,13 +100,13 @@ it('prefetches on explicit focus while keeping the sheet closed', async () => {
   await show('agent/example')
   await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Resources"]')!.focus())
   await settle()
-  expect(document.querySelector('[role="dialog"]')).toBeNull()
+  expect(document.querySelector('aside[aria-label="Agent resources"]')).toBeNull()
   expect(requests).toEqual(['/v1/client/capabilities', '/v1/client/resources'])
 })
 it('shows the agent Todos as the first Resources section, naming a missing snapshot', async () => {
   await show('agent/example')
   await click('Resources')
-  const sections = [...document.querySelectorAll('[role="dialog"] section[aria-label]')]
+  const sections = [...document.querySelectorAll('aside[aria-label="Agent resources"] section[aria-label]')]
   expect(sections.map(section => section.getAttribute('aria-label'))).toEqual(['Todos', 'Agent queue', 'Observed resources'])
   expect(sections[0]!.textContent).toBe('TodosNo harness todo snapshot observed. This is not an empty todo list.')
 })
@@ -121,13 +121,36 @@ it('keeps the Todos disclosure with phase, progress and harness inside Resources
   expect(summary).toContain(`${state.completed}/${state.total}`)
   expect(summary).toContain(state.todo.snapshot.harness)
 })
-it('keeps the Resources portal inside its owning scheme root', async () => {
+it('keeps the Resources panel inside its owning scheme root', async () => {
   host.dataset.scheme = 'light'
   await show(todoAgentRef)
   await click('Resources')
-  const dialog = document.querySelector('[role="dialog"][aria-label="Agent resources"]')!
-  expect(dialog.closest('[data-scheme]')).toBe(host)
-  expect(dialog.closest('[aria-hidden="true"]')).toBeNull()
+  const panel = document.querySelector('aside[aria-label="Agent resources"]')!
+  expect(panel.closest('[data-scheme]')).toBe(host)
+  expect(panel.closest('[aria-hidden="true"]')).toBeNull()
+})
+it('opens Resources as a non-modal complementary panel that returns focus on Escape', async () => {
+  await show(todoAgentRef)
+  const trigger = host.querySelector<HTMLButtonElement>('button[aria-label="Resources"]')!
+  await act(async () => trigger.focus())
+  await click('Resources')
+  const panel = document.querySelector<HTMLElement>('aside[aria-label="Agent resources"]')!
+  // A labelled complementary landmark, never a dialog: nothing outside it is inerted or hidden.
+  expect(panel.getAttribute('role')).toBeNull()
+  expect(panel.getAttribute('aria-modal')).toBeNull()
+  expect(document.querySelector('[role="dialog"]')).toBeNull()
+  expect(document.querySelectorAll('[inert]').length).toBe(0)
+  expect(trigger.closest('[aria-hidden="true"]')).toBeNull()
+  expect(document.querySelectorAll('body > [aria-hidden="true"]').length).toBe(0)
+  expect(trigger.getAttribute('aria-expanded')).toBe('true')
+  expect(trigger.getAttribute('aria-controls')).toBe(panel.id)
+  expect(panel.contains(document.activeElement)).toBe(true)
+  await act(async () => { document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+  // React Aria restores focus on the frame after the scope unmounts.
+  await act(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
+  expect(document.querySelector('aside[aria-label="Agent resources"]')).toBeNull()
+  expect(document.activeElement).toBe(trigger)
+  expect(trigger.getAttribute('aria-expanded')).toBe('false')
 })
 
 it('shows pending binding verification instead of Stale while the roster request is pending', async () => {
