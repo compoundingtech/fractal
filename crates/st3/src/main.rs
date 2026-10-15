@@ -6828,6 +6828,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         Store::open(&config.state_dir.join("claims.sqlite3"), &config.node)
     })?);
     st3::otel::register_work_metrics(store.clone());
+    st3::otel::register_attention_metrics(store.clone(), config.person.as_deref());
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
     }

@@ -816,6 +816,50 @@ pub(crate) fn register_work_metrics_on(
         }).build();
 }
 
+/// Only configured people are label values; attention subjects never become labels.
+pub fn register_attention_metrics(store: std::sync::Arc<crate::store::Store>, person: Option<&str>) {
+    if !metrics_enabled() { return; }
+    let Some(person) = person else { return; };
+    register_attention_metrics_on(opentelemetry::global::meter("st3"), store, person.to_owned());
+}
+
+pub(crate) fn register_attention_metrics_on(
+    meter: opentelemetry::metrics::Meter,
+    store: std::sync::Arc<crate::store::Store>,
+    person: String,
+) {
+    use crate::store::flow_metrics::ATTENTION_KINDS;
+    let labels = ATTENTION_KINDS.map(|kind| [
+        KeyValue::new("st.person", person.clone()),
+        KeyValue::new("st.attention.kind", kind),
+    ]);
+    let sample = std::sync::Arc::new(move || store.attention_metrics(
+        &person, SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
+    ));
+    let counts = sample.clone();
+    let count_labels = labels.clone();
+    meter.u64_observable_gauge("st.attention.open")
+        .with_unit("{item}")
+        .with_description("Open canonical fleet attention for the configured person")
+        .with_callback(move |observer| {
+            if let Some(value) = counts() {
+                for (count, labels) in value.counts.into_iter().zip(&count_labels) {
+                    observer.observe(count, labels);
+                }
+            }
+        }).build();
+    meter.f64_observable_gauge("st.attention.oldest_age")
+        .with_unit("s")
+        .with_description("Age of the oldest open canonical attention item by ask or update")
+        .with_callback(move |observer| {
+            if let Some(value) = sample() {
+                for (age, labels) in value.oldest_seconds.into_iter().zip(&labels) {
+                    observer.observe(age, labels);
+                }
+            }
+        }).build();
+}
+
 impl Telemetry {
     pub fn init(unit: Unit, node: Option<&str>) -> Self {
         let mut telemetry = Self {

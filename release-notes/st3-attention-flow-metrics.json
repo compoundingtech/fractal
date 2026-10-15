@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Export open asks and unread updates from the canonical attention publication as bounded daemon metrics",
+  "replay": { "status": "none", "detail": "No claim or replay changes." },
+  "schema": { "status": "none", "detail": "Reads an existing in-memory publication without SQL or schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "Additive OTLP gauges only; no client, peer or harness protocol changes." },
+  "downtime": { "status": "none", "detail": "No interruption beyond a normal daemon upgrade." },
+  "manual": { "status": "none", "detail": "The existing configured person bounds metric labels; replicas aggregate with max rather than sum." },
+  "recovery": { "status": "none", "detail": "No persistent changes; existing binary rollback remains unchanged." }
+}

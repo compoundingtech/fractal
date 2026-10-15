@@ -336,3 +336,46 @@ completed history. Snapshot memory is O(W + H); export callback output is consta
 Failed refreshes omit samples rather than export stale values or fabricated zeros.
 `flow_metrics_cost_is_independent_of_completed_history` records elapsed time and SQLite VM
 work at two completed-history sizes and asserts bounded growth.
+
+### Fleet person-attention metrics (O11Y-R18)
+
+`canonical attention publication -> configured-person filter -> two bounded kinds -> OTLP`
+
+| Instrument | Type | Unit | Labels |
+| --- | --- | --- | --- |
+| `st.attention.open` | gauge | `{item}` | `st.person`, `st.attention.kind` |
+| `st.attention.oldest_age` | gauge | `s` | `st.person`, `st.attention.kind` |
+
+The source is the same shared attention publication served by client attention windows,
+not a second query or interpretation of work history. Only the daemon's configured person
+subject is an eligible `st.person` value; no configured person means no attention series.
+Labels are bounded by configured fleet people, with exactly `ask` and `update` kinds for
+each exported person. Both buckets export zero when a valid publication has no matching
+rows. Missing, withdrawn or stopped publications omit metrics; there is no full-fold fallback.
+
+Rows must be canonical `state=open` attention for the configured `person_id`. A structured
+`update` field selects `update`; every other open attention item selects `ask`. Titles,
+details, subject names and urgency are never inspected or exported as attributes.
+Oldest age is seconds since the earliest matching `requested_at`; empty buckets are zero.
+
+An unread update about a cancelled mission still counts as open when its own attention
+row is open. Cancelling the subject it reports on does not mean the person has read the
+notice. Reading/dismissing the update, or cancellation of the update's own person-step,
+removes it through the existing canonical publication filters.
+
+Each metric callback makes one O(A) pass over the already-published open attention rows,
+where A is current published attention, with O(1) additional aggregation memory and zero
+SQL statements. Both gauges together make two such passes and publish four points for the
+configured person. Reading keeps the existing attention refresher active; wake requests
+coalesce in that refresher. No metric export walks completed work or attention history.
+The focused canonical-publication test asserts zero SQLite VM work for aggregation.
+
+Fleet replicas report the same person's fleet-wide attention rather than node-owned subsets:
+
+```promql
+max by (st_person, st_attention_kind) (st_attention_open)
+max by (st_person, st_attention_kind) (st_attention_oldest_age_seconds)
+```
+
+Use the existing resource/`target_info` join for host attribution. During replication or
+publication lag, max is an upper envelope; it is exact after convergence.

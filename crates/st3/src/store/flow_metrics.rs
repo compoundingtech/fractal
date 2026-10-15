@@ -3,6 +3,9 @@ use super::*;
 #[cfg(test)]
 #[path = "flow_metrics_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "attention_metrics_tests.rs"]
+mod attention_tests;
 
 pub(crate) const WORK_STATES: [&str; 4] = ["ready", "claimed", "waiting_person", "blocked"];
 
@@ -66,10 +69,35 @@ SELECT 1, agent, NULL, NULL, NULL, since,
 FROM holders
 "#;
 
+pub(crate) const ATTENTION_KINDS: [&str; 2] = ["ask", "update"];
+
+#[derive(Default)]
+pub(crate) struct AttentionMetrics {
+    pub counts: [u64; 2],
+    pub oldest_seconds: [f64; 2],
+}
+
 impl Store {
     pub(crate) fn flow_snapshot(&self, now: u128) -> Result<FlowSnapshot> {
         let connection = self.readers.get();
         flow_snapshot_tx(&connection, i64::try_from(now).unwrap_or(i64::MAX))
+    }
+
+    /// Read the same publication attention windows serve; never fall back to a fold.
+    pub(crate) fn attention_metrics(&self, person: &str, now: u128) -> Option<AttentionMetrics> {
+        self.request_attention_list_refresh();
+        if !self.published_view_serving("attention") { return None; }
+        let publication = self.published_attention_list()?;
+        let mut result = AttentionMetrics::default();
+        for row in publication.rows.iter().filter(|row| row["person_id"] == person && row["state"] == "open") {
+            let bucket = usize::from(row.get("update").is_some());
+            let requested = chrono::DateTime::parse_from_rfc3339(row["requested_at"].as_str()?).ok()?;
+            let requested = u128::try_from(requested.timestamp_millis()).ok()?;
+            result.counts[bucket] += 1;
+            result.oldest_seconds[bucket] = result.oldest_seconds[bucket]
+                .max(now.saturating_sub(requested) as f64 / 1000.0);
+        }
+        Some(result)
     }
 }
 
