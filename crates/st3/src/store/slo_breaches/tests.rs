@@ -506,3 +506,44 @@ fn an_old_registry_repair_withdraws_closure_and_matches_replay_on_current_member
     let after = projection_digest::oracle(&source.readers.get()).unwrap();
     for table in ["slo_pending", "slo_episode_heads", "slo_episode_events"] { assert_eq!(before[table], after[table], "{table}"); }
 }
+
+#[test]
+fn initial_owner_block_is_positive_only_after_unblock_and_does_not_flap() {
+    let source = Arc::new(source());
+    let episode = miss(&source, "person-read");
+    source.dispatch_slo_mission(source.prepare_slo_missions("/tmp").unwrap().remove(0)).unwrap();
+    assert!(!crate::reconcile::tests::slo_breach_tests::gate_passes(source.clone(), &episode));
+    declare_owner(&source);
+    source.unblock_slo_owner(&episode).unwrap();
+    assert!(crate::reconcile::tests::slo_breach_tests::gate_passes(source.clone(), &episode));
+    let intent = crate::graph::parse_internal_intent("version 2\nstop \"agent/fleet/smalltalk/speed\"", "alder").unwrap();
+    let planned = source.mission(&intent, IntentInput { kdl: "stop owner".into(), source_name: None }).unwrap();
+    source.apply(&intent, &planned.subject_tokens, "owner-went-away").unwrap();
+    let before = claims(&source).len();
+    source.unblock_slo_owner(&episode).unwrap();
+    assert_eq!(claims(&source).len(), before, "owner flaps do not create receipt storms");
+    assert_eq!(fact_state(&source, &episode), "owner_unavailable");
+    assert!(crate::reconcile::tests::slo_breach_tests::gate_passes(source.clone(), &episode),
+        "existing execution admission is preserved through ordinary owner liveness changes");
+}
+
+#[test]
+fn concurrent_misses_and_prepared_dispatches_create_one_mission() {
+    let source = Arc::new(source());
+    let callers = (0..8).map(|_| {
+        let source = source.clone();
+        std::thread::spawn(move || miss(&source, "person-read"))
+    }).collect::<Vec<_>>();
+    let episodes = callers.into_iter().map(|thread| thread.join().unwrap()).collect::<BTreeSet<_>>();
+    assert_eq!(episodes.len(), 1);
+    let prepared = (0..2).map(|_| source.prepare_slo_missions("/tmp").unwrap().remove(0)).collect::<Vec<_>>();
+    let dispatches = prepared.into_iter().map(|prepared| {
+        let source = source.clone();
+        std::thread::spawn(move || source.dispatch_slo_mission(prepared).unwrap())
+    }).collect::<Vec<_>>();
+    let missions = dispatches.into_iter().map(|thread| thread.join().unwrap()).collect::<BTreeSet<_>>();
+    assert_eq!(missions.len(), 1);
+    let records = claims(&source);
+    assert_eq!(records.iter().filter(|claim| claim.kind == KIND && claim.body["fields"]["record"]["event"] == "pending").count(), 1);
+    assert_eq!(records.iter().filter(|claim| claim.kind == "mission-run.created").count(), 1);
+}
