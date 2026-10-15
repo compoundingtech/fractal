@@ -7156,6 +7156,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 }
             });
             spawn_publication_evidence(store.clone());
+            tokio::spawn(build_transport_observation_index(
+                config.state_dir.join("claims.sqlite3"),
+            ));
             startup_telemetry.serving();
             let ready_at = Instant::now();
             startup_phases.log_ready(
@@ -26406,6 +26409,47 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
         });
     if let Err(error) = worker {
         eprintln!("st3: start WAL checkpoint worker: {error}");
+    }
+}
+
+/// This starts only after both APIs serve. Separate 5 ms busy-timeout connections
+/// copy at most 128 source rows per transaction, then yield for 100 ms.
+async fn build_transport_observation_index(path: PathBuf) {
+    use smallclaims::store::transport_observation_index as index;
+    let started = Instant::now();
+    st3::otel::record_index_migration(index::NAME, false, None, None);
+    loop {
+        let page_path = path.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<Option<index::Page>> {
+            let mut connection = index::open(&page_path)?;
+            if index::ready(&connection)? {
+                return Ok(None);
+            }
+            index::advance(&mut connection).map(Some)
+        }).await;
+        match result {
+            Ok(Ok(None)) => {
+                st3::otel::record_index_migration(index::NAME, true, None, None);
+                return;
+            }
+            Ok(Ok(Some(page))) => {
+                st3::otel::record_index_migration(
+                    index::NAME,
+                    page.ready,
+                    Some(page.write_hold),
+                    page.ready.then(|| started.elapsed()),
+                );
+                if page.ready {
+                    return;
+                }
+            }
+            Ok(Err(error)) if maintenance_contention(&error) => {}
+            error => {
+                eprintln!("st: transport observation index build stopped: {error:?}");
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

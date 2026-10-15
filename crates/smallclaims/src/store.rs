@@ -68,6 +68,7 @@ pub mod first_sync;
 pub mod principals;
 pub mod projection_digest;
 pub mod runtime;
+pub mod transport_observation_index;
 
 pub use runtime::{IncrementalProjection, ReplayProgress, Runtime};
 
@@ -470,10 +471,6 @@ CREATE INDEX IF NOT EXISTS claims_kind_index ON claims(kind, store_index);
 CREATE INDEX IF NOT EXISTS claims_subject_kind_index ON claims(subject, kind, store_index);
 CREATE INDEX IF NOT EXISTS claims_subject_kind_accepted_index
 ON claims(subject, kind, length(accepted_at_unix_ms), accepted_at_unix_ms);
--- Seek this writer's newest observation without walking the peer's replicated history.
-CREATE INDEX IF NOT EXISTS claims_transport_observed_latest_index
-ON claims(subject, origin, length(accepted_at_unix_ms), accepted_at_unix_ms)
-WHERE kind='transport.observed';
 CREATE INDEX IF NOT EXISTS claims_batch_index ON claims(batch_id, store_index);
 -- Heals once compared claim identities through this index; nothing reads it any more.
 DROP INDEX IF EXISTS claims_batch_claim_id;
@@ -1665,12 +1662,6 @@ pub fn previous_batch_hash(transaction: &Transaction<'_>, origin: &str) -> Resul
 pub const LATEST_CLAIM_QUERY: &str =
     "SELECT id FROM claims INDEXED BY claims_subject_accepted_index
     WHERE subject=?1 ORDER BY CANONICAL_DESC(claims) LIMIT 1";
-
-// As with LATEST_CLAIM_QUERY, only the newest timestamp's canonical ties need sorting.
-pub const LATEST_TRANSPORT_OBSERVATION_QUERY: &str =
-    "SELECT body, accepted_at_unix_ms FROM claims INDEXED BY claims_transport_observed_latest_index
-     WHERE subject=?1 AND kind='transport.observed' AND origin=?2
-     ORDER BY CANONICAL_DESC(claims) LIMIT 1";
 
 pub fn latest_claim_id_tx(transaction: &Transaction<'_>, subject: &str) -> Result<Option<String>> {
     transaction
@@ -7445,15 +7436,11 @@ impl Store {
         let subject = format!("host/{peer}");
         let now = now_ms();
         // Another member's observation of this peer cannot renew this node's evidence.
-        let latest: Option<(String, String)> = self
-            .readers
-            .get()
-            .query_row(
-                &canonical_sql(LATEST_TRANSPORT_OBSERVATION_QUERY),
-                params![subject, self.origin],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
+        let latest = transport_observation_index::latest(
+            &self.readers.get(),
+            &subject,
+            &self.origin,
+        )?;
         let already_current = latest.is_some_and(|(body, accepted_at)| {
             let body: Value = serde_json::from_str(&body).unwrap_or_default();
             let observed_at = body
