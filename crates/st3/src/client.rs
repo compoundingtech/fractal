@@ -2105,6 +2105,20 @@ mod tests {
     }
 
     #[test]
+    fn driver_retry_typed_conflict_uses_the_timeout_curve() {
+        let error = api_error(409, br#"{"code":"conflict","message":"fixture refusal","details":{}}"#);
+        assert_eq!(api_error_code(&error), Some("conflict"));
+        assert!(daemon_unreachable(&error).is_none());
+        let mut retry = DriverRetry::default();
+        for (failures, seconds) in [1, 2, 4, 8, 16, 30, 30].into_iter().enumerate() {
+            let base = Duration::from_secs(seconds);
+            let pause = retry.failed(&error);
+            assert!((base / 2..=(base * 3 / 2).min(Duration::from_secs(30))).contains(&pause));
+            assert_eq!(retry.failures, failures as u32 + 1);
+        }
+    }
+
+    #[test]
     fn driver_retry_resets_on_first_success() {
         let error = anyhow::anyhow!("request timed out");
         let mut retry = DriverRetry::default();

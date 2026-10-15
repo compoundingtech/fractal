@@ -96,8 +96,15 @@ not just opening a socket.
 A refused connection or a missing socket stays at the one-second restart base instead of
 growing. Its random wait is 0.5 to 1 second, so the retry wait itself does not delay discovery
 of a restarted daemon by more than one second. Request execution time is separate from this wait.
-Control retries do not stop provider-completion handling. Work renewal has its own retry state;
-control-report success cannot clear a failed renewal's backoff. Renewal writes keep their
+The native session report, binding watch and harness publications inside the gated control tick
+back off together. After repeated failures, the whole block can wait up to 30 seconds plus request
+time. Delivery-control work and Claude attachment checks outside that block keep their cadence,
+as does provider-completion handling. This is deliberate degradation while the daemon is slow;
+settle gating of these ticks is a separate change. A fast typed API refusal from a live daemon
+also grows that operation's failure count, just as a timeout does; it is not a refused socket.
+A caller's existing terminal-refusal handling still applies before another attempt is scheduled.
+Work renewal has its own retry state; control-report success cannot clear a failed renewal's
+backoff. Renewal writes keep their
 existing per-step, per-actor, per-minute idempotency keys. Warning logs remain rate limited.
 Each known held-work lease also caps the retry wait at half of its remaining margin. A retry
 keeps the last known expiry if the next work read fails; an expired lease gets no 30-second wait.
