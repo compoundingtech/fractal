@@ -34254,7 +34254,7 @@ fn terminalize_projected_generation_steps_tx(
             "UPDATE step_runs
              SET status='cancelled', blocked_reason=?2, lease_owner=NULL,
                  lease_incarnation=NULL, lease_expires_at_unix_ms=NULL,
-                 updated_at_unix_ms=CASE WHEN status!='cancelled' THEN ?3 ELSE updated_at_unix_ms END
+                 updated_at_unix_ms=?3
              WHERE generation_id=?1
                AND (status NOT IN ('completed','failed','cancelled')
                     OR (status='cancelled' AND blocked_reason=?4))",
@@ -34280,7 +34280,7 @@ fn terminalize_projected_run_steps_tx(
             "UPDATE step_runs
              SET status='cancelled', blocked_reason=?2, lease_owner=NULL,
                  lease_incarnation=NULL, lease_expires_at_unix_ms=NULL,
-                 updated_at_unix_ms=CASE WHEN status!='cancelled' THEN ?3 ELSE updated_at_unix_ms END
+                 updated_at_unix_ms=?3
              WHERE run_id=?1
                AND (status NOT IN ('completed','failed','cancelled')
                     OR (status='cancelled' AND blocked_reason=?4))",
@@ -35295,6 +35295,16 @@ mod tests {
     use super::*;
     use crate::graph::parse_test_intent as parse_intent;
     use proptest::prelude::*;
+
+    mod resource_pending_receive_tests {
+        use super::*;
+        include!("store/resource_pending_receive_tests.rs");
+    }
+
+    mod terminal_projection_date_tests {
+        use super::*;
+        include!("store/terminal_projection_date_tests.rs");
+    }
 
     mod mission_eval_reuse_tests {
         include!("store/mission_eval_reuse_tests.rs");
@@ -48811,10 +48821,10 @@ mission "external-blocker" state="ready" {
         publish_mission(
             &source,
             r#"version 2
- mission "terminal-stamps" state="ready" {
-   goal "Keep each completed child's own completion time."
-   step "work" { agentless }
- }"#,
+    mission "terminal-stamps" state="ready" {
+      goal "Keep each completed child's own completion time."
+      step "work" { agentless }
+    }"#,
             "terminal-stamps-mission",
         );
         let request = |key: &str| MissionRunRequest {
@@ -48829,12 +48839,7 @@ mission "external-blocker" state="ready" {
         let root = source.create_mission_run(&request("root")).unwrap();
         let children = ["child-one", "child-two"].map(|key| {
             source
-                .create_child_mission_run(
-                    &request(key),
-                    &root,
-                    &root.steps[0].subject,
-                    None,
-                )
+                .create_child_mission_run(&request(key), &root, &root.steps[0].subject, None)
                 .unwrap()
         });
         let exchange_all = || {
@@ -48851,6 +48856,33 @@ mission "external-blocker" state="ready" {
                 }
             }
         };
+        // Retain the actual immutable lifecycle inputs, not a synthesized receipt or wall-clock
+        // estimate. Sorting by id compares bytes independently of local arrival/store positions.
+        let lifecycle_inputs = |member: &Store| {
+            let connection = member.readers.get();
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, subject, kind, accepted_at_unix_ms, body, predecessors
+                     FROM claims WHERE kind IN ('mission-run.state','run-generation.state')
+                     ORDER BY id",
+                )
+                .unwrap();
+            let inputs = statement
+                .query_map([], |row| {
+                    Ok([
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ])
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            inputs
+        };
         exchange_all();
         for (index, child) in children.iter().enumerate() {
             at(start + (index as u128 + 1) * 1_000);
@@ -48861,6 +48893,12 @@ mission "external-blocker" state="ready" {
             );
             exchange_all();
         }
+        let child_inputs = lifecycle_inputs(&source);
+        assert_eq!(
+            child_inputs.len(),
+            4,
+            "two actual terminal claims per child"
+        );
         at(start + 3_000);
         assert!(
             source
@@ -48868,28 +48906,81 @@ mission "external-blocker" state="ready" {
                 .unwrap()
         );
         exchange_all();
-
-        let expected = source
-            .replication_status(true, Some(TEST_FLEET), &[])
-            .unwrap()
-            .projection_digests;
+        let expected_inputs = lifecycle_inputs(&source);
+        assert_eq!(expected_inputs.len(), 6, "root plus two completed children");
+        assert_eq!(
+            expected_inputs
+                .iter()
+                .filter(|input| child_inputs.iter().any(|child| child[0] == input[0]))
+                .cloned()
+                .collect::<Vec<_>>(),
+            child_inputs,
+            "a later parent claim never replaces the children's immutable inputs"
+        );
+        let runs = [&children[0], &children[1], &root];
+        let expected = runs.map(|run| {
+            let generation: String = source
+                .readers
+                .get()
+                .query_row(
+                    "SELECT current_generation_id FROM mission_runs WHERE id=?1",
+                    [&run.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let accepted = |subject: String, kind: &str| {
+                let claims = expected_inputs
+                    .iter()
+                    .filter(|input| input[1] == subject && input[2] == kind)
+                    .collect::<Vec<_>>();
+                assert_eq!(claims.len(), 1, "one real terminal state for {subject}");
+                let body: Value = serde_json::from_str(&claims[0][4]).unwrap();
+                assert_eq!(body["fields"]["status"], "completed");
+                assert_eq!(body["fields"]["phase"], "terminal");
+                claims[0][3].clone()
+            };
+            let run_time = accepted(format!("mission-run/{}", run.id), "mission-run.state");
+            let generation_time = accepted(
+                format!("run-generation/{generation}"),
+                "run-generation.state",
+            );
+            (generation, run_time, generation_time)
+        });
+        for child in &expected[..2] {
+            assert_ne!(
+                child.1, expected[2].1,
+                "distinct child/root run times discriminate retiming"
+            );
+            assert_ne!(
+                child.2, expected[2].2,
+                "distinct child/root generation times discriminate retiming"
+            );
+        }
+        let inventory = source.replication_inventory().unwrap();
+        let mut captures = Vec::new();
+        // Check every member's actual inputs and terminal state BEFORE any date/digest assertion.
         for member in members {
-            let digests = member
-                .replication_status(true, Some(TEST_FLEET), &[])
-                .unwrap()
-                .projection_digests;
-            for table in ["mission_runs", "run_generations"] {
-                assert_eq!(digests[table], expected[table], "{}: {table}", member.origin);
-            }
+            assert_eq!(
+                member.replication_inventory().unwrap().digest,
+                inventory.digest,
+                "same envelope cut: {}",
+                member.origin
+            );
+            assert_eq!(
+                lifecycle_inputs(member),
+                expected_inputs,
+                "same lifecycle bytes: {}",
+                member.origin
+            );
             let connection = member.readers.get();
-            for (index, run) in children.iter().chain([&root]).enumerate() {
+            let mut states = Vec::new();
+            for (index, run) in runs.iter().enumerate() {
                 let state = connection
                     .query_row(
-                        "SELECT r.status, r.phase, r.updated_at_unix_ms,
-                                g.status, g.updated_at_unix_ms
-                         FROM mission_runs r
-                         JOIN run_generations g ON g.id=r.current_generation_id
-                         WHERE r.id=?1",
+                        "SELECT g.id, r.status, r.phase, r.updated_at_unix_ms,
+                            g.status, g.updated_at_unix_ms
+                     FROM mission_runs r JOIN run_generations g ON g.id=r.current_generation_id
+                     WHERE r.id=?1",
                         [&run.id],
                         |row| {
                             Ok((
@@ -48898,75 +48989,56 @@ mission "external-blocker" state="ready" {
                                 row.get::<_, String>(2)?,
                                 row.get::<_, String>(3)?,
                                 row.get::<_, String>(4)?,
+                                row.get::<_, String>(5)?,
                             ))
                         },
                     )
                     .unwrap();
-                let completed_at = (start + (index as u128 + 1) * 1_000).to_string();
                 assert_eq!(
-                    state,
-                    (
-                        "completed".into(),
-                        "terminal".into(),
-                        completed_at.clone(),
-                        "completed".into(),
-                        completed_at,
-                    ),
-                    "{}: {}",
+                    state.0, expected[index].0,
+                    "exact generation: {} {}",
+                    member.origin, run.id
+                );
+                assert_eq!(
+                    (state.1.as_str(), state.2.as_str(), state.4.as_str()),
+                    ("completed", "terminal", "completed"),
+                    "status before date: {} {}",
                     member.origin,
                     run.id
                 );
+                states.push(state);
+            }
+            captures.push((member.origin.clone(), states));
+        }
+        for (member, states) in captures {
+            for (index, state) in states.iter().enumerate() {
+                assert_eq!(
+                    (&state.3, &state.5),
+                    (&expected[index].1, &expected[index].2),
+                    "immutable completion dates: {member} {}",
+                    runs[index].id
+                );
             }
         }
-
-        // A later owner claim may refine the reason for a projected cancellation.
-        // Both step scopes must preserve the time at which the status changed.
-        source
-            .connection
-            .batched(|transaction| -> Result<(), St3Error> {
-                let step = &children[0].steps[0].subject;
-                let generation: String = transaction
-                    .query_row(
-                        "SELECT generation_id FROM step_runs WHERE subject=?1",
-                        [step],
-                        |row| row.get(0),
-                    )
-                    .map_err(internal)?;
-                for by_generation in [false, true] {
-                    transaction
-                        .execute(
-                            "UPDATE step_runs SET blocked_reason='the root mission run is terminal'
-                             WHERE subject=?1",
-                            [step],
-                        )
-                        .map_err(internal)?;
-                    if by_generation {
-                        terminalize_projected_generation_steps_tx(
-                            transaction,
-                            &generation,
-                            "refined reason",
-                            start + 4_000,
-                        )?;
-                    } else {
-                        terminalize_projected_run_steps_tx(
-                            transaction,
-                            &children[0].id,
-                            "refined reason",
-                            start + 4_000,
-                        )?;
-                    }
-                    let state: (String, String) = transaction
-                        .query_row(
-                            "SELECT blocked_reason, updated_at_unix_ms FROM step_runs WHERE subject=?1",
-                            [step],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
-                        )
-                        .map_err(internal)?;
-                    assert_eq!(state, ("refined reason".into(), (start + 1_000).to_string()));
-                }
-                Ok(())
-            })
-            .unwrap();
+        // The tiny-fixture full-row oracle is independent of the maintained digest cache.
+        let expected_digests = projection_digest::oracle(&source.readers.get()).unwrap();
+        for member in members {
+            let reader = member.readers.get();
+            let cached = projection_digest::tables(&reader).unwrap();
+            let oracle = projection_digest::oracle(&reader).unwrap();
+            for table in ["mission_runs", "run_generations"] {
+                assert_eq!(
+                    cached[table], oracle[table],
+                    "{}: {table} cache/rows",
+                    member.origin
+                );
+                assert_eq!(
+                    oracle[table], expected_digests[table],
+                    "{}: {table} three-member parity",
+                    member.origin
+                );
+            }
+        }
     }
 
     #[test]
