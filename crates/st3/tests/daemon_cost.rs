@@ -1810,7 +1810,7 @@ fn conversation_owner_history_cost(other_origin: bool) {
         // must not scan every intervening heartbeat, even when the current fields omit it.
         append(&store, "runtime.observed", json!({"status": "running"}));
         append(&store, "harness.observed", json!({
-            "incarnation_id": "ada", "status": "idle",
+            "incarnation_id": "ada", "state": "idle",
         }));
         // Ordinary resource observations participate in the actual-state field fold;
         // their presence alone must not force a historical owner reduction.
