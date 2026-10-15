@@ -7,7 +7,7 @@ export type IconName =
   | 'chevron-right' | 'chevron-down' | 'chevrons-left' | 'panel' | 'drawer'
   | 'attach' | 'copy' | 'send' | 'stop' | 'check' | 'x' | 'alert'
   | 'spinner' | 'folder' | 'message' | 'dot'
-  | 'wrap' | 'whitespace' | 'pull-request' | 'stop-circle'
+  | 'wrap' | 'whitespace' | 'pull-request' | 'stop-circle' | 'thought'
   | 'person' | 'question' | 'arrow-left'
 
 const PATHS: Record<IconName, React.ReactNode> = {
@@ -40,6 +40,7 @@ const PATHS: Record<IconName, React.ReactNode> = {
   person: <><circle cx="8" cy="5" r="2.5" /><path d="M2.5 14v-1a5.5 5.5 0 0 1 11 0v1" /></>,
   question: <><circle cx="8" cy="8" r="6" /><path d="M6.5 5.5a1.6 1.6 0 1 1 2.4 1.4C8.2 7.3 8 7.7 8 8.5M8 11h.01" /></>,
   'arrow-left': <path d="M13.5 8h-11M7 3.5 2.5 8 7 12.5" />,
+  thought: <path d="M8 2.5c.45 2.75 1.75 4.05 4.5 4.5-2.75.45-4.05 1.75-4.5 4.5-.45-2.75-1.75-4.05-4.5-4.5 2.75-.45 4.05-1.75 4.5-4.5z" />,
 }
 
 /** One 16px stroke icon set; stroke inherits currentColor, fill none. */

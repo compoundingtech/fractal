@@ -43,7 +43,7 @@ type ReferenceOptions = Omit<MarkdownProps, 'text' | 'streaming' | 'tone'>
 const EMPTY_REFERENCES: ReferenceOptions = {}
 const ReferenceContext = React.createContext<ReferenceOptions>(EMPTY_REFERENCES)
 const MutedTone = React.createContext(false)
-/** True inside a list item, where loose blocks use the shared sibling rhythm. */
+/** True directly inside a list item, where blocks get the 8px sibling gap the root and quotes get from flex. */
 const InListItem = React.createContext(false)
 /** Paragraphs keep the caret on their final line; every other terminal block gets an inline fallback. */
 function markStreamingTail() {
@@ -193,7 +193,7 @@ function CodeFence({ node }: React.ComponentProps<'pre'> & ExtraProps) {
 const heading = (Tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') => function Heading({ children }: React.ComponentProps<'h3'>) {
   return <Tag {...stylex.props(styles.heading, styles.prose)}><InlineText>{children}</InlineText></Tag>
 }
-/** Nested lists get the indent, rail and open marker. */
+/** Nesting depth, so a list inside a list item gets the indent, rail and open marker. */
 const ListDepth = React.createContext(0)
 function MarkdownStrong({ children }: React.ComponentProps<'strong'>) {
   return <strong {...stylex.props(styles.strong, React.useContext(MutedTone) && styles.strongMuted)}><InlineText>{children}</InlineText></strong>
@@ -321,7 +321,8 @@ export function completeStreamingTail(source: string): string {
 }
 
 const styles = stylex.create({
-  // Shared stack prerequisite: flush blocks separated by one 8px gap on every kit Markdown surface.
+  // Blocks are separated by one 8px gap and carry no outer margin, so the last child ends flush.
+  // Prose blocks inherit ink from here (or a blockquote), so tone is one themed declaration rather than a var override.
   markdown: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0, maxWidth: '100%', color: textColor.fgSoft },
   muted: { color: textColor.fgMuted },
   foreground: { color: textColor.fg },
@@ -335,6 +336,7 @@ const styles = stylex.create({
   nestedList: { marginBlockStart: s.xs2, paddingInlineStart: s.xxl, borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.rail },
   nestedUnordered: { listStyleType: 'circle' },
   listItem: { display: 'list-item', marginBlockStart: { default: s.xs2, ':first-child': 0 }, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit', '::marker': { color: textColor.fgMuted } },
+  // Loose items hold sibling blocks: 8px between them, none before the first, so items keep their 2px pitch.
   itemBlock: { marginBlockStart: { default: s.md, ':first-child': 0 } },
   strong: { fontWeight: t.weightBold, color: textColor.fg }, strongMuted: { color: 'inherit' },
   emphasis: { fontStyle: 'italic' },
@@ -354,11 +356,11 @@ const styles = stylex.create({
   codeLanguage: { flexGrow: 1, minWidth: 0, overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fgMuted },
   codeButton: { flexShrink: 0, minHeight: g.controlSm, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: surface.transparent, borderRadius: r.sm, backgroundColor: surface.transparent, color: textColor.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset }, ':disabled': { cursor: 'default', color: textColor.fgMuted } },
   codeButtonSelected: { backgroundColor: surface.rowActive, borderColor: border.borderStrong, color: textColor.fg },
-  codePre: { margin: 0, padding: s.md, overflowX: 'auto', whiteSpace: 'pre', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  codePre: { margin: 0, paddingBlock: s.md, paddingInline: s.lg, overflowX: 'auto', whiteSpace: 'pre', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   codeWrapped: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   copyStatus: { display: 'block', paddingInline: s.md, paddingBlock: s.xs, color: status.dangerFg, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  codeBlock: { minWidth: 0, maxWidth: '100%', margin: 0, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, overflow: 'hidden' },
-  codeText: { fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.uiLeading, color: textColor.fgSoft },
+  codeBlock: { minWidth: 0, maxWidth: '100%', margin: 0, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, overflow: 'hidden' },
+  codeText: { fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.codeLeading, color: textColor.fgSoft },
   paragraph: { margin: 0, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit', overflowWrap: 'anywhere' },
   streamingTail: { '::after': { content: '""', display: 'inline-block', width: g.caret, height: t.bodySize, marginInlineStart: s.xs, verticalAlign: 'text-bottom', backgroundColor: textColor.fgMuted } },
   inlineCode: { fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingInline: s.xs },
