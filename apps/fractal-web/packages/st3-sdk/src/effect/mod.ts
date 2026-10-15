@@ -431,8 +431,12 @@ export const decodeConversationChunk = (
     : {}),
   entries: frame.items.flatMap<TimelineEntry | UnrecognizedEntry>((raw) => {
     try {
-      const entry = decodeEntry(raw)
-      const blocks = raw !== null && typeof raw === 'object' && 'body' in raw ? sourceBlocks(raw.body) : undefined
+      const body = raw !== null && typeof raw === 'object' && 'body' in raw && raw.body !== null && typeof raw.body === 'object' ? raw.body : undefined
+      // Blocks are decoded by the open SourceBlock schema below: one block view that misses the
+      // generated typed view (e.g. a fractional wall_ms) must not reject the fallback entry.
+      const { blocks: _strictBlocks, ...fallbackBody } = (body ?? {}) as Record<string, unknown>
+      const entry = decodeEntry(body === undefined ? raw : { ...raw, body: fallbackBody })
+      const blocks = sourceBlocks(body)
       // The generated v0 schema strips future block fields. Restore only decoded native facts,
       // never the raw body: ids, roles, timestamps and fallback content remain schema-checked.
       if (blocks !== undefined) Object.assign(entry.body, { blocks })

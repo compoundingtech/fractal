@@ -1,6 +1,7 @@
 import { Schema } from 'effect'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui/work-log'
 import { recordValue } from '../conversation/blocks.ts'
+import { recordedWaitFor, type RecordedWait } from '../conversation/recordedWait.ts'
 
 export interface RecordedMatch { readonly path?: string; readonly line?: number; readonly text?: string }
 export interface RecordedSource { readonly title?: string; readonly url?: string; readonly snippet?: string }
@@ -10,7 +11,7 @@ export type TypedToolProjection =
   | (CommonResult & { readonly kind: 'search'; readonly query?: string; readonly path?: string; readonly matches: readonly RecordedMatch[]; readonly files: readonly string[] })
   | (CommonResult & { readonly kind: 'web'; readonly query?: string; readonly url?: string; readonly sources: readonly RecordedSource[] })
   | (CommonResult & { readonly kind: 'subagent'; readonly tasks: readonly RecordedTask[] })
-  | (CommonResult & { readonly kind: 'wait'; readonly awaited: readonly string[]; readonly arrived: readonly string[]; readonly running: boolean; readonly interrupted: boolean; readonly completed: boolean })
+  | (CommonResult & RecordedWait & { readonly kind: 'wait'; readonly running: boolean; readonly interrupted: boolean; readonly completed: boolean })
   | (CommonResult & { readonly kind: 'unknown' })
 
 const RecordedJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
@@ -18,7 +19,6 @@ const TextParts = Schema.Array(Schema.Union([Schema.Struct({ type: Schema.option
 const text = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined
 const strings = (value: unknown): readonly string[] => typeof value === 'string' ? [value] : Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : []
 const records = (value: unknown): readonly Readonly<Record<string, unknown>>[] => Array.isArray(value) ? value.flatMap(entry => { const record = recordValue(entry); return record === undefined ? [] : [record] }) : []
-const namedRefs = (value: unknown): readonly string[] => Array.isArray(value) ? value.flatMap(entry => { if (typeof entry === 'string') return [entry]; const record = recordValue(entry); const name = text(record?.ref) ?? text(record?.jobId) ?? text(record?.id) ?? text(record?.name); return name === undefined ? [] : [name] }) : strings(value)
 /** Decode exact JSON objects and arrays. Malformed or non-JSON text remains prose. */
 const decoded = (value: unknown): unknown => {
   if (typeof value !== 'string') return value
@@ -96,7 +96,7 @@ export const projectTypedToolResult = (call: WorkLogCall): TypedToolProjection =
       const tasks = taskRecords.length > 0 ? taskRecords : sources.filter((source): source is Readonly<Record<string, unknown>> => source !== undefined && ['name', 'agent', 'agent_id', 'agentRef', 'ref'].some(key => source[key] !== undefined))
       return { ...common, kind: 'subagent', tasks: tasks.map(task => ({ name: text(task.name) ?? text(task.id) ?? text(task.agent), ...(text(task.agent) === undefined ? {} : { agent: text(task.agent) }), state: text(task.state) ?? text(task.status), ref: text(task.ref) ?? text(task.agentRef) ?? text(task.agent_id) ?? text(task.id), sessionId: text(recordValue(task.conversation)?.session_id), requested: observed.length === 0, ...(taskReport(task) === undefined ? {} : { report: taskReport(task) }) })) }
     }
-    case 'wait': return { ...common, kind: 'wait', awaited: namedRefs(view?.awaited ?? input?.awaited ?? input?.handles ?? input?.ids ?? input?.jobs), arrived: [...namedRefs(view?.arrived ?? metadata?.arrived ?? metadata?.jobs ?? result?.arrived ?? output?.arrived), ...strings(metadata?.from)], running: call.status === 'running' || field('running') === true, interrupted: call.status === 'interrupted' || field('interrupted') === true, completed: call.status === 'success' && !common.skipped }
+    case 'wait': return { ...common, kind: 'wait', ...recordedWaitFor({ input, view, metadata, arrived: result?.arrived ?? output?.arrived }), running: call.status === 'running' || field('running') === true, interrupted: call.status === 'interrupted' || field('interrupted') === true, completed: call.status === 'success' && !common.skipped }
     default: return { ...common, kind: 'unknown' }
   }
 }

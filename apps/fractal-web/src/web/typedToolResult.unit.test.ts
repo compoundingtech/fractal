@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui/work-log'
 import { projectTypedToolResult, recordedWebHref } from './typedToolResult.ts'
+import { semanticToolFor } from '../conversation/semanticToolModel.ts'
 
 const call = (fields: Partial<WorkLogCall>): WorkLogCall => ({ id: 'recorded-call', title: 'Recorded tool', kind: 'unknown', status: 'success', startedAt: '2026-01-01T00:00:00Z', ...fields })
 describe('typed result projection', () => {
@@ -31,8 +32,24 @@ describe('typed result projection', () => {
     expect(projectTypedToolResult(call({ kind: 'subagent', output: { details: { progress: [{ agent: 'Example worker', status: 'running' }] } } }))).toMatchObject({ tasks: [{ name: 'Example worker', state: 'running' }] })
   })
   it('reports completed waits and native jobId arrivals', () => {
-    expect(projectTypedToolResult(call({ kind: 'wait', metadata: { jobs: [{ jobId: 'example-job' }] } }))).toMatchObject({ arrived: ['example-job'], completed: true })
+    expect(projectTypedToolResult(call({ kind: 'wait', metadata: { jobs: [{ jobId: 'example-job', status: 'completed' }] } }))).toMatchObject({ arrived: ['example-job'], completed: true })
     expect(projectTypedToolResult(call({ kind: 'wait', skipped: true }))).toMatchObject({ completed: false })
+  })
+  it('uses the delivered sender, never the waiting seat, in both wait surfaces', () => {
+    const metadata = { from: 'WaitingSeat', waited: { from: 'SenderSeat', to: 'WaitingSeat', body: 'Ready.' } }
+    const row = semanticToolFor({ _tag: 'ToolCall', id: 'example/wait', callId: 'call/wait', name: 'wait', input: { i: 'Waiting for a reply' }, status: 'success', callSeen: true, at: '2026-01-01T00:00:00Z', result: { content: 'Ready.', metadata, isError: false, at: '2026-01-01T00:00:00Z' } })
+    expect(row).toMatchObject({ arrived: ['SenderSeat'], senders: ['SenderSeat'], stillRunning: [] })
+    expect(projectTypedToolResult(call({ kind: 'wait', metadata }))).toMatchObject({ arrived: ['SenderSeat'], senders: ['SenderSeat'], stillRunning: [] })
+    expect(projectTypedToolResult(call({ kind: 'wait', metadata: { from: 'WaitingSeat' } }))).toMatchObject({ arrived: [], senders: [] })
+  })
+  it('separates completed deliveries from running and unknown jobs in both wait surfaces', () => {
+    const metadata = { jobs: [{ jobId: 'bg/ready', status: 'completed' }, { jobId: 'bg/busy', status: 'running' }, { jobId: 'bg/unknown' }, { jobId: 'bg/failed', status: 'failed' }] }
+    const row = semanticToolFor({ _tag: 'ToolCall', id: 'example/wait', callId: 'call/wait', name: 'wait', input: { jobs: ['bg/ready', 'bg/busy'] }, status: 'success', callSeen: true, at: '2026-01-01T00:00:00Z', result: { content: 'One job completed.', metadata, isError: false, at: '2026-01-01T00:00:00Z' } })
+    expect(row).toMatchObject({ arrived: ['bg/ready'], stillRunning: ['bg/busy'] })
+    expect(projectTypedToolResult(call({ kind: 'wait', metadata }))).toMatchObject({ arrived: ['bg/ready'], stillRunning: ['bg/busy'], completed: true, running: false })
+  })
+  it('keeps explicit native arrivals authoritative over legacy snapshots', () => {
+    expect(projectTypedToolResult(call({ kind: 'wait', view: { arrived: ['bg/native'], awaited: ['bg/native'] }, metadata: { jobs: [{ jobId: 'bg/legacy', status: 'completed' }] } }))).toMatchObject({ arrived: ['bg/native'], awaited: ['bg/native'] })
   })
 
   it('decodes nested task text arrays before escaped detail JSON', () => {

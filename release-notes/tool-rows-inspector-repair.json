@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Repairs the fractal-web tool inspector port. Raw invocation input and Raw recorded output show the exact recorded text, and JSON previews reindent only when the text round-trips unchanged, so unsafe integers and duplicate keys stay as recorded. Wait rows and details list only completed jobs as arrivals, keep running jobs under Still running and name the delivered sender from metadata.waited.from rather than the waiting seat. The SDK decodes a timeline entry's fallback body without its blocks, so a block view outside the generated typed view (such as a fractional wall_ms) no longer turns a tool result into an unrecognized entry; an unreadable block view is dropped from that block only. An opened tool inspector belongs to its conversation, so Back, Forward or a pasted URL to another agent hides it.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted or wire schema change; the generated client schema is unchanged." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Client-side only. Entries that were previously rejected as unrecognized because of an off-schema block view now decode as their typed entry; well-formed entries decode as before." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

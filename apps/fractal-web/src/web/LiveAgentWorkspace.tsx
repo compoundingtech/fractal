@@ -176,7 +176,9 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   const selectedPane = query.get('open') ?? 'thread'
   const [resourcePanel, setResourcePanel] = React.useState<ResourcePanelState>({ expanded: false, size: 288 })
   const [diffOpen, setDiffOpen] = React.useState(false)
-  const [openedTool, setOpenedTool] = React.useState<WorkLogCall | undefined>(undefined)
+  // The inspector belongs to the conversation it was opened from; Back/Forward or a URL change hides it.
+  const [openedTool, setOpenedTool] = React.useState<{ readonly agentRef: string; readonly call: WorkLogCall } | undefined>(undefined)
+  const shownTool = openedTool !== undefined && openedTool.agentRef === current ? openedTool.call : undefined
   const [panelFraction, setPanelFraction] = useAtom(panelRatio)
   const [dragWidth, setDragWidth] = React.useState<number | undefined>()
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
@@ -204,6 +206,9 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   const openLatest = React.useRef(open)
   openLatest.current = open
   const openDocument = React.useCallback((ref: string) => openLatest.current({ ref, presentation: 'detail' }), [])
+  const currentLatest = React.useRef(current)
+  currentLatest.current = current
+  const openTool = React.useCallback((call: WorkLogCall) => setOpenedTool({ agentRef: currentLatest.current, call }), [])
   const stale = fleet._tag === 'Observed' && (fleet.freshness === 'stale' || connection._tag !== 'Live')
   const headerRow = agent === undefined ? undefined : sidebarRow({ agent, stale, now })
   const parsedSearch = parseSidebarQuery(search)
@@ -356,7 +361,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                 ) : null}
                 <div ref={setPaneHost} {...stylex.props(styles.body)} />
               </section>
-              {diffOpen && openedTool === undefined && current !== '' ? (
+              {diffOpen && shownTool === undefined && current !== '' ? (
                 <>
                   <ResizableSplit id="live-change-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Change panel width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setDiffOpen(false)} onReset={() => setPanelFraction(380 / viewport)} />
                   <React.Suspense fallback={<aside aria-label="Changes" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}><p role="status" {...stylex.props(styles.notice)}>Loading captured changes…</p></aside>}>
@@ -364,11 +369,11 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                   </React.Suspense>
                 </>
               ) : null}
-              {openedTool !== undefined && current !== '' ? (
+              {shownTool !== undefined && current !== '' ? (
                 <>
                   <ResizableSplit id="live-tool-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Tool detail panel width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setOpenedTool(undefined)} onReset={() => setPanelFraction(380 / viewport)} />
                   <React.Suspense fallback={<aside aria-label="Tool detail" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}><p role="status" {...stylex.props(styles.notice)}>Loading tool inspector…</p></aside>}>
-                    <ToolInspector agentRef={current} call={openedTool} width={panelSize} onClose={() => setOpenedTool(undefined)} />
+                    <ToolInspector agentRef={current} call={shownTool} width={panelSize} onClose={() => setOpenedTool(undefined)} />
                   </React.Suspense>
                 </>
               ) : null}
@@ -380,7 +385,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)}
+    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={openTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)}
   </>)
 }
 

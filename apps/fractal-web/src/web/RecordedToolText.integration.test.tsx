@@ -32,3 +32,25 @@ it('formats parsed JSON before previewing, reveals the complete formatted result
     vi.unstubAllGlobals()
   }
 })
+
+it('never reformats JSON that would lose recorded integers or duplicate keys, and raw routes show exact text', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  try {
+    for (const exact of ['{"id":9007199254740993}', '{"status":"old","status":"new"}']) {
+      await React.act(async () => root.render(<RecordedToolText text={exact} />))
+      expect(container.querySelector('[data-tool-output]')?.textContent).toBe(exact)
+    }
+    const compact = '{"id":7,"ok":true}'
+    await React.act(async () => root.render(<RecordedToolText text={compact} raw />))
+    expect(container.querySelector('[data-tool-output]')?.textContent).toBe(compact)
+    await React.act(async () => root.render(<RecordedToolText text={compact} />))
+    expect(container.querySelector('[data-tool-output]')?.textContent).toBe('{\n  "id": 7,\n  "ok": true\n}')
+  } finally {
+    await React.act(async () => root.unmount())
+    container.remove()
+    vi.unstubAllGlobals()
+  }
+})

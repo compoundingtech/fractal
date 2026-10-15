@@ -2,18 +2,13 @@ import type { ToolCallItem } from './model.ts'
 import { recordValue } from './blocks.ts'
 import { skippedTool, toolKindFor } from './toolClassification.ts'
 import { recordedStSendFor } from './recordedStSend.ts'
+import { recordedWaitFor, type RecordedWait } from './recordedWait.ts'
 
 export type SemanticTool =
   | { readonly type: 'skipped'; readonly reason: 'interrupted-before-execution' }
   | { readonly type: 'message'; readonly recipients: readonly string[]; readonly broadcast: boolean; readonly body: string; readonly subject?: string; readonly receipts: readonly { readonly to: string; readonly outcome: string }[] }
-  | { readonly type: 'wait'; readonly awaited: readonly string[]; readonly arrived: readonly string[]; readonly interrupted: boolean; readonly running: boolean; readonly waited?: number }
+  | (RecordedWait & { readonly type: 'wait'; readonly interrupted: boolean; readonly running: boolean })
 const strings = (value: unknown): readonly string[] => typeof value === 'string' ? [value] : Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
-const jobNames = (value: unknown): readonly string[] => Array.isArray(value) ? value.flatMap(value => {
-  if (typeof value === 'string') return [value]
-  const job = recordValue(value)
-  const id = job?.jobId ?? job?.id ?? job?.name
-  return typeof id === 'string' ? [id] : []
-}) : []
 
 /** Shared recorded-message model for the transcript card and its inspector. */
 export const outgoingMessageFor = ({ input: rawInput, view, metadata }: { readonly input?: unknown; readonly view?: Readonly<Record<string, unknown>>; readonly metadata?: Readonly<Record<string, unknown>> }): Extract<SemanticTool, { type: 'message' }> => {
@@ -32,14 +27,11 @@ export const outgoingMessageFor = ({ input: rawInput, view, metadata }: { readon
 }
 export const semanticToolFor = (item: ToolCallItem): SemanticTool | undefined => {
   if (item.skipped || skippedTool(item)) return { type: 'skipped', reason: 'interrupted-before-execution' }
-  const kind = toolKindFor(item), input = recordValue(item.input), metadata = item.result?.metadata, view = item.view ?? item.result?.view
+  const kind = toolKindFor(item), metadata = item.result?.metadata, view = item.view ?? item.result?.view
   if (kind === 'message') return outgoingMessageFor({ input: item.input, metadata, view })
   if (kind === 'wait') {
     const resultView = item.result?.view
-    const arrived = jobNames(resultView?.arrived ?? metadata?.arrived ?? metadata?.jobs)
-    const from = strings(metadata?.from)
-    const waited = metadata?.waited
-    return { type: 'wait', awaited: jobNames(view?.awaited ?? input?.jobs ?? input?.handles ?? input?.ids), arrived: [...arrived, ...from], interrupted: item.status === 'interrupted' || metadata?.interrupted === true || resultView?.interrupted === true, running: item.status === 'running', ...(typeof waited === 'number' && Number.isFinite(waited) ? { waited } : {}) }
+    return { type: 'wait', ...recordedWaitFor({ input: item.input, view: resultView ?? view, awaited: view?.awaited, metadata }), interrupted: item.status === 'interrupted' || metadata?.interrupted === true || resultView?.interrupted === true, running: item.status === 'running' }
   }
   return undefined
 }

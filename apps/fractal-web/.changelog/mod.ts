@@ -18,6 +18,7 @@ import toolRowIntent from './2026-10-12-tool-row-intent.ts'
 import diagnosticsRecovery from './2026-10-12-diagnostics-recovery.ts'
 import toolInspectorEscape from './2026-10-12-tool-inspector-escape.ts'
 import commandPalette from './2026-10-13-command-palette.ts'
+import toolInspectorEvidence from './2026-10-14-tool-inspector-evidence.ts'
 
 /** Public registry: every other file in this directory must be listed here exactly once. */
 export const changelogSources: readonly ChangelogSourceRegistration[] = Object.freeze([
@@ -40,5 +41,6 @@ export const changelogSources: readonly ChangelogSourceRegistration[] = Object.f
   { file: '2026-10-12-diagnostics-recovery.ts', source: diagnosticsRecovery, visibility: 'public' },
   { file: '2026-10-12-tool-inspector-escape.ts', source: toolInspectorEscape, visibility: 'public' },
   { file: '2026-10-13-command-palette.ts', source: commandPalette, visibility: 'public' },
+  { file: '2026-10-14-tool-inspector-evidence.ts', source: toolInspectorEvidence, visibility: 'public' },
 ])
 export const changelogDeployment: ChangelogDeployment = 'main'

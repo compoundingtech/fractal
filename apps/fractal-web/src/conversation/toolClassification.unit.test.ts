@@ -26,8 +26,8 @@ describe('typed semantic tool classification', () => {
     expect(semanticToolFor(message)).toMatchObject({type:'message',recipients:['Builder','Reviewer'],broadcast:true,body:'Ready for review.',receipts:[{to:'Builder',outcome:'injected'},{to:'Reviewer',outcome:'queued'}]})
   })
   it('keeps wait arrival facts distinct from file reads', () => {
-    const wait = call('wait', {jobs:['bg_1']}, {result:{content:'arrived',isError:false,at,metadata:{jobs:[{jobId:'bg_1'}],waited:12}}})
-    expect(semanticToolFor(wait)).toEqual({type:'wait',awaited:['bg_1'],arrived:['bg_1'],interrupted:false,running:false,waited:12})
+    const wait = call('wait', {jobs:['bg_1']}, {result:{content:'arrived',isError:false,at,metadata:{jobs:[{jobId:'bg_1',status:'completed'}],waited:12}}})
+    expect(semanticToolFor(wait)).toEqual({type:'wait',awaited:['bg_1'],arrived:['bg_1'],stillRunning:[],senders:[],interrupted:false,running:false,waited:12})
     expect(semanticToolFor(call('read',{path:'src/rows.ts'}))).toBeUndefined()
   })
   it('renders synthetic interrupt_skipped neutral and excludes it from command counts', () => {

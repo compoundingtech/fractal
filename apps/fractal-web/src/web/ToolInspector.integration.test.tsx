@@ -101,6 +101,17 @@ it('never invents duration, input, output or an applied change for an incomplete
   } finally { await act(async () => root.unmount()); vi.unstubAllGlobals() }
 })
 
+it('keeps the raw recorded output byte-exact even when it parses as round-trippable JSON', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  const container = document.createElement('div')
+  const root = createRoot(container)
+  const output = '{"id":7,"rows":["a","b"]}'
+  try {
+    await act(async () => root.render(<ToolInspector call={{ id: 'raw-call', kind: 'unknown', title: 'Fictional fetch', toolName: 'fetch_rows', startedAt: '', status: 'success', input: { id: 1 }, output }} onClose={() => {}} />))
+    expect(container.querySelector('[data-tool-raw] [data-tool-output]')?.textContent).toBe(output)
+  } finally { await act(async () => root.unmount()); vi.unstubAllGlobals() }
+})
+
 const KeyboardInspectorHost = ({ manageFocus }: { readonly manageFocus: boolean }) => {
   const [open, setOpen] = React.useState(false)
   const Inspector = manageFocus ? ToolInspector : ToolInspectorContent

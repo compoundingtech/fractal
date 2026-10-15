@@ -9,10 +9,19 @@ export const SourceBlock = Schema.Struct({
   assistant_metadata: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
 })
 export type SourceBlock = typeof SourceBlock.Type
-const decodeBlocks = Schema.decodeUnknownSync(Schema.Array(SourceBlock))
+const decodeBlock = Schema.decodeUnknownSync(SourceBlock)
+const decodeBlocks = Schema.decodeUnknownSync(Schema.Array(Schema.Unknown))
 
-/** Feature-detect the optional negotiated blocks; old daemons keep the fallback body. */
+/** Feature-detect the optional negotiated blocks; old daemons keep the fallback body.
+ * A block whose view is unreadable renders without that view, as the wire contract asks;
+ * other malformed block facts still reject the entry. */
 export const sourceBlocks = (body: unknown): readonly SourceBlock[] | undefined => {
   if (body === null || typeof body !== 'object' || !('blocks' in body) || body.blocks === undefined) return undefined
-  return decodeBlocks(body.blocks)
+  return decodeBlocks(body.blocks).map(block => {
+    try { return decodeBlock(block) } catch (error) {
+      if (block === null || typeof block !== 'object' || !('view' in block)) throw error
+      const { view: _unreadableView, ...withoutView } = block
+      return decodeBlock(withoutView)
+    }
+  })
 }

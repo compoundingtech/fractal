@@ -7,7 +7,7 @@ import { semanticToolDetail } from './semanticTool.tsx'
 const at = '2026-01-15T12:00:00Z'
 const fixtures: readonly ToolCallItem[] = [
   { _tag:'ToolCall', id:'example/message', callId:'call/message', name:'write', input:{path:'agent://all',content:'The review is ready.'},status:'success',callSeen:true,at,result:{content:'sent',isError:false,at,metadata:{message:{to:['Builder','Reviewer'],receipts:[{to:'Builder',outcome:'injected'},{to:'Reviewer',outcome:'queued'}]}}}},
-  { _tag:'ToolCall', id:'example/wait', callId:'call/wait', name:'wait', input:{jobs:['bg_example']},status:'success',callSeen:true,at,result:{content:'arrived',isError:false,at,metadata:{jobs:[{jobId:'bg_example'}],waited:12}}},
+  { _tag:'ToolCall', id:'example/wait', callId:'call/wait', name:'wait', input:{jobs:['bg_example']},status:'success',callSeen:true,at,result:{content:'arrived',isError:false,at,metadata:{jobs:[{jobId:'bg_example',status:'completed'}],waited:12}}},
   { _tag:'ToolCall', id:'example/skip', callId:'call/skip', name:'bash', input:{command:'printf ready'},status:'success',skipped:true,callSeen:true,at,result:{content:'Interrupted before execution.',isError:false,at}},
   { _tag:'ToolCall', id:'example/file-control', callId:'call/file', name:'write', input:{path:'notes/agent-plan.md',content:'Review notes'},status:'success',callSeen:true,at,result:{content:'written',isError:false,at}},
 ]

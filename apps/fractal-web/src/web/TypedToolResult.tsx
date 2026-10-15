@@ -1,5 +1,5 @@
 import * as stylex from '@stylexjs/stylex'
-import { Markdown } from '@smalltalk/fractal-ui/assistant-ui'
+import { Markdown } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui/work-log'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { projectTypedToolResult, recordedToolEvidence, recordedWebHref } from './typedToolResult.ts'
@@ -30,6 +30,8 @@ export const TypedToolResult = ({ call }: TypedToolResultProps) => {
     {result.kind === 'wait' && <dl {...stylex.props(styles.facts)}>
       {result.awaited.length > 0 && <><dt>Awaited</dt><dd {...stylex.props(styles.value)}>{result.awaited.map((ref, index) => <pre key={index} {...stylex.props(styles.text)}>{ref}</pre>)}</dd></>}
       {result.arrived.length > 0 && <><dt>Arrived</dt><dd {...stylex.props(styles.value)}>{result.arrived.map((ref, index) => <pre key={index} {...stylex.props(styles.text)}>{ref}</pre>)}</dd></>}
+      {result.senders.length > 0 && <><dt>From</dt><dd {...stylex.props(styles.value)}>{result.senders.join(', ')}</dd></>}
+      {result.stillRunning.length > 0 && <><dt>Still running</dt><dd {...stylex.props(styles.value)}>{result.stillRunning.map((ref, index) => <pre key={index} {...stylex.props(styles.text)}>{ref}</pre>)}</dd></>}
       {result.running && <><dt>Status</dt><dd {...stylex.props(styles.value)}>Running</dd></>}
       {result.interrupted && <><dt>Status</dt><dd {...stylex.props(styles.value)}>Interrupted</dd></>}
       {result.completed && !result.running && !result.interrupted && <><dt>Status</dt><dd {...stylex.props(styles.value)}>Completed</dd></>}

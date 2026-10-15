@@ -353,3 +353,38 @@ describe('conversation import boundary', () => {
     }
   })
 })
+
+describe('tool inspector ownership', () => {
+  it('hides an inspector opened in one conversation when history selects another', async () => {
+    vi.doMock('./ConversationPane.tsx', async () => ({
+      ConversationPane: ({ agentRef, onOpenTool }: React.ComponentProps<typeof PaneModule.ConversationPane>) =>
+        <button data-open-tool={agentRef} onClick={() => onOpenTool({ id: `${agentRef}/call`, kind: 'run', title: 'Fictional run', startedAt: '', status: 'success' })}>Inspect {agentRef}</button>,
+    }))
+    vi.doMock('./ToolInspector.tsx', async () => ({
+      LiveToolInspector: ({ agentRef, call }: { readonly agentRef: string; readonly call: { readonly id: string } }) =>
+        <aside aria-label="Tool detail" data-inspected-agent={agentRef} data-inspected-call={call.id} />,
+    }))
+    const inspector = () => container.querySelector('aside[aria-label="Tool detail"]')
+    const go = async (path: string) => act(async () => {
+      window.history.pushState(null, '', path)
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    window.history.replaceState(null, '', '/w/agent/a')
+    await renderShell()
+    await act(async () => { await vi.waitFor(() => expect(container.querySelector('[data-open-tool="agent/a"]')).not.toBeNull()) })
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-open-tool="agent/a"]')!.click())
+    await act(async () => { await vi.waitFor(() => expect(container.querySelector('[data-inspected-call]')).not.toBeNull()) })
+    expect(inspector()?.getAttribute('data-inspected-agent')).toBe('agent/a')
+    expect(inspector()?.getAttribute('data-inspected-call')).toBe('agent/a/call')
+
+    // Back/Forward and pasted URLs change the conversation without the roster's select().
+    await go('/w/agent/b')
+    expect(container.querySelector('[data-open-tool="agent/b"]')).not.toBeNull()
+    expect(inspector()).toBeNull()
+
+    // The opened call stays scoped to its own conversation, never another agent's ref.
+    await go('/w/agent/a')
+    expect(inspector()?.getAttribute('data-inspected-agent')).toBe('agent/a')
+    expect(inspector()?.getAttribute('data-inspected-call')).toBe('agent/a/call')
+  })
+})

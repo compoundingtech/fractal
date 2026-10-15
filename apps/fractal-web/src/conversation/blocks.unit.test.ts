@@ -23,4 +23,22 @@ describe('optional native block facts', () => {
     expect(timeline.project().items[0]).not.toHaveProperty('blocks')
     expect(timeline.project().items[0]).not.toHaveProperty('assistantMetadata')
   })
+  it('keeps a result joined when its open view misses the generated typed view', () => {
+    const timeline = new LiveTimeline()
+    const chunk = frame([
+      entry('tool_call', 1, { call_id: 'call/example', name: 'bash', arguments: { command: 'printf ready' } }),
+      entry('tool_result', 2, { call_id: 'call/example', content: 'ready', media_type: 'text/plain', status: 'success', blocks: [block('tool_output', { view: { type: 'bash', tool: 'bash', wall_ms: 1.5 } })] }),
+    ])
+    expect(chunk.entries.map(entry => entry.type)).toEqual(['tool_call', 'tool_result'])
+    timeline.apply(chunk)
+    expect(timeline.project().items).toHaveLength(1)
+    expect(timeline.project().items[0]).toMatchObject({ _tag: 'ToolCall', status: 'success', result: { content: 'ready', view: { type: 'bash', wall_ms: 1.5 } } })
+  })
+  it('renders a block with an unreadable view without that view instead of dropping the entry', () => {
+    const chunk = frame([entry('tool_result', 2, { call_id: 'call/example', content: 'ready', media_type: 'text/plain', status: 'success', blocks: [block('tool_output', { view: 'not-a-view', metadata: { exitCode: 0 } })] })])
+    expect(chunk.entries).toHaveLength(1)
+    const body = chunk.entries[0]?.type === 'tool_result' ? chunk.entries[0].body : undefined
+    expect(body?.blocks?.[0]).toMatchObject({ id: 'block/tool_output', metadata: { exitCode: 0 } })
+    expect(body?.blocks?.[0]).not.toHaveProperty('view')
+  })
 })
