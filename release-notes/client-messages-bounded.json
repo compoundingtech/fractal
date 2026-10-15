@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "none",
-    "detail": "Canonical claim-log checkpoint rules, the schema registry digest and shared projection digests are unchanged. Online backfill disables automatic WAL checkpoints within each bounded writer loan and restores the caller's policy on success or error; the daemon WAL recycler schedules checkpoints separately. Deletion or repair that destroys a retained message cut, or a selector backfill start, invalidates that traversal instead of returning a partial successful page."
+    "detail": "Canonical claim-log checkpoint rules, the schema registry digest and shared projection digests are unchanged. One background-worker guard disables automatic WAL checkpoints for the entire initial backfill lifecycle, including interleaved foreground writes; it restores the caller's policy on completion, error or unwind. The daemon WAL recycler schedules checkpoints separately. Deletion or repair that destroys a retained message cut, or a selector backfill start, invalidates that traversal instead of returning a partial successful page."
   },
   "compatibility": {
     "status": "changed",

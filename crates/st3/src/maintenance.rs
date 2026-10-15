@@ -131,6 +131,7 @@ pub(crate) async fn run_client_message_selectors_observed(
         })
     };
     let mut previously_pending = false;
+    let mut checkpoint_guard = None;
     loop {
         // Consume before draining, not after: a commit during the read/drain/wait
         // registration remains unseen and changed() completes without losing the wake.
@@ -139,13 +140,19 @@ pub(crate) async fn run_client_message_selectors_observed(
         on_turn(true);
         let result = tokio::task::spawn_blocking(move || {
             let _loan = SelectorLoan::enter();
+            let mut guard = match checkpoint_guard {
+                Some(guard) => Some(guard),
+                None => current.client_message_backfill_checkpoint_guard()?,
+            };
             let pending = current.client_message_selectors_pending()?;
             let more = current.maintain_client_message_selectors()?;
             let remaining = current.client_message_selectors_pending()?;
-            Ok::<_, anyhow::Error>((pending, remaining, more))
+            if !remaining { drop(guard.take()); }
+            Ok::<_, anyhow::Error>((pending, remaining, more, guard))
         }).await;
         let more = match result {
-            Ok(Ok((pending, remaining, more))) => {
+            Ok(Ok((pending, remaining, more, guard))) => {
+                checkpoint_guard = guard;
                 // A source/tail-verdict commit can finish pending work before this loan.
                 if (previously_pending || pending) && !remaining {
                     events.send_modify(|generation| *generation = generation.saturating_add(1));

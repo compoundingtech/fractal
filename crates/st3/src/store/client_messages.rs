@@ -454,9 +454,16 @@ fn clear_fold_batches(transaction: &Transaction<'_>, budget: &mut FoldBudget) ->
 }
 
 fn new_fold_work(transaction: &Transaction<'_>, subject: String, flags: u8, generation: u64) -> Result<FoldWork> {
-    let base = if flags == 0 { current_header(transaction, &subject)?.map(|(_, header)| header) } else { None };
+    // A header folded during initial backfill has no published frontier.
+    // Metadata-only appends must refold it rather than use an incremental base.
+    let published: Option<String> = if flags == 0 {
+        transaction.query_row("SELECT value FROM meta WHERE key=?1", [MARKER], |row| row.get(0)).optional()?
+    } else { None };
+    let base = if flags == 0 && published.is_some() {
+        current_header(transaction, &subject)?.map(|(_, header)| header)
+    } else { None };
     let after = if base.is_some() {
-        transaction.query_row("SELECT value FROM meta WHERE key=?1", [MARKER], |row| row.get::<_, String>(0))?.parse()?
+        published.expect("incremental base requires a published frontier").parse()?
     } else { 0 };
     let first = base.as_ref().map(|header| header.sent_key.clone());
     Ok(FoldWork {
@@ -1093,7 +1100,32 @@ fn selectors_not_ready() -> St3Error {
     St3Error::new("message-selectors-not-ready", "message selector initialization is still in progress")
 }
 
+/// Owns checkpoint policy across initial backfill loans and interleaved writes.
+/// Completion, error and unwind all restore the incoming automatic policy.
+pub(crate) struct BackfillCheckpointGuard {
+    store: std::sync::Weak<Store>,
+    automatic: u32,
+}
+
+impl Drop for BackfillCheckpointGuard {
+    fn drop(&mut self) {
+        if let Some(store) = self.store.upgrade()
+            && let Err(error) = store.connection.write_background()
+                .pragma_update(None, "wal_autocheckpoint", self.automatic) {
+            tracing::error!(%error, "could not restore selector backfill checkpoint policy");
+        }
+    }
+}
+
 impl Store {
+    pub(crate) fn client_message_backfill_checkpoint_guard(self: &Arc<Self>) -> Result<Option<BackfillCheckpointGuard>> {
+        let connection = self.connection.write_background();
+        if !backfill_incomplete(&connection)? { return Ok(None); }
+        let automatic = connection.pragma_query_value(None, "wal_autocheckpoint", |row| row.get(0))?;
+        connection.pragma_update(None, "wal_autocheckpoint", 0)?;
+        Ok(Some(BackfillCheckpointGuard { store: Arc::downgrade(self), automatic }))
+    }
+
     pub(crate) fn client_messages_cut_epoch(&self) -> Result<u64> {
         Ok(self.readers.get().query_row("SELECT epoch FROM local_client_message_cut_epoch WHERE id=1",[],|row|row.get(0))?)
     }
@@ -1121,14 +1153,7 @@ impl Store {
         }
         let mut connection = self.connection.write_background();
         if backfill_incomplete(&connection)? {
-            // Do not turn one bounded loan's COMMIT into a checkpoint of the whole
-            // backfill WAL. The daemon's WAL recycler owns checkpoint scheduling.
-            let automatic: u32 = connection.pragma_query_value(None, "wal_autocheckpoint", |row| row.get(0))?;
-            connection.pragma_update(None, "wal_autocheckpoint", 0)?;
-            let result = backfill_chunk(&mut connection, false);
-            let restore = connection.pragma_update(None, "wal_autocheckpoint", automatic);
-            restore?;
-            result?;
+            backfill_chunk(&mut connection, false)?;
             return Ok(backfill_incomplete(&connection)? || has_pending(&connection)?);
         }
         let transaction = connection.transaction()?;
@@ -1579,6 +1604,91 @@ mod tests {
             "SELECT value FROM meta WHERE key=?1", [BACKFILL_MARKER], |row| row.get(0),
         ).unwrap();
         serde_json::from_str(&value).unwrap()
+    }
+
+    #[test]
+    fn metadata_only_append_between_initial_pending_loans_refolds_without_published_cut() {
+        let store = Store::open_memory("node").unwrap();
+        seed_backfill(&store, BACKFILL_SUBJECTS * 3);
+        backfill_chunk(&mut store.connection.write(), true).unwrap();
+        let subject = loop {
+            let mut connection = store.connection.write();
+            let header: Option<String> = connection.query_row(
+                "SELECT subject FROM local_client_message_selectors_v1 WHERE born_index>=0 LIMIT 1",
+                [], |row| row.get(0),
+            ).optional().unwrap();
+            if let Some(subject) = header {
+                assert!(has_pending(&connection).unwrap());
+                assert!(backfill_incomplete(&connection).unwrap());
+                break subject;
+            }
+            assert!(!backfill_chunk(&mut connection, false).unwrap().unwrap().1);
+        };
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            deferred_claim(&transaction, &subject, "custom.message.annotation",
+                json!({"content":"appended between initial pending loans"}), None);
+            transaction.commit().unwrap();
+            let flags: u8 = connection.query_row(
+                "SELECT dirty_flags FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index=-1",
+                [&subject], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(flags, 0);
+            assert!(!connection.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [MARKER],
+                |row| row.get::<_, bool>(0)).unwrap());
+        }
+        while store.maintain_client_message_selectors().unwrap() {}
+        assert!(!store.client_message_selectors_pending().unwrap());
+        let cut = store.client_messages_page_cut(store.index().unwrap()).unwrap();
+        let rows = store.client_messages_page(None, None, true, cut, None, 100).unwrap();
+        assert_eq!(rows.len(), BACKFILL_SUBJECTS * 3);
+        let row = rows.iter().find(|row| row.0.subject == subject).unwrap();
+        let expected = latest_actual_at(&store.readers.get(), &subject, Some(cut)).unwrap().unwrap();
+        assert_eq!(row.0.content, expected["content"].as_str().unwrap());
+    }
+
+    #[test]
+    fn initial_backfill_checkpoint_owner_covers_interleaved_writers_and_restores_on_unwind() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("checkpoint-owner.sqlite"), "node").unwrap());
+        seed_backfill(&store, BACKFILL_SUBJECTS * 3);
+        backfill_chunk(&mut store.connection.write(), true).unwrap();
+        store.connection.write().pragma_update(None, "wal_autocheckpoint", 1).unwrap();
+        let policy = || store.connection.write().pragma_query_value(None, "wal_autocheckpoint",
+            |row| row.get::<_, u32>(0)).unwrap();
+        let guard = store.client_message_backfill_checkpoint_guard().unwrap().unwrap();
+        assert_eq!(policy(), 0);
+        assert!(store.maintain_client_message_selectors().unwrap());
+        {
+            let mut connection = store.connection.write();
+            assert_eq!(connection.pragma_query_value(None, "wal_autocheckpoint",
+                |row| row.get::<_, u32>(0)).unwrap(), 0);
+            let transaction = connection.transaction().unwrap();
+            deferred_claim(&transaction, "message/interleaved", "message.sent",
+                json!({"from":"agent/sender","to":"person/reader","content":"x".repeat(32_768),"status":"sent"}), None);
+            transaction.commit().unwrap();
+        }
+        assert_eq!(policy(), 0, "foreground COMMIT must not inherit an automatic backfill checkpoint");
+        while store.maintain_client_message_selectors().unwrap() {
+            assert_eq!(policy(), 0);
+        }
+        drop(guard);
+        assert_eq!(policy(), 1);
+        backfill_chunk(&mut store.connection.write(), true).unwrap();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.client_message_backfill_checkpoint_guard().unwrap().unwrap();
+            assert_eq!(policy(), 0);
+            panic!("interrupt backfill owner");
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(policy(), 1, "unwind restores the original policy");
+        let failed: Result<()> = (|| {
+            let _guard = store.client_message_backfill_checkpoint_guard()?.unwrap();
+            anyhow::bail!("stop backfill");
+        })();
+        assert!(failed.is_err());
+        assert_eq!(policy(), 1, "error exit restores the original policy");
     }
 
     #[test]
