@@ -7010,7 +7010,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // The policy reads `[limits]` again on every pass, so an edit applies without a restart.
     st3::config::set_daemon_config(args_config.as_deref());
     tokio::spawn(st3::task_cpu::account("account_limits.enforce", enforce_account_limits(store.clone(), config.limits.clone(), reconciler)));
-    recycle_idle_wal(config.state_dir.join("claims.sqlite3"), Arc::downgrade(&store));
+    recycle_idle_wal(store.path.clone(), Arc::downgrade(&store));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(st3::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
     tokio::spawn(st3::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
