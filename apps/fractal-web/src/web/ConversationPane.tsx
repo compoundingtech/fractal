@@ -8,13 +8,15 @@ import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNow } from '../data/react.tsx'
 import { createConversationTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, type SendRefusal } from './composerSend.ts'
+import { createComposerAttachmentAdapter } from './composerAttachments.ts'
 import { spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
 import { DOCUMENT_REF } from '../documents/document-port.ts'
 import { documentReferences } from '../documents/DocumentLink.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
-import type { ConversationPage, Feed } from '../data/source.ts'
-import type * as Atom from 'effect/reactivity/Atom'
+import type { ConversationPage, Feed, NetworkReachability } from '../data/source.ts'
+import * as Atom from 'effect/reactivity/Atom'
+const assumedOnline = Atom.make<NetworkReachability>({ _tag: 'Online' })
 
 /** The follow owns content and the kit owns its presentation. The display-contents host
  * boundary observes asynchronous runtime adoption without inventing a kit commit hook.
@@ -104,10 +106,15 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   const source = useDataSource()
   const now = useNow()
   const observation = useConversationSync(agentRef)
+  const network = useAtomValue(source.network ?? assumedOnline)
   const grants = useGrants()
   const [refusal, setRefusal] = React.useState<SendRefusal>()
+  const attachmentAdapter = React.useMemo(() => source.attachments === undefined ? undefined
+    : createComposerAttachmentAdapter(source.attachments), [source.attachments])
   const binding = composerSendBinding({
     source, agentRef, grants,
+    online: network._tag === 'Online',
+    sessionId: feed._tag === 'Observed' ? feed.value.sessionId : undefined,
     readable: state._tag === 'Observed',
     items: state._tag === 'Observed' ? state.items : [],
     refusal, onRefused: setRefusal,
@@ -122,7 +129,18 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     event.stopPropagation()
     onOpenDocument(href)
   }
-  return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: state._tag === 'Observed' && state.isRunning }}>
+  return <EmbraceRuntimeProvider key={agentRef} options={{
+    ...binding.runtime,
+    adapters: attachmentAdapter === undefined ? undefined : { attachments: attachmentAdapter },
+    onNew: async message => {
+      const attachments = (message.attachments ?? []).map(attachment => ({
+        ...attachment, id: attachmentAdapter?.nativeId(attachment.id) ?? attachment.id,
+      }))
+      attachmentAdapter?.submitted(attachments.map(attachment => attachment.id))
+      await binding.runtime.onNew({ ...message, attachments })
+    },
+    isRunning: state._tag === 'Observed' && state.isRunning,
+  }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
     <Transcript
@@ -137,7 +155,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       onRetrySync={state._tag === 'Unavailable' || retryConversation === undefined ? undefined : () => retryConversation(agentRef)}
       {...(renderInlineReference === undefined ? {} : { renderInlineReference })}
       onLoadImage={(src) => { const url = openableImageUrl(src); if (url !== undefined) window.open(url, '_blank', 'noopener,noreferrer') }}
-      onRetrySend={grants.messageSend === 'granted' ? (id) => {
+      onRetrySend={grants.messageSend === 'granted' && binding.disabledReason === undefined ? (id) => {
         if (feed._tag !== 'Observed') return
         const item = feed.value.items.find(item => item.id === id)
         if (item !== undefined) void binding.retry(item)
@@ -154,7 +172,14 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     <LiveAgentTodos agentRef={agentRef} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     <div data-testid="conversation-composer-dock" style={{ flexShrink: 0, paddingBottom: spaceVars.lg }}>
-      <EmbraceComposer variant="C1" readingColumn disabledReason={binding.disabledReason} />
+      {binding.availability._tag === 'Offline' || binding.availability._tag === 'Revoked' ? <div role="status">
+        {binding.availability.detail}
+        {binding.availability._tag === 'Offline' && source.reconnect !== undefined ? <button type="button" onClick={source.reconnect}>Reconnect now</button> : null}
+        {binding.availability._tag === 'Revoked' ? <button type="button" onClick={() => { void binding.recover() }}>Check access</button> : null}
+      </div> : null}
+      <EmbraceComposer variant="C1" readingColumn targetLabel={`${agentName} (${agentRef})${feed._tag === 'Observed' && feed.value.sessionId !== undefined ? ` · Session ${feed.value.sessionId}` : ''}`}
+        sendDisabled={binding.disabledReason !== undefined}
+        disabledReason={binding.availability._tag === 'Offline' || binding.availability._tag === 'Revoked' ? undefined : binding.disabledReason} />
     </div>
   </EmbraceRuntimeProvider>
 })

@@ -11,6 +11,7 @@ import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConversationItem } from '../conversation/model.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
+import type { AttachmentPort } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 import { Markdown, type WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import type * as Kit from '@smalltalk/fractal-ui/assistant-ui'
@@ -38,19 +39,34 @@ const source = vi.hoisted(() => ({
   transcriptTurns: [] as (readonly TranscriptTurn[])[],
   scrollToBottomKeys: [] as (string | undefined)[],
   composerProps: [] as React.ComponentProps<typeof Kit.EmbraceComposer>[],
+  sendEnabled: false,
+  offline: false,
+  reconnect: vi.fn<() => void>(),
+  send: vi.fn<AttachmentPort['send']>(),
+  upload: vi.fn<AttachmentPort['upload']>(),
+  capabilities: vi.fn<AttachmentPort['capabilities']>(),
+  runtimeOptions: [] as ConversationRuntimeOptions[],
 }))
 
 vi.mock('../data/react.tsx', async () => {
   // Vitest hoists this factory before static imports are initialized.
   const Atom = await import('effect/reactivity/Atom')
   const agents = Atom.make({ _tag: 'Observed' as const, freshness: 'live' as const, value: [] })
+  const online = Atom.make({ _tag: 'Online' as const })
+  const offline = Atom.make({ _tag: 'Offline' as const })
+  const attachments = { send: source.send, upload: source.upload, capabilities: source.capabilities, chunk: vi.fn() }
   return ({
   useConversation: () => source.feed,
   useConversationSync: () => source.sync,
-  useDataSource: () => ({ agents, conversationInterest: undefined }),
+  useDataSource: () => ({
+    agents, conversationInterest: undefined,
+    reconnect: source.reconnect,
+    network: source.offline ? offline : online,
+    ...(source.sendEnabled ? { attachments } : {}),
+  }),
   useFeedInterest: () => {},
   useNow: () => source.now,
-  useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', terminalInput: 'ungranted' }),
+  useGrants: () => ({ actions: 'ungranted', messageSend: source.sendEnabled ? 'granted' : 'ungranted', terminalInput: 'ungranted' }),
   })
 })
 
@@ -61,6 +77,7 @@ vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx', a
     ...kit,
     EmbraceRuntimeProvider: (props: React.ComponentProps<typeof Kit.EmbraceRuntimeProvider>) => {
       source.runtimeItems.push(props.options.messages ?? [])
+      source.runtimeOptions.push(props.options)
       return <kit.EmbraceRuntimeProvider {...props} />
     },
   }
@@ -110,6 +127,13 @@ beforeEach(() => {
   source.transcriptTurns = []
   source.scrollToBottomKeys = []
   source.composerProps = []
+  source.sendEnabled = false
+  source.offline = false
+  source.send.mockReset()
+  source.upload.mockReset()
+  source.capabilities.mockReset()
+  source.reconnect.mockReset()
+  source.runtimeOptions = []
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   // jsdom has no layout observers; the kit instantiates one while attaching scroll.
   // Test-environment sizing (react-aria renders every row) needs no measured entries.
@@ -613,6 +637,76 @@ describe('ConversationPane composition activation', () => {
     expect(text()).not.toContain('unfamiliar_kind')
     expect(text()).not.toContain('synthetic-payload-sentinel')
     expect(container.querySelectorAll('[data-testid="transcript-message"]')).toHaveLength(0)
+  })
+
+  it('names the actual recipient and active session in the existing kit composer', async () => {
+    source.sendEnabled = true
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: scenario, hasOlder: false, sessionId: 'session/active', observation: { empty: false },
+    } }
+    await mount()
+    expect(source.composerProps.at(-1)?.targetLabel).toBe('Example Agent (agent/selected) · Session session/active')
+    expect(container.querySelector('textarea')?.getAttribute('aria-label')).toBe('Message to Example Agent (agent/selected) · Session session/active')
+  })
+
+  it('routes a prepared native image through the pane to the captured recipient session', async () => {
+    source.sendEnabled = true
+    source.upload.mockResolvedValue({ _tag: 'Success', value: { blob: `blob/${'a'.repeat(64)}`, media_type: 'image/png', sha256: 'a'.repeat(64), size: 1 } })
+    source.send.mockResolvedValue({ _tag: 'Refused', reason: 'failed', detail: 'Offline fixture' })
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false, sessionId: 'session/image' } }
+    await mount()
+    const options = source.runtimeOptions.at(-1)!
+    const adapter = options.adapters!.attachments!
+    const pending = await adapter.add({ file: new File(['x'], 'image.png', { type: 'image/png' }) })
+    if (!('id' in pending)) throw new Error('Expected pending image')
+    const ready = await adapter.send(pending)
+    await act(async () => options.onNew({
+      role: 'user', content: [], attachments: [ready], createdAt: new Date(0),
+      metadata: { custom: {} }, parentId: null, sourceId: null, runConfig: undefined,
+    }))
+    expect(source.send).toHaveBeenCalledWith(expect.objectContaining({ parameters: {
+      to: 'agent/selected', session_id: 'session/image', content: '', tags: [],
+      attachments: [{ blob: `blob/${'a'.repeat(64)}`, media_type: 'image/png', name: 'image.png' }],
+    } }))
+  })
+
+  it('keeps an offline composer editable without dispatching on reconnect', async () => {
+    source.sendEnabled = true
+    source.offline = true
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false } }
+    await mount()
+    expect(text()).toContain('Your draft stays editable')
+    expect(container.querySelector('textarea')?.readOnly).toBe(false)
+    expect(source.composerProps.at(-1)?.sendDisabled).toBe(true)
+    const reconnect = [...container.querySelectorAll('button')].find(button => button.textContent === 'Reconnect now')
+    expect(reconnect).toBeDefined()
+    await act(async () => { reconnect!.click() })
+    expect(source.reconnect).toHaveBeenCalledOnce()
+    expect(source.send).not.toHaveBeenCalled()
+    source.offline = false
+    await mount()
+    expect(source.composerProps.at(-1)?.sendDisabled).toBe(false)
+    expect(source.send).not.toHaveBeenCalled()
+  })
+
+  it('distinguishes revoked access and checks the native grant without resending', async () => {
+    source.sendEnabled = true
+    source.send.mockResolvedValue({ _tag: 'Refused', reason: 'ungranted', status: 401, detail: 'Revoked' })
+    source.capabilities.mockResolvedValue({ _tag: 'Success', value: { upload: 'granted', send: 'granted', read: 'granted' } })
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false } }
+    await mount()
+    await act(async () => source.runtimeOptions.at(-1)!.onNew({
+      role: 'user', content: [{ type: 'text', text: 'hello' }], createdAt: new Date(0),
+      metadata: { custom: {} }, parentId: null, sourceId: null, runConfig: undefined,
+    }))
+    expect(text()).toContain('credential was revoked')
+    expect(container.querySelector('textarea')?.readOnly).toBe(false)
+    const check = [...container.querySelectorAll('button')].find(button => button.textContent === 'Check access')
+    expect(check).toBeDefined()
+    await act(async () => { check!.click() })
+    expect(source.capabilities).toHaveBeenCalledOnce()
+    expect(source.send).toHaveBeenCalledOnce()
+    expect(source.composerProps.at(-1)?.sendDisabled).toBe(false)
   })
 
   it.each(['running', 'completed'] as const)('renders no unavailable cancel control or raw state text while %s', async status => {
