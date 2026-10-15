@@ -711,7 +711,12 @@ the branch has a listed author and committer (the signing guard's own `check_aut
 protected file differs between the branch point and the head, the base, or the current tip of the merge's first parent. The gate, verifier, policy,
 keys and author rule are all taken from the base, never from the checkout. The decision line says which: `tree_of=head|merge`, `pr_head=`,
 `merge_tree=` and `head_tree=used` or `head_tree=fallback:<why>`. A `merge_group` run never uses a head tree: only a note for its own tree can skip
-it, and a head-tree decision on any other event is refused. A skip on a pull request therefore means "the head tree passed on a trusted host", not
+it, and a head-tree decision on any other event is refused (`pull_request_target` is not `pull_request`: it never uses a head tree and never skips). The line also
+says `notes_fetch=ok|failed` and the first 16 hex digits of the base-tip policy and key-registry hashes it used (`policy_sha256`, `keys_sha256`), and input-keyed lookups use
+the key of the tree the run asks about (the head's, in head mode). The signer is not checked against the author list: signers are the keys of
+`.st/evidence-keys` (the trust root, read from the base), authors are GitHub accounts; the two answer different questions and a host key has no login. **Time
+dependence:** a skip now depends on state outside the pull request. The same head can run when the gate looks (no note yet) and skip on a re-run once the
+agent has signed and pushed the note, or the reverse if a note is later superseded by a failing record; a skip is the decision at that run, not a property of the sha. A skip on a pull request therefore means "the head tree passed on a trusted host", not
 "the merge with today's main passes"; a break caused only by main moving is caught in the merge queue, which still tests the integrated tree.
 
 ### When the gate says skip

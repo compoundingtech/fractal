@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "A pull request run now looks for the evidence note of the pull request head tree, not of GitHub's merge ref, under strict conditions and with a fall back to the merge tree; nothing is enforced",
+  "summary": "A pull request run now asks the evidence gate about the pull request HEAD's tree, not GitHub's merge ref: a skip means the head tree passed on a trusted host, not that the merge with today's main passes, and it depends on notes that can appear between runs; nothing is enforced yet",
   "replay": {
     "status": "none",
     "detail": "No claim replay or recovery behavior changes; this changes the CI evidence gate, its workflow environment and tests only."
@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "none",
-    "detail": "No checkpoint rules or digest changes. Every check stays enforce false, so no job is skipped because of this change; the decision line gains tree_of, pr_head, merge_tree and head_tree fields."
+    "detail": "No checkpoint rules or digest changes. Every check stays enforce false, so no job is skipped because of this change; the meaning of a future pull request skip changes (the head tree, not the integrated tree; the merge queue still tests the integrated tree), and the decision line gains tree_of, pr_head, merge_tree, head_tree, notes_fetch, policy_sha256 and keys_sha256."
   },
   "compatibility": {
     "status": "none",

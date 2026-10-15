@@ -308,7 +308,8 @@ class EndToEnd(unittest.TestCase):
     AUTHORS = {'about': 'test', 'logins': ['alice', 'bob'], 'emails': ['fixture@example.invalid'], 'noreply_logins': [],
                'committers_also': []}
 
-    def pull_request(self, main_moves=True, signing=True, head_files=None, main_files=None, head_email=None):
+    def pull_request(self, main_moves=True, signing=True, head_files=None, main_files=None, head_email=None, policy=None,
+                     base_files=None, authors_text=None):
         """Base B (with the gate, verifier, policy, keys, author list and signing script), a branch head H on it, and the
         merge M of H into a main that moved (B2), as GitHub's merge ref is. The repository's HEAD is M, as the checkout."""
         repo = self.f.repo
@@ -316,8 +317,10 @@ class EndToEnd(unittest.TestCase):
         if signing:
             shutil.copy(ROOT / 'scripts/ci-evidence-signing', repo / 'scripts/ci-evidence-signing')
         (repo / '.st').mkdir(exist_ok=True)
-        (repo / '.st/evidence-authors.json').write_text(json.dumps(self.AUTHORS))
-        base = self.commit_base(policy=skip_policy())
+        (repo / '.st/evidence-authors.json').write_text(authors_text if authors_text is not None else json.dumps(self.AUTHORS))
+        for name, content in (base_files or {}).items():
+            (repo / name).write_text(content)
+        base = self.commit_base(policy=policy or skip_policy())
         self.f.git('config', 'uploadpack.allowAnySHA1InWant', 'true')
         self.f.git('config', 'uploadpack.allowFilter', 'true')
         for name, content in (head_files or {}).items():
@@ -340,7 +343,8 @@ class EndToEnd(unittest.TestCase):
         merged_tree = self.f.git('merge-tree', '--write-tree', '--no-messages', tip, head).splitlines()[0]
         merge = self.f.git('commit-tree', merged_tree, '-p', tip, '-p', head, '-m', 'merge ref')
         self.f.git('checkout', '-q', '--detach', merge)
-        return dict(base=base, head=head, head_tree=head_tree, tip=tip, merge=merge, merge_tree=merged_tree)
+        return dict(base=base, base_tree=self.f.git('rev-parse', base + '^{tree}'), head=head, head_tree=head_tree, tip=tip, merge=merge,
+                    merge_tree=merged_tree)
 
     def pr_env(self, scenario, **overrides):
         env = dict(EVENT_NAME='pull_request', PR_HEAD_SHA=scenario['head'], PR_USER='alice', ACTOR='alice',
@@ -355,6 +359,10 @@ class EndToEnd(unittest.TestCase):
         fields, outputs = self.run_gate(s['base'], **self.pr_env(s))
         self.assertEqual((fields['decision'], fields['tree_of'], fields['head_tree'], outputs['record']), ('skip', 'head', 'used', record))
         self.assertEqual((fields['tree'], fields['pr_head'], fields['merge_tree']), (s['head_tree'], s['head'], s['merge_tree']))
+        # The clone is depth 1 (a shallow checkout of the merge ref), as on the runner: the gate deepened it itself.
+        self.assertEqual(fields['notes_fetch'], 'ok')
+        self.assertRegex(fields['policy_sha256'], r'^[0-9a-f]{16}$')
+        self.assertRegex(fields['keys_sha256'], r'^[0-9a-f]{16}$')
 
     def test_a_note_for_the_merge_tree_alone_does_not_cover_a_pull_request_head(self):
         s = self.pull_request()
@@ -379,6 +387,8 @@ class EndToEnd(unittest.TestCase):
         cases = {
             'a fork': dict(HEAD_REPOSITORY='someone/fork'),
             'a draft': dict(PR_DRAFT='true'),
+            'a draft flag that is not positively false': dict(PR_DRAFT=''),
+            'pull_request_target': dict(EVENT_NAME='pull_request_target'),
             'a stale head (not the merge\'s second parent)': dict(PR_HEAD_SHA=other),
             'a short head sha': dict(PR_HEAD_SHA=s['head'][:12]),
             'a head object nobody has': dict(PR_HEAD_SHA='a' * 40),
@@ -394,8 +404,66 @@ class EndToEnd(unittest.TestCase):
                 env = self.pr_env(s, **extra)
                 fields = self.assertRuns(env.pop('BASE_SHA', s['base']), name, **env)
                 self.assertEqual(fields['tree_of'], 'merge', name)
-                self.assertTrue(fields['head_tree'].startswith('fallback:') or fields['head_tree'] == '-', (name, fields['head_tree']))
+                self.assertTrue(fields['head_tree'].startswith('fallback:') or fields['head_tree'] in ('-', 'not-a-pull-request'), (name, fields['head_tree']))
                 self.assertEqual(fields['tree'], s['merge_tree'] if fields['tree'] != '-' else '-', name)
+
+    def test_the_input_keyed_lookup_uses_the_head_trees_key_not_the_merge_trees(self):
+        doc = json.loads(skip_policy())
+        for entry in doc['checks'].values():
+            entry['inputs'] = ['inputs.txt']
+        s = self.pull_request(policy=json.dumps(doc), base_files={'inputs.txt': 'declared'}, main_files={'inputs.txt': 'main changed it'})
+        key = fixtures.evidence_verify.project(str(self.f.repo), s['base_tree'], ('inputs.txt',))
+        self.assertEqual(key, fixtures.evidence_verify.project(str(self.f.repo), s['head_tree'], ('inputs.txt',)))
+        self.assertNotEqual(key, fixtures.evidence_verify.project(str(self.f.repo), s['merge_tree'], ('inputs.txt',)))  # main moved the input
+        record = self.note(s['base'], s['base_tree'], inputs={'source_inputs': key}, seconds=1)
+        self.f.git('update-ref', f'refs/notes/evidence-input/linux-gate/{key}/{record}', record)
+        fields, outputs = self.run_gate(s['base'], **self.pr_env(s))
+        self.assertEqual((fields['decision'], fields['tree_of'], fields['match'], fields['source_inputs'], outputs['record']),
+                         ('skip', 'head', 'inputs', key, record))
+        # The same run asking about the merge tree (a fork-like fallback) misses: its key moved with main.
+        fields = self.assertRuns(s['base'], 'merge tree key', **self.pr_env(s, PR_USER='mallory'))
+        self.assertEqual((fields['tree_of'], fields['outcome']), ('merge', 'no_note'))
+
+    def test_a_missing_notes_namespace_is_logged_and_the_check_runs(self):
+        s = self.pull_request()
+        fields = self.assertRuns(s['base'], 'no notes at all', **self.pr_env(s))
+        self.assertEqual((fields['notes_fetch'], fields['outcome'], fields['tree_of']), ('failed', 'no_note', 'head'))
+
+    def test_an_unreadable_policy_or_author_file_means_run(self):
+        s = self.pull_request(policy='{ not json')
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['base'], 'unparseable policy', **self.pr_env(s))
+        self.assertEqual(fields['outcome'], 'unavailable')
+        self.tmp_reset()
+        s = self.pull_request(authors_text='{ not json')
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['base'], 'unparseable author list', **self.pr_env(s))
+        self.assertEqual(fields['tree_of'], 'merge')
+        self.assertIn('authors', fields['head_tree'])
+
+    def test_a_note_for_an_earlier_head_does_not_cover_a_force_pushed_head(self):
+        s = self.pull_request()
+        older = self.f.git('rev-parse', s['base'])
+        self.note(older, s['base_tree'], seconds=1)  # signed for what the head was before the force-push
+        fields = self.assertRuns(s['base'], 'older head signed', **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['outcome']), ('head', 'no_note'))
+
+    def test_the_same_head_can_run_and_then_skip_on_a_re_run_once_a_note_exists(self):
+        s = self.pull_request()
+        self.assertRuns(s['base'], 'before the agent signed', **self.pr_env(s))
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields, _ = self.run_gate(s['base'], **self.pr_env(s, RUN_ATTEMPT='2'))
+        self.assertEqual((fields['decision'], fields['tree_of']), ('skip', 'head'))
+
+    def test_the_base_copy_of_the_gate_runs_when_the_branch_rewrites_it(self):
+        poison = ("import os\nopen(os.environ['GITHUB_OUTPUT'], 'a').write('outcome=satisfied\\nskip=true\\nrecord=" + 'a' * 40 +
+                  "\\n')\nprint('POISON evidence-decision v1 decision=skip')\n")
+        s = self.pull_request(head_files={'scripts/ci-evidence-gate': poison})
+        self.note(s['head'], s['head_tree'], seconds=1)
+        outputs, printed = self.run_step(s['base'], **self.pr_env(s))
+        self.assertEqual(outputs['skip'], 'false')
+        self.assertNotIn('POISON', printed)
+        self.assertIn('evidence-decision v1', printed)
 
     def test_after_a_fallback_the_old_merge_tree_note_still_works_as_before(self):
         s = self.pull_request()
@@ -1027,7 +1095,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(list(fields), [
             'check', 'decision', 'outcome', 'reason', 'record', 'signer', 'trust_level', 'kind', 'tier',
             'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'match', 'source_inputs', 'tree', 'tree_of', 'pr_head', 'merge_tree',
-            'head_tree', 'head', 'base', 'event', 'pr', 'repo', 'run',
+            'head_tree', 'notes_fetch', 'policy_sha256', 'keys_sha256', 'head', 'base', 'event', 'pr', 'repo', 'run',
             'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
         self.assertEqual((fields['pr'], fields['repo'], fields['run'], fields['attempt'], fields['fork']),
                          ('123', REPOSITORY, '42', '1', 'false'))

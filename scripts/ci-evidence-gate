@@ -50,6 +50,7 @@ NOTES = 'refs/notes/evidence/*:refs/notes/evidence/*'
 CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 VERIFIER = 'scripts/evidence-verify'
 KEYS = '.st/evidence-keys'
+POLICY = '.st/evidence-skip-policy.json'
 MISSING = ('no_record', 'stale_tree', 'wrong_check')
 UNAVAILABLE = ('error', 'no_policy')
 OID = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})$')
@@ -155,7 +156,10 @@ def observe(context, revision='HEAD'):
         return 'unavailable', None, 'no accepted base commit for this event', None
     if run('git', 'fetch', '--no-tags', '--depth=1', '-q', 'origin', base).returncode != 0:
         return 'unavailable', None, 'could not fetch the accepted base', None
-    run('git', 'fetch', '--no-tags', '--depth=1', '-q', 'origin', NOTES)
+    context['notes_fetch'] = 'ok' if run('git', 'fetch', '--no-tags', '--depth=1', '-q', 'origin', NOTES).returncode == 0 else 'failed'
+    for name, path in (('policy_sha256', POLICY), ('keys_sha256', KEYS)):
+        shown = run('git', 'show', f'{base}:{path}')
+        context[name] = hashlib.sha256(shown.stdout).hexdigest()[:16] if shown.returncode == 0 else 'none'
     script = run('git', 'show', f'{base}:{VERIFIER}')
     if script.returncode != 0:
         return 'unavailable', None, 'the accepted base has no verifier yet', None
@@ -171,7 +175,7 @@ def observe(context, revision='HEAD'):
             empty = os.path.join(scratch, 'empty-keys')
             open(empty, 'w').close()
             keys = ['--keys', empty]
-        fetch_input_notes(path, base, check, repository)
+        fetch_input_notes(path, base, check, repository, revision)
         done = run(sys.executable, path, '--repo', '.', '--revision', revision, '--check', check,
                    '--policy-from', base, '--repository', repository, *keys, timeout=VERIFIER_TIMEOUT)
     try:
@@ -181,13 +185,13 @@ def observe(context, revision='HEAD'):
     return classify(done.returncode, result), result, result.get('reason') or 'satisfied', digest
 
 
-def fetch_input_notes(verifier, base, check, repository):
+def fetch_input_notes(verifier, base, check, repository, revision='HEAD'):
     """For a check that declares inputs: fetch only the records indexed under this tree's input key.
     Best effort: a failure here just means no input-keyed record is seen, and the check runs."""
     if not CHECK_NAME.fullmatch(check):
         return
     try:
-        done = run(sys.executable, verifier, '--repo', '.', '--revision', 'HEAD', '--check', check, '--project',
+        done = run(sys.executable, verifier, '--repo', '.', '--revision', revision, '--check', check, '--project',
                    '--policy-from', base, '--repository', repository, timeout=VERIFIER_TIMEOUT)
         key = json.loads(done.stdout).get('source_inputs') if done.returncode == 0 else None
     except (ValueError, AttributeError, subprocess.TimeoutExpired, OSError):
@@ -214,6 +218,7 @@ def line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sh
         ('attempts', result.get('attempts')), ('enforce', result.get('enforce')), ('match', result.get('match')),
         ('source_inputs', result.get('source_inputs')), ('tree', tree), ('tree_of', context.get('tree_of')),
         ('pr_head', context.get('pr_head')), ('merge_tree', context.get('merge_tree')), ('head_tree', context.get('head_tree')),
+        ('notes_fetch', context.get('notes_fetch')), ('policy_sha256', context.get('policy_sha256')), ('keys_sha256', context.get('keys_sha256')),
         ('head', context['head']),
         ('base', context['base']), ('event', context['event']), ('pr', context['pr']),
         ('repo', context['repository']), ('run', context['run']), ('attempt', context['attempt']),
@@ -234,7 +239,7 @@ def context_from(environ):
         'attempt': environ.get('RUN_ATTEMPT', ''), 'fork': fork,
         'pr_head': environ.get('PR_HEAD_SHA', ''), 'pr_user': environ.get('PR_USER', ''), 'actor': environ.get('ACTOR', ''),
         'triggering_actor': environ.get('TRIGGERING_ACTOR', ''), 'draft': environ.get('PR_DRAFT', ''),
-        'tree_of': 'merge', 'merge_tree': None, 'head_tree': '-',
+        'tree_of': 'merge', 'merge_tree': None, 'head_tree': '-', 'notes_fetch': '-', 'policy_sha256': '-', 'keys_sha256': '-',
     }
 
 
@@ -283,8 +288,8 @@ def choose_tree(context):
     try:
         if context['fork'] != 'false':
             raise Fallback('not from this repository')
-        if context['draft'] == 'true':
-            raise Fallback('draft')
+        if context['draft'] != 'false':
+            raise Fallback('not positively a non-draft pull request')
         head, base = context['pr_head'], context['base']
         if not OID.match(head or '') or not OID.match(base or ''):
             raise Fallback('no full head or base object id')
@@ -334,6 +339,10 @@ def main():
     context = context_from(os.environ)
     outcome, result, detail, verifier_sha, tree = 'unavailable', None, 'not run', None, None
     revision, protected = 'HEAD', None
+    try:
+        context['merge_tree'] = git_out('rev-parse', '--verify', 'HEAD^{tree}', check=False) or None
+    except Exception:
+        pass
     try:
         revision, protected = choose_tree(context)
     except Exception as error:  # never raise out of the gate
