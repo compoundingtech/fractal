@@ -3,11 +3,12 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import * as Atom from 'effect/reactivity/Atom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { gatewayResources } from '../resources/agent/source.ts'
-import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
+import { ConversationHeaderActions, retainedResourceAtoms } from './ConversationHeaderActions.tsx'
 import { AgentTodos } from '../conversation/todos/AgentTodos.tsx'
 import { todoAgent, todoAgentRef } from '../conversation/todos/fixtures.ts'
 import { projectTodos } from '../conversation/todos/model.ts'
@@ -60,7 +61,7 @@ it('adds no serial HTTP requests to a seat switch while Resources is closed', as
   await click('Resources')
   expect(requests).toEqual(['/v1/client/capabilities', '/v1/client/resources'])
 })
-it('ends the resource poll when its inspector closes, not on the next seat switch', async () => {
+it('keeps the authoritative poll alive for 60 seconds after closing, then releases it', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   await show('agent/example')
   await click('Resources')
@@ -68,7 +69,39 @@ it('ends the resource poll when its inspector closes, not on the next seat switc
   requests.length = 0
   await act(async () => vi.advanceTimersByTimeAsync(30_000))
   await settle()
+  expect(requests.filter(path => path === '/v1/client/resources').length).toBeGreaterThan(0)
+  await act(async () => vi.advanceTimersByTimeAsync(31_000))
+  await settle()
+  requests.length = 0
+  await act(async () => vi.advanceTimersByTimeAsync(30_000))
+  await settle()
   expect(requests).toEqual([])
+})
+it('reopens within the TTL with the retained Observed value and no second read', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  let reads = 0
+  const resource = Atom.make(() => {
+    reads++
+    return observed({ value: { items: [], nextCursor: null } })
+  })
+  const retainedSource = { ...source, resources: { ...source.resources, byAgent: () => resource } }
+  const atom = retainedResourceAtoms(retainedSource).resources('agent/negative-control')
+  let release = registry.mount(atom)
+  const first = registry.get(atom)
+  expect(first._tag).toBe('Observed')
+  release()
+  await vi.advanceTimersByTimeAsync(1000)
+  release = registry.mount(atom)
+  expect(registry.get(atom)).toBe(first)
+  expect(reads).toBe(1)
+  release()
+})
+it('prefetches on explicit focus while keeping the sheet closed', async () => {
+  await show('agent/example')
+  await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Resources"]')!.focus())
+  await settle()
+  expect(document.querySelector('[role="dialog"]')).toBeNull()
+  expect(requests).toEqual(['/v1/client/capabilities', '/v1/client/resources'])
 })
 it('shows the agent Todos as the first Resources section, naming a missing snapshot', async () => {
   await show('agent/example')
