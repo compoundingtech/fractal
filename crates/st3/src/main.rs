@@ -6966,6 +6966,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
     };
+    // Tiles this daemon's user supervises reach it only through their restricted endpoint.
+    #[cfg(target_os = "linux")]
+    st3::api::spawn_tile_endpoints(state.clone());
     st3::gate_check::set_endpoint(config.socket.display().to_string());
     startup_phases.app_state_ms = phase_elapsed_ms();
     let reconciler = Arc::new(Reconciler::native(
@@ -12511,6 +12514,24 @@ fn render_replication_peers(
                 .or(peer.last_error.as_deref())
                 .unwrap_or("")
         );
+        for (label, record) in [
+            ("last successful exchange", &peer.last_successful_exchange),
+            ("last failed exchange", &peer.last_failed_exchange),
+        ] {
+            if let Some(record) = record {
+                let _ = writeln!(
+                    output,
+                    "  {label} {} via {}{}",
+                    relative_time(record.at_unix_ms, now),
+                    record.carrier.as_str(),
+                    record
+                        .fabric_route
+                        .as_ref()
+                        .map(|route| format!(" (Fabric route {route})"))
+                        .unwrap_or_default()
+                );
+            }
+        }
         if let Some(worker) = &peer.worker {
             let _ = writeln!(
                 output,
@@ -27480,6 +27501,8 @@ mod tests {
 
     fn peer_status(peer: &str, digest: Option<&str>) -> st3::model::ReplicationPeerStatus {
         st3::model::ReplicationPeerStatus {
+            last_successful_exchange: None,
+            last_failed_exchange: None,
             worker: None,
             projection_digests: Default::default(),
             differing_tables: Vec::new(),
@@ -29380,6 +29403,8 @@ mod tests {
         let peer =
             |name: &str, graph: Option<&str>, sync: Option<st3::model::ReplicationPeerSync>| {
                 ReplicationPeerStatus {
+                    last_successful_exchange: None,
+                    last_failed_exchange: None,
                     worker: None,
                     projection_digests: BTreeMap::from([("claim_sources".into(), "sample".into())]),
                     differing_tables: Vec::new(),
@@ -29485,6 +29510,8 @@ mod tests {
         page.sync = Some(st3_client::SyncNotice {
             state: "catching-up".into(),
             peers: vec![st3_client::SyncPeer {
+                last_successful_exchange: None,
+                last_failed_exchange: None,
                 host_id: "host/ExampleMac".into(),
                 peer_only_envelopes: 1,
                 local_only_envelopes: 0,
