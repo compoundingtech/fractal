@@ -24641,7 +24641,7 @@ fn reviewer_answer_sql(result: &str) -> String {
     format!(
         "{result}.subject=request.subject
          AND {result}.kind='gate.result'
-         AND json_extract({result}.body, '$.fields.request')=request.id
+         AND json_extract({result}.body, '$.fields.request')=+request.id
          AND ({result}.actor={reviewer}
               OR ({result}.actor LIKE 'agent/%'
                   AND json_extract({result}.body, '$.fields.acted_for')={reviewer}

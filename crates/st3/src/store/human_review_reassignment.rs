@@ -5,6 +5,8 @@ use crate::model::PersonRenameRequest;
 
 /// SQL for the reviewer assigned to this exact request. An answer uses the assignment at its
 /// canonical moment, so later repairs cannot erase an answer already made by its reviewer.
+/// Unary `+` removes the request ID's TEXT affinity so its JSON-expression index is seekable;
+/// both IDs remain strings, as in the operation-conflict query.
 pub(super) fn reviewer_sql(request: &str, answer: Option<&str>) -> String {
     let before_answer = answer
         .map(|answer| format!(" AND {}", canonical::after_sql(answer, "reassignment")))
@@ -19,7 +21,7 @@ pub(super) fn reviewer_sql(request: &str, answer: Option<&str>) -> String {
            FROM claims reassignment INDEXED BY claims_human_gate_reassignment_request_index
            WHERE reassignment.subject={request}.subject
              AND reassignment.kind='gate.reviewer-reassigned'
-             AND json_extract(reassignment.body, '$.fields.request')={request}.id
+             AND json_extract(reassignment.body, '$.fields.request')=+{request}.id
              AND json_extract(reassignment.body, '$.fields.owner')=json_extract({request}.body, '$.fields.owner')
              AND {accepted}
              {before_answer}
@@ -529,7 +531,7 @@ mission "review-repair" state="ready" {
         receive(&source, &target);
         let request = request(&source, &run, "pending", "late-request", 0);
         target.set_write_clock_at(request.accepted_at_unix_ms + 1).unwrap();
-        target.append_claim(&ClaimInput {
+        let reassignment = target.append_claim(&ClaimInput {
             subject: request.subject.clone(),
             kind: "gate.reviewer-reassigned".into(),
             actor: Some(OLD.into()),
@@ -550,6 +552,9 @@ mission "review-repair" state="ready" {
             assert!(store.pending_human_reviews(Some(OLD)).unwrap().is_empty());
             assert_eq!(store.pending_human_reviews(Some(NEW)).unwrap()[0].request, request.id);
         }
+        // The source's pinned clock has not advanced with the replicated repair. The answer
+        // must follow that repair canonically to be an answer by the new reviewer.
+        source.set_write_clock_at(reassignment.accepted_at_unix_ms + 1).unwrap();
         let verdict = answer(&source, &request, NEW, "late-request-answer");
         receive(&source, &target);
         for store in [&source, &target] {

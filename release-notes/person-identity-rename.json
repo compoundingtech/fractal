@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds registered claim shapes for work.person-reassigned, gate.reviewer-reassigned and person.rename.completed, plus SQLite human-gate request, episode, reassignment and answer indexes used by pending-review reads. These reads use indexed candidates and exclude answered or superseded requests before hydration. The database schema version is unchanged; indexes are installed on store open. No destructive table conversion is required."
+    "detail": "Adds registered claim shapes for work.person-reassigned, gate.reviewer-reassigned and person.rename.completed, plus SQLite human-gate request, episode, reassignment and answer indexes used by pending-review reads. These reads use indexed candidates and exclude answered or superseded requests before hydration. Exact-request joins remove SQLite column affinity so JSON request IDs seek the expression indexes instead of scanning unrelated episodes. The database schema version is unchanged; indexes are installed on store open. No destructive table conversion is required."
   },
   "rules": {
     "status": "changed",

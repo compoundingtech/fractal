@@ -201,16 +201,40 @@ fn routing_references(value: &Value, person: &str) -> Vec<String> {
     found
 }
 
+/// Both work and human-review reducers must choose the same replicated receipt winner.
+/// Before any receipt arrives, existing episode fences still govern provisional assignments.
+/// Receipt arrival invalidates affected run trees so canonical replay removes a losing route.
+pub(super) fn accepted_reassignment_sql(alias: &str, previous: &str, destination: &str) -> String {
+    let old = format!("json_extract({alias}.body,'$.fields.{previous}')");
+    let new = format!("json_extract({alias}.body,'$.fields.{destination}')");
+    format!(
+        "(NOT EXISTS(SELECT 1 FROM claims rename_receipt
+            WHERE rename_receipt.kind='person.rename.completed' AND rename_receipt.subject={old})
+          OR {new}=(SELECT json_extract(rename_receipt.body,'$.fields.new_person')
+            FROM claims rename_receipt
+            WHERE rename_receipt.kind='person.rename.completed' AND rename_receipt.subject={old}
+            ORDER BY {} LIMIT 1))",
+        canonical::order_sql("rename_receipt", false),
+    )
+}
+
+fn winner_person_tx(connection: &Connection, old: &str) -> Result<Option<String>> {
+    Ok(connection.query_row(
+        &canonical_sql("SELECT json_extract(body,'$.fields.new_person') FROM claims
+            WHERE kind='person.rename.completed' AND subject=?1
+            ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
+        [old], |row| row.get(0)).optional()?)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn know(store: &Store, person: &str) {
         store.append_claim(&ClaimInput {
-            subject: format!("note/known-{}", person.strip_prefix("person/").unwrap()),
-            kind: "note.set".into(),
+            subject: person.into(),
+            kind: "person.delegation-set".into(),
             actor: Some(person.into()),
-            fields: BTreeMap::from([("text".into(), json!("Identity evidence predates the repair."))]),
+            fields: BTreeMap::from([("actions".into(), json!([]))]),
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: Some(format!("known:{person}")),
@@ -663,27 +687,3 @@ mission "replicated-repair" state="ready" {
     }
 }
 
-/// Both work and human-review reducers must choose the same replicated receipt winner.
-/// Before any receipt arrives, existing episode fences still govern provisional assignments.
-/// Receipt arrival invalidates affected run trees so canonical replay removes a losing route.
-pub(super) fn accepted_reassignment_sql(alias: &str, previous: &str, destination: &str) -> String {
-    let old = format!("json_extract({alias}.body,'$.fields.{previous}')");
-    let new = format!("json_extract({alias}.body,'$.fields.{destination}')");
-    format!(
-        "(NOT EXISTS(SELECT 1 FROM claims rename_receipt
-            WHERE rename_receipt.kind='person.rename.completed' AND rename_receipt.subject={old})
-          OR {new}=(SELECT json_extract(rename_receipt.body,'$.fields.new_person')
-            FROM claims rename_receipt
-            WHERE rename_receipt.kind='person.rename.completed' AND rename_receipt.subject={old}
-            ORDER BY {} LIMIT 1))",
-        canonical::order_sql("rename_receipt", false),
-    )
-}
-
-fn winner_person_tx(connection: &Connection, old: &str) -> Result<Option<String>> {
-    Ok(connection.query_row(
-        &canonical_sql("SELECT json_extract(body,'$.fields.new_person') FROM claims
-            WHERE kind='person.rename.completed' AND subject=?1
-            ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
-        [old], |row| row.get(0)).optional()?)
-}

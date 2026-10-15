@@ -4860,7 +4860,15 @@ mission "example/person-rename" state="ready" {
     assert_eq!(report["reassigned_steps"], json!([ask_step]));
     assert_eq!(report["reassigned_reviews"], json!([review_step]));
     assert!(report["run_requesters"].as_array().unwrap().contains(&json!(run.subject)));
-    assert_eq!(report["missions_to_republish"], json!(["mission/example/person-rename"]));
+    let ask_mission = daemon
+        .store()
+        .mission_run(&original_work.run)
+        .unwrap()
+        .unwrap()
+        .mission;
+    let mut missions_to_republish = vec!["mission/example/person-rename".to_owned(), ask_mission];
+    missions_to_republish.sort();
+    assert_eq!(report["missions_to_republish"], json!(missions_to_republish));
     assert!(
         report["namespace_notice"]
             .as_str()

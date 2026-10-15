@@ -28584,7 +28584,7 @@ version 2
             actor: Some("person/robin".into()),
             fields: BTreeMap::from([
                 ("from".into(), json!("person/robin")),
-                ("to".into(), json!(claimant)),
+                ("to".into(), json!("person/alex")),
                 ("content".into(), json!("The new person already participates in the graph.")),
                 ("status".into(), json!("sent")),
             ]),
