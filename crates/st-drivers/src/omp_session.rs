@@ -1,9 +1,9 @@
-//! Controlled omp launch with a session-owned presence lease.
+//! Controlled omp launch and native session binding.
 //!
-//! omp is pi-family: its integration point is a pi-style extension loaded into the interactive
-//! process, which reaches st2 by spawning `st2 driver omp-channel` (`hooks/omp-channel.ts`,
-//! forked from the pi channel — see `docs/vrs/06-omp-driver/spec.md` for the measured
-//! divergences). The launch body itself is shared with pi in [`crate::pi_family_session`].
+//! omp is pi-family: a pi-style extension inside the interactive process starts
+//! `driver omp-channel` on the configured channel binary (`hooks/omp-channel.ts`).
+//! The current contract is documented in `docs/st3/omp.md`; the launch body itself is
+//! shared with pi in [`crate::pi_family_session`].
 //!
 //! Unlike pi, the wrapper hard-gates the provider version (OMP-R05): the delivery-critical
 //! surface — event names, the sampled idle edge, the approval events — is versioned behavior, not

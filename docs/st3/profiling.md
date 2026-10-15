@@ -117,6 +117,25 @@ phone's live share is a minimum over foreground milliseconds, so it is not in th
 `st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only
 the targets, not every path's snapshot.
 
+`st slo` lists the same targets with the account limits as one list, and `GET /v1/slo`, the daemon's own route
+beside `/v1/usage`, serves it to the CLI. The phone and the web app read it through a client route
+that comes later, with its capability, schema and generated clients. An objective is a target with windows and an error budget: a p99
+target may have 1% of its samples over, so `LEFT` is how much of that 1% the last hour has not
+spent; a max target has no allowance, so it is whole or empty; CPU and the database's size read
+against their own ceilings; a phone's live share against the disconnected time its minimum
+allows. A budget is an allowance that resets: each account's weekly and 5-hour limit, with `LEFT`
+the part not yet used and a reset time. `st slo explain ID` says one row in plain words and `ID`
+may be the start of an id. The list is computed on each read from the live windows and the limit
+readings, and writes nothing.
+
+`st slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
+`7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
+remaining percent of every row to `<state>/slo-history/YYYY-MM-DD.jsonl` (UTC day) and deletes a
+day after seven. A chart column is the lowest reading in its slice of the period, so a brief spend
+shows; a column with no reading is a dot, which means the daemon was down or nothing was
+measured, not that a budget was spent. `GET /v1/slo/history?id=&since_ms=&until_ms=&steps=`
+serves the same columns. A node with a collector keeps the longer history there.
+
 `st doctor` prints a `slo/NAME` line for each target and a line for each of the ten paths furthest
 over their target in the last five minutes. A p99 target is missed in a window when more than 1%
 of its samples are over. A max target is missed when any one sample is over. A miss is `info`,
@@ -199,6 +218,33 @@ Terminal sockets (`terminal_stream_socket`) follow the shared latest-screen sour
 recheck their live fence; the existing fence span is `terminal/live-fence`. These are source
 locations for investigating ongoing work, not an attribution of process CPU. Long-poll waits and
 socket lifetime must be distinguished from the cost of a completed read.
+
+On `/v1/client/collections/stream` (`st3.client.collections.v0`), a conversation
+subscription additionally owns `stream conversation/first-frame` from accepted receipt
+through its first successful data-frame send. Its `conversation/first-frame-total`
+includes admission/scheduler delay, owner resolution, initial retries, page work and
+outbox/send delay. `completion: finished` means the socket send succeeded, not that
+the client rendered it; cancellation or replacement records `dropped`, not success.
+The follower releases first-frame ownership before its intentional change long poll.
+Async admission, owner resolution/relay, first-page and send spans record wall time
+only. CPU and SQL are charged only during a future's poll or its physical blocking
+worker, never across an async suspension. Native preparation/fold, bounded header,
+stored-message overlay, page/frame preparation and serialization use thread-local
+CPU/SQL spans. These overlapping spans are not additive. Labels are static and carry
+no transcript, audio, text, session identifier or credential attributes. No public
+request-latency rows or diagnostic fields are added.
+
+Local opening captures the first page and replay boundary together, using the native
+keyset fold and reusing its bounded head for the header. Remote opening retains the
+two established owner reads (changes with no cursor and zero wait, then timeline);
+profile those reads separately before attributing repeated fold work to local opening.
+For representative receipts, pin the daemon build and capture five successful initial,
+tab-switch and reconnect frames on the used collections route, with client receipt/render
+time beside the internal profile. Record local versus relayed ownership and cold versus
+warm source state; exclude intentional reconnect-offline time from server-work comparisons.
+The isolated `conversation_first_frame_profile_lifecycle` test runs with
+`ST3_PROFILE_DIR` and `ST3_PROFILE_SLOW_MS=0`; it proves successful completion and
+wall-only async attribution before long-poll idle, not production performance.
 
 A slow record's `completion` is `finished` when the request or task explicitly finished its
 profile. If its owner exits without finishing, including a canceled HTTP request, the last

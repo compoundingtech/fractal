@@ -103,7 +103,7 @@
 
         # Cargo.toml is the single source of truth for the version, so a release
         # bump needs no matching edit here.
-        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
 
         # NixStamp for the shared build-versioning contract: the flake rev is a
         # pure input, so baking it lets a hermetic build know its own identity
@@ -1327,6 +1327,8 @@
             ];
             BUCK2_BIN = "${effectUtilsPackages.buck2}/bin/buck2";
             FRACTAL_WEB_BUCK_ROOT = "${buckRoot}";
+            PLAYWRIGHT_MODULE = "${webPkgs.playwright-driver}/index.mjs";
+            CHROMIUM_PATH = webPkgs.lib.optionalString webPkgs.stdenv.hostPlatform.isLinux "${webPkgs.chromium}/bin/chromium";
             shellHook = ''
               mkdir -p repos .buck2
               ln -sfn ${effect-utils} repos/effect-utils

@@ -555,8 +555,8 @@ fn a_terminal_interrupt_ends_the_call_and_is_still_recorded() {
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null()
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
             ),
             0
         );
@@ -931,7 +931,7 @@ fn terminal_stdout_stays_interactive_and_does_not_publish_a_receipt() {
         assert_eq!(
             libc::openpty(
                 &mut master, &mut slave, std::ptr::null_mut(),
-                std::ptr::null(), std::ptr::null(),
+                std::ptr::null_mut(), std::ptr::null_mut(),
             ),
             0,
         );

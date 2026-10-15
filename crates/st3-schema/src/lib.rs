@@ -4122,6 +4122,7 @@ mod tests {
                 "account",
                 "agent",
                 "arrangement",
+                "assistant",
                 "attention",
                 "checkpoint",
                 "checkpoint-excusal",

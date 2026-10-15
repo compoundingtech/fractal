@@ -740,74 +740,9 @@ impl Store {
         }).map_err(internal)?
     }
 
-    fn migrate_legacy_person_asks(&self) -> Result<bool> {
-        let connection = self.readers.get();
-        let requests = pending_attention_requests_tx(&connection, None)?;
-        let mut changed = false;
-        for legacy in requests {
-            if !agent_attention_requester(&legacy.actor)
-                || !declaration_live(&connection, &legacy.actor)?
-            {
-                continue;
-            }
-            let imported: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE kind='work.person-asked' AND json_extract(body,'$.fields.legacy_request')=?1)", [&legacy.request], |row| row.get(0))?;
-            if imported {
-                continue;
-            }
-            let origin = if let Some(subject) = &legacy.step {
-                let Some(origin) = step(&connection, subject)? else {
-                    continue;
-                };
-                if legacy.step_attempt != Some(u64::from(origin.attempt))
-                    || !matches!(
-                        origin.status.as_str(),
-                        "claimed" | "working" | "ready" | "blocked"
-                    )
-                {
-                    continue;
-                }
-                Some(origin)
-            } else {
-                let Some(owner) = current_desired_row(&connection, &legacy.actor)? else {
-                    continue;
-                };
-                if owner.owner_run.is_none() || owner.owner_generation.is_none() {
-                    continue;
-                }
-                None
-            };
-            let input = PersonAskRequest {
-                legacy_request: Some(legacy.request.clone()),
-                person: legacy.reviewer,
-                title: legacy.title,
-                reason: legacy.reason,
-                actor: legacy.actor,
-                step: origin.as_ref().map(|origin| origin.subject.clone()),
-                new_run: origin
-                    .is_none()
-                    .then(|| format!("legacy-{}", &legacy.request[..16])),
-                incarnation: origin.and_then(|origin| origin.claim_incarnation),
-                idempotency_key: format!("legacy-person-ask:{}", legacy.request),
-                request: None,
-            };
-            match self.ask_person(&input) {
-                Ok(_) => changed = true,
-                Err(error)
-                    if matches!(
-                        error.code,
-                        "stale-work-ask" | "missing-ask-owner" | "ambiguous-ask-owner"
-                    ) => {}
-                Err(error) => return Err(anyhow::Error::new(error)),
-            }
-        }
-        Ok(changed)
-    }
-
     pub(crate) fn reconcile_person_asks(&self) -> Result<bool> {
         /// How many asks one pass ends, each with its cancellation, message and update.
         const ENDED_ASKS_PER_PASS: usize = 32;
-        let migrated = self.migrate_legacy_person_asks()?;
-        // Legacy requests can create the first ask, so migrate before checking for no work.
         // Drop this read connection before submitting any cancellation transaction.
         let has_asks: bool = {
             let connection = self.readers.get();
@@ -817,11 +752,11 @@ impl Store {
         };
         if !has_asks {
             // A concurrent new ask is handled by the next notified reconcile pass.
-            return Ok(migrated);
+            return Ok(false);
         }
         self.connection.batched(|tx| -> Result<bool> {
             let asks = person_asks_for_reconcile(tx)?;
-            let mut changed = migrated;
+            let mut changed = false;
             let mut ended = 0;
             for ask in asks {
                 // Each ending writes a cancellation, a message and an update while holding the
@@ -2750,7 +2685,7 @@ mission "writer-load" state="ready" {
     }
 
     #[test]
-    fn live_legacy_asks_import_once_with_age_and_origin_after_release() {
+    fn legacy_requests_remain_audit_claims_without_creating_new_person_work() {
         let (store, origin, input) = fixture();
         let legacy = store
             .request_attention_closing(
@@ -2770,7 +2705,6 @@ mission "writer-load" state="ready" {
                 },
             )
             .unwrap();
-        assert_eq!(legacy.step.as_deref(), Some(origin.subject.as_str()));
         store
             .work_action(
                 &origin.subject,
@@ -2786,33 +2720,29 @@ mission "writer-load" state="ready" {
                 },
             )
             .unwrap();
-        assert!(store.reconcile_person_asks().unwrap());
-        let asks = store.attention_items(Some("person/avery")).unwrap();
-        assert_eq!(asks.len(), 1);
-        assert_eq!(asks[0].title, legacy.title);
-        assert_eq!(asks[0].detail, legacy.reason);
-        assert_eq!(asks[0].requested_at_unix_ms, legacy.requested_at_unix_ms);
+        assert!(!store.reconcile_person_asks().unwrap());
+        assert!(
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             store.step_run(&origin.subject).unwrap().unwrap().status,
-            "waiting-person"
+            "ready"
         );
-        assert!(!store.reconcile_person_asks().unwrap());
         store.replay_replication_graph().unwrap();
-        assert_eq!(
-            store.attention_items(Some("person/avery")).unwrap()[0].episode,
-            asks[0].episode
+        let retained = store.attention_request(&legacy.subject).unwrap().unwrap();
+        assert_eq!(retained.request, legacy.request);
+        assert_eq!(retained.status, "pending");
+        assert_eq!(retained.requested_at_unix_ms, legacy.requested_at_unix_ms);
+        assert!(!store.reconcile_person_asks().unwrap());
+        assert!(
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .is_empty()
         );
-        let connection = store.readers.get();
-        let at = now_ms();
-        let (_, elapsed) =
-            step_execution_timing_at(&connection, &origin.subject, 1, at, false).unwrap();
-        assert_eq!(
-            step_execution_timing_at(&connection, &origin.subject, 1, at + 6 * 86_400_000, false)
-                .unwrap(),
-            (None, elapsed)
-        );
-        let record = request(&connection, &asks[0].subject).unwrap().unwrap();
-        assert!(record.predecessors.contains(&legacy.request));
     }
 
     #[test]

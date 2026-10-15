@@ -49,6 +49,11 @@ cp "$FIXTURES/${url##*/}" "$out"
     assert result.returncode == 0 and result.stdout == 'st3-fixture\n' and result.stderr == '', result
     requests = (root / 'requests').read_text()
     assert '/latest/download/' in requests and '/download/v0.3.18/' in requests
+    result = install('--edge', '--no-run')
+    assert result.returncode == 0 and result.stdout == '' and result.stderr == '', result
+    assert (root / 'requests').read_text().count('/download/edge/') == 2
+    result = install('--edge', '--tag', 'v0.3.18', '--no-run')
+    assert result.returncode == 2 and 'either --edge or --tag' in result.stderr, result
     original = (installed / 'st3').read_bytes()
     checksum.write_text('0' * 64 + '  ' + archive.name + '\n')
     result = install('--no-run')

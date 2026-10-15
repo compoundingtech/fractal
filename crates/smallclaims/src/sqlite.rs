@@ -297,6 +297,7 @@ pub struct WalCheckpointReport {
 pub fn checkpoint_wal_report(connection: &Connection) -> Result<WalCheckpointReport> {
     connection.busy_timeout(std::time::Duration::ZERO)?;
     let started = std::time::Instant::now();
+    let _checkpoint = telemetry::CheckpointGuard::start(connection);
     let (_, frames, backfilled): (i32, i32, i32) =
         connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -311,6 +312,7 @@ pub fn checkpoint_wal_report(connection: &Connection) -> Result<WalCheckpointRep
 /// the daemon calls this only while it has borrowed the Store's sole writer from its queue.
 pub fn truncate_idle_wal(connection: &Connection) -> Result<bool> {
     connection.busy_timeout(std::time::Duration::ZERO)?;
+    let _checkpoint = telemetry::CheckpointGuard::start(connection);
     let busy: i32 = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
     Ok(busy == 0)
 }
@@ -334,6 +336,7 @@ pub struct WriterConnection {
     #[cfg_attr(not(test), allow(dead_code))]
     pub batches: Arc<(AtomicU64, AtomicU64)>,
     fifo: Arc<crate::fifo::Queue>,
+    telemetry: Option<Arc<telemetry::Writer>>,
 }
 
 pub enum WriterJob {
@@ -360,6 +363,7 @@ pub enum WriterJob {
         returned: std::sync::mpsc::Receiver<Connection>,
         holder: crate::windows::holds::Holder,
         enqueued: std::time::Instant,
+        origin: Option<telemetry::Origin>,
     },
     /// Hands the connection to a caller until its guard gives it back.
     Lend {
@@ -368,6 +372,7 @@ pub enum WriterJob {
         /// Who borrows the writer, charged for the hold.
         holder: crate::windows::holds::Holder,
         enqueued: std::time::Instant,
+        origin: Option<telemetry::Origin>,
     },
 }
 
@@ -436,6 +441,8 @@ impl WriterConnection {
         let background_queue = background.clone();
         let fifo = crate::fifo::Queue::new(crate::fifo::Kind::Writer);
         let observed_fifo = fifo.clone();
+        let telemetry = telemetry::Writer::new(&connection);
+        let writer_telemetry = telemetry.clone();
         let thread = std::thread::Builder::new()
             .name("st3-writer".into())
             .spawn(move || {
@@ -444,7 +451,7 @@ impl WriterConnection {
                     queue,
                     &index,
                     &counted,
-                    (&observed, &finalized, mutations.as_ref()),
+                    (&observed, &finalized, mutations.as_ref(), writer_telemetry.as_deref()),
                     background_queue,
                     &observed_fifo,
                 )
@@ -461,6 +468,7 @@ impl WriterConnection {
             mutation_observer,
             batches,
             fifo,
+            telemetry,
         })
     }
 
@@ -528,7 +536,11 @@ impl WriterConnection {
         self.finalizers.install(prepare, finalize)
     }
 
-    pub fn send(&self, job: WriterJob) {
+    pub fn send(&self, mut job: WriterJob) {
+        if let (Some(writer), WriterJob::Batched { wait, .. }) = (&self.telemetry, &mut job) {
+            *wait = Some(crate::profile::writer_waiting_for(wait.take(), writer.holder(),
+                telemetry::current_origin().unwrap_or_else(telemetry::Origin::other)));
+        }
         let enqueued = match &job {
             WriterJob::Batched { enqueued, .. } | WriterJob::Lend { enqueued, .. } | WriterJob::FenceLend { enqueued, .. } => Some(*enqueued),
             WriterJob::BackgroundReady(_) => None,
@@ -575,10 +587,11 @@ impl WriterConnection {
         let (lent, lent_here) = std::sync::mpsc::sync_channel(1);
         let (give_back, returned) = std::sync::mpsc::sync_channel(1);
         let enqueued = std::time::Instant::now();
+        let origin = telemetry::current_origin();
         match class {
-            writer_queue::LoanClass::Foreground => self.send(WriterJob::Lend { lent, returned, holder, enqueued }),
+            writer_queue::LoanClass::Foreground => self.send(WriterJob::Lend { lent, returned, holder, enqueued, origin }),
             writer_queue::LoanClass::Background => {
-                self.enqueue_background(WriterJob::Lend { lent, returned, holder, enqueued });
+                self.enqueue_background(WriterJob::Lend { lent, returned, holder, enqueued, origin });
             }
             writer_queue::LoanClass::Fence => {
                 // Hold the admission lock while recording the barrier and enqueueing it.
@@ -590,7 +603,7 @@ impl WriterConnection {
                     .get()
                     .map_or(0, |queue| queue.watermark());
                 let job = if through == 0 {
-                    WriterJob::Lend { lent, returned, holder, enqueued }
+                    WriterJob::Lend { lent, returned, holder, enqueued, origin }
                 } else {
                     WriterJob::FenceLend {
                         through,
@@ -598,6 +611,7 @@ impl WriterConnection {
                         returned,
                         holder,
                         enqueued,
+                        origin,
                     }
                 };
                 self.fifo.send_at(enqueued, || jobs.as_ref()
@@ -762,18 +776,19 @@ fn write_queue(
     queue: std::sync::mpsc::Receiver<WriterJob>,
     committed_index: &AtomicU64,
     batches: &(AtomicU64, AtomicU64),
-    callbacks: (&CommitObservers, &TransactionFinalizers, Option<&Arc<writer_observer::MutationState>>),
+    callbacks: (&CommitObservers, &TransactionFinalizers, Option<&Arc<writer_observer::MutationState>>, Option<&telemetry::Writer>),
     background: Arc<writer_queue::BackgroundAdmission>,
     fifo: &Arc<crate::fifo::Queue>,
 ) {
     let mut admission = fifo.receiver(writer_queue::Admission::new(queue, background));
     while let Some(job) = admission.next() {
         match job {
-            WriterJob::Lend { lent, returned, holder, enqueued }
-            | WriterJob::FenceLend { lent, returned, holder, enqueued, .. } => {
+            WriterJob::Lend { lent, returned, holder, enqueued, origin }
+            | WriterJob::FenceLend { lent, returned, holder, enqueued, origin, .. } => {
                 fifo.dequeued_at(enqueued);
                 telemetry::METRICS.queue.record(enqueued.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
                 let _hold = crate::windows::holds::WriterHold::start(crate::windows::holds::HoldKind::Lend, &holder);
+                let _holder = callbacks.3.map(|writer| writer.holding(origin));
                 if let Err(std::sync::mpsc::SendError(back)) = lent.send(connection) {
                     connection = back;
                     continue;
@@ -814,15 +829,22 @@ fn run_write_batch(
         &CommitObservers,
         &TransactionFinalizers,
         Option<&Arc<writer_observer::MutationState>>,
+        Option<&telemetry::Writer>,
     ),
     fifo: &crate::fifo::Queue,
 ) -> Option<WriterJob> {
-    let (observers, finalizers, mutation_observer) = callbacks;
+    let (observers, finalizers, mutation_observer, writer_telemetry) = callbacks;
+    let first_origin = match &first {
+        WriterJob::Batched { wait, .. } => wait.as_ref().and_then(crate::profile::WriterWait::trace_origin),
+        _ => None,
+    };
+    let _holder = writer_telemetry.map(|writer| writer.holding(first_origin.cloned()));
     if let WriterJob::Batched { enqueued, .. } = &first {
         fifo.dequeued_at(*enqueued);
         telemetry::METRICS.queue.record(enqueued.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
     }
     let started = std::time::Instant::now();
+    let mut attribution = writer_telemetry.map(telemetry::Batch::start);
     // The writer starts a batch only from a batched write.
     let first_holder = match &first {
         WriterJob::Batched { holder, .. } => holder.clone(),
@@ -837,15 +859,22 @@ fn run_write_batch(
             Ok(transaction) => (Some(transaction), None),
             Err(error) => (None, Some(anyhow::Error::from(error))),
         };
+    if let Some(batch) = &mut attribution {
+        batch.begin = started.elapsed();
+    }
     if let Some(transaction) = &transaction {
+        let prepare_started = attribution.as_ref().map(|_| std::time::Instant::now());
         failure = finalizers.prepare(transaction).err();
+        if let (Some(batch), Some(prepare_started)) = (&mut attribution, prepare_started) {
+            batch.finalizers += prepare_started.elapsed();
+        }
     }
     let mut job = Some(first);
     while let Some(current) = job.take() {
         let WriterJob::Batched {
             run,
             profile,
-            wait,
+            mut wait,
             holder,
             done,
             enqueued,
@@ -854,12 +883,24 @@ fn run_write_batch(
             lend = Some(current);
             break;
         };
+        if let Some(batch) = &mut attribution {
+            let waited = enqueued.elapsed();
+            if waited >= batch.wait {
+                batch.wait = waited;
+                batch.holder = wait.as_ref().and_then(crate::profile::WriterWait::trace_holder);
+            }
+        }
+        let origin = wait.as_mut().map(crate::profile::WriterWait::take_trace_origin);
+        if let Some(writer) = writer_telemetry {
+            writer.set_holder(origin.clone());
+        }
         if !answers.is_empty() {
             fifo.dequeued_at(enqueued);
             telemetry::METRICS.queue.record(enqueued.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
         }
         match (&transaction, &failure) {
             (Some(transaction), None) => {
+                let operation_started = attribution.as_ref().map(|_| std::time::Instant::now());
                 // The caller's operation waited until now, holds the writer while its write
                 // runs, and shares the commit below with the rest of the batch.
                 let _entered = crate::profile::enter(profile.as_ref());
@@ -878,6 +919,14 @@ fn run_write_batch(
                 crate::profile::writer_released(acquired);
                 hold.ran(&holder, running.elapsed());
                 failure = savepoint.err().map(anyhow::Error::from);
+                if let (Some(batch), Some(operation_started)) = (&mut attribution, operation_started) {
+                    let elapsed = operation_started.elapsed();
+                    batch.operations += elapsed;
+                    if elapsed >= batch.slowest {
+                        batch.slowest = elapsed;
+                        batch.origin = origin.unwrap_or_else(telemetry::Origin::other);
+                    }
+                }
             }
             // A batch that failed to begin answers its first write with the error.
             _ => drop(run),
@@ -892,11 +941,20 @@ fn run_write_batch(
     }
     batches.0.fetch_add(1, Ordering::Relaxed);
     batches.1.fetch_add(answers.len() as u64, Ordering::Relaxed);
+    let op_count = answers.len();
     let committed = match (transaction, failure) {
         (Some(transaction), None) => {
-            finalizers.run(&transaction).and_then(|()| {
+            let finalize_started = attribution.as_ref().map(|_| std::time::Instant::now());
+            let finalized = finalizers.run(&transaction);
+            if let (Some(batch), Some(finalize_started)) = (&mut attribution, finalize_started) {
+                batch.finalizers += finalize_started.elapsed();
+            }
+            finalized.and_then(|()| {
                 let commit_started = std::time::Instant::now();
                 let result = transaction.commit().map_err(anyhow::Error::from);
+                if let Some(batch) = &mut attribution {
+                    batch.commit = commit_started.elapsed();
+                }
                 // Only a COMMIT that landed is a commit-latency sample. A failed one answers its
                 // batch with the error; the batch histogram still records that batch's duration.
                 if result.is_ok() {
@@ -909,6 +967,7 @@ fn run_write_batch(
         (_, Some(error)) => Err(error),
         (None, None) => unreachable!("a batch without a transaction failed to begin"),
     };
+    let post_commit_started = attribution.as_ref().map(|_| std::time::Instant::now());
     drop(transaction_timer);
     // Observe COMMIT before post-commit callbacks can unwind; no changed-row or ACK claim.
     if committed.is_ok() {
@@ -928,6 +987,9 @@ fn run_write_batch(
     let committed = committed.map_err(|error| format!("{error:#}"));
     for done in answers {
         let _ = done.send(committed.clone());
+    }
+    if let (Some(batch), Some(post_commit_started)) = (attribution, post_commit_started) {
+        batch.finish(started.elapsed(), post_commit_started.elapsed(), op_count);
     }
     lend
 }
@@ -2153,7 +2215,7 @@ mod tests {
         let thread = std::thread::spawn(move || {
             write_queue(writer, receiver, &AtomicU64::new(0),
                 &(AtomicU64::new(0), AtomicU64::new(0)),
-                (&CommitObservers::default(), &TransactionFinalizers::default(), None),
+                (&CommitObservers::default(), &TransactionFinalizers::default(), None, None),
                 Arc::new(writer_queue::BackgroundAdmission::default()), &observed);
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);

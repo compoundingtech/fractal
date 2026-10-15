@@ -8,7 +8,8 @@ use smallclaims::{
     error::Error,
     store::{
         ReplicatedClaimAdmission,
-        checkpoint::{DropPlan, SealedSet, claim_tombstone, drop_digest, retained_digest, sealed_digest},
+        checkpoint::{DropCount, DropPlan, EnvelopeTombstone, SealedSet, claim_tombstone, drop_digest, retained_digest, sealed_digest},
+        checkpoint_staging::StagedPlanner,
         checkpoint_agreement::{
             CHECKPOINT_PROOF_BACKOFF_MS, CheckpointAction, CheckpointContext, DAY_MS,
             newest_seals,
@@ -76,17 +77,47 @@ impl Runtime for CountRuntime {
         let claims = sealed.claims.iter().filter(|claim| {
             self.revision.load(Ordering::Relaxed) < 2 && claim.valid && claim.claim.kind == "example.note"
         }).map(claim_tombstone).collect::<Vec<_>>();
-        let kept = sealed.claims.iter().filter(|claim| !claims.iter().any(|drop| drop.id == claim.claim.id));
+        let dropped = |id: &str| claims.iter().any(|drop| drop.id == id);
+        let kept = sealed.claims.iter().filter(|claim| !dropped(&claim.claim.id));
+        // An envelope goes when every claim it holds goes.
+        let envelopes = sealed.envelopes.iter()
+            .filter(|envelope| {
+                let held = sealed.claims.iter().filter(|claim| claim.envelope == envelope.key).collect::<Vec<_>>();
+                !held.is_empty() && held.iter().all(|claim| dropped(&claim.claim.id))
+            })
+            .map(|envelope| EnvelopeTombstone {
+                writer: envelope.key.writer.clone(),
+                sequence: envelope.key.sequence,
+                envelope_hash: envelope.key.envelope_hash.clone(),
+                accepted_at_unix_ms: envelope.accepted_at_unix_ms,
+            })
+            .collect::<Vec<_>>();
+        let mut by_kind = BTreeMap::new();
+        if !claims.is_empty() {
+            by_kind.insert("example.note".to_owned(), DropCount {
+                sealed: sealed.claims.iter().filter(|claim| claim.claim.kind == "example.note").count(),
+                dropped: claims.len(),
+            });
+        }
         DropPlan {
             cut_unix_ms: sealed.cut_unix_ms,
             rules_digest: self.checkpoint_rules_digest(),
             sealed_envelopes: sealed.envelopes.len(),
             sealed_claims: sealed.claims.len(),
             sealed_digest: sealed_digest(sealed),
-            drop_digest: drop_digest(&[], &claims),
+            drop_digest: drop_digest(&envelopes, &claims),
             retained_digest: retained_digest(kept.map(|claim| claim.claim.id.as_str())),
-            envelopes: Vec::new(), claims, by_kind: BTreeMap::new(),
+            envelopes, claims, by_kind,
         }
+    }
+    fn plan_staged_checkpoint_drops(&self, planner: &StagedPlanner<'_>) -> Result<()> {
+        if self.revision.load(Ordering::Relaxed) < 2 {
+            planner.staging().execute(
+                "UPDATE claims SET dropped=1 WHERE first=1 AND valid=1 AND kind='example.note'",
+                [],
+            )?;
+        }
+        Ok(())
     }
     fn clear_checkpoint_projections(&self, tx: &Transaction<'_>) -> Result<()> {
         Plain.clear_checkpoint_projections(tx)
@@ -146,16 +177,17 @@ fn unchanged_failed_input_is_not_copied_or_replayed_even_after_restart() {
     note(&store);
     context.now_unix_ms += CHECKPOINT_PROOF_BACKOFF_MS;
     assert!(store.checkpoint_step(&context).unwrap().is_empty());
-    // A scratch path that cannot be created proves that the copy phase is skipped, not merely
-    // that its diagnostic is deduplicated. The persisted decision survives a new Store.
-    let blocked = directory.path().join("not-a-directory");
-    std::fs::write(&blocked, b"blocked").unwrap();
-    context.scratch = blocked;
+    // The persisted decision survives a new Store. A proof copies the store and replays it on
+    // the copy, so an unchanged replay count proves the copy phase is skipped, not merely that
+    // its diagnostic is deduplicated. No proof copy is left in the scratch directory either.
     drop(store);
     let store = Store::open(&path, "alder", runtime.clone()).unwrap();
     assert!(store.checkpoint_step(&context).unwrap().is_empty());
     assert_eq!(runtime.replays.load(Ordering::Relaxed), 2);
     assert_eq!(diagnostics(&store), before);
+    assert!(std::fs::read_dir(&context.scratch).unwrap().all(|entry| {
+        !entry.unwrap().file_name().to_string_lossy().starts_with("proof-")
+    }));
 }
 
 #[test]

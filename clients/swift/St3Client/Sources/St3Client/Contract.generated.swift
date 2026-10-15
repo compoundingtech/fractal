@@ -201,3 +201,6 @@ public let st3ClientReadPaths: [ReadOperation: String] = [
     .assistantConversationContent: "/v1/client/assistant/conversation-content",
     .assistantTerminalContent: "/v1/client/assistant/terminal-content",
 ]
+
+/// Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043).
+public let st3SidebarArrangementUuid: String = "00000000-0000-7000-8000-000000000001"
