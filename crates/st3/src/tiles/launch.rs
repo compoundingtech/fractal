@@ -32,6 +32,8 @@ pub const TILE_HOME: &str = "/tile/home";
 pub const TILE_WORK: &str = "/tile/work";
 /// The tile's endpoint directory: the only host directory a tile can reach a socket in.
 pub const TILE_ENDPOINT: &str = "/run/st";
+/// Where a tile reaches the sekrets gateway, when the registry names one.
+pub const TILE_SEKRETS_SOCKET: &str = crate::sekrets::gateway::DEFAULT_SOCKET;
 /// The tile's user name inside the tile.
 const TILE_USER: &str = "tile";
 
@@ -115,6 +117,16 @@ pub fn run(registry_path: &Path, name: &str, terminal: bool, command: &[OsString
         .status()
         .context("start systemd-run")?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// `st tiles prepare`: make the tile's directories without starting it, so its supervisor can
+/// serve the endpoint before the first launch.
+pub fn prepare(registry_path: &Path, name: &str) -> Result<()> {
+    require_root("st tiles prepare")?;
+    let registry = Registry::load(registry_path)?;
+    let tile = registry.tile(name)?;
+    check_account(name, tile)?;
+    prepare_directories(&registry, name, tile).map(|_| ())
 }
 
 /// `st tiles stop`: end every process of the tile's tools unit.
@@ -367,6 +379,7 @@ struct Setup {
     work: PathBuf,
     endpoint: PathBuf,
     read_only: Vec<(PathBuf, bool)>,
+    sekrets: Option<PathBuf>,
     passwd: String,
     group: String,
     program: PathBuf,
@@ -389,6 +402,19 @@ impl Setup {
                 format!("read_only: {} is bound into every tile", path.display())
             })?;
             read_only.push((path.clone(), fs::metadata(path)?.is_dir()));
+        }
+        // A tile that should reach sekrets and cannot is refused, never started without it.
+        if let Some(socket) = &registry.sekrets_socket {
+            use std::os::unix::fs::FileTypeExt as _;
+            let is_socket =
+                fs::symlink_metadata(socket).is_ok_and(|metadata| metadata.file_type().is_socket());
+            if !is_socket {
+                bail!(
+                    "the registry names the sekrets gateway at {}, but there is no socket there; \
+                     start st-sekrets.service, or remove sekrets_socket from the registry",
+                    socket.display()
+                );
+            }
         }
         let c = |value: &OsStr| {
             CString::new(value.as_bytes()).context("an argument contains a NUL byte")
@@ -425,6 +451,7 @@ impl Setup {
             work: dirs.work.clone(),
             endpoint: dirs.endpoint.clone(),
             read_only,
+            sekrets: registry.sekrets_socket.clone(),
             passwd: format!(
                 "root:x:0:0::/:/nonexistent\n{TILE_USER}:x:{}:{}::{TILE_HOME}:/nonexistent\n",
                 tile.uid, tile.gid
@@ -545,6 +572,12 @@ impl Setup {
         let endpoint = inside(root, Path::new(TILE_ENDPOINT));
         fs::create_dir_all(&endpoint)?;
         bind(&self.endpoint, &endpoint, true)?;
+        if let Some(socket) = &self.sekrets {
+            let target = inside(root, Path::new(TILE_SEKRETS_SOCKET));
+            fs::create_dir_all(target.parent().expect("an absolute path has a parent"))?;
+            fs::write(&target, b"")?;
+            bind(socket, &target, true)?;
+        }
         for (target, options) in [("tmp", "mode=1777"), ("dev", "mode=0755,size=64k")] {
             let target = root.join(target);
             fs::create_dir_all(&target)?;
