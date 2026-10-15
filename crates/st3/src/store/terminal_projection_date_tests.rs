@@ -183,7 +183,7 @@ fn receive_dates(target: &Store, envelopes: Vec<ReplicaEnvelope>) {
     target
         .receive_replication_exchange("node", TEST_FLEET, &wire)
         .unwrap();
-    target.admit_received_replication().unwrap();
+    target.validate_replication_backlog().unwrap();
     assert!(target.project_replication_backlog().unwrap());
 }
 
@@ -214,7 +214,7 @@ fn terminal_date_three_paths(source: &Store, run: &MissionRunView) -> [TerminalD
     }
     drop(arrival);
     let arrival = Store::open(&path, "arrival").unwrap();
-    arrival.admit_received_replication().unwrap();
+    arrival.validate_replication_backlog().unwrap();
     assert!(arrival.project_replication_backlog().unwrap());
     same_envelopes(source, &arrival);
     let arrived = terminal_date_capture(&arrival, run);

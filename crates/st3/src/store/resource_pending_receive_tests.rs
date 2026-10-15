@@ -81,7 +81,7 @@ observer "github/acme/demo/pull/1" {
             [resource],
         )
         .unwrap();
-    target.admit_received_replication().unwrap();
+    target.validate_replication_backlog().unwrap();
     assert!(target.replica_records(true).unwrap().is_empty());
     assert!(target.project_replication_backlog().unwrap());
     assert_eq!(
@@ -125,7 +125,7 @@ observer "github/acme/demo/pull/1" {
             [resource],
         )
         .unwrap();
-    target.admit_received_replication().unwrap();
+    target.validate_replication_backlog().unwrap();
     assert!(target.project_replication_backlog().unwrap());
     assert!(target.replica_records(true).unwrap().is_empty());
     let after = target.replica_records(false).unwrap();

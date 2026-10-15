@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Use the existing admission entry point in isolated projection controls.",
+  "schema": {
+    "status": "none",
+    "detail": "Only isolated test fixture calls change; no production or persisted-state behavior changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Only isolated test fixture calls change; no production or persisted-state behavior changes."
+  },
+  "replay": {
+    "status": "none",
+    "detail": "Only isolated test fixture calls change; no production or persisted-state behavior changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Only isolated test fixture calls change; no production or persisted-state behavior changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Only isolated test fixture calls change; no production or persisted-state behavior changes."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Only isolated test fixture calls change; no production or persisted-state behavior changes."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Only isolated test fixture calls change; no production or persisted-state behavior changes."
+  }
+}
