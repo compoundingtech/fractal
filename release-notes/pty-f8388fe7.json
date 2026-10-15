@@ -6,7 +6,7 @@
   "rules": { "status": "none", "detail": "No checkpoint rules change." },
   "compatibility": {
     "status": "changed",
-    "detail": "Move pty from 1ae8c187 to f8388fe7, including pty#145's Darwin daemon identity and bounded long-session socket paths. Direct terminal connections and terminal views resolve the producer's published socket address instead of assuming <id>.sock. The intervening pty changes also include identity-safe launch operations, attachment-loss reporting, bounded output queues, enhanced-paste support, and packet batching (#137). No Smalltalk database or wire API changes."
+    "detail": "Move pty from 1ae8c187 to f8388fe7, including pty#145's Darwin daemon identity and bounded long-session socket paths. Direct terminal connections and terminal views resolve the producer's published socket address instead of assuming <id>.sock. The intervening pty changes also include identity-safe launch operations, attachment-loss reporting, bounded output queues, and enhanced-paste support. No Smalltalk database or wire API changes."
   },
   "downtime": { "status": "none", "detail": "No additional service interruption introduced." },
   "manual": { "status": "none", "detail": "No manual action required; matching Cargo and flake pins preserve the evaluation-time assertion and unblock the downstream fleet repin." },
