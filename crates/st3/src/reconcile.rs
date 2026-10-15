@@ -8386,15 +8386,21 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
+    /// Keep the earliest pending wake for this item. Repeated passes can request `now + delay`;
+    /// those requests must not each create a timer or postpone the already pending wake.
     fn arm_restart(&self, subject: &str, until: u128) {
-        smallclaims::touched::note_due(until);
         let mut armed = self
             .delayed_restarts
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if armed.get(subject).is_some_and(|current| *current == until) {
+        if let Some(current) = armed.get(subject)
+            && *current <= until
+        {
+            // The incremental item must retain the earlier clock dependency too.
+            smallclaims::touched::note_due(*current);
             return;
         }
+        smallclaims::touched::note_due(until);
         armed.insert(subject.into(), until);
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
@@ -8405,11 +8411,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         handle.spawn(async move {
             let delay = until.saturating_sub(now_ms()).min(u64::MAX as u128) as u64;
             tokio::time::sleep(Duration::from_millis(delay)).await;
-            delayed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&subject);
-            crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::TimerRestart, Some(restart_wake_kind(&subject)));
+            {
+                let mut armed = delayed.lock().unwrap_or_else(PoisonError::into_inner);
+                // An earlier wake may have replaced this one, or the item may have cancelled
+                // it. A stale timer must neither erase its replacement nor wake another pass.
+                if armed.get(&subject) != Some(&until) {
+                    return;
+                }
+                armed.remove(&subject);
+            }
+            crate::reconcile_telemetry::record_wake(
+                crate::reconcile_telemetry::WakeCause::TimerRestart,
+                Some(restart_wake_kind(&subject)),
+            );
             notify.notify_one();
         });
     }
@@ -18737,6 +18751,109 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         assert_eq!(restart_wake_kind("stage/faults"), "stage/faults");
         assert_eq!(restart_wake_kind("runtime-snapshot"), "runtime-snapshot");
         assert_eq!(restart_wake_kind("agent/example/seat"), "member");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_schedule_sync_retries_keep_one_earliest_wake() {
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        let first = now_ms() + 5_000;
+        // Each pass proposes a different `now + retry` for the same blocked schedule stage.
+        for pass in 0..20 {
+            reconciler.arm_restart("stage/schedule-sync", first + pass * 1_000);
+        }
+        assert_eq!(
+            reconciler
+                .delayed_restarts
+                .lock()
+                .unwrap()
+                .get("stage/schedule-sync"),
+            Some(&first),
+        );
+        tokio::time::timeout(Duration::from_secs(6), notify.notified())
+            .await
+            .expect("the original retry must not be postponed by later passes");
+        assert!(reconciler.delayed_restarts.lock().unwrap().is_empty());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), notify.notified())
+                .await
+                .is_err(),
+            "later requests must not leave extra timer wakes behind",
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_superseded_restart_timer_cannot_wake_or_erase_a_rearmed_retry() {
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        let origin = now_ms();
+        reconciler.arm_restart("stage/schedule-sync", origin + 20_000);
+        reconciler.arm_restart("stage/schedule-sync", origin + 5_000);
+        tokio::time::timeout(Duration::from_secs(6), notify.notified())
+            .await
+            .expect("an earlier retry must replace the later one");
+        assert!(reconciler.delayed_restarts.lock().unwrap().is_empty());
+
+        let next = origin + 40_000;
+        reconciler.arm_restart("stage/schedule-sync", next);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(25), notify.notified())
+                .await
+                .is_err(),
+            "the superseded 20-second timer must stay silent",
+        );
+        assert_eq!(
+            reconciler
+                .delayed_restarts
+                .lock()
+                .unwrap()
+                .get("stage/schedule-sync"),
+            Some(&next),
+            "a stale timer must not remove the new retry",
+        );
+        tokio::time::timeout(Duration::from_secs(20), notify.notified())
+            .await
+            .expect("the new retry must still wake reconciliation");
+        assert!(reconciler.delayed_restarts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_one_restart_timer_preserves_other_items_wakes() {
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        let origin = now_ms();
+        reconciler.arm_restart("stage/schedule-sync", origin + 5_000);
+        reconciler.arm_restart("restart-prepare:agent/example/seat", origin + 15_000);
+        reconciler
+            .delayed_restarts
+            .lock()
+            .unwrap()
+            .remove("stage/schedule-sync");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), notify.notified())
+                .await
+                .is_err(),
+            "a cancelled retry must not wake reconciliation",
+        );
+        tokio::time::timeout(Duration::from_secs(6), notify.notified())
+            .await
+            .expect("cancelling a schedule retry must not cancel a member's wake");
+        assert!(reconciler.delayed_restarts.lock().unwrap().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
