@@ -1350,11 +1350,9 @@ fn observe_payload(
         let already_bound = fs::read(agent_dir.join("claude-native-session")).ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .is_some_and(|binding| binding["incarnation"].as_str() == exported_session.as_deref());
-        if !already_bound {
-            if let Some(expected) = expected_restart.as_deref() {
-                let actual = payload.get("session_id").and_then(serde_json::Value::as_str).unwrap_or_default();
-                anyhow::ensure!(actual == expected, "native resume bound session {actual:?}, expected {expected:?}");
-            }
+        if !already_bound && let Some(expected) = expected_restart.as_deref() {
+            let actual = payload.get("session_id").and_then(serde_json::Value::as_str).unwrap_or_default();
+            anyhow::ensure!(actual == expected, "native resume bound session {actual:?}, expected {expected:?}");
         }
         let binding = match (runtime_id, exported_session.as_deref()) {
             (Some(runtime_id), Some(runtime_incarnation)) => Some(record_session_start_binding(
