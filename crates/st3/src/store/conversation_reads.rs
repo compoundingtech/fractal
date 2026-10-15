@@ -48,6 +48,25 @@ const CONVERSATION_CHANGED: &str = "SELECT
     OR EXISTS(SELECT 1 FROM local_observations INDEXED BY local_observations_subject_id_index
       WHERE subject=?1 AND id>?4 AND id<=?5)";
 
+/// SQL text is fixed by the schema registry, not by the conversation or its history.
+static IDENTITY_FIELD_READS: std::sync::LazyLock<[String; 2]> = std::sync::LazyLock::new(|| {
+    ["runtime_id", "incarnation_id"].map(|field| {
+        let predicate = identity_field_predicate(field);
+        let path = format!("CASE WHEN json_type(claims.body,'$.fields') IS NULL
+            THEN '$.{field}' ELSE '$.fields.{field}' END");
+        format!(
+            "SELECT CASE WHEN json_type(claims.body,{path})='text'
+                    THEN json_extract(claims.body,{path}) END FROM claims
+             INDEXED BY claims_identity_{field}_accepted_index
+             JOIN batches ON batches.id=claims.batch_id
+             WHERE claims.subject=?1 AND +claims.store_index<=?2
+               AND {ACTUAL_STATE_CLAIM} AND {predicate} AND {UNREPAIRED_CLAIM}
+               AND claims.kind NOT LIKE 'harness.%'
+             ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1"
+        )
+    })
+});
+
 /// Both exact-subject and fleet-map routing share these bounded identity seeks.
 fn conversation_owner_from_connection(
     connection: &Connection,
@@ -60,31 +79,18 @@ fn conversation_owner_from_connection(
     if !exists {
         return Ok(None);
     }
-    let mut actual = serde_json::Map::new();
-    for field in ["runtime_id", "incarnation_id"] {
-        let predicate = identity_field_predicate(field);
-        let body: Option<String> = connection.prepare_cached(&format!(
-            "SELECT claims.body FROM claims
-             INDEXED BY claims_identity_{field}_accepted_index
-             JOIN batches ON batches.id=claims.batch_id
-             WHERE claims.subject=?1 AND +claims.store_index<=?2
-               AND {ACTUAL_STATE_CLAIM} AND {predicate} AND {UNREPAIRED_CLAIM}
-               AND claims.kind NOT LIKE 'harness.%'
-             ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1",
-        ))?.query_row(params![subject, through], |row| row.get(0)).optional()?;
-        if let Some(body) = body {
-            let body: Value = serde_json::from_str(&body)?;
-            if let Some(value) = body.get("fields").unwrap_or(&body).get(field) {
-                actual.insert(field.into(), value.clone());
-            }
-        }
-    }
+    let read = |query: &str| -> Result<Option<String>> {
+        Ok(connection.prepare_cached(query)?
+            .query_row(params![subject, through], |row| row.get::<_, Option<String>>(0))
+            .optional()?.flatten())
+    };
+    let runtime = read(&IDENTITY_FIELD_READS[0])?;
+    let incarnation = read(&IDENTITY_FIELD_READS[1])?;
     let (_, origin, _) = identity_actual_source_at(connection, subject, through)?;
-    let field = |name: &str| actual.get(name).and_then(Value::as_str).map(str::to_owned);
     Ok(Some(Owner {
         subject: subject.into(),
-        incarnation: field("incarnation_id"),
-        runtime: field("runtime_id"),
+        incarnation,
+        runtime,
         origin,
     }))
 }
