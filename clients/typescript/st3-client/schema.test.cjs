@@ -4,6 +4,24 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('queued mission deadlines decode null and admission timestamps', async () => {
+    const [{ Option, Schema }, Rich] = await modules;
+    const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');
+    for (const mode of ['strict', 'tolerant']) {
+        const decode = Rich.decodeUnknownSync(Rich.Mission, mode);
+        const queued = structuredClone(wire);
+        queued.run_details[0].after = 'mission-run/predecessor';
+        queued.run_details[0].deadline = null;
+        const value = decode(queued);
+        assert(Option.isNone(value.run_details[0].deadline));
+        assert.equal(Schema.encodeSync(Rich.Mission)(value).run_details[0].deadline, null);
+        queued.run_details[0].deadline = '2026-09-20T11:05:00.000Z';
+        assert(Option.isSome(decode(queued).run_details[0].deadline));
+        assert.equal(Schema.encodeSync(Rich.Mission)(decode(queued)).run_details[0].deadline,
+            '2026-09-20T11:05:00.000Z');
+    }
+});
+
 test('terminal refusal and unconfirmed send envelopes preserve their applied answers', async () => {
     const [{ Schema }, Rich] = await modules;
     const decode = Rich.decodeUnknownSync(Rich.ErrorEnvelope);
@@ -390,6 +408,30 @@ test('normalized conversation fallbacks and open block payloads survive schema r
     const block = { id: 'native-1/0', kind: 'future-kind', source_type: 'native-future', payload: { raw: { token: 'invented-token', nested: { arguments: ['all', 'values'] } } } };
     const decoded = Rich.decodeUnknownSync(Rich.TimelineBlock, 'strict')(block);
     assert.deepEqual(Schema.encodeSync(Rich.TimelineBlock)(decoded), block);
+});
+
+test('assistant error views preserve exact native diagnostics in both decoder modes', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = {
+        type: 'assistant_error', status: 'failed', presentation: 'full',
+        is_error: true, label: 'native diagnostic', message: 'native diagnostic',
+        native: {
+            stopReason: 'future-stop', errorMessage: 'native\n\u001bdiagnostic',
+            errorStatus: { future: [false, null, 429] }, errorId: null,
+            retryRecovery: { attempt: 2, future: ['unchanged'] },
+            future: { retained: true },
+        },
+    };
+    for (const mode of ['strict', 'tolerant']) {
+        const decoded = Rich.decodeUnknownSync(Rich.TimelineViewAssistantError, mode)(wire);
+        assert.deepEqual(Schema.encodeSync(Rich.TimelineViewAssistantError)(decoded), wire);
+        const { native, ...legacy } = wire;
+        assert.deepEqual(
+            Schema.encodeSync(Rich.TimelineViewAssistantError)(
+                Rich.decodeUnknownSync(Rich.TimelineViewAssistantError, mode)(legacy)),
+            legacy,
+        );
+    }
 });
 
 

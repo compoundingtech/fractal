@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::os::fd::AsRawFd as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -21,7 +23,7 @@ use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 use tokio::sync::{Notify, watch};
 use tower::ServiceExt as _;
 
@@ -1170,6 +1172,61 @@ async fn response_envelope_unbounded(
             }
             response
         }
+        (None, Ok(_)) if smallclaims::read_budget::current().is_none() => {
+            // A mutation's synchronous poll can borrow the writer. Its async waits must
+            // own neither a writer permit nor a parked blocking parent (including bodies).
+            let handler_profile = profile.clone();
+            let cpu_kind = request_route.clone();
+            let cpu_client = caller.clone();
+            let mut handler_queue = profile.as_ref().map(|op| op.wall_span("handler/queue"));
+            let mut diagnostic_queue = Some(crate::relay_trace::span(crate::relay_trace::Phase::HandlerQueue));
+            let mut diagnostic_handler = crate::relay_trace::span(crate::relay_trace::Phase::Handler);
+            let diagnostic = crate::relay_trace::current();
+            let handler_enqueued = Instant::now();
+            let first_poll = Arc::new(std::sync::OnceLock::<Instant>::new());
+            let first_work = first_poll.clone();
+            let server_trace = otel.clone();
+            let writer_wait = server_trace.as_ref().map(|_| {
+                Arc::new(smallclaims::sqlite::telemetry::WriterWait::default())
+            });
+            let polled_writer_wait = writer_wait.clone();
+            let remote = served_remote.clone();
+            let result = read_deadline::spawn_mutation_handler(
+                state.store.clone(),
+                track_remote_reads(remote, next.run(request)),
+                move |mut future, cx| {
+                    if first_work.set(Instant::now()).is_ok() {
+                        drop(handler_queue.take());
+                        if let Some(mut queue) = diagnostic_queue.take() {
+                            queue.finish(crate::relay_trace::Outcome::Completed);
+                        }
+                        if let Some(profile) = &handler_profile { profile.queued(); }
+                    }
+                    let _server = server_trace.as_ref().map(|span| span.enter());
+                    let _writer_scope = smallclaims::sqlite::telemetry::enter_request(polled_writer_wait.clone());
+                    let _entered = crate::profile::enter(handler_profile.as_ref());
+                    crate::relay_trace::blocking(diagnostic.clone(), || {
+                        crate::performance::with_cpu(Some(&cpu_kind), Some(&cpu_client), || {
+                            future.as_mut().poll(cx)
+                        })
+                    })
+                },
+            ).await;
+            let response = result.unwrap_or_else(|error| ApiError::internal(error).into_response());
+            diagnostic_handler.finish(if response.status().is_success() {
+                crate::relay_trace::Outcome::Completed
+            } else {
+                crate::relay_trace::Outcome::Failed
+            });
+            if let (Some(server), Some(started)) = (otel.as_ref(), first_poll.get()) {
+                server.record("st.handler.queue_ms", started.duration_since(handler_enqueued).as_millis() as i64);
+                server.record("st.handler.duration_ms", started.elapsed().as_millis() as i64);
+                if let Some(wait) = writer_wait.as_ref() {
+                    crate::otel::record_writer_wait(server, wait.totals());
+                }
+            }
+            response
+        }
         (None, Ok(_)) => {
             let runtime = tokio::runtime::Handle::current();
             let handler_profile = profile.clone();
@@ -1187,7 +1244,10 @@ async fn response_envelope_unbounded(
             let (_body_owner, body_cancelled) = tokio::sync::oneshot::channel::<()>();
             let remote = served_remote.clone();
             let roster_trace = (request_route == "/v1/client/agents").then(|| server_trace.clone()).flatten();
-            match crate::api::read_deadline::spawn_handler(roster_trace, move || {
+            match crate::api::read_deadline::spawn_handler(
+                roster_trace,
+                None,
+                move || {
                 diagnostic_queue.finish(crate::relay_trace::Outcome::Completed);
                 drop(handler_queue);
                 let queue_ms = handler_enqueued.elapsed().as_millis() as i64;
@@ -3001,7 +3061,12 @@ fn client_agent_resources_uncached(
     history: bool,
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
-    let status = store.status_for_subject_prefix_at("agent/", Some(snapshot_index), history)?;
+    let status = store.status_for_subject_prefix_at(
+        "agent/",
+        Some(snapshot_index),
+        history,
+        crate::store::ClaimsReduction::Summary,
+    )?;
     client_agent_resources_from_status(store, history, snapshot_index, None, status)
 }
 
@@ -3334,7 +3399,7 @@ fn client_agent_cards_presented(
             let revision = subject
                 .desired_revision
                 .clone()
-                .or_else(|| subject.claims.last().cloned())
+                .or_else(|| subject.claims_summary.latest.clone())
                 .unwrap_or_else(|| format!("agent/{}", subject.subject));
             let queue = queues.queues
                 .get(&subject.subject)
@@ -3476,8 +3541,6 @@ fn managed_session_owner_for_subject_at(
     })
 }
 
-/// Bound the legacy runtime-only scan; incarnation dating uses two index seeks instead.
-const SESSION_CLAIMS: usize = 10_000;
 
 fn client_session_resources(
     store: &Arc<Store>,
@@ -3604,7 +3667,12 @@ fn managed_session_resources(
     at: &str,
     snapshot_index: u64,
 ) -> anyhow::Result<(Vec<Value>, BTreeSet<String>)> {
-    let status = store.status_for_subject_prefix_at("agent/", Some(snapshot_index), history)?;
+    let status = store.status_for_subject_prefix_at(
+        "agent/",
+        Some(snapshot_index),
+        history,
+        crate::store::ClaimsReduction::Summary,
+    )?;
     let mut sessions = Vec::new();
     for subject in status
         .subjects
@@ -3647,17 +3715,19 @@ fn managed_session_resources(
         };
         // Keep the old page bound only for runtime-only identities, which scan subject history.
         // Incarnation spans are index-bounded and must include incarnations after that page.
+        // The summary's boundary is set exactly while the count passes the window.
         let through_claim = subject
-            .claims
-            .get(SESSION_CLAIMS - 1)
-            .filter(|_| incarnation.is_none() && subject.claims.len() > SESSION_CLAIMS);
+            .claims_summary
+            .session_boundary
+            .as_deref()
+            .filter(|_| incarnation.is_none());
         let mut accepted_times = store
             .runtime_claim_span_at(
                 &subject.subject,
                 incarnation,
                 runtime,
                 snapshot_index,
-                through_claim.map(String::as_str),
+                through_claim,
             )?
             .map(|(first, last)| vec![first, last])
             .unwrap_or_default();
@@ -3678,7 +3748,7 @@ fn managed_session_resources(
             None => subject
                 .actual_claim
                 .as_deref()
-                .or_else(|| subject.claims.first().map(String::as_str))
+                .or(subject.claims_summary.first.as_deref())
                 .map(|id| store.claim_by_id(id))
                 .transpose()?
                 .flatten()
@@ -4050,7 +4120,7 @@ fn client_message_resources(
             "title": message.title,
             "content": message.content,
             "state": message.status,
-            "delivery": message_delivery_value(store, &message.to, &message.status, sent_at, client_now_ms())?,
+            "delivery": message_delivery_for(store, &message, sent_at, client_now_ms())?,
             "sent_at": client_timestamp(sent_at),
             "session_id": session_id,
             "in_reply_to": message.in_reply_to,
@@ -4114,6 +4184,33 @@ fn message_delivery_value(store: &Store, to: &str, status: &str, sent_at: u128, 
     }))
 }
 
+fn message_delivery_for(store: &Store, message: &MessageView, sent_at: u128, now: u128) -> anyhow::Result<Value> {
+    let mut delivery = message_delivery_value(store, &message.to, &message.status, sent_at, now)?;
+    if !matches!(message.status.as_str(), "sent" | "staged") { return Ok(delivery); }
+    let Some(runtime) = store.latest_claim(&message.to, Some("runtime.observed"))? else {
+        return Ok(delivery);
+    };
+    let runtime = runtime.body.get("fields").unwrap_or(&runtime.body);
+    if runtime.get("status").and_then(Value::as_str) != Some("running") { return Ok(delivery); }
+    let Some(incarnation) = runtime.get("incarnation_id").and_then(Value::as_str) else {
+        return Ok(delivery);
+    };
+    // Evidence scopes this seat diagnostic to one mail item. Query only the
+    // running incarnation: late old failures and clears cannot mask its state.
+    let diagnostic = store.claude_preparation_diagnostic(&message.to, &message.subject, incarnation)?
+        .filter(|(_, accepted)| *accepted >= sent_at);
+    if let Some((body, _)) = diagnostic {
+        let fields = body.get("fields").unwrap_or(&body);
+        if fields.get("status").and_then(Value::as_str) == Some("waiting") {
+            delivery["state"] = json!("waiting");
+            // Diagnostics retain operator detail; delivery exposes only the safe
+            // preparation/FIFO condition, never error strings or filesystem paths.
+            delivery["reason"] = json!(crate::claude_channel::PREPARATION_WAIT_REASON);
+        }
+    }
+    Ok(delivery)
+}
+
 async fn message_delivery(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
@@ -4129,7 +4226,7 @@ async fn message_delivery(
         let claims = state.store.claims_for(&subject, Some("message.sent")).map_err(ApiError::internal)?;
         let sent_at = claims.first().map(|claim| claim.accepted_at_unix_ms).unwrap_or_default();
         Ok(Json(json!({ "id": subject, "from": message.from, "to": message.to,
-            "delivery": message_delivery_value(&state.store, &message.to, &message.status, sent_at, client_now_ms()).map_err(ApiError::internal)? })))
+            "delivery": message_delivery_for(&state.store, &message, sent_at, client_now_ms()).map_err(ApiError::internal)? })))
     }).await
 }
 
@@ -6518,6 +6615,24 @@ where
     blocking_store(move || roster_worker(true, submitted, None, operation)).await
 }
 
+/// Blocking external work that does not borrow the live-store SQLite writer. Mutation polls
+/// yield while this runs, so provider/RPC/git waits retain no writer capacity.
+/// Keep this explicit: a callback that writes must use the admitted store path.
+async fn blocking_external<T, F>(operation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let profile = crate::profile::current();
+    let cpu_kind = crate::performance::current();
+    let trace = crate::otel::export_enabled().then(tracing::Span::current);
+    tokio::task::spawn_blocking(move || {
+        let _trace = trace.as_ref().map(tracing::Span::enter);
+        let _entered = crate::profile::enter(profile.as_ref());
+        crate::performance::with_charged(cpu_kind, operation)
+    }).await.map_err(ApiError::internal)
+}
+
 async fn blocking_store<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
@@ -6764,7 +6879,7 @@ pub async fn serve_unix_bound(
     serve_unix_bound_with_ready(socket, state_socket, app, || {}).await
 }
 
-/// Readiness is published only once the local API is bound and discoverable.
+/// Readiness is published only once the initialized local API can accept requests.
 pub async fn serve_unix_bound_with_ready(
     socket: &Path,
     state_socket: &Path,
@@ -6804,15 +6919,59 @@ async fn serve_unix_with_ancestor_ready(
     ancestor: fn(u32) -> Option<String>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    // Only st3-fixture initializes this process-local state. Disable host ancestry while
-    // retaining native-driver identification, which mailbox subscriptions require.
-    #[cfg(feature = "test-support")]
-    let bind_ancestry = bind_harness && crate::test_support::login_shell().is_none();
-    #[cfg(not(feature = "test-support"))]
-    let bind_ancestry = bind_harness;
+    let reserved = reserve_unix_socket(socket, state_socket).await?;
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bind_harness, ancestor, ready).await
+}
+
+/// An address reservation, not a listener. Connect attempts remain refused until
+/// the initialized application calls `serve_reserved_unix_with_ready`.
+pub struct ReservedUnixSocket {
+    socket: tokio::net::UnixSocket,
+    // The existing connect probe protects a listening predecessor. This lock also
+    // protects a new daemon's bound-but-not-listening address during startup.
+    reservation: File,
+}
+
+pub fn unix_reservation_path(socket: &Path) -> std::path::PathBuf {
+    // Discovery aliases and parent aliases must refer to the same reservation.
+    let socket = fs::canonicalize(socket).unwrap_or_else(|_| {
+        socket
+            .parent()
+            .and_then(|parent| fs::canonicalize(parent).ok())
+            .zip(socket.file_name())
+            .map(|(parent, name)| parent.join(name))
+            .unwrap_or_else(|| socket.to_path_buf())
+    });
+    let mut path = socket.as_os_str().to_owned();
+    path.push(".reservation.lock");
+    path.into()
+}
+
+/// Bind the address and publish discovery without listening or queueing clients.
+/// Retain the per-address reservation for the entire serving lifetime; never
+/// unlink its lock file while another process could hold its inode.
+pub async fn reserve_unix_socket(
+    socket: &Path,
+    state_socket: Option<&Path>,
+) -> anyhow::Result<ReservedUnixSocket> {
     crate::config::validate_unix_socket_path(socket, "--socket or --client-gateway-socket")?;
     if let Some(parent) = socket.parent() {
         fs::create_dir_all(parent)?;
+    }
+    let reservation = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(unix_reservation_path(socket))?;
+    if unsafe { libc::flock(reservation.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        anyhow::bail!(
+            "refusing to replace reserved Unix socket at {}: {}",
+            socket.display(),
+            std::io::Error::last_os_error()
+        );
     }
     // A second daemon must never detach an active listener by unlinking its pathname.
     if tokio::net::UnixStream::connect(socket).await.is_ok() {
@@ -6826,11 +6985,47 @@ async fn serve_unix_with_ancestor_ready(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let listener = UnixListener::bind(socket)?;
+    let listener = tokio::net::UnixSocket::new_stream()?;
+    listener.bind(socket)?;
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
     if let Some(state_socket) = state_socket {
         publish_state_socket(socket, state_socket)?;
     }
+    Ok(ReservedUnixSocket {
+        socket: listener,
+        reservation,
+    })
+}
+
+/// Only a fully initialized router may turn the reservation into a listener.
+pub async fn serve_reserved_unix_with_ready(
+    reserved: ReservedUnixSocket,
+    app: Router,
+    bind_harness: bool,
+    ready: impl FnOnce(),
+) -> anyhow::Result<()> {
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bind_harness, harness_ancestor, ready)
+        .await
+}
+
+async fn serve_reserved_unix_with_ancestor_ready(
+    reserved: ReservedUnixSocket,
+    app: Router,
+    bind_harness: bool,
+    ancestor: fn(u32) -> Option<String>,
+    ready: impl FnOnce(),
+) -> anyhow::Result<()> {
+    let ReservedUnixSocket {
+        socket,
+        reservation: _reservation,
+    } = reserved;
+    let listener = socket.listen(1024)?;
+    // Only st3-fixture initializes this process-local state. Disable host ancestry while
+    // retaining native-driver identification, which mailbox subscriptions require.
+    #[cfg(feature = "test-support")]
+    let bind_ancestry = bind_harness && crate::test_support::login_shell().is_none();
+    #[cfg(not(feature = "test-support"))]
+    let bind_ancestry = bind_harness;
     ready();
     let mut accept_failures = AcceptFailures::default();
     loop {
@@ -6983,6 +7178,88 @@ mod gateway_listener_tests {
         );
         assert!(tokio::net::UnixStream::connect(&socket).await.is_ok());
         drop(listener);
+    }
+
+    #[tokio::test]
+    async fn reserved_addresses_refuse_connections_until_initialized_serving() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("api.sock");
+        let discovery = root.path().join("state/run/st3.sock");
+        let reserved = super::reserve_unix_socket(&socket, Some(&discovery))
+            .await
+            .unwrap();
+        assert!(socket.exists());
+        for path in [&socket, &discovery] {
+            let error = tokio::net::UnixStream::connect(path).await.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+        }
+
+        let (ready, serving) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(super::serve_reserved_unix_with_ready(
+            reserved,
+            axum::Router::new().fallback(|| async { "initialized" }),
+            false,
+            move || ready.send(()).unwrap(),
+        ));
+        serving.await.unwrap();
+        let error = super::reserve_unix_socket(&socket, None)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to replace reserved Unix socket"),
+            "{error}"
+        );
+        let mut stream = tokio::net::UnixStream::connect(&discovery).await.unwrap();
+        stream
+            .write_all(b"GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_string(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.ends_with("initialized"), "{response}");
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn a_starting_socket_reservation_cannot_be_unlinked_even_through_discovery() {
+        use std::os::unix::fs::MetadataExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("api.sock");
+        let discovery = root.path().join("state/run/st3.sock");
+        let reserved = super::reserve_unix_socket(&socket, Some(&discovery))
+            .await
+            .unwrap();
+        let inode = std::fs::metadata(&socket).unwrap().ino();
+        for path in [&socket, &discovery] {
+            let error = super::reserve_unix_socket(path, None).await.err().unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("refusing to replace reserved Unix socket"),
+                "{error}"
+            );
+            assert_eq!(std::fs::metadata(path).unwrap().ino(), inode);
+        }
+        drop(reserved);
+        // A released/crashed reservation is not a permanent latch.
+        let next = super::reserve_unix_socket(&socket, Some(&discovery))
+            .await
+            .unwrap();
+        assert!(tokio::net::UnixStream::connect(&socket).await.is_err());
+        drop(next);
     }
 }
 
@@ -7445,6 +7722,7 @@ async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, Api
         &crate::resource::github_usage_report(),
         client_now_ms(),
     ));
+    report.checks.extend(crate::github_admission::doctor_lines(client_now_ms()));
     report.checks.push(reader_store.mailbox_wake_health());
     report.checks.push(descriptor_check());
     report.checks.push(reader_memory_check(
@@ -8963,11 +9241,15 @@ async fn checkpoint_plan(
         Some(day) => crate::store::checkpoint_cut(day).map_err(ApiError::bad)?,
         None => crate::store::newest_due_cut(client_now_ms()),
     };
-    let store = state.store.clone();
     let scratch = state.state_dir.join("checkpoint");
-    blocking_store(move || store.checkpoint_plan_view(cut, &scratch))
-        .await
-        .map(Json)
+    let capture_dir = scratch.join("plan");
+    let capture = state.store.clone();
+    let staged = blocking_store(move || capture.checkpoint_staged_set(cut, None, &capture_dir)).await?;
+    let store = state.store.clone();
+    // The capture may seal/register the live writer. Planning and proof on the
+    // scratch copy do not borrow it and must not occupy its worker capacity.
+    blocking_external(move || store.checkpoint_plan_view_from_staged(cut, staged, &scratch))
+        .await?.map(Json).map_err(ApiError::internal)
 }
 
 async fn checkpoint_status(
@@ -11286,7 +11568,7 @@ async fn start_gate_check(
         )));
     }
     let (node, state_dir, pty_root) = (state.node, state.state_dir, state.pty_root);
-    let view = crate::api::read_deadline::spawn_blocking(move || {
+    let view = blocking_external(move || {
         crate::gate_check::start(
             crate::gate_check::CheckHost {
                 node: &node,
@@ -11298,8 +11580,7 @@ async fn start_gate_check(
             &request.inputs,
         )
     })
-    .await
-    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?
+    .await?
     .map_err(ApiError::internal)?;
     Ok(Json(view))
 }
@@ -11403,7 +11684,7 @@ async fn publication_refusals(
     let store = state.store.clone();
     let node = state.node.clone();
     let intent = intent.clone();
-    blocking_action(move || {
+    blocking_external(move || {
         let references = store.unresolved_references(&intent)?;
         let publication = intent.subjects.values().collect::<Vec<_>>();
         // Render reads the workspace and asks git about tracked files, so it runs only for a
@@ -11421,7 +11702,7 @@ async fn publication_refusals(
             renders,
         })
     })
-    .await
+    .await?.map_err(ApiError::bad)
 }
 
 #[derive(Deserialize)]
@@ -15776,7 +16057,7 @@ async fn sekrets_attest(
             "attestations are only given over the local socket",
         )));
     };
-    crate::api::read_deadline::spawn_blocking(move || {
+    blocking_external(move || {
         crate::sekrets::daemon::attest(
             &state.store,
             &state.node,
@@ -15786,8 +16067,7 @@ async fn sekrets_attest(
             &request.nonce,
         )
     })
-    .await
-    .map_err(ApiError::internal)?
+    .await?
     .map(Json)
     .map_err(ApiError::bad)
 }
@@ -16095,7 +16375,7 @@ fn stage_eval_documents(
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct LiveSession {
     runtime_id: String,
     incarnation_id: String,
@@ -16417,21 +16697,23 @@ async fn input_session_as(
             idempotency_key: Some(request_key),
         })
         .map_err(ApiError::bad)?;
-    let effect = daemon_pty(state).and_then(|runtime| match request.mode {
+    let effect_state = state.clone();
+    let effect_session = session.clone();
+    let effect = blocking_external(move || daemon_pty(&effect_state).and_then(|runtime| match request.mode {
         SessionInputMode::Line => runtime.send_line_if(
-            &session.runtime_id,
+            &effect_session.runtime_id,
             &request.value,
-            Some(&session.incarnation_id),
+            Some(&effect_session.incarnation_id),
         ),
         SessionInputMode::Raw => {
-            runtime.send_raw_if(&session.runtime_id, &bytes, Some(&session.incarnation_id))
+            runtime.send_raw_if(&effect_session.runtime_id, &bytes, Some(&effect_session.incarnation_id))
         }
         SessionInputMode::Key => runtime.send_key_if(
-            &session.runtime_id,
+            &effect_session.runtime_id,
             &request.value,
-            Some(&session.incarnation_id),
+            Some(&effect_session.incarnation_id),
         ),
-    });
+    })).await?;
     finish_session_control(
         state,
         &subject,
@@ -16506,9 +16788,11 @@ async fn clear_context(
             idempotency_key: Some(request_key),
         })
         .map_err(ApiError::bad)?;
-    let effect = daemon_pty(&state).and_then(|runtime| {
-        runtime.send_line_if(&session.runtime_id, "/clear", Some(&session.incarnation_id))
-    });
+    let effect_state = state.clone();
+    let effect_session = session.clone();
+    let effect = blocking_external(move || daemon_pty(&effect_state).and_then(|runtime| {
+        runtime.send_line_if(&effect_session.runtime_id, "/clear", Some(&effect_session.incarnation_id))
+    })).await?;
     finish_session_control(
         &state,
         &subject,
@@ -16604,14 +16888,16 @@ async fn signal_session_as(
             idempotency_key: Some(request_key),
         })
         .map_err(ApiError::bad)?;
-    let effect = if session.terminal {
-        daemon_pty(&state).and_then(|runtime| {
-            runtime.signal_if(&session.runtime_id, Some(&session.incarnation_id), signal)
+    let effect_state = state.clone();
+    let effect_session = session.clone();
+    let effect = blocking_external(move || if effect_session.terminal {
+        daemon_pty(&effect_state).and_then(|runtime| {
+            runtime.signal_if(&effect_session.runtime_id, Some(&effect_session.incarnation_id), signal)
         })
     } else {
-        st_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"))
-            .signal_if(&session.runtime_id, Some(&session.incarnation_id), signal)
-    };
+        st_runtime::ExecRuntime::new(effect_state.state_dir.join("exec"), effect_state.state_dir.join("logs"))
+            .signal_if(&effect_session.runtime_id, Some(&effect_session.incarnation_id), signal)
+    }).await?;
     finish_session_control(
         &state,
         &subject,
@@ -17045,6 +17331,7 @@ fn normalize_message_party(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SESSION_CLAIMS;
     use axum::body::to_bytes;
     use axum::http::Request;
     use std::path::PathBuf;
@@ -18333,6 +18620,81 @@ mission "expiring-work" state="ready" {
     }
 
     #[test]
+    fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_mail() {
+        let store = Store::open_memory("claude-preparation-delivery").unwrap();
+        let seat = "agent/claude-preparation-worker";
+        let append = |subject: &str, kind: &str, actor: &str, fields: Value, evidence: Vec<String>| {
+            store.append_client_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence,
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        append(seat, "runtime.observed", seat, json!({
+            "status":"running", "runtime_id":"claude-runtime", "incarnation_id":"first"
+        }), Vec::new());
+        let messages: Vec<_> = ["head", "later", "last"].into_iter().map(|name| {
+            let subject = format!("message/claude-preparation-{name}");
+            let sent = append(&subject, "message.sent", "person/sender", json!({
+                "from":"person/sender", "to":seat, "content":name, "status":"sent"
+            }), Vec::new());
+            (store.message(&subject).unwrap().unwrap(), sent.accepted_at_unix_ms)
+        }).collect();
+        let diagnostic = |message: &MessageView, incarnation: &str, status: &str, reason: &str| {
+            append(seat, "harness.diagnostic", seat, json!({
+                "severity":"warning", "code":"claude-message-unforwarded",
+                "status":status, "reason":reason, "incarnation_id":incarnation
+            }), vec![store.claims_for(&message.subject, Some("message.sent")).unwrap()[0].id.clone()])
+        };
+        diagnostic(&messages[0].0, "first", "waiting",
+            "FIFO head preparation failed: /private/internal/body.txt unavailable; token=private-detail");
+        for (message, _) in &messages[1..] {
+            diagnostic(message, "first", "waiting",
+                "queued behind FIFO head message/claude-preparation-head: body unavailable; later mail cannot overtake it");
+        }
+        for (message, sent_at) in &messages {
+            let delivery = message_delivery_for(&store, message, *sent_at, *sent_at).unwrap();
+            assert_eq!(delivery["state"], "waiting");
+            assert_eq!(delivery["phase"], "sent");
+            assert_eq!(delivery["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
+            assert!(!delivery["reason"].as_str().unwrap().contains("/private/"));
+            assert!(!delivery["reason"].as_str().unwrap().contains("private-detail"));
+            let mut accepted = message.clone();
+            accepted.status = "delivered".into();
+            assert!(!message_delivery_for(&store, &accepted, *sent_at, *sent_at).unwrap()["reason"]
+                .as_str().unwrap().contains("FIFO"));
+        }
+        // Match an operator's actor-scoped list: a person filter selects that person's
+        // incoming mailbox, not the messages they sent to this seat.
+        let resources = client_message_resources(&store, None, false, Some(seat)).unwrap();
+        assert_eq!(resources.len(), 3);
+        assert!(resources.iter().all(|resource| resource["delivery"]["state"] == "waiting"));
+        // A different message's clear cannot release the head or its queued successors.
+        diagnostic(&messages[2].0, "first", "ready", "preparation succeeded; FIFO blocker cleared");
+        assert!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1)
+            .unwrap()["reason"].as_str().unwrap().contains("preparation is unavailable"));
+        // Recovery clears each message. Late previous-incarnation reports cannot undo it.
+        for (message, sent_at) in &messages {
+            diagnostic(message, "first", "ready", "preparation succeeded; FIFO blocker cleared");
+            diagnostic(message, "old", "waiting", "stale incarnation failure");
+            let delivery = message_delivery_for(&store, message, *sent_at, *sent_at).unwrap();
+            assert_eq!(delivery["state"], "pending");
+            assert!(!delivery["reason"].as_str().unwrap().contains("failure"));
+        }
+        append(seat, "runtime.observed", seat, json!({
+            "status":"running", "runtime_id":"claude-runtime", "incarnation_id":"second"
+        }), Vec::new());
+        diagnostic(&messages[0].0, "second", "waiting", "current attachment preparation failed");
+        diagnostic(&messages[0].0, "first", "ready", "old incarnation clear");
+        assert_eq!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1)
+            .unwrap()["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
+        let stale = message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1 + 90_001).unwrap();
+        assert_eq!(stale["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
+        assert_eq!(messages.iter().map(|(message, _)| store.message(&message.subject).unwrap().unwrap().content)
+            .collect::<Vec<_>>(), ["head", "later", "last"]);
+    }
+
+    #[test]
     fn message_delivery_distinguishes_pending_acceptance_and_recipient_read() {
         let store = Store::open_memory("message-delivery-test").unwrap();
         let to = "agent/remote/message-delivery-test";
@@ -18356,6 +18718,47 @@ mission "expiring-work" state="ready" {
             message_delivery_value(&store, to, "read", 1_000, 12_000).unwrap()["state"],
             "read"
         );
+    }
+
+    #[test]
+    fn message_delivery_keeps_expired_claude_hook_mail_held_until_native_closure() {
+        let store = Store::open_memory("expired-claude-hook-mail-hold").unwrap();
+        let seat = "agent/expired-claude-hook-mail-hold";
+        let append = |kind: &str, fields: Value| {
+            store.append_claim(&ClaimInput {
+                subject: seat.into(), kind: kind.into(), actor: Some(seat.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
+        let now = client_now_ms();
+        let expired = now - crate::store::CLAUDE_PROMPT_ANSWER_WAIT_MS - 1_000;
+        append("harness.observed", json!({
+            "state":"working", "driver":"claude", "incarnation_id":"one",
+            "blocked_on":"human", "ask":"permission", "reason":"Read",
+            "observed_at_ms":expired, "ownership_sequence":1, "transition_sequence":5
+        }));
+        let heartbeat = append("harness.observed", json!({
+            "state":"working", "driver":"claude", "incarnation_id":"one",
+            "blocked_on":"human", "ask":"permission", "reason":"Read",
+            "observed_at_ms":now, "ownership_sequence":1, "transition_sequence":5
+        }));
+        assert_eq!(store.native_prompt_state(seat, 1, 5).unwrap(), crate::store::NativePromptState::Open);
+        for phase in ["sent", "staged"] {
+            let delivery = message_delivery_value(&store, seat, phase, now, heartbeat.accepted_at_unix_ms).unwrap();
+            assert_eq!(delivery["state"], "waiting");
+            assert!(delivery["reason"].as_str().unwrap().contains("held outside"));
+        }
+        let closed = append("harness.observed", json!({
+            "state":"idle", "driver":"claude", "incarnation_id":"one",
+            "blocked_on":null, "ask":null, "ownership_sequence":1, "transition_sequence":6
+        }));
+        assert_eq!(store.native_prompt_state(seat, 1, 5).unwrap(), crate::store::NativePromptState::Gone);
+        for phase in ["sent", "staged"] {
+            assert!(!message_delivery_value(&store, seat, phase, now, closed.accepted_at_unix_ms).unwrap()["reason"]
+                .as_str().unwrap().contains("held outside"));
+        }
     }
 
     #[test]
@@ -26801,7 +27204,12 @@ mission "wake" state="ready" {
                 let cards = client_agent_resources_selected(store, false, index, None)?;
                 assert_eq!(Sha256::digest(serde_json::to_vec(&cards)?),
                     Sha256::digest(serde_json::to_vec(&full)?));
-                let status = store.status_for_subject_prefix_at("agent/", Some(index), false)?;
+                let status = store.status_for_subject_prefix_at(
+                    "agent/",
+                    Some(index),
+                    false,
+                    crate::store::ClaimsReduction::Full,
+                )?;
                 let declared = status.subjects.iter().find(|s| s.subject == "agent/node.declared").unwrap();
                 assert_eq!(cards.iter().find(|c| c["id"] == declared.subject).unwrap()["revision"],
                     declared.desired_revision.as_ref().unwrap().as_str());
@@ -26826,7 +27234,7 @@ mission "wake" state="ready" {
         let full = client_agent_resources_uncached(store, false, index).unwrap();
         let cards = client_agent_resources_selected(store, false, index, None).unwrap();
         assert_eq!(Sha256::digest(serde_json::to_vec(&cards).unwrap()),
-            Sha256::digest(serde_json::to_vec(&full).unwrap()));
+            Sha256::digest(serde_json::to_vec(&full).unwrap()), "cards={cards:?}\nfull={full:?}");
         assert_eq!(cards.iter().find(|c| c["id"] == "agent/undeclared").unwrap()["revision"],
             runtime.id);
     }
