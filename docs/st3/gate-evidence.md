@@ -581,6 +581,23 @@ checked. Only `observed` (the central observer's record) is listed today; `wrapp
 check when its real command is known. Write `scripts/evidence-verify --policy-from BASE
 --repository OWNER/NAME` to apply it by hand.
 
+### Host keys
+
+Our own machines are trusted to sign what they run. `scripts/evidence-keygen` makes a host's key, a scratch
+repository and the signer configuration under `~/.config/st`, all owned by the running user, and prints one
+line, `host/NAME namespaces="git" ssh-ed25519 ...`. Adding that line to `.st/evidence-keys` is a pull request
+like any other: the file is read from the accepted base (main), so a change cannot vouch for its own key, and
+removing a line stops every record that key signed from counting. The principal's first part, `host`, is the
+trust level; a check's policy admits it for the `wrapper` kind only (the per-kind `trust_levels` override above),
+never for `observed`. No root, no `sekrets` grant and no pinned program is needed.
+
+What this does not give, stated so nobody assumes it: anything that runs as the same user can read the key and
+sign a result it never ran, and a signer that is not isolated from the code under test is only as honest as that
+code. This is cooperative trust in the host. It is bounded: a record is keyed to a tree, a failing run is a
+record too, the latest record decides, the merge queue still tests the integrated tree wherever no input-keyed
+note matches, and sampled real runs compare a note with the job. The root-installed, hash-pinned signer
+(`scripts/evidence-sign` behind a `sekrets` grant) stays supported for a host that wants it.
+
 ### When the gate says skip
 
 `scripts/ci-evidence-gate` takes the verifier from the accepted base and asks it, with the policy,
