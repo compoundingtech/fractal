@@ -7,7 +7,7 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, waiting } from '../data/source.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
-import { LiveAgentWorkspace, narrowLayoutBreakpoint } from './LiveAgentWorkspace.tsx'
+import { LiveAgentWorkspace, narrowLayoutQuery } from './LiveAgentWorkspace.tsx'
 
 // The real workspace over the deterministic fixture world, with resources supported as on the live gateway.
 const source = {
@@ -42,7 +42,7 @@ type Story = StoryObj<typeof meta>
 
 const workspace = async (canvasElement: HTMLElement) => {
   await waitFor(() => expect(within(canvasElement).getByText('Let me find where groups close.')).toBeVisible(), { timeout: 60000 })
-  const narrow = window.innerWidth < narrowLayoutBreakpoint
+  const narrow = window.matchMedia(narrowLayoutQuery).matches
   return { canvas: within(canvasElement), narrow, header: within(within(canvasElement).getByTestId('thread-header')) }
 }
 /** Wide windows keep the docked sidebar, the full header cluster and the inline Details panel. */
@@ -89,7 +89,8 @@ const openDetailsSheet = async (canvasElement: HTMLElement) => {
   const opener = header.getByRole('button', { name: 'Agent details' })
   await userEvent.click(opener)
   const sheet = await canvas.findByRole('dialog', { name: 'Agent details' })
-  await expect(await within(sheet).findByRole('complementary', { name: 'Changes' })).toBeInTheDocument()
+  // Changes is a lazy chunk; on a cold dev server its first load takes longer than findBy's default second.
+  await expect(await within(sheet).findByRole('complementary', { name: 'Changes' }, { timeout: 15000 })).toBeInTheDocument()
   await waitFor(() => expect(sheet.contains(document.activeElement)).toBe(true))
   return { canvas, sheet, opener }
 }
@@ -118,6 +119,8 @@ export const DrawersFlow: Story = { play: async ({ canvasElement }) => {
   if (!narrow) return assertWide(canvasElement)
   // Agents, from the left.
   const chevron = header.getByRole('button', { name: 'Expand sidebar' })
+  await expect(chevron).toHaveAttribute('aria-haspopup', 'dialog')
+  await expect(chevron).toHaveAttribute('aria-expanded', 'false')
   await userEvent.hover(chevron)
   chevron.focus()
   await userEvent.keyboard('{Enter}')
@@ -125,9 +128,14 @@ export const DrawersFlow: Story = { play: async ({ canvasElement }) => {
   await expect(within(agents).getByRole('navigation', { name: 'Agent roster' })).toBeVisible()
   await expect(agents.getBoundingClientRect().left).toBe(0)
   await waitFor(() => expect(agents.contains(document.activeElement)).toBe(true))
+  await expect(chevron).toHaveAttribute('aria-expanded', 'true')
+  await expect(agents.id).not.toBe('')
+  await expect(chevron).toHaveAttribute('aria-controls', agents.id)
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
   await waitFor(() => expect(chevron).toHaveFocus())
+  await expect(chevron).toHaveAttribute('aria-expanded', 'false')
+  await expect(chevron).not.toHaveAttribute('aria-controls')
   await userEvent.keyboard('{Enter}')
   const backdrop = (await canvas.findByRole('dialog', { name: 'Agents' })).parentElement!.parentElement!
   await userEvent.click(backdrop)

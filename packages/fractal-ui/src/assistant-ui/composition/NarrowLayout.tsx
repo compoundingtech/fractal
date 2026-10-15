@@ -8,8 +8,11 @@ import { Icon } from './Icons'
 /**
  * A modal sheet from one edge; the thread behind it keeps its layout. Escape, the close button or the
  * backdrop closes it and focus returns to its opener. The column is header, `actions`, then one scrolling body.
+ * The sheet is `width` wide and always leaves a strip of the thread visible beside it.
  */
-export function NarrowSheet({ label, side = 'end', isOpen, onOpenChange, width, portalContainer, actions, children }: {
+export function NarrowSheet({ id, label, side = 'end', isOpen, onOpenChange, width, portalContainer, actions, children }: {
+  /** The dialog's id, for the opener's `aria-controls`. */
+  readonly id?: string
   readonly label: string
   readonly side?: 'start' | 'end'
   readonly isOpen: boolean
@@ -23,7 +26,7 @@ export function NarrowSheet({ label, side = 'end', isOpen, onOpenChange, width, 
 }) {
   return <ModalOverlay isOpen={isOpen} onOpenChange={onOpenChange} isDismissable UNSTABLE_portalContainer={portalContainer} {...stylex.props(styles.overlay, side === 'start' && styles.overlayStart)}>
     <Modal style={{ width }} {...stylex.props(styles.sheet, side === 'start' ? styles.sheetStart : styles.sheetEnd)}>
-      <Dialog aria-label={label} data-narrow-sheet={side} {...stylex.props(styles.dialog)}>
+      <Dialog {...(id === undefined ? {} : { id })} aria-label={label} data-narrow-sheet={side} {...stylex.props(styles.dialog)}>
         <header {...stylex.props(styles.sheetHeader)}>
           <Heading slot="title" {...stylex.props(styles.sheetTitle)}>{label}</Heading>
           <Button aria-label={`Close ${label.toLowerCase()}`} onPress={() => onOpenChange(false)} {...stylex.props(styles.iconButton)}><Icon name="x" /></Button>
@@ -43,7 +46,8 @@ export function NarrowActionRow({ label, children }: { readonly label: string; r
 const styles = stylex.create({
   overlay: { position: 'fixed', insetInline: 0, insetBlockStart: 0, insetBlockEnd: 'var(--wf-devbar-space, 0px)', zIndex: 90, display: 'flex', justifyContent: 'flex-end', backgroundColor: surface.scrim },
   overlayStart: { justifyContent: 'flex-start' },
-  sheet: { height: '100%', maxWidth: '100%', display: 'flex', backgroundColor: surface.canvas, color: text.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  // The visible strip of thread beside the sheet (40px) tells you the sheet is on top of it.
+  sheet: { height: '100%', maxWidth: 'calc(100% - 40px)', display: 'flex', backgroundColor: surface.canvas, color: text.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
   sheetEnd: { borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.borderStrong },
   sheetStart: { backgroundColor: surface.sidebar, borderInlineEndWidth: g.hairline, borderInlineEndStyle: 'solid', borderInlineEndColor: border.borderStrong },
   dialog: { flexGrow: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', outline: 'none' },

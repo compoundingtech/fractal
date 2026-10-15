@@ -105,12 +105,14 @@ const palette = persistedAtom({ key: 'round2.scheme', schema: Schema.Literals(['
 const workspacePanes = Atom.family((ref: string) => persistedAtom({ key: `round2.panes.${ref}`, schema: Schema.Array(Schema.Struct({ ref: Schema.String, presentation: Schema.optional(Schema.Literals(['detail', 'overview', 'resources'])) })), defaultValue: [] }))
 const selectedAgent = persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' })
 const viewportWidth = () => window.innerWidth
-/** Below this width the thread is the only thing on screen: agents open as a sheet from the left, the agent's actions and Details from the right. Same value as the sidebar drawer breakpoint. */
-export const narrowLayoutBreakpoint = 900
+/** Below 900px the thread is the only thing on screen: agents open as a sheet from the left, the agent's actions and Details from the right. Same width as the sidebar drawer breakpoint. */
+export const narrowLayoutQuery = '(max-width: 899px)'
 const subscribeViewport = (callback: () => void) => {
   window.addEventListener('resize', callback)
   return () => window.removeEventListener('resize', callback)
 }
+const narrowLayoutMatches = () => window.matchMedia(narrowLayoutQuery).matches
+const serverNarrow = () => false
 const locationState = () => `${window.location.pathname}${window.location.search}`
 const subscribeLocation = (callback: () => void) => {
   window.addEventListener('popstate', callback)
@@ -132,12 +134,18 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [scheme, setScheme] = useAtom(palette)
   // The agents sheet never outlives the narrow layout: widening the window docks the sidebar again.
   const [agentsOpen, setAgentsOpen] = React.useState(false)
-  const subscribeLayoutViewport = React.useCallback((callback: () => void) => subscribeViewport(() => {
-    if (window.innerWidth >= narrowLayoutBreakpoint) setAgentsOpen(false)
-    callback()
-  }), [])
-  const viewport = React.useSyncExternalStore(subscribeLayoutViewport, viewportWidth, viewportWidth)
-  const narrow = viewport < narrowLayoutBreakpoint
+  const agentsSheetId = React.useId()
+  const subscribeNarrow = React.useCallback((callback: () => void) => {
+    const query = window.matchMedia(narrowLayoutQuery)
+    const change = () => {
+      if (!query.matches) setAgentsOpen(false)
+      callback()
+    }
+    query.addEventListener('change', change)
+    return () => query.removeEventListener('change', change)
+  }, [])
+  const narrow = React.useSyncExternalStore(subscribeNarrow, narrowLayoutMatches, serverNarrow)
+  const viewport = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
   const location = React.useSyncExternalStore(subscribeLocation, locationState, locationState)
   const hoverOwner = React.useRef<HTMLElement | null>(null)
   const rememberHoverOwner = (event: React.SyntheticEvent<HTMLElement>) => {
@@ -290,7 +298,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
           <ThreadHeaderSlotContext.Provider value={headerSlot}>
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
-              {narrow ? <NarrowSheet side="start" label="Agents" isOpen={agentsOpen} onOpenChange={setAgentsOpen} width={Math.min(320, viewport - 40)} {...(sheetPortal === null ? {} : { portalContainer: sheetPortal })}>
+              {narrow ? <NarrowSheet id={agentsSheetId} side="start" label="Agents" isOpen={agentsOpen} onOpenChange={setAgentsOpen} width={320} {...(sheetPortal === null ? {} : { portalContainer: sheetPortal })}>
                 {sidebarBody}
               </NarrowSheet> : <>
                 <aside aria-label="Agents" style={{ width: collapsed ? 40 : Math.min(width, maxSidebar) }} {...stylex.props(styles.sidebar)}>
@@ -305,7 +313,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                 <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
               </>}
               <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-                <ThreadHeader narrow={narrow} sidebarCollapsed={narrow} onToggleSidebar={() => setAgentsOpen(true)} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={narrow ? undefined : agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} status={headerRow?.status} statusLabel={headerRow?.statusLabel} statusSince={headerRow?.statusSince} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} now={now} panelOpen={narrow ? narrowDetailsOpen : diffOpen} drawerOpen={terminalOpen} onTogglePanel={narrow ? () => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) } : () => setDiffOpen((value) => !value)} onToggleDrawer={toggleTerminal} />
+                <ThreadHeader narrow={narrow} sidebarCollapsed={narrow} onToggleSidebar={() => setAgentsOpen(true)} sidebarSheet={{ open: agentsOpen, id: agentsSheetId }} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={narrow ? undefined : agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} status={headerRow?.status} statusLabel={headerRow?.statusLabel} statusSince={headerRow?.statusSince} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} now={now} panelOpen={narrow ? narrowDetailsOpen : diffOpen} drawerOpen={terminalOpen} onTogglePanel={narrow ? () => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) } : () => setDiffOpen((value) => !value)} onToggleDrawer={toggleTerminal} />
                 {visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
                     <Aria.Button aria-pressed={selectedPane === 'thread'} onPress={() => navigate(current)} {...stylex.props(styles.textButton)}>
@@ -337,7 +345,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                   {toolDetail(openedTool, panelSize)}
                 </>
               ) : null}
-              {narrow ? <NarrowSheet label="Agent details" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={Math.min(400, viewport - 40)} {...(sheetPortal === null ? {} : { portalContainer: sheetPortal })} actions={
+              {narrow ? <NarrowSheet label="Agent details" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={400} {...(sheetPortal === null ? {} : { portalContainer: sheetPortal })} actions={
                 <NarrowActionRow label="Agent actions">
                   {agentHeaderActions}
                   {terminalRef === undefined && terminalDisabledReason === undefined ? null : <>

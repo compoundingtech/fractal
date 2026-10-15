@@ -121,6 +121,7 @@ export function ThreadHeader({
   onToggleDrawer,
   sidebarCollapsed = false,
   onToggleSidebar,
+  sidebarSheet,
   narrow = false,
 }: {
   /** Reported folder for the breadcrumb; omitted entirely when the host knows none. */
@@ -149,6 +150,8 @@ export function ThreadHeader({
   /** When the sidebar is collapsed its separator is gone; the header carries the expand toggle. */
   sidebarCollapsed?: boolean
   onToggleSidebar?: () => void
+  /** The expand toggle opens the sidebar as a sheet (narrow hosts): its open state and dialog id, for `aria-expanded`/`aria-controls`. */
+  sidebarSheet?: { readonly open: boolean; readonly id: string }
   /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, and one Agent details button opens `panelOpen`'s sheet. */
   narrow?: boolean
 }) {
@@ -156,7 +159,7 @@ export function ThreadHeader({
   return (
     <header data-testid="thread-header" {...stylex.props(styles.header)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
-        <button type="button" aria-label="Expand sidebar" title="Expand sidebar" onClick={onToggleSidebar} {...stylex.props(styles.ghostMd)}>
+        <button type="button" aria-label="Expand sidebar" title="Expand sidebar" onClick={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { 'aria-haspopup': 'dialog' as const, 'aria-expanded': sidebarSheet.open, ...(sidebarSheet.open ? { 'aria-controls': sidebarSheet.id } : {}) })} {...stylex.props(styles.ghostMd)}>
           <Icon name="chevron-right" />
         </button>
       ) : null}
