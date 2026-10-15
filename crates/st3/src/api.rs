@@ -15349,6 +15349,8 @@ struct WorkQuery {
     include_terminal: bool,
     #[serde(default)]
     view: WorkView,
+    #[serde(default)]
+    caller: WorkCaller,
 }
 
 #[derive(Default, Deserialize)]
@@ -15357,6 +15359,29 @@ enum WorkView {
     #[default]
     Full,
     Renewal,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum WorkCaller {
+    #[default]
+    List,
+    CapacityDiagnostics,
+    TimelineBinding,
+    WaitInterruption,
+    SubagentAttribution,
+}
+
+impl WorkCaller {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::List => "work/list",
+            Self::CapacityDiagnostics => "work/capacity-diagnostics",
+            Self::TimelineBinding => "work/timeline-binding",
+            Self::WaitInterruption => "work/wait-interruption",
+            Self::SubagentAttribution => "work/subagent-attribution",
+        }
+    }
 }
 
 async fn list_work(
@@ -15373,7 +15398,7 @@ async fn list_work(
         }).await.map(Json);
     }
     let (mut work, desired) = blocking_store(move || {
-        let work = crate::performance::task("work/human-list", || {
+        let work = crate::performance::task(query.caller.label(), || {
             store.work(query.actor.as_deref(), query.include_terminal)
         })?;
         // Only the agents these steps name, not every subject the fleet has ever declared.

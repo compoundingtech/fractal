@@ -11702,7 +11702,7 @@ async fn wait_for_condition(
 async fn agent_wait_interruption(client: &Client, actor: &str) -> Result<Option<String>> {
     let work: Vec<StepRunView> = client
         .get(&format!(
-            "/v1/work?actor={}&include_terminal=false",
+            "/v1/work?actor={}&include_terminal=false&caller=wait-interruption",
             urlencoding::encode(actor)
         ))
         .await?;
@@ -21658,7 +21658,7 @@ async fn native_timeline_claim(
         && receipt.valid() && receipt.actor == subject
     {
         let work: Vec<StepRunView> = client.get(&format!(
-            "/v1/work?actor={}", urlencoding::encode(subject))).await?;
+            "/v1/work?actor={}&caller=timeline-binding", urlencoding::encode(subject))).await?;
         if let Some(step) = work.into_iter().find(|step| {
             step.subject == receipt.step_run && step.status == "ready"
                 && step.wake.as_ref().is_some_and(|wake| {
@@ -23894,7 +23894,7 @@ async fn publish_provider_capacity_diagnostic(
         fields.insert("retry_after_unix_ms".into(), Value::from(retry_after));
     }
     let work: Vec<StepRunView> = client
-        .get(&format!("/v1/work?actor={}", urlencoding::encode(subject)))
+        .get(&format!("/v1/work?actor={}&caller=capacity-diagnostics", urlencoding::encode(subject)))
         .await?;
     if let Some(step) = work.into_iter().find(|step| {
         matches!(step.status.as_str(), "claimed" | "working")

@@ -45,7 +45,8 @@ Native lease polling uses `GET /v1/work?actor=...&view=renewal`: only the actor'
 currently held claimed/working steps, with owner and lease validity applied. This view
 does not populate execution timing, queue, wake, summaries or agent hierarchy. The
 default work list remains fully enriched. Performance tasks distinguish `work/renewal`
-from `work/human-list`; these labels are fixed, never actor-derived.
+from `work/list`; native diagnostics, timeline binding, wait interruption and subagent
+attribution have fixed caller labels too. Labels are never actor-derived.
 
 ```sh
 st doctor
