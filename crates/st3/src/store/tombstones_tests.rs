@@ -772,7 +772,9 @@ fn a_trim_never_makes_a_write_wait_long() {
     let cut = now_ms() + 1_000;
     let plan = plan_drops(&store.checkpoint_sealed_set(cut).unwrap());
     assert!(plan.claims.len() >= 1_000, "{}", plan.claims.len());
-    production_history(&store, 150_000);
+    // The bound below comes from the per-row cost set next, not from the history's size: the
+    // history only has to be large against the 1,500 rows the trim deletes.
+    production_history(&store, 15_000);
     // Every deleted row is slow, as on a store missing an index: 2,000 of them at once would
     // hold the writer for four seconds.
     store.set_trim_row_cost(std::time::Duration::from_millis(2));
