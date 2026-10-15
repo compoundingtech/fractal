@@ -134,8 +134,8 @@ fn missions(model: &Model) -> Vec<Mission> {
 pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     let link = if extras.offline.is_some() {
         Link::Offline(match &model.last_connected {
-            Some(at) => format!("Last connected at {at} · reconnecting · r retry now"),
-            None => "No member reachable · reconnecting · r retry now".into(),
+            Some(at) => format!("Last connected at {at} · reconnecting · Ctrl+R retry now"),
+            None => "No member reachable · reconnecting · Ctrl+R retry now".into(),
         })
     } else if extras.live {
         Link::Live
