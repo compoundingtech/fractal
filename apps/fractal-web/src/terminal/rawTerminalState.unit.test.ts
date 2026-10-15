@@ -4,14 +4,54 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   gridFor,
   makeResizeDebouncer,
+  rawModeFor,
   resizeSettleMillis,
   terminalChip,
+  terminalInputPath,
   terminalPresentation,
   type RawPreparation,
+  type TerminalInputPath,
 } from './rawTerminalState.ts'
 
 const session = (state: PtyState): RawPreparation => ({ _tag: 'Session', state })
-const chip = (raw: RawPreparation, typing = false) => terminalChip({ raw, presentation: terminalPresentation(raw), typing }).label
+const attach = { _tag: 'Attach' } as const
+const chip = (raw: RawPreparation, typing = false, input: TerminalInputPath = attach) =>
+  terminalChip({ raw, presentation: terminalPresentation(raw), input, typing }).label
+const granted = { terminalInput: 'granted', terminalControl: 'granted' } as const
+const limitedPairing = { terminalInput: 'granted', terminalControl: 'ungranted' } as const
+const watchOnly = { terminalInput: 'ungranted', terminalControl: 'ungranted' } as const
+
+describe('input capability decision', () => {
+  it('types over a raw ATTACH when the device holds terminal.control', () => {
+    const input = terminalInputPath({ raw: true, gateway: true, grants: granted, attachLost: false })
+    expect(input).toEqual({ _tag: 'Attach' })
+    expect(rawModeFor(input)).toBe('attach')
+  })
+
+  it('keeps gateway typing, and watches by PEEK, for a limited pairing without terminal.control', () => {
+    const input = terminalInputPath({ raw: true, gateway: true, grants: limitedPairing, attachLost: false })
+    expect(input).toEqual({ _tag: 'Gateway' })
+    expect(rawModeFor(input)).toBe('peek')
+  })
+
+  it('moves typing to the gateway once an ATTACH for this terminal fell back', () => {
+    expect(terminalInputPath({ raw: true, gateway: true, grants: granted, attachLost: true })).toEqual({ _tag: 'Gateway' })
+    expect(terminalInputPath({ raw: false, gateway: true, grants: granted, attachLost: false })).toEqual({ _tag: 'Gateway' })
+  })
+
+  it('is read-only without a typing grant, or without a port that can carry the keys', () => {
+    expect(terminalInputPath({ raw: true, gateway: true, grants: watchOnly, attachLost: false })).toEqual({
+      _tag: 'ReadOnly',
+      reason: 'This device may watch this terminal but not type into it.',
+    })
+    expect(terminalInputPath({ raw: true, gateway: false, grants: limitedPairing, attachLost: false })).toEqual({
+      _tag: 'ReadOnly',
+      reason: 'This gateway does not accept typing into this terminal.',
+    })
+    expect(terminalInputPath({ raw: false, gateway: false, grants: granted, attachLost: false })._tag).toBe('ReadOnly')
+    expect(rawModeFor({ _tag: 'ReadOnly', reason: 'no' })).toBe('peek')
+  })
+})
 
 describe('fallback selection', () => {
   it('keeps the raw path while it connects, is live, reconnects or re-resolves a stale fence', () => {
@@ -26,31 +66,36 @@ describe('fallback selection', () => {
     expect(terminalPresentation({ _tag: 'Preparing' })).toEqual({ _tag: 'Raw' })
   })
 
-  it('falls back to the read-only projected screen when ATTACH is refused', () => {
+  it('falls back to the projected screen when the stream is refused', () => {
     expect(terminalPresentation(session({ _tag: 'Refused', message: 'forbidden', status: 403, code: 'forbidden' }))).toEqual({
-      _tag: 'ReadOnly',
-      reason: 'This device may watch this terminal but not type into it.',
+      _tag: 'Projected',
+      reason: 'The live terminal stream was refused (forbidden). Showing the projected screen.',
     })
   })
 
   it('falls back when the socket keeps failing, the emulator cannot load, or the source has no stream', () => {
     expect(terminalPresentation(session({ _tag: 'Failed', message: 'PTY socket error' }))).toEqual({
-      _tag: 'ReadOnly',
-      reason: 'The live terminal stream failed (PTY socket error). Showing the read-only screen.',
+      _tag: 'Projected',
+      reason: 'The live terminal stream failed (PTY socket error). Showing the projected screen.',
     })
     expect(terminalPresentation({ _tag: 'Unprepared', message: 'The terminal emulator could not be loaded' })).toEqual({
-      _tag: 'ReadOnly',
+      _tag: 'Projected',
       reason: 'The terminal emulator could not be loaded',
     })
-    expect(terminalPresentation({ _tag: 'Unsupported' })._tag).toBe('ReadOnly')
+    expect(terminalPresentation({ _tag: 'Unsupported' })._tag).toBe('Projected')
   })
 
   it('names the state in the chip: typing, read-only, reconnecting', () => {
     expect(chip(session({ _tag: 'Live', rows: 24, cols: 80 }), true)).toBe('Typing')
     expect(chip(session({ _tag: 'Live', rows: 24, cols: 80 }))).toBe('Click to type')
-    expect(chip(session({ _tag: 'Refused', message: 'forbidden' }), true)).toBe('Read-only')
-    expect(chip({ _tag: 'Unsupported' })).toBe('Read-only')
+    // A PEEK stream with gateway typing reads exactly like an ATTACH; a watch-only one is read-only.
+    expect(chip(session({ _tag: 'Live', rows: 24, cols: 80 }), true, { _tag: 'Gateway' })).toBe('Typing')
+    expect(chip(session({ _tag: 'Live', rows: 24, cols: 80 }), false, { _tag: 'ReadOnly', reason: 'no' })).toBe('Read-only')
+    // The projected screen types through the gateway too, or is read-only.
+    expect(chip({ _tag: 'Unsupported' }, false, { _tag: 'Gateway' })).toBe('Click to type')
+    expect(chip(session({ _tag: 'Refused', message: 'forbidden' }), true, { _tag: 'ReadOnly', reason: 'no' })).toBe('Read-only')
     expect(chip(session({ _tag: 'Reconnecting', attempt: 1, delayMs: 500, issue: 'lost' }))).toBe('Reconnecting…')
+    expect(chip(session({ _tag: 'Reconnecting', attempt: 1, delayMs: 500, issue: 'lost' }), false, { _tag: 'ReadOnly', reason: 'no' })).toBe('Reconnecting…')
     expect(chip(session({ _tag: 'Connecting', attempt: 2 }))).toBe('Reconnecting…')
     expect(chip(session({ _tag: 'Connecting', attempt: 1 }))).toBe('Connecting…')
     expect(chip(session({ _tag: 'Exited', code: 130 }))).toBe('Exited (130)')

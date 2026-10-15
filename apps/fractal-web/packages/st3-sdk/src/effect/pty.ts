@@ -162,6 +162,8 @@ export interface PtyTarget {
   readonly terminalId: string
   readonly incarnation: string
 }
+/** ATTACH types and votes the shared size (`terminal.control`); PEEK only watches (`terminal.read`). */
+export type PtyMode = 'attach' | 'peek'
 /** Requested terminal dimensions. */
 export interface PtySize {
   readonly rows: number
@@ -179,16 +181,16 @@ export interface PtyAttachment {
   readonly capability: string
 }
 const AttachmentEnvelope = Schema.Struct({ api_version: Schema.String, snapshot: Schema.Unknown, value: Schema.Struct({
-  terminal_id: Schema.String, runtime_incarnation: Schema.String, owner_host_id: Schema.String, mode: Schema.Literal('attach'), stream_capability: Schema.String,
+  terminal_id: Schema.String, runtime_incarnation: Schema.String, owner_host_id: Schema.String, mode: Schema.Literals(['attach', 'peek']), stream_capability: Schema.String,
 }) })
 const ErrorEnvelope = Schema.Struct({ api_version: Schema.String, error_version: Schema.String, code: Schema.String, message: Schema.String, retryable: Schema.optionalKey(Schema.Boolean) })
 const terminalPath = (target: PtyTarget) => `/v1/client/terminals/${encodeURIComponent(target.terminalId.replace(/^terminal\//, ''))}`
 const base = (url: string) => url.replace(/\/+$/, '')
 /** Request a fresh capability, decoding success and refusal envelopes at the boundary. */
-export const requestPtyAttachment = Effect.fn('st3.pty.attachment')(function* (options: { readonly baseUrl: string; readonly target: PtyTarget; readonly fetch?: typeof fetch }) {
+export const requestPtyAttachment = Effect.fn('st3.pty.attachment')(function* (options: { readonly baseUrl: string; readonly target: PtyTarget; readonly mode: PtyMode; readonly fetch?: typeof fetch }) {
   const response = yield* Effect.tryPromise({
     try: signal => (options.fetch ?? globalThis.fetch)(`${base(options.baseUrl)}${terminalPath(options.target)}/raw-attachments`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runtime_incarnation: options.target.incarnation, mode: 'attach' }), signal,
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runtime_incarnation: options.target.incarnation, mode: options.mode }), signal,
     }),
     catch: cause => new PtyAttachFailure({ message: String(cause), retryable: true }),
   })
@@ -198,11 +200,12 @@ export const requestPtyAttachment = Effect.fn('st3.pty.attachment')(function* (o
     return yield* new PtyAttachFailure({ message: error.message, status: response.status, code: error.code, retryable: error.retryable ?? response.status >= 500 })
   }
   const envelope = yield* Schema.decodeUnknownEffect(AttachmentEnvelope)(json).pipe(Effect.mapError(cause => new PtyAttachFailure({ message: String(cause), status: response.status, retryable: false })))
+  if (envelope.value.mode !== options.mode) return yield* new PtyAttachFailure({ message: `Requested a ${options.mode} capability, received ${envelope.value.mode}`, status: response.status, retryable: false })
   return { terminalId: envelope.value.terminal_id, incarnation: envelope.value.runtime_incarnation, ownerHostId: envelope.value.owner_host_id, capability: envelope.value.stream_capability }
 })
 /** Build the fenced raw-stream WebSocket URL. */
-export const ptyStreamUrl = (options: { readonly baseUrl: string; readonly target: PtyTarget }): string =>
-  `${base(options.baseUrl).replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')}${terminalPath(options.target)}/raw-stream?incarnation=${encodeURIComponent(options.target.incarnation)}&mode=attach`
+export const ptyStreamUrl = (options: { readonly baseUrl: string; readonly target: PtyTarget; readonly mode: PtyMode }): string =>
+  `${base(options.baseUrl).replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')}${terminalPath(options.target)}/raw-stream?incarnation=${encodeURIComponent(options.target.incarnation)}&mode=${options.mode}`
 
 /** Connection state, including terminal refusal and incarnation fencing. */
 export type PtyState =
@@ -287,12 +290,13 @@ const browserSocket: PtySocketFactory = (url, protocols) => {
 export type PtyOutput = { _tag: 'Screen'; bytes: Uint8Array } | { _tag: 'Data'; bytes: Uint8Array } | { _tag: 'Geometry'; rows: number; cols: number } | { _tag: 'Exit'; code: number }
 /** Scoped raw-terminal connection with unbuffered synchronous input. */
 export interface PtySession {
+  readonly mode: PtyMode
   readonly state: SubscriptionRef.SubscriptionRef<PtyState>
-  /** Send DATA only while live; input is never retained for a retry. */
+  /** Send DATA only while a live ATTACH; input is never retained for a retry. A PEEK sends nothing. */
   readonly send: (bytes: Uint8Array) => boolean
-  /** Remember the next attach size and resize a live socket immediately. */
+  /** Remember the next attach size and resize a live ATTACH immediately. A PEEK has no size vote. */
   readonly resize: (size: PtySize) => void
-  /** Clear server-side input modes only while live. */
+  /** Clear server-side input modes only while a live ATTACH. */
   readonly resetInputModes: () => boolean
 }
 
@@ -300,6 +304,8 @@ export interface PtySession {
 export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
   readonly baseUrl: string
   readonly target: PtyTarget
+  readonly mode: PtyMode
+  /** The ATTACH size; a PEEK only watches the shared geometry. */
   readonly size: PtySize
   readonly onOutput: (output: PtyOutput) => void
   readonly fetch?: typeof fetch
@@ -319,8 +325,10 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
     current = ptyTransition({ state: current, event, ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }) })
     return SubscriptionRef.set(state, current)
   }
+  const attach = options.mode === 'attach'
+  // The server closes a PEEK socket on any frame but DETACH and STATUS.
   const write = (frame: PtyFrame) => {
-    if (!writable || current._tag !== 'Live' || liveSocket === undefined) return false
+    if ((!attach && frame._tag !== 'Detach') || !writable || current._tag !== 'Live' || liveSocket === undefined) return false
     try {
       liveSocket.send(encodePtyFrame(frame).buffer as ArrayBuffer)
       return true
@@ -360,7 +368,7 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
     socket.onopen = () => {
       if (ended || disposed) return
       try {
-        socket.send(encodePtyFrame({ _tag: 'Attach', ...size }).buffer as ArrayBuffer)
+        socket.send(encodePtyFrame(attach ? { _tag: 'Attach', ...size } : { _tag: 'Peek', plain: false, full: false }).buffer as ArrayBuffer)
         resizePending = false
         Queue.offerUnsafe(events, { _tag: 'SocketOpened' })
       } catch (cause) {
@@ -431,6 +439,7 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
     yield* transition({ _tag: 'Closed' })
   }))
   return {
+    mode: options.mode,
     state,
     send: (bytes: Uint8Array) => {
       for (let start = 0; start < bytes.length; start += ptyDataChunkBytes) {
@@ -439,6 +448,7 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
       return true
     },
     resize: (next: PtySize) => {
+      if (!attach) return
       size = next
       resizePending = !write({ _tag: 'Resize', ...next })
     },

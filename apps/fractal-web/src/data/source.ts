@@ -39,6 +39,9 @@ import type { AgentResourceSource } from '../resources/agent/source.ts'
 import type { SubjectEnvelope } from '../resources/envelope.ts'
 import type { TerminalHistoryFactory } from '../terminal/historySource.ts'
 import type { RawTerminalPort } from '../terminal/rawTerminalState.ts'
+import type { TerminalInputPortFactory } from '../terminal/orderedTerminalInput.ts'
+import type { TerminalResizePort } from '../terminal/terminal-resize-port.ts'
+import type { AgentControlPort } from '../agents/agent-control-port.ts'
 import type { DocumentPort } from '../documents/document-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
@@ -147,6 +150,10 @@ export interface ConversationPage {
 export interface Grants {
   readonly actions: 'granted' | 'ungranted'
   readonly messageSend: 'granted' | 'ungranted'
+  /** `terminal.input`: typing through the gateway's fenced `terminal.input` actions. */
+  readonly terminalInput: 'granted' | 'ungranted'
+  /** `terminal.control`: a raw PTY ATTACH that types on the socket and votes the shared size. */
+  readonly terminalControl: 'granted' | 'ungranted'
 }
 
 /** One gateway activity line (`at` is ISO-8601) for the events feed. */
@@ -271,12 +278,18 @@ export interface DataSource {
   readonly terminalInterest?: (terminalRef: string) => Atom.Atom<void>
   /** Explicit recovery for a retryable terminal failure; never retries a healthy or permanent feed. */
   readonly retryTerminal?: (terminalRef: string) => void
+  /** Restart, suspend, retire, start, resume or interrupt a seat (`agent.*`, Esc to its terminal). */
+  readonly agentControls?: AgentControlPort
   /** st documents by name or exact reference (`GET /v1/client/documents/content`). */
   readonly documents?: DocumentPort
+  /** Explicit geometry action; never tied to the browser pane dimensions. The raw ATTACH path resizes on the socket instead. */
+  readonly terminalResize?: TerminalResizePort
   /** Retained owner scrollback, with its own independently granted availability. */
   readonly terminalHistory?: TerminalHistoryFactory
-  /** Raw PTY stream (`st3.client.pty.v0`): interactive terminals; absent when the source has none. */
+  /** Raw PTY stream (`st3.client.pty.v0`): ATTACH with `terminal.control`, else view-only PEEK; absent when the source has none. */
   readonly terminalRaw?: RawTerminalPort
+  /** Ordered `terminal.input` sessions bound to one terminal incarnation: typing when raw ATTACH is not allowed. */
+  readonly terminalInput?: TerminalInputPortFactory
   /** Keyed by subject ref (PR, CI run, mission, pty …). */
   readonly envelope: (ref: string) => Atom.Atom<Feed<SubjectEnvelope>>
   /** Real graph observations, polled while visible until upstream adds resource subscriptions. */

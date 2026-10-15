@@ -109,6 +109,7 @@ export {
   encodePtyFrame,
   makePtyFrameReader,
   type PtyTarget,
+  type PtyMode,
   type PtySize,
   PtyAttachFailure,
   type PtyAttachment,

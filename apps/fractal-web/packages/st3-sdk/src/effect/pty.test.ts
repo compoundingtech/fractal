@@ -128,7 +128,8 @@ class Gateway {
   readonly sockets: { url: string; protocols: readonly string[]; socket: PtySocket; sent: ArrayBuffer[]; closes: (number | undefined)[] }[] = []
   readonly fetch: typeof fetch = async (url, init) => {
     this.requests.push({ url: String(url), init })
-    return Response.json({ api_version: 'st3.client.v0', snapshot: {}, value: { terminal_id: target.terminalId, runtime_incarnation: target.incarnation, owner_host_id: 'host/a', mode: 'attach', stream_capability: `cap-${this.requests.length}` } })
+    const { mode } = JSON.parse(String(init?.body)) as { readonly mode: string }
+    return Response.json({ api_version: 'st3.client.v0', snapshot: {}, value: { terminal_id: target.terminalId, runtime_incarnation: target.incarnation, owner_host_id: 'host/a', mode, stream_capability: `cap-${this.requests.length}` } })
   }
   readonly factory = (url: string, protocols: readonly string[]): PtySocket => {
     const sent: ArrayBuffer[] = []
@@ -145,7 +146,7 @@ it.live('speaks binary PTY, reconnects with a fresh grant, and detaches on scope
   const output: PtyOutput[] = []
   let session: PtySession | undefined
   yield* Effect.gen(function* () {
-    session = yield* openPtySession({ baseUrl: 'https://alpha.example/', target, size: { rows: 24, cols: 80 }, onOutput: frame => output.push(frame), fetch: gateway.fetch, socket: gateway.factory })
+    session = yield* openPtySession({ baseUrl: 'https://alpha.example/', target, mode: 'attach', size: { rows: 24, cols: 80 }, onOutput: frame => output.push(frame), fetch: gateway.fetch, socket: gateway.factory })
     yield* settle
     expect(gateway.requests[0]!.url).toBe('https://alpha.example/v1/client/terminals/a%2Fb/raw-attachments')
     expect(gateway.requests[0]!.init?.method).toBe('POST')
@@ -195,7 +196,7 @@ it.live('speaks binary PTY, reconnects with a fresh grant, and detaches on scope
 it.live('splits large input under the 64 KiB server message cap and flushes a resize made before the attach ack', () => Effect.gen(function* () {
   const gateway = new Gateway()
   yield* Effect.gen(function* () {
-    const session = yield* openPtySession({ baseUrl: 'https://alpha.example/', target, size: { rows: 24, cols: 80 }, onOutput: () => {}, fetch: gateway.fetch, socket: gateway.factory })
+    const session = yield* openPtySession({ baseUrl: 'https://alpha.example/', target, mode: 'attach', size: { rows: 24, cols: 80 }, onOutput: () => {}, fetch: gateway.fetch, socket: gateway.factory })
     yield* settle
     const socket = gateway.sockets[0]!
     expect(read(new Uint8Array(socket.sent[0]!))).toEqual([{ _tag: 'Attach', rows: 24, cols: 80 }])
@@ -228,6 +229,7 @@ it.live('settles a 404 attachment as failed so the projected screen takes over, 
     const session = yield* openPtySession({
       baseUrl: 'https://alpha.example',
       target,
+      mode: 'attach',
       size: { rows: 24, cols: 80 },
       onOutput: () => {},
       fetch: async url => {
@@ -255,9 +257,41 @@ it.effect('decodes attach failures and maps malformed envelopes and network erro
     [async () => Response.json({ value: {} }), false, 200],
     [async () => { throw new TypeError('offline') }, true, undefined],
   ] as const) {
-    const result = yield* Effect.result(requestPtyAttachment({ baseUrl: 'http://alpha.example', target, fetch: fetchImpl }))
+    const result = yield* Effect.result(requestPtyAttachment({ baseUrl: 'http://alpha.example', target, mode: 'attach', fetch: fetchImpl }))
     expect(Result.isFailure(result)).toBe(true)
     if (Result.isFailure(result)) { expect(result.failure.retryable).toBe(retryable); expect(result.failure.status).toBe(status) }
   }
-  expect(ptyStreamUrl({ baseUrl: 'http://alpha.example', target }).startsWith('ws://')).toBe(true)
+  expect(ptyStreamUrl({ baseUrl: 'http://alpha.example', target, mode: 'attach' }).startsWith('ws://')).toBe(true)
+  // A capability granted for the other mode is a protocol mismatch, not a usable stream.
+  const peekGrant = async () => Response.json({ api_version: 'st3.client.v0', snapshot: {}, value: { terminal_id: target.terminalId, runtime_incarnation: target.incarnation, owner_host_id: 'host/a', mode: 'peek', stream_capability: 'cap' } })
+  const mismatch = yield* Effect.result(requestPtyAttachment({ baseUrl: 'http://alpha.example', target, mode: 'attach', fetch: peekGrant }))
+  expect(Result.isFailure(mismatch) && mismatch.failure.retryable).toBe(false)
+}))
+
+it.live('a PEEK watches the same byte stream but never writes DATA, RESIZE or RESET, and still detaches', () => Effect.gen(function* () {
+  const gateway = new Gateway()
+  const output: PtyOutput[] = []
+  yield* Effect.gen(function* () {
+    const session = yield* openPtySession({ baseUrl: 'https://alpha.example/', target, mode: 'peek', size: { rows: 24, cols: 80 }, onOutput: frame => output.push(frame), fetch: gateway.fetch, socket: gateway.factory })
+    yield* settle
+    expect(session.mode).toBe('peek')
+    expect(JSON.parse(String(gateway.requests[0]!.init?.body))).toEqual({ runtime_incarnation: target.incarnation, mode: 'peek' })
+    const socket = gateway.sockets[0]!
+    expect(socket.url).toBe('wss://alpha.example/v1/client/terminals/a%2Fb/raw-stream?incarnation=runtime%2Fnew%20incarnation&mode=peek')
+    expect(socket.protocols).toEqual(['st3.client.pty.v0', 'st3.cap.cap-1'])
+    // The first frame is PEEK (live follow, no plain text, no full scrollback), never ATTACH.
+    expect(read(new Uint8Array(socket.sent[0]!))).toEqual([{ _tag: 'Peek', plain: false, full: false }])
+    const expected: PtyOutput[] = [{ _tag: 'Geometry', rows: 20, cols: 70 }, { _tag: 'Screen', bytes: Uint8Array.of(27, 99) }, { _tag: 'Data', bytes }]
+    socket.socket.onmessage?.({ data: concatenate(expected.map(encodePtyFrame)).buffer })
+    yield* settle
+    expect(output).toEqual(expected)
+    expect(yield* SubscriptionRef.get(session.state)).toEqual({ _tag: 'Live', rows: 20, cols: 70 })
+    expect(session.send(bytes)).toBe(false)
+    session.resize({ rows: 30, cols: 90 })
+    expect(session.resetInputModes()).toBe(false)
+    expect(socket.sent).toHaveLength(1)
+  }).pipe(Effect.scoped)
+  const socket = gateway.sockets[0]!
+  expect(read(new Uint8Array(socket.sent.at(-1)!))).toEqual([{ _tag: 'Detach' }])
+  expect(socket.closes).toContain(1000)
 }))

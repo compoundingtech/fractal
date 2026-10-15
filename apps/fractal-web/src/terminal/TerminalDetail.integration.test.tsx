@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { Agent, decodeUnknownSync, type TerminalScreen } from '@smalltalk/st3-client/schema'
-import type { PtyOutput, PtySession, PtySize, PtyState, PtyTarget } from '@st3/sdk/effect'
+import type { PtyMode, PtyOutput, PtySession, PtySize, PtyState, PtyTarget } from '@st3/sdk/effect'
 import { Effect, SubscriptionRef } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { readFile } from 'node:fs/promises'
@@ -12,9 +12,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
-import { observed, unavailable, waiting, type Feed } from '../data/source.ts'
+import { observed, unavailable, waiting, type Feed, type Grants } from '../data/source.ts'
+import { makeActionTerminalInput } from './actionTerminalInput.ts'
 import { makeScreen } from './fixtures.ts'
-import type { RawTerminalPort } from './rawTerminalState.ts'
+import type { TerminalInputPortFactory } from './orderedTerminalInput.ts'
+import { resizeSettleMillis, type RawTerminalPort } from './rawTerminalState.ts'
+import { rawInput, type TerminalInputWire } from './terminalInputWire.ts'
 import { TerminalDetail } from './TerminalDetail.tsx'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
@@ -30,9 +33,23 @@ let registry: AtomRegistry.AtomRegistry
 let root: Root
 let host: HTMLDivElement
 let frames: FrameRequestCallback[]
+/**
+ * Every ResizeObserver the pane creates. The viewport always follows its own geometry for scrolling;
+ * only a raw ATTACH turns an observed size into a RESIZE vote.
+ */
+let observers: Array<{ readonly callback: ResizeObserverCallback; readonly elements: Element[]; readonly self: ResizeObserver }>
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  observers = []
+  vi.stubGlobal('ResizeObserver', class {
+    readonly elements: Element[] = []
+    constructor(callback: ResizeObserverCallback) {
+      observers.push({ callback, elements: this.elements, self: this as unknown as ResizeObserver })
+    }
+    observe(element: Element) { this.elements.push(element) }
+    unobserve() {}
+    disconnect() { this.elements.length = 0 }
+  })
   frames = []
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback))
   vi.stubGlobal('cancelAnimationFrame', () => {})
@@ -53,14 +70,17 @@ afterEach(async () => {
 })
 const isFeed = (terminal: Feed<TerminalScreen> | Readonly<Record<string, Feed<TerminalScreen>>>): terminal is Feed<TerminalScreen> =>
   typeof terminal._tag === 'string'
-const mount = async ({ terminal, reachability = 'reachable', terminalRaw, at = ref }: {
+const mount = async ({ terminal, reachability = 'reachable', terminalRaw, terminalInput, grants, at = ref }: {
   readonly terminal: Feed<TerminalScreen> | Readonly<Record<string, Feed<TerminalScreen>>>
   readonly reachability?: 'reachable' | 'unreachable'
   readonly terminalRaw?: RawTerminalPort
+  readonly terminalInput?: TerminalInputPortFactory
+  readonly grants?: Grants
   readonly at?: `terminal/${string}`
 }) => {
-  const source = fixtureSource({ world: { now: 0, agents: [agent(reachability)], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } }, overrides: { terminal: isFeed(terminal) ? { [ref]: terminal } : terminal } })
-  await act(async () => root.render(<DataSourceProvider source={terminalRaw === undefined ? source : { ...source, terminalRaw }} registry={registry}><React.Suspense fallback={<p>suspended</p>}><TerminalDetail key={at} address={{ ref: at, presentation: 'detail' }} visibility="visible" /></React.Suspense></DataSourceProvider>))
+  const base = fixtureSource({ world: { now: 0, agents: [agent(reachability)], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } }, overrides: { terminal: isFeed(terminal) ? { [ref]: terminal } : terminal, ...(grants === undefined ? {} : { grants }) } })
+  const source = { ...base, ...(terminalRaw === undefined ? {} : { terminalRaw }), ...(terminalInput === undefined ? {} : { terminalInput }) }
+  await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><React.Suspense fallback={<p>suspended</p>}><TerminalDetail key={at} address={{ ref: at, presentation: 'detail' }} visibility="visible" /></React.Suspense></DataSourceProvider>))
 }
 const chip = () => host.querySelector('[data-terminal-mode]')
 const field = () => host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Terminal input"]')
@@ -70,6 +90,7 @@ const paint = () => act(async () => {
 
 interface FakeSession {
   readonly target: PtyTarget
+  readonly mode: PtyMode
   readonly size: PtySize
   readonly sent: string[]
   readonly resized: PtySize[]
@@ -83,12 +104,13 @@ const rawSessions = () => {
   const opened: FakeSession[] = []
   const decode = new TextDecoder()
   const port: RawTerminalPort = {
-    open: ({ target, size, onOutput }) =>
+    open: ({ target, mode, size, onOutput }) =>
       Effect.gen(function* () {
         const state = yield* SubscriptionRef.make<PtyState>({ _tag: 'Connecting', attempt: 1 })
         let current: PtyState = { _tag: 'Connecting', attempt: 1 }
         const entry: FakeSession = {
           target,
+          mode,
           size,
           sent: [],
           resized: [],
@@ -104,12 +126,15 @@ const rawSessions = () => {
           entry.closed = true
         }))
         const session: PtySession = {
+          mode,
           state,
           send: (bytes) => {
-            if (current._tag !== 'Live') return false
+            // As the SDK: a PEEK socket never carries DATA.
+            if (current._tag !== 'Live' || mode !== 'attach') return false
             entry.sent.push(decode.decode(bytes))
             return true
           },
+          // Record every call: the pane, not the SDK, must keep a PEEK from voting a size.
           resize: (next) => {
             entry.resized.push(next)
           },
@@ -120,6 +145,49 @@ const rawSessions = () => {
   }
   return { opened, port }
 }
+
+/** Gateway `terminal.input` sessions over the production ordered input; every write is delivered. */
+const gatewaySessions = () => {
+  const writes: TerminalInputWire[] = []
+  const bound: Array<{ readonly subject: string; readonly terminalRef: string; readonly incarnation: string }> = []
+  const factory: TerminalInputPortFactory = async ({ registry: sessionRegistry, ...binding }) => {
+    bound.push(binding)
+    return makeActionTerminalInput({
+      registry: sessionRegistry,
+      submit: async (wire) => {
+        writes.push(wire)
+        return { _tag: 'Delivered' }
+      },
+    })
+  }
+  return { writes, bound, factory }
+}
+const limitedPairing: Grants = { actions: 'granted', messageSend: 'ungranted', terminalInput: 'granted', terminalControl: 'ungranted' }
+const watchOnly: Grants = { actions: 'granted', messageSend: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }
+const press = (key: string, code: string, init: KeyboardEventInit = {}) =>
+  field()!.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key, code, ...init }))
+const resizeButton = () => [...host.querySelectorAll('button')].find((button) => button.getAttribute('aria-label') === 'Resize terminal')
+/**
+ * Lay the pane out at 800×400 px with an 8 px cell, notify every live ResizeObserver and let a
+ * pending RESIZE settle. Only an ATTACH may turn this into a vote.
+ */
+const rect = (width: number, height: number) => ({ x: 0, y: 0, top: 0, left: 0, right: width, bottom: height, width, height, toJSON: () => ({}) }) as DOMRect
+const relayout = async () => {
+  const measured = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(rect(80, 16))
+  try {
+    await act(async () => {
+      for (const { callback, elements, self } of observers)
+        if (elements.length > 0)
+          callback(elements.map((target) => ({ target, contentRect: rect(800, 400) }) as unknown as ResizeObserverEntry), self)
+      const settled = Promise.withResolvers<void>()
+      setTimeout(settled.resolve, resizeSettleMillis + 30)
+      await settled.promise
+    })
+  } finally {
+    measured.mockRestore()
+  }
+}
+const watching = () => observers.filter(({ elements }) => elements.length > 0).length
 
 /** Attach, go live and paint the server's SCREEN replay. */
 const live = async (session: FakeSession, text: string) => {
@@ -309,16 +377,36 @@ describe('raw terminal', () => {
     expect(session.sent).toEqual([])
   })
 
-  it('falls back to the read-only projected screen with a clear chip when ATTACH is refused', async () => {
+  it('reopens a refused ATTACH as a read-only PEEK when the device cannot type through the gateway either', async () => {
     const { opened, port } = rawSessions()
     await mount({ terminal: observed({ value: screen }), terminalRaw: port })
     await vi.waitFor(() => expect(opened).toHaveLength(1))
+    expect(opened[0]!.mode).toBe('attach')
+    await opened[0]!.go({ _tag: 'Refused', message: 'forbidden', status: 403, code: 'forbidden' })
+    await vi.waitFor(() => expect(opened).toHaveLength(2))
+    expect(opened[0]!.closed).toBe(true)
+    expect(opened[1]!.mode).toBe('peek')
+    await live(opened[1]!, 'peek prompt$ ')
+    expect(host.querySelector('[aria-roledescription="terminal"]')?.textContent).toContain('peek prompt$')
+    expect(chip()?.textContent).toBe('Read-only')
+    expect(chip()?.getAttribute('data-terminal-input-path')).toBe('ReadOnly')
+    expect(host.textContent).toContain('This gateway does not accept typing into this terminal.')
+    expect(field()).toBeNull()
+  })
+
+  it('shows the projected screen read-only when even the PEEK stream is refused', async () => {
+    const { opened, port } = rawSessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port, grants: watchOnly })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    expect(opened[0]!.mode).toBe('peek')
     await opened[0]!.go({ _tag: 'Refused', message: 'forbidden', status: 403, code: 'forbidden' })
     expect(chip()?.textContent).toBe('Read-only')
-    expect(chip()?.getAttribute('data-terminal-mode')).toBe('ReadOnly')
+    expect(chip()?.getAttribute('data-terminal-mode')).toBe('Projected')
     expect(host.textContent).toContain('This device may watch this terminal but not type into it.')
     expect(host.querySelector(`[aria-label="Terminal: ${screen.title}"]`)?.querySelectorAll('[data-terminal-row]')).toHaveLength(screen.lines.length)
     expect(field()).toBeNull()
+    // The PEEK never retries as an ATTACH.
+    expect(opened).toHaveLength(1)
   })
 
   it('detaches when the pane leaves and attaches the next terminal fresh', async () => {
@@ -332,5 +420,113 @@ describe('raw terminal', () => {
     expect(opened[0]!.closed).toBe(true)
     expect(opened[1]!.target).toEqual({ terminalId: otherScreen.terminal_id, incarnation: otherScreen.runtime_incarnation })
     expect(opened[1]!.sent).toEqual([])
+  })
+})
+
+describe('input capability', () => {
+  it('types on the raw ATTACH socket and votes the element size when the device holds terminal.control', async () => {
+    const { opened, port } = rawSessions()
+    const gateway = gatewaySessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port, terminalInput: gateway.factory })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    expect(opened[0]!.mode).toBe('attach')
+    await live(opened[0]!, '$ ')
+    expect(chip()?.getAttribute('data-terminal-input-path')).toBe('Attach')
+    await act(async () => field()!.focus())
+    await act(async () => press('l', 'KeyL'))
+    expect(opened[0]!.sent).toEqual(['l'])
+    expect(gateway.bound).toEqual([])
+    expect(gateway.writes).toEqual([])
+    // The element's size is this client's vote, settled into one RESIZE; there is no explicit resize control.
+    await relayout()
+    expect(opened[0]!.resized).toEqual([expect.objectContaining({ cols: 100 })])
+    expect(resizeButton()).toBeUndefined()
+  })
+
+  it('keeps gateway typing on the same surface over a PEEK stream for a limited pairing, with explicit resize only', async () => {
+    const { opened, port } = rawSessions()
+    const gateway = gatewaySessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port, terminalInput: gateway.factory, grants: limitedPairing })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    expect(opened[0]!.mode).toBe('peek')
+    await live(opened[0]!, 'peek prompt$ ')
+    expect(host.querySelector('[aria-roledescription="terminal"]')?.textContent).toContain('peek prompt$')
+    expect(chip()?.textContent).toBe('Click to type')
+    expect(chip()?.getAttribute('data-terminal-input-path')).toBe('Gateway')
+    expect(host.textContent).not.toContain('Enable input')
+    await act(async () => field()!.focus())
+    expect(chip()?.textContent).toBe('Typing')
+    await act(async () => {
+      press('l', 'KeyL')
+      press('c', 'KeyC', { ctrlKey: true })
+      press('Enter', 'Enter')
+    })
+    await vi.waitFor(() => expect(gateway.writes).toHaveLength(3))
+    expect(gateway.writes).toEqual([rawInput(utf8.encode('l')), { mode: 'key', value: 'ctrl+c' }, { mode: 'key', value: 'enter' }])
+    // One session, bound to the shown terminal and incarnation; nothing rode the PEEK socket.
+    expect(gateway.bound).toEqual([{ subject: ref, terminalRef: screen.terminal_id, incarnation: screen.runtime_incarnation }])
+    expect(opened[0]!.sent).toEqual([])
+    // The viewport still follows its own geometry, but only an ATTACH votes a size; the explicit resize stays.
+    expect(watching()).toBeGreaterThan(0)
+    await relayout()
+    expect(opened[0]!.resized).toEqual([])
+    expect(resizeButton()).toBeDefined()
+  })
+
+  it('moves typing to the gateway when a granted ATTACH is refused', async () => {
+    const { opened, port } = rawSessions()
+    const gateway = gatewaySessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port, terminalInput: gateway.factory })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    await opened[0]!.go({ _tag: 'Refused', message: 'forbidden', status: 403, code: 'forbidden' })
+    await vi.waitFor(() => expect(opened).toHaveLength(2))
+    expect(opened[1]!.mode).toBe('peek')
+    await live(opened[1]!, '$ ')
+    expect(chip()?.getAttribute('data-terminal-input-path')).toBe('Gateway')
+    await act(async () => field()!.focus())
+    await act(async () => press('l', 'KeyL'))
+    await vi.waitFor(() => expect(gateway.writes).toEqual([rawInput(utf8.encode('l'))]))
+    expect(opened.flatMap((session) => session.sent)).toEqual([])
+    // The fallback PEEK never inherits the ATTACH's size vote.
+    await relayout()
+    expect(opened[1]!.resized).toEqual([])
+    expect(resizeButton()).toBeDefined()
+  })
+
+  it('types through the gateway on the projected screen when the source has no raw stream', async () => {
+    const gateway = gatewaySessions()
+    await mount({ terminal: observed({ value: screen }), terminalInput: gateway.factory, grants: limitedPairing })
+    await vi.waitFor(() => expect(field()).not.toBeNull())
+    expect(chip()?.getAttribute('data-terminal-mode')).toBe('Projected')
+    expect(chip()?.textContent).toBe('Click to type')
+    await act(async () => host.querySelector<HTMLElement>('[aria-roledescription="terminal"]')!.focus())
+    expect(document.activeElement).toBe(field())
+    await act(async () => press('Enter', 'Enter'))
+    await vi.waitFor(() => expect(gateway.writes).toEqual([{ mode: 'key', value: 'enter' }]))
+    expect(resizeButton()).toBeDefined()
+  })
+
+  it('is read-only on the PEEK stream without a typing grant: no input field, and keys go nowhere', async () => {
+    const { opened, port } = rawSessions()
+    const gateway = gatewaySessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port, terminalInput: gateway.factory, grants: watchOnly })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    expect(opened[0]!.mode).toBe('peek')
+    await live(opened[0]!, '$ ')
+    expect(chip()?.textContent).toBe('Read-only')
+    expect(host.textContent).toContain('This device may watch this terminal but not type into it.')
+    expect(field()).toBeNull()
+    const grid = host.querySelector<HTMLElement>('[aria-roledescription="terminal"]')!
+    await act(async () => {
+      grid.focus()
+      grid.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'l', code: 'KeyL' }))
+    })
+    expect(document.activeElement).toBe(grid)
+    expect(opened[0]!.sent).toEqual([])
+    expect(gateway.bound).toEqual([])
+    expect(gateway.writes).toEqual([])
+    expect(watching()).toBeGreaterThan(0)
+    await relayout()
+    expect(opened[0]!.resized).toEqual([])
   })
 })

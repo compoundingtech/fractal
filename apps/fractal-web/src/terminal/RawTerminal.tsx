@@ -1,12 +1,13 @@
 /**
- * The interactive terminal: a native Ghostty VT emulator (WASM) fed byte-exact from the raw PTY
- * socket, painted through the DOM renderer so selection, copy, find and screen readers keep
- * reading real text. Keys and pastes leave as DATA frames on the same socket.
+ * The terminal surface: a native Ghostty VT emulator (WASM) fed byte-exact from the raw PTY
+ * socket (or the projected screen), painted through the DOM renderer so selection, copy, find and
+ * screen readers keep reading real text. Focus it and type: keys and pastes go to one typing sink,
+ * DATA frames on a raw ATTACH socket or the gateway's `terminal.input` actions.
  */
 
 import { useAtomValue } from '@effect/atom-react'
-import type { TerminalScreen } from '@smalltalk/st3-client/schema'
-import type { PtyOutput, PtySession, PtySize, PtyState, PtyTarget } from '@st3/sdk/effect'
+import type { TerminalModes, TerminalScreen } from '@smalltalk/st3-client/schema'
+import type { PtyMode, PtyOutput, PtySession, PtySize, PtyState, PtyTarget } from '@st3/sdk/effect'
 import * as stylex from '@stylexjs/stylex'
 import { Cause, Effect, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as AsyncResult from 'effect/reactivity/AsyncResult'
@@ -144,17 +145,21 @@ export interface RawTerminal {
 
 /**
  * Own one raw session for `target` while `active`. The atom's scope owns the emulator, encoder and
- * socket; leaving, hiding or retargeting the pane closes it (DETACH) and nothing is replayed.
+ * socket; leaving, hiding, retargeting the pane or changing the mode closes it (DETACH) and nothing
+ * is replayed.
  */
 export const useRawTerminal = ({
   port,
   target,
+  mode,
   active,
   size,
   title,
 }: {
   readonly port: RawTerminalPort | undefined
   readonly target: PtyTarget | undefined
+  /** ATTACH types and votes the size; PEEK only watches. */
+  readonly mode: PtyMode
   readonly active: boolean
   /** The attach size: the current shared geometry until the element is measured. */
   readonly size: PtySize
@@ -191,7 +196,7 @@ export const useRawTerminal = ({
         )
         const view = makeRawView({ terminal, meta: { terminalId, incarnation, fallbackTitle: title } })
         yield* Effect.addFinalizer(() => Effect.sync(view.dispose))
-        const session = yield* port.open({ target: { terminalId, incarnation }, size, onOutput: view.output })
+        const session = yield* port.open({ target: { terminalId, incarnation }, mode, size, onOutput: view.output })
         yield* SubscriptionRef.changes(session.state).pipe(
           Stream.runForEach((state) => Effect.sync(() => view.state(state))),
           Effect.forkScoped,
@@ -199,7 +204,7 @@ export const useRawTerminal = ({
         return { session, encoder, terminal, view } satisfies RawTerminalHandle
       }),
     ).pipe(Atom.setIdleTTL(0))
-  }, [port, terminalId, incarnation, active])
+  }, [port, terminalId, incarnation, mode, active])
   const result = useAtomValue(resource)
   const handle = AsyncResult.isSuccess(result) ? result.value : undefined
   const subscribe = React.useMemo(() => handle?.view.subscribe ?? unsubscribed, [handle])
@@ -231,26 +236,56 @@ const selectionInside = (element: HTMLElement | null) => {
   )
 }
 
-/** Props of the interactive surface. */
-export interface RawTerminalSurfaceProps {
-  readonly handle: RawTerminalHandle
+/** Where typed bytes go and how they are encoded; absent on a read-only pane. */
+export interface TerminalTyping {
+  readonly encoder: TerminalKeyEncoder
+  /** The modes keys and pastes are encoded under, read at each key. */
+  readonly modes: () => TerminalModes
+  /** Hand bytes to the terminal; returns a notice when nothing was sent. Nothing is queued for a retry. */
+  readonly send: (bytes: Uint8Array) => string | undefined
+  /** The explicit gesture that starts typing: focusing or clicking the terminal. */
+  readonly arm: () => void
+  /** What the sink reports on its own, e.g. a refused delivery that ended its session. */
+  readonly notice: string | undefined
+}
+
+const notConnected = 'The terminal is not connected. Nothing was sent, and keys are never replayed.'
+
+/** Typing over a raw ATTACH: DATA frames on the same socket, encoded under the emulator's modes. */
+export const rawTyping = (handle: RawTerminalHandle): TerminalTyping => ({
+  encoder: handle.encoder,
+  modes: () => handle.terminal.modes(),
+  send: (bytes) => (handle.session.send(bytes) ? undefined : notConnected),
+  arm: () => {},
+  notice: undefined,
+})
+
+/** Props of the terminal surface. */
+export interface TerminalSurfaceProps {
   readonly screen: TerminalScreen
   readonly palette: TerminalPalette
+  /** Absent when nothing typed may reach the terminal. */
+  readonly typing: TerminalTyping | undefined
+  /** Keys are accepted now: a live ATTACH, or a live screen behind a gateway input session. */
   readonly live: boolean
   /** Whether keystrokes currently go to the terminal (the input at the cursor has focus). */
   readonly onTypingChange: (typing: boolean) => void
+  /** The element's grid is this client's size vote. Only a raw ATTACH passes it. */
+  readonly resize?: ((size: PtySize) => void) | undefined
+  /** Scroll the emulator's viewport; absent on the projected screen. */
+  readonly scroll?: ((delta: number | 'bottom') => void) | undefined
   /** Browser KeyboardLayoutMap, when available. */
   readonly layout?: ReadonlyMap<string, string>
 }
 
 /** Fonts must be ready before the cell is measured, or the first RESIZE carries a wrong grid. */
-export const RawTerminalSurface = (props: RawTerminalSurfaceProps) => (
+export const TerminalSurface = (props: TerminalSurfaceProps) => (
   <React.Suspense fallback={<p role="status">Loading terminal fonts…</p>}>
     <LoadedSurface {...props} />
   </React.Suspense>
 )
 
-const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }: RawTerminalSurfaceProps) => {
+const LoadedSurface = ({ screen, palette, typing, live, onTypingChange, resize, scroll, layout }: TerminalSurfaceProps) => {
   React.use(terminalFontsReady())
   const id = React.useId()
   const gate = React.useMemo(makeCompositionGate, [])
@@ -266,15 +301,11 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
   const [notice, setNotice] = React.useState<string | undefined>(undefined)
   // A large paste waits here, already encoded for the modes it was pasted under.
   const [heldPaste, setHeldPaste] = React.useState<Uint8Array | undefined>(undefined)
-  const { session, encoder, terminal, view } = handle
   const send = (bytes: Uint8Array) => {
-    if (bytes.length === 0) return
-    if (!session.send(bytes)) {
-      setNotice('The terminal is not connected. Nothing was sent, and keys are never replayed.')
-      return
-    }
-    setNotice(undefined)
-    view.scroll('bottom')
+    if (bytes.length === 0 || typing === undefined) return
+    const refused = typing.send(bytes)
+    setNotice(refused)
+    if (refused === undefined) scroll?.('bottom')
   }
   const admit = (admission: TerminalAdmission) => {
     if (admission._tag === 'Send') send(admission.bytes)
@@ -304,11 +335,12 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
     })
   // React's onBeforeInput is synthesized from other events; the native event carries inputType.
   const beforeInput = React.useEffectEvent((event: InputEvent) => {
+    if (typing === undefined) return
     const decision = gate.beforeInput({ inputType: event.inputType, data: event.data, isComposing: event.isComposing })
     if (decision._tag === 'Pass') return
     event.preventDefault()
     if (decision._tag === 'Drop') setNotice('Dropped text is not sent to the terminal. Paste it instead.')
-    else if (decision.text !== undefined) admit(admitText({ encoder, text: decision.text, modes: terminal.modes() }))
+    else if (decision.text !== undefined) admit(admitText({ encoder: typing.encoder, text: decision.text, modes: typing.modes() }))
   })
   // Unmounting a focused field fires no blur; the pane must not keep saying "Typing".
   const released = React.useEffectEvent(() => onTypingChange(false))
@@ -323,40 +355,46 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
       released()
     }
   }, [])
-  // The PTY follows the element: measure the viewport's content box against the font's cell and
+  // An ATTACH follows the element: measure the viewport's content box against the font's cell and
   // send one debounced RESIZE per settled size. The server applies the smallest writable size.
   const measureRef = React.useCallback(
     (node: HTMLDivElement | null) => {
       surface.current = node
       const viewport = node?.parentElement
-      if (node === null || viewport === null || viewport === undefined) return
-      const debouncer = makeResizeDebouncer({ send: session.resize })
-      const observer = new ResizeObserver(([entry]) => {
-        const cellWidth = (probe.current?.getBoundingClientRect().width ?? 0) / 10
-        if (entry === undefined) return
-        const size = gridFor({
-          width: entry.contentRect.width,
-          height: entry.contentRect.height,
-          cellWidth,
-          cellHeight: TERMINAL_LINE_HEIGHT,
-        })
-        if (size !== undefined) debouncer.observe(size)
-      })
-      observer.observe(viewport)
+      if (node === null) return
+      const observed =
+        resize === undefined || viewport === null || viewport === undefined
+          ? undefined
+          : (() => {
+              const debouncer = makeResizeDebouncer({ send: resize })
+              const observer = new ResizeObserver(([entry]) => {
+                const cellWidth = (probe.current?.getBoundingClientRect().width ?? 0) / 10
+                if (entry === undefined) return
+                const size = gridFor({
+                  width: entry.contentRect.width,
+                  height: entry.contentRect.height,
+                  cellWidth,
+                  cellHeight: TERMINAL_LINE_HEIGHT,
+                })
+                if (size !== undefined) debouncer.observe(size)
+              })
+              observer.observe(viewport)
+              return { observer, debouncer }
+            })()
       return () => {
-        observer.disconnect()
-        debouncer.dispose()
+        observed?.observer.disconnect()
+        observed?.debouncer.dispose()
         pointerRelease.current?.abort()
         surface.current = null
       }
     },
-    [session],
+    [resize],
   )
   const cursor = screen.cursor
   return (
     <div
       ref={measureRef}
-      data-terminal-input={live ? 'live' : 'paused'}
+      data-terminal-input={typing === undefined ? 'read-only' : live ? 'live' : 'paused'}
       {...stylex.props(styles.surface)}
       onFocus={(event) => {
         // Keyboard-first typing: a grid focused while live hands focus to the cursor field at once,
@@ -388,32 +426,36 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
           leaving.current = false
           return
         }
-        if (route !== 'encode') return
+        if (route !== 'encode' || typing === undefined) return
         gate.key()
         event.preventDefault()
-        send(encoder.key({ event: browserTerminalKey(event.nativeEvent, 'press', layout), modes: terminal.modes() }))
+        send(typing.encoder.key({ event: browserTerminalKey(event.nativeEvent, 'press', layout), modes: typing.modes() }))
         if (document.activeElement !== field.current) field.current?.focus({ preventScroll: true })
       }}
       onKeyUp={(event) => {
-        if (keyRoute(event) !== 'encode') return
-        send(encoder.key({ event: browserTerminalKey(event.nativeEvent, 'release', layout), modes: terminal.modes() }))
+        if (typing === undefined || keyRoute(event) !== 'encode') return
+        send(typing.encoder.key({ event: browserTerminalKey(event.nativeEvent, 'release', layout), modes: typing.modes() }))
       }}
       onPaste={(event) => {
-        if (gate.composing()) return
+        if (typing === undefined || gate.composing()) return
         event.preventDefault()
-        admit(admitPaste({ encoder, text: event.clipboardData.getData('text/plain'), modes: terminal.modes() }))
+        admit(admitPaste({ encoder: typing.encoder, text: event.clipboardData.getData('text/plain'), modes: typing.modes() }))
       }}
       onMouseUp={() => {
         // The window listener has already cleared the press.
         // A drag leaves a selection to copy; a plain click starts typing at the cursor.
-        if (!selectionInside(surface.current)) field.current?.focus({ preventScroll: true })
+        if (typing === undefined || selectionInside(surface.current)) return
+        field.current?.focus({ preventScroll: true })
+        // A click on an already focused field is still the explicit gesture that resumes typing.
+        if (live) typing.arm()
       }}
       onWheel={(event) => {
+        if (scroll === undefined) return
         wheel.current += event.deltaMode === 1 ? event.deltaY : event.deltaY / TERMINAL_LINE_HEIGHT
         const lines = Math.trunc(wheel.current)
         if (lines === 0) return
         wheel.current -= lines
-        view.scroll(lines)
+        scroll(lines)
       }}
     >
       <span
@@ -427,49 +469,56 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
         palette={palette}
         describedBy={`${id}-help`}
         overlay={
-          <textarea
-            ref={fieldRef}
-            aria-label="Terminal input"
-            aria-describedby={`${id}-help`}
-            tabIndex={-1}
-            rows={1}
-            autoCapitalize="off"
-            autoComplete="off"
-            autoCorrect="off"
-            spellCheck={false}
-            {...stylex.props(styles.field, composing && styles.composing)}
-            style={{
-              top: cursor.row * TERMINAL_LINE_HEIGHT,
-              left: `${cursor.column}ch`,
-              width: composing ? `${Math.max(1, screen.columns - cursor.column)}ch` : '1ch',
-              fontFamily: TERMINAL_FONT_FAMILY,
-              color: palette.foreground,
-              backgroundColor: composing ? palette.background : 'transparent',
-            }}
-            onFocus={() => onTypingChange(true)}
-            onBlur={() => onTypingChange(false)}
-            onCompositionStart={() => {
-              gate.start()
-              setComposing(true)
-            }}
-            onCompositionEnd={(event) => {
-              setComposing(false)
-              const text = gate.end(event.data)
-              event.currentTarget.value = ''
-              if (text !== undefined) admit(admitText({ encoder, text, modes: terminal.modes() }))
-            }}
-            onInput={(event) => {
-              if (!gate.composing()) event.currentTarget.value = ''
-            }}
-          />
+          typing === undefined ? undefined : (
+            <textarea
+              ref={fieldRef}
+              aria-label="Terminal input"
+              aria-describedby={`${id}-help`}
+              tabIndex={-1}
+              rows={1}
+              autoCapitalize="off"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+              {...stylex.props(styles.field, composing && styles.composing)}
+              style={{
+                top: cursor.row * TERMINAL_LINE_HEIGHT,
+                left: `${cursor.column}ch`,
+                width: composing ? `${Math.max(1, screen.columns - cursor.column)}ch` : '1ch',
+                fontFamily: TERMINAL_FONT_FAMILY,
+                color: palette.foreground,
+                backgroundColor: composing ? palette.background : 'transparent',
+              }}
+              onFocus={() => {
+                onTypingChange(true)
+                if (live) typing.arm()
+              }}
+              onBlur={() => onTypingChange(false)}
+              onCompositionStart={() => {
+                gate.start()
+                setComposing(true)
+              }}
+              onCompositionEnd={(event) => {
+                setComposing(false)
+                const text = gate.end(event.data)
+                event.currentTarget.value = ''
+                if (text !== undefined) admit(admitText({ encoder: typing.encoder, text, modes: typing.modes() }))
+              }}
+              onInput={(event) => {
+                if (!gate.composing()) event.currentTarget.value = ''
+              }}
+            />
+          )
         }
       />
       <p id={`${id}-help`} {...stylex.props(styles.help)}>
-        Click the terminal or start typing to send keys. Ctrl-\ returns focus to the page; Tab then moves on.
+        {typing === undefined
+          ? 'Read-only: keys are not sent to this terminal. Select text to copy it.'
+          : 'Click the terminal or start typing to send keys. Ctrl-\\ returns focus to the page; Tab then moves on.'}
       </p>
-      {notice !== undefined && (
+      {(notice ?? typing?.notice) !== undefined && (
         <p role="alert" {...stylex.props(styles.notice)}>
-          {notice}
+          {notice ?? typing?.notice}
         </p>
       )}
       <Modal
