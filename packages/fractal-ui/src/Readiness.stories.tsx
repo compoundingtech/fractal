@@ -1,15 +1,18 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, within } from 'storybook/test'
 
+interface ReadinessArgs { pauseAtMidpoint?: boolean }
+type Story = StoryObj<ReadinessArgs>
+
 const meta = {
   title: 'Fractal UI/Readiness controls',
   args: { pauseAtMidpoint: false },
   render: () => <main style={{ background: '#fff', color: '#000', padding: 24 }}><p data-testid="finite-fade">Finite fade must reach its endpoint before accessibility checks.</p></main>,
-} satisfies Meta<{ pauseAtMidpoint: boolean }>
+} satisfies Meta<ReadinessArgs>
 export default meta
 
 /** Exercises the actual Storybook completing → addon-a11y → storyFinished path. */
-export const FiniteFade: StoryObj<typeof meta> = {
+export const FiniteFade: Story = {
   play: async ({ canvasElement, args }) => {
     const target = within(canvasElement).getByTestId('finite-fade')
     const animation = target.animate([{ opacity: 0, color: '#fff' }, { opacity: 1, color: '#000' }], { duration: 3000, fill: 'forwards' })
@@ -26,7 +29,7 @@ export const FiniteFade: StoryObj<typeof meta> = {
   },
 }
 
-export const CssTransition: StoryObj<typeof meta> = {
+export const CssTransition: Story = {
   play: async ({ canvasElement }) => {
     const target = within(canvasElement).getByTestId('finite-fade')
     target.style.opacity = '0'
@@ -46,7 +49,7 @@ export const CssTransition: StoryObj<typeof meta> = {
   },
 }
 
-function cssKeyframes(fill: 'none' | 'backwards'): StoryObj<typeof meta> {
+function cssKeyframes(fill: 'none' | 'backwards'): Story {
   return {
     play: async ({ canvasElement }) => {
       const target = within(canvasElement).getByTestId('finite-fade')
@@ -70,7 +73,7 @@ function cssKeyframes(fill: 'none' | 'backwards'): StoryObj<typeof meta> {
 export const CssKeyframesNone = cssKeyframes('none')
 export const CssKeyframesBackwards = cssKeyframes('backwards')
 
-export const FinishChain: StoryObj<typeof meta> = {
+export const FinishChain: Story = {
   play: async ({ canvasElement }) => {
     const target = within(canvasElement).getByTestId('finite-fade')
     const first = target.animate([{ opacity: 0 }, { opacity: 0.4 }], { duration: 1500, fill: 'forwards' })
