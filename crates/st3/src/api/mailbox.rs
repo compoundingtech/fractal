@@ -3069,6 +3069,7 @@ mod tests {
         source.bind_fleet(FLEET).unwrap();
         crate::mailbox::tests::ready(&source, "session-1");
         let request = || ReplicationReceiveRequest {
+            carrier: Default::default(),
             peer: "source".into(),
             fleet_id: FLEET.into(),
             exchange: source

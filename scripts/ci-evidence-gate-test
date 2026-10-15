@@ -1271,17 +1271,20 @@ class WorkflowStructure(unittest.TestCase):
         self.assertEqual(sorted(n for n in names if n.startswith('evidence-gate-')),
                          sorted(f'evidence-gate-{c}' for c in CHECKS))
 
-    def test_the_aggregate_note_job_never_runs_for_a_pull_request(self):
+    def test_the_aggregate_note_job_signs_only_for_the_queue_main_and_pull_requests_of_this_repository(self):
         text = (ROOT / '.github/workflows/fleet.yml').read_text()
         job = re.search(r'^  evidence-note-linux-gate:\n((?:    .*\n|\n)+)', text, re.M).group(1)
         condition = re.search(r'^    if: (.*)$', job, re.M).group(1)
-        # Other conjuncts (the draft filter) may be added around it; this one must stay whole, and nothing
-        # may offer a pull request an alternative way in.
+        # Other conjuncts (the draft filter) may be added around it; this one must stay whole. A pull request gets the
+        # key only from this repository (unit A3); a fork, whose head repository differs, never does.
         self.assertIn("(always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && "
-                      "github.ref == 'refs/heads/main')))", condition)
-        self.assertNotIn("github.event_name == 'pull_request'", condition)
+                      "github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && "
+                      "github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && "
+                      "github.event.pull_request.head.repo.full_name == github.repository)))", condition)
+        self.assertEqual(condition.count("github.event_name == 'pull_request'"), 1)
+        self.assertEqual(condition.count('head.repo.full_name == github.repository'), 1)
         self.assertNotIn('true', condition)
-        self.assertEqual(condition.count('||'), 1 + condition.count("github.event_name != 'pull_request' ||"))
+        self.assertEqual(condition.count('||'), 3 + condition.count("github.event_name != 'pull_request' ||"))
 
     def test_every_evidence_test_script_runs_in_the_required_genie_freshness_check(self):
         listed = (ROOT / 'scripts/ci-genie-freshness').read_text()
