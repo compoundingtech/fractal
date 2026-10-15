@@ -2945,6 +2945,8 @@ async fn authority_guard_error_or_changed_digest_still_opens_the_push_connection
         let wake = watch::channel(0).0;
         let worker = tokio::spawn(dial_peer(backend.clone(), "alder".into(), "birch".into(),
             routes, auth, context, wake.subscribe()));
+        // A real local wake requests a push; startup itself deliberately does not.
+        wake.send_modify(|generation| *generation += 1);
         tokio::time::timeout(Duration::from_secs(5), async {
             while backend.guard_calls.load(Ordering::Relaxed) == 0 { tokio::task::yield_now().await; }
         }).await.expect("the real worker did not reach its recent-inbound guard");
