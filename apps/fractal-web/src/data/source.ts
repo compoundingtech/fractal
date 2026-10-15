@@ -118,6 +118,9 @@ export interface Agent {
   readonly state?: string
   readonly description?: string
   readonly usage: Known<UsageSummary>
+  readonly incarnationId?: string
+  /** Only occupancy newer than a retained incarnation transition may claim current context. */
+  readonly contextObservedAfter?: number
   /** Requested checkout, not confirmation of a successful checkout. */
   readonly checkout: Known<AgentCheckout>
   readonly workspace: Known<string>

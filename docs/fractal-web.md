@@ -141,6 +141,10 @@ duration. This comparison never uses the client's display clock. Rejected/earlie
 starts are remembered per source, agent, session and incarnation across Details mounts;
 an earlier corrected start or a distinct incarnation can establish duration. Unknown
 duration values expose the actual guard reason rather than a fabricated age.
+The source retains a context-observation fence across an incarnation transition, even
+when the new row omits occupancy. Context, model and compaction claims remain unknown
+until a strictly newer occupancy observation arrives; cumulative token totals alone
+cannot restore them.
 Elapsed and age each stay pending until the session first read settles. A shared
 timing guard reason appears once, without duplicating it beneath both values.
 
