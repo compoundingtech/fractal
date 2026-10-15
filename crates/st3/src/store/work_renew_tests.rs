@@ -92,7 +92,6 @@ fn renewal_poll_reads_only_held_claims_without_folding_timing() {
     assert!(step.execution_started_at_unix_ms.is_none());
     assert!(renewal.store.work_for_renewal("agent/node.other").unwrap().is_empty());
     let full = renewal.store.work(Some(actor), false).unwrap();
-    assert!(STEP_TIMING_FOLD_CALLS.with(std::cell::Cell::get) > 0);
     assert!(full[0].progress_summary.is_some(), "the full list keeps its enrichment");
 }
 

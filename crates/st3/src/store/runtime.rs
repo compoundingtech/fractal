@@ -142,6 +142,7 @@ impl SmalltalkRuntime {
         stop_deferral::create_schema(connection)?;
         publication_facts::create_schema(connection)?;
         glass_heads::create_schema(connection)?;
+        step_clock_projection::create_schema(connection)?;
         directive_notes::create_schema(connection)?;
         limits::create_limits_schema(connection)?;
         if let Some(transaction) = transaction {
@@ -296,6 +297,7 @@ impl Runtime for SmalltalkRuntime {
         if shared_memory {
             rebuild_operations_tx(transaction)?;
             rebuild_planning_tx(transaction)?;
+            step_clock_projection::open(transaction)?;
             return Ok(());
         }
         let upgraded: bool = transaction.query_row(
@@ -326,6 +328,7 @@ impl Runtime for SmalltalkRuntime {
             let _ = rebuilt;
         }
         migrate_occurrence_creation_projections_tx(transaction)?;
+        step_clock_projection::open(transaction)?;
         Ok(())
     }
 
@@ -407,6 +410,7 @@ impl Runtime for SmalltalkRuntime {
         custom::flush(transaction).map_err(internal)?;
         resources::flush(transaction).map_err(internal)?;
         glass_heads::flush(transaction).map_err(internal)?;
+        step_clock_projection::flush(transaction).map_err(internal)?;
         directive_notes::flush(transaction).map_err(internal)?;
         agent_messages::flush(transaction).map_err(internal)?;
         limits::flush_limits(transaction).map_err(internal)?;

@@ -207,6 +207,8 @@ order from the same admitted claims.
 | `local_resource_projection_pending` | Local projection work queue | Resource subjects whose admitted observations changed in the current transaction; flushed before commit |
 | `local_seat_accounts` | Local operational fact | The account chosen for each pooled seat on this node; retained across restarts, never replicated |
 | `local_subscription_mission_deferrals` | Local | Local reconciler capacity backoff/retry scheduling. |
+| `local_step_clocks` | Local derived state | Rebuildable current-attempt raw execution/wait accumulators and canonical frontiers. Snapshot reads never settle time into these rows; historical or unflushed reads use the claim fold. Excluded from shared digests and replication. |
+| `local_step_clock_pending`, `local_step_clock_dirty` | Local projection work queues | Newly admitted timing claims and subjects invalidated by canonical metadata, body, attempt or retained-history changes. Local append and replication projection flush these queues transactionally. |
 | `local_stop_deferral_backfill` | Local cache | Trigger-maintained claim ids, subjects and recovered-failure references of retained-stop diagnostics, faults and recoveries, plus the ceiling and completion of the one-time copy of older claims. Rebuildable from claims; never replicated; excluded from shared projection digests. |
 | `local_usage_provenance` | Local | Pricing contributions for the local spend slots. |
 | `local_usage_responses` | Local | Counted provider response IDs and times; deduplicates replay across harness incarnations. |
@@ -257,6 +259,10 @@ The resource observation projection is backfilled once on the first open with it
 version and rebuilt from admitted claims during graph replay. Updates, out-of-order replication,
 repair, and retained-claim deletion refresh only affected resource subjects. Neither the
 projection nor its pending-subject queue is independent authority.
+The current step-clock projection similarly rebuilds once on upgrade and during explicit
+replay. Normal in-order timing claims apply one new event; a late canonical insertion or
+source correction rebuilds only its step. The projection preserves the exact retained
+claim fold and does not change checkpoint retention or shared authority.
 
 Replication receipt decodes the wire's base64 representation and stores an envelope before
 admission interprets its CBOR payload. Malformed base64 remains exact TEXT evidence for admission.

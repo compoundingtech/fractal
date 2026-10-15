@@ -48,6 +48,22 @@ default work list remains fully enriched. Performance tasks distinguish `work/re
 from `work/list`; native diagnostics, timeline binding, wait interruption and subagent
 attribution have fixed caller labels too. Labels are never actor-derived.
 
+Current-attempt execution clocks use a transactionally maintained raw accumulator, so
+renewals do not make each current read replay more history. Reads settle elapsed and
+declared wait time at the requested snapshot without changing the stored accumulator.
+An older attempt, a snapshot before the canonical frontier, or pending/invalidated
+source changes uses the reference history fold. Late claims and canonical metadata,
+body or retained-history changes refold only the affected step. Quiet local lease
+renewals remain separate from the claim-recorded timing lease.
+
+`st3_work_clock_operations_total` counts fixed `operation`/`reason` pairs: `read` with
+`hit`, `pending`, `missing`, `historical-attempt` or `historical-snapshot`; `refold` with
+`invalidated`, `missing`, `attempt` or `backwards`; `fold/reference`; and `apply/in-order`.
+`st3_work_clock_events_total` counts events visited by reference folds and incremental
+applications. Refolds also invoke the reference event reader, so refold and fold call
+counts overlap; do not sum them as separate history passes. These monotonically
+increasing counters reset on process restart and are exported when metrics are enabled.
+
 ```sh
 st doctor
 st doctor --performance

@@ -579,6 +579,31 @@ pub fn extract_remote_context(headers: &axum::http::HeaderMap) -> opentelemetry:
 
 static HTTP_DURATION: OnceLock<opentelemetry::metrics::Histogram<f64>> = OnceLock::new();
 
+static STEP_CLOCK: std::sync::LazyLock<(opentelemetry::metrics::Counter<u64>, opentelemetry::metrics::Counter<u64>)> = std::sync::LazyLock::new(|| {
+    let meter = opentelemetry::global::meter("st3.work");
+    (
+        meter.u64_counter("st3_work_clock_operations_total")
+            .with_description("Step clock reads, reference folds, refolds and incremental applications by fixed reason")
+            .build(),
+        meter.u64_counter("st3_work_clock_events_total")
+            .with_description("Timing events visited by reference folds or incremental applications")
+            .build(),
+    )
+});
+
+/// Bounded operation/reason labels only: never step, attempt, actor or claim identities.
+pub(crate) fn record_step_clock(operation: &'static str, reason: &'static str, events: u64) {
+    if !metrics_enabled() {
+        return;
+    }
+    let (calls, folded) = &*STEP_CLOCK;
+    let labels = [KeyValue::new("operation", operation), KeyValue::new("reason", reason)];
+    calls.add(1, &labels);
+    if events != 0 {
+        folded.add(events, &labels);
+    }
+}
+
 /// The five status classes the request-duration histogram labels; 101 WebSocket upgrades
 /// count as `1xx`.
 fn status_class(status: axum::http::StatusCode) -> &'static str {

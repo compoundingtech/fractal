@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Maintain current step execution clocks instead of replaying retained timing history on work reads",
+  "replay": { "status": "changed", "detail": "A local current-attempt clock projection is rebuilt from canonical timing claims once on upgrade and on explicit replay. Ordinary in-order timing claims update its raw accumulator transactionally. Late claims, canonical metadata corrections, body repairs, deletions and attempt changes refold the affected step. Replication admission marks pending source changes; projection completion flushes the same maintenance path. Pending reads, older snapshots and historical attempts use the reference fold." },
+  "schema": { "status": "changed", "detail": "Adds local_step_clocks, local_step_clock_pending and local_step_clock_dirty, with an indexed pending-subject queue and source invalidation triggers. These rebuildable local tables are excluded from shared authority digests and replication." },
+  "rules": { "status": "none", "detail": "Canonical timing semantics and checkpoint retention remain unchanged. Snapshot settlement never mutates the raw accumulator. Quiet local lease extensions remain separate from the lease recorded by timing claims." },
+  "compatibility": { "status": "changed", "detail": "Existing stores build the local projection from retained authoritative claims. Work response fields and timing results are unchanged. Metrics add bounded operation/reason counters for projection hits, fallback reasons, reference fold calls, refolds and events visited; no entity identities label them." },
+  "downtime": { "status": "changed", "detail": "The first open rebuilds current clocks from retained step timing claims once; subsequent opens flush only pending or invalidated clocks." },
+  "manual": { "status": "none", "detail": "No operator steps or source migration required." },
+  "recovery": { "status": "none", "detail": "The claim log remains authoritative. Replaying projections rebuilds clocks. Binary rollback ignores the local clock projection and restores reference reads without losing timing history." }
+}

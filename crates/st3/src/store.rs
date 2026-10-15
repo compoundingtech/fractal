@@ -165,6 +165,10 @@ pub use database_size::DatabaseSize;
 mod person_work;
 mod reconcile_work_context;
 pub(crate) mod work_summaries_ivm;
+mod step_clock_accumulator;
+mod step_clock_projection;
+#[cfg(test)]
+mod step_clock_tests;
 mod subagents;
 mod watches;
 mod idle_holds;
@@ -4345,6 +4349,7 @@ impl Store {
         rebuild_planning_tx(&transaction)?;
         resources::rebuild(&transaction)?;
         glass_heads::rebuild(&transaction)?;
+        step_clock_projection::rebuild(&transaction)?;
         directive_notes::rebuild(&transaction)?;
         arrangements::rebuild(&transaction)?;
         transaction.commit()?;
@@ -22587,6 +22592,13 @@ fn append_admitted_claim_tx(
         body,
         record.accepted_at_unix_ms,
     )?;
+    if matches!(kind, "step-run.state" | "step-run.carried" | "step-run.retried"
+        | "work.claimed" | "work.renewed" | "work.progress" | "work.submitted"
+        | "work.failed" | "work.released" | "work.extended"
+        | "work.person-asked" | "work.person-done" | "work.person-cancelled")
+    {
+        step_clock_projection::flush(transaction)?;
+    }
     Ok(record)
 }
 
@@ -30391,6 +30403,8 @@ fn replay_graph_from_nothing_with_progress_tx(
     resources::rebuild(transaction).map_err(internal)?;
     stage("full-replay/glass-heads");
     glass_heads::rebuild(transaction).map_err(internal)?;
+    stage("full-replay/step-clocks");
+    step_clock_projection::rebuild(transaction).map_err(internal)?;
     stage("full-replay/directive-notes");
     directive_notes::rebuild(transaction).map_err(internal)?;
     stage("full-replay/custom");
@@ -33507,9 +33521,8 @@ fn step_execution_clock_at(
     snapshot_unix_ms: u128,
     currently_active: bool,
 ) -> rusqlite::Result<StepTiming> {
-    Ok(fold_step_clock(
-        &step_timing_events(connection, subject)?,
-        attempt,
+    Ok(finish_step_clock(
+        step_clock_projection::clock_open_at(connection, subject, attempt, snapshot_unix_ms)?,
         snapshot_unix_ms,
         currently_active,
     ))
@@ -33524,9 +33537,8 @@ pub(crate) fn step_timing_lease_at(
     attempt: u32,
     snapshot_unix_ms: u128,
 ) -> rusqlite::Result<Option<u128>> {
-    let (started, _, lease) =
-        fold_step_timing_open(&step_timing_events(connection, subject)?, attempt, snapshot_unix_ms);
-    Ok(started.and(lease))
+    let fold = step_clock_projection::clock_open_at(connection, subject, attempt, snapshot_unix_ms)?;
+    Ok(fold.started.and(fold.lease_expires))
 }
 
 #[cfg(test)]
@@ -33558,6 +33570,7 @@ fn step_timing_events(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    crate::otel::record_step_clock("fold", "reference", events.len() as u64);
     Ok(events
         .into_iter()
         .map(|(kind, body, accepted)| {
@@ -33621,13 +33634,21 @@ pub(crate) fn fold_step_clock(
     snapshot_unix_ms: u128,
     currently_active: bool,
 ) -> StepTiming {
+    finish_step_clock(
+        fold_step_clock_open(events, attempt, snapshot_unix_ms),
+        snapshot_unix_ms,
+        currently_active,
+    )
+}
+
+fn finish_step_clock(fold: ClockFold, snapshot_unix_ms: u128, currently_active: bool) -> StepTiming {
     let ClockFold {
         mut started,
         mut elapsed,
         lease_expires,
         paused_until,
         waited,
-    } = fold_step_clock_open(events, attempt, snapshot_unix_ms);
+    } = fold;
     if let Some(interval_start) = started {
         let interval_end =
             lease_expires.map_or(snapshot_unix_ms, |expiry| snapshot_unix_ms.min(expiry));
@@ -33647,18 +33668,8 @@ pub(crate) fn fold_step_clock(
     }
 }
 
-/// [`fold_step_timing`]'s events folded up to `snapshot_unix_ms`: the open interval's start,
-/// if any, the time elapsed in closed intervals, and the lease the claims last named.
-fn fold_step_timing_open(
-    events: &[(String, Value, u128)],
-    attempt: u32,
-    snapshot_unix_ms: u128,
-) -> (Option<u128>, u128, Option<u128>) {
-    let fold = fold_step_clock_open(events, attempt, snapshot_unix_ms);
-    (fold.started, fold.elapsed, fold.lease_expires)
-}
-
 /// The events folded up to the snapshot, before the interval that is running is settled.
+#[derive(Debug, PartialEq, Eq)]
 struct ClockFold {
     started: Option<u128>,
     elapsed: u128,
@@ -33672,169 +33683,14 @@ fn fold_step_clock_open(
     attempt: u32,
     snapshot_unix_ms: u128,
 ) -> ClockFold {
-    let mut elapsed = 0_u128;
-    let mut started = None;
-    let mut lease_expires = None;
-    let mut paused_until: Option<u128> = None;
-    let mut pause_started: Option<u128> = None;
-    let mut waited = 0_u128;
+    let mut clock = step_clock_accumulator::Accumulator::default();
     for (kind, body, accepted) in events {
-        let accepted = *accepted;
-        if accepted > snapshot_unix_ms {
+        if *accepted > snapshot_unix_ms {
             break;
         }
-        let fields = body.get("fields").unwrap_or(body);
-        if kind.starts_with("work.")
-            && fields.get("attempt").and_then(Value::as_u64) != Some(u64::from(attempt))
-        {
-            continue;
-        }
-
-        // A wait ends at its deadline whether or not anyone resumed.
-        if let Some(deadline) = paused_until
-            && accepted > deadline
-        {
-            started = Some(deadline);
-            end_wait(&mut waited, &mut pause_started, &mut paused_until, deadline);
-        }
-        if let (Some(interval_start), Some(expiry)) = (started, lease_expires)
-            && accepted > expiry
-        {
-            elapsed = elapsed.saturating_add(expiry.saturating_sub(interval_start));
-            started = None;
-            lease_expires = None;
-        }
-
-        match kind.as_str() {
-            "step-run.state"
-                if fields
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(|status| matches!(status, "claimed" | "working")) =>
-            {
-                // Agentless execution has no `work.claimed` event. Its reconciler-owned
-                // `working` transition is therefore the authoritative opening edge. Worker
-                // claims may also carry this projection; keeping the earliest edge is
-                // idempotent and their following work event supplies the lease. A declared
-                // wait keeps the clock stopped.
-                if started.is_none() && paused_until.is_none() {
-                    started = Some(accepted);
-                }
-            }
-            "work.claimed" => {
-                // A new claim ends any wait the previous holder declared.
-                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
-                if started.is_none() {
-                    started = Some(accepted);
-                }
-                lease_expires = fields
-                    .get("claim_expires_at_unix_ms")
-                    .and_then(Value::as_u64)
-                    .map(u128::from);
-            }
-            // A claim carried into a successor generation opens its interval at the cutover.
-            "step-run.carried"
-                if fields
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(|status| matches!(status, "claimed" | "working"))
-                    && fields
-                        .get("claimant")
-                        .is_some_and(|claimant| !claimant.is_null()) =>
-            {
-                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
-                if started.is_none() {
-                    started = Some(accepted);
-                }
-                lease_expires = fields
-                    .get("claim_expires_at_unix_ms")
-                    .and_then(Value::as_u64)
-                    .map(u128::from);
-            }
-            "work.renewed" | "work.progress" | "work.extended"
-                if started.is_some() || paused_until.is_some() =>
-            {
-                let clock = if kind == "work.progress" {
-                    fields.get("clock").and_then(Value::as_str)
-                } else {
-                    None
-                };
-                let wait_until = fields
-                    .get("wait_until_unix_ms")
-                    .and_then(Value::as_u64)
-                    .map(u128::from)
-                    .filter(|deadline| *deadline > accepted);
-                match (clock, wait_until) {
-                    (Some("paused"), Some(deadline)) => {
-                        // Declaring again while a wait runs spends the time so far and starts
-                        // the next span, so chained declarations draw on one budget.
-                        end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
-                        pause_started = Some(accepted);
-                        if let Some(interval_start) = started {
-                            let interval_end =
-                                lease_expires.map_or(accepted, |expiry| accepted.min(expiry));
-                            elapsed = elapsed
-                                .saturating_add(interval_end.saturating_sub(interval_start));
-                        }
-                        started = None;
-                        paused_until = Some(deadline);
-                    }
-                    (Some("running"), _) if paused_until.is_some() => {
-                        end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
-                        started = Some(accepted);
-                    }
-                    _ => {}
-                }
-                lease_expires = fields
-                    .get("claim_expires_at_unix_ms")
-                    .and_then(Value::as_u64)
-                    .map(u128::from);
-            }
-            "work.submitted" | "work.failed" | "work.released" => {
-                if let Some(interval_start) = started {
-                    let interval_end =
-                        lease_expires.map_or(accepted, |expiry| accepted.min(expiry));
-                    elapsed = elapsed.saturating_add(interval_end.saturating_sub(interval_start));
-                }
-                started = None;
-                lease_expires = None;
-                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
-            }
-            "step-run.state"
-                if fields
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(|status| !matches!(status, "claimed" | "working")) =>
-            {
-                if let Some(interval_start) = started {
-                    let interval_end =
-                        lease_expires.map_or(accepted, |expiry| accepted.min(expiry));
-                    elapsed = elapsed.saturating_add(interval_end.saturating_sub(interval_start));
-                }
-                started = None;
-                lease_expires = None;
-                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
-            }
-            _ => {}
-        }
+        clock.apply(kind, body, *accepted, attempt);
     }
-
-    if let Some(deadline) = paused_until
-        && snapshot_unix_ms > deadline
-    {
-        started = Some(deadline);
-        end_wait(&mut waited, &mut pause_started, &mut paused_until, deadline);
-    }
-    if let Some(began) = pause_started {
-        waited = waited.saturating_add(snapshot_unix_ms.saturating_sub(began));
-    }
-    ClockFold {
-        started,
-        elapsed,
-        lease_expires,
-        paused_until,
-        waited,
-    }
+    clock.snapshot(snapshot_unix_ms)
 }
 
 fn apply_effective_step_state(
@@ -42373,7 +42229,7 @@ version 2
 
     /// A controller that publishes a one-step mission and a worker that projects its run, with
     /// the step ready for the worker's agent.
-    fn replicated_step_pair() -> (Store, Store, String) {
+    pub(super) fn replicated_step_pair() -> (Store, Store, String) {
         let controller = Store::open_memory("controller").unwrap();
         let kdl = r#"
 version 2
@@ -42420,7 +42276,7 @@ version 2
         (controller, worker, step)
     }
 
-    fn worker_work(worker: &Store, step: &str, action: &str, summary: Option<&str>, key: &str) {
+    pub(super) fn worker_work(worker: &Store, step: &str, action: &str, summary: Option<&str>, key: &str) {
         worker
             .work_action(
                 step,
