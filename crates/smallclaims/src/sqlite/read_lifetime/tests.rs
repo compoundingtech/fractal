@@ -350,10 +350,14 @@ fn loans_are_grouped_by_route_with_their_oldest_checkout_and_confirmed_snapshot(
         (pool.get(), pool.get(), pool.register_snapshot())
     });
     std::thread::sleep(std::time::Duration::from_millis(20));
-    // A budget with no time left has expired when its loan is reported.
-    let messages =
-        crate::read_budget::ReadBudget::new("/test-loans/messages", std::time::Duration::ZERO);
-    let late = crate::read_budget::with(Some(messages), || pool.get());
+    // A budget cancelled after its loan was taken has expired when the loan is reported. (A
+    // budget already spent would not get a loan: opening a connection under it is interrupted.)
+    let messages = crate::read_budget::ReadBudget::new(
+        "/test-loans/messages",
+        std::time::Duration::from_secs(30),
+    );
+    let late = crate::read_budget::with(Some(messages.clone()), || pool.get());
+    messages.cancel();
     let mine = || {
         loans_by_route(usize::MAX)
             .into_iter()
