@@ -25,6 +25,16 @@ says `running`; when it stops reporting, the card says `down` and `st terminals 
 session for it too. Finding the process and relaunching a seat that declares `restart always` belong to
 the launch and reconcile path, not to the label.
 
+## A seat st cannot place on a host
+
+When two hosts both claim a seat's runtime, st cannot say which one runs it, and `st terminals`
+refuses with `runtime-authority-indeterminate`. The card keeps `state: waiting` and
+`reachability: indeterminate`, and its `reason` reads "st cannot tell which host runs this agent; its
+processes may be running" unless the harness gave a reason of its own. The card does not call the
+seat running, stopped or down, and the conflicting claims stay as they are. `st agents show` prints
+the same sentence in place of "Still starting". The apps keep their present word for the state until
+they learn to print the reason.
+
 ## A seat that dies mid-turn
 
 Keeping a stale `working` report means the card no longer lapses it after 90 seconds. What ends
