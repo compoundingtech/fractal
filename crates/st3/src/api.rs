@@ -784,6 +784,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/mailbox", get(mailbox::subscribe))
         .route("/v1/harness-events", post(harness_events::publish))
         .route("/v1/harness-prompts/state", get(harness_events::prompt_state))
+        .route("/v1/harness-prompts/answer", get(harness_events::prompt_answer))
         .route("/v1/mailbox/bind", post(mailbox::bind))
         .route("/v1/mailbox/attachment", get(mailbox::attachment))
         .route("/v1/mailbox/receipts", post(mailbox::receipt))
@@ -1663,6 +1664,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "idempotency-conflict"
         | "idempotency-key-expired"
         | "issuer-required"
+        | "suspend-authored-session-selection"
         | "arrangement-exists"
         | "arrangement-folder-exists"
         | "arrangement-retired"
@@ -2788,6 +2790,11 @@ fn add_agent_todos(store: &Store, items: &mut [Value], index: u64) -> anyhow::Re
 }
 
 /// Live presentation of already folded cards: freshness, delivery presence and subagents.
+/// The card's `reason` while rival hosts both claim a seat's runtime. A sentence, not a code:
+/// clients may print it as it is.
+pub(crate) const AUTHORITY_INDETERMINATE_REASON: &str =
+    "st cannot tell which host runs this agent; its processes may be running";
+
 fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
@@ -2913,7 +2920,10 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
 /// without a claim, so this is read per request rather than cached with the agents.
 fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
     let mut running = BTreeMap::<String, Vec<Value>>::new();
-    for subagent in store.running_subagents(client_now_ms() as u64)? {
+    let subagents = crate::otel::roster_phase("subagent_leases", || {
+        store.running_subagents(client_now_ms() as u64)
+    })?;
+    for subagent in subagents {
         running
             .entry(subagent.agent.clone())
             .or_default()
@@ -3295,6 +3305,13 @@ fn client_agent_cards_presented(
                 .transpose()?.flatten();
             let moving = handoff.as_ref().is_some_and(|h| h.phase != "running");
             let state = if member_fault.is_some() { "failed" } else if mailbox_fault.is_some() || moving { "waiting" } else { state };
+            // A session is observed but st cannot tell which host owns it (rival origins claim
+            // the runtime): the seat is neither running nor stopped as far as st can say.
+            let authority_unknown = member_fault.is_none()
+                && mailbox_fault.is_none()
+                && !moving
+                && subject.reachability == "indeterminate"
+                && matches!(observed, Some("running" | "ready" | "working" | "idle"));
             let suspension = if card_reads.may_have_suspension(&subject.subject) {
                 crate::suspension::current(store, &subject.subject)?
             } else {
@@ -3373,7 +3390,8 @@ fn client_agent_cards_presented(
                 "_launch_since_ms": launch_since_ms.map(|ms| ms as u64),
                 "blocked_on": subject.harness.as_ref().and_then(|harness| harness.blocked_on.as_deref()),
                 "ask": subject.harness.as_ref().and_then(|harness| harness.ask.as_deref()),
-                "reason": subject.harness.as_ref().and_then(|harness| harness.reason.as_deref()),
+                "reason": subject.harness.as_ref().and_then(|harness| harness.reason.as_deref())
+                    .or_else(|| authority_unknown.then_some(AUTHORITY_INDETERMINATE_REASON)),
                 // What the seat is doing that is neither work nor a wait on anyone: a status,
                 // never an alert.
                 "activity": subject
@@ -11486,7 +11504,7 @@ async fn restart_agent(
     {
         return Err(ApiError::bad(St3Error::new(
             "restart-suspended",
-            "the seat is suspended; resume it with `st agents resume`",
+            "the seat is suspended; resume it with `st agents resume`. If resume refuses an authored session selection, use `st agents stop` then `st agents start`; this ends the suspension and launches the declaration without preserving the suspended session",
         )));
     }
     let status = state
@@ -11808,6 +11826,15 @@ pub(crate) fn request_suspend(
             ))
         })?;
     check_suspension_fence(fence.as_ref(), Some(incarnation), &token)?;
+    if let Some(selector) = crate::native_resume::authored_session_selection(&member) {
+        return Err(ApiError::bad(
+            St3Error::new(
+                "suspend-authored-session-selection",
+                format!("the seat declares its own session selection ({selector}); native resume would refuse it, so suspend leaves the seat running"),
+            )
+            .with_detail("selector", selector),
+        ));
+    }
     let blocking = crate::suspension::blockers(&state.store, &subject, incarnation)
         .map_err(ApiError::internal)?;
     if !blocking.is_empty() {
@@ -19737,18 +19764,23 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
     }
 
     #[test]
-    fn timeline_pages_preserve_large_envelopes_and_advance_by_returned_count() {
+    fn timeline_pages_preserve_large_typed_events_and_advance_by_returned_count() {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
         let snapshot = new_client_snapshot(&state);
         let expected_ids: Vec<_> = (0..100).map(|id| format!("native/{id}")).collect();
+        // Typed native blocks: an `omp_event` view whose content and details are each at the
+        // native-value bound, beside the owner-fetchable raw record.
         let items = expected_ids.iter().map(|id| {
-            let envelope = json!({
-                "_tag":"OmpEvent", "version":1, "kind":"irc:incoming", "attribution":"agent",
+            let view = json!({
+                "type":"omp_event", "kind":"irc:incoming", "attribution":"agent",
                 "content":"x".repeat(8000),
                 "details":{"from":"worker","message":"x".repeat(8000)}
             });
-            json!({"id":id,"body":{"media_type":"application/vnd.omp.event+json","text":envelope.to_string()}})
+            json!({"id":id,"body":{"blocks":[{
+                "id":format!("{id}/0"), "kind":"status", "source_type":"custom_message",
+                "payload":{"raw":{"type":"custom_message","customType":"irc:incoming"}}, "view":view
+            }]}})
         }).collect();
         let mut query = ClientListQuery {
             limit: Some(100),
@@ -19761,10 +19793,9 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             assert!(serde_json::to_vec(&page).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES - 1024);
             for item in &page.items {
                 received_ids.push(item["id"].as_str().unwrap().to_owned());
-                let envelope: Value =
-                    serde_json::from_str(item["body"]["text"].as_str().unwrap()).unwrap();
-                assert_eq!(envelope["content"], "x".repeat(8000));
-                assert_eq!(envelope["details"]["message"], "x".repeat(8000));
+                let view = &item["body"]["blocks"][0]["view"];
+                assert_eq!(view["content"], "x".repeat(8000));
+                assert_eq!(view["details"]["message"], "x".repeat(8000));
             }
             let Some(cursor) = page.page.next_cursor else {
                 assert!(!page.page.has_more);

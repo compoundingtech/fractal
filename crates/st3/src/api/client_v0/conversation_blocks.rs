@@ -744,15 +744,8 @@ pub(super) fn prepare_one(
             block["payload"]
         ));
     }
-    // OMP fields were bounded before serialization. Clipping the resulting JSON string
-    // would destroy the envelope; typed blocks independently retain raw-source continuations.
-    let omp_event =
-        body.get("media_type").and_then(Value::as_str) == Some("application/vnd.omp.event+json");
     // Fallback bodies use known v0 types and also move native pixels to owner fetch refs.
     for key in ["text", "arguments", "content"] {
-        if omp_event && key == "text" {
-            continue;
-        }
         if let Some(value) = body.get_mut(key) {
             image_refs(
                 value,
@@ -804,14 +797,9 @@ pub(super) fn prepare_one(
     if serde_json::to_vec(item).map_err(ApiError::internal)?.len()
         > CLIENT_MAX_RESPONSE_BYTES - 128_000
     {
-        if omp_event {
-            return Err(validation(
-                "a native event exceeds the client response limit",
-            ));
-        }
         let body = item["body"].as_object_mut().expect("native body");
         for (key, value) in body.iter_mut() {
-            if key != "blocks" && !(omp_event && key == "text") {
+            if key != "blocks" {
                 bound_open_value(value);
                 if !value.is_string() {
                     bound(value);
@@ -1164,14 +1152,14 @@ mod tests {
     }
 
     #[test]
-    fn omp_event_wire_keeps_envelope_typed_view_and_complete_raw_continuation() {
+    fn omp_event_wire_keeps_bounded_typed_view_and_complete_raw_continuation() {
         for negotiated in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let native = fixture(root.path(), json!([]));
             let record = json!({
-                "type":"custom_message", "customType":"irc:incoming", "display":true,
+                "type":"custom_message", "customType":"notice", "display":true,
                 "timestamp":"2026-10-06T12:00:01Z", "attribution":"agent",
-                "content":"λ".repeat(VALUE_BYTES / 2),
+                "content":"λ".repeat(VALUE_BYTES / 2 + 1),
                 "details":{"from":"worker", "message":"x".repeat(VALUE_BYTES)},
             });
             // Use the real owner transcript read and preparation, not a fabricated block.
@@ -1183,35 +1171,31 @@ mod tests {
             let page = read(&native, &session, &native.id).unwrap();
             let event = page
                 .iter()
-                .find(|item| item["body"]["media_type"] == "application/vnd.omp.event+json")
+                .find(|item| item["body"]["blocks"][0]["view"]["type"] == "omp_event" || !negotiated)
                 .unwrap();
-            let envelope: Value =
-                serde_json::from_str(event["body"]["text"].as_str().unwrap()).unwrap();
-            assert_eq!(envelope["content"], record["content"]);
-            assert!(
-                envelope["details"]
-                    .as_str()
-                    .unwrap()
-                    .ends_with("[st truncated this native timeline value]")
-            );
-            assert_eq!(envelope["kind"], "irc:incoming");
-            assert_eq!(envelope["attribution"], "agent");
             if negotiated {
                 let block = &event["body"]["blocks"][0];
-                assert_eq!(block["kind"], "irc");
-                assert_eq!(block["view"]["from"], "worker");
-                assert_eq!(block["view"]["message"], record["details"]["message"]);
+                assert_eq!(block["kind"], "text");
+                let view = &block["view"];
+                assert_eq!(view["kind"], "notice");
+                assert_eq!(view["attribution"], "agent");
+                // Each value is clipped to the native-value bound with a visible marker.
+                let marker = "[st truncated this native timeline value";
+                assert!(view["content"].as_str().unwrap().contains(marker));
+                assert!(view["details"].as_str().unwrap().contains(marker));
                 let location =
                     locator(block["continuation"]["ref"].as_str().unwrap(), &native.id).unwrap();
-                assert_eq!(
-                    located_value(&native, &location).unwrap(),
-                    json!({"raw":record})
-                );
+                // The continuation of a body-backed text block covers the owner's whole body,
+                // which holds the complete native record beside the display text.
+                let located = located_value(&native, &location).unwrap();
+                assert_eq!(located.pointer("/blocks/0/payload/raw"), Some(&record));
                 let changed = record.to_string().replace("worker", "edited");
                 std::fs::write(&native.transcript, format!("{header}\n{changed}\n")).unwrap();
                 assert!(located_value(&native, &location).is_err());
             } else {
+                // A client that did not negotiate blocks reads the plain text content.
                 assert!(event["body"].get("blocks").is_none());
+                assert_eq!(event["body"]["media_type"], "text/plain");
             }
         }
     }
@@ -1233,25 +1217,11 @@ mod tests {
         .unwrap();
         let mut session = ClientSession::local(Some("person/example")).unwrap();
         session.conversation_blocks = true;
-        let preview = crate::external_sessions::normalized_timeline(&native).unwrap();
-        let locator = serde_json::from_value(preview[1]["_source"].clone()).unwrap();
-        // Complete owner-record preparation also bounds identity fields, independently
-        // of the ordinary timeline's earlier wide-record preview.
-        let full = crate::external_sessions::normalized_record(&native, &locator).unwrap();
-        let full = prepare(&native, &session, &native.id, full).unwrap();
-        let envelope: Value =
-            serde_json::from_str(full[0]["body"]["text"].as_str().unwrap()).unwrap();
-        for key in ["kind", "attribution"] {
-            let value = envelope[key].as_str().unwrap();
-            assert!(value.ends_with("[st truncated this native timeline value]"));
-            assert!(value.len() <= 256 + 48);
-        }
         let items = read(&native, &session, &native.id).unwrap();
         assert_eq!(items.len(), 3);
         for index in [0, 2] {
-            let envelope: Value =
-                serde_json::from_str(items[index]["body"]["text"].as_str().unwrap()).unwrap();
-            assert_eq!(envelope["content"], "normal");
+            assert_eq!(items[index]["body"]["blocks"][0]["view"]["kind"], "notice");
+            assert_eq!(items[index]["body"]["text"], "normal");
         }
         assert!(items.iter().all(|item| item.get("_source").is_none()));
         assert!(serde_json::to_vec(&items).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);

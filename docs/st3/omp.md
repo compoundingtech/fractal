@@ -182,57 +182,51 @@ Native transcript tool results use the message-level `toolCallId` and `isError` 
 one typed result paired with its exact call, preserving composite IDs and failure status.
 Text blocks within that result remain its content, not separate plain tool messages.
 
-Visible native OMP `custom_message` records are content entries with
-`body.media_type = "application/vnd.omp.event+json"` and `body.text` containing this JSON envelope:
+A visible native OMP `custom_message` (one without `display: false`) keeps its native kind,
+attribution, content and details on its typed blocks. Records with a more specific view
+(`irc:incoming`, `launch-completion`, `async-result`, `skill-prompt`) keep that view: IRC senders
+come from `view.from`, and async task identities stay in `view.jobs` with their native `type`,
+`label` and `id`. Every other visible custom message keeps main's block (`text` for text content) and gains this view and the complete record in `payload.raw`:
 
 ```json
 {
-  "_tag": "OmpEvent",
-  "version": 1,
-  "kind": "irc:incoming",
-  "attribution": "agent",
-  "content": "An incoming message",
-  "details": {"from": "worker", "message": "An incoming message", "id": "message-id"}
+  "type": "omp_event",
+  "kind": "resource-observed",
+  "attribution": "daemon",
+  "content": {"resource": "resource/example", "status": "ready"},
+  "details": {"revision": 3}
 }
 ```
 
-`kind`, `attribution`, `content`, and `details` retain the native values; missing values are
-`null`. The timeline role remains `system` as a transport role. Consumers derive provenance
-from the envelope, not display-text heuristics: IRC senders come from `details.from`; async
-task identities stay in `details.jobs` with their native `type`, `label`, and `id`. Mixed or
+`kind` is the native `customType`; `attribution`, `content` and `details` are the native values
+and each is present only when the record carries it. Human, daemon, system, and absent
+attribution are not inferred to be agents; the block's `payload.raw` is the complete native
+record, so attribution is available there for every custom message, typed or not. Mixed or
 multiple jobs remain one native event unless their body has an authoritative partition.
-Human, daemon, system, and absent attribution are not inferred to be agents.
-Structured resource observations retain their content and details in the same envelope.
-`display: false` stays hidden; an absent `display` retains the native reader's visible behavior.
-The native-value byte bound applies separately to content and details (8 KiB each), with
-kind and attribution bounded separately to 256 UTF-8 bytes. Oversized fields become marked
-truncated strings without corrupting the envelope's JSON; the marker is added after the
-retained byte window. In particular, administrative details is the native record object when
-it fits, and a marked JSON-preview STRING when it exceeds 8 KiB. Complete original fields
-remain accessible through the negotiated native-source continuation. A wide identity cannot
-make the surrounding conversation unreadable.
+`display: false` stays omitted, as main's omission table states. The 8 KiB native-value bound
+applies separately to the view's `content` and `details` (UTF-8 aware, and a string of exactly 8 KiB is kept whole), and kind and attribution are bounded separately to 256 bytes; an over-limit one becomes marked
+truncated text without corrupting the view's JSON, and the complete value stays in
+`payload.raw`.
 Timeline page limits are item-count upper bounds: a page can contain fewer entries to stay
-within the gateway response budget. Pagination preserves each complete envelope and advances
-the continuation cursor by the number actually returned; following it does not skip entries.
-Consumers must opt into this media type. Legacy conversation adapters may omit these system
-entries rather than render their JSON.
-Pi's existing plain custom-message projection is unchanged.
+within the 768 KiB page target (offset-cached and native keyset pages alike). Pagination
+preserves each complete entry and advances the continuation cursor by the number actually
+returned; following it does not skip entries. A complete lone entry may exceed the target up to
+the hard response ceiling (1,048,576 minus 128,000 reserved bytes) and is served alone; an entry
+beyond that ceiling is refused rather than skipped, though the owner's visible size-limit
+bounding normally keeps entries well below it.
+Pi shares the native format and gets the same views.
 
 The observed administrative entry types `model_usage`, `title_change`, `session_init`, and
-`ttsr_injection` use the same envelope rather than an unrecognized-entry text fallback.
-Their `kind` is the native entry type, `content` is `null`, and `details` contains the bounded
-native record, including its IDs and timestamp. Native attribution is retained when present;
-otherwise it stays `null`. The timeline timestamp uses the same native/predecessor rule as
-conversation entries. `display: false` remains hidden.
-Main's typed bookkeeping, reasoning, tool views, timing metadata and compaction summaries remain
-visible according to the current native-reader omission table; this change does not restore an
-older hidden-record list. This event whitelist applies only to OMP: Pi and genuinely unknown
-entry types retain their current behavior. Negotiated conversation blocks keep their typed
-view and authenticated continuation to the complete raw record beside the bounded envelope.
-Both legacy and negotiated preparation preserve the envelope's parseable JSON. A complete lone entry may exceed the 768 KiB page target up to the hard response ceiling
-(1,048,576 minus 128,000 reserved bytes); larger entries retain the current native reader's
-visible size-limit/error continuation behavior. Cached and keyset pagination explicitly refuse
-an entry above that hard ceiling if it still reaches paging; they never silently skip it.
+`ttsr_injection` are `status` blocks rather than unrecognized-entry fallbacks, and keep the
+complete native record in `payload.raw`. `model_usage`, `session_init` and `ttsr_injection` use
+the `omp_event` view: `kind` is the native entry type, there is no `content`, and `details` is the
+bounded native record, including its IDs and timestamp; native attribution is retained when
+present. `title_change` uses the existing `title` view. The timeline timestamp uses the same
+native/predecessor rule as conversation entries. An explicit `display: false` on one of these
+records is retained with the `hidden-by-harness` visibility hint rather than dropped. This applies
+to the observed kinds: genuinely unknown entry types retain their existing behavior, and the other
+bookkeeping records (`model_change`, `custom`, `credential_pin`, `title`) keep the views and
+visibility the conversation design gives them.
 
 `crates/st3/fixtures/omp-admin-events.jsonl` preserves one native shape per administrative kind
 from a session resumed on 2026-10-04. Native IDs and timestamps remain exact, but every payload
@@ -240,7 +234,7 @@ string and numeric usage value is redacted. No bootstrap prompt, injected rule, 
 label, or tool name from that capture is published.
 
 `crates/st3/fixtures/omp-native-events.jsonl` contains a redacted 2026-10-01 OMP capture:
-the native tool call/result IDs and error flag, plus an incoming IRC event's envelope.
+the native tool call/result IDs and error flag, plus an incoming IRC event.
 Tool arguments, result text, sender name and incoming text are redacted; no credentials,
 machine paths, or host metadata are retained. Task-job and structured-resource boundary
 cases are synthetic regression inputs, not additional claims about that capture.

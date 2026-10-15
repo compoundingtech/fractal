@@ -41,7 +41,7 @@ A torn prefix can produce both a raw block and a recovered typed record.
 
 The sole omission table is `omission_reason` in
 `crates/st3/src/external_sessions.rs`: one named match arm per permitted type with
-an explicit reason. It omits only the five categories below. Nothing else may be
+an explicit reason. It omits only the four categories below. Nothing else may be
 dropped by a parser branch: an otherwise empty projection falls back to raw JSON.
 The coverage test uses harness-specific native record fixtures, the redacted OMP
 resume/tool captures (also exercising Pi’s shared format), and message/part objects
@@ -59,7 +59,6 @@ direct owner reads. Fixture provenance is in `crates/st3/fixtures/native-records
 | Pi/OMP `session` | Omit the native session setup header. |
 | OMP `reset_boundary`, `credential_pin`, `title` | Retain raw plus typed status views; reset/title are quiet events, credential pins are internal bookkeeping hidden by default. |
 | Pi/OMP `custom_message` with explicit `display: false` | Omit because the native extension explicitly marks it hidden from its terminal. |
-| OMP `model_usage`, `title_change`, `session_init`, `ttsr_injection` with explicit `display: false` | Omit the explicitly hidden administrative event; otherwise retain its OmpEvent envelope and existing typed view. |
 | Pi/OMP `custom`, `label`, `session_info`, model/thinking changes and summary records without text | Retain raw; summaries with text remain readable native notes. |
 | OpenCode `snapshot` | Retain raw; visibility is not established across releases. |
 | Claude documents | Retain the complete document payload, with a readable document fallback. |
@@ -102,10 +101,10 @@ subtree uses a continuation to `/body/blocks/{index}/view` or `/metadata`; if an
 remainder already needs that block's continuation, it instead points to the whole
 original `/body` so owner fetch recovers every exact subtree. Clients inspect the
 returned JSON accordingly. The final entry-size guard still runs after all display
-bounding and can replace an over-budget entry with a fetchable error notice. OMP event
-fields are bounded before serialization so their JSON envelope remains parseable; kind and
-attribution have 256-byte windows, content and details have 8 KiB windows, plus visible markers.
-Complete raw fields remain available through owner continuations. Page windows target 768 KiB
+bounding and can replace an over-budget entry with a fetchable error notice. `omp_event`
+view fields are bounded before the view is built so it stays parseable: kind and attribution
+have 256-byte windows, content and details 8 KiB windows, each plus a visible marker. The
+complete raw record remains available through the block's owner continuation. Page windows target 768 KiB
 but retain one complete larger entry up to the hard response ceiling (1 MiB minus 128,000
 reserved bytes); paging refuses an entry beyond that hard ceiling rather than skipping it.
 
@@ -156,7 +155,7 @@ subagent card links to the child transcript as its own conversation.
 duration_ms?, output_bytes?}`.
 
 Extension and bookkeeping records become blocks as follows; anything not listed keeps
-its block shape (other `custom_message` records with display != false stay `text`):
+its block shape:
 
 | OMP record | block kind | view |
 | --- | --- | --- |
@@ -167,6 +166,8 @@ its block shape (other `custom_message` records with display != false stay `text
 | `compaction` / `branch_summary` | `status` | `{type:"compaction", method?, tokens_before?, tokens_after?, short_summary?, summary?}`; first lines collapsed, full summary on expansion |
 | `model_change` | `status` | `{type:"model_change", model, role?, fallback?: bool}` |
 | `thinking_level_change` | `status` | `{type:"thinking_level", level, configured?}` |
+| other visible custom_message | unchanged (`text`) | `{type:"omp_event", kind, attribution?, content?, details?}`: `kind` is the native customType, the rest are the native values present on the record (attribution is never inferred); content and details are bounded separately to 8 KiB (marked text when over) and the full record stays in the raw payload |
+| `model_usage` / `session_init` / `ttsr_injection` | `status` | `{type:"omp_event", kind: <record type>, attribution?, details: <record>}`; explicit `display: false` is retained with visibility `hidden-by-harness` |
 | `title_change` / `title` | `status` | `{type:"title", title, previous?, source?}` (`previous` only on title changes) |
 | `reset_boundary` | `status` | `{type:"reset_boundary"}`; quiet event `session reset` |
 | `credential_pin` | `status`, visibility `internal` | `{type:"credential_pin", provider}`; hidden by default; hash remains only in raw payload/source record |
