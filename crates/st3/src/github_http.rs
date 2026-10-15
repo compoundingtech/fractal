@@ -293,6 +293,7 @@ pub(crate) fn configure(config: &crate::config::Config) -> Result<()> {
         );
         return Ok(());
     }
+    crate::github_admission::configure(config.state_dir.join("github-admission.json"));
     SOURCE
         .set(Arc::new(config.clone()))
         .map_err(|_| anyhow::anyhow!("GitHub source was already configured"))
@@ -395,6 +396,20 @@ pub(crate) async fn send(
     request: reqwest::RequestBuilder,
     auth: &GithubAuth,
 ) -> Result<reqwest::Response> {
+    // Admission precedes both the credential-bearing local send and the
+    // authorized RPC. A failed send remains spent; there is no HTTP retry.
+    if let Some(config) = SOURCE.get() {
+        let resource = request.try_clone().and_then(|copy| copy.build().ok())
+            .map(|copy| match copy.url().path() {
+                "/graphql" => "graphql",
+                path if path.starts_with("/search/") => "search",
+                _ => "core",
+            }).unwrap_or("core");
+        crate::github_admission::before_send(
+            config.state_dir.join("github-admission.json"),
+            crate::resource::github_spender(), resource.into(),
+        ).await?;
+    }
     match auth {
         GithubAuth::Authorized { config, profile } => {
             send_authorized_with(
