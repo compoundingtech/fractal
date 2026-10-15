@@ -1654,6 +1654,8 @@ fn client_error_code(code: Option<&str>) -> String {
         | "attention-migrated"
         | "unsupported-capability"
         | "validation-failed"
+        | "invalid-answer"
+        | "not-answerable"
         | "idempotency-conflict"
         | "idempotency-key-expired"
         | "issuer-required"

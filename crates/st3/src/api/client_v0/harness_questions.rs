@@ -213,6 +213,20 @@ mod tests {
     use st3_schema::harness_questions::Question;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn harness_question_refusals_keep_their_typed_code_and_reason_in_client_envelopes() {
+        for (error, code, reason) in [
+            (unavailable(HarnessQuestionAdapterError::Missing), "not-answerable", "adapter_missing"),
+            (invalid(InvalidAnswerReason::UnknownOption), "invalid-answer", "unknown_option"),
+        ] {
+            let raw = json!({"code": error.code, "message": error.message, "details": error.details});
+            let envelope = client_error_envelope(error.status, &raw, "request/tester");
+            assert_eq!(envelope["code"], code);
+            assert_eq!(envelope["details"]["reason"], reason);
+            assert_eq!(envelope["retryable"], false);
+        }
+    }
+
     struct Sink { calls: AtomicUsize, timed_out: bool }
     impl HarnessQuestionSettleSink for Sink {
         fn availability(&self, _: &HarnessQuestion) -> Result<(), HarnessQuestionAdapterError> { Ok(()) }
