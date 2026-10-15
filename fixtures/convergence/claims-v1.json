@@ -7653,6 +7653,55 @@
     "projection": "work",
     "wakes_reconciler": true
   },
+  "work.person-reassigned": {
+    "kind": "work.person-reassigned",
+    "subjects": [
+      "step-run"
+    ],
+    "fields": {
+      "attempt": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "episode": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "generation": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true
+      },
+      "person": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true
+      },
+      "previous_person": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true
+      },
+      "run": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "authorized-requester",
+    "cardinality": "append",
+    "projection": "work",
+    "wakes_reconciler": true
+  },
   "work.progress": {
     "kind": "work.progress",
     "subjects": [
