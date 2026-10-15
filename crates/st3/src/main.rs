@@ -17908,6 +17908,7 @@ async fn wait_for_agent_incarnation_from(
 ) -> Result<String> {
     let mut deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut outage_logged = false;
+    let mut retry = st3::client::DriverRetry::default();
     loop {
         // A restarted provider process can begin before the reconciler has projected its new PTY
         // observation. Reading the graph immediately would then bind this new driver to the old
@@ -17920,7 +17921,7 @@ async fn wait_for_agent_incarnation_from(
         };
         match lookup {
             Ok(Some(incarnation)) => return Ok(incarnation),
-            Ok(None) => {}
+            Ok(None) => retry.succeeded(),
             // A restarting daemon cannot answer yet; its outage does not use up the wait.
             Err(error) if st3::client::daemon_unreachable(&error).is_some() => {
                 if !outage_logged {
@@ -17931,7 +17932,7 @@ async fn wait_for_agent_incarnation_from(
                     outage_logged = true;
                 }
                 deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-                tokio::time::sleep(st3::client::driver_retry_pause()).await;
+                tokio::time::sleep(retry.failed(&error)).await;
                 continue;
             }
             Err(error) => return Err(error),
@@ -20221,6 +20222,8 @@ async fn drive_st2_native(
     let mut work_interval = tokio::time::interval(std::time::Duration::from_secs(1));
     work_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut renewed_minute = None;
+    let mut work_retry = st3::client::DriverRetry::default();
+    let mut control_retry = st3::client::DriverRetry::default();
     let mut last_activity_fingerprint = None;
     let mut last_usage_fingerprint = None;
     let mut last_limits_fingerprint = None;
@@ -20632,8 +20635,12 @@ async fn drive_st2_native(
                     .await?;
                     Ok(())
                 }.await;
-                if let Err(error) = tick {
-                    note_driver_tick_failure(subject, error, &mut last_control_warning);
+                match tick {
+                    Ok(()) => control_retry.succeeded(),
+                    Err(error) => {
+                        interval.reset_after(control_retry.failed(&error));
+                        note_driver_tick_failure(subject, error, &mut last_control_warning);
+                    }
                 }
                 if let Some(subagents) = subagents.as_mut()
                     && let Err(error) = subagents.tick(client).await
@@ -20647,13 +20654,17 @@ async fn drive_st2_native(
                     if let Some(minute) = renewal_minute(subject)?
                         && renewed_minute != Some(minute)
                     {
-                        renew_claimed_work(client, subject, minute).await?;
+                        renew_claimed_work(client, subject, minute, &mut work_retry).await?;
                         renewed_minute = Some(minute);
                     }
                     Ok(())
                 }.await;
-                if let Err(error) = tick {
-                    note_driver_tick_failure(subject, error, &mut last_control_warning);
+                match tick {
+                    Ok(()) => work_retry.succeeded(),
+                    Err(error) => {
+                        work_interval.reset_after(work_retry.failed(&error));
+                        note_driver_tick_failure(subject, error, &mut last_control_warning);
+                    }
                 }
             }
         }
@@ -22241,6 +22252,7 @@ async fn run_pi_channel(
     let mut work_interval = tokio::time::interval(std::time::Duration::from_secs(1));
     work_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut renewed_minute = None;
+    let mut work_retry = st3::client::DriverRetry::default();
     let mut checked_todo_minute = None;
     let mut todo_end_seen = None;
     loop {
@@ -22590,10 +22602,17 @@ async fn run_pi_channel(
                 }
                 if let Some(renew_minute) = renewal_minute(subject)?
                     && renewed_minute != Some(renew_minute)
+                    && work_retry.ready()
                 {
-                    match renew_claimed_work(client, subject, renew_minute).await {
-                        Ok(()) => renewed_minute = Some(renew_minute),
-                        Err(error) => warn_pi_channel(subject, &error, &mut last_warning),
+                    match renew_claimed_work(client, subject, renew_minute, &mut work_retry).await {
+                        Ok(()) => {
+                            work_retry.succeeded();
+                            renewed_minute = Some(renew_minute);
+                        }
+                        Err(error) => {
+                            work_retry.failed(&error);
+                            warn_pi_channel(subject, &error, &mut last_warning);
+                        }
                     }
                 }
             }
@@ -23454,6 +23473,8 @@ async fn drive_codex_native(
     let mut work_interval = tokio::time::interval(std::time::Duration::from_secs(1));
     work_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut renewed_minute = None;
+    let mut work_retry = st3::client::DriverRetry::default();
+    let mut control_retry = st3::client::DriverRetry::default();
     let mut last_activity_fingerprint = None;
     let mut last_usage_fingerprint = None;
     let mut last_limits_fingerprint = None;
@@ -23738,8 +23759,12 @@ async fn drive_codex_native(
                     .await?;
                     Ok(())
                 }.await;
-                if let Err(error) = tick {
-                    note_driver_tick_failure(subject, error, &mut last_control_warning);
+                match tick {
+                    Ok(()) => control_retry.succeeded(),
+                    Err(error) => {
+                        interval.reset_after(control_retry.failed(&error));
+                        note_driver_tick_failure(subject, error, &mut last_control_warning);
+                    }
                 }
                 subagents.set_timeline_incarnation(
                     st_drivers::codex_app_server::current_runtime_incarnation(
@@ -23762,13 +23787,17 @@ async fn drive_codex_native(
                     if let Some(minute) = renewal_minute(subject)?
                         && renewed_minute != Some(minute)
                     {
-                        renew_claimed_work(client, subject, minute).await?;
+                        renew_claimed_work(client, subject, minute, &mut work_retry).await?;
                         renewed_minute = Some(minute);
                     }
                     Ok(())
                 }.await;
-                if let Err(error) = tick {
-                    note_driver_tick_failure(subject, error, &mut last_control_warning);
+                match tick {
+                    Ok(()) => work_retry.succeeded(),
+                    Err(error) => {
+                        work_interval.reset_after(work_retry.failed(&error));
+                        note_driver_tick_failure(subject, error, &mut last_control_warning);
+                    }
                 }
             }
         }
@@ -23988,7 +24017,7 @@ fn tolerate_driver_api_outage(
         // The driver shares a PTY with its provider. Writing to stderr here would
         // corrupt the provider's interactive screen while the API is restarting.
         let line = format!(
-            "{}; the driver keeps running and retries every second until the daemon is back",
+            "{}; the driver keeps running and retries with bounded backoff until the daemon is back",
             outage.unwrap_or_else(|| format!("the st daemon did not answer ({error:#})"))
         );
         let _ = write_driver_log(subject, &line);
@@ -24025,12 +24054,16 @@ where
     Fut: std::future::Future<Output = Result<T>>,
 {
     let mut last_warning = None;
+    let mut retry = st3::client::DriverRetry::default();
     loop {
         match call().await {
             Ok(value) => return Ok(value),
-            Err(error) => tolerate_driver_api_outage(subject, error, &mut last_warning)?,
+            Err(error) => {
+                let pause = retry.failed(&error);
+                tolerate_driver_api_outage(subject, error, &mut last_warning)?;
+                tokio::time::sleep(pause).await;
+            }
         }
-        tokio::time::sleep(st3::client::driver_retry_pause()).await;
     }
 }
 
@@ -24062,10 +24095,23 @@ fn work_incarnation_key(incarnation: Option<&str>) -> String {
     )
 }
 
-async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Result<()> {
+async fn renew_claimed_work(
+    client: &Client,
+    subject: &str,
+    minute: u64,
+    retry: &mut st3::client::DriverRetry,
+) -> Result<()> {
     let work: Vec<StepRunView> = client
         .get(&format!("/v1/work?actor={}", urlencoding::encode(subject)))
         .await?;
+    if let Some(expiry) = work.iter()
+        .filter(|step| work_claim_is_held_by(step, subject))
+        .filter_map(|step| step.claim_expires_at_unix_ms)
+        .min()
+    {
+        let remaining = u128::from(expiry).saturating_sub(current_unix_ms()?);
+        retry.lease_margin(Duration::from_millis(remaining.min(u128::from(u64::MAX)) as u64));
+    }
     // Most resident seats hold no work. Only a held claim needs the status reduction
     // that proves its harness incarnation is still live before renewing the lease.
     if !work.iter().any(|step| work_claim_is_held_by(step, subject)) {
@@ -24294,11 +24340,10 @@ impl NativeDeliverySupervisor {
             self.daemon_outage = daemon_unreachable;
         }
         self.failures = self.failures.saturating_add(1);
-        let shift = self.failures.saturating_sub(1).min(5);
         let backoff = if daemon_unreachable {
             Duration::from_secs(1)
         } else {
-            Duration::from_secs((1_u64 << shift).min(30))
+            st3::client::driver_retry_base(self.failures.saturating_sub(1))
         };
         self.retry_after = Some(Instant::now() + backoff);
         backoff

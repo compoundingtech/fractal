@@ -214,7 +214,8 @@ impl DaemonUnreachable {
     fn connect_io(endpoint: impl Into<String>, error: &std::io::Error) -> Self {
         let endpoint = endpoint.into();
         if !error.raw_os_error().is_some_and(st_drivers::work_claim_failure::is_socket_access_defect)
-            && let Some(outage) = Self::during_startup(Path::new(&endpoint)) {
+            && let Some(mut outage) = Self::during_startup(Path::new(&endpoint)) {
+            outage.socket_os_error = error.raw_os_error();
             return outage;
         }
         let reason = match error.kind() {
@@ -1259,11 +1260,64 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
     }
 }
 
-/// How long a seat's driver waits before it reconnects to the daemon or retries a call the daemon
-/// could not take. Every driver loses the daemon in the same instant when it stops, so without a
-/// random share they would all retry together and reach it in the instant it starts to listen.
-pub fn driver_retry_pause() -> Duration {
-    jittered(Duration::from_secs(1))
+/// The native delivery curve, indexed by consecutive failures before this attempt.
+pub fn driver_retry_base(failures: u32) -> Duration {
+    Duration::from_secs((1_u64 << failures.min(5)).min(30))
+}
+
+/// Retry state belongs to one driver operation, never to the whole client. A refused or missing
+/// socket stays on the restart cadence; a daemon that accepts work but cannot answer gets relief.
+#[derive(Default)]
+pub struct DriverRetry {
+    failures: u32,
+    retry_at: Option<tokio::time::Instant>,
+    lease_deadline: Option<tokio::time::Instant>,
+}
+
+impl DriverRetry {
+    pub fn ready(&self) -> bool {
+        self.retry_at.is_none_or(|at| tokio::time::Instant::now() >= at)
+    }
+
+    pub fn succeeded(&mut self) {
+        self.failures = 0;
+        self.retry_at = None;
+    }
+
+    /// Keep renewal retry waits inside half of the last known remaining lease.
+    /// The deadline survives success because the next read can fail.
+    pub fn lease_margin(&mut self, remaining: Duration) {
+        self.lease_deadline = Some(tokio::time::Instant::now() + remaining);
+    }
+
+    pub fn failed(&mut self, error: &anyhow::Error) -> Duration {
+        let refused = daemon_unreachable(error).is_some_and(|outage| {
+            matches!(outage.socket_os_error(), Some(libc::ECONNREFUSED | libc::ENOENT))
+        }) || error.chain().any(|cause| {
+            cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                matches!(error.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound)
+            })
+        });
+        let pause = if refused {
+            // Keep restart discovery within one second, including the random share.
+            self.failures = 0;
+            jittered(Duration::from_secs(1)).min(Duration::from_secs(1))
+        } else {
+            let base = driver_retry_base(self.failures);
+            self.failures = self.failures.saturating_add(1);
+            jittered(base).min(Duration::from_secs(30))
+        };
+        let pause = self.lease_deadline.map_or(pause, |deadline| {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                pause.min(Duration::from_secs(1))
+            } else {
+                pause.min(remaining / 2)
+            }
+        });
+        self.retry_at = Some(tokio::time::Instant::now() + pause);
+        pause
+    }
 }
 
 /// Half to one and a half times `pause`. Every seat and command waiting out one daemon restart
@@ -2015,15 +2069,69 @@ mod tests {
         );
     }
 
-    /// Drivers that lost one daemon reconnect at different times, within half to one and a half
-    /// seconds of losing it.
     #[test]
-    fn driver_retries_are_spread_around_one_second() {
-        let pauses = (0..64).map(|_| driver_retry_pause()).collect::<Vec<_>>();
-        assert!(pauses.iter().all(|pause| {
-            (Duration::from_millis(500)..=Duration::from_millis(1500)).contains(pause)
-        }));
-        assert!(pauses.iter().collect::<std::collections::BTreeSet<_>>().len() > 8);
+    fn driver_retry_timeout_sequence_has_bounded_jitter() {
+        let error = deadline_error("test", "GET /v1/work", Duration::from_secs(30));
+        let mut retry = DriverRetry::default();
+        for seconds in [1, 2, 4, 8, 16, 30, 30, 30] {
+            assert_eq!(driver_retry_base(retry.failures), Duration::from_secs(seconds));
+            let base = Duration::from_secs(seconds);
+            let pause = retry.failed(&error);
+            assert!((base / 2..=(base * 3 / 2).min(Duration::from_secs(30))).contains(&pause));
+        }
+    }
+
+    #[test]
+    fn driver_retry_resets_on_first_success() {
+        let error = anyhow::anyhow!("request timed out");
+        let mut retry = DriverRetry::default();
+        for _ in 0..8 { retry.failed(&error); }
+        retry.succeeded();
+        assert!(retry.ready());
+        assert_eq!(retry.failures, 0);
+        assert!((Duration::from_millis(500)..=Duration::from_millis(1500)).contains(&retry.failed(&error)));
+    }
+
+    #[test]
+    fn driver_retry_refused_socket_stays_on_restart_floor() {
+        for errno in [libc::ECONNREFUSED, libc::ENOENT] {
+            let mut retry = DriverRetry::default();
+            for _ in 0..8 { retry.failed(&anyhow::anyhow!("timeout")); }
+            let error = DaemonUnreachable::connect_io("test", &std::io::Error::from_raw_os_error(errno));
+            for _ in 0..8 {
+                let pause = retry.failed(&error.clone().into());
+                assert!((Duration::from_millis(500)..=Duration::from_secs(1)).contains(&pause));
+            }
+            assert_eq!(retry.failures, 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn driver_retry_waits_until_due_without_blocking_other_work() {
+        let mut retry = DriverRetry::default();
+        let pause = retry.failed(&deadline_error("test", "response", Duration::from_secs(30)));
+        assert!(!retry.ready());
+        tokio::time::advance(pause - Duration::from_millis(1)).await;
+        assert!(!retry.ready());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(retry.ready());
+        retry.failed(&anyhow::anyhow!("timeout"));
+        retry.succeeded();
+        assert!(retry.ready());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn driver_retry_stays_inside_known_lease_margin() {
+        let mut retry = DriverRetry::default();
+        retry.lease_margin(Duration::from_secs(20));
+        let error = deadline_error("test", "response", Duration::from_secs(30));
+        for _ in 0..8 {
+            assert!(retry.failed(&error) <= Duration::from_secs(10));
+        }
+        tokio::time::advance(Duration::from_secs(18)).await;
+        assert!(retry.failed(&error) <= Duration::from_secs(1));
+        retry.succeeded();
+        assert!(retry.failed(&error) <= Duration::from_secs(1));
     }
 
     #[tokio::test]
