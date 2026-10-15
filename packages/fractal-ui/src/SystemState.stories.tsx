@@ -22,12 +22,12 @@ const agent = (name: string, host: string, status: AgentStatus, since: number): 
   childrenKnown: false, children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' },
 })
 const rows: readonly Row[] = [
-  agent('fractal-web', 'dev5', 'working', 12),
-  agent('st-gateway', 'dev3', 'idle', 95),
-  agent('ui-design', 'dev5', 'waiting', 4),
-  agent('hypermerge', 'dev3', 'working', 31),
-  agent('nix-infra', 'dev4', 'idle', 240),
-  agent('pr-review', 'dev4', 'waiting', 18),
+  agent('fractal-web', 'workstation-a', 'working', 12),
+  agent('st-gateway', 'build-host-a', 'idle', 95),
+  agent('ui-design', 'workstation-a', 'waiting', 4),
+  agent('hypermerge', 'build-host-a', 'working', 31),
+  agent('nix-infra', 'build-host-b', 'idle', 240),
+  agent('pr-review', 'build-host-b', 'waiting', 18),
 ]
 const countdown = 'Next try in 2s · attempt 1'
 
@@ -51,7 +51,7 @@ function SystemStatesStory({ scheme, connection: initial, failure, ticking = fal
       <SystemNotice scope="rail" kind="stale" connection title="Last observed roster" detail="Live updates pending" />
     </aside>
     <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-      <ThreadHeader folder="dev5" title="fractal-web" status="working" statusLabel="working" statusSince={minutes(12)} freshness="stale" now={now} terminalAvailable panelOpen drawerOpen onTogglePanel={() => {}} onToggleDrawer={() => {}} />
+      <ThreadHeader folder="workstation-a" title="fractal-web" status="working" statusLabel="working" statusSince={minutes(12)} freshness="stale" now={now} terminalAvailable panelOpen drawerOpen onTogglePanel={() => {}} onToggleDrawer={() => {}} />
       <ConnectionStatus state={connection} {...(text === undefined ? {} : { text })} {...(connection === 'offline' || connection === 'reconnecting' ? { onReconnect: reconnect } : {})} />
       <div {...stylex.props(styles.body)}>
         <section aria-label="Missions" {...stylex.props(styles.missions)}>
@@ -97,7 +97,7 @@ function ConnectionGeometryStory({ scheme }: { scheme: Scheme }) {
   const [connection, setConnection] = React.useState<ConnectionState>('live')
   return <main aria-label="Workspace" data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'dark' && darkTheme, liveAccentTheme, scheme === 'light' && lightTheme)}>
     <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-      <ThreadHeader folder="dev5" title="fractal-web" status="working" statusLabel="working" statusSince={minutes(12)} freshness={connection === 'live' ? 'live' : 'stale'} now={now} panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
+      <ThreadHeader folder="workstation-a" title="fractal-web" status="working" statusLabel="working" statusSince={minutes(12)} freshness={connection === 'live' ? 'live' : 'stale'} now={now} panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
       <ConnectionStatus state={connection} {...(connection === 'offline' ? { onReconnect: () => setConnection('live') } : {})} />
       <EmbraceScrollViewport items={transcript} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(styles.turns)}>
         {transcript.map(turn => <article key={turn.id} data-item-id={turn.id} {...stylex.props(styles.turn)}><strong {...stylex.props(styles.turnWho)}>{turn.who}</strong><p {...stylex.props(styles.turnText)}>{turn.text}</p></article>)}
