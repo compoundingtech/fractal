@@ -4867,3 +4867,70 @@ fn setup_rejects_unknown_config_before_any_rewrite() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown field"));
     assert_eq!(std::fs::read(path).unwrap(), original);
 }
+
+#[test]
+fn local_state_commands_reject_unknown_config_before_using_default_state() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let config_root = root.path().join("config");
+    let state_root = root.path().join("state");
+    std::fs::create_dir_all(config_root.join("st3")).unwrap();
+    std::fs::create_dir_all(state_root.join("st3")).unwrap();
+    let marker = state_root.join("st3/keep-marker");
+    std::fs::write(&marker, b"unchanged default-state fixture").unwrap();
+    let path = config_root.join("st3/config.toml");
+    let original = b"node = 'fixture'\nstate_dr = '/fictional/wrong-state'\n";
+    std::fs::write(&path, original).unwrap();
+    let missing_binary = root.path().join("no-harness");
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["fleet", "status"],
+        // Even a guard regression is confined to a private dry run, never a host uninstall.
+        vec![
+            "uninstall",
+            "--dry-run",
+            "--no-service",
+            "--keep-binaries",
+            "--offline",
+        ],
+        vec![
+            "admission",
+            "revoke",
+            "omp",
+            "--binary",
+            missing_binary.to_str().unwrap(),
+        ],
+        vec!["service", "status"],
+    ];
+    for args in cases {
+        let output = st3::test_support::command(test_bin!("st3-fixture"))
+            .env_remove("ST_AGENT")
+            .env_remove("ST_MISSION_RUN")
+            .env("HOME", root.path())
+            .env("XDG_CONFIG_HOME", &config_root)
+            .env("XDG_STATE_HOME", &state_root)
+            .env("ST3_ENDPOINT", root.path().join("missing.sock"))
+            .env("ST3_DAEMON_WAIT", "0")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("unknown field") && error.contains("state_dr"),
+            "{args:?}: {error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original, "{args:?}");
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            b"unchanged default-state fixture",
+            "{args:?}"
+        );
+        assert!(
+            !state_root
+                .join("st3/drivers/sessions/harness-admission")
+                .exists()
+        );
+    }
+}

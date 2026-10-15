@@ -117,8 +117,8 @@ escaped key paths, never their values. This warning is once per process, includi
 completion: at most 16 paths, each capped at 160 characters, with explicit truncation notices.
 `st doctor` lists the same bounded names and `--strict` fails on the warning. Known values
 still use the existing typed parser and validation. Daemon startup, replication, policy reloads
-and local configuration/state management (including fleet, uninstall and admission commands)
-remain strict about unknown settings. Setup rejects unknown keys before rewriting; it keeps
+and local configuration/state management (including fleet, uninstall, admission, service
+status and Fabric discovery) remain strict about unknown settings. Setup rejects unknown keys before rewriting; it keeps
 its existing raw-TOML merge, which can reformat comments/order rather than preserving the
 original text. New restrictive client-visible settings must not rely on older clients honoring
 them: those clients can ignore an unknown restriction with only this warning.

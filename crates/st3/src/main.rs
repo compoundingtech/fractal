@@ -9269,7 +9269,7 @@ async fn fabric_route(
 
 /// This machine's `fabric`, the fleet file's override or the one on `PATH`, and its fleet.
 fn configured_fabric() -> Result<(Option<st3::fleet::transport::Fabric>, Option<String>)> {
-    let mut config = Config::load_client_unvalidated(None)?.0;
+    let mut config = Config::load_unvalidated(None)?;
     config.apply_fleet_file()?;
     let override_path = config
         .fleet
@@ -12122,11 +12122,7 @@ async fn run_doctor(
     if args.developer {
         let environment = st3::environment::snapshot()?;
         let check = doctor_cli::developer_tools(&environment);
-        let status = if config_check.is_some() {
-            "warn"
-        } else {
-            &check.status
-        };
+        let status = doctor_cli::client_config_status(&check.status, config_check.is_some());
         if json_output {
             print_value(
                 &json!({"status": status, "scope": "local developer tools", "checks":
@@ -12142,6 +12138,7 @@ async fn run_doctor(
                 );
             }
         }
+        anyhow::ensure!(status != "fail", "st doctor found a failed check");
         anyhow::ensure!(
             !args.strict || status != "warn",
             "st doctor found a computed warning in strict mode"
@@ -13117,8 +13114,8 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
             )
         }
         ServiceCommand::Status => {
+            let config = Config::load_unvalidated(None)?;
             let mut report = st3::service::status()?;
-            let config = Config::load_client_unvalidated(None)?.0;
             if let Some(startup) = st3::startup::read(&config.client_socket()) {
                 for service in &mut report.services {
                     if service.name == "st3.service" || service.name == "com.compoundingtech.st3" {
