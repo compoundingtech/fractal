@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Keep one pending reconcile retry per item and discard obsolete timer wakes",
+  "summary": "Coalesce schedule-sync retry wakes and discard obsolete timer callbacks",
   "replay": {
     "status": "none",
     "detail": "No replay or projection change."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "No response, wire or client contract changes. Repeated requests retain the earliest pending wake, and cancelled or superseded timers no longer wake reconciliation."
+    "detail": "No response, wire or client contract changes. Schedule-sync retries retain their earliest pending wake. Other items retain the latest requested deadline. Cancelled or superseded timers no longer wake reconciliation."
   },
   "downtime": {
     "status": "unknown",

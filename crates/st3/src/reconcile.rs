@@ -8386,8 +8386,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
-    /// Keep the earliest pending wake for this item. Repeated passes can request `now + delay`;
-    /// those requests must not each create a timer or postpone the already pending wake.
+    /// Coalesce sliding schedule-sync retry requests without postponing their pending wake.
+    /// Other callers retain the latest requested deadline; obsolete callbacks stay silent.
     fn arm_restart(&self, subject: &str, until: u128) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             // Keep the incremental clock dependency, but do not register an unspawned timer:
@@ -8400,9 +8400,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if let Some(current) = armed.get(subject)
-            && *current <= until
+            && (*current == until || (subject == "stage/schedule-sync" && *current < until))
         {
-            // The incremental item must retain the earlier clock dependency too.
+            // Schedule sync is a retry of the same catchup predicate, not a moved eligibility
+            // deadline. Other callers can move their authoritative deadline in either direction.
             smallclaims::touched::note_due(*current);
             return;
         }
@@ -18754,6 +18755,43 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         assert_eq!(restart_wake_kind("stage/faults"), "stage/faults");
         assert_eq!(restart_wake_kind("runtime-snapshot"), "runtime-snapshot");
         assert_eq!(restart_wake_kind("agent/example/seat"), "member");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_changed_item_deadline_keeps_its_later_wake_without_rearming() {
+        // These callers do not share schedule-sync's sliding retry policy. Exercise the
+        // actual timer utility with their keys; no caller re-evaluation is needed here.
+        for subject in [
+            "restart-prepare:agent/example/seat",
+            "checkout:agent/example/seat",
+            "stage/github-watches",
+            "stage/subagents",
+        ] {
+            let notify = Arc::new(Notify::new());
+            let reconciler = Reconciler::new(
+                Arc::new(Store::open_memory("node").unwrap()),
+                Arc::new(FakeRuntime::default()),
+                "node".into(),
+                notify.clone(),
+            );
+            let origin = now_ms();
+            reconciler.arm_restart(subject, origin + 5_000);
+            reconciler.arm_restart(subject, origin + 15_000);
+            assert_eq!(
+                reconciler.delayed_restarts.lock().unwrap().get(subject),
+                Some(&(origin + 15_000)),
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), notify.notified())
+                    .await
+                    .is_err(),
+                "the superseded early deadline must not wake the item",
+            );
+            tokio::time::timeout(Duration::from_secs(6), notify.notified())
+                .await
+                .expect("the later deadline must survive without a caller rearming it");
+            assert!(reconciler.delayed_restarts.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test(start_paused = true)]
