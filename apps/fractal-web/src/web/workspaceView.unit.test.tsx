@@ -66,6 +66,6 @@ describe('workspace tab labels', () => {
     expect(paneTabLabel('doc/notes', undefined)).toBe('Notes')
   })
   it('keeps a subject title verbatim', () => {
-    expect(paneTabLabel('terminal/dev3/one', 'st graph SDK')).toBe('st graph SDK')
+    expect(paneTabLabel('terminal/workstation-a/one', 'example agent SDK')).toBe('example agent SDK')
   })
 })
