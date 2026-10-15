@@ -245,8 +245,8 @@ pub(super) async fn page(
         .map(|limit| limit.clamp(1, MAX_CANDIDATES))
         .or_else(|| cursor.as_ref().map(|cursor| cursor.limit))
         .unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS.clamp(1, MAX_CANDIDATES));
-    if let Some(cursor) = &cursor {
-        if cursor.collection != format!("{collection}-history")
+    if let Some(cursor) = &cursor
+        && (cursor.collection != format!("{collection}-history")
             || !cursor.history
             || cursor.person != query.person
             || cursor.snapshot.id != snapshot.id
@@ -255,12 +255,11 @@ pub(super) async fn page(
             || !(1..=MAX_CANDIDATES).contains(&cursor.limit)
             || cursor.state != query.state
             || cursor.expires_at_unix_ms <= client_now_ms()
-            || cursor.before_index.is_none()
-        {
-            return Err(client_page_expired(
-                "attention history cursor does not match its filter or snapshot",
-            ));
-        }
+            || cursor.before_index.is_none())
+    {
+        return Err(client_page_expired(
+            "attention history cursor does not match its filter or snapshot",
+        ));
     }
     let reader = state.clone();
     let person = query.person.clone();
