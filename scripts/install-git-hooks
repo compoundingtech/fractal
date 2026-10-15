@@ -23,9 +23,10 @@ mkdir -p "$hooks"
 cat > "$hook.tmp" <<STUB
 #!/usr/bin/env bash
 $mark
-top=\$(git rev-parse --show-toplevel)
+top=\$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 [ -x "\$top/scripts/git-hooks/pre-push" ] || exit 0
-exec "\$top/scripts/git-hooks/pre-push" "\$@"
+"\$top/scripts/git-hooks/pre-push" "\$@"
+exit 0
 STUB
 chmod +x "$hook.tmp"
 mv -f "$hook.tmp" "$hook"

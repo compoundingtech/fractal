@@ -599,7 +599,9 @@ A pre-push hook does this without anyone remembering. `scripts/install-git-hooks
 CI) installs a stub in the repository's hooks directory, never replacing a hook it did not write and leaving a configured
 `core.hooksPath` alone. When you push the branch you have checked out, `scripts/evidence-prepush` asks `st-test --status`; if every check
 is covered it says so, otherwise it runs `st-test --push REMOTE` (bounded by `ST_EVIDENCE_TIME_LIMIT`, default 1200 seconds, then
-stopped) and the push goes. It never blocks a push: a failing check is recorded and printed, a timeout is printed. `ST_SKIP_EVIDENCE=1`
+stopped) and the push goes. It never blocks a push: a failing check is recorded and printed, a timeout is printed, and so is every other failure (an exception, a missing
+`python3`, a slow fetch, a missing signing key). It runs from the working tree being pushed, implicitly on `git push`, so the code in that tree executes on
+this machine as you; the checks run in a throwaway worktree, but the hook and `st-test` come from the tree. A covered tree is pushed silently. `ST_SKIP_EVIDENCE=1`
 skips it and says so. Tags, deletes, other branches and the base branch are pushed untouched, and the notes push inside the run
 does not run the hook again.
 

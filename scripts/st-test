@@ -26,13 +26,16 @@ It runs `nix develop` and `pnpm install` from the tree under test, on this machi
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md
 ("Host keys"); do not run it on a branch you would not run by hand.
 
-Exit 0 when every selected check passed and was signed, 1 otherwise.
+Exit 0 when every selected check passed and was signed; 1 when a check failed, timed out or could not be signed; 2 when it
+could not start (a refusal: dirty tree, bad argument, merge conflict); 3 from --status when the tree is not covered.
 """
 import argparse
 import json
 import os
 from pathlib import Path
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -89,6 +92,24 @@ def target_worktree(base, scratch):
     directory = Path(scratch) / 'tree'
     git('worktree', 'add', '--detach', '-q', str(directory), commit)
     return directory, commit
+
+
+def reap_stale():
+    """Remove worktrees an earlier st-test left when it was killed (no TERM, no cleanup): its scratch directory names its pid."""
+    listing = text(git('worktree', 'list', '--porcelain', check=False))
+    for block in listing.split('\n\n'):
+        match = re.search(r'^worktree (\S*/st-test-[^/]+)/tree$', block, re.M)
+        if not match:
+            continue
+        scratch = Path(match.group(1))
+        try:
+            os.kill(int((scratch / 'pid').read_text()), 0)
+            continue  # still running
+        except (OSError, ValueError):
+            pass
+        git('worktree', 'remove', '--force', str(scratch / 'tree'), check=False)
+        shutil.rmtree(scratch, ignore_errors=True)
+    git('worktree', 'prune', check=False)
 
 
 def covered(verifier, directory, tree, check, base, repository):
@@ -154,8 +175,10 @@ def main(argv):
     status = git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
     if status:
         raise Failure('the checkout has uncommitted changes to tracked files; commit them first, the note is for the committed tree')
+    reap_stale()
     with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
         os.chmod(scratch, 0o700)
+        (Path(scratch) / 'pid').write_text(str(os.getpid()))
         tools = {}
         for name in BASE_SCRIPTS:
             path = Path(scratch) / name
@@ -198,8 +221,10 @@ def main(argv):
 
 
 if __name__ == '__main__':
+    # TERM (the pre-push hook's timeout, a closed terminal) unwinds like an error so the throwaway worktree is removed.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(143))
     try:
         sys.exit(main(sys.argv[1:]))
     except Failure as error:
         print(f'st-test: {error}', file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)

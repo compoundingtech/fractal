@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """Pre-push: when the tree about to be tested has no signed evidence, produce it, then let the push go.
 
-Nobody has to remember: pushing a branch you have checked out runs `scripts/st-test --status`; if every check
-that has a local command is covered it says so and the push goes. If not, it runs `scripts/st-test --push REMOTE`
-(the checks run once on this machine, the host's signer records them, the notes are pushed) and then the push goes.
+When you push the branch you have checked out, `scripts/st-test --status` says whether its merge tree is covered. If
+every check that has a local command is covered the push goes, silently. If not, `scripts/st-test --push REMOTE` runs the checks
+once on this machine, the host's signer records them, the notes are pushed, and then the push goes.
 
-  * It never blocks a push. A failing check is recorded and printed, a timeout is printed, the push goes either way.
+This runs from the working tree being pushed, implicitly on `git push`, once `scripts/install-git-hooks` has installed
+it: the code in that tree (st-test, and the `nix develop` and `pnpm install` it runs) executes on this machine as you.
+
+  * It never blocks a push. Every failure path (an exception, a missing python3, a hung fetch, a signer that refuses,
+    a failing check, a timeout) is printed and the push goes. Ctrl-C stops the run and everything under it (its process
+    group) and the hook exits 0; `git push` itself gets the same Ctrl-C from the terminal, so the push ends there.
   * ST_SKIP_EVIDENCE=1 skips all of it (work in progress); it says it did not sign and the PR simply runs in CI.
-  * ST_EVIDENCE_TIME_LIMIT=SECONDS bounds the signing run (default 1200); past it the run is stopped, that is
-    printed, and the push goes.
-  * Only a branch under refs/heads/ that is the one checked out, is not being deleted and is not the base branch is
-    looked at; anything else is pushed untouched. Pushing notes from inside the run does not run this hook again.
+  * ST_EVIDENCE_TIME_LIMIT=SECONDS bounds the signing run (default 1200, must be a positive integer); past it the run
+    is stopped (TERM, then KILL after 15 s), that is printed, and the push goes. ST_EVIDENCE_STATUS_TIMEOUT bounds the
+    "is it covered" question (default 60 s).
+  * It signs only the checked-out branch's merge tree and only when the work tree has no uncommitted changes to tracked
+    files; anything else (other refs, tags, deletes, the base branch, a remote given as a URL) is pushed untouched.
+    Pushing notes from inside the run does not run this hook again.
 """
 import os
 from pathlib import Path
@@ -21,36 +28,59 @@ import sys
 
 sys.dont_write_bytecode = True
 LIMIT = 1200
+STATUS_LIMIT = 60
 BASE = 'main'
+CHILD = None
 
 
 def say(message):
     print(f'evidence: {message}', file=sys.stderr)
 
 
-def run(command, **kwargs):
-    return subprocess.run(command, text=True, **kwargs)
+def git(*args):
+    return subprocess.run(['git', *args], capture_output=True, text=True)
 
 
-def main(argv):
+def positive(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    if raw.isdecimal() and int(raw) > 0:
+        return int(raw)
+    say(f'{name}={raw!r} is not a positive integer; using {default}')
+    return default
+
+
+def stop(group, wait):
+    """TERM the process group (st-test cleans its worktree on TERM), then KILL what is left."""
+    try:
+        os.killpg(group.pid, signal.SIGTERM)
+        group.wait(timeout=wait)
+    except subprocess.TimeoutExpired:
+        os.killpg(group.pid, signal.SIGKILL)
+        group.wait()
+    except ProcessLookupError:
+        pass
+
+
+def hook(argv):
+    global CHILD
     if os.environ.get('ST_EVIDENCE_IN_HOOK'):
         return 0  # the notes push of our own run
     remote = argv[0] if argv else 'origin'
     if os.environ.get('ST_SKIP_EVIDENCE') == '1':
         say('NOT signing (ST_SKIP_EVIDENCE=1); the pull request will run in CI')
         return 0
-    head = run(['git', 'rev-parse', 'HEAD'], capture_output=True).stdout.strip()
+    head = git('rev-parse', 'HEAD').stdout.strip()
     pushed = []
     for line in sys.stdin:
         fields = line.split()
         if len(fields) != 4:
             continue
-        local_ref, local_sha, remote_ref, _ = fields
+        _, local_sha, remote_ref, _ = fields
         if not remote_ref.startswith('refs/heads/') or re.fullmatch(r'0+', local_sha):
             continue  # a tag, a note, a delete: untouched
-        if remote_ref == f'refs/heads/{BASE}':
-            continue
-        if local_sha == head:
+        if remote_ref != f'refs/heads/{BASE}' and local_sha == head:
             pushed.append(remote_ref)
     if not pushed:
         return 0
@@ -58,36 +88,68 @@ def main(argv):
     if not script.exists():
         say('scripts/st-test is not in this checkout; not signing')
         return 0
+    if remote not in git('remote').stdout.split():
+        say(f'{remote!r} is not a configured remote name (a URL?); not signing')
+        return 0
+    if git('status', '--porcelain', '--untracked-files=no').stdout.strip():
+        say('uncommitted changes to tracked files: not signing (the note is for the committed tree)')
+        return 0
+    if not os.environ.get('EVIDENCE_SIGNER') and not (Path.home() / '.config/st/evidence-sign.json').exists():
+        say('no signing key is set up on this machine (run scripts/evidence-keygen --name ALIAS and list its line in '
+            '.st/evidence-keys); not signing, the pull request will run in CI')
+        return 0
     base = f'{remote}/{BASE}'
-    status = run([sys.executable, str(script), '--status', '--base', base], capture_output=True)
-    if status.returncode == 0:
-        say('this tree is already covered by signed evidence')
-        return 0
-    if status.returncode != 3:
-        say(f'could not tell whether the tree is covered ({(status.stderr or status.stdout).strip()[-200:]}); not signing, the pull request will run in CI')
-        return 0
     try:
-        limit = int(os.environ.get('ST_EVIDENCE_TIME_LIMIT', LIMIT))
-    except ValueError:
-        limit = LIMIT
-    say(f'no signed evidence for this tree yet: running the checks here and signing them (at most {limit // 60} min; '
+        status = subprocess.run([sys.executable, str(script), '--status', '--base', base], capture_output=True, text=True,
+                                timeout=positive('ST_EVIDENCE_STATUS_TIMEOUT', STATUS_LIMIT))
+    except subprocess.TimeoutExpired:
+        say('could not tell whether the tree is covered in time (a slow fetch?); not signing, the pull request will run in CI')
+        return 0
+    if status.returncode == 0:
+        return 0  # already covered: nothing to say
+    if status.returncode != 3:
+        say(f'could not tell whether the tree is covered ({(status.stderr or status.stdout).strip()[-200:]}); '
+            'not signing, the pull request will run in CI')
+        return 0
+    limit = positive('ST_EVIDENCE_TIME_LIMIT', LIMIT)
+    say(f'no signed evidence for this tree yet: running the checks here and signing them (at most {max(limit // 60, 1)} min; '
         'ST_SKIP_EVIDENCE=1 skips this)')
-    # Its own process group, so a timeout stops the nix and pnpm processes under it too.
-    child = subprocess.Popen([sys.executable, str(script), '--base', base, '--push', remote, '--time-limit', str(limit)],
+    # Its own process group, so stopping it stops the nix and pnpm processes under it too.
+    CHILD = subprocess.Popen([sys.executable, str(script), '--base', base, '--push', remote, '--time-limit', str(limit)],
                              env=dict(os.environ, ST_EVIDENCE_IN_HOOK='1'), stdout=sys.stderr, start_new_session=True)
     try:
-        child.wait(timeout=limit)
+        CHILD.wait(timeout=limit)
     except subprocess.TimeoutExpired:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait()
+        stop(CHILD, 15)
+        git('worktree', 'prune')
         say(f'signing did not finish within {max(limit // 60, 1)} minute(s); stopped. Pushing anyway: the pull request will run in CI')
         return 0
-    done = child
-    if done.returncode == 0:
+    code = CHILD.returncode
+    CHILD = None
+    if code == 0:
         say('signed; pushing')
+    elif code == 1:
+        say('a check failed or could not be signed (the reason is above); a failing run is recorded. Pushing anyway')
     else:
-        say(f'the checks did not all pass or could not be signed (exit {done.returncode}); the failing run is recorded. Pushing anyway')
+        say(f'signing could not run (exit {code}; the reason is above). Pushing anyway')
     return 0
+
+
+def main(argv):
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        return hook(argv)
+    except KeyboardInterrupt:
+        if CHILD is not None:
+            stop(CHILD, 15)
+            git('worktree', 'prune')
+        say('interrupted; the signing run was stopped')
+        return 0
+    except Exception as error:  # nothing here may stop a push
+        say(f'{type(error).__name__}: {error}; not signing, pushing anyway')
+        return 0
 
 
 if __name__ == '__main__':

@@ -185,6 +185,33 @@ class StTest(unittest.TestCase):
         git(self.work, 'checkout', '-q', 'feature')
         self.assertEqual(self.run_st_test('--check', 'demo', '--status')[0], 3)
 
+    def test_a_worktree_left_by_a_killed_run_is_removed_by_the_next_run(self):
+        self.commit('b.txt', 'two')
+        stale = Path(tempfile.mkdtemp(prefix='st-test-'))
+        (stale / 'pid').write_text('999999999')
+        git(self.work, 'worktree', 'add', '--detach', '-q', str(stale / 'tree'), 'HEAD')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        self.assertFalse(stale.exists())
+        self.assertNotIn('st-test-', git(self.work, 'worktree', 'list'))
+
+    def test_a_worktree_of_a_live_run_is_left_alone(self):
+        self.commit('b.txt', 'two')
+        live = Path(tempfile.mkdtemp(prefix='st-test-'))
+        self.addCleanup(shutil.rmtree, live, ignore_errors=True)
+        (live / 'pid').write_text(str(os.getpid()))
+        git(self.work, 'worktree', 'add', '--detach', '-q', str(live / 'tree'), 'HEAD')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        self.assertTrue((live / 'tree').exists())
+
+    def test_the_command_line_maps_a_refusal_to_exit_2_and_a_failed_check_to_exit_1(self):
+        self.commit('b.txt', 'two')
+        env = dict(GIT_ENV, HOME=str(self.home))
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--base', '--bad'], capture_output=True, text=True, cwd=self.work, env=env)
+        self.assertEqual(done.returncode, 2)
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--check', 'genie-freshness', '--base', 'origin/main'],
+                              capture_output=True, text=True, cwd=self.work, env=dict(env, PATH='/nonexistent'))
+        self.assertIn(done.returncode, (1, 2))
+
     def test_a_base_that_looks_like_a_git_option_is_refused(self):
         self.commit('b.txt', 'two')
         for bad in ('--upload-pack=x', '-x', 'a b', ''):
