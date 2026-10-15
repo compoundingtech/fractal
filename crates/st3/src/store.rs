@@ -58731,9 +58731,12 @@ fn append_claim_with_subject_fences(
     append_claim_with_commit_context(graph, input, fence, event_runtime, expected_subjects, observer_completion, Default::default())
 }
 
+type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), St3Error> + Sync + 'a;
+
 #[derive(Default)]
 struct ClaimCommitContext<'a> {
     signature: Option<&'a str>,
+    admission: Option<&'a ClaimAdmission<'a>>,
     assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
 }
 
@@ -58764,6 +58767,7 @@ fn append_claim_with_commit_context(
     // batch commits.
     graph.connection
         .batched(|transaction| -> Result<(ClaimRecord, bool), St3Error> {
+            if let Some(admission) = context.admission { admission(transaction)?; }
             let mut assistant_input;
             let input = if let Some(authorization) = context.assistant {
                 let grant_id = assistant_write::authorize_grant(transaction, &graph.origin, authorization)?;

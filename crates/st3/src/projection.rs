@@ -241,9 +241,9 @@ mod tests {
         .unwrap();
         assert!(projected.starts_with(
             "from: assistant/example\n\
+             to: agent/receiver\n\
              sender_class: external-assistant\n\
-             assistant_grant_id: assistant-grant/one\n\
-             to: agent/receiver\n"
+             assistant_grant_id: assistant-grant/one\n"
         ));
         // An ordinary send projects no provenance lines.
         message.sender_class = None;

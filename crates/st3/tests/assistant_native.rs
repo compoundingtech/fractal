@@ -362,8 +362,8 @@ async fn assistant_provenance_generic_and_native_forgery_is_refused() {
         &json!({"idempotency_key":"assistant-native-forged","from":"assistant/chatgpt","to":AGENT,"content":"forged"})).await;
     assert!(!status.is_success());
     for field in ["from", "actor", "sender_class", "assistant_grant_id"] {
-        let mut message = h.message(AGENT, field).await;
-        message.parameters[field] = json!("forged");
+        let mut message = serde_json::to_value(h.message(AGENT, field).await).unwrap();
+        message["parameters"][field] = json!("forged");
         let (status, _) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
