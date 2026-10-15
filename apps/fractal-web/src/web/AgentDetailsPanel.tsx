@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Button, Dialog, Heading, Modal, ModalOverlay } from 'react-aria-components'
 import { RegistryContext } from '@effect/atom-react'
 import { DetailsPane, Workbench } from '@smalltalk/fractal-ui/assistant-ui'
-import type { DetailsLayoutIntent, DetailsVariants, WorkbenchLayout, WorkbenchResources } from '@smalltalk/fractal-ui/assistant-ui'
+import type { DetailsLayoutIntent, DetailsSection, DetailsVariants, TraceSeries, WorkbenchLayout, WorkbenchResources } from '@smalltalk/fractal-ui/assistant-ui'
 import type { SyncStatus } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-status.ts'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useGatewaySync, useNow } from '../data/react.tsx'
@@ -28,6 +28,11 @@ export interface AgentDetailsPanelProps {
   readonly onOpen: (uri: string, split: boolean) => void
   readonly variants?: DetailsVariants
 }
+
+/** q44 hides absent resource bodies; an observed zero descendant count is still evidence. */
+export const visibleDetailsSections = (sections: readonly DetailsSection[], trace: TraceSeries): readonly DetailsSection[] =>
+  sections.filter(section => section.items._tag === 'Known' && (section.items.value.length > 0 || section.title === 'Subagents') ||
+    section.title === 'Subagents' && (trace.subagents._tag === 'Known' || trace.subagentCount._tag === 'Known'))
 
 /** The real kit tab-group owns Details' status/action slot; hidden tabs release reader demand. */
 export function AgentDetailsPanel({ agentRef, width, scheme, onClose, onOpen, variants = liveDetailsVariants }: AgentDetailsPanelProps) {
@@ -63,10 +68,10 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
 }) {
   const native = useNativeDetails({ agentRef })
   const protectedSections = useDetailsSections({ agentRef })
-  const sections = native.sections.map(section => protectedSections.find(contribution => contribution.title === section.title) ?? section)
+  const suppliedSections = native.sections.map(section => protectedSections.find(contribution => contribution.title === section.title) ?? section)
   const [inspectedUri, setInspectedUri] = React.useState<string>()
   const portalContainer = React.useRef<HTMLDivElement>(null)
-  const resource = sections.flatMap(section => section.items._tag === 'Known' ? section.items.value : []).find(item => item.uri === inspectedUri)
+  const resource = suppliedSections.flatMap(section => section.items._tag === 'Known' ? section.items.value : []).find(item => item.uri === inspectedUri)
   const now = useNow()
   const [requestedAt] = React.useState(now)
   const gateway = useGatewaySync()
@@ -82,6 +87,8 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
     ...(native.harness === undefined ? {} : { harness: native.harness }),
     ...(native.nativeSessionId === undefined ? {} : { nativeSessionId: native.nativeSessionId }),
   })
+  const sections = visibleDetailsSections(suppliedSections, data.trace)
+  const unreportedSections = suppliedSections.filter(section => section.items._tag === 'Unknown' && !sections.includes(section)).map(section => section.title)
   const traced = inspectedUri?.startsWith('session:') && data.trace.subagents._tag === 'Known'
     ? data.trace.subagents.value.find(child => `session:${child.sessionId}` === inspectedUri) : undefined
   const inspection = resource !== undefined ? { label: resource.card.label, detail: resource.card.detail }
@@ -111,6 +118,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
       hasPriorContent={native.state !== 'loading' && native.state !== 'error'}
       {...(native.observedAt === undefined ? {} : { observedAt: native.observedAt })}
     />
+    {unreportedSections.length > 0 && <p data-details-unreported-sections {...stylex.props(styles.coverage)}>Not supplied: {unreportedSections.join(', ')}.</p>}
     <ModalOverlay isOpen={inspection !== undefined} onOpenChange={open => { if (!open) setInspectedUri(undefined) }} isDismissable UNSTABLE_portalContainer={portalContainer.current ?? undefined} {...stylex.props(styles.overlay)}>
       <Modal {...stylex.props(styles.modal)}><Dialog aria-label="Reported resource details" {...stylex.props(styles.inspection)}>
         <Heading slot="title">{inspection?.label}</Heading>

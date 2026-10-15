@@ -57,6 +57,13 @@ describe('native observations mounted on the production kit Details pane', () =>
     context.setAttribute('aria-valuenow', String(480_035_214 / 1_000_000 * 100))
     expect(() => expect(Number(context.getAttribute('aria-valuenow'))).toBeCloseTo(6.1206, 6)).toThrow()
   })
+  it('hides not-supplied resource sections and names their absence once, without inventing empty counts', () => {
+    for (const name of ['Pull requests', 'CI runs', 'Reviews', 'Files touched', 'Terminals', 'Missions / queue', 'Attention', 'History'])
+      expect(within(host).queryByRole('region', { name })).toBeNull()
+    expect(host.querySelector('[data-details-unreported-sections]')?.textContent).toContain('Not supplied:')
+    expect(host.querySelector('[data-details-unreported-sections]')?.textContent).toContain('CI runs')
+    expect(host.textContent).not.toContain('CI runs observations are not supplied')
+  })
   it('preserves Changes as a selectable real captured-changes surface and returns to Details', async () => {
     await act(async () => within(host).getByRole('tab', { name: 'Changes' }).click())
     expect(host.querySelector('aside[aria-label="Changes"]')).not.toBeNull()
