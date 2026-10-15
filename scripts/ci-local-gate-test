@@ -172,6 +172,58 @@ class Slot(unittest.TestCase):
         self.assertEqual(gate.LIGHT, ('upgrade-impact',))
 
 
+class SlotRun(unittest.TestCase):
+    """The parent's mapping of a stage's exit code, through a fake cargo that records its argv."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.shim = Path(self.tmp.name) / 'bin'
+        self.shim.mkdir()
+        self.log = Path(self.tmp.name) / 'argv.log'
+
+    def fake_cargo(self, *codes, stage_form=True):
+        marker = '# the stage form: cargo --stage-slot LABEL -- COMMAND\n' if stage_form else ''
+        script = self.shim / 'cargo'
+        script.write_text('#!/usr/bin/env bash\n' + marker + f'printf "%s\\n" "$*" >> {self.log}\n'
+                          f'n=$(wc -l < {self.log}); codes=({" ".join(str(c) for c in codes)}); exit "${{codes[$((n - 1))]:-0}}"\n')
+        script.chmod(0o755)
+
+    def run_main(self, *argv):
+        return gate.main([*argv, '--base', 'origin/main'], shim=str(self.shim), setup=lambda work: {'RUNNER_TEMP': work})
+
+    def test_a_stage_goes_through_the_slot_and_its_exit_code_is_the_result(self):
+        self.fake_cargo(0)
+        self.assertEqual(self.run_main('--stage', 'linux-clippy'), 0)
+        line, = self.log.read_text().splitlines()
+        self.assertTrue(line.startswith('--stage-slot ci-local-gate-linux-clippy -- '), line)
+        self.assertIn('--direct --stage linux-clippy --base origin/main', line)
+
+    def test_a_failing_stage_and_a_stage_stopped_by_the_host_limit_are_failures(self):
+        for code in (1, gate.STAGE_LIMIT_EXIT):
+            with self.subTest(code):
+                self.log.unlink(missing_ok=True)
+                self.fake_cargo(code)
+                self.assertEqual(self.run_main('--stage', 'linux-clippy'), 1)
+
+    def test_fail_fast_stops_after_the_first_failing_stage_and_otherwise_every_stage_runs(self):
+        self.fake_cargo(1, 0)
+        self.assertEqual(self.run_main('--stage', 'linux-clippy', '--stage', 'linux-fleet-compat', '--fail-fast'), 1)
+        self.assertEqual(len(self.log.read_text().splitlines()), 1)
+        self.log.unlink()
+        self.fake_cargo(1, 0)
+        self.assertEqual(self.run_main('--stage', 'linux-clippy', '--stage', 'linux-fleet-compat'), 1)
+        self.assertEqual(len(self.log.read_text().splitlines()), 2)  # the second ran after the first failed
+
+    def test_a_shim_without_the_stage_form_is_not_asked_for_it(self):
+        self.fake_cargo(0, stage_form=False)
+        self.assertFalse(gate.has_stage_slot(str(self.shim)))
+        self.assertTrue(gate.has_stage_slot(str(self.shim)) is False)
+        self.assertFalse(gate.has_stage_slot(str(Path(self.tmp.name) / 'nowhere')))
+        self.fake_cargo(0)
+        self.assertTrue(gate.has_stage_slot(str(self.shim)))
+
+
 class Prepared(unittest.TestCase):
     def test_the_environment_is_the_ci_jobs_isolated_home_and_runner_temp(self):
         with tempfile.TemporaryDirectory() as work:

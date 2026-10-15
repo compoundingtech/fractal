@@ -12,7 +12,9 @@ A test proves every command below appears in the generated workflow, so the two 
 On a host whose cargo shim lives at $HOME/.local/bin/cargo (build admission, a builds slice) the dev shell's cargo is run through
 that shim, so the compile is queued and sliced like any other, and each stage that builds runs inside ONE ticket of the shim's
 stage slot (`cargo --stage-slot LABEL -- ...`, one stage at a time, stopped after the host's stage limit): the same compile, only
-queued once per stage instead of once per cargo command. Done at run time; not a CI command.
+queued once per stage instead of once per cargo command. A stage the host stops (40 minutes today, exit 124) is reported as a failure;
+a stage that needs longer must be split. A shim without the stage form is detected (its file names `--stage-slot`) and the stage runs the
+old way, in this process. Done at run time; not a CI command.
 
 Every stage runs even after a failure (a failing record is information); --fail-fast stops at the first and writes
 no facts. --external NAME=EXIT passes the exit code of a member this script does not run (genie-freshness and
@@ -82,6 +84,16 @@ def admitted(command, shim_dir):
 
 
 LIGHT = ('upgrade-impact',)  # no cargo, no nix build: no slot
+STAGE_LIMIT_EXIT = 124  # the shim stops a stage after the host's limit (2400 s today) and exits 124: reported as a failure
+
+
+def has_stage_slot(shim_dir):
+    """True when the shim at shim_dir has the stage form (st3-network #383). An older shim hands `--stage-slot` to the real
+    cargo, which fails: every building stage would report a false red. Reading the file costs no ticket."""
+    try:
+        return b'--stage-slot' in (Path(shim_dir) / 'cargo').read_bytes()[:2_000_000]
+    except OSError:
+        return False
 
 
 def slot_command(name, shim_dir, base):
@@ -148,7 +160,7 @@ def facts(results, gate=GATE):
                        'stage_results': ','.join(f'{n}={r}' for n, r in needs.items())}}
 
 
-def main(argv, table=None, setup=None):
+def main(argv, table=None, setup=None, shim=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--stage', action='append', default=[], metavar='NAME', help='only this stage (repeatable)')
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
@@ -185,7 +197,8 @@ def main(argv, table=None, setup=None):
         return 2
     results, failed = {}, False
     real_home = os.environ.get('HOME', '')
-    shim_dir = str(Path(real_home) / '.local/bin') if real_home and os.access(Path(real_home) / '.local/bin/cargo', os.X_OK) else None
+    shim_dir = shim or (str(Path(real_home) / '.local/bin') if real_home and os.access(Path(real_home) / '.local/bin/cargo', os.X_OK) else None)
+    slotted = bool(shim_dir) and has_stage_slot(shim_dir)  # an older shim: the stage runs the old way, in this process
     with tempfile.TemporaryDirectory(prefix='ci-local-gate-') as work:
         environment = dict(os.environ, **(setup or prepare)(work))
         if shim_dir and os.access(Path(shim_dir) / 'build-admission', os.X_OK):
@@ -194,7 +207,7 @@ def main(argv, table=None, setup=None):
         for name in chosen:
             started = time.monotonic()
             code = 0
-            if shim_dir and table is None and not args.direct and name not in LIGHT and (Path(shim_dir) / 'cargo').exists():
+            if slotted and (table is None or shim) and not args.direct and name not in LIGHT:
                 # One ticket for the whole stage; the stage runs this script again, directly, inside it.
                 code = subprocess.run(slot_command(name, shim_dir, args.base), env=dict(environment, HOME=real_home)).returncode
                 results[name] = 'success' if code == 0 else 'failure'
