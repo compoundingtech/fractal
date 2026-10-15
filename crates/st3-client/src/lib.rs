@@ -899,6 +899,8 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
             "this image was removed after its retention window; the message text remains".into()
         }
         ErrorCode::ValidationFailed
+        | ErrorCode::InvalidAnswer
+        | ErrorCode::NotAnswerable
         | ErrorCode::ProjectionDetailTooLarge
         | ErrorCode::ProjectionDetailInvalidSource
         | ErrorCode::AttentionMigrated
@@ -4105,6 +4107,8 @@ mod tests {
         assert!(!gone.is_transient());
         assert!(!api(ErrorCode::Forbidden, "no").is_transient());
         for code in [
+            ErrorCode::InvalidAnswer,
+            ErrorCode::NotAnswerable,
             ErrorCode::ProjectionDetailTooLarge,
             ErrorCode::ProjectionDetailInvalidSource,
         ] {
