@@ -249,6 +249,8 @@ impl Store {
 
     /// Private factoring entry only: the caller owns a complete, closed staging file.
     /// No CLI/copy, installation, migration, sealing or repair is attached in this slice.
+    /// It must remain unwired until the producer binds the exporting build/claim registry
+    /// to the stage's projection cut; layout metadata alone does not establish that binding.
     #[allow(dead_code, reason = "read-only staging is intentionally not attached to a CLI yet")]
     pub(crate) fn write_read_only_backup(
         path: &Path,

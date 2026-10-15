@@ -15,6 +15,13 @@ fn sealed(path: &Path) -> Store {
     let store = Store::open(path, "alder").unwrap();
     diagnostic(&store, "retained source");
     store.seal_local_batches().unwrap();
+    let connection = store.readers.get();
+    assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), CURRENT_SCHEMA_VERSION);
+    let columns = connection.prepare("PRAGMA index_info(sqlite_autoindex_batches_1)").unwrap()
+        .query_map([], |row| row.get::<_, String>(2)).unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(columns, ["id"], "the pinned current batches primary key supplies this forced index");
+    drop(connection);
     store
 }
 
@@ -80,12 +87,13 @@ fn read_only_v2_preserves_owned_missing_mismatched_and_stray_body_semantics() {
     let store = sealed(&path);
     let bodies = crate::message_body::bodies(&state);
     let body = "a long body with UTF-8 é\n".repeat(500);
-    for id in ["owned", "missing", "mismatch"] {
+    for id in ["owned", "missing", "mismatch", "foreign-holder"] {
+        let sender = if id == "foreign-holder" { "person/blake" } else { "person/alex" };
         store.append_claim(&ClaimInput {
             subject: format!("message/{id}"), kind: "message.sent".into(),
-            actor: Some("person/alex".into()),
+            actor: Some(sender.into()),
             fields: BTreeMap::from([
-                ("from".into(), json!("person/alex")), ("to".into(), json!("agent/reader")),
+                ("from".into(), json!(sender)), ("to".into(), json!("agent/reader")),
                 ("content".into(), json!(crate::message_body::preview(&body))),
                 ("status".into(), json!("sent")),
                 ("attachments".into(), json!([{
@@ -98,6 +106,18 @@ fn read_only_v2_preserves_owned_missing_mismatched_and_stray_body_semantics() {
     bodies.put("person/alex", "message/owned", body.as_bytes()).unwrap();
     bodies.put("person/alex", "message/mismatch", b"different bytes").unwrap();
     bodies.put("person/alex", "message/stray", b"no claim names this").unwrap();
+    bodies.put("person/alex", "message/foreign-holder", body.as_bytes()).unwrap();
+    let before_receipt = store.message("message/owned").unwrap().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "message/owned".into(), kind: "message.read".into(), actor: Some("agent/reader".into()),
+        fields: BTreeMap::from([("status".into(), json!("read"))]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let after_receipt = store.message("message/owned").unwrap().unwrap();
+    assert_eq!(after_receipt.created_index, before_receipt.created_index);
+    assert_eq!(after_receipt.status, "read", "creation index is display identity, not an as-of cutoff");
+    assert_eq!(after_receipt.from, "person/alex");
+    assert_eq!(after_receipt.body_ref, before_receipt.body_ref);
     let (header, bytes) = compare_live(&store, Some(&bodies));
     assert_eq!(header.version, crate::backup::VERSION_WITH_BODIES);
     assert_eq!(String::from_utf8_lossy(&bytes).matches("\"record\":\"message-body\"").count(), 1);
@@ -110,6 +130,8 @@ fn read_only_v2_preserves_owned_missing_mismatched_and_stray_body_semantics() {
         assert!(!restored.exists("person/alex", "message/missing"));
         assert!(!restored.exists("person/alex", "message/mismatch"));
         assert!(!restored.exists("person/alex", "message/stray"));
+        assert!(!restored.exists("person/alex", "message/foreign-holder"));
+        assert!(!restored.exists("person/blake", "message/foreign-holder"));
     }
 }
 
@@ -185,7 +207,12 @@ fn read_only_refuses_old_or_incomplete_layout_and_unprojected_cut_without_repair
         drop(store);
         let before = fs::read(&path).unwrap();
         let mut bytes = Vec::new();
-        assert!(Store::write_read_only_backup(&path, &mut bytes, None).is_err(), "{case}");
+        let error = Store::write_read_only_backup(&path, &mut bytes, None).unwrap_err();
+        if case == "unprojected" {
+            assert!(error.to_string().contains("fully projected graph"), "{error:#}");
+            assert!(error.to_string().contains("retry after replication catches up"));
+            assert!(!error.to_string().contains("predecessor"), "projection lag is not a chain gap");
+        }
         assert!(bytes.is_empty(), "{case}");
         assert_eq!(fs::read(&path).unwrap(), before, "{case}");
     }

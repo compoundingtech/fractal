@@ -67,6 +67,8 @@ fn log_digest(connection: &Connection) -> Result<String> {
 }
 
 fn message_at(connection: &Connection, subject: &str) -> Result<Option<MessageView>> {
+    // created_index is a returned identity/display field, not an as-of bound:
+    // message_view_tx folds latest_actual and current_desired on this connection.
     let created: Option<u64> = connection.query_row(
         "SELECT MIN(store_index) FROM claims WHERE subject=?1 AND subject LIKE 'message/%'",
         [subject], |row| row.get(0),
