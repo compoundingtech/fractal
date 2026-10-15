@@ -227,6 +227,20 @@ function assertSelected(tab: HTMLElement) {
   requireContract(panel.querySelector<HTMLElement>('[data-pane-key]')?.dataset.paneKey === tab.dataset.tabKey, 'Wrong resource body')
   requireContract(painted(tab), 'Selected resource is not revealed whole')
 }
+/**
+ * The tab's disclosure, resolved through its own aria-describedby. A document-wide ByRole
+ * query re-runs on every mutation at 46ms (unthrottled) to 319ms (6x CPU) per check on this
+ * page, so under load a few checks consumed the whole 1s budget meant for RAC's 0 or 350ms
+ * (warm or cold) open delay and missed a tooltip that was already mounted.
+ */
+async function tooltipFor(tab: HTMLElement, name: string) {
+  return waitFor(() => {
+    const tooltip = tab.getAttribute('aria-describedby')?.split(/\s+/).map(id => tab.ownerDocument.getElementById(id)).find(node => node?.getAttribute('role') === 'tooltip')
+    requireContract(tooltip !== undefined && tooltip !== null, `Missing tooltip for ${name}`)
+    expect(tooltip).toHaveAccessibleName(name)
+    return tooltip
+  })
+}
 async function interactionPlay({ canvasElement }: { canvasElement: HTMLElement }) {
   const strip = await stripFor(canvasElement)
   const tabs = within(strip).getAllByRole('tab')
@@ -248,7 +262,7 @@ async function interactionPlay({ canvasElement }: { canvasElement: HTMLElement }
   await userEvent.keyboard('{Home}{ArrowRight}{ArrowRight}{ArrowLeft}')
   expect(tabs[1]).toHaveFocus()
   assertSelected(tabs[1]!)
-  const focusedTooltip = await within(canvasElement.ownerDocument.body).findByRole('tooltip', { name: names[1]! })
+  const focusedTooltip = await tooltipFor(tabs[1]!, names[1]!)
   expect(focusedTooltip).toBeVisible()
   expect(tabs[1].getAttribute('aria-describedby')?.split(/\s+/)).toContain(focusedTooltip.id)
   await userEvent.keyboard('{Escape}')
@@ -271,7 +285,7 @@ async function interactionPlay({ canvasElement }: { canvasElement: HTMLElement }
     await userEvent.unhover(tab)
     await userEvent.hover(tab)
     const name = tab.getAttribute('aria-label')!
-    const tooltip = await within(canvasElement.ownerDocument.body).findByRole('tooltip', { name })
+    const tooltip = await tooltipFor(tab, name)
     await waitFor(() => expect(tooltip).toBeVisible())
     const assertTooltip = () => requireContract(Boolean(tab.getAttribute('aria-describedby')?.split(/\s+/).includes(tooltip.id)) && tooltip.getBoundingClientRect().top >= tab.getBoundingClientRect().bottom, 'Missing anchored full-name tooltip')
     assertTooltip()
@@ -356,7 +370,7 @@ async function stabilityPlay({ canvasElement }: { canvasElement: HTMLElement }) 
       const selected = within(strip).getByRole('tab', { selected: true })
       assertSelected(selected)
       assertPaint(strip)
-      const tooltip = await within(canvasElement.ownerDocument.body).findByRole('tooltip', { name: selected.getAttribute('aria-label')! })
+      const tooltip = await tooltipFor(selected, selected.getAttribute('aria-label')!)
       expect(tooltip).toBeVisible()
       await userEvent.keyboard('{Escape}')
       await waitFor(() => expect(tooltip).not.toBeInTheDocument())
