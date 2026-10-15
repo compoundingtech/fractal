@@ -2232,7 +2232,7 @@ mod tests {
         transaction.commit().unwrap();
         let historical = assert_desired_parity(&mut connection, "message/keyed", through, false);
         assert_eq!(historical["claim_id"], claim_a.id);
-        let fresh_cut = current_index_tx(&connection).unwrap();
+        let fresh_cut = smallclaims::store::current_index(&connection).unwrap();
         let fresh = assert_desired_parity(&mut connection, "message/keyed", fresh_cut, true);
         assert_eq!(fresh["claim_id"], claim_b.id);
     }
