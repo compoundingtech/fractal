@@ -58,6 +58,7 @@ export type Agent = ResourceHeader & {
   next_work_id?: (Id | null);
   observation?: "current" | "stale" | "missing";
   owner_run_id?: (MissionRunId | null);
+  presentation?: AgentPresentation;
   queued_work_count?: number;
   reachability: AgentReachability;
   reason?: string | null;
@@ -151,6 +152,29 @@ export type AgentMessageEstimate = {
   fallback_low_microusd: number;
   method: string;
   source: string;
+};
+
+export type AgentPresentation = {
+  because: string | null;
+  group: "needs_you" | "needs_login" | "fault" | "working" | "idle" | "stopped" | "retired";
+  next: Array<AgentPresentationWork>;
+  now: (AgentPresentationNow | null);
+  queued: number;
+  state: "needs_you" | "needs_login" | "fault" | "working" | "compacting" | "idle" | "starting" | "down" | "stopped" | "retired" | "unknown";
+};
+
+export type AgentPresentationNow = AgentPresentationWork & {
+  goal?: string | null;
+  holder_down_since?: (Timestamp | null);
+  since: Timestamp;
+};
+
+export type AgentPresentationWork = {
+  label: string;
+  mission: Id;
+  path: string;
+  step: StepRunId;
+  title?: string | null;
 };
 
 export type AgentQueue = {
@@ -1165,6 +1189,7 @@ export type Mission = ResourceHeader & {
   runs: Array<MissionRunId>;
   runs_truncated?: boolean;
   state: MissionState;
+  system?: boolean;
   title: string;
   total_runs?: number;
   usage?: (UsageSummary | null);
@@ -1227,6 +1252,7 @@ export type MissionStep = {
   constraints?: Array<string>;
   goals?: Array<string>;
   id: Id;
+  keep_open?: boolean;
   last_progress?: string | null;
   loop_max_rounds?: number | null;
   loop_reason?: string | null;
