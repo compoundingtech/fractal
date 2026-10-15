@@ -18,8 +18,7 @@ agent-context delivery, and the shared client schema for stui, the Fractal TUI
 and Fractal web.
 
 Does not define: git and pull-request annotations (owned by
-`agent/dotfiles/annotations`); the UX variants (documented in the
-`ux-variants` step); the existing person directive note, which stays as
+`agent/dotfiles/annotations`); the UX variants (see [Quick-note UX variants](./ux-variants.md)); the existing person directive note, which stays as
 specified in `docs/st3/schema.md`.
 
 ## Candidate requirements (pending interview)
