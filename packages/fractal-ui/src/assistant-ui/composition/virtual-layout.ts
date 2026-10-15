@@ -1,7 +1,19 @@
-import type { Key, ListLayout } from 'react-aria-components'
+import { ListLayout, type Key } from 'react-aria-components'
 
 /** Shared RAC configuration. Estimates bootstrap unmounted rows; observed sizes own geometry. */
 export const measuredListLayoutOptions = { estimatedRowHeight: 160 } as const
+
+/** Keep the reader's one anchor mounted while a prepended collection adopts its new geometry. */
+export class AnchoredListLayout extends ListLayout<unknown> {
+  anchorKey: string | undefined
+  override getVisibleLayoutInfos(rect: Parameters<ListLayout<unknown>['getVisibleLayoutInfos']>[0]) {
+    const visible = super.getVisibleLayoutInfos(rect)
+    if (this.anchorKey === undefined || visible.some(info => info.key === this.anchorKey)) return visible
+    const anchor = this.getLayoutInfo(this.anchorKey)
+    if (anchor !== null) visible.push(anchor)
+    return visible
+  }
+}
 
 /** Reveal a collection key, leaving room for a sticky inset. Returns false until RAC has its key. */
 export function scrollToLayoutKey(layout: ListLayout<unknown>, key: Key, viewport: HTMLElement, topInset = 0): boolean {

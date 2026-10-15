@@ -9,10 +9,9 @@ export function useConversationRuntime(options: ConversationRuntimeOptions) {
   return useExternalStoreRuntime<ConversationItem>({ ...options, convertMessage: convertConversationItem })
 }
 /**
- * Message ids the runtime holds after adopting the latest snapshot, or undefined before the first
- * adoption. `Transcript` uses it to tell ids the runtime adopted (its store is still publishing them)
- * from ids it never adopted. It is a store rather than state, so readers re-render only when the
- * ids they are waiting for change, never merely because an adoption happened.
+ * Message ids held by the current runtime window or deferred outside it, or undefined before the
+ * first commit. The source remains complete; only mounted virtual rows create client message
+ * resources. A converter rejecting a requested item still becomes a visible fallback row.
  */
 export interface RuntimeAdoption {
   readonly get: () => ReadonlySet<string> | undefined
@@ -28,10 +27,25 @@ function createRuntimeAdoption() {
     publish: (next: ReadonlySet<string>) => { ids = next; for (const listener of listeners) listener() },
   }
 }
-export function EmbraceRuntimeProvider({ options, children }: { readonly options: ConversationRuntimeOptions; readonly children: React.ReactNode }) {
-  const runtime = useConversationRuntime(options)
+const noSubscription = () => () => undefined
+const noMessages: readonly ConversationItem[] = []
+/** Internal viewport demand, not a second pending-send or host-history API. */
+export const RuntimeVisibleIds = React.createContext<((ids: readonly string[]) => void) | undefined>(undefined)
+export function EmbraceRuntimeProvider({ options, virtualizeMessages = false, children }: { readonly options: ConversationRuntimeOptions; readonly virtualizeMessages?: boolean; readonly children: React.ReactNode }) {
+  const measurable = React.useSyncExternalStore(noSubscription, () => true, () => false)
+  const [visibleIds, setVisibleIds] = React.useState<ReadonlySet<string>>()
+  const source = options.messages ?? noMessages
+  const messages = React.useMemo(() => !virtualizeMessages || !measurable ? source : visibleIds === undefined ? noMessages : source.filter(item => visibleIds.has(item.id)), [source, measurable, visibleIds, virtualizeMessages])
+  const visible = React.useCallback((ids: readonly string[]) => {
+    setVisibleIds(previous => previous !== undefined && previous.size === ids.length && ids.every(id => previous.has(id)) ? previous : new Set(ids))
+  }, [])
+  const runtime = useConversationRuntime({ ...options, messages })
   const [adoption] = React.useState(createRuntimeAdoption)
-  // Declared after the runtime hook, so it reads the runtime after that hook's adoption effect for the same snapshot.
-  React.useEffect(() => adoption.publish(new Set(runtime.thread.getState().messages.map(message => message.id))), [runtime, options, adoption])
-  return <AssistantRuntimeProvider runtime={runtime}><RuntimeAdoptedIds.Provider value={adoption}>{children}</RuntimeAdoptedIds.Provider></AssistantRuntimeProvider>
+  React.useEffect(() => {
+    const requested = new Set(messages.map(item => item.id))
+    const ids = new Set(runtime.thread.getState().messages.map(message => message.id))
+    for (const item of source) if (!requested.has(item.id)) ids.add(item.id)
+    adoption.publish(ids)
+  }, [runtime, source, messages, adoption])
+  return <AssistantRuntimeProvider runtime={runtime}><RuntimeAdoptedIds.Provider value={adoption}><RuntimeVisibleIds.Provider value={virtualizeMessages ? visible : undefined}>{children}</RuntimeVisibleIds.Provider></RuntimeAdoptedIds.Provider></AssistantRuntimeProvider>
 }

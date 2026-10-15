@@ -4,7 +4,7 @@ import { ActionBarPrimitive, MessagePrimitive, ThreadPrimitive, useAui, useAuiSt
 import { Button, Disclosure, DisclosurePanel, ProgressBar } from 'react-aria-components'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
 import { EmbraceVirtualScrollViewport, type VirtualViewportHandle, type VirtualViewportHistory } from '../EmbraceScrollViewport'
-import { RuntimeAdoptedIds } from '../EmbraceRuntime'
+import { RuntimeAdoptedIds, RuntimeVisibleIds } from '../EmbraceRuntime'
 import { WorkLogV1 } from '../taste/WorkLogV1'
 import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
 import { SyncLine } from '../st3-views/SyncLine'
@@ -219,6 +219,21 @@ const contentVersion = (item: ConversationItem): string => {
   contentVersions.set(item, version)
   return version
 }
+const WindowedTurn = React.memo(function WindowedTurn(props: React.ComponentProps<typeof PreparedTurn>) {
+  const messages = useAuiState(state => state.thread.messages)
+  const turn = React.useMemo(() => {
+    const ids = new Set(messages.map(message => message.id))
+    const source = props.turn
+    if (source.prompt !== undefined && !ids.has(source.prompt.id)) return undefined
+    const pending = source.items.findIndex(item => !ids.has(item.id))
+    if (pending === -1) return source
+    const items = source.items.slice(0, pending)
+    if (source.prompt === undefined && items.length === 0) return undefined
+    const itemIds = new Set(items.map(item => item.id))
+    return { ...source, items, work: { ...source.work, calls: source.work.calls.filter(call => itemIds.has(call.id)) } }
+  }, [messages, props.turn])
+  return turn === undefined ? <div data-testid="transcript-row-pending" style={{ minHeight: 160 }} /> : <PreparedTurn {...props} turn={turn} />
+})
 const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; now: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
   const detail = React.useCallback((call: WorkLogCall) => <ToolDetailPreview call={call} onOpen={onOpenTool} />, [onOpenTool])
   const reasoning = turn.items.filter(item => item._tag === 'Reasoning')
@@ -247,9 +262,13 @@ export function LiveActivity({ state, startedAt, now }: { readonly state: LiveAc
 }
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
+const noStrandedIds: ReadonlySet<string> = new Set()
+interface TranscriptRow { readonly id: string; readonly turn: TranscriptTurn; readonly targetIds: readonly string[]; readonly version: string }
+const turnRows = new WeakMap<TranscriptTurn, TranscriptRow>()
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
 export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history, emptyState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, ref }: TranscriptProps) {
   const messages = useAuiState(state => state.thread.messages)
+  const windowedRuntime = React.useContext(RuntimeVisibleIds) !== undefined
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
   // adopted messages a task later. Recording the snapshot after its commit is the adoption epoch.
   // An id is pending (deferred so the turn stays mounted) while its snapshot has not been through a
@@ -275,15 +294,18 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
   const unpublished = React.useMemo(() => [...sourceIds].filter(id => !published.has(id)), [sourceIds, published])
   const adoption = React.useContext(RuntimeAdoptedIds)
   const getHeldKey = () => {
+    if (windowedRuntime) return '[]'
     const held = adoption?.get()
     return JSON.stringify(held === undefined ? [] : unpublished.filter(id => held.has(id)))
   }
   const heldKey = React.useSyncExternalStore(adoption?.subscribe ?? staticSubscription, getHeldKey, getHeldKey)
   const runtimeIds = React.useMemo(() => new Set<string>(JSON.parse(heldKey)), [heldKey])
   React.useEffect(() => {
-    if (adoptionEpoch !== turns && unpublished.some(id => !runtimeIds.has(id))) setAdoptionEpoch(turns)
-  }, [turns, unpublished, runtimeIds, adoptionEpoch])
+    if (!windowedRuntime && adoptionEpoch !== turns && unpublished.some(id => !runtimeIds.has(id))) setAdoptionEpoch(turns)
+  }, [turns, unpublished, runtimeIds, adoptionEpoch, windowedRuntime])
   const { committed, stranded } = React.useMemo(() => {
+    if (windowedRuntime) return { committed: turns, stranded: noStrandedIds }
+    if (unpublished.length === 0) return { committed: turns, stranded: noStrandedIds }
     const settled = new Set(adoptionEpoch?.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)]))
     const stranded = new Set<string>()
     const visible = (id: string) => {
@@ -302,8 +324,8 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
       const itemIds = new Set(items.map(item => item.id))
       return [{ ...turn, items, work: { ...turn.work, calls: turn.work.calls.filter(call => itemIds.has(call.id)) } }]
     })
-    return { committed, stranded }
-  }, [published, turns, adoptionEpoch, runtimeIds])
+    return { committed, stranded: stranded.size === 0 ? noStrandedIds : stranded }
+  }, [published, turns, adoptionEpoch, runtimeIds, unpublished, windowedRuntime])
   const strandedIds = [...stranded].join(', ')
   React.useEffect(() => {
     if (strandedIds !== '' && process.env.NODE_ENV !== 'production') console.warn(`Transcript: the runtime never adopted ${strandedIds}; showing a fallback row.`)
@@ -312,10 +334,28 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
   // New rows or changed content are news; send state, tool status and timing are metadata.
   // A row is keyed by its turn id, so a pending send keeps its DOM through acknowledgement.
   const rows = React.useMemo(() => committed.map(turn => {
+    const cached = turnRows.get(turn)
+    if (cached !== undefined) return cached
     const items = turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]
-    return { id: turn.id, turn, targetIds: items.map(item => item.id), version: items.map(contentVersion).join(' ') }
+    const row = { id: turn.id, turn, targetIds: items.map(item => item.id), version: items.map(contentVersion).join(' ') }
+    turnRows.set(turn, row)
+    return row
   }), [committed])
-  const running = [...committed].reverse().find(turn => turn.work.running)
+  let running: TranscriptTurn | undefined
+  for (let index = committed.length - 1; index >= 0; index--) {
+    if (committed[index]!.work.running) { running = committed[index]; break }
+  }
+  const contentProps = React.useMemo(() => stylex.props(readingColumnStyles.column, styles.content), [])
+  const RenderTurn = windowedRuntime ? WindowedTurn : PreparedTurn
+  const activityClock = running === undefined ? 0 : now
+  const renderTurn = React.useCallback(({ turn }: TranscriptRow) => <RenderTurn turn={turn} now={turn.work.running ? activityClock : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />, [activityClock, stranded, onOpenTool, onRetryRun, landmarkContext, RenderTurn])
+  const hasCommitted = committed.length > 0
+  const renderBoundary = React.useCallback((request: () => void) => history._tag === 'Complete' && !hasCommitted ? null : <div data-testid="history-boundary" data-history={history._tag.toLowerCase()} {...stylex.props(styles.historyBoundary)}>
+    {history._tag === 'Complete' ? <span data-testid="history-start" {...stylex.props(styles.historyNote)}>Start of conversation</span>
+      : history._tag === 'Loading' ? <span role="status" data-testid="history-loading" {...stylex.props(styles.historyNote)}>Loading earlier messages…</span>
+      : history._tag === 'Failed' ? <><span role="status" data-testid="history-error" {...stylex.props(styles.historyNote)}>Earlier messages could not be loaded.</span>{history.detail !== undefined && <span data-testid="history-error-detail" {...stylex.props(styles.historyNote)}>{history.detail}</span>}<Button data-testid="history-retry" onPress={request} {...stylex.props(styles.historyLoad)}>Try again</Button></>
+      : <><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history._tag === 'More' && <Button data-testid="history-load" onPress={request} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</>}
+  </div>, [history, hasCommitted])
   const progress = sync._tag === 'Progress' && sync.stage === 'reading' && sync.done !== undefined && sync.total !== undefined ? sync : undefined
   const failure = syncLine({ status: sync, label: 'conversation', now, observedAt })
   const started = Date.parse(running?.work.startedAt ?? '')
@@ -333,15 +373,10 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
       {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} />}
       {running !== undefined && <><div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div><span data-testid="run-elapsed">Running{Number.isFinite(started) && started <= now ? ` · ${formatWorkDuration(now - started) || '<1s'}` : ''}</span></>}
     </header>
-    <ErrorOverlayHost lane><EmbraceVirtualScrollViewport key={viewportKey} ref={ref} items={rows} sourceIds={jumpTargetIds} history={history} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
+    <ErrorOverlayHost lane><EmbraceVirtualScrollViewport key={viewportKey} ref={ref} items={rows} sourceIds={jumpTargetIds} history={history} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={contentProps}
       empty={empty}
-      boundary={request => history._tag === 'Complete' && committed.length === 0 ? null : <div data-testid="history-boundary" data-history={history._tag.toLowerCase()} {...stylex.props(styles.historyBoundary)}>
-        {history._tag === 'Complete' ? <span data-testid="history-start" {...stylex.props(styles.historyNote)}>Start of conversation</span>
-          : history._tag === 'Loading' ? <span role="status" data-testid="history-loading" {...stylex.props(styles.historyNote)}>Loading earlier messages…</span>
-          : history._tag === 'Failed' ? <><span role="status" data-testid="history-error" {...stylex.props(styles.historyNote)}>Earlier messages could not be loaded.</span>{history.detail !== undefined && <span data-testid="history-error-detail" {...stylex.props(styles.historyNote)}>{history.detail}</span>}<Button data-testid="history-retry" onPress={request} {...stylex.props(styles.historyLoad)}>Try again</Button></>
-          : <><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history._tag === 'More' && <Button data-testid="history-load" onPress={request} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</>}
-      </div>}
-      renderItem={({ turn }) => <PreparedTurn turn={turn} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />}
+      boundary={renderBoundary}
+      renderItem={renderTurn}
     />{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
   </ThreadPrimitive.Root></RetrySend.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider>
 }

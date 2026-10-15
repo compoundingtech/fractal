@@ -1,5 +1,4 @@
-import type { ListLayout } from 'react-aria-components'
-import { layoutKeyAtOffset, scrollToLayoutKey } from '../composition/virtual-layout'
+import { layoutKeyAtOffset, scrollToLayoutKey, type AnchoredListLayout } from '../composition/virtual-layout'
 
 /** The source transcript persists a mode or a stable entry, never a numeric bottom. */
 export type ScrollAnchor =
@@ -128,7 +127,7 @@ export class ScrollController {
 
   constructor(
     private readonly options: {
-      readonly layout: ListLayout<unknown>
+      readonly layout: AnchoredListLayout
       readonly initial: ScrollAnchor
       readonly save: (anchor: ScrollAnchor) => void
       readonly setUnread: (unread: boolean) => void
@@ -139,6 +138,24 @@ export class ScrollController {
     if (options.initial._tag === 'Reading' && options.initial.entry !== null) {
       this.pendingAnchor = { key: options.initial.entry, offset: options.initial.offset }
     }
+  }
+
+  /** Pin a content row before loading changes the boundary or prepends alter the collection. */
+  readonly prepareForPrepend = () => {
+    if (this.following || this.element === null) return
+    this.captureAnchor()
+    if (this.anchor?.key === this.leadingKey && this.firstKey !== undefined) {
+      const top = this.element.getBoundingClientRect().top
+      for (const row of this.element.querySelectorAll<HTMLElement>('[data-embrace-entry-id]')) {
+        if (row.dataset['embraceEntryId'] === this.firstKey) {
+          this.anchor = { key: this.firstKey, offset: row.getBoundingClientRect().top - top }
+          break
+        }
+      }
+    }
+    this.pendingAnchor = this.anchor
+    this.userScrolling = false
+    this.options.layout.anchorKey = this.anchor?.key
   }
 
   readonly jump = () => {
@@ -393,6 +410,7 @@ export class ScrollController {
       if (match !== undefined) this.anchor = { key: String(match.key), offset: match.info.rect.y - element.scrollTop }
     }
     if (this.pendingAnchor !== undefined) this.pendingAnchor = this.anchor
+    this.options.layout.anchorKey = this.anchor?.key
   }
 
   private scheduleRestore() {
@@ -472,17 +490,16 @@ export class ScrollController {
       info !== null &&
       element.scrollHeight >= info.rect.y + Math.min(info.rect.height, element.clientHeight)
     ) {
-      scrollToLayoutKey(this.options.layout, key, element, anchor.offset)
       const target = mounted(key)
       if (target !== undefined) {
-        element.scrollTop +=
-          target.getBoundingClientRect().top - element.getBoundingClientRect().top - anchor.offset
+        const delta = target.getBoundingClientRect().top - element.getBoundingClientRect().top - anchor.offset
+        if (Math.abs(delta) > 0.5) element.scrollTop += delta
         this.anchor = { key, offset: anchor.offset }
         this.pendingAnchor = this.anchor
         this.restoring = false
         this.savePosition()
         if (this.pendingJump !== undefined && (this.rowByTarget.get(this.pendingJump.key) ?? this.pendingJump.key) === key) this.finishJump({ _tag: 'Anchored' })
-      }
+      } else scrollToLayoutKey(this.options.layout, key, element, anchor.offset)
     }
     if (this.restoring || this.pendingJump !== undefined && this.rowKeys.has(this.rowByTarget.get(this.pendingJump.key) ?? this.pendingJump.key)) this.scheduleRestore()
   }
@@ -556,6 +573,7 @@ export class ScrollController {
       return
     }
     if (this.following) {
+      this.options.layout.anchorKey = undefined
       this.setUnread(false)
       if (this.element !== null) scrollToEnd(this.element)
       return
@@ -583,6 +601,7 @@ export class ScrollController {
       // The collection rebuild follows this commit. ResizeObserver restores before
       // paint when the sizer grows; the tracked animation frame is the fallback.
       this.pendingAnchor = this.anchor
+      this.options.layout.anchorKey = this.anchor.key
       // The sizer may already include the inserted rows; the settled geometry does not.
       if (this.element !== null) this.prependBottom = (this.geometry.contentHeight || this.element.scrollHeight) - this.element.scrollTop
       this.scheduleRestore()

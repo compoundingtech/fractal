@@ -1,8 +1,9 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, ButtonContext, GridList, GridListItem, ListLayout, Virtualizer } from 'react-aria-components'
+import { Button, ButtonContext, GridList, GridListItem, Virtualizer } from 'react-aria-components'
 import { ScrollController, type JumpResult, type ScrollAnchor } from './embrace-virtual/ScrollController'
-import { measuredListLayoutOptions } from './composition/virtual-layout'
+import { AnchoredListLayout, measuredListLayoutOptions } from './composition/virtual-layout'
+import { RuntimeVisibleIds } from './EmbraceRuntime'
 import { surfaceVars, textVars, borderVars, radiusVars, spaceVars, typeVars, geometryNumbers } from './composition-tokens.stylex'
 
 const rowSelector = '[data-item-id], [data-embrace-entry-id]'
@@ -396,9 +397,23 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
 }: EmbraceVirtualScrollViewportProps<T>) {
   // False for server output and the hydration pass that adopts it; true for every client render after.
   const measurable = React.useSyncExternalStore(noSubscription, () => true, () => false)
+  // RAC's hidden collection creates React resources even for unmounted rows.
+  // Frame-sized metadata adoption bounds commits without narrowing source ids.
+  const [collectionCount, setCollectionCount] = React.useState(64)
+  React.useEffect(() => {
+    if (!measurable || collectionCount >= items.length) return
+    const frame = requestAnimationFrame(() => setCollectionCount(count => Math.min(items.length, count + 64)))
+    return () => cancelAnimationFrame(frame)
+  }, [measurable, collectionCount, items.length])
+  const collectionReady = React.useRef(false)
+  collectionReady.current = collectionCount >= items.length
+  const publishVisible = React.useContext(RuntimeVisibleIds)
+  const rowsById = React.useMemo(() => new Map(items.map(item => [item.id, item])), [items])
+  const rowsRef = React.useRef(rowsById)
+  rowsRef.current = rowsById
   const store = React.useContext(ViewportStoreContext)
   const state = stateKey === undefined ? undefined : store?.get(stateKey)
-  const [layout] = React.useState(() => new ListLayout())
+  const [layout] = React.useState(() => new AnchoredListLayout())
   const [unread, setUnread] = React.useState(state?.unread ?? false)
   const unreadRef = React.useRef(unread)
   unreadRef.current = unread
@@ -422,6 +437,7 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
   // One history request at a time; the host reports its outcome through the next `history`.
   const invokeHistory = React.useCallback((action: () => Promise<void>): Promise<void> => {
     if (flight.current !== undefined) return flight.current
+    controller.prepareForPrepend()
     const promise = Promise.resolve().then(action).catch(error => {
       console.warn('Transcript history request rejected; waiting for host history state.', error)
     }).finally(() => {
@@ -429,7 +445,7 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     })
     flight.current = promise
     return promise
-  }, [])
+  }, [controller])
   const request = React.useCallback(() => {
     const source = current.current
     if (source._tag === 'More') void invokeHistory(source.loadOlder)
@@ -441,11 +457,12 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
   const prefetch = React.useCallback(() => {
     const viewport = element.current
     const source = current.current
-    if (viewport === null || !armed.current || source._tag !== 'More') return
+    if (viewport === null || !armed.current || !collectionReady.current || source._tag !== 'More') return
     if (viewport.scrollTop > viewport.clientHeight * 1.5) return
     armed.current = false
     void invokeHistory(source.loadOlder)
   }, [invokeHistory])
+  React.useEffect(() => { if (collectionReady.current) prefetch() }, [collectionCount, prefetch])
   const attach = React.useCallback((viewport: HTMLDivElement | null) => {
     element.current = viewport
     if (viewport === null) return
@@ -523,6 +540,25 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
       element.current = null
     }
   }, [controller, prefetch])
+  React.useLayoutEffect(() => {
+    const node = element.current
+    if (!measurable || node === null || publishVisible === undefined) return
+    const publish = () => {
+      // Loading can begin before the first visible row has adopted. Capture its
+      // measured position once it mounts, still before the older page arrives.
+      if (current.current._tag === 'Loading') controller.prepareForPrepend()
+      const ids: string[] = []
+      for (const row of node.querySelectorAll<HTMLElement>('[data-embrace-entry-id]')) {
+        const item = rowsRef.current.get(row.dataset['embraceEntryId'] ?? '')
+        if (item !== undefined) ids.push(...(item.targetIds ?? [item.id]))
+      }
+      publishVisible(ids)
+    }
+    const observer = new MutationObserver(publish)
+    observer.observe(node, { childList: true, subtree: true })
+    publish()
+    return () => observer.disconnect()
+  }, [measurable, publishVisible, rowsById, controller])
   const command = React.useRef(scrollToBottomKey)
   React.useLayoutEffect(() => {
     if (!measurable) return
@@ -540,11 +576,19 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
       return result
     },
   }), [controller])
+  const emptyContent = items.length === 0 ? empty : null
+  const leading = React.useMemo(() => <ButtonContext.Provider value={null}>{boundary(request)}{emptyContent}</ButtonContext.Provider>, [boundary, request, emptyContent])
+  const [collectionRows] = React.useState(() => new WeakMap<T, { readonly id: string; readonly item: T; readonly content: undefined }>())
   const collection = React.useMemo(() => [
-    { id: historyKey, item: undefined },
-    ...items.map(item => ({ id: item.id, item })),
-  ], [items])
-  const leading = <ButtonContext.Provider value={null}>{boundary(request)}{items.length === 0 ? empty : null}</ButtonContext.Provider>
+    { id: historyKey, item: undefined, content: leading },
+    ...items.slice(-collectionCount).map(item => {
+      const cached = collectionRows.get(item)
+      if (cached !== undefined) return cached
+      const row = { id: item.id, item, content: undefined }
+      collectionRows.set(item, row)
+      return row
+    }),
+  ], [items, leading, collectionRows, collectionCount])
   if (!measurable) return <div {...stylex.props(styles.frame)}>
     <div {...props} aria-busy={history._tag === 'Loading'} style={{ ...props.style, overflowAnchor: 'none' }}>
       <div data-embrace-entry-id={historyKey} {...contentProps}>{leading}</div>
@@ -553,9 +597,9 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
   </div>
   return <div {...stylex.props(styles.frame)}>
     <Virtualizer layout={layout} layoutOptions={measuredListLayoutOptions} shouldObserveItemSize>
-      <GridList {...props} ref={attach} items={collection} dependencies={[renderItem, boundary, empty, contentProps, request]} keyboardNavigationBehavior="tab" render={domProps => <div {...domProps} aria-busy={history._tag === 'Loading'} />} style={{ ...props.style, overflowAnchor: 'none' }}>
+      <GridList {...props} ref={attach} items={collection} dependencies={[renderItem, contentProps]} keyboardNavigationBehavior="tab" render={domProps => <div {...domProps} data-embrace-collection-ready={collectionCount >= items.length} aria-busy={history._tag === 'Loading'} />} style={{ ...props.style, overflowAnchor: 'none' }}>
         {row => <GridListItem id={row.id} textValue={row.id} {...stylex.props(styles.virtualRow)}>
-          <div data-embrace-entry-id={row.id} {...contentProps}>{row.item === undefined ? leading : <ButtonContext.Provider value={null}>{renderItem(row.item)}</ButtonContext.Provider>}</div>
+          <div data-embrace-entry-id={row.id} {...contentProps}>{row.item === undefined ? row.content : <ButtonContext.Provider value={null}>{renderItem(row.item)}</ButtonContext.Provider>}</div>
         </GridListItem>}
       </GridList>
     </Virtualizer>

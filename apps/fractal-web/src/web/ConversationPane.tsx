@@ -124,7 +124,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     event.stopPropagation()
     onOpenDocument(href)
   }
-  return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: state._tag === 'Observed' && state.isRunning }}>
+  return <EmbraceRuntimeProvider key={agentRef} virtualizeMessages options={{ ...binding.runtime, isRunning: state._tag === 'Observed' && state.isRunning }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
     <Transcript

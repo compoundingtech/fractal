@@ -43,10 +43,10 @@ const cases: Readonly<Record<State, TranscriptStoryData>> = {
   settled: fixture('settled', 'settled'), expanded: fixture('expanded', 'expanded'), streaming: fixture('streaming', 'streaming'), failed: fixture('failed', 'failed'), interrupted: fixture('interrupted', 'interrupted'), unknown: fixture('unknown', 'unknown'), loading: fixture('loading', 'loading'), 'catching-up': fixture('catching-up', 'catching-up'), reconnecting: fixture('reconnecting', 'reconnecting'), 'sync-failed': fixture('sync-failed', 'sync-failed'), 'pending-send': fixture('pending-send', 'pending-send'), 'failed-send': fixture('failed-send', 'failed-send'), 'unconfirmed-send': fixture('unconfirmed-send', 'unconfirmed-send'), empty: fixture('empty', 'empty'),
 }
 /** `drop` withholds ids from the runtime adapter, standing in for an adapter that never adopts them. */
-function RuntimeTranscript({ data, drop, onOpenTool, onRetry, onRetrySend, availability, history, emptyState }: { data: TranscriptStoryData; drop?: readonly string[]; onOpenTool?: (call: WorkLogCall) => void; onRetry: () => void; onRetrySend?: (itemId: string) => void; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState }) {
+function RuntimeTranscript({ data, drop, onOpenTool, onRetry, onRetrySend, availability, history, emptyState, virtualizeMessages }: { data: TranscriptStoryData; drop?: readonly string[]; onOpenTool?: (call: WorkLogCall) => void; onRetry: () => void; onRetrySend?: (itemId: string) => void; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState; virtualizeMessages?: boolean }) {
   const messages = React.useMemo(() => data.turns.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]).filter(item => !drop?.includes(item.id)), [data, drop])
   const options = React.useMemo(() => ({ messages, isRunning: data.turns.some(turn => turn.work.running), onNew: async () => {} }), [messages, data])
-  return <EmbraceRuntimeProvider options={options}><Transcript title="Row projection" turns={data.turns} sync={data.sync} now={now} observedAt={now - 8000} onOpenTool={onOpenTool} onRetryRun={onRetry} onRetrySync={onRetry} onRetrySend={onRetrySend} availability={availability} history={history ?? data.history} emptyState={emptyState} /></EmbraceRuntimeProvider>
+  return <EmbraceRuntimeProvider options={options} virtualizeMessages={virtualizeMessages}><Transcript title="Row projection" turns={data.turns} sync={data.sync} now={now} observedAt={now - 8000} onOpenTool={onOpenTool} onRetryRun={onRetry} onRetrySync={onRetry} onRetrySend={onRetrySend} availability={availability} history={history ?? data.history} emptyState={emptyState} /></EmbraceRuntimeProvider>
 }
 function TranscriptStory({ scheme = 'dark', state = 'settled', availability, history, emptyState }: { scheme?: Scheme; state?: State; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState }) {
   const [opened, setOpened] = React.useState<WorkLogCall | undefined>(undefined)
@@ -524,7 +524,7 @@ function AppendedItemsStory({ scheme = 'dark' }: { scheme?: Scheme }) {
     const items = [...appendInitialItems, ...appendItems.slice(0, count)]
     return { history: appendBase.history, sync: appendBase.sync, turns: [{ ...appendTurn, items, work: workLogTurnFromItems(items, { kindFor: name => name === 'run' ? 'run' : 'read', running: true, failed: false, interrupted: false, startedAt: at, completeHistory: true }) }] }
   }, [count])
-  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><button type="button" disabled={count === appendItems.length} onClick={() => setCount(value => value + 1)}>Append {count === 0 ? 'tool' : count === 1 ? 'reasoning' : 'answer'}</button><div {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} /></div></main>
+  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><button type="button" disabled={count === appendItems.length} onClick={() => setCount(value => value + 1)}>Append {count === 0 ? 'tool' : count === 1 ? 'reasoning' : 'answer'}</button><div {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} virtualizeMessages /></div></main>
 }
 export const AppendedItems: Story = { render: args => <AppendedItemsStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
@@ -540,6 +540,8 @@ export const AppendedItems: Story = { render: args => <AppendedItemsStory scheme
   await userEvent.click(thinkingControl)
   await expect(thinkingControl).toHaveAttribute('aria-expanded', 'true')
   const lane = canvas.getByTestId('transcript-scroll')
+  // Establish reader intent, releasing the held disclosure anchor before scrolling.
+  lane.dispatchEvent(new WheelEvent('wheel', { deltaY: -48, bubbles: true }))
   lane.scrollTop = 48
   lane.dispatchEvent(new Event('scroll'))
   const scrollTop = lane.scrollTop
