@@ -6,6 +6,8 @@
 //! bounded startup work may commit its own chunks before readers are exposed.
 //! The runtime may call the graph freely.
 
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use rusqlite::{Connection, Transaction};
 use serde_json::{Value, json};
@@ -85,6 +87,18 @@ pub trait Runtime: Send + Sync {
     /// project the same claims differently, so they compare their logs instead of their graphs.
     fn schema_digest(&self) -> String;
 
+    /// Claim vocabulary and shared layout before per-table definition versions. An older
+    /// peer advertises this identity as schema_digest. No admission depends on this value.
+    fn projection_registry_digest(&self) -> String {
+        self.schema_digest()
+    }
+
+    /// Definition versions different from the implicit legacy version 1. All table digests
+    /// stay advertised; a comparison skips only tables with different definition versions.
+    fn projection_versions(&self) -> BTreeMap<String, u64> {
+        BTreeMap::new()
+    }
+
     /// Check a replicated claim's kind and fields once the graph has verified its hash and batch.
     fn classify_replicated_claim(
         &self,
@@ -92,6 +106,18 @@ pub trait Runtime: Send + Sync {
         batch: &ReplicaBatch,
         claim: &ClaimRecord,
     ) -> Result<ReplicatedClaimAdmission, Error>;
+
+    /// `classify_replicated_claim` for a runtime whose answer depends only on the claim and this
+    /// build, never on the store: admission then classifies before it takes the writer. `None`,
+    /// the default, means the runtime reads the store, and the claim is classified under the
+    /// writer as before.
+    fn classify_replicated_claim_unbound(
+        &self,
+        _batch: &ReplicaBatch,
+        _claim: &ClaimRecord,
+    ) -> Option<Result<ReplicatedClaimAdmission, Error>> {
+        None
+    }
 
     /// Append a claim this node writes, from a client's input. The runtime decides how the claim
     /// is kept (some kinds stay local observations), validates it, appends it through the graph
@@ -225,7 +251,10 @@ pub trait Runtime: Send + Sync {
         subject: &str,
         cut: u128,
     ) -> Result<(Value, super::checkpoint::CheckpointAnswerSources)> {
-        Ok((self.checkpoint_subject_answers(connection, subject, cut)?, Default::default()))
+        Ok((
+            self.checkpoint_subject_answers(connection, subject, cut)?,
+            Default::default(),
+        ))
     }
 }
 
