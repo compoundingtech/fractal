@@ -55,8 +55,14 @@ required; mapping to Ada does not give ownership of Nathan's profiles. Profile
 and grant policies both apply, including expiry, revocation and locks. Program
 callers cannot change profiles/keys/grants, make authorized HTTP requests or read
 the person's audit log. The human reads `st sekrets log` from their login session;
-allowed calls/refusals/exits retain the program identity in the gateway's local log,
-without needing a daemon to mirror it.
+allowed calls/refusals/exits retain the program identity in the gateway's local log.
+Program-caller `sekret.called`, `sekret.exited` and `sekret.refused` events are not
+mirrored into the graph: the daemon importer rejects their caller reference,
+skips the entries and advances its cursor. The gateway's local log is the only
+record of these events. It is stored on the host under the gateway's `sekrets`
+user, separate from the Program's UID; that account and privileged host users can
+modify it. It is evidence of use, not a tamper-resistant audit. Graph queries do
+not provide a history of Program calls, exits or refusals.
 
 From the owner's actual login session after the reviewed installation:
 
