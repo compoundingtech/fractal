@@ -359,7 +359,14 @@ class EndToEnd(unittest.TestCase):
         fields, outputs = self.run_gate(s['base'], **self.pr_env(s))
         self.assertEqual((fields['decision'], fields['tree_of'], fields['head_tree'], outputs['record']), ('skip', 'head', 'used', record))
         self.assertEqual((fields['tree'], fields['pr_head'], fields['merge_tree']), (s['head_tree'], s['head'], s['merge_tree']))
-        # The clone is depth 1 (a shallow checkout of the merge ref), as on the runner: the gate deepened it itself.
+        # The runner's checkout is depth 1; the gate deepened it itself (the head commit and the merge's history are present now).
+        shallow = Path(self.work_dir.name) / 'precondition'
+        subprocess.run(['git', 'clone', '-q', '--depth=1', 'file://' + str(self.f.repo), str(shallow)], check=True, capture_output=True)
+        self.assertEqual(subprocess.run(['git', '-C', str(shallow), 'rev-parse', '--is-shallow-repository'], capture_output=True, text=True).stdout.strip(), 'true')
+        self.assertNotEqual(subprocess.run(['git', '-C', str(shallow), 'cat-file', '-e', s['head'] + '^{commit}'], capture_output=True).returncode, 0)
+        work = Path(self.work_dir.name) / 'work'
+        self.assertEqual(subprocess.run(['git', '-C', str(work), 'cat-file', '-e', s['head'] + '^{commit}'], capture_output=True).returncode, 0)
+        self.assertGreater(int(subprocess.run(['git', '-C', str(work), 'rev-list', '--count', s['merge']], capture_output=True, text=True).stdout), 3)
         self.assertEqual(fields['notes_fetch'], 'ok')
         self.assertRegex(fields['policy_sha256'], r'^[0-9a-f]{16}$')
         self.assertRegex(fields['keys_sha256'], r'^[0-9a-f]{16}$')
@@ -424,10 +431,33 @@ class EndToEnd(unittest.TestCase):
         fields = self.assertRuns(s['base'], 'merge tree key', **self.pr_env(s, PR_USER='mallory'))
         self.assertEqual((fields['tree_of'], fields['outcome']), ('merge', 'no_note'))
 
-    def test_a_missing_notes_namespace_is_logged_and_the_check_runs(self):
+    def test_a_repository_with_no_notes_yet_fetches_nothing_without_failing_and_the_check_runs(self):
+        # Whether git calls a glob refspec that matches nothing a failure depends on its version and protocol (here: the one
+        # in the test environment); either way the line says which, the outcome is no_note and the check runs.
         s = self.pull_request()
         fields = self.assertRuns(s['base'], 'no notes at all', **self.pr_env(s))
-        self.assertEqual((fields['notes_fetch'], fields['outcome'], fields['tree_of']), ('failed', 'no_note', 'head'))
+        self.assertIn(fields['notes_fetch'], ('ok', 'failed'))
+        self.assertEqual((fields['outcome'], fields['tree_of']), ('no_note', 'head'))
+
+    def test_a_notes_fetch_that_fails_is_logged_as_failed_not_as_no_note(self):
+        calls = []
+        real_run = gate.run
+
+        def fake(*command, **kwargs):
+            calls.append(command)
+            done = real_run('true')
+            if command[:2] == ('git', 'fetch') and any(str(part).startswith('refs/notes/evidence/*') for part in command):
+                return real_run('false')
+            return done
+        context = gate.context_from({'CHECK': 'linux-gate', 'REPOSITORY': REPOSITORY, 'BASE_SHA': 'a' * 40, 'EVENT_NAME': 'pull_request'})
+        gate.run = fake
+        try:
+            outcome, result, detail, sha = gate.observe(context, 'HEAD')
+        finally:
+            gate.run = real_run
+        self.assertEqual(context['notes_fetch'], 'failed')
+        self.assertTrue(any(str(part).startswith('refs/notes/evidence/*') for call in calls for part in call))
+        self.assertEqual(outcome, 'unavailable')  # and the check runs
 
     def test_an_unreadable_policy_or_author_file_means_run(self):
         s = self.pull_request(policy='{ not json')

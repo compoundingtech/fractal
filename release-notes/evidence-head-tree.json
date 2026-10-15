@@ -11,11 +11,11 @@
   },
   "rules": {
     "status": "none",
-    "detail": "No checkpoint rules or digest changes. Every check stays enforce false, so no job is skipped because of this change; the meaning of a future pull request skip changes (the head tree, not the integrated tree; the merge queue still tests the integrated tree), and the decision line gains tree_of, pr_head, merge_tree, head_tree, notes_fetch, policy_sha256 and keys_sha256."
+    "detail": "No checkpoint rules or digest changes. Every check stays enforce false, so no job is skipped because of this change."
   },
   "compatibility": {
-    "status": "none",
-    "detail": "No command, frame, scope or stored-format change in the product."
+    "status": "changed",
+    "detail": "CI evidence semantics only, no product command, frame, scope or stored-format change: a future pull request skip means the pull request HEAD's tree passed on a trusted host, not that the merge with today's main passes (the merge queue still tests the integrated tree), and whether a head skips can change between runs as notes appear. The decision line gains tree_of, pr_head, merge_tree, head_tree, notes_fetch, policy_sha256 and keys_sha256. Nothing is enforced yet."
   },
   "downtime": {
     "status": "none",
