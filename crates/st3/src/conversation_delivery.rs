@@ -65,7 +65,9 @@ pub(crate) fn receipt_fingerprint(
         "message.read",
         actor,
         origin,
-        body,
+        // Claim storage canonicalizes object keys; serde_json preserves insertion order.
+        // Hash the same meaning before append and after reading that stored body.
+        smallclaims::hash::canonical_json_value(body),
     ))?)))
 }
 
@@ -101,6 +103,22 @@ pub(crate) fn unique_links(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn receipt_fingerprint_survives_canonical_storage_but_detects_changed_meaning() {
+        let appended: Value = serde_json::from_str(
+            r#"{"fields":{"status":"read"},"evidence":[],"_operation":{"request_digest":"digest","id":"operation/fixture"}}"#,
+        ).unwrap();
+        let stored = smallclaims::hash::canonical_json_text(&appended).unwrap();
+        assert_ne!(serde_json::to_string(&appended).unwrap(), stored);
+        let mut restored: Value = serde_json::from_str(&stored).unwrap();
+        let fingerprint = |body: &Value| {
+            receipt_fingerprint("message/fixture", "agent/fixture", "fixture", body).unwrap()
+        };
+        assert_eq!(fingerprint(&appended), fingerprint(&restored));
+        restored["fields"]["status"] = json!("closed");
+        assert_ne!(fingerprint(&appended), fingerprint(&restored));
+    }
 
     #[test]
     fn only_an_explicit_user_identity_in_the_bound_session_is_eligible() {

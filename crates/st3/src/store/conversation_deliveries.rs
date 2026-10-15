@@ -326,6 +326,7 @@ mod tests {
         let (receipt, _) = store
             .append_native_mailbox_receipt_outcome(&read, &fence, Some(&proof("native-one")))
             .unwrap();
+        assert_eq!(links(&store, store.index().unwrap()).len(), 1);
         let operation = operation_parts(&receipt.body).unwrap().0;
         store
             .connection
@@ -397,6 +398,7 @@ mod tests {
             .append_native_mailbox_receipt_outcome(&read, &fence, Some(&proof("native-one")))
             .unwrap();
         let before = links(&store, store.index().unwrap());
+        assert_eq!(before.len(), 1);
         store.rebuild_claim_projections().unwrap();
         store.replay_replication_graph().unwrap();
         assert_eq!(links(&store, store.index().unwrap()), before);
@@ -424,6 +426,28 @@ mod tests {
             let connection = store.connection.write();
             connection
                 .execute_batch("PRAGMA foreign_keys=OFF;")
+                .unwrap();
+            let error = connection
+                .execute(
+                    "UPDATE claims SET id='replacement-fixture-id' WHERE id=?1",
+                    [&receipt.id],
+                )
+                .expect_err(
+                    "the production source-identity guard also applies with foreign keys off",
+                );
+            assert!(
+                error
+                    .to_string()
+                    .contains("claim source identity is immutable")
+            );
+        }
+        assert_eq!(links(&store, store.index().unwrap()).len(), 1);
+        // Fault injection only: if a table-copy tool lost the source-identity guard,
+        // our independent local-provenance update guard still retires the old link.
+        {
+            let connection = store.connection.write();
+            connection
+                .execute_batch("DROP TRIGGER projection_digest_claims_identity_update;")
                 .unwrap();
             connection
                 .execute(
@@ -454,6 +478,7 @@ mod tests {
         let (receipt, _) = store
             .append_native_mailbox_receipt_outcome(&read, &fence, Some(&proof("native-one")))
             .unwrap();
+        assert_eq!(links(&store, store.index().unwrap()).len(), 1);
         {
             let connection = store.connection.write();
             connection
