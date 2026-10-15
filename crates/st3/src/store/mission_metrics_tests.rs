@@ -181,11 +181,17 @@ fn mission_metrics_wait_mapping_ages_labels_and_unknown_clock_visibility() {
             let finished = exporter.get_finished_metrics().unwrap();
             let metrics = finished.iter().flat_map(|r|r.scope_metrics())
                 .flat_map(|s|s.metrics()).collect::<Vec<_>>();
-            assert_eq!(metrics.len(),1,"partial reason counts must be absent");
-            assert_eq!(metrics[0].name(),"st.mission.steps.wait_unknown");
-            let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = metrics[0].data()
+            let unknown = metrics.iter().find(|metric|metric.name()=="st.mission.steps.wait_unknown").unwrap();
+            let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = unknown.data()
                 else { panic!("unknown clock gauge") };
             assert_eq!(gauge.data_points().next().unwrap().value(),1);
+            for metric in metrics.iter().filter(|metric|metric.name()!="st.mission.steps.wait_unknown") {
+                match metric.data() {
+                    AggregatedMetrics::U64(MetricData::Gauge(gauge)) => assert_eq!(gauge.data_points().count(),0),
+                    AggregatedMetrics::F64(MetricData::Gauge(gauge)) => assert_eq!(gauge.data_points().count(),0),
+                    other => panic!("unexpected omitted gauge: {other:?}"),
+                }
+            }
             provider.shutdown().unwrap();
         }
     }
