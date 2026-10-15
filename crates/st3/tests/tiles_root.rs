@@ -82,6 +82,12 @@ struct Host {
 
 impl Host {
     fn new(tiles: &[&str], tasks_max: u32) -> Self {
+        Self::with(tiles, tasks_max, "", false)
+    }
+
+    /// A host whose registry also has `head`'s top-level settings, and whose tiles can run st
+    /// itself when `st_inside`.
+    fn with(tiles: &[&str], tasks_max: u32, head: &str, st_inside: bool) -> Self {
         let serial = SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -102,7 +108,14 @@ impl Host {
                 .map(std::ffi::OsStr::new)
                 .chain([dir.as_os_str()]),
         ));
-        let st = dir.join("st3");
+        let bin = dir.join("bin");
+        ok(sudo(
+            ["install", "-d", "-o", "root", "-g", "root", "-m", "0755"]
+                .iter()
+                .map(std::ffi::OsStr::new)
+                .chain([bin.as_os_str()]),
+        ));
+        let st = bin.join("st3");
         ok(sudo([
             "install".as_ref(),
             "-o".as_ref(),
@@ -151,20 +164,40 @@ impl Host {
             });
         }
         let python = std::fs::canonicalize(which("python3")).unwrap();
+        let mut roots = vec![python.clone()];
+        let mut path = vec![python.parent().unwrap().to_path_buf()];
+        let mut read_only = Vec::new();
+        if st_inside {
+            // st's own libraries, from the store paths its loader names.
+            let libraries = text(&ok(Command::new("ldd").arg(&host.st).output().unwrap()));
+            roots.extend(libraries.split_whitespace().filter_map(|word| {
+                let rest = word.strip_prefix("/nix/store/")?;
+                Some(PathBuf::from("/nix/store").join(rest.split('/').next()?))
+            }));
+            read_only.push(bin.display().to_string());
+            path.push(bin.clone());
+        }
         let closure = text(&ok(Command::new("nix-store")
             .arg("-qR")
-            .arg(&python)
+            .args(&roots)
             .output()
             .unwrap()));
+        read_only.extend(closure.lines().map(str::to_owned));
+        read_only.sort();
+        read_only.dedup();
         let mut registry = format!(
-            "state_root = \"{dir}/state\"\nruntime_root = \"{dir}/run\"\nread_only = [{closure}]\npath = [\"{bin}\"]\n",
+            "state_root = \"{dir}/state\"\nruntime_root = \"{dir}/run\"\nread_only = [{read_only}]\npath = [{path}]\n{head}",
             dir = host.dir.display(),
-            closure = closure
-                .lines()
+            read_only = read_only
+                .iter()
                 .map(|line| format!("\"{line}\""))
                 .collect::<Vec<_>>()
                 .join(", "),
-            bin = python.parent().unwrap().display(),
+            path = path
+                .iter()
+                .map(|dir| format!("\"{}\"", dir.display()))
+                .collect::<Vec<_>>()
+                .join(", "),
         );
         for tile in &host.tiles {
             registry.push_str(&format!(
@@ -1050,5 +1083,224 @@ fn a_launch_with_an_inherited_descriptor_does_not_hand_it_to_the_tile() {
         fds.values()
             .all(|target| !target.as_str().unwrap().contains("tmp")),
         "{seen}"
+    );
+}
+
+const ENDPOINT_ST: &str = r#"
+import http.client, json, socket
+class Endpoint(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX)
+        self.sock.connect("/run/st/st.sock")
+def call(method, path, body=None):
+    connection = Endpoint("tile")
+    connection.request(method, path, body=None if body is None else json.dumps(body),
+                       headers={"content-type": "application/json"})
+    response = connection.getresponse()
+    data = response.read()
+    try:
+        data = json.loads(data)
+    except ValueError:
+        data = None
+    return [response.status, data]
+other = input()
+me = call("GET", "/v1/tile/whoami")[1]["agent"]
+print(json.dumps({
+    "whoami": call("GET", "/v1/tile/whoami"),
+    "send": call("POST", "/v1/messages", {"idempotency_key": "tile-1", "from": me, "to": other,
+                                         "content": "from the tile"}),
+    "send_as_other": call("POST", "/v1/messages", {"idempotency_key": "tile-2", "from": other,
+                                                  "to": me, "content": "forged"}),
+    "other_mailbox": call("GET", "/v1/messages?to=" + other),
+    "admin": call("POST", "/v1/intent/apply", {}),
+}))
+"#;
+
+#[test]
+fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
+    if !enabled() {
+        return;
+    }
+    let host = Host::new(&["a", "b"], 64);
+    let (a, b) = (host.tile("a"), host.tile("b"));
+    let registry = host.registry();
+    for tile in [a, b] {
+        ok(sudo([
+            host.st.as_os_str(),
+            "tiles".as_ref(),
+            "prepare".as_ref(),
+            "--registry".as_ref(),
+            host.registry.as_os_str(),
+            tile.name.as_ref(),
+        ]));
+    }
+    // This test process is the tiles' supervisor: its daemon state serves both endpoints.
+    let state_dir = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(
+        st3::store::Store::open(&state_dir.path().join("graph.sqlite3"), "example").unwrap(),
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    {
+        let _context = runtime.enter();
+        st3::api::spawn_tile_endpoints_from(
+            st3::api::AppState {
+                store: store.clone(),
+                notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+                event_notify: tokio::sync::watch::channel(0_u64).0,
+                node: "example".into(),
+                state_dir: state_dir.path().to_path_buf(),
+                pty_root: state_dir.path().join("pty"),
+                pty_binary: "pty".into(),
+                fleet_id: None,
+                configured_peers: vec![],
+                client_relay: None,
+                native_session_home: None,
+                planner_default: st3::model::PlannerSpec::default(),
+            },
+            host.registry.clone(),
+        );
+    }
+    for tile in [a, b] {
+        let socket = registry
+            .endpoint_dir(&tile.name)
+            .join(st3::api::TILE_ENDPOINT_SOCKET);
+        // The daemon binds when it sees the directory; give it a bounded moment.
+        let mut served = false;
+        for _ in 0..400 {
+            if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+                served = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(served, "{} is not served", socket.display());
+    }
+    let a_agent = format!("agent/fleet/fixture-example/{}", a.name);
+    let b_agent = format!("agent/fleet/fixture-example/{}", b.name);
+    let seen = json(&ok(host.probe(a, ENDPOINT_ST, &format!("{b_agent}\n"))));
+    assert_eq!(seen["whoami"][0], 200);
+    assert_eq!(seen["whoami"][1]["agent"], a_agent);
+    assert_eq!(seen["whoami"][1]["tile"], a.name);
+    assert_eq!(seen["send"][0], 200, "{seen}");
+    assert_eq!(seen["send"][1]["from"], a_agent);
+    assert_eq!(seen["send_as_other"][0], 403, "{seen}");
+    assert_eq!(seen["other_mailbox"][0], 403, "{seen}");
+    assert_eq!(seen["admin"][0], 403, "{seen}");
+    // The graph holds the tile's message, from its own agent, and never the forged one.
+    let mail = store.messages(Some(&b_agent), true).unwrap();
+    assert!(
+        mail.iter()
+            .any(|message| message.from == a_agent && message.content == "from the tile")
+    );
+    let forged = store.messages(Some(&a_agent), true).unwrap();
+    assert!(forged.iter().all(|message| message.content != "forged"));
+    // The sibling's endpoint answers for the sibling alone.
+    let b_seen = text(&ok(host.probe(
+        b,
+        "import socket, http.client\nclass E(http.client.HTTPConnection):\n    def connect(self):\n        self.sock = socket.socket(socket.AF_UNIX); self.sock.connect('/run/st/st.sock')\nc = E('tile'); c.request('GET', '/v1/tile/whoami'); print(c.getresponse().read().decode())",
+        "",
+    )));
+    assert!(b_seen.contains(&b_agent), "{b_seen}");
+    assert!(!b_seen.contains(&a_agent), "{b_seen}");
+    drop(runtime);
+}
+
+/// The kernel's word about a caller, read from /proc as the gateway itself does.
+struct ProcKernel;
+
+impl st3::sekrets::gateway::Kernel for ProcKernel {
+    fn cgroup(&self, pid: i32) -> Option<String> {
+        st3::sekrets::identity::process_cgroup(pid)
+    }
+    fn start(&self, pid: i32) -> Option<u64> {
+        st3::sekrets::identity::process_start(pid)
+    }
+}
+
+#[test]
+fn sekrets_names_a_tile_its_agent_and_its_user_outside_the_tile_no_one() {
+    if !enabled() {
+        return;
+    }
+    // A gateway like st-sekrets.service, run by this test's user over a disposable store.
+    let gateway_dir = tempfile::Builder::new()
+        .prefix("st-tiles-sekrets-")
+        .tempdir_in("/var/tmp")
+        .unwrap();
+    std::fs::set_permissions(gateway_dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let store = gateway_dir.path().join("store");
+    std::fs::create_dir(&store).unwrap();
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = gateway_dir.path().join("gateway.sock");
+    let host = Host::with(
+        &["a"],
+        64,
+        &format!("sekrets_socket = {:?}\n", socket),
+        true,
+    );
+    let a = host.tile("a");
+    let config: st3::sekrets::gateway::GatewayConfig = toml::from_str(&format!(
+        "socket = {socket:?}\nstore = {store:?}\npath = [\"/run/current-system/sw/bin\"]\n\
+         tile_registry = {registry:?}\n[people]\n",
+        registry = host.registry,
+    ))
+    .unwrap();
+    // The gateway reads root's registry the way it does in production: Registry::load.
+    let gateway = std::sync::Arc::new(
+        st3::sekrets::gateway::Gateway::new(
+            config,
+            unsafe { libc::getuid() },
+            None,
+            Box::new(ProcKernel),
+        )
+        .unwrap(),
+    );
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666)).unwrap();
+    std::thread::spawn(move || gateway.serve_listener(listener));
+
+    // Inside the tile, at the client's default socket, with no daemon to vouch for it.
+    let inside = ok(host
+        .command(a, &["st3", "sekrets", "whoami"])
+        .output()
+        .unwrap());
+    let said = text(&inside);
+    assert!(
+        said.contains(&format!(
+            "agent/fleet/fixture-example/{}, working for person/example",
+            a.name
+        )),
+        "{said}\n{}",
+        String::from_utf8_lossy(&inside.stderr)
+    );
+
+    // The same Unix user outside the tile is no one.
+    let outside = sudo([
+        "-u".as_ref(),
+        format!("#{}", a.uid).as_ref(),
+        "env".as_ref(),
+        "-i".as_ref(),
+        format!("ST_SEKRETS_SOCKET={}", socket.display()).as_ref(),
+        "HOME=/nonexistent".as_ref(),
+        host.st.as_os_str(),
+        "sekrets".as_ref(),
+        "whoami".as_ref(),
+    ]);
+    let said = format!(
+        "{}{}",
+        text(&outside),
+        String::from_utf8_lossy(&outside.stderr)
+    );
+    assert!(said.contains("outside the tile"), "{said}");
+    assert!(!said.contains(", working for"), "{said}");
+
+    // Without its gateway, a tile that should reach sekrets is refused, not started.
+    std::fs::remove_file(&socket).unwrap();
+    let refused = host.probe(a, "print('started')", "");
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("no socket there"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
     );
 }
