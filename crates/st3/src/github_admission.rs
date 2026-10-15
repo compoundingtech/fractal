@@ -163,12 +163,13 @@ fn cleanup_temporary(path: &Path) {
     for entry in entries.take(1024).flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with(".github-admission-") && name.ends_with(".tmp") {
-            if let Ok(meta) = entry.path().symlink_metadata() {
-                if meta.is_file() && meta.uid() == unsafe { libc::geteuid() } {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
+        if name.starts_with(".github-admission-")
+            && name.ends_with(".tmp")
+            && let Ok(meta) = entry.path().symlink_metadata()
+            && meta.is_file()
+            && meta.uid() == unsafe { libc::geteuid() }
+        {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }

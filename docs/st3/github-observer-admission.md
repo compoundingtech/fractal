@@ -59,7 +59,7 @@ patch does not replace those live gates with cached PR facts. Consumer coverage
 must still be qualified on the deployed build. No automatic skip or stale-head
 approval follows from the cache or this meter.
 
-Rust controls are WRITTEN, NOT RUN on hetz (no Cargo/native authorization):
+Rust controls are written and have not been run locally:
 restart/expiry and aggregate limits, separate resource counting, refusal without
 spending, persistence without a response, corrupt/gross-future state, symlink
 refusal, unscoped flood, tolerated skew, meter-only policy, enforced failure vs
