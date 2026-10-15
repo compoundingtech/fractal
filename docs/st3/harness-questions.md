@@ -93,11 +93,11 @@ contract: by default availability reports `adapter_missing` and answering return
 
 ## CLI
 
-Read metadata with `st harness-questions list --as ada` or
-`st harness-questions show QUESTION --as ada`. To answer:
+Read metadata with `st harness-questions list --as person/ada` or
+`st harness-questions show QUESTION --as person/ada`. To answer:
 
 ```sh
-st harness-questions answer QUESTION --as ada \
+st harness-questions answer QUESTION --as person/ada \
   --answers-file answers.json --idempotency-key harness-answer-retry-key
 ```
 

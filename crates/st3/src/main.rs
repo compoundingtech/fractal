@@ -34072,8 +34072,8 @@ mod harness_question_cli_tests {
     #[test]
     fn harness_question_cli_reads_require_an_explicit_person() {
         for arguments in [
-            vec!["st", "harness-questions", "list", "--as", "ada"],
-            vec!["st", "harness-questions", "show", "harness-question/ada", "--as", "ada"],
+            vec!["st", "harness-questions", "list", "--as", "person/ada"],
+            vec!["st", "harness-questions", "show", "harness-question/ada", "--as", "person/ada"],
         ] {
             assert!(matches!(
                 Cli::try_parse_from(arguments).unwrap().command,
@@ -34084,6 +34084,9 @@ mod harness_question_cli_tests {
         assert!(
             Cli::try_parse_from(["st", "harness-questions", "show", "harness-question/ada"])
                 .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["st", "harness-questions", "list", "--as", "ada"]).is_err()
         );
     }
 
@@ -34113,7 +34116,7 @@ mod harness_question_cli_tests {
             "answer",
             "harness-question/ada",
             "--as",
-            "ada",
+            "person/ada",
             "--answers-file",
             "answers.json",
             "--idempotency-key",

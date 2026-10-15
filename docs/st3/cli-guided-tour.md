@@ -327,8 +327,8 @@ are control mutations and are not aimed at arbitrary live work.
 
 ```sh
 st harness-questions --help
-st harness-questions list --as ada
-st harness-questions show QUESTION --as ada
+st harness-questions list --as person/ada
+st harness-questions show QUESTION --as person/ada
 st harness-questions answer --help
 ```
 
