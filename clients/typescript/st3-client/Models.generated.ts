@@ -2498,7 +2498,7 @@ export type ActionRequest =
   placement: "top" | "bottom" | "before" | "after";
   reason?: string;
 }; fence: Fence }) |
-  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.restart'; parameters: AgentRestartParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.restart'; parameters: AgentRestartParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.resume'; parameters: AgentResumeParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.retire'; parameters: AgentRetireParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.start'; parameters: AgentStartParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |

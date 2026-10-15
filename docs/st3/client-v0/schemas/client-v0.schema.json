@@ -2061,7 +2061,7 @@
         {"properties": {"type": {"const": "agent.start"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_desired_revision"]}]}, "parameters": {"$ref": "#/$defs/AgentStartParameters"}}},
         {"properties": {"type": {"const": "agent.suspend"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_incarnation", "runtime_desired_revision"]}]}, "parameters": {"$ref": "#/$defs/AgentSuspendParameters"}}},
         {"properties": {"type": {"const": "agent.resume"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_desired_revision"]}]}, "parameters": {"$ref": "#/$defs/AgentResumeParameters"}}},
-        {"properties": {"type": {"const": "agent.restart"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_incarnation"]}]}, "parameters": {"$ref": "#/$defs/AgentRestartParameters"}}},
+        {"properties": {"type": {"const": "agent.restart"}, "fence": {"$ref": "#/$defs/Fence"}, "parameters": {"$ref": "#/$defs/AgentRestartParameters"}}},
         {"properties": {"type": {"const": "terminal.create"}, "parameters": {"$ref": "#/$defs/TerminalCreateParameters"}}},
         {"properties": {"type": {"const": "terminal.end"}, "parameters": {"$ref": "#/$defs/TargetParameters"}}},
         {"properties": {"type": {"const": "work.ask"}, "parameters": {"$ref": "#/$defs/PersonAskParameters"}}},

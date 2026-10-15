@@ -1058,6 +1058,22 @@ and requires the local current runtime incarnation and the declared supported na
 It accepts no import metadata or arbitrary claim fields. The generic `/v1/claims` endpoint
 still rejects requester-owned `harness.session-file` claims; authorized native-session imports
 continue to use `session.import`.
+
+The restart/native-report contract adds these refusal checks (HTTP statuses are for the
+direct endpoints; these are errors, not successful restart receipts):
+
+| Code | HTTP status | When returned |
+| --- | --- | --- |
+| `stale-incarnation` | 409 Conflict | A supplied restart incarnation differs from the current one, including an empty value on a running seat; or a native report does not name this host's current incarnation. Omitting the restart fence does not trigger this check. |
+| `stale-revision` | 422 Unprocessable Entity | A supplied restart desired-revision fence differs from the selected declaration. |
+| `binding-not-declared` | 422 Unprocessable Entity | A native report has a current seat but no active agent declaration. |
+| `binding-driver-mismatch` | 422 Unprocessable Entity | A native report's supported harness differs from the declared driver, or the declaration has conflicts. |
+
+Native reports also retain `foreign-agent-actor` (422, actor is not the reporting seat),
+`invalid-native-session` (422, empty session/incarnation or unsupported harness), and
+`missing-agent` (422, no current seat). An accepted restart can later produce a durable
+`runtime.action.failed` result; that asynchronous refusal is not another HTTP error code.
+
 `agent.suspend` takes `{agent, reason?}` and requires the running incarnation and selected desired
 revision in its fence. `agent.resume` takes `{agent, host?}` and requires the selected desired
 revision. An absent `host` preserves single-host behavior. A different host requests portable
