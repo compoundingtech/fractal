@@ -48867,7 +48867,7 @@ mission "external-blocker" state="ready" {
                      ORDER BY id",
                 )
                 .unwrap();
-            let inputs = statement
+            statement
                 .query_map([], |row| {
                     Ok([
                         row.get::<_, String>(0)?,
@@ -48880,8 +48880,7 @@ mission "external-blocker" state="ready" {
                 })
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            inputs
+                .unwrap()
         };
         exchange_all();
         for (index, child) in children.iter().enumerate() {

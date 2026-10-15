@@ -107,14 +107,13 @@ fn terminal_date_claims(store: &Store, run: &MissionRunView) -> Vec<(String, Str
          ORDER BY id",
         )
         .unwrap();
-    let rows = statement
+    statement
         .query_map(params![run.subject, run.generation, run.id], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    rows
+        .unwrap()
 }
 
 #[derive(Debug)]
@@ -310,7 +309,7 @@ async fn work_completed_child_dates_survive_later_parent_terminal_projection() {
         r#"version 2
 mission "work-date-root" state="ready" {
   goal "Keep a completed child's dates."
-  step "child" { agentless }
+  step "child" { assigned-to "person/operator" }
 }
 mission "work-date-child" state="ready" {
   goal "Finish by submitting actual work."
@@ -345,6 +344,20 @@ mission "work-date-child" state="ready" {
     for _ in 0..4 {
         reconciler.reconcile_once().unwrap();
     }
+    assert_eq!(
+        source.mission_run_status(&parent.id).unwrap().as_deref(),
+        Some("running"),
+        "the unsubmitted parent work must keep the root live while its child works"
+    );
+    assert_eq!(
+        source
+            .step_run(&parent.steps[0].subject)
+            .unwrap()
+            .unwrap()
+            .status,
+        "ready",
+        "a person-owned parent is not auto-completed by reconciliation"
+    );
     assert_eq!(
         source
             .step_run(&child.steps[0].subject)
@@ -413,6 +426,11 @@ mission "work-date-child" state="ready" {
         completed_claims
             .iter()
             .any(|claim| claim.0 == submission.id)
+    );
+    assert_eq!(
+        source.mission_run_status(&parent.id).unwrap().as_deref(),
+        Some("running"),
+        "the parent must still be live until the deliberate later terminal transition"
     );
     source.set_write_clock_at(initial_time + 3_000).unwrap();
     assert!(
