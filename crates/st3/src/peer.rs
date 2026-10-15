@@ -1366,8 +1366,9 @@ async fn receive_client_read(
                     limit.is_none_or(|limit| (1..=200).contains(&limit)),
                     "the messages limit is invalid"
                 );
+                let client = client.with_messages_paging(false);
                 if messages_paging {
-                    let advertised = client.clone().with_messages_paging(false).capabilities().await?;
+                    let advertised = client.capabilities().await?;
                     if !advertised.value.capabilities.iter().any(|capability| {
                         capability.id == "messages-paging"
                             && capability.version == 2
