@@ -10,8 +10,15 @@ never conflict, because regenerating them from merged source gives the same byte
     scripts/conflict-census --json     # machine-readable, for the before/after table
     scripts/conflict-census --top 40   # rows to print (default 25)
 
-Needs `gh` for the open-PR list and git 2.38+ for merge-tree. Pull heads are fetched to
-refs/census/NUMBER, so the report is reproducible from the same fetch.
+Needs `gh` for the open-PR list and git 2.38+ for merge-tree.
+
+Run it in a throwaway clone or worktree, not a shared checkout, and not on a loaded host: it
+updates origin/main, force-writes one ref per open PR under refs/census/ (refs of PRs that are no
+longer open are deleted first) and, because merge-tree --write-tree writes tree objects, leaves
+loose objects in the repository for `git gc` to collect. A failed gh, fetch or git command stops
+it with that command's error; only merge-tree's exit status 1 means "conflicts". It reads which
+files are generated from .gitattributes at the base ref, so it can run from any directory of the
+clone.
 """
 import argparse
 import collections
@@ -21,26 +28,32 @@ import subprocess
 import sys
 
 
-def run(*args, check=True):
+def run(*args, ok=(0,)):
     done = subprocess.run(args, capture_output=True, text=True)
-    if check and done.returncode not in (0, 1):
+    if done.returncode not in ok:
         sys.exit(f"{' '.join(args)}: {done.stderr.strip()}")
     return done
 
 
+def repository():
+    """OWNER/REPO of origin, so gh does not depend on the directory it runs in."""
+    url = run("git", "remote", "get-url", "origin").stdout.strip()
+    match = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", url)
+    if not match:
+        sys.exit(f"cannot read OWNER/REPO from origin url {url}")
+    return match.group(1)
+
+
 def open_prs():
-    listing = run("gh", "pr", "list", "--state", "open", "--limit", "1000",
+    listing = run("gh", "pr", "list", "-R", repository(), "--state", "open", "--limit", "1000",
                   "--json", "number,mergeable,isDraft").stdout
     return {pr["number"]: pr for pr in json.loads(listing)}
 
 
-def generated_patterns():
+def generated_patterns(base):
     patterns = []
-    try:
-        lines = open(".gitattributes").read().splitlines()
-    except OSError:
-        return patterns
-    for line in lines:
+    shown = run("git", "show", f"{base}:.gitattributes", ok=(0, 128))
+    for line in shown.stdout.splitlines():
         parts = line.split()
         if parts and not parts[0].startswith("#") and "linguist-generated=true" in parts[1:]:
             patterns.append(parts[0])
@@ -77,16 +90,18 @@ def conflicts(base, refs):
     hunks = collections.Counter()
     conflicted = {}
     for label in sorted(refs):
-        done = run("git", "merge-tree", "--write-tree", "--name-only", "--no-messages",
-                   base, refs[label])
+        done = run("git", "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z",
+                   base, refs[label], ok=(0, 1))
         if done.returncode == 0:
             continue
-        lines = done.stdout.splitlines()
-        tree, paths = lines[0], sorted({line for line in lines[1:] if line})
+        # -z: the tree id, then NUL-separated paths, then a NUL and any informational messages.
+        tree, _, rest = done.stdout.partition("\0")
+        tree = tree.strip()
+        paths = sorted({path for path in rest.split("\0\0")[0].split("\0") if path})
         conflicted[label] = paths
         for path in paths:
             files[path] += 1
-            text = run("git", "show", f"{tree}:{path}", check=False).stdout
+            text = run("git", "show", f"{tree}:{path}", ok=(0, 128)).stdout
             hunks[path] += len(re.findall(r"^<<<<<<< ", text, re.M))
     return conflicted, files, hunks
 
@@ -100,10 +115,13 @@ def main():
 
     run("git", "fetch", "-q", "origin", "main")
     prs = open_prs()
+    stale = run("git", "for-each-ref", "--format=%(refname)", "refs/census/").stdout.split()
+    for ref in stale:
+        run("git", "update-ref", "-d", ref)
     refspecs = [f"+refs/pull/{n}/head:refs/census/{n}" for n in prs]
     for start in range(0, len(refspecs), 100):
         run("git", "fetch", "-q", "origin", *refspecs[start:start + 100])
-    generated = [glob_regex(p) for p in generated_patterns()]
+    generated = [glob_regex(p) for p in generated_patterns(args.base)]
 
     def is_generated(path):
         return any(rx.match(path) for rx in generated)

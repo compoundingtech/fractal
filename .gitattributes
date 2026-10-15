@@ -3,8 +3,6 @@ evals/**/_git/objects/** binary
 # side and regenerate (docs/st3/client-v0/README.md).
 crates/st3-client/src/generated.rs linguist-generated=true
 crates/st3-client/src/contract.rs linguist-generated=true
-# Written by `cargo run -p st3-schema --example schema_markdown docs/st3/schema.md`.
-docs/st3/schema.md linguist-generated=true
 crates/st3-client/src/lib.rs linguist-generated=true
 clients/typescript/st3-client/*.generated.ts linguist-generated=true
 clients/swift/St3Client/Sources/St3Client/*.generated.swift linguist-generated=true
