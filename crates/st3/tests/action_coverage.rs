@@ -4899,7 +4899,7 @@ mission "example/person-rename" state="ready" {
     );
     let reviews: Value = daemon.transport().get("/v1/reviews").await.unwrap();
     assert_eq!(reviews.as_array().unwrap().len(), 1);
-    assert_eq!(reviews[0]["owner"], review_step);
+    assert_eq!(reviews[0]["owner"].as_str(), Some(review_step.as_str()));
     assert_eq!(reviews[0]["reviewer"], NEW_PERSON);
     assert_eq!(reviews[0]["request"], review_request.id);
     assert!(daemon.store().attention_items(Some(PERSON)).unwrap().is_empty());
