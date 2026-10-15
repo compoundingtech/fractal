@@ -701,6 +701,7 @@ fn validate_surfaces(
         "SubscriptionSpec",
         "SyncNotice",
         "SyncPeer",
+        "ExchangeTransport",
         "StructuredDiff",
         "Visualization",
         "VisualizationNode",

@@ -17,7 +17,7 @@ is `https://smalltalk.dev/evidence/gate/v1`. Its fields are:
 | Field | Meaning |
 | --- | --- |
 | `schema_version` | Predicate schema version, initially `1`; unknown versions fail closed. |
-| `change_id` | Nonempty stable identifier; currently supplied by the workflow pending the change format. |
+| `change_id` | Nonempty free label in the signed predicate; supplied by the workflow or the wrapper. Nothing matches or filters on it. |
 | `signer` | Exact SSH principal in the caller's allowed-signers file, or null for degraded records. |
 | `tier` | `full`, `degraded`, or `test`; a signature alone never promotes a tier. |
 | `re_attests` | Optional degraded record ID when a fresh full-trust test run re-attests the same keyed check. |
@@ -184,8 +184,10 @@ The workflow embeds its producer in a temporary file outside the checkout. The
 receipt measures those actual script bytes. The artifact is retained for 14 days,
 including source objects whose synthetic merge ref has since moved or disappeared.
 
-`change_id` is `github:OWNER/REPO#NUMBER` for a PR or merge queue entry, pending the
-changes-in-git format. A queue entry can contain additional changes: its source
+`change_id` is a free label in the signed predicate. Today it is `github:OWNER/REPO#NUMBER`
+for a PR or merge queue entry in the source receipt, `github:OWNER/REPO@SHA` in the aggregate
+note, and `local:<commit>` from the local wrapper. Nothing reads a commit message, and no
+trailer or ref is needed. A queue entry can contain additional changes: its source
 and tree still identify the whole tested checkout. A manual run uses
 `github:OWNER/REPO@SOURCE`, without inventing a PR identity.
 
@@ -350,11 +352,17 @@ The machine that ran a check can sign the result itself, with no call to GitHub.
 `EVIDENCE_SIGNING_KEY` secret of the `evidence-signing` environment (forks never receive it).
 `scripts/ci-evidence-signing` holds the steps that handle it, and all of them are tested without
 GitHub: `guard` allows only merge-queue refs, `main`, manual runs on `main` and same-repository
-pull requests; `configure` writes the signer configuration and key as mode 0600 in a 0700
+pull requests whose opener, run trigger and commit authors are on the list `.st/evidence-authors.json`
+at the base commit (GitHub logins are authenticated; commit author emails are free text and only
+catch a stray commit by someone else; a fork never signs); `configure` writes the signer configuration and key as mode 0600 in a 0700
 directory and masks every key line; `once CHECK` refuses a second signature for a check in one job;
 `cleanup` overwrites and removes the key, and runs even when earlier steps failed. The wrapper and
 signer scripts must come from the base commit of the change, never from the tree under test.
-Accepted gap: code under test in a job that holds the key can read it.
+Accepted gap: code under test in a job that holds the key can read it. That now includes every pull
+request from this repository: its author controls the workflow file the run executes, so a person or agent with
+write access can read the key and sign any note; the author list narrows who gets a note, it does not
+stop that person's code from reading the key. Forks never get it. Narrowing the `evidence-signing`
+environment back to the merge queue and main undoes this.
 
 An aggregate job records what it knows: `scripts/ci-evidence-signing aggregate FILE` builds, from
 the `needs` context, the needed jobs, the result each reported and the gate job's own result, and
@@ -489,7 +497,7 @@ trusted record for the tree and check decides, so a newer failure supersedes an 
 pass. Reasons: `no_record`, `stale_tree` (records exist only for other trees),
 `wrong_check`, `bad_signature` (forged or unsigned), `untrusted_signer` (a valid
 signature from a key not on the list, or a principal that differs from the record's
-signer), `untrusted_tier`, `degraded`, `unsupported_kind`, `check_failed`, `wrong_command`, `wrong_input` and
+signer), `untrusted_tier`, `untrusted_level`, `wrong_runner`, `too_old`, `future_dated`, `degraded`, `unsupported_kind`, `check_failed`, `wrong_command`, `wrong_input` and
 `error` (unreadable input: no decision was made, count it separately). Notes are found
 by the tree they name with one `git cat-file --batch-check`, so the cost grows with the
 number of evidence refs; pack refs, or add a per-tree index, before they reach the
@@ -501,7 +509,18 @@ statement's tree stands. When the subject commit is present its tree must equal 
 statement's, so a record cannot be rebound to a different tree. The tree claim is the
 signer's: the signature covers the statement, so only a key on the list can make it.
 
-`--kinds nix,wrapper` limits the record kinds a check accepts. `--bind-input KEY=PATH`
+`--kinds nix,wrapper` limits the record kinds a check accepts. `--max-age SECONDS` rejects a record observed longer ago than that (`too_old`) or claiming a time
+more than two minutes ahead (`future_dated`). `--runner-prefix github:ORG/REPO/` requires the record
+to come from this repository's runs (`wrong_runner`; keep the trailing slash, it is what stops `repo`
+matching `repo2`). `--trust-levels fleet,machine` limits which signer trust levels a check accepts
+(`untrusted_level`); a newer failure from a level the check does not accept still stops a skip.
+A record claiming a time more than two minutes ahead is always `future_dated`, with or without
+`--max-age`. Every one of these options defaults to permissive, so **a check that skips on an
+observed record must pass `--kinds`, `--command`, `--runner-prefix`, `--trust-levels` and
+`--max-age` explicitly** (or, better, `--policy-from`). Any unexpected exception is a JSON
+refusal with reason `error`, never a traceback and never a pass.
+
+`--bind-input KEY=PATH`
 (repeatable) requires the record's input `KEY` to equal the sha256 of `PATH` as it is in
 the tree being verified, for example `flake_lock_sha256=flake.lock`, so an environment
 fingerprint is tied to the tree and not to a claim; any mismatch, missing key or missing
@@ -519,3 +538,118 @@ be ordered against each other.
 
 This slice verifies SSH-signed `tests` records. The raw Nix output-path signature
 check for the typed `nix` observation is a later slice, agreed with the Nix producer.
+
+## Evidence gate and the skip policy
+
+Five non-required jobs, `evidence-gate-<check>` for each required check (`linux-gate`,
+`typescript-client`, `isolation-vm`, `genie-freshness`, `mail-redelivery-canaries`), decide whether
+a trusted note already covers the run's tree. Nothing `needs` them, they hold `contents: read`
+only, write nothing and dispatch nothing, and every problem becomes `decision=run`. **The gate
+decides; it does not yet skip anything.** Wiring a skip into the jobs it would skip is a separate
+change, so this one cannot make any check run less.
+
+### The skip policy
+
+`.st/evidence-skip-policy.json` is read from the accepted base (the pull request base or the merge
+group base), never from the change under test, and says per check what a note must be:
+
+```json
+{"version": 1, "checks": {"linux-gate": {
+  "trust_levels": ["fleet"],
+  "max_age_s": null,
+  "kinds": {
+    "observed": {"command": ["github-actions", "{repository}", ".github/workflows/fleet.yml", "{check}"],
+                 "runner_prefix": "github:{repository}/"},
+    "wrapper": {"command": ["..."], "required_inputs": ["flake_lock_sha256", "toolchain_sha256"],
+                "bind_inputs": {"flake_lock_sha256": "flake.lock"}}}}}}
+```
+
+Each kind has its own rule: the exact `command` the record must have run, an optional
+`runner_prefix`, optional per-kind `trust_levels`, the `required_inputs` it must carry (every one a nonempty string) and
+`bind_inputs`, which must equal the sha256 of a file as it is in the tree being verified. A kind's own
+`trust_levels` replaces the check's for that kind only, so a weaker signer (say `local`, the CI's
+own runner signer) can be admitted for `wrapper` notes without ever satisfying `observed`; a note
+never changes kind, since the kind comes from the record's runner and each kind keeps its own
+command and inputs.
+**Adding an input to `required_inputs` tightens future notes without breaking anything**: a
+note that lacks it simply stops satisfying the check (`missing_input`). `max_age_s` is `null`
+by default (no age limit; a signature is meant to grow to cover more over time); a note claiming
+a future time is always refused. The file is validated strictly: an unknown key is an error, so
+a typo cannot silently weaken a rule, and a check with no entry never skips. The tree, the check
+name, the command, the exit code and the output hash are part of every record and are always
+checked. Only `observed` (the central observer's record) is listed today; `wrapper` is added per
+check when its real command is known. Write `scripts/evidence-verify --policy-from BASE
+--repository OWNER/NAME` to apply it by hand.
+
+### When the gate says skip
+
+`scripts/ci-evidence-gate` takes the verifier from the accepted base and asks it, with the policy,
+about this run's tree. It prints `decision=skip` only if **all** of these hold, and otherwise
+`decision=run`:
+
+- the head repository is positively this repository (a fork or an unknown head never skips);
+- the event is `pull_request` or `merge_group` (a manual run or a push never skips);
+- the verifier exits 0 reporting `satisfied`, that it applied the policy, tier `full`, and a
+  kind, trust level, signer and record id of the expected shape;
+- the verifier's tree equals this run's own tree and its check equals this job's check;
+- the record's time is not in the future;
+- **no file that decides skipping differs between the accepted base and this run's tree**:
+  `scripts/ci-evidence-gate`, `scripts/evidence-verify`, `.st/evidence-skip-policy.json`,
+  `.st/evidence-keys`, `.github/workflows/fleet.yml` and its `.genie.ts` source. Such a change always
+  runs everything, and a comparison that cannot be made counts as a change.
+
+A verifier that is missing, slow (30 seconds), crashes, prints invalid UTF-8 or contradicts the run
+leaves `decision=run`.
+
+**The gate script comes from the accepted base, like the verifier.** The step runs
+`git show "$BASE_SHA:scripts/ci-evidence-gate"`, never the checked-out copy, and if the base has no
+gate or it fails in any way the step reports `unavailable` and the check runs. A change that rewrites
+the gate therefore cannot make itself skip, and the protected-path rule above makes any such change
+run in full. What remains is the workflow file itself, which a same-repo change can edit; that is
+visible in review, is itself a protected path (so that very change runs in full), and is the documented
+same-repo limit. Fork pull requests never skip.
+
+Limits, stated plainly:
+- The shipped `observed` rule has no `required_inputs` or `bind_inputs`. That is deliberate: a note is
+  keyed to the exact tree, and the tree contains the workflow, so tree equality plus the pinned command
+  and runner prefix is the binding. The central observer additionally records full tier only for a
+  workflow and recipe matching its operator pin.
+- For a pull request the tree is the merge-ref tree, so a note matches only a branch that is current
+  with main.
+- With no age limit (`max_age_s` null), an old success on the identical tree can skip checks that depend
+  on the hosted image or on timing (`typescript-client`, `isolation-vm`). That is a choice, recorded in
+  the known defects; `age_s` in the decision line is there to audit it.
+
+### Skips are not recorded as fresh runs
+
+A job that skipped because a note covered it still ends in success. Each gate job therefore runs one
+more fixed step, `evidence skip taken`, when it decides to skip. **The observer must not record a check
+whose gate job ran that step as a finished run**: otherwise one real run would keep refreshing its own
+skips and the age and attempt data would lie. This is a contract with the observer (it lives in
+`.github/workflows` of the Evidence observe workflow, not in this change) and nothing may consume the
+skip decision until the observer honors it.
+
+### The decision line
+
+Every run prints exactly one line, to the job log and `$GITHUB_STEP_SUMMARY`, with no spaces inside
+values and `-` for none:
+
+```
+evidence-decision v1 check=… decision=skip|run outcome=satisfied|degraded|no_note|rejected|unavailable
+reason=… record=… signer=… trust_level=… kind=… tier=… observed_at=… age_s=… max_age_s=… attempts=…
+tree=… head=… base=… event=… pr=… repo=… run=… attempt=… fork=true|false verifier_sha256=… gate_sha256=…
+```
+
+(one line; wrapped here). Each job also ends with exactly one of these steps running, which is how a
+collector reads the outcome from the jobs API: `evidence satisfied by existing note`,
+`evidence existing note is degraded`, `evidence no note`, `evidence note rejected`,
+`evidence verifier unavailable`, plus `evidence skip taken` when the decision is skip. A note made for a pull request is reused by the merge queue's run
+only when the tree is identical, that is, when main has not moved in between.
+
+### Loops
+
+No workflow has an unfiltered `push` trigger (the `push` triggers are limited to `branches: [main]` or
+tags), so pushing `refs/notes/evidence/*` starts nothing; a test fails if one is added. The gate holds
+`contents: read`, so it cannot push, dispatch or comment and cannot cause a rerun. The record's
+`attempts` count (trusted records for the tree and check) is what a producer reads to refuse a
+second production.
