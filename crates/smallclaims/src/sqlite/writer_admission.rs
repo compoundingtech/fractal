@@ -1,6 +1,48 @@
 //! Admission of top-level writer-bound callbacks before they occupy blocking threads.
 use super::*;
 use std::future::Future;
+use std::collections::BTreeMap;
+use std::time::Instant;
+
+#[derive(Default)]
+pub(super) struct WorkerQueue {
+    pending: Mutex<BTreeMap<u64, Instant>>,
+    next: AtomicU64,
+}
+
+impl WorkerQueue {
+    pub(super) fn new() -> Arc<Self> {
+        let queue = Arc::new(Self::default());
+        telemetry::register_worker_queue(&queue);
+        queue
+    }
+
+    pub(super) fn sample(&self) -> (u64, f64) {
+        let pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        (pending.len() as u64, pending.first_key_value().map_or(0.0, |(_, at)| at.elapsed().as_secs_f64()))
+    }
+
+    fn enqueue(self: &Arc<Self>) -> QueuedWorker {
+        std::sync::LazyLock::force(&telemetry::METRICS);
+        let mut pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let at = Instant::now();
+        pending.insert(id, at);
+        QueuedWorker { queue: self.clone(), id, at }
+    }
+}
+
+struct QueuedWorker {
+    queue: Arc<WorkerQueue>,
+    id: u64,
+    at: Instant,
+}
+
+impl Drop for QueuedWorker {
+    fn drop(&mut self) {
+        self.queue.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.id);
+    }
+}
 
 pub const MAX_WRITE_WORKERS: usize = 32;
 
@@ -79,15 +121,27 @@ impl WritePermit {
 pub struct WriteWorkers {
     admission: Arc<Semaphore>,
     inherited: Option<WritePermit>,
+    queue: Arc<WorkerQueue>,
+    requester: Option<Arc<tokio::sync::oneshot::Sender<()>>>,
+    route: Option<String>,
 }
 
 impl WriteWorkers {
+    /// Observe a detached request without cancelling or skipping its work.
+    /// `route` must be the router's normalized matched path, never a raw URI.
+    pub fn with_requester(mut self, requester: Arc<tokio::sync::oneshot::Sender<()>>, route: String) -> Self {
+        self.requester = Some(requester);
+        self.route = Some(route);
+        self
+    }
+
     /// Admit before submitting work; dependent callbacks retain their parent's slot.
     pub async fn spawn_blocking<F, T>(self, work: F) -> Result<T, tokio::task::JoinError>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
+        let queued = self.inherited.is_none().then(|| self.queue.enqueue());
         let permit = match self.inherited {
             Some(permit) => permit,
             None => {
@@ -103,7 +157,23 @@ impl WriteWorkers {
                 }
             }
         };
-        tokio::task::spawn_blocking(move || permit.run(work)).await
+        tokio::task::spawn_blocking(move || {
+            if let Some(queued) = queued {
+                let wait = queued.at.elapsed();
+                drop(queued);
+                telemetry::METRICS.worker_wait.record(
+                    wait.as_secs_f64(),
+                    &[self.route.map_or_else(
+                        || opentelemetry::KeyValue::new("origin", "other"),
+                        |route| opentelemetry::KeyValue::new("origin", route),
+                    )],
+                );
+            }
+            if self.requester.is_some_and(|requester| requester.is_closed()) {
+                telemetry::METRICS.worker_abandoned.add(1, &[opentelemetry::KeyValue::new("outcome", "ran")]);
+            }
+            permit.run(work)
+        }).await
     }
 }
 
@@ -114,6 +184,9 @@ impl WriterConnection {
         WriteWorkers {
             admission: self.workers.clone(),
             inherited: self.current_write_permit(),
+            queue: self.worker_queue.clone(),
+            requester: None,
+            route: None,
         }
     }
 
@@ -134,12 +207,16 @@ impl WriterConnection {
     /// semaphore grants queued admission in FIFO order. No store locks may be held here.
     pub fn admit_write(&self) -> impl Future<Output = WritePermit> + Send + use<> {
         let admission = self.workers.clone();
+        let queue = self.worker_queue.clone();
         async move {
+            let queued = queue.enqueue();
             let permit = admission
                 .clone()
                 .acquire_owned()
                 .await
                 .expect("writer worker admission is never closed");
+            telemetry::METRICS.worker_wait.record(queued.at.elapsed().as_secs_f64(), &[opentelemetry::KeyValue::new("origin", "other")]);
+            drop(queued);
             WritePermit {
                 admission,
                 _permit: Arc::new(permit),

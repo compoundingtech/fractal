@@ -386,6 +386,44 @@ unbounded attributes. Duration histograms use the seconds buckets above; batch s
 explicit boundaries `1`, `2`, `4`, `8`, `16`, `32`, `64`, `128`, `256`.
 Storage metrics are not sampled.
 
+### Write-worker admission
+
+These process-wide instruments cover the asynchronous admission queue before a
+writer-bound blocking callback starts, not the SQLite writer's separate batch queue.
+They use the existing SDK meter provider and daemon resource identity.
+
+| Instrument | Kind | Unit | Attributes / meaning |
+| --- | --- | --- | --- |
+| `st.write_workers.queue.depth` | Observable gauge | `{job}` | Queued, not-yet-started top-level callbacks |
+| `st.write_workers.queue.oldest_age` | Observable gauge | `s` | Age of the oldest queued callback; zero when empty |
+| `st.write_workers.queue.wait` | Histogram | `s` | `origin`: normalized HTTP route when available, otherwise `other`; enqueue through callback start (or explicit admission grant) |
+| `st.write_workers.abandoned` | Counter | `{job}` | `outcome=ran`: callbacks starting after their request waiter was dropped |
+
+Inherited dependent callbacks do not add queue entries. Pending admission cancellation
+removes the entry; admitted callbacks remain queued until their blocking thread starts.
+Explicit `admit_write` calls leave the queue when granted capacity. Each store tracks
+pending enqueue timestamps in an ordered map; observable callbacks read only its length
+and head under a short mutex, without scanning jobs or taking a store/writer lock.
+Across stores the gauges sum depth and take the maximum oldest age.
+
+Mutation handlers retain their existing detached completion behavior. A closed response
+oneshot detects abandonment before each synchronous handler poll; it only counts and
+never cancels or skips work. Consequently the counter counts callback starts, not unique
+HTTP requests; a pending handler can contribute again on a later abandoned poll.
+`outcome=skipped` is reserved for jobs skipped after abandonment; the current implementation
+does not skip jobs and emits only `ran`. Wait histograms use the storage duration buckets.
+
+An alert for sustained admission delay can use:
+
+```promql
+max by (host_name) (st_write_workers_queue_oldest_age_seconds * on(instance) group_left(host_name) target_info{job="infra/st-daemon"}) > 5
+```
+
+Proof: `worker_queue_exports_wait_and_abandoned_requests` blocks worker capacity,
+checks exported depth and oldest age, drops the requester before start, and checks
+the exported abandonment counter, wait histogram, and empty-queue reset. It also
+checks pending-admission cancellation removes queue entries.
+
 A scoped thread-local `Option<Arc<WriterWait>>` shares a request accumulator across
 handler, store, action, and API blocking sections. Two relaxed atomics sum writer ACK
 wait in nanoseconds and count writer operations. Outer handler completion records
