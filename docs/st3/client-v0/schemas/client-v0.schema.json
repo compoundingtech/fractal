@@ -37,7 +37,6 @@
       "type": "object", "additionalProperties": false, "required": ["target", "text"],
       "properties": {
         "target": {"type": "string"}, "text": {"type": "string", "minLength": 1, "maxLength": 1024},
-        "audience": {"$ref": "#/$defs/NoteAudience"},
         "session": {"type": ["string", "null"]},
         "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
       }
@@ -46,7 +45,6 @@
       "type": "object", "additionalProperties": false,
       "properties": {
         "text": {"type": ["string", "null"], "minLength": 1, "maxLength": 1024},
-        "audience": {"$ref": "#/$defs/NoteAudience"},
         "session": {"type": ["string", "null"]},
         "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
       }

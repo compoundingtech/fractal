@@ -17,7 +17,7 @@ const DISCLAIMER: &str = "Notes inform you. They never assign work or grant auth
 pub fn current_notes(store: &Store, agent: &str) -> Result<Vec<SubjectNote>> {
     let mut notes = Vec::new();
     for note in store.list_subject_notes(None, None, agent)? {
-        if note.audience == "agent" && store.subject_note_agents(&note.target)?.contains(agent) {
+        if store.subject_note_agents(&note.target)?.contains(agent) {
             notes.push(note);
         }
     }
@@ -40,9 +40,9 @@ fn neutralize(text: &str) -> String {
     out
 }
 
-/// Currency and recipient resolution happen before rendering; self notes are excluded here too.
+/// Currency and recipient resolution happen before rendering, independently of audience.
 pub fn render(notes: &[SubjectNote]) -> Result<Option<String>> {
-    let mut ordered = notes.iter().filter(|note| note.audience == "agent")
+    let mut ordered = notes.iter()
         .map(|note| Ok((DateTime::parse_from_rfc3339(&note.updated_at)?, note)))
         .collect::<Result<Vec<_>>>()?;
     ordered.sort_by(|(left_time, left), (right_time, right)| {
@@ -71,7 +71,7 @@ pub fn idempotency_key(agent: &str, incarnation: &str, notes: &[SubjectNote]) ->
     };
     component(agent);
     component(incarnation);
-    let mut revisions = notes.iter().filter(|note| note.audience == "agent")
+    let mut revisions = notes.iter()
         .map(|note| (&note.id, &note.revision)).collect::<Vec<_>>();
     revisions.sort_unstable();
     for (id, revision) in revisions { component(id); component(revision); }
@@ -190,11 +190,13 @@ mod tests {
     }
 
     #[test]
-    fn self_notes_are_not_rendered_or_keyed() {
-        let mut private = note(0); private.audience = "self".into();
-        assert!(render(&[private.clone()]).unwrap().is_none());
-        assert_eq!(idempotency_key("agent/example.reader", "first", &[private]),
-            idempotency_key("agent/example.reader", "first", &[]));
+    fn all_audiences_are_rendered_and_keyed() {
+        for audience in ["self", "agent", "future-level"] {
+            let mut input = note(0); input.audience = audience.into();
+            assert!(render(&[input.clone()]).unwrap().unwrap().contains("text 0"));
+            assert_ne!(idempotency_key("agent/example.reader", "first", &[input]),
+                idempotency_key("agent/example.reader", "first", &[]));
+        }
     }
 
     const NOTE_ID: &str = "note/person/example/0192f3c4-7a1e-7c3a-9b2d-4f5e6a7b8c9d";
@@ -219,7 +221,7 @@ mod tests {
     #[test]
     fn first_and_later_incarnations_receive_idempotent_non_waking_context() {
         let store = enabled_store();
-        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Shared"), "agent", None, None).unwrap();
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Shared"), None, None).unwrap();
         assert!(emit_for_incarnation(&store, AGENT, "first").unwrap());
         assert!(!emit_for_incarnation(&store, AGENT, "first").unwrap());
         assert!(emit_for_incarnation(&store, AGENT, "second").unwrap());
@@ -230,32 +232,46 @@ mod tests {
             assert!(crate::silent::is_held(message));
             assert!(!message.tags.iter().any(|tag| tag.starts_with(crate::handoff::SESSION_START_TAG_PREFIX)));
         }
-        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Updated"), "agent", None, None).unwrap();
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Updated"), None, None).unwrap();
         assert!(emit_for_incarnation(&store, AGENT, "second").unwrap());
     }
 
     #[test]
     fn silent_release_refreshes_revision_and_drops_archived_context() {
         let store = enabled_store();
-        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Old"), "agent", None, None).unwrap();
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Old"), None, None).unwrap();
         emit_for_incarnation(&store, AGENT, "first").unwrap();
         let mut messages = store.messages(Some(AGENT), true).unwrap();
-        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Current"), "agent", None, None).unwrap();
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Current"), None, None).unwrap();
         crate::silent::refresh_notes(&store, &mut messages).unwrap();
         assert!(messages[0].content.contains("Current"));
         assert!(!messages[0].content.contains(": Old"));
-        store.set_subject_note(NOTE_ID, "person/example", AGENT, None, "agent", None, None).unwrap();
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, None, None, None).unwrap();
         crate::silent::refresh_notes(&store, &mut messages).unwrap();
         assert!(messages.is_empty());
     }
 
     #[test]
-    fn private_notes_never_emit_context() {
-        let store = enabled_store();
-        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("Private"), "self", None, None).unwrap();
-        assert!(current_notes(&store, AGENT).unwrap().is_empty());
-        assert!(!emit_for_incarnation(&store, AGENT, "first").unwrap());
-        assert!(store.messages(Some(AGENT), true).unwrap().is_empty());
+    fn historical_audiences_emit_context_at_session_start_and_silent_release() {
+        for audience in ["self", "agent", "future-level"] {
+            let store = enabled_store();
+            store.append_claim(&ClaimInput {
+                subject: NOTE_ID.into(), kind: st3_schema::subject_notes::KIND.into(),
+                actor: Some("person/example".into()),
+                fields: BTreeMap::from([
+                    ("target".into(), json!(AGENT)), ("text".into(), json!("Historical context")),
+                    ("audience".into(), json!(audience)),
+                ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let notes = current_notes(&store, AGENT).unwrap();
+            assert_eq!(notes.len(), 1);
+            assert_eq!(notes[0].audience, audience);
+            assert!(emit_for_incarnation(&store, AGENT, "first").unwrap());
+            let mut messages = store.messages(Some(AGENT), true).unwrap();
+            assert_eq!(messages.len(), 1);
+            crate::silent::refresh_notes(&store, &mut messages).unwrap();
+            assert!(messages[0].content.contains("Historical context"));
+        }
     }
 
     #[test]
@@ -271,7 +287,7 @@ mod tests {
         };
         runtime("running");
         store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("This session"),
-            "agent", Some("first"), None).unwrap();
+            Some("first"), None).unwrap();
         assert!(emit_for_incarnation(&store, AGENT, "first").unwrap());
         runtime("exited");
         assert!(current_notes(&store, AGENT).unwrap().is_empty());

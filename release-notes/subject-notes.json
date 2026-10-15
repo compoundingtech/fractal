@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Attach private reminders or non-waking agent context to subjects",
+  "summary": "Attach non-waking agent context to subjects without an audience choice",
   "replay": {
     "status": "changed",
     "detail": "Durable note.set claims project canonical subject notes with target and author indexes. Archives, expiry and authoritative session scope remove notes from current reads without removing history. Replay and checkpoints rebuild the projection."
@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "Only the encoded author writes a note. Self notes are readable only by their person author, never by agents. Agent-audience notes are readable by persons, their author and current resolved agents. Local API admission allows agent authors to write audience agent only and target themselves or assigned mission/step runs. Daemon-origin digests inform and never assign work or grant authority."
+    "detail": "Only the encoded author writes a note. Every current note, including historical self or unfamiliar audience values, is readable by persons with target access, its author and current resolved agents. New writes always store agent; API inputs have no audience field. Local API admission restricts agent authors to themselves or assigned mission/step runs. Daemon-origin digests include every current target note and never assign work or grant authority."
   },
   "compatibility": {
     "status": "changed",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "Upgrade active members and fence legacy peers. Use st --instance NAME note add TARGET TEXT, with --for agent to deliver context, --session current to narrow to a running agent incarnation, or --expires-at UTC. Read with note ls and archive with note archive ID. Existing person directive-note commands are unchanged. Clients derive previews and counts from the notes window."
+    "detail": "Upgrade active members and fence legacy peers. Use st --instance NAME note add TARGET TEXT for agent context, --session current to narrow to a running agent incarnation, or --expires-at UTC. There is no --for option. Read with note ls and archive with note archive ID. Existing person directive-note commands are unchanged. Clients derive previews and counts from the notes window."
   },
   "recovery": {
     "status": "changed",

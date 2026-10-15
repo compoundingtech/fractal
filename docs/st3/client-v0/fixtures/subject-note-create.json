@@ -1,1 +1,1 @@
-{"target": "agent/example/reviewer", "text": "Retire this session after handing off.", "audience": "self", "session": "incarnation/example", "expires_at": "2026-10-15T09:00:00Z"}
+{"target": "agent/example/reviewer", "text": "Retire this session after handing off.", "session": "incarnation/example", "expires_at": "2026-10-15T09:00:00Z"}

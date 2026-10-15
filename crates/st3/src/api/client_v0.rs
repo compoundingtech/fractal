@@ -12229,33 +12229,49 @@ mod tests {
         append("daemon/notes-test", "daemon.started", json!({"status":"running","features":{"subject_notes":1}}));
         let target = "agent/example/reader";
         append(target, "runtime.observed", json!({"status":"running","runtime_id":"reader","host":"notes-test","terminal":true,"incarnation_id":"first"}));
-        let private = "note/person/ada/019a0000-0000-7000-8000-000000000001";
+        let historical = "note/person/ada/019a0000-0000-7000-8000-000000000001";
         let shared = "note/person/ada/019a0000-0000-7000-8000-000000000002";
-        state.store.set_subject_note(private, "person/ada", target, Some("Private reminder"), "self", None, None).unwrap();
-        state.store.set_subject_note(shared, "person/ada", target, Some("Session context"), "agent", Some("first"), None).unwrap();
-        state.store.set_subject_note("note/agent/example/reader/019a0000-0000-7000-8000-000000000003",
-            target, target, Some("Agent author's self note"), "self", None, None).unwrap();
+        let future = "note/agent/example/reader/019a0000-0000-7000-8000-000000000003";
+        for (id, author, audience, session) in [
+            (historical, "person/ada", "self", None),
+            (future, target, "future-level", Some("first")),
+        ] {
+            let mut fields = std::collections::BTreeMap::from([
+                ("target".into(), json!(target)), ("text".into(), json!("Historical context")),
+                ("audience".into(), json!(audience)),
+            ]);
+            if let Some(session) = session { fields.insert("session".into(), json!(session)); }
+            state.store.append_claim(&crate::model::ClaimInput {
+                subject: id.into(), kind: st3_schema::subject_notes::KIND.into(), actor: Some(author.into()),
+                fields,
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        state.store.set_subject_note(shared, "person/ada", target, Some("Session context"), Some("first"), None).unwrap();
         state.store.set_subject_note("note/person/ada/019a0000-0000-7000-8000-000000000004",
-            "person/ada", target, Some("Expired reminder"), "agent", None, Some("2000-01-01T00:00:00Z")).unwrap();
+            "person/ada", target, Some("Expired reminder"), None, Some("2000-01-01T00:00:00Z")).unwrap();
         let request: CollectionSubscribe = serde_json::from_value(json!({"kind":"subscribe","id":"notes","collection":"notes","limit":200})).unwrap();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-        for (reader, expected) in [("person/ada", 2), ("person/other", 1), (target, 1), ("agent/example/unrelated", 0)] {
+        for (reader, expected) in [("person/ada", 3), ("person/other", 3), (target, 3), ("agent/example/unrelated", 0)] {
             let mut session = ClientSession::for_tests(reader, reader, "unix");
             session.scopes.insert("read.projections".into());
             let (_, rows, has_more) = collection_items(&state, &session, &request, semaphore.clone().acquire_owned().await.unwrap()).await.unwrap();
             assert_eq!(rows.len(), expected, "{reader}");
             assert!(!has_more);
             assert!(rows.iter().all(|row| row["kind"] == "note"));
-            if reader != "person/ada" {
-                assert!(rows.iter().all(|row| row["audience"] != "self"));
+            if expected != 0 {
+                for audience in ["self", "agent", "future-level"] {
+                    assert!(rows.iter().any(|row| row["audience"] == audience), "{reader}: {audience}");
+                }
             }
         }
-        state.store.set_subject_note(private, "person/ada", target, None, "self", None, None).unwrap();
+        state.store.set_subject_note(historical, "person/ada", target, None, None, None).unwrap();
         let mut owner = ClientSession::for_tests("person/ada", "person/ada", "unix");
         owner.scopes.insert("read.projections".into());
         let (_, rows, _) = collection_items(&state, &owner, &request, semaphore.clone().acquire_owned().await.unwrap()).await.unwrap();
-        assert_eq!(rows.len(), 1, "archived and expired notes leave the current window");
-        assert_eq!(rows[0]["id"], shared);
+        assert_eq!(rows.len(), 2, "archived and expired notes leave the current window");
+        assert!(rows.iter().any(|row| row["id"] == shared));
+        assert!(rows.iter().any(|row| row["id"] == future));
         append(target, "runtime.observed", json!({"status":"exited","runtime_id":"reader","host":"notes-test","terminal":true,"incarnation_id":"first"}));
         let mut session = ClientSession::for_tests(target, target, "unix");
         session.scopes.insert("read.projections".into());

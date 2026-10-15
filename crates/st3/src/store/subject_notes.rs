@@ -338,12 +338,8 @@ impl Store {
     }
 
     fn subject_note_readable(&self, note: &SubjectNote, reader: &str) -> Result<bool> {
-        match note.audience.as_str() {
-            "self" => Ok(reader.starts_with("person/") && reader == note.author),
-            "agent" => Ok(reader.starts_with("person/") || reader == note.author
-                || (reader.starts_with("agent/") && self.subject_note_agents(&note.target)?.contains(reader))),
-            _ => Ok(reader.starts_with("person/") && reader == note.author),
-        }
+        Ok(reader.starts_with("person/") || reader == note.author
+            || (reader.starts_with("agent/") && self.subject_note_agents(&note.target)?.contains(reader)))
     }
 
     pub fn subject_note(&self, id: &str, reader: &str) -> Result<Option<SubjectNote>, St3Error> {
@@ -380,7 +376,7 @@ impl Store {
         }).map_err(internal)
     }
 
-    pub fn set_subject_note(&self, id: &str, actor: &str, target: &str, text: Option<&str>, audience: &str,
+    pub fn set_subject_note(&self, id: &str, actor: &str, target: &str, text: Option<&str>,
         session: Option<&str>, expires_at: Option<&str>) -> Result<Option<SubjectNote>, St3Error> {
         if actor.starts_with("agent/") && actor != target {
             if !(target.starts_with("mission-run/") || target.starts_with("step-run/"))
@@ -389,14 +385,14 @@ impl Store {
             }
         }
         let mut fields = BTreeMap::from([
-            ("target".into(), json!(target)), ("text".into(), json!(text)), ("audience".into(), json!(audience))]);
+            ("target".into(), json!(target)), ("text".into(), json!(text)), ("audience".into(), json!("agent"))]);
         if let Some(session) = session { fields.insert("session".into(), json!(session)); }
         if let Some(at) = expires_at { fields.insert("expires_at".into(), json!(at)); }
         self.append_claim(&ClaimInput {
             subject: id.into(), kind: KIND.into(), actor: Some(actor.into()), fields,
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         })?;
-        // Authors may archive/write private agent notes without gaining read access.
+        // Currency still applies to the returned projection after an archive or expiry.
         self.subject_note(id, actor)
     }
 }

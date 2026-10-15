@@ -8,7 +8,7 @@ use st3::client::{Client, Endpoint};
 use st3::store::directive_notes::DirectiveNote;
 
 #[derive(Args)]
-#[command(after_help = "Without a subcommand, read person directive notes; set and clear remain person-only. Add, ls and archive manage subject notes. --for me is private; --for agent also delivers non-waking agent context. Notes never assign work, approve a gate or grant authority.")]
+#[command(after_help = "Without a subcommand, read person directive notes; set and clear remain person-only. Add, ls and archive manage subject notes. Every subject note reaches its target agent as non-waking context. Notes never assign work, approve a gate or grant authority.")]
 pub(super) struct NoteArgs {
     /// Act as this person or agent; defaults to the harness identity, else configured person.
     #[arg(long, global = true, value_parser = super::parse_actor_subject)]
@@ -32,9 +32,6 @@ enum NoteCommand {
     Add {
         target: String,
         text: String,
-        /// Audience defaults to me for a person and agent for an agent.
-        #[arg(long = "for", value_parser = ["me", "agent"])]
-        audience: Option<String>,
         #[arg(long)]
         session: Option<String>,
         #[arg(long)]
@@ -125,21 +122,12 @@ pub(super) async fn run(
     Ok(())
 }
 
-fn subject_audience(actor: &str, requested: Option<&str>) -> &'static str {
-    match requested {
-        Some("me") => "self",
-        Some("agent") => "agent",
-        _ if actor.starts_with("agent/") => "agent",
-        _ => "self",
-    }
-}
 
 async fn run_subject_note(client: &Client, actor: &str, command: NoteCommand, json_output: bool) -> Result<()> {
     match command {
-        NoteCommand::Add { target, text, audience, session, expires_at } => {
+        NoteCommand::Add { target, text, session, expires_at } => {
             let response: serde_json::Value = client.post("/v1/subject-notes", &json!({
                 "target": target, "text": text,
-                "audience": subject_audience(actor, audience.as_deref()),
                 "session": session, "expires_at": expires_at,
             })).await.context("could not add subject note")?;
             if json_output { return super::print_value(&response, true); }
@@ -201,13 +189,12 @@ mod tests {
     #[test]
     fn subject_note_parser_preserves_directive_commands_and_scope() {
         let cli = super::super::Cli::try_parse_from([
-            "st", "note", "add", "agent/example/worker", "short context", "--for", "agent", "--session", "current",
+            "st", "note", "add", "agent/example/worker", "short context", "--session", "current",
         ]).unwrap();
         let super::super::Command::Note(args) = cli.command else { panic!("expected note") };
-        let Some(NoteCommand::Add { target, text, audience, session, .. }) = args.command else { panic!("expected add") };
+        let Some(NoteCommand::Add { target, text, session, .. }) = args.command else { panic!("expected add") };
         assert_eq!(target, "agent/example/worker");
         assert_eq!(text, "short context");
-        assert_eq!(audience.as_deref(), Some("agent"));
         assert_eq!(session.as_deref(), Some("current"));
         for argv in [
             vec!["st", "note", "ls"],
@@ -216,9 +203,9 @@ mod tests {
         ] {
             assert!(super::super::Cli::try_parse_from(argv).is_ok());
         }
-        assert_eq!(subject_audience("person/example", None), "self");
-        assert_eq!(subject_audience("agent/example/worker", None), "agent");
-        assert_eq!(subject_audience("agent/example/worker", Some("me")), "self");
+        assert!(super::super::Cli::try_parse_from([
+            "st", "note", "add", "agent/example/worker", "context", "--for", "agent",
+        ]).is_err());
     }
 
     #[tokio::test]
@@ -256,12 +243,13 @@ mod tests {
         listening.await.unwrap();
         let client = Client::unix_as(&socket, "person/example").unwrap();
         run_subject_note(&client, "person/example", NoteCommand::Add {
-            target: "agent/example/worker".into(), text: "Remember the context".into(), audience: Some("agent".into()),
+            target: "agent/example/worker".into(), text: "Remember the context".into(),
             session: None, expires_at: None,
         }, true).await.unwrap();
         let notes = store.list_subject_notes(None, Some("person/example"), "person/example").unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].text, "Remember the context");
+        assert_eq!(notes[0].audience, "agent");
         assert!(store.messages(Some("agent/example/worker"), false).unwrap().iter()
             .any(|message| message.tags.iter().any(|tag| tag == st3::notes_digest::TAG)));
         run_subject_note(&client, "person/example", NoteCommand::Ls { target: None }, true).await.unwrap();

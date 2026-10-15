@@ -58,12 +58,11 @@ public struct SubjectNoteResult: Codable, Sendable, Equatable {
 }
 public struct SubjectNoteCreate: Codable, Sendable {
     public let target, text: String
-    public let audience: NoteAudience?
     public let session, expiresAt: String?
-    public init(target: String, text: String, audience: NoteAudience? = nil, session: String? = nil, expiresAt: String? = nil) {
-        self.target = target; self.text = text; self.audience = audience; self.session = session; self.expiresAt = expiresAt
+    public init(target: String, text: String, session: String? = nil, expiresAt: String? = nil) {
+        self.target = target; self.text = text; self.session = session; self.expiresAt = expiresAt
     }
-    enum CodingKeys: String, CodingKey { case target, text, audience, session, expiresAt = "expires_at" }
+    enum CodingKeys: String, CodingKey { case target, text, session, expiresAt = "expires_at" }
 }
 /// Nil patch fields preserve values; clear explicitly sends JSON null.
 public enum NotePatch: Codable, Sendable, Equatable {
@@ -79,17 +78,15 @@ public enum NotePatch: Codable, Sendable, Equatable {
 }
 public struct SubjectNoteUpdate: Codable, Sendable {
     public let text, session, expiresAt: NotePatch?
-    public let audience: NoteAudience?
-    public init(text: NotePatch? = nil, audience: NoteAudience? = nil, session: NotePatch? = nil, expiresAt: NotePatch? = nil) {
-        self.text = text; self.audience = audience; self.session = session; self.expiresAt = expiresAt
+    public init(text: NotePatch? = nil, session: NotePatch? = nil, expiresAt: NotePatch? = nil) {
+        self.text = text; self.session = session; self.expiresAt = expiresAt
     }
-    enum CodingKeys: String, CodingKey { case text, audience, session, expiresAt = "expires_at" }
+    enum CodingKeys: String, CodingKey { case text, session, expiresAt = "expires_at" }
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         text = container.contains(.text) ? try container.decode(NotePatch.self, forKey: .text) : nil
         session = container.contains(.session) ? try container.decode(NotePatch.self, forKey: .session) : nil
         expiresAt = container.contains(.expiresAt) ? try container.decode(NotePatch.self, forKey: .expiresAt) : nil
-        audience = try container.decodeIfPresent(NoteAudience.self, forKey: .audience)
     }
 }
 public struct NoteResource: Codable, Sendable, Identifiable {

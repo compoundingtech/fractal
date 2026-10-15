@@ -28,15 +28,16 @@ fn store() -> Store {
 #[test]
 fn lifecycle_preserves_creation_time_and_archive_projection_through_replay() {
     let store = store();
-    let first = store.set_subject_note(ID, "person/avery", AGENT, Some("Context"), "agent", None, None).unwrap().unwrap();
+    let first = store.set_subject_note(ID, "person/avery", AGENT, Some("Context"), None, None).unwrap().unwrap();
     assert_eq!(first.author, "person/avery");
     assert_eq!(first.target, AGENT);
-    let update = store.set_subject_note(ID, "person/avery", AGENT, Some("Changed"), "agent", None, None).unwrap().unwrap();
+    assert_eq!(first.audience, "agent");
+    let update = store.set_subject_note(ID, "person/avery", AGENT, Some("Changed"), None, None).unwrap().unwrap();
     assert_eq!(update.created_at, first.created_at);
     assert_ne!(update.revision, first.revision);
     assert_eq!(store.list_subject_notes(Some(AGENT), None, AGENT).unwrap(), vec![update.clone()]);
     assert_eq!(store.list_subject_notes(None, Some("person/avery"), "person/other").unwrap(), vec![update]);
-    assert!(store.set_subject_note(ID, "person/avery", AGENT, None, "agent", None, None).unwrap().is_none());
+    assert!(store.set_subject_note(ID, "person/avery", AGENT, None, None, None).unwrap().is_none());
     assert!(store.list_subject_notes(None, None, AGENT).unwrap().is_empty());
     let rows: usize = store.readers.get().query_row("SELECT COUNT(*) FROM subject_notes WHERE note=?1", [ID], |row| row.get(0)).unwrap();
     assert_eq!(rows, 1, "archives retain their canonical projection head");
@@ -45,21 +46,31 @@ fn lifecycle_preserves_creation_time_and_archive_projection_through_replay() {
 }
 
 #[test]
-fn self_is_person_author_only_even_for_agent_authors() {
+fn all_historical_audiences_are_readable_and_preserved_through_replay() {
     let store = store();
-    store.set_subject_note(ID, "person/avery", AGENT, Some("Private"), "self", None, None).unwrap().unwrap();
-    assert!(store.subject_note(ID, "person/avery").unwrap().is_some());
-    for reader in ["person/other", AGENT] {
-        assert!(store.subject_note(ID, reader).unwrap().is_none());
-        assert!(store.list_subject_notes(None, None, reader).unwrap().is_empty());
+    for audience in ["self", "agent", "future-level"] {
+        for (id, author) in [(ID, "person/avery"), (AGENT_ID, AGENT)] {
+            store.append_claim(&ClaimInput {
+                subject: id.into(), kind: KIND.into(), actor: Some(author.into()),
+                fields: BTreeMap::from([
+                    ("target".into(), json!(AGENT)), ("text".into(), json!("Historical context")),
+                    ("audience".into(), json!(audience)),
+                ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        store.replay_replication_graph().unwrap();
+        for reader in ["person/avery", "person/other", AGENT] {
+            for id in [ID, AGENT_ID] {
+                assert_eq!(store.subject_note(id, reader).unwrap().unwrap().audience, audience);
+            }
+            assert_eq!(store.list_subject_notes(Some(AGENT), None, reader).unwrap().len(), 2);
+        }
+        assert!(store.list_subject_notes(None, None, "agent/example/unrelated").unwrap().is_empty());
     }
-    assert!(store.set_subject_note(AGENT_ID, AGENT, AGENT, Some("Private agent"), "self", None, None).unwrap().is_none());
-    assert!(store.subject_note(AGENT_ID, AGENT).unwrap().is_none());
-    assert!(store.subject_note(AGENT_ID, "person/avery").unwrap().is_none());
-    store.set_subject_note(AGENT_ID, AGENT, AGENT, Some("Shared"), "agent", None, None).unwrap().unwrap();
-    assert!(store.subject_note(AGENT_ID, AGENT).unwrap().is_some());
-    assert!(store.subject_note(AGENT_ID, "person/other").unwrap().is_some());
-    assert!(store.subject_note(AGENT_ID, "agent/example/unrelated").unwrap().is_none());
+    let updated = store.set_subject_note(ID, "person/avery", AGENT, Some("Updated context"), None, None).unwrap().unwrap();
+    assert_eq!(updated.audience, "agent");
+    let created = store.set_subject_note(AGENT_ID, AGENT, AGENT, Some("Agent context"), None, None).unwrap().unwrap();
+    assert_eq!(created.audience, "agent");
 }
 
 #[test]
@@ -67,7 +78,7 @@ fn session_scope_requires_running_authoritative_state_not_retained_incarnation()
     let store = store();
     append(&store, AGENT, "runtime.observed", json!({"status":"running","runtime_id":"reader","host":"alder","terminal":true,"incarnation_id":"first"}));
     assert_eq!(store.current_subject_note_incarnation(AGENT).unwrap().as_deref(), Some("first"));
-    store.set_subject_note(ID, "person/avery", AGENT, Some("This session"), "agent", Some("first"), None).unwrap().unwrap();
+    store.set_subject_note(ID, "person/avery", AGENT, Some("This session"), Some("first"), None).unwrap().unwrap();
     append(&store, AGENT, "runtime.observed", json!({"status":"exited","runtime_id":"reader","host":"alder","terminal":true,"incarnation_id":"first"}));
     assert!(store.current_subject_note_incarnation(AGENT).unwrap().is_none());
     assert!(store.subject_note(ID, AGENT).unwrap().is_none());
@@ -78,31 +89,31 @@ fn session_scope_requires_running_authoritative_state_not_retained_incarnation()
 #[test]
 fn expiry_boundaries_and_utf8_limits_are_enforced() {
     let store = store();
-    let note = store.set_subject_note(ID, "person/avery", AGENT, Some(&"é".repeat(512)), "agent", None, Some("2099-01-01T00:00:00.000500Z")).unwrap().unwrap();
+    let note = store.set_subject_note(ID, "person/avery", AGENT, Some(&"é".repeat(512)), None, Some("2099-01-01T00:00:00.000500Z")).unwrap().unwrap();
     let floor = st3_schema::subject_notes::expiry(note.expires_at.as_deref().unwrap()).unwrap().timestamp_millis() as u128;
     assert!(current(&store, ID, floor).unwrap().is_some());
     assert!(current(&store, ID, floor + 1).unwrap().is_none());
     for text in [" \n\t".to_owned(), "é".repeat(513)] {
-        assert!(store.set_subject_note(ID, "person/avery", AGENT, Some(&text), "agent", None, None).is_err());
+        assert!(store.set_subject_note(ID, "person/avery", AGENT, Some(&text), None, None).is_err());
     }
-    assert!(store.set_subject_note(ID, "person/other", AGENT, Some("Wrong author"), "agent", None, None).is_err());
-    assert!(store.set_subject_note(AGENT_ID, AGENT, "agent/example/other", Some("Wrong target"), "agent", None, None).is_err());
+    assert!(store.set_subject_note(ID, "person/other", AGENT, Some("Wrong author"), None, None).is_err());
+    assert!(store.set_subject_note(AGENT_ID, AGENT, "agent/example/other", Some("Wrong target"), None, None).is_err());
 }
 
 #[test]
 fn publication_requires_subject_notes_feature() {
     let store = Store::open_memory("alder").unwrap();
-    assert_eq!(store.set_subject_note(ID, "person/avery", AGENT, Some("Context"), "agent", None, None).unwrap_err().code, "subject-note-feature-barrier");
+    assert_eq!(store.set_subject_note(ID, "person/avery", AGENT, Some("Context"), None, None).unwrap_err().code, "subject-note-feature-barrier");
     let store = self::store();
     append(&store, "daemon/alder", "daemon.started", json!({"status":"running", "features":{"subject_notes":0}}));
-    assert_eq!(store.set_subject_note(ID, "person/avery", AGENT, Some("Context"), "agent", None, None).unwrap_err().code, "subject-note-feature-barrier");
+    assert_eq!(store.set_subject_note(ID, "person/avery", AGENT, Some("Context"), None, None).unwrap_err().code, "subject-note-feature-barrier");
 }
 
 #[test]
 fn dirty_head_update_delete_and_rebuild_select_the_same_revision() {
     let store = store();
-    let first = store.set_subject_note(ID, "person/avery", AGENT, Some("First"), "agent", None, None).unwrap().unwrap();
-    let second = store.set_subject_note(ID, "person/avery", AGENT, Some("Second"), "agent", None, None).unwrap().unwrap();
+    let first = store.set_subject_note(ID, "person/avery", AGENT, Some("First"), None, None).unwrap().unwrap();
+    let second = store.set_subject_note(ID, "person/avery", AGENT, Some("Second"), None, None).unwrap().unwrap();
     store.connection.batched(|tx| -> Result<()> {
         tx.execute("UPDATE claims SET accepted_at_unix_ms=accepted_at_unix_ms+100000 WHERE id=?1", [&first.revision])?;
         flush(tx)?;
@@ -143,7 +154,7 @@ mission "notes" state="ready" {
     for target in [format!("mission/{mission}"), run.subject.clone(), step.clone()] {
         assert_eq!(store.subject_note_agents(&target).unwrap(), BTreeSet::from([AGENT.to_owned()]));
     }
-    store.set_subject_note(ID, "person/avery", &run.subject, Some("Run context"), "agent", None, None).unwrap().unwrap();
+    store.set_subject_note(ID, "person/avery", &run.subject, Some("Run context"), None, None).unwrap().unwrap();
     assert!(store.subject_note(ID, AGENT).unwrap().is_some());
     store.connection.batched(|tx| -> Result<()> {
         tx.execute("UPDATE step_runs SET assignee='agent/example/other',lease_owner=?2 WHERE subject=?1", params![step, AGENT])?;
@@ -162,7 +173,7 @@ mission "notes" state="ready" {
 #[test]
 fn replicated_admission_binds_author_and_validates_note_fields() {
     let store = store();
-    let note = store.set_subject_note(ID, "person/avery", AGENT, Some("Context"), "agent", None, None).unwrap().unwrap();
+    let note = store.set_subject_note(ID, "person/avery", AGENT, Some("Context"), None, None).unwrap().unwrap();
     let claim = store.claim_by_id(&note.revision).unwrap().unwrap();
     assert!(matches!(classify_replicated_claim_with_registry(&claim, st3_schema::registry()).unwrap(), ReplicatedClaimAdmission::Valid));
     for actor in [None, Some("person/other"), Some(AGENT)] {

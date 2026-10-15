@@ -47,10 +47,11 @@ placement changes are full resource upserts; retirement sends the arrangement ID
 
 The `notes` window carries independent `note` resources with the shared
 `SubjectNote` fields. It selects the authenticated authority actor, not a free
-`person` or `actor` filter. A `self` note is visible only to its person author;
-agents never receive self notes, even their own. An `agent` note is visible to
-persons and the agents its target currently resolves to. Clients derive note
-counts and previews from this window; agent and mission rows have no note fields.
+`person` or `actor` filter. Every current note is visible to persons with target
+access, its author and the agents its target currently resolves to, regardless of
+stored audience (including historical `self` and unfamiliar values). Clients
+derive note counts and previews from this window; agent and mission rows have no
+note fields.
 Clock ticks remove expired notes, and runtime and assignment changes refresh
 currency and recipient access. A session note requires the target's authoritative
 runtime to be running in that incarnation. Archives and ended sessions remove

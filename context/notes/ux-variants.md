@@ -23,8 +23,8 @@ Johannes decided on 2026-10-15:
 
 The comparison, input counts and interview prompts below preserve the
 prototype evidence, including its audience controls; they are not the target
-design. Those controls and filters still exist in the prototype until the
-implementation cutover described in [Implementation status](./spec.md#implementation-status).
+design. The source cutover removes those controls and filters; generated-client
+regeneration and verification are tracked in [Implementation status](./spec.md#implementation-status).
 These decisions do not choose between the web or TUI surface variants.
 
 ## Input count

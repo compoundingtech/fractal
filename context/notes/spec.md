@@ -13,14 +13,15 @@ candidate requirements below are input for that interview, not constraints.
 
 ### Implementation status
 
-This spec records the target design from Johannes's 2026-10-15 interview
-(DQ3/DQ5). The prototype still has `self`/`agent` audience choices, person
-defaults, audience-based read filtering and digest selection, and composer
-controls. Those behaviors do not implement the interview outcome. The CLI
-`--for` option, read/digest filters and audience controls in every composer
-(stui, Fractal TUI and Fractal web) must be removed in the implementation
-cutover; the schema's open audience enum stays. This documentation change
-does not change the prototype.
+The source implementation follows Johannes's 2026-10-15 interview
+(DQ3/DQ5): writes store `agent`, API and CLI inputs have no audience choice,
+and reads and digests include every current note regardless of stored
+audience. Composer audience controls and audience-specific badges are
+removed; the schema's open audience enum stays.
+
+Client regeneration and verification are deferred until dev4 is cleared.
+Run `cargo run -p st3-client-codegen` first, commit the generated output
+separately, then run the codegen `--check` and the notes acceptance checks.
 
 ## Scope
 
