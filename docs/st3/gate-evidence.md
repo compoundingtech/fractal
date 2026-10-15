@@ -568,6 +568,20 @@ writes the record id to the job summary. The wiring is deliberately conservative
 - A skip of `genie-freshness` skips the tests of this machinery too (`ci-evidence-gate-test`,
   `evidence-verify-test`, `genie --check`) for that tree. That is accepted because the note is for the same tree and
   a change to those files is a protected path that always runs in full; a reader must not assume they ran.
+- What is protected and what is bound otherwise. The protected paths are the gate, the verifier, both of their
+  tests, the policy, the evidence keys, the workflow source (`fleet.yml.genie.ts`), the helper module it imports
+  (`workspace-ci.ts`) and the generated `fleet.yml`. The signing and publishing wrapper scripts are not on that list:
+  they are bound by the note itself, which carries their `wrapper_sha256`, so a changed wrapper cannot produce a note
+  the policy accepts.
+- A required check that is a job, `isolation-vm` and `mail-redelivery-canaries`, never reports `skipped`; under an
+  enforced skip it reports success with its steps skipped, so once a check is enforced the name means "covered by
+  a trusted note", not "ran". Whoever reads a result (including the observer) must treat such a run as covered, not
+  freshly run; the job's summary says so (`evidence covered by a trusted note`).
+- The aggregate `linux-gate` accepts `skipped` for a stage only in the stage's position and only when that stage's
+  own skip rule evaluates true (the workflow passes one flag per stage), so a stage skipped for any other reason
+  fails the gate even when the aggregate's gate also decided to skip.
+- Step conditions are combined as text only when none contains a marker inside it; the helper that combines them
+  refuses otherwise and a test checks every condition of the generated workflow. Keep actionlint in the required path.
 - The skip rests on a note of kind `observed`, which the central observer records only for a `merge_group`
   run, so a pull request can skip only a tree an earlier queue run already passed. Do not expect a saving at
   pull-request time from these two checks.

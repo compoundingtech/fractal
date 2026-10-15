@@ -33,7 +33,8 @@ VERIFIER_TIMEOUT = int(os.environ.get('GATE_VERIFIER_TIMEOUT', '30'))
 # a forged skip would have to edit. Compared between the accepted base and this run's tree.
 PROTECTED = (
     'scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
-    '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts',
+    '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts', '.github/workflows/workspace-ci.ts',
+    'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
 )
 
 NOTES = 'refs/notes/evidence/*:refs/notes/evidence/*'

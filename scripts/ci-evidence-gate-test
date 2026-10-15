@@ -51,7 +51,8 @@ LOCK = 'fake flake.lock contents\n'
 # Written out here, not read from the script, so removing a path from the script cannot hide it.
 EXPECTED_PROTECTED = (
     'scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
-    '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts',
+    '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts', '.github/workflows/workspace-ci.ts',
+    'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
 )
 
 
@@ -831,6 +832,9 @@ class EndToEnd(unittest.TestCase):
                 (self.f.repo / '.github/workflows').mkdir(parents=True, exist_ok=True)
                 (self.f.repo / '.github/workflows/fleet.yml').write_text('name: x\n')
                 (self.f.repo / '.github/workflows/fleet.yml.genie.ts').write_text('export default 1\n')
+                for name in ('.github/workflows/workspace-ci.ts', 'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test'):
+                    (self.f.repo / name).parent.mkdir(parents=True, exist_ok=True)
+                    (self.f.repo / name).write_text('placeholder\n')
                 base = self.commit_base()
                 (self.f.repo / 'moved-away').mkdir(exist_ok=True)
                 self.f.git('mv', path, 'moved-away/' + path.replace('/', '_'))
@@ -992,9 +996,18 @@ class WorkflowStructure(unittest.TestCase):
         stage_names = re.findall(r'needs\.([a-z0-9-]+)\.result', re.search(r'^          RESULTS: (.*)$', aggregate, re.M).group(1))
         self.assertEqual(len(stage_names), 7)
 
-        def accepts(event, results, skip):
+        flags_line = re.search(r'^          STAGE_SKIPS: (.*)$', aggregate, re.M).group(1)
+
+        def stage_flags(gates):
+            """The per-stage skip flags the workflow would compute for these gate decisions."""
+            tokens = re.findall(r'\$\{\{.*?\}\}|\S+', json.loads(flags_line))
+            return [str(self.truth(t, gates, 'merge_group')).lower() if t.startswith('${{') else t for t in tokens]
+
+        def accepts(event, results, skip, gates=None, flags=None):
+            flags = flags if flags is not None else stage_flags(gates or {})
             env = {**os.environ, 'EVENT': event, 'RESULTS': ' '.join(results[n] for n in stage_names),
-                   'MERGE_RESULTS': f"{results['linux-tests-shard-3']} {results['linux-tests-shard-4']}"}
+                   'MERGE_RESULTS': f"{results['linux-tests-shard-3']} {results['linux-tests-shard-4']}",
+                   'STAGE_SKIPS': ' '.join(flags)}
             env.pop('GATE_SKIP', None)
             if skip is not None:
                 env['GATE_SKIP'] = skip
@@ -1024,22 +1037,64 @@ class WorkflowStructure(unittest.TestCase):
             # The real aggregate accepts the consistent outcome...
             results = {n: ('success' if runs.get(n, True) else 'skipped') for n in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']}
             skip = 'true' if lg else None
-            self.assertTrue(accepts(event, results, skip), label)
+            self.assertTrue(accepts(event, results, skip, gates), label)
             # ...and rejects a failure in ANY job that ran, even under a skip.
             for victim in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']:
                 if results[victim] == 'success':
                     broken = {**results, victim: 'failure'}
-                    self.assertFalse(accepts(event, broken, skip), label + (victim,))
+                    self.assertFalse(accepts(event, broken, skip, gates), label + (victim,))
             # ...and rejects a skipped upgrade-impact or canaries even under a skip: they are never covered by it.
             if lg:
                 for never in ('upgrade-impact', 'mail-redelivery-canaries'):
-                    self.assertFalse(accepts(event, {**results, never: 'skipped'}, 'true'), label + (never,))
+                    self.assertFalse(accepts(event, {**results, never: 'skipped'}, 'true', gates), label + (never,))
             # ...and rejects skipped stages if its own gate had not said skip.
             if any(v == 'skipped' for n, v in results.items() if n not in ('linux-tests-shard-3', 'linux-tests-shard-4')):
                 self.assertTrue(lg, label)  # a stage can only be skipped when the aggregate's gate decided skip
-                self.assertFalse(accepts(event, results, None), label)
+                self.assertFalse(accepts(event, results, None, gates), label)
             checked += 1
         self.assertEqual(checked, 16)
+
+    def test_a_stage_skipped_for_an_unrelated_reason_fails_even_when_the_aggregate_gate_said_skip(self):
+        aggregate = self.blocks()['linux-gate']
+        script = __import__('textwrap').dedent(aggregate.split('run: |\n', 1)[1].split('\n      - ', 1)[0])
+        stage_names = re.findall(r'needs\.([a-z0-9-]+)\.result', re.search(r'^          RESULTS: (.*)$', aggregate, re.M).group(1))
+        flags = re.search(r'^          STAGE_SKIPS: (.*)$', aggregate, re.M).group(1)
+        positions = len(re.findall(r'\$\{\{.*?\}\}|\S+', json.loads(flags)))
+        self.assertEqual(positions, 9)  # the seven base stages and the two merge-only shards, in the aggregate's order
+
+        def accepts(event, results, flags):
+            env = {**os.environ, 'EVENT': event, 'GATE_SKIP': 'true', 'RESULTS': ' '.join(results[n] for n in stage_names),
+                   'MERGE_RESULTS': f"{results['linux-tests-shard-3']} {results['linux-tests-shard-4']}", 'STAGE_SKIPS': ' '.join(flags)}
+            return subprocess.run(['bash', '-c', script], env=env, capture_output=True).returncode == 0
+
+        covered = {n: 'skipped' for n in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']}
+        covered.update({'upgrade-impact': 'success', 'mail-redelivery-canaries': 'success'})
+        all_true = ['true', 'false', 'true', 'true', 'true', 'true', 'false', 'true', 'true']
+        self.assertTrue(accepts('merge_group', covered, all_true), 'everything covered by its own rule')
+        for index, stage in enumerate(stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']):
+            if all_true[index] == 'true':
+                with self.subTest(stage):
+                    # The gate said skip but this stage's own rule does not: its skip has another cause.
+                    flags_off = list(all_true)
+                    flags_off[index] = 'false'
+                    self.assertFalse(accepts('merge_group', covered, flags_off), stage)
+        # Without the flags at all nothing is accepted as skipped.
+        self.assertFalse(accepts('merge_group', covered, []))
+
+    def test_no_condition_in_the_workflow_has_markers_inside_it(self):
+        """A condition is either bare or one whole `${{ ... }}`. Combining two conditions as text would leave markers
+        inside the other (GitHub then reads the string as a literal that is always true), so none may exist; the
+        genie helper that combines them refuses such a condition when it generates."""
+        workflow = (ROOT / '.github/workflows/fleet.yml').read_text()
+        source = (ROOT / '.github/workflows/fleet.yml.genie.ts').read_text()
+        self.assertIn("throw new Error(`step condition has markers inside it", source)
+        conditions = re.findall(r'^\s*(?:-\s+)?if:\s*(.+)$', workflow, re.M)
+        self.assertGreater(len(conditions), 50)
+        for condition in conditions:
+            value = condition.strip().strip('"\'')
+            inner = value[3:-2] if value.startswith('${{') and value.endswith('}}') else value
+            self.assertNotIn('${{', inner, condition)
+            self.assertNotIn('}}', inner, condition)
 
     def test_the_required_checks_that_are_jobs_keep_running_and_skip_only_their_steps(self):
         blocks = self.blocks()
