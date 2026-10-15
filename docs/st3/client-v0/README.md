@@ -1311,12 +1311,17 @@ agent has no `replicated`. Page cursors of a relayed list belong to the owner.
 
 The bounded message paging contract below is capability **`messages-paging` version 2**.
 Clients opt in on each request with `X-St3-Features: messages-paging.v2` (comma-separated
-with any other feature tokens). Capability discovery advertises support but does not opt
+with any other feature tokens in the first header value; repeated header values are ignored).
+Capability discovery advertises support but does not opt
 a client in. Requests without that exact token retain the legacy message-list response
 shape and paging behavior, including legacy cursors; they do not receive the new retained
 SQL cuts or byte-bounded paging behavior. Gateways preserve the negotiation when relaying
-message lists. The generated Rust, Swift and TypeScript clients send the opt-in token;
-previously generated clients that omit it keep the old contract unchanged.
+message lists. Generated Rust, Swift and TypeScript clients default to the legacy contract:
+regenerating a client alone does not opt in. Enable the per-client option explicitly with
+Rust `.with_messages_paging(true)`, Swift `St3Client(..., messagesPaging: true)`, or
+TypeScript `new St3Client({ ..., messagesPaging: true })`. This choice applies to HTTP
+and every WebSocket transport; the default (`false`) omits only the messages-paging token
+while preserving existing feature tokens. Clients without the token keep the old contract unchanged.
 
 Message list pages select the recipient and actor, newest `sent_at` first with ascending message
 ID ties, before loading message bodies. A cursor retains the first page's server-issued cut

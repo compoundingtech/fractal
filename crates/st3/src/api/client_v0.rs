@@ -17181,6 +17181,31 @@ subscription "watch/source" {
     }
 
     #[test]
+    fn messages_paging_repeated_feature_headers_use_only_the_first_value() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for (first, second, expected) in [
+            ("conversation-blocks.v1", "messages-paging.v2", false),
+            ("", "messages-paging.v2", false),
+            ("messages-paging.v20", "messages-paging.v2", false),
+            ("messages-paging.v2", "conversation-blocks.v1", true),
+            ("custom-subjects.v1, messages-paging.v2", "", true),
+        ] {
+            let mut request = Request::builder()
+                .uri("/v1/client/messages")
+                .body(Body::empty()).unwrap();
+            request.headers_mut().append("x-st3-features", first.parse().unwrap());
+            request.headers_mut().append("x-st3-features", second.parse().unwrap());
+            assert_eq!(request.headers().get_all("x-st3-features").iter().count(), 2);
+            assert_eq!(
+                authenticate(&state, &request, "unix").unwrap().messages_paging,
+                expected,
+                "only the first feature header negotiates: {first:?}, {second:?}",
+            );
+        }
+    }
+
+    #[test]
     fn paired_authentication_uses_pairing_claims_and_honors_revocation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
