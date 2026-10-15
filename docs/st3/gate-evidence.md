@@ -656,6 +656,18 @@ matching and the check runs.
 Write `scripts/evidence-verify --policy-from BASE
 --repository OWNER/NAME` to apply it by hand.
 
+### The Linux gate's members, locally (`scripts/ci-local-gate`)
+
+`scripts/ci-local-gate` runs the members of `linux-gate` that CI runs as separate jobs (`upgrade-impact`, `linux-test-build`, the
+four test partitions, `linux-clippy`, `linux-fleet-compat`, `mail-redelivery-canaries`, `isolation-vm`) one after another in the
+checkout it is in, with the environment their jobs prepare (an isolated `HOME`, `RUNNER_TEMP`, the historical messaging channel,
+the provider components). The one difference from CI is that nextest builds in place instead of extracting a test archive that
+another job built, so no GitHub artifact is needed. A test checks every command it runs against the generated workflow, so the
+two cannot drift apart. Every stage runs even after a failure; with `--external genie-freshness=EXIT --external
+typescript-client=EXIT` and `--facts FILE` it writes the facts the CI aggregate job records (the command the policy pins, every
+member's result), for `scripts/evidence-wrap --aggregate`. `isolation-vm` needs `/dev/kvm`. This change does not sign anything and
+has not been run end to end on a build host; the drill and the `st-test` wiring come next.
+
 ### When the gate says skip
 
 `scripts/ci-evidence-gate` takes the verifier from the accepted base and asks it, with the policy,

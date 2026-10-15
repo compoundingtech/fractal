@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""scripts/ci-local-gate: the stages are the commands CI runs; the facts are the aggregate's; failures are kept."""
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('ci_local_gate', str(ROOT / 'scripts/ci-local-gate'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+gate = importlib.util.module_from_spec(spec)
+loader.exec_module(gate)
+
+WORKFLOW = (ROOT / '.github/workflows/fleet.yml').read_text()
+WORKSPACE_CI = (ROOT / '.github/workflows/workspace-ci.ts').read_text()
+POLICY = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+
+
+def policy_command():
+    return POLICY['checks']['linux-gate']['kinds']['wrapper']['command']
+
+
+class Drift(unittest.TestCase):
+    def test_every_command_a_stage_runs_is_in_the_generated_workflow(self):
+        """If CI changes how a member is run, this stage must change with it."""
+        for name, steps in gate.stages('BASE').items():
+            for command, extra in steps:
+                if command[:2] == ['bash', '-c']:
+                    for line in command[2].splitlines():
+                        line = line.strip()
+                        if line.startswith(('nix build', 'mkdir', '"$RUNNER_TEMP')):
+                            self.assertIn(line, WORKFLOW, (name, line))
+                    continue
+                shown = ' '.join(part for part in command if part != gate.MERGE and part != 'BASE')
+                shown = shown.replace('--base --source', '').strip()
+                head = ' '.join(command[:command.index('--base')] if '--base' in command else command)
+                if name == 'linux-test-build':
+                    # The producer job compiles with this step of the shared workspace helper before it archives.
+                    self.assertIn("command: ['bash', 'scripts/ci-nextest', 'run', '--no-run']", WORKSPACE_CI)
+                    continue
+                self.assertIn(head, WORKFLOW, (name, head))
+
+    def test_the_shards_are_the_merge_queue_partitions_of_the_workflow(self):
+        for shard, partition in gate.SHARDS.items():
+            self.assertIn(f"'{partition}'", (ROOT / '.github/workflows/fleet.yml.genie.ts').read_text(), shard)
+
+    def test_the_stage_names_are_exactly_the_members_the_policy_command_lists(self):
+        members = set(policy_command()[2:])
+        self.assertEqual(set(gate.stages('BASE')) | set(gate.EXTERNAL) | {gate.GATE}, members)
+
+
+class Facts(unittest.TestCase):
+    def results(self, **overrides):
+        names = set(policy_command()[2:]) - {gate.GATE}
+        return {name: overrides.get(name, 'success') for name in names}
+
+    def test_the_facts_command_is_the_one_the_policy_pins(self):
+        self.assertEqual(gate.facts(self.results())['command'], policy_command())
+
+    def test_one_failing_member_makes_the_gate_fail_and_is_named(self):
+        facts = gate.facts(self.results(**{'linux-clippy': 'failure'}))
+        self.assertEqual((facts['exit_code'], facts['output']['gate']), (1, 'failure'))
+        self.assertEqual(facts['output']['needs']['linux-clippy'], 'failure')
+        self.assertEqual(facts['output']['needs'][gate.GATE], 'failure')
+
+    def test_all_success_is_exit_zero_and_the_shape_the_ci_aggregate_writes(self):
+        facts = gate.facts(self.results())
+        self.assertEqual((facts['exit_code'], facts['output']['gate']), (0, 'success'))
+        self.assertEqual(set(facts), {'command', 'exit_code', 'output', 'inputs'})
+        self.assertEqual(set(facts['output']), {'gate', 'needs'})
+
+
+class Run(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.facts = Path(self.tmp.name) / 'facts.json'
+
+    def stub(self, **codes):
+        names = list(gate.stages('BASE'))
+        return {name: [(['sh', '-c', f'echo {name} >> "$RUNNER_TEMP/ran"; exit {codes.get(name, 0)}'], {})] for name in names}
+
+    def run_gate(self, table, *args):
+        return gate.main([*args], table=table, setup=lambda work: {'RUNNER_TEMP': work})
+
+    def test_all_stages_pass_and_facts_are_written_when_the_external_members_are_given(self):
+        code = self.run_gate(self.stub(), '--external', 'genie-freshness=0', '--external', 'typescript-client=0', '--facts', str(self.facts))
+        self.assertEqual(code, 0)
+        facts = json.loads(self.facts.read_text())
+        self.assertEqual(facts['command'], policy_command())
+        self.assertEqual(facts['output']['gate'], 'success')
+
+    def test_a_failing_stage_does_not_stop_the_others_and_is_recorded(self):
+        code = self.run_gate(self.stub(**{'linux-fleet-compat': 3}), '--external', 'genie-freshness=0', '--external', 'typescript-client=0',
+                             '--facts', str(self.facts))
+        self.assertEqual(code, 1)
+        facts = json.loads(self.facts.read_text())
+        self.assertEqual((facts['exit_code'], facts['output']['needs']['linux-fleet-compat']), (1, 'failure'))
+        self.assertEqual(facts['output']['needs']['linux-clippy'], 'success')  # the stages after it still ran
+
+    def test_a_failing_external_member_fails_the_facts(self):
+        self.run_gate(self.stub(), '--external', 'genie-freshness=1', '--external', 'typescript-client=0', '--facts', str(self.facts))
+        facts = json.loads(self.facts.read_text())
+        self.assertEqual((facts['exit_code'], facts['output']['needs']['genie-freshness']), (1, 'failure'))
+
+    def test_no_facts_are_written_when_a_member_is_missing(self):
+        code = self.run_gate(self.stub(), '--external', 'genie-freshness=0', '--facts', str(self.facts))
+        self.assertEqual(code, 1)
+        self.assertFalse(self.facts.exists())
+        table = self.stub()
+        del table['linux-clippy']
+        code = self.run_gate(table, '--external', 'genie-freshness=0', '--external', 'typescript-client=0', '--facts', str(self.facts))
+        self.assertEqual(code, 1)  # a stage the table does not have makes the member set short of the policy's
+        self.assertFalse(self.facts.exists())
+
+    def test_a_chosen_subset_cannot_produce_facts(self):
+        code = self.run_gate(self.stub(), '--stage', 'upgrade-impact', '--external', 'genie-freshness=0', '--external', 'typescript-client=0',
+                             '--facts', str(self.facts))
+        self.assertEqual(code, 1)
+        self.assertFalse(self.facts.exists())
+
+    def test_fail_fast_stops_at_the_first_failure_and_writes_nothing(self):
+        code = self.run_gate(self.stub(**{'linux-test-build': 1}), '--fail-fast', '--facts', str(self.facts))
+        self.assertEqual(code, 1)
+        self.assertFalse(self.facts.exists())
+
+    def test_bad_arguments_are_refused(self):
+        self.assertEqual(self.run_gate(self.stub(), '--stage', 'nope'), 2)
+        self.assertEqual(self.run_gate(self.stub(), '--external', 'linux-clippy=0'), 2)
+        self.assertEqual(self.run_gate(self.stub(), '--external', 'genie-freshness=x'), 2)
+        self.assertEqual(self.run_gate(self.stub(), '--base=--upload-pack=x'), 2)
+
+
+class Prepared(unittest.TestCase):
+    def test_the_environment_is_the_ci_jobs_isolated_home_and_runner_temp(self):
+        with tempfile.TemporaryDirectory() as work:
+            env = gate.prepare(work)
+            self.assertTrue(Path(env['HOME']).is_dir() and env['HOME'].startswith(env['RUNNER_TEMP']))
+            for key in ('XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME'):
+                self.assertTrue(Path(env[key]).is_dir(), key)
+
+    def test_the_effective_merge_source_is_a_merge_of_head_into_the_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = lambda *a: subprocess.run(['git', '-C', tmp, *a], capture_output=True, text=True, check=True,
+                                            env=dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@e.invalid', GIT_COMMITTER_NAME='t',
+                                                     GIT_COMMITTER_EMAIL='t@e.invalid')).stdout.strip()
+            run('init', '-q', '-b', 'main')
+            Path(tmp, 'a').write_text('1')
+            run('add', '.'); run('commit', '-q', '-m', 'one')
+            Path(tmp, 'b').write_text('2')
+            run('add', '.'); run('commit', '-q', '-m', 'two')
+            cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                merged = gate.merge_commit('HEAD~1', dict(os.environ))
+                self.assertEqual(run('rev-parse', merged + '^{tree}'), run('rev-parse', 'HEAD^{tree}'))
+                self.assertEqual(len(run('rev-list', '--parents', '-n1', merged).split()), 3)  # two parents
+                with self.assertRaises(RuntimeError):
+                    gate.merge_commit('HEAD', dict(os.environ)) if False else gate.merge_commit('nonexistent', dict(os.environ))
+            finally:
+                os.chdir(cwd)
+
+
+if __name__ == '__main__':
+    unittest.main()
