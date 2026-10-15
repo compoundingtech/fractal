@@ -302,7 +302,7 @@ pub(super) fn finish_legacy_shape(
             if st_drivers::claude_process::failure_kind(&error)
                 == Some(st_drivers::claude_process::FailureKind::Refused)
                 || error
-                    .downcast_ref::<smallclaims::error::St3Error>()
+                    .downcast_ref::<super::St3Error>()
                     .is_some_and(|error| error.code == "stale-mailbox-session") =>
         {
             "would-have-refused direct-chain shape; installed topology remains unverified".into()
