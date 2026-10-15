@@ -14,7 +14,7 @@ const styles = stylex.create({
   narrow: { width: g.polishNarrow },
 })
 const HeaderSurface = ({ scheme = 'dark', narrow = false }: { scheme?: Scheme; narrow?: boolean }) => <main {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>{[false, true].map(showHeader => <section key={String(showHeader)} aria-label={showHeader ? 'Standalone control' : 'Host-owned header'} style={{ height: 300 }}>
-  {!showHeader && <header role="banner" aria-label="Workspace header">Row projection</header>}
+  {!showHeader && <header role="group" aria-label="Workspace header">Row projection</header>}
   <EmbraceRuntimeProvider options={{ messages: [], isRunning: false, onNew: async () => {} }}>
     <Transcript title="Row projection" turns={[]} showHeader={showHeader} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} />
   </EmbraceRuntimeProvider>
@@ -26,7 +26,7 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const hosted = within(canvas.getByRole('region', { name: 'Host-owned header' }))
   await expect(hosted.queryByTestId('transcript-header')).toBeNull()
-  await expect(hosted.getByRole('banner', { name: 'Workspace header' })).toBeVisible()
+  await expect(hosted.getByRole('group', { name: 'Workspace header' })).toBeVisible()
   await expect(hosted.getByTestId('transcript-scroll')).toBeVisible()
   // Failing control: standalone presentation retains the band by default.
   await expect(within(canvas.getByRole('region', { name: 'Standalone control' })).getByTestId('transcript-header')).toBeVisible()

@@ -31,6 +31,7 @@ for (const turns of [[], [turn]]) test(`Transcript server-renders ${turns.length
   let markup
   assert.doesNotThrow(() => { markup = renderToStaticMarkup(element) })
   assert.match(markup, /Row projection/)
+  assert.match(markup, /data-testid="transcript-scroll" role="group" aria-label="Conversation history"/)
   if (turns.length > 0) {
     assert.doesNotMatch(markup, /data-testid="transcript-empty"/)
     assert.match(markup, /data-testid="transcript-placeholder"/)
@@ -104,5 +105,6 @@ for (const withTool of [false, true]) test(`server-rendered transcript groups re
   assert.equal((render([makeTurn('grouped', items)]).match(/data-testid="thinking-entry"/g) ?? []).length, 1)
   assert.equal((render([makeTurn('first', items.slice(0, 3)), makeTurn('second', items.slice(3))]).match(/data-testid="thinking-entry"/g) ?? []).length, 2)
   assert.doesNotMatch(render([makeTurn('empty', [{ _tag: 'Reasoning', id: 'blank', text: '  ', streaming: false, at }])]), /data-testid="thinking-entry"/)
+  assert.match(render([makeTurn('empty', [{ _tag: 'Reasoning', id: 'blank', text: '  ', streaming: false, at }])]), /data-testid="transcript-scroll" role="group" aria-label="Conversation history"/)
   assert.doesNotMatch(render([makeTurn('none', [])]), /data-testid="thinking-entry"/)
 })

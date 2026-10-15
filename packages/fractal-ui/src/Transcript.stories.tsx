@@ -606,7 +606,7 @@ export const AppendedItems: Story = { render: args => <AppendedItemsStory scheme
   try {
     for (const [index, label] of ['tool', 'reasoning', 'answer'].entries()) {
       await userEvent.click(canvas.getByRole('button', { name: `Append ${label}` }))
-      await waitFor(() => expect(index === 0 ? work.querySelector('[data-tool-status="running"]') : index === 1 ? within(work).queryAllByTestId('thinking-entry').length === 2 : within(turn).queryByText('New answer content follows the retained rows.')).toBeTruthy())
+      await waitFor(() => expect(index === 0 ? work.querySelector('[data-tool-status="running"]') : index === 1 ? within(thinking).queryByText('New reasoning follows the observed tool call.') : within(turn).queryByText('New answer content follows the retained rows.')).toBeTruthy())
       recordRemovals(observer.takeRecords())
       await expect(removed).toHaveLength(0)
       await expect(fallbacks).toHaveLength(0)
@@ -616,6 +616,7 @@ export const AppendedItems: Story = { render: args => <AppendedItemsStory scheme
       await expect(within(turn).getByTestId('work-log')).toBe(work)
       await expect(within(work).getByRole('button', { name: /^read src\/rows\.ts\b/ })).toBe(tool)
       await expect(within(work).getAllByTestId('thinking-entry')[0]).toBe(thinking)
+      await expect(within(work).getAllByTestId('thinking-entry')).toHaveLength(1)
       await expect(tool).toHaveAttribute('aria-expanded', 'true')
       await expect(thinkingControl).toHaveAttribute('aria-expanded', 'true')
       await expect(lane.scrollTop).toBe(scrollTop)
