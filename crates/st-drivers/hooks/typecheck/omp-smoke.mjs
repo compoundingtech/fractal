@@ -14,6 +14,7 @@ const framesPath = path.join(dir, "frames.jsonl");
 // Lines appended here are what the channel sends the extension, as `message` frames do.
 const outboxPath = path.join(dir, "outbox.jsonl");
 const pidPath = path.join(dir, "channel-pids");
+const closedPath = path.join(dir, "closed-channel-pids");
 const delayedHelloPath = path.join(dir, "delay-hello");
 const recorder = path.join(dir, "recorder");
 fs.writeFileSync(
@@ -39,7 +40,10 @@ process.stdin.on("data", (chunk) => {
   record(chunk.slice(0, 7));
   record(chunk.slice(7));
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", () => {
+  fs.appendFileSync(${JSON.stringify(closedPath)}, process.pid + "\\n");
+  process.exit(0);
+});
 let sent = 0;
 setInterval(() => {
   let outbox = "";
@@ -70,6 +74,17 @@ assert.throws(() => completeFrames('{broken}\n'), SyntaxError);
 const readFrames = () => completeFrames(
   fs.existsSync(framesPath) ? fs.readFileSync(framesPath, "utf8") : "",
 );
+// Shutdown closes the pipe but does not await its recorder. Fence the next context's
+// baseline on EOF after all prior frames are recorded, rather than on a fixed sleep.
+const awaitRecorderDrain = async () => {
+  const deadline = Date.now() + 10000;
+  const count = (file) => fs.existsSync(file)
+    ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).length : 0;
+  while (count(closedPath) < count(pidPath)) {
+    assert.ok(Date.now() < deadline, "all prior channel recorders must drain before the next context");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
 
 process.env.ST_OMP_CHANNEL_BIN = recorder;
 process.env.ST_OMP_CHANNEL_CATALOG = "/tmp/st2-smoke-catalog";
@@ -88,10 +103,12 @@ const handlers = new Map();
 // Every message the extension hands to omp, with the options it chose.
 const handedOver = [];
 const sessionMessages = [];
+let handoffWait;
 const pi = {
   on: (name, handler) => handlers.set(name, handler),
   sendUserMessage: (content, options) => {
     handedOver.push(options === undefined ? { content } : { content, options });
+    return handoffWait;
   },
   sendMessage: (message, options) => sessionMessages.push({ message, options }),
 };
@@ -183,6 +200,7 @@ for (const ctx of [bareCtx, fullCtx, throwingCtx]) {
   await handlers.get("session_compact")({ compactionEntry: { id: "86c8955c" } }, ctx);
   await handlers.get("session_before_compact")({}, ctx);
   await handlers.get("session_shutdown")({}, ctx);
+  await awaitRecorderDrain();
 }
 
 // Structured ask observation is correlated by toolCallId. An unrelated result must emit nothing
@@ -356,6 +374,27 @@ const acknowledged = () =>
   readFrames()
     .filter((frame) => frame.type === "delivered")
     .map((frame) => frame.meta?.messageId);
+// The recorder consumes an IPC pipe in another process. Subscribe before checking the
+// snapshot so an ACK arriving between those operations cannot be missed.
+const awaitAcknowledgement = (messageId) => new Promise((resolve, reject) => {
+  const finish = (error) => {
+    clearTimeout(deadline);
+    watcher.close();
+    if (error) reject(error);
+    else resolve();
+  };
+  const check = () => {
+    try {
+      if (acknowledged().includes(messageId)) finish();
+    } catch (error) {
+      finish(error);
+    }
+  };
+  const watcher = fs.watch(framesPath, check);
+  const deadline = setTimeout(() => finish(new Error(`Recorder did not acknowledge ${messageId}`)), 5_000);
+  watcher.on("error", finish);
+  check();
+});
 const toolCall = (id) =>
   handlers.get("tool_call")({ toolName: "bash", toolCallId: id, input: {} }, holdCtx);
 const toolResult = (id) =>
@@ -430,6 +469,157 @@ assert.deepStrictEqual(
   "every message is acknowledged exactly once",
 );
 fs.rmSync(outboxPath, { force: true });
+
+// A native human hold overrides even a cap armed before the modal opened. The unrelated
+// batch result and a foreground continuation ending must not release or acknowledge mail.
+for (const modal of ["ask", "approval"]) {
+  await handlers.get("session_start")({}, holdCtx);
+  await handlers.get("agent_start")({}, holdCtx);
+  await toolCall(`before-${modal}`);
+  const beforeModal = handedOver.length;
+  const modalIds = [`message/hold-${mailSequence + 1}`, `message/hold-${mailSequence + 2}`];
+  sendMail(`before ${modal}`);
+  await pause(150);
+  if (modal === "ask") {
+    await handlers.get("tool_call")({ toolName: "ask", toolCallId: "held-ask",
+      input: { questions: [{ question: "Proceed?" }] } }, holdCtx);
+  } else {
+    await handlers.get("tool_approval_requested")({ toolName: "bash" }, holdCtx);
+  }
+  sendMail(`during ${modal}`);
+  await toolResult(`before-${modal}`);
+  await handlers.get("agent_end")({ ...successfulEnd, willContinue: true }, holdCtx);
+  await pause(10_500);
+  assert.strictEqual(handedOver.length, beforeModal, `${modal} stays outside omp past the cap`);
+  assert.deepStrictEqual(acknowledged().filter(id => modalIds.includes(id)), [],
+    `${modal} mail is not delivered; unrelated receipt recovery is independent`);
+  if (modal === "ask") {
+    await handlers.get("tool_result")({ toolCallId: "unrelated" }, holdCtx);
+    assert.strictEqual(handedOver.length, beforeModal, "only the matching answer releases an ask");
+    await handlers.get("tool_result")({ toolCallId: "held-ask" }, holdCtx);
+  } else {
+    await handlers.get("tool_approval_resolved")({ approved: true }, holdCtx);
+  }
+  assert.deepStrictEqual(handedOver.slice(beforeModal), [{
+    content: `before ${modal}\n\nduring ${modal}`, options: { deliverAs: "steer" },
+  }], `${modal} answer delivers one FIFO batch before its handler returns`);
+  await pause(100);
+  assert.deepStrictEqual(acknowledged().filter(id => modalIds.includes(id)), modalIds);
+  await handlers.get("agent_end")(successfulEnd, holdCtx);
+  fs.rmSync(outboxPath, { force: true });
+}
+
+// Ask cancellation and timeout use the same correlated tool-result boundary. A terminal
+// abort can end without a result. Idle-looking modal contexts must still retain mail.
+for (const resolution of ["cancel", "timeout", "abort", "denied"]) {
+  await handlers.get("session_start")({}, bareCtx);
+  if (resolution === "denied") {
+    await handlers.get("tool_approval_requested")({ toolName: "bash" }, bareCtx);
+  } else {
+    await handlers.get("tool_call")({ toolName: "ask", toolCallId: `ask-${resolution}`,
+      input: { questions: [{ question: "Proceed?" }] } }, bareCtx);
+  }
+  const beforeResolution = handedOver.length;
+  sendMail(`after ${resolution}`);
+  await pause(150);
+  assert.strictEqual(handedOver.length, beforeResolution, "idle proof cannot override a modal");
+  if (resolution === "abort") {
+    await handlers.get("agent_end")({ messages: [{ role: "assistant", stopReason: "aborted" }] }, bareCtx);
+  } else if (resolution === "denied") {
+    await handlers.get("tool_approval_resolved")({ approved: false }, bareCtx);
+  } else {
+    await handlers.get("tool_result")({ toolCallId: `ask-${resolution}`, isError: resolution === "cancel" }, bareCtx);
+  }
+  await pause(100);
+  assert.deepStrictEqual(handedOver.slice(beforeResolution), [{ content: `after ${resolution}` }]);
+  assert.strictEqual(acknowledged().filter(id => id === `message/hold-${mailSequence}`).length, 1);
+  fs.rmSync(outboxPath, { force: true });
+}
+
+// Independent ask and approval surfaces both need resolution, regardless of answer order.
+for (const first of ["ask", "approval"]) {
+  await handlers.get("session_start")({}, bareCtx);
+  await handlers.get("tool_call")({ toolName: "ask", toolCallId: "overlapping-ask",
+    input: { questions: [{ question: "Proceed?" }] } }, bareCtx);
+  await handlers.get("tool_approval_requested")({ toolName: "bash" }, bareCtx);
+  const beforeOverlap = handedOver.length;
+  sendMail("after both answers");
+  await pause(150);
+  const answerAsk = () => handlers.get("tool_result")({ toolCallId: "overlapping-ask" }, bareCtx);
+  const answerApproval = () => handlers.get("tool_approval_resolved")({}, bareCtx);
+  await (first === "ask" ? answerAsk() : answerApproval());
+  assert.strictEqual(handedOver.length, beforeOverlap, "one open modal still holds mail");
+  await (first === "ask" ? answerApproval() : answerAsk());
+  assert.deepStrictEqual(handedOver.slice(beforeOverlap), [{ content: "after both answers" }]);
+  fs.rmSync(outboxPath, { force: true });
+}
+
+// Session restart drops the retired channel copy, not the durable mail. Its successor
+// re-sends the unacknowledged identity with no inherited human hold.
+await handlers.get("session_start")({}, bareCtx);
+await handlers.get("tool_call")({ toolName: "ask", toolCallId: "restart-ask",
+  input: { questions: [{ question: "Proceed?" }] } }, bareCtx);
+const restartMail = { type: "message", deliverAs: "steer", content: "after session restart",
+  meta: { messageId: "message/human-restart" } };
+const beforeHumanRestart = handedOver.length;
+fs.appendFileSync(outboxPath, JSON.stringify(restartMail) + "\n");
+await pause(150);
+assert.strictEqual(handedOver.length, beforeHumanRestart);
+fs.rmSync(outboxPath, { force: true });
+await handlers.get("session_start")({}, bareCtx);
+fs.appendFileSync(outboxPath, JSON.stringify(restartMail) + "\n");
+await pause(200);
+assert.deepStrictEqual(handedOver.slice(beforeHumanRestart), [{ content: "after session restart" }]);
+assert.strictEqual(acknowledged().filter(id => id === "message/human-restart").length, 1);
+fs.rmSync(outboxPath, { force: true });
+
+// An earlier asynchronous native handoff can delay a release beyond its boundary.
+// That release must not take mail held for a newer tool batch or a newly opened modal.
+for (const newerBoundary of ["batch", "ask"]) {
+  holdIdle = true;
+  await handlers.get("session_start")({}, holdCtx);
+  let finishHandoff;
+  handoffWait = new Promise(resolve => { finishHandoff = resolve; });
+  const beforeDeferred = handedOver.length;
+  sendMail("pending native handoff");
+  await pause(150);
+  assert.strictEqual(handedOver.length, beforeDeferred + 1);
+  holdIdle = false;
+  await handlers.get("agent_start")({}, holdCtx);
+  sendMail("eligible at old boundary");
+  await pause(150);
+  await handlers.get("agent_end")(successfulEnd, holdCtx);
+  await handlers.get("agent_start")({}, holdCtx);
+  if (newerBoundary === "batch") {
+    await toolCall("newer-batch");
+  } else {
+    await handlers.get("tool_call")({ toolName: "ask", toolCallId: "deferred-ask",
+      input: { questions: [{ question: "Proceed?" }] } }, holdCtx);
+  }
+  sendMail("held at new boundary");
+  await pause(150);
+  handoffWait = undefined;
+  finishHandoff();
+  await pause(150);
+  if (newerBoundary === "batch") {
+    assert.deepStrictEqual(handedOver.slice(beforeDeferred), [
+      { content: "pending native handoff" },
+      { content: "eligible at old boundary", options: { deliverAs: "steer" } },
+    ], "a deferred release cannot drain the new batch's mail");
+    await toolResult("newer-batch");
+    assert.deepStrictEqual(handedOver.at(-1),
+      { content: "held at new boundary", options: { deliverAs: "steer" } });
+  } else {
+    assert.deepStrictEqual(handedOver.slice(beforeDeferred), [{ content: "pending native handoff" }],
+      "a newly opened modal fences an already queued release");
+    await handlers.get("tool_result")({ toolCallId: "deferred-ask" }, holdCtx);
+    assert.deepStrictEqual(handedOver.at(-1),
+      { content: "eligible at old boundary\n\nheld at new boundary", options: { deliverAs: "steer" } });
+  }
+  await handlers.get("agent_end")(successfulEnd, holdCtx);
+  fs.rmSync(outboxPath, { force: true });
+}
+
 
 // A channel that dies during a hold must be replaced. The successor re-sends the unacknowledged
 // message; the retired channel's held copy must never be handed off or acknowledged.
@@ -984,7 +1174,7 @@ if (process.argv[2]?.includes("st-omp-channel")) {
     assert.strictEqual(handedOver.length, beforeInFlight, `${proof} proof retains in-flight hold`);
     throwing = false;
     await handlers.get("tool_result")({ toolName: "bash", toolCallId: `foreground-${proof}` }, inFlightCtx);
-    await pause(100);
+    await awaitAcknowledgement(`message/hold-${mailSequence}`);
     assert.strictEqual(handedOver.length, beforeInFlight + 1, "matching real tool result releases once");
     assert.strictEqual(acknowledged().filter(id => id === `message/hold-${mailSequence}`).length, 1);
     await handlers.get("agent_end")(successfulEnd, inFlightCtx);

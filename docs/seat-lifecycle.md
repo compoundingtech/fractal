@@ -24,7 +24,7 @@ st agents restart agent/garden/worker --as person/ada
 st agents show agent/garden/worker
 ```
 
-When repeated failed starts have parked a seat, a person's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the seat parks again and its cause stays visible in `st agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
+When repeated failed starts have parked a seat, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the seat parks again and its cause stays visible in `st agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
 
 The graph retains claimed work and pending mail. A relaunch continues the previous native session when the harness can; otherwise it starts a new session and recovers work from the graph. Stop and start explicitly when you want it off between uses:
 
@@ -38,6 +38,13 @@ exact harness incarnation remains live, including an idle or blocked harness. Se
 held claims do not read full subject status for lease maintenance. Checking work before
 status keeps resident seats cheap without extending the renewal period or weakening the
 incarnation check.
+
+A restart of a seat that is up and ready first asks it for its handoff and waits at most two minutes
+(`--now` skips the wait); see [seat handoff](st3/seat-continuity.md).
+
+A restarted seat that cannot continue its conversation (another account, another model, a crash)
+gets a first message with the handoff it left and the live state of its work. See
+[seat handoff](st3/seat-continuity.md); a seat writes its handoff with `st agents handoff write`.
 
 To preserve the exact conversation, wait until the seat has finished its turn and holds no claim:
 

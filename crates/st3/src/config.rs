@@ -18,6 +18,9 @@ pub struct Config {
     /// Absent in legacy installs: preserve their bypass policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_mode: Option<st_drivers::access::AccessMode>,
+    /// How seats rank against the daemon for CPU and IO. Absent means `background`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seat_priority: Option<st_runtime::SeatPriority>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
     pub fleet_id: Option<String>,
@@ -45,6 +48,9 @@ pub struct Config {
     /// Daemon GitHub HTTP authentication. Omitted unless an explicit credential source is configured.
     #[serde(skip_serializing_if = "GithubConfig::is_default")]
     pub github: GithubConfig,
+    /// Git change pilot: explicit repositories and one designated discovery owner.
+    #[serde(skip_serializing_if = "crate::changes::config::Config::is_default")]
+    pub changes: crate::changes::config::Config,
     /// Checkpoints that trim replicated history. Written only when it differs from the
     /// default, so a config this build writes still loads in a build without checkpoints.
     #[serde(skip_serializing_if = "CheckpointConfig::is_default")]
@@ -356,6 +362,7 @@ impl Default for Config {
         Self {
             node: host_name(),
             access_mode: None,
+            seat_priority: None,
             person: None,
             fleet_id: None,
             shared_secret_file: None,
@@ -370,6 +377,7 @@ impl Default for Config {
             planner: PlannerSpec::default(),
             observations: ObservationsConfig::default(),
             github: GithubConfig::default(),
+            changes: crate::changes::config::Config::default(),
             checkpoint: CheckpointConfig::default(),
             limits: LimitsConfig::default(),
             reconcile: ReconcileConfig::default(),
@@ -382,6 +390,10 @@ impl Default for Config {
 impl Config {
     pub fn active_access_mode(&self) -> st_drivers::access::AccessMode {
         self.access_mode.unwrap_or_default()
+    }
+
+    pub fn active_seat_priority(&self) -> st_runtime::SeatPriority {
+        self.seat_priority.unwrap_or_default()
     }
 
     /// Service installation writes a new config once, never upgrading a legacy missing mode.
@@ -508,6 +520,7 @@ impl Config {
         if self.work_root.is_some() {
             self.work_root()?;
         }
+        self.changes.validate()?;
         anyhow::ensure!(
             matches!(
                 self.planner.provider.as_str(),
@@ -679,25 +692,70 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 /// Refuse a work root that would make agents start in the home folder itself or in a folder
-/// macOS guards with a permission prompt.
+/// macOS guards with a permission prompt. Links are followed as far as the path exists, so a
+/// linked `~/Documents` is caught, and a folder that does not exist yet below a link is judged
+/// where it will be made; the path as written is refused as well.
 fn check_work_root(root: &Path) -> Result<()> {
+    let Ok(home) = home_dir() else {
+        anyhow::ensure!(
+            root.is_absolute(),
+            "work_root must be an absolute path, not {}",
+            root.display()
+        );
+        return Ok(());
+    };
+    check_work_root_in(root, &home)
+}
+
+/// `path` with links followed as far as it exists: the deepest existing ancestor is resolved and
+/// the part that does not exist yet is appended, so a new folder below a link is seen where it
+/// will be made.
+fn resolve_existing(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut base = path;
+    loop {
+        if let Ok(real) = fs::canonicalize(base) {
+            return rest.iter().rev().fold(real, |resolved, name| resolved.join(name));
+        }
+        match (base.file_name(), base.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                base = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+fn check_work_root_in(root: &Path, home: &Path) -> Result<()> {
     anyhow::ensure!(
         root.is_absolute(),
         "work_root must be an absolute path, not {}",
         root.display()
     );
-    let Ok(home) = home_dir() else {
-        return Ok(());
-    };
-    anyhow::ensure!(
-        root != home,
-        "work_root cannot be the home folder; name a folder inside it"
-    );
-    for protected in PROTECTED_HOME_FOLDERS {
+    // The folder is refused when it is guarded as written or once links are followed. A guarded
+    // folder that is itself a link is resolved too, so the folder it points to is refused.
+    let (resolved_root, resolved_home) = (resolve_existing(root), resolve_existing(home));
+    for (root, home, resolve_guarded) in [
+        (root, home, false),
+        (resolved_root.as_path(), resolved_home.as_path(), true),
+    ] {
         anyhow::ensure!(
-            !root.starts_with(home.join(protected)),
-            "work_root cannot be inside {protected}: macOS asks permission before a program lists it"
+            root != home,
+            "work_root cannot be the home folder; name a folder inside it"
         );
+        for protected in PROTECTED_HOME_FOLDERS {
+            let guarded = home.join(protected);
+            let guarded = if resolve_guarded {
+                resolve_existing(&guarded)
+            } else {
+                guarded
+            };
+            anyhow::ensure!(
+                !root.starts_with(&guarded),
+                "work_root cannot be inside {protected}: macOS asks permission before a program lists it"
+            );
+        }
     }
     Ok(())
 }
@@ -806,10 +864,42 @@ mod tests {
     }
 
     #[test]
+    fn a_linked_guarded_folder_is_still_refused() {
+        let home = tempdir().unwrap();
+        let elsewhere = tempdir().unwrap();
+        fs::create_dir(elsewhere.path().join("projects")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), home.path().join("Documents")).unwrap();
+        // Through the link, and straight at the folder the link points to.
+        let through = home.path().join("Documents/projects");
+        assert!(super::check_work_root_in(&through, home.path()).is_err());
+        let direct = elsewhere.path().join("projects");
+        assert!(super::check_work_root_in(&direct, home.path()).is_err());
+        // A folder that does not exist yet, below the link, is refused too.
+        let new_through = home.path().join("Documents/newwork");
+        assert!(super::check_work_root_in(&new_through, home.path()).is_err());
+        let new_direct = elsewhere.path().join("newwork/deeper");
+        assert!(super::check_work_root_in(&new_direct, home.path()).is_err());
+        assert!(super::check_work_root_in(&home.path().join("Smalltalk"), home.path()).is_ok());
+        assert!(super::check_work_root_in(home.path(), home.path()).is_err());
+    }
+
+    #[test]
     fn a_config_without_a_work_root_stays_without_one() {
         let config: Config = toml::from_str("node=\"example\"\n").unwrap();
         assert!(config.work_root.is_none());
         assert!(!toml::to_string(&config).unwrap().contains("work_root"));
+    }
+
+    #[test]
+    fn seat_priority_defaults_to_background_and_accepts_normal() {
+        use st_runtime::SeatPriority;
+        assert_eq!(Config::default().active_seat_priority(), SeatPriority::Background);
+        let background: Config = toml::from_str("seat_priority=\"background\"").unwrap();
+        assert_eq!(background.active_seat_priority(), SeatPriority::Background);
+        let normal: Config = toml::from_str("seat_priority=\"normal\"").unwrap();
+        assert_eq!(normal.active_seat_priority(), SeatPriority::Normal);
+        assert!(toml::from_str::<Config>("seat_priority=\"high\"").is_err());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("seat_priority"));
     }
 
     #[test]

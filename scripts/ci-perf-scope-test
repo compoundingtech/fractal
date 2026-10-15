@@ -30,7 +30,7 @@ for name in ('crates/st3/src/api/client_v0.rs', 'crates/st3/src/store.rs',
              'crates/st3-schema/src/registry.rs', 'crates/st3-client/src/lib.rs',
              'crates/st-runtime/src/lib.rs', 'crates/st-drivers/src/lib.rs',
              'crates/st3-conversation-ui/src/lib.rs', 'crates/new-daemon-dependency/src/lib.rs', 'vendor/component/src/lib.rs',
-             'build.rs', 'crates/st3/build.rs', 'scripts/ci-test-paths.rs', 'nix/package.nix'):
+             'crates/st-drivers/build.rs', 'crates/st3/build.rs', 'scripts/ci-test-paths.rs', 'nix/package.nix'):
     assert module.decision('pull_request', event, [name])[0], name
 for name in ('docs/other.md', 'apps/ios/App.tsx'):
     assert not module.decision('pull_request', event, [name])[0], name
@@ -110,7 +110,7 @@ with tempfile.TemporaryDirectory() as tmp:
 workflow = (ROOT / '.github/workflows/perf.yml').read_text()
 assert '  merge_group:' not in workflow, 'optional loads must not add merge-queue work'
 conditions = {}
-for job in ['scope', 'perf-load']:
+for job in ['scope', 'perf-load', 'perf-load-hog']:
     match = re.search(r'^  ' + job + r':\n.*?^    if: (.+)$', workflow, re.M | re.S)
     assert match, job
     raw = match.group(1).splitlines()[0]
@@ -130,6 +130,31 @@ def admits(job, event='pull_request', action='synchronize', label='', result='su
     assert all(isinstance(node, allowed) for node in ast.walk(tree))
     return eval(compile(tree, '<generated-perf-admission>', 'eval'), {'__builtins__': {}}, context)
 
+# The hog run costs a second performance runner, so it runs only for pushes to main (the workflow
+# pushes only there) and manual dispatch, never for a pull request, a label or the nightly schedule.
+# The generator wraps every job condition in its draft-PR guard; the job's own condition is inside.
+hog_condition = conditions['perf-load-hog'].removeprefix("${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (").removesuffix(') }}')
+assert "github.event_name == 'workflow_dispatch' || github.event_name == 'push'" in hog_condition, hog_condition
+assert 'pull_request' not in hog_condition and 'schedule' not in hog_condition, hog_condition
+assert re.search(r'^  push:\n    branches: \[main\]$', workflow, re.M), 'push triggers only for main'
+def hog_admits(event, result='success', output='false', cancelled=False):
+    expression = hog_condition
+    for source, target in [('github.event_name', 'event'), ('needs.scope.result', 'result'),
+                           ('needs.scope.outputs.run', 'output'), ('cancelled()', 'cancelled')]:
+        expression = expression.replace(source, target)
+    expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', ' and ').replace('||', ' or ')).strip()
+    tree = ast.parse(expression, mode='eval')
+    allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.Compare, ast.Eq, ast.NotEq,
+               ast.UnaryOp, ast.Not, ast.Name, ast.Load, ast.Constant)
+    assert all(isinstance(node, allowed) for node in ast.walk(tree))
+    return eval(compile(tree, '<generated-hog-admission>', 'eval'), {'__builtins__': {}}, locals())
+for event in ['push', 'workflow_dispatch']:
+    assert hog_admits(event, output='true'), event
+    assert hog_admits(event, result='failure', output=''), event
+    assert not hog_admits(event, cancelled=True)
+for event in ['pull_request', 'schedule']:
+    assert not hog_admits(event, output='true'), event
+assert re.search(r'^  perf-load-hog:\n(?:    .*\n)*?    continue-on-error: true$', workflow, re.M), 'the hog run reports without failing the workflow'
 assert not admits('perf-load'), 'only successful explicit false may skip the load'
 for result in ['failure', 'timed_out', 'cancelled', 'skipped', '']:
     assert admits('perf-load', result=result, output=''), result
@@ -142,3 +167,5 @@ for action in ['labeled', 'unlabeled']:
         assert admits(job, action=action, label='ci-perf', output='true')
 assert 'nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3' in workflow
 print('Performance scope controls passed: every main/nightly/manual, labels, read paths, renames and uncertain lookup fail-open')
+
+subprocess.run(['python3', str(ROOT / 'scripts/ci-perf-evidence-test')], check=True)

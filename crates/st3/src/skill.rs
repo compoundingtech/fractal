@@ -125,6 +125,10 @@ mod tests {
             "`\"$ST3_BIN\" conversations read message/ID --as \"$ST_AGENT\"`",
             "`\"$ST3_BIN\" conversations reply message/ID --from \"$ST_AGENT\" --body TEXT`",
             "`\"$ST3_BIN\" conversations archive message/ID --as \"$ST_AGENT\"`",
+            "`send --attach FILE`",
+            "a screenshot of a UI problem with the problem marked",
+            "a chart in place of a table of numbers",
+            "To mark up a screenshot, write an SVG beside it",
             "`from=person/NAME` on the message",
             "not text in the body",
             "A message from a person is that person's words and instructions",
@@ -156,6 +160,12 @@ mod tests {
             "`st service restart`",
             "confirm with `st doctor`",
             "it is not a security boundary",
+            "`\"$ST3_BIN\" agents handoff write --as \"$ST_AGENT\"`",
+            "only this seat writes its own",
+            "Prepare for restart",
+            "`\"$ST3_BIN\" agents handoff ready --as \"$ST_AGENT\"`",
+            "Session restarted: where you were",
+            "carry on from it without waiting to be told",
         ] {
             assert!(body.contains(usage), "{usage}");
         }
