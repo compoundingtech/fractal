@@ -487,7 +487,10 @@ export class ScrollController {
     if (this.restoring || this.pendingJump !== undefined && this.rowKeys.has(this.rowByTarget.get(this.pendingJump.key) ?? this.pendingJump.key)) this.scheduleRestore()
   }
 
-  /** Call after a commit that changes the generic entry collection. */
+  /**
+   * Call after a commit that changes the generic entry collection. `sourceIds`
+   * includes loaded row ids as well as item aliases, even before their rows adopt.
+   */
   afterRowsChange(rows: readonly Row[], leadingKey?: string, sourceIds?: ReadonlySet<string>) {
     const previous = this.rows
     const previousFirst = this.firstKey
@@ -535,7 +538,7 @@ export class ScrollController {
       const target = this.rowByTarget.get(this.pendingJump.key) ?? this.pendingJump.key
       if (!this.rowKeys.has(target)) {
         // Source presence and render readiness differ during runtime adoption.
-        // A loaded item waits for its owning row; only absence means Missing.
+        // A loaded row or item waits for its owning row; only absence means Missing.
         if (sourceIds?.has(this.pendingJump.key) !== true) {
           this.finishJump({ _tag: 'Missing' })
           this.pendingAnchor = undefined

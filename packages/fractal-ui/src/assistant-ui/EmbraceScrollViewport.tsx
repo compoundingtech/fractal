@@ -370,7 +370,7 @@ export type VirtualViewportHistory =
 export interface EmbraceVirtualScrollViewportProps<T extends ViewportRow> extends Omit<EmbraceScrollViewportProps, 'items' | 'children'> {
   /** Rows keyed by stable id, oldest first. Server output renders all of them; client lanes virtualize them. */
   readonly items: readonly T[]
-  /** Every source id the host has loaded; a `jumpTo` id outside it settles `Missing`. */
+  /** Every loaded row id and source alias, including rows awaiting adoption; ids outside it settle `Missing`. */
   readonly sourceIds?: ReadonlySet<string>
   readonly renderItem: (item: T) => React.ReactNode
   readonly history: VirtualViewportHistory

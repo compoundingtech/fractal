@@ -44,15 +44,18 @@ const transcriptRoot = (element: React.ReactElement): Element => {
 describe('conversation code-loading fallback', () => {
   it('matches the real kit Waiting transcript structure, testids, accessible labels and geometry', () => {
     const waiting = transcriptRoot(<EmbraceRuntimeProvider options={{ messages: [], onNew: async () => { throw new Error('A Waiting transcript must not send a message') } }}>
-      <Transcript turns={[]} title="Example Agent" sync={{ _tag: 'Requested', since: 0 }} now={0} observedAt={0} />
+      <Transcript history={{ _tag: 'Pending' }} turns={[]} title="Example Agent" sync={{ _tag: 'Requested', since: 0 }} now={0} observedAt={0} />
     </EmbraceRuntimeProvider>)
     const fallback = transcriptRoot(<ConversationPaneFallback agentName="Example Agent" />)
 
     expect(shape(fallback)).toEqual(shape(waiting))
     expect([...fallback.querySelectorAll('[data-testid]')].map(node => node.getAttribute('data-testid')))
-      .toEqual(['transcript-header', 'transcript-scroll', 'transcript-placeholder', 'sync-line'])
+      .toEqual(['transcript-header', 'transcript-scroll', 'history-boundary', 'transcript-placeholder', 'sync-line'])
     expect(fallback.querySelector('[data-testid="transcript-placeholder"]')?.getAttribute('aria-label')).toBe('Loading conversation')
     expect(fallback.querySelector('[data-testid="transcript-scroll"]')?.getAttribute('aria-label')).toBe('Conversation history')
+    expect(fallback.querySelector('[data-testid="transcript-scroll"]')?.getAttribute('aria-busy')).toBe('false')
+    expect(fallback.querySelector('[data-testid="history-boundary"]')?.textContent).toBe('Earlier messages not loaded')
+    expect([...fallback.querySelectorAll('button')].some(button => button.textContent === 'New messages ↓')).toBe(false)
     expect(fallback.querySelector('header')?.textContent).toBe('Example Agent')
     expect(fallback.querySelector('textarea')).toBeNull()
   })

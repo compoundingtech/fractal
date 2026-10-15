@@ -24,7 +24,7 @@ const turn = { id: 'turn/example', prompt, items: [], work: { calls: [], duratio
 for (const turns of [[], [turn]]) test(`Transcript server-renders ${turns.length === 0 ? 'empty history' : 'an unpublished prompt'} without throwing`, () => {
   const element = React.createElement(EmbraceRuntimeProvider, {
     options: { messages: turns.flatMap(entry => [entry.prompt]), isRunning: false, onNew: async () => {} },
-  }, React.createElement(Transcript, { turns, title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now }))
+  }, React.createElement(Transcript, { turns, history: { _tag: 'Complete' }, title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now }))
   let markup
   assert.doesNotThrow(() => { markup = renderToStaticMarkup(element) })
   assert.match(markup, /Row projection/)
@@ -46,7 +46,7 @@ test('an unconfirmed send reads as not confirmed yet with Send again, never as a
   const unconfirmed = { ...prompt, sendState: { _tag: 'Unconfirmed', detail: 'Sending it again is safe.' } }
   const element = React.createElement(EmbraceRuntimeProvider, {
     options: { messages: [unconfirmed], isRunning: false, onNew: async () => {} },
-  }, React.createElement(Transcript, { turns: [{ ...turn, prompt: unconfirmed }], title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now, onRetrySend: () => {} }))
+  }, React.createElement(Transcript, { turns: [{ ...turn, prompt: unconfirmed }], history: { _tag: 'Complete' }, title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now, onRetrySend: () => {} }))
   const markup = renderToStaticMarkup(element)
   assert.match(markup, /data-send-state="unconfirmed"/)
   assert.match(markup, /data-testid="send-unconfirmed"/)
@@ -73,7 +73,6 @@ test('the history boundary server-renders before the lane is measured', () => {
     [{ _tag: 'Loading' }, ['data-testid="history-loading"', 'Loading earlier messages…'], ['Load earlier messages']],
     [{ _tag: 'Failed', retry: request, detail: 'The connection dropped.' }, ['data-testid="history-error"', 'The connection dropped.', 'Try again'], ['Load earlier messages']],
     [{ _tag: 'Complete' }, ['data-testid="history-start"', 'Start of conversation'], ['Earlier messages not loaded']],
-    [undefined, ['data-testid="history-start"', 'Start of conversation'], ['Earlier messages not loaded']],
   ]
   for (const [history, present, absent] of cases) {
     const markup = serverTranscript([turn], history)

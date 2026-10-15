@@ -97,7 +97,7 @@ function Hierarchy({ scheme = 'dark', narrow = false, failure = 'none', showSeat
   return <main ref={root} data-revision={revision} {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
     <div {...stylex.props(styles.controls)}><Button onPress={() => rerender(value => value + 1)}>Apply selected regression</Button><Button onPress={() => setRunShown(false)}>Hide run</Button><Button onPress={() => { setRunShown(true); setRemounts(value => value + 1) }}>Show run</Button><span>{failure}</span></div>
     <section aria-label="Fold example"><WorkLogV1 turn={work} hideLiveRow ariaLabel="Release work" expandedBody={<ThinkingEntry text="Check the **retained snapshot** first, then compare identities." />} /></section>
-    <section aria-label="Message example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [rich, ...run], onNew: async () => {} }}><Transcript title="Release review" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} showSeatHeader={failure === 'seat-header' && revision > 0 ? !showSeatHeader : showSeatHeader} turns={turns(failure === 'run-copy' && revision > 0, runShown)} /></EmbraceRuntimeProvider></section>
+    <section aria-label="Message example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [rich, ...run], onNew: async () => {} }}><Transcript history={{ _tag: 'Complete' }} title="Release review" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} showSeatHeader={failure === 'seat-header' && revision > 0 ? !showSeatHeader : showSeatHeader} turns={turns(failure === 'run-copy' && revision > 0, runShown)} /></EmbraceRuntimeProvider></section>
   </main>
 }
 const meta = {

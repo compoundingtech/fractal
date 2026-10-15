@@ -54,7 +54,7 @@ function PressStory({ scheme }: { scheme: Scheme }) {
   const attachResult = React.useCallback(() => setTurns(replacing(historyTurn(22, { tool: toolCall(22, 'export const rows = groupVisible(filter(rows))') }))), [])
   return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><EmbraceRuntimeProvider options={options}>
     <div {...stylex.props(styles.toolbar)}><Button onPress={republish} {...stylex.props(styles.button)}>Republish snapshot</Button><Button onPress={appendReply} {...stylex.props(styles.button)}>Append agent reply</Button><Button onPress={insertReply} {...stylex.props(styles.button)}>Insert reply above failed send</Button><Button onPress={reviseAnswer} {...stylex.props(styles.button)}>Revise answer</Button><Button onPress={attachResult} {...stylex.props(styles.button)}>Attach tool result</Button><span>Retries <output data-testid="retry-count">{retries}</output></span></div>
-    <div {...stylex.props(styles.transcript)}><Transcript title="Row projection" turns={turns} sync={sync} now={now} observedAt={now - 8000} onRetrySend={retry} /></div>
+    <div {...stylex.props(styles.transcript)}><Transcript history={{ _tag: 'Complete' }} title="Row projection" turns={turns} sync={sync} now={now} observedAt={now - 8000} onRetrySend={retry} /></div>
   </EmbraceRuntimeProvider></main>
 }
 

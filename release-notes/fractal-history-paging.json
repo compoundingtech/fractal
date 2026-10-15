@@ -4,7 +4,7 @@
   "replay": { "status": "none", "detail": "No persisted projections or replay changes." },
   "schema": { "status": "none", "detail": "No database schema changes." },
   "rules": { "status": "none", "detail": "No checkpoint rule changes." },
-  "compatibility": { "status": "none", "detail": "Uses the existing native timeline paging cursor; adds no wire operation." },
+  "compatibility": { "status": "none", "detail": "Uses the existing native timeline paging cursor; adds no wire operation. Kit Transcript callers now explicitly supply their history knowledge; all repository callers are migrated. Mounted-row runtime windowing is opt-in for long transcripts." },
   "downtime": { "status": "none", "detail": "No service restart or coordinated rollout required." },
   "manual": { "status": "none", "detail": "No manual migration required." },
   "recovery": { "status": "none", "detail": "Failed history pages retain loaded messages and expose explicit retry; no persisted state changes." }

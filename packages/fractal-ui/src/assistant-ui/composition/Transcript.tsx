@@ -54,7 +54,7 @@ export interface TranscriptProps {
   /** The host's own inline references in message Markdown, such as a `doc/…` name it can open. */
   readonly renderInlineReference?: InlineReferenceRenderer
   readonly availability?: TranscriptAvailability
-  readonly history?: TranscriptHistory
+  readonly history: TranscriptHistory
   readonly emptyState?: React.ReactNode | TranscriptEmptyState
   /** Workbench conversation key for the owning surface's scroll memory. */
   readonly viewportKey?: string
@@ -248,7 +248,7 @@ export function LiveActivity({ state, startedAt, now }: { readonly state: LiveAc
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, ref }: TranscriptProps) {
+export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history, emptyState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, ref }: TranscriptProps) {
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
   // adopted messages a task later. Recording the snapshot after its commit is the adoption epoch.
@@ -266,6 +266,12 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
     }
     return ids
   }, [turns])
+  // Turn ids are valid jump targets, but are not message ids the runtime can publish.
+  const jumpTargetIds = React.useMemo(() => {
+    const ids = new Set(sourceIds)
+    for (const turn of turns) ids.add(turn.id)
+    return ids
+  }, [sourceIds, turns])
   const unpublished = React.useMemo(() => [...sourceIds].filter(id => !published.has(id)), [sourceIds, published])
   const adoption = React.useContext(RuntimeAdoptedIds)
   const getHeldKey = () => {
@@ -327,7 +333,7 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
       {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} />}
       {running !== undefined && <><div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div><span data-testid="run-elapsed">Running{Number.isFinite(started) && started <= now ? ` · ${formatWorkDuration(now - started) || '<1s'}` : ''}</span></>}
     </header>
-    <ErrorOverlayHost lane><EmbraceVirtualScrollViewport key={viewportKey} ref={ref} items={rows} sourceIds={sourceIds} history={history} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
+    <ErrorOverlayHost lane><EmbraceVirtualScrollViewport key={viewportKey} ref={ref} items={rows} sourceIds={jumpTargetIds} history={history} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
       empty={empty}
       boundary={request => history._tag === 'Complete' && committed.length === 0 ? null : <div data-testid="history-boundary" data-history={history._tag.toLowerCase()} {...stylex.props(styles.historyBoundary)}>
         {history._tag === 'Complete' ? <span data-testid="history-start" {...stylex.props(styles.historyNote)}>Start of conversation</span>

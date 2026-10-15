@@ -4,7 +4,7 @@ import { renderToString } from 'react-dom/server'
 import { hydrateRoot } from 'react-dom/client'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { Transcript, type TranscriptHistory, type TranscriptTurn } from './assistant-ui/composition/Transcript'
+import { Transcript, type TranscriptHandle, type TranscriptHistory, type TranscriptTurn } from './assistant-ui/composition/Transcript'
 import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
 import type { TextItem } from './assistant-ui/embrace-data/model'
 import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
@@ -61,6 +61,31 @@ function Hydration({ scheme = 'dark' }: { scheme?: Scheme }) {
     return () => root.unmount()
   }, [])
   return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><section ref={host} data-testid="hydration-host" {...stylex.props(styles.frame)} dangerouslySetInnerHTML={{ __html: markup }} /></main>
+}
+function AdoptionJump({ scheme = 'dark' }: { scheme?: Scheme }) {
+  const ref = React.useRef<TranscriptHandle>(null)
+  const host = React.useRef<HTMLElement>(null)
+  const [requested, setRequested] = React.useState(false)
+  const loaded = React.useMemo(() => turns.slice(requested ? 98 : 100, 120), [requested])
+  const messages = React.useMemo(() => loaded.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]), [loaded])
+  const started = React.useRef(false)
+  const [beforeAdoption, setBeforeAdoption] = React.useState(false)
+  const [superseded, setSuperseded] = React.useState('')
+  const [anchored, setAnchored] = React.useState('')
+  const [missing, setMissing] = React.useState('')
+  React.useLayoutEffect(() => {
+    if (!requested || started.current) return
+    started.current = true
+    // Run in the snapshot's layout commit, before the runtime's passive adoption.
+    setBeforeAdoption(host.current?.querySelector('[data-item-id="paging/99"]') === null)
+    void ref.current!.jumpTo('paging/98').then(result => setSuperseded(result._tag))
+    void ref.current!.jumpTo('paging/99').then(result => setAnchored(result._tag))
+  }, [requested])
+  return <main ref={host} data-scheme={scheme} data-before-adoption={beforeAdoption} data-superseded={superseded} data-anchored={anchored} data-missing={missing} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <button type="button" disabled={requested} onClick={() => setRequested(true)}>Adopt page and jump</button>
+    <button type="button" onClick={() => { void ref.current!.jumpTo('paging/absent').then(result => setMissing(result._tag)) }}>Jump to absent turn</button>
+    <section aria-label="Jump during runtime adoption" {...stylex.props(styles.frame)}><EmbraceRuntimeProvider options={{ messages, onNew: async () => {} }}><Transcript ref={ref} title="Adoption jump" turns={loaded} history={{ _tag: 'Complete' }} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} /></EmbraceRuntimeProvider></section>
+  </main>
 }
 const meta = { title: 'Fractal UI/Transcript paging', component: Paging, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', state: 'more' }, argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] }, state: { control: 'select', options: ['more', 'complete', 'loading', 'error'] } } } satisfies Meta<typeof Paging>
 export default meta
@@ -132,3 +157,21 @@ export const PendingHydration: Story = { render: args => <Hydration scheme={args
   await assertSingle()
 } }
 export const AllStates: Story = { render: args => <main {...stylex.props(styles.states)}>{(['complete', 'more', 'loading', 'error'] as const).map(state => <section key={state} aria-label={`${state} paging state`}><h2>{state}</h2><Paging state={state} scheme={args.scheme} embedded /></section>)}</main> }
+
+export const JumpDuringAdoption: Story = { render: args => <AdoptionJump scheme={args.scheme} />, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const host = canvasElement.querySelector('[data-before-adoption]')!
+  await waitFor(() => expect(canvasElement.querySelectorAll('[data-testid="transcript-turn"]').length).toBeGreaterThan(0))
+  await userEvent.click(canvas.getByRole('button', { name: 'Adopt page and jump' }))
+  await waitFor(() => expect(host).toHaveAttribute('data-anchored', 'Anchored'))
+  expect(host).toHaveAttribute('data-before-adoption', 'true')
+  expect(host).toHaveAttribute('data-superseded', 'Superseded')
+  const lane = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]')!
+  await waitFor(() => {
+    const target = lane.querySelector<HTMLElement>('[data-embrace-entry-id="paging/99"]')
+    expect(target).not.toBeNull()
+    expect(Math.abs(target!.getBoundingClientRect().top - lane.getBoundingClientRect().top)).toBeLessThan(4)
+  })
+  await userEvent.click(canvas.getByRole('button', { name: 'Jump to absent turn' }))
+  await waitFor(() => expect(host).toHaveAttribute('data-missing', 'Missing'))
+} }
