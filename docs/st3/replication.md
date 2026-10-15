@@ -897,3 +897,31 @@ After a partition, each node continues local work. A later exchange transfers ev
 If two nodes differ, inspect unresolved records and peer errors first. Publish a replacement repair when a record needs correction.
 
 Do not copy one live SQLite file over another. A file copy can discard concurrent authority and local runtime state.
+
+### Carrier evidence for exchanges
+
+Replication and fleet status expose optional `last_successful_exchange` and
+`last_failed_exchange` per peer. Each describes the last **locally initiated**
+exchange or attempt of that outcome and records `at_unix_ms`, the locally dialed
+`carrier` (`tailscale`, `fabric`, `loopback`, or `unknown`), and, for Fabric,
+`fabric_route: "unknown"`. A failed record names the attempted carrier; a
+successful record names the carrier of the accepted exchange. Client sync notices
+expose the same two optional records with an ISO timestamp in `at`.
+
+These are two independent host-local records kept in memory, never replicated
+claims or a growing history. A successful fallback replaces the successful
+record and preserves the failed one, even after the existing `last_error` clears.
+An incoming exchange updates ordinary last-seen status but preserves the outbound
+carrier record and its original timestamp. It cannot establish an incoming carrier:
+Fabric tunnels can arrive on loopback. An inbound-only peer has no carrier record;
+absence means unknown/unavailable evidence, not an inferred loopback route. An older
+worker's locally initiated success can still have carrier `unknown`.
+Restart clears both records;
+absence means evidence is unavailable, even when durable last-seen status exists.
+Worker phase changes, connectivity events and separate probes do not rewrite them.
+
+The worker captures a Fabric route before converting it to its loopback tunnel
+URL. Fabric currently supplies no direct/relay evidence for that exact dial or
+stream. Probe transport, connection presence snapshots and session lifetime
+counters cannot prove the path used by an earlier exchange. Part 2 of #2697
+requires Fabric API evidence; this status addition reports `unknown` meanwhile.

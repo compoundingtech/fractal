@@ -481,8 +481,8 @@ done`,
     'evidence-note-linux-gate': {
       name: 'evidence-note-linux-gate',
       needs: ['linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries', ...evidenceStepNames],
-      // Only the merge queue and main sign; a pull request, even from this repository, never gets the key.
-      if: "${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}",
+      // The merge queue, main and pull requests from this repository sign; a fork never gets the key.
+      if: "${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}",
       'runs-on': 'ubuntu-latest',
       environment: evidenceEnvironment,
       permissions: { contents: 'write' },
@@ -491,6 +491,9 @@ done`,
       env: {
         EVIDENCE_PUSH_TOKEN: '${{ github.token }}',
         PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+        PR_BASE_SHA: '${{ github.event.pull_request.base.sha }}',
+        PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+        PR_USER: '${{ github.event.pull_request.user.login }}',
         NEEDS_JSON: '${{ toJSON(needs) }}',
       },
       steps: [
