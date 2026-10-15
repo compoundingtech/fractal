@@ -71,7 +71,7 @@ mod presentation;
 
 use presentation::{
     OutputStyle, follow_snapshot, glance, mission_run_signature, relative_time,
-    render_attention_show, render_generation, render_generations, render_host_facts,
+    render_attention_show, render_claim_lease, render_generation, render_generations, render_host_facts,
     render_human_value, render_mission_run_page, render_revision_proposal, render_step_run,
     shell_argument,
 };
@@ -17309,7 +17309,12 @@ async fn run_work(
                 let ClientResource::Work(work) = &response.value else {
                     anyhow::bail!("`{normalized}` is not a work resource");
                 };
-                print!("{}", render_client_work_detail(work));
+                let driver_held = claim_has_driver(
+                    client,
+                    work.claimant.as_deref(),
+                    work.claim_incarnation.as_deref(),
+                ).await?;
+                print!("{}", render_client_work_detail(work, driver_held));
                 Ok(())
             }
         }
@@ -17485,7 +17490,7 @@ async fn run_work(
     }
 }
 
-fn render_client_work_detail(work: &st3_client::Work) -> String {
+fn render_client_work_detail(work: &st3_client::Work, driver_held: bool) -> String {
     use std::fmt::Write as _;
 
     let mut output = String::new();
@@ -17506,6 +17511,19 @@ fn render_client_work_detail(work: &st3_client::Work) -> String {
     }
     if let Some(incarnation) = &work.submitted_incarnation {
         let _ = writeln!(output, "Submitted incarnation: {incarnation}");
+    }
+    if let Some(expires) = work.claim_expires_at_unix_ms {
+        let _ = writeln!(
+            output,
+            "Lease: {}",
+            render_claim_lease(
+                &work.header.id,
+                work.claimant.as_deref(),
+                work.claim_incarnation.as_deref(),
+                u128::from(expires),
+                driver_held,
+            )
+        );
     }
     if let Some(nudged) = work
         .nudged_at_unix_ms
@@ -17766,9 +17784,19 @@ async fn post_work(
         print_value(&response, true)
     } else {
         if action == "claim" {
+            let driver_held = claim_has_driver(
+                client,
+                response.claimant.as_deref(),
+                response.claim_incarnation.as_deref(),
+            ).await?;
             print!(
                 "{}",
-                render_step_run(&response, OutputStyle::stdout(), current_unix_ms()?)
+                render_step_run(
+                    &response,
+                    OutputStyle::stdout(),
+                    current_unix_ms()?,
+                    driver_held,
+                )
             );
             if let Some((node, documents)) = host_facts(client).await {
                 print!(
@@ -24203,6 +24231,31 @@ fn renewal_lost_its_claim(error: &anyhow::Error) -> bool {
     )
 }
 
+async fn claim_has_driver(
+    client: &Client,
+    claimant: Option<&str>,
+    incarnation: Option<&str>,
+) -> Result<bool> {
+    let Some(subject) = claimant.filter(|subject| subject.starts_with("agent/")) else {
+        return Ok(false);
+    };
+    let Some(incarnation) = incarnation else {
+        return Ok(false);
+    };
+    let status: StatusResponse = client
+        .get(&format!(
+            "/v1/status?subject={}&harness_only=true",
+            urlencoding::encode(subject)
+        ))
+        .await?;
+    let harness = status
+        .subjects
+        .iter()
+        .find(|candidate| candidate.subject == subject)
+        .and_then(|candidate| candidate.harness.as_ref());
+    Ok(claim_has_active_harness(Some(incarnation), harness))
+}
+
 fn work_claim_is_held_by(step: &StepRunView, subject: &str) -> bool {
     matches!(
         step.status.as_str(),
@@ -24216,10 +24269,13 @@ fn work_claim_has_active_harness(
     harness: Option<&CurrentHarnessView>,
 ) -> bool {
     work_claim_is_held_by(step, subject)
-        && harness.is_some_and(|harness| {
-            harness.state != "ended"
-                && step.claim_incarnation.as_deref() == Some(harness.incarnation_id.as_str())
-        })
+        && claim_has_active_harness(step.claim_incarnation.as_deref(), harness)
+}
+
+fn claim_has_active_harness(incarnation: Option<&str>, harness: Option<&CurrentHarnessView>) -> bool {
+    harness.is_some_and(|harness| {
+        harness.state != "ended" && incarnation == Some(harness.incarnation_id.as_str())
+    })
 }
 
 fn unix_minute() -> Result<u64> {
@@ -29648,14 +29704,14 @@ mod tests {
         let mut work = work.clone();
         work.blocked_reason = Some("the step's lease expired".into());
         work.state = "claimed".into();
-        let claimed = render_client_work_detail(&work);
+        let claimed = render_client_work_detail(&work, false);
         assert!(!claimed.contains("Blocked:"), "{claimed}");
         assert!(
             claimed.contains("\nReason: the step's lease expired\n"),
             "{claimed}"
         );
         work.state = "blocked".into();
-        let blocked = render_client_work_detail(&work);
+        let blocked = render_client_work_detail(&work, false);
         assert!(
             blocked.contains("\nBlocked: the step's lease expired\n"),
             "{blocked}"
@@ -29669,13 +29725,35 @@ mod tests {
             panic!("expected work fixture");
         };
         let mut work = work.clone();
-        assert!(!render_client_work_detail(&work).contains("Nudged:"));
+        assert!(!render_client_work_detail(&work, false).contains("Nudged:"));
         work.nudged_at_unix_ms = Some(1_791_581_505_000);
-        let rendered = render_client_work_detail(&work);
+        let rendered = render_client_work_detail(&work, false);
         assert!(
             rendered.contains("\nNudged: 2026-10-09T21:31:45Z ("),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn work_detail_explains_managed_and_unmanaged_leases() {
+        let page = fixture_product_page(&["work"], false);
+        let ClientResource::Work(work) = &page.items[0] else {
+            panic!("expected work fixture");
+        };
+        let mut work = work.clone();
+        work.claimant = Some("agent/example".into());
+        work.claim_incarnation = Some("incarnation/current".into());
+        work.claim_expires_at_unix_ms = Some(62_001);
+        let managed = render_client_work_detail(&work, true);
+        assert!(managed.contains("\nLease: The st driver renews the lease on claimed st work. A managed agent must not run a renewal loop.\n"));
+        assert!(!managed.contains("st work renew"));
+        let unmanaged = render_client_work_detail(&work, false);
+        assert!(unmanaged.contains(&format!("\nLease: The lease expires at 1970-01-01T00:01:02.001Z. Renew it with: st work renew {} --as agent/example --incarnation incarnation/current\n", work.header.id)));
+        assert!(!unmanaged.contains("st driver renews"));
+        work.claim_incarnation = None;
+        let unmanaged = render_client_work_detail(&work, false);
+        assert!(unmanaged.contains(" --as agent/example\n"));
+        assert!(!unmanaged.contains("--incarnation"));
     }
 
     #[test]
