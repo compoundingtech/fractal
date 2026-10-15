@@ -3,12 +3,14 @@
 //! or by it) through sealing and through a frozen copy of the sealing functions as they were
 //! before preparation (main at 5bf3105b9), and compare every stored row. Then they change the
 //! store between preparation and the writer: a blob stored or dropped, a claim signature that
-//! arrives, the member key, the fleet id or the keyring replaced, a batch sealed by another pass,
-//! a claim deleted, an own envelope's signature removed.
+//! arrives, the member key, the fleet id or the node key replaced, an agent's key replaced, a
+//! keyring change in progress at the loan, keys added for principals no claim is signed as, a
+//! batch sealed by another pass, a claim deleted, an own envelope's signature removed. And they
+//! hold a chunk to its payload budget.
 use super::runtime::Plain;
 use super::*;
 use crate::fleet::{MemberKey, envelope_signature_message, verify_signature};
-use crate::principal::ClaimSignature;
+use crate::principal::{ClaimSignature, HeldKey, Judged, Role, content_digest};
 use std::cell::Cell;
 
 const FLEET: &str = "3e7a9c41-5d2b-4f86-b0c3-9a1e6d4f2b58";
@@ -68,6 +70,23 @@ fn claims(connection: &Connection) -> Vec<ClaimRecord> {
         .unwrap()
 }
 
+/// Whether `signature` is a genuine signature of `claim`, checked independently of sealing.
+fn verifies(claim: &ClaimRecord, signature: &ClaimSignature) -> bool {
+    signature.verifies(&Judged {
+        id: &claim.id,
+        subject: &claim.subject,
+        kind: &claim.kind,
+        actor: claim.actor.as_deref(),
+        content: content_digest(
+            &claim.subject,
+            &claim.kind,
+            claim.actor.as_deref(),
+            &claim.body,
+        ),
+        fields: &Value::Null,
+    })
+}
+
 /// Run `change` once, after sealing prepares its next chunk and before it takes the writer.
 fn before_the_loan(change: impl FnOnce(&Store) + 'static) {
     SEAL_BEFORE_LOAN.with(|hook| *hook.borrow_mut() = Some(Box::new(change)));
@@ -114,7 +133,7 @@ fn sealed_by_the_old_passes<T>(store: &Store, read: impl FnOnce(&Connection) -> 
         .unwrap();
         seeded_through = through;
     }
-    read(&*transaction)
+    read(&transaction)
 }
 
 /// Every row sealing writes, in key order, without the time a signature was stored.
@@ -303,6 +322,10 @@ fn a_claim_signed_while_preparing_is_signed_as_the_old_sealing_signs_it() {
             Some(&serde_json::from_str::<ClaimSignature>(&stored).unwrap()),
             "{subject} carries the signature stored for it"
         );
+        assert!(
+            verifies(claim, &payload.claim_signatures[&claim.id]),
+            "{subject}'s signature is genuine"
+        );
     }
     assert_eq!(envelopes_signed_by(&reader, &key, FLEET), 3);
 }
@@ -406,7 +429,10 @@ fn a_member_key_fleet_id_or_keyring_changed_after_preparation_is_signed_again() 
                     )
                     .unwrap();
             }
-            _ => store.keyring.set_node(store.keyring.node()),
+            // Only the node key, which signs these claims; the member key stays.
+            _ => store
+                .keyring
+                .set_node(Some(Arc::new(MemberKey::generate().unwrap().0))),
         });
         assert_eq!(seal(&store), 1, "{change}");
         let (key, fleet_id) = match change {
@@ -526,7 +552,113 @@ fn an_own_envelope_found_unsigned_under_the_writer_is_prepared_again() {
 }
 
 #[test]
-fn preparation_stops_at_its_byte_budget_and_prepares_a_larger_batch_alone() {
+fn a_claim_whose_signing_key_changes_after_preparation_is_signed_with_the_new_key() {
+    let store = node("juniper");
+    keyed(&store);
+    // An agent's claim: the node mints the agent a key and grants it first.
+    let claim = store
+        .append_claim(&ClaimInput {
+            subject: "note/by-an-agent".into(),
+            kind: "example.note".into(),
+            actor: Some("agent/scribe".into()),
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let minted = store
+        .keyring
+        .signing("agent/scribe")
+        .expect("the node holds a key for its agent");
+    let replacement = Arc::new(MemberKey::generate().unwrap().0);
+    let held = replacement.clone();
+    before_the_loan(move |store| {
+        store.keyring.insert(HeldKey {
+            principal: "agent/scribe".into(),
+            role: Role::Agent,
+            key: held,
+            chain: vec!["claim/replacement-grant".into()],
+        });
+    });
+    assert_eq!(seal(&store), 1);
+    let payloads = payloads(&store.readers.get());
+    let signature = &payloads["note/by-an-agent"].claim_signatures[&claim.id];
+    assert_ne!(signature.key, minted.key.public());
+    assert_eq!(signature.key, replacement.public());
+    assert_eq!(signature.signer, "agent/scribe");
+    assert_eq!(signature.chain, ["claim/replacement-grant"]);
+    assert!(verifies(&claim, signature));
+}
+
+#[test]
+fn a_keyring_change_in_progress_at_the_loan_prepares_again() {
+    let store = node("larch");
+    keyed(&store);
+    note(&store, "note/sealed-at-a-boundary", BTreeMap::new());
+    let target = max_batch_rowid(&store.readers.get()).unwrap();
+    let prepared = store.prepare_seal(target, usize::MAX).unwrap().unwrap();
+    let mut connection = store.connection.write();
+    let written = store.keyring.changing_while(|| {
+        let transaction = connection.transaction().unwrap();
+        store.seal_prepared_tx(&transaction, &prepared).unwrap()
+    });
+    assert!(!written, "keys being changed are not a settled keyring");
+    let transaction = connection.transaction().unwrap();
+    assert!(
+        store.seal_prepared_tx(&transaction, &prepared).unwrap(),
+        "once the change completes without touching these claims' keys, the chunk is current"
+    );
+}
+
+thread_local! {
+    static BYSTANDERS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Give the keyring a key for a principal no claim is signed as, and again before the next loan.
+fn add_a_bystander_key(store: &Store) {
+    let count = BYSTANDERS.with(|count| {
+        count.set(count.get() + 1);
+        count.get()
+    });
+    store.keyring.insert(HeldKey {
+        principal: format!("agent/bystander-{count}"),
+        role: Role::Agent,
+        key: Arc::new(MemberKey::generate().unwrap().0),
+        chain: Vec::new(),
+    });
+    before_the_loan(add_a_bystander_key);
+}
+
+#[test]
+fn keys_added_for_other_principals_before_every_loan_do_not_hold_sealing_back() {
+    let store = node("maple");
+    keyed(&store);
+    // Three chunks.
+    for index in 0..130 {
+        note(
+            &store,
+            &format!("note/among-bystanders-{index}"),
+            BTreeMap::new(),
+        );
+    }
+    BYSTANDERS.with(|count| count.set(0));
+    before_the_loan(add_a_bystander_key);
+    assert_eq!(seal(&store), 0);
+    SEAL_BEFORE_LOAN.with(|hook| hook.borrow_mut().take());
+    assert_eq!(
+        BYSTANDERS.with(Cell::get),
+        3,
+        "a key arrived before each loan"
+    );
+    assert_eq!(
+        store.seeded_batch_rowid.load(Ordering::Acquire),
+        max_batch_rowid(&store.readers.get()).unwrap()
+    );
+}
+
+#[test]
+fn preparation_keeps_a_chunk_within_its_byte_budget_and_a_larger_batch_alone() {
     let store = node("ginkgo");
     keyed(&store);
     for index in 0..3 {
@@ -535,20 +667,72 @@ fn preparation_stops_at_its_byte_budget_and_prepares_a_larger_batch_alone() {
     let target = max_batch_rowid(&store.readers.get()).unwrap();
     let all = store.prepare_seal(target, usize::MAX).unwrap().unwrap();
     assert_eq!((all.batches.len(), all.through), (3, target));
-    let alone = store.prepare_seal(target, 1).unwrap().unwrap();
+    let sizes = all
+        .batches
+        .iter()
+        .map(|sealed| sealed.payload.len())
+        .collect::<Vec<_>>();
+    // The batches kept within `budget`, and their payload bytes.
+    let kept = |budget: usize| {
+        let prepared = store.prepare_seal(target, budget).unwrap().unwrap();
+        let last = prepared.batches.last().unwrap().batch.rowid;
+        assert_eq!(
+            prepared.through, last,
+            "the frontier stops after the last batch kept"
+        );
+        let bytes = prepared
+            .batches
+            .iter()
+            .map(|sealed| sealed.payload.len())
+            .sum::<usize>();
+        (prepared.batches.len(), bytes)
+    };
+    assert_eq!(kept(1), (1, sizes[0]), "a larger first batch alone");
+    assert_eq!(kept(sizes[0] + sizes[1]), (2, sizes[0] + sizes[1]));
+    assert_eq!(kept(sizes[0] + sizes[1] - 1), (1, sizes[0]));
+    // Two batches leave room, but not for all of the third: it waits for the next chunk.
     assert_eq!(
-        alone.batches.len(),
-        1,
-        "a batch larger than the budget is prepared alone"
+        kept(sizes[0] + sizes[1] + sizes[2] / 2),
+        (2, sizes[0] + sizes[1])
     );
-    assert_eq!(alone.through, alone.batches[0].batch.rowid);
-    let budget = alone.batches[0].payload.len() + 1;
-    let two = store.prepare_seal(target, budget).unwrap().unwrap();
-    assert_eq!(two.batches.len(), 2, "the second batch reaches the budget");
-    assert_eq!(two.through, two.batches[1].batch.rowid);
-    assert!(two.through < target);
     assert_eq!(seal(&store), 0);
     assert_eq!(payloads(&store.readers.get()).len(), 3);
+}
+
+#[test]
+fn an_oversized_batch_after_a_small_one_waits_and_is_then_sealed_alone() {
+    let store = node("hawthorn");
+    keyed(&store);
+    let large = store.put_blob(&[7_u8; 64 * 1024]).unwrap();
+    note(&store, "note/small-before", BTreeMap::new());
+    note(&store, "note/oversized", naming(&large));
+    note(&store, "note/small-after", BTreeMap::new());
+    let target = max_batch_rowid(&store.readers.get()).unwrap();
+    let rowids = store
+        .readers
+        .get()
+        .prepare("SELECT rowid FROM batches ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| row.get::<_, i64>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(rowids.len(), 3);
+    let all = store.prepare_seal(target, usize::MAX).unwrap().unwrap();
+    let budget = all.batches[0].payload.len() * 2;
+    assert!(all.batches[1].payload.len() > budget);
+    let prepared = store.prepare_seal(target, budget).unwrap().unwrap();
+    assert_eq!(prepared.batches.len(), 1, "the oversized batch waits");
+    assert_eq!(prepared.through, rowids[0]);
+    // Small, then oversized alone, then small: one chunk each.
+    for through in &rowids {
+        assert!(store.seal_local_batch_chunk_within(target, budget).unwrap());
+        assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), *through);
+    }
+    assert!(!store.seal_local_batch_chunk_within(target, budget).unwrap());
+    let payloads = payloads(&store.readers.get());
+    assert_eq!(payloads.len(), 3);
+    assert!(payloads["note/oversized"].blobs.contains_key(&large));
 }
 
 // The sealing functions as they were before preparation, verbatim from main at 5bf3105b9

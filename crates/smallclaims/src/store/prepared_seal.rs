@@ -12,11 +12,20 @@
 //! - each batch's claims;
 //! - which named blobs are stored;
 //! - each claim's stored signature;
-//! - the member key, the fleet id and the keyring's generation.
+//! - the member key and the fleet id;
+//! - for each claim it signed itself, who the keyring would have it signed as now: the key, the
+//!   principal, the principal acted for and the chain, read in one settled view of the keyring
+//!   (see `Keyring::settled`). A change to keys no claim of the chunk is signed with does not
+//!   matter.
 //!
 //! When any fact has changed, the transaction is not committed and the caller prepares the
 //! chunk again, off the writer. A committed chunk therefore holds what sealing under the writer
 //! would have stored from the same state, apart from the nonces of claim signatures made now.
+//! Every retry follows a change to one of these facts.
+//!
+//! Claims and blobs are compared by id and hash, not by content: both are content-addressed and
+//! never rewritten in place, so equal ids name equal bytes. The rereads do not detect a raw
+//! rewrite of a row under the same id.
 //!
 //! `seed_replica_envelopes_signed_tx` itself prepares and writes each batch in one transaction,
 //! so its other callers store exactly what they did before.
@@ -152,6 +161,31 @@ pub(crate) struct SealedBatch {
     pub(crate) payload: Vec<u8>,
     pub(crate) envelope_hash: String,
     records: Vec<SealedRecord>,
+    /// The claims this sealing signed itself, having found no stored signature.
+    fresh: Vec<FreshClaim>,
+}
+
+/// A claim sealing signed itself, with the signature it made: `None` when the keyring had no
+/// key to sign with.
+struct FreshClaim {
+    subject: String,
+    kind: String,
+    actor: Option<String>,
+    body: Value,
+    accepted_at_unix_ms: u128,
+    signature: Option<ClaimSignature>,
+}
+
+impl FreshClaim {
+    fn unsealed(&self) -> principals::Unsealed<'_> {
+        principals::Unsealed {
+            subject: &self.subject,
+            kind: &self.kind,
+            actor: self.actor.as_deref(),
+            body: &self.body,
+            accepted_at_unix_ms: self.accepted_at_unix_ms,
+        }
+    }
 }
 
 /// Seal `batch`: read its claims and the blobs they name, sign each claim without a stored
@@ -185,6 +219,7 @@ pub(crate) fn seal_batch(
     let mut stored_signatures = Vec::with_capacity(claims.len());
     let mut signatures = Vec::new();
     let mut claim_signatures = BTreeMap::new();
+    let mut fresh = Vec::new();
     for claim in &claims {
         let stored = connection
             .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
@@ -195,13 +230,24 @@ pub(crate) fn seal_batch(
             .and_then(|text| serde_json::from_str::<ClaimSignature>(text).ok());
         let signature = match (existing, sign) {
             (Some(signature), _) => Some(signature),
-            (None, Some(sign)) => sign(&principals::Unsealed {
-                subject: &claim.subject,
-                kind: &claim.kind,
-                actor: claim.actor.as_deref(),
-                body: &claim.body,
-                accepted_at_unix_ms: claim.accepted_at_unix_ms,
-            }),
+            (None, Some(sign)) => {
+                let signature = sign(&principals::Unsealed {
+                    subject: &claim.subject,
+                    kind: &claim.kind,
+                    actor: claim.actor.as_deref(),
+                    body: &claim.body,
+                    accepted_at_unix_ms: claim.accepted_at_unix_ms,
+                });
+                fresh.push(FreshClaim {
+                    subject: claim.subject.clone(),
+                    kind: claim.kind.clone(),
+                    actor: claim.actor.clone(),
+                    body: claim.body.clone(),
+                    accepted_at_unix_ms: claim.accepted_at_unix_ms,
+                    signature: signature.clone(),
+                });
+                signature
+            }
             (None, None) => None,
         };
         stored_signatures.push(stored);
@@ -259,6 +305,7 @@ pub(crate) fn seal_batch(
         payload,
         envelope_hash,
         records,
+        fresh,
     })
 }
 
@@ -362,7 +409,8 @@ pub(crate) struct EnvelopeSigner {
 pub(crate) struct PreparedSeal {
     pub(crate) seeded_through: i64,
     pub(crate) through: i64,
-    keyring_generation: u64,
+    /// The store it was prepared from: a preparation is written only to its own store.
+    origin: String,
     signer: Option<EnvelopeSigner>,
     pub(crate) batches: Vec<SealedBatch>,
     /// A member-key signature for each envelope the writer may find unsigned: those unsigned
@@ -392,15 +440,14 @@ impl Store {
     }
 
     /// Prepare the batches after the sealing frontier, through at most `SEAL_CHUNK_BATCHES`
-    /// batches up to `target`, stopping once the prepared payloads reach `budget` bytes. `None`
-    /// when the frontier has reached `target`.
+    /// batches up to `target`, keeping at most `budget` bytes of payload: a batch that would take
+    /// the chunk past it is left for the next chunk, unless it is the first, which is kept alone.
+    /// `None` when the frontier has reached `target`.
     pub(crate) fn prepare_seal(&self, target: i64, budget: usize) -> Result<Option<PreparedSeal>> {
         let seeded_through = self.seeded_batch_rowid.load(Ordering::Acquire);
         if seeded_through >= target {
             return Ok(None);
         }
-        // Read before signing: a change to the keys while this signs moves it.
-        let keyring_generation = self.keyring.generation();
         let reader = self.readers.get();
         let snapshot = reader.unchecked_transaction()?;
         let chunk_through: i64 = snapshot.query_row(
@@ -414,18 +461,19 @@ impl Store {
         let mut batches: Vec<SealedBatch> = Vec::new();
         let mut bytes = 0;
         for batch in unsealed_batches(&snapshot, Some(seeded_through), Some(chunk_through))? {
-            if !batches.is_empty() && bytes >= budget {
-                // The frontier stops after the last batch prepared; the rest is the next chunk's.
-                through = batches
-                    .last()
-                    .map_or(seeded_through, |sealed| sealed.batch.rowid);
-                break;
-            }
             let sealed = seal_batch(
                 &snapshot,
                 batch,
                 Some(&|claim: &principals::Unsealed<'_>| self.sign_unsealed(claim)),
             )?;
+            if !batches.is_empty() && bytes + sealed.payload.len() > budget {
+                // This batch would take the chunk past its budget, so it starts the next chunk,
+                // prepared again off the writer. The frontier stops after the last batch kept.
+                through = batches
+                    .last()
+                    .map_or(seeded_through, |kept| kept.batch.rowid);
+                break;
+            }
             bytes += sealed.payload.len();
             batches.push(sealed);
         }
@@ -466,7 +514,7 @@ impl Store {
         Ok(Some(PreparedSeal {
             seeded_through,
             through,
-            keyring_generation,
+            origin: self.origin.clone(),
             signer: signer.map(|(_, signer)| signer),
             batches,
             envelope_signatures,
@@ -481,7 +529,7 @@ impl Store {
         transaction: &Transaction<'_>,
         prepared: &PreparedSeal,
     ) -> Result<bool> {
-        if self.keyring.generation() != prepared.keyring_generation {
+        if prepared.origin != self.origin {
             return Ok(false);
         }
         let signer = self.envelope_signer(transaction)?;
@@ -505,6 +553,24 @@ impl Store {
             if !sealed_batch_current(transaction, sealed)? {
                 return Ok(false);
             }
+        }
+        // Each claim sealing signed itself is signed as the keyring would sign it now. A change
+        // to the keyring in progress or overlapping this read counts as a change.
+        let signers_unchanged = self.keyring.settled(|| {
+            prepared
+                .batches
+                .iter()
+                .flat_map(|sealed| &sealed.fresh)
+                .all(
+                    |fresh| match (self.claim_signer(&fresh.unsealed()), &fresh.signature) {
+                        (Some(signer), Some(signature)) => signer.signed(signature),
+                        (None, None) => true,
+                        _ => false,
+                    },
+                )
+        });
+        if signers_unchanged != Some(true) {
+            return Ok(false);
         }
         for sealed in &prepared.batches {
             write_sealed_batch_tx(transaction, &self.origin, sealed)?;

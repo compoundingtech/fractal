@@ -5614,9 +5614,14 @@ impl Store {
     /// checks that what it prepared from is unchanged and writes; otherwise it drops the loan and
     /// prepares again. See `prepared_seal`.
     fn seal_local_batch_chunk(&self, target: i64) -> Result<bool> {
+        self.seal_local_batch_chunk_within(target, prepared_seal::SEAL_PREPARED_BYTES)
+    }
+
+    /// Seal the next chunk, keeping its payload within `budget` bytes but for one larger batch.
+    fn seal_local_batch_chunk_within(&self, target: i64, budget: usize) -> Result<bool> {
         let prepared = {
             let _timing = time_stage(&self.replication_timers.snapshot);
-            self.prepare_seal(target, prepared_seal::SEAL_PREPARED_BYTES)?
+            self.prepare_seal(target, budget)?
         };
         let Some(prepared) = prepared else {
             return Ok(false);
@@ -5647,8 +5652,9 @@ impl Store {
         }
         // Something the chunk was prepared from changed. Dropping the transaction writes nothing;
         // the next pass prepares again, off the writer. Retries are bounded by input churn, not by
-        // a count: each one follows a commit (or a key change) that changed what this finite
-        // chunk reads, and a quiet store seals on the next pass.
+        // a count: each one follows a commit, or a change to a key a claim of this finite chunk
+        // is signed with (or a keyring change overlapping the writer's brief read of it), and a
+        // store quiet in those facts seals on the next pass.
         #[cfg(test)]
         SEALS_PREPARED_AGAIN.with(|count| count.set(count.get() + 1));
         Ok(true)
@@ -8595,13 +8601,17 @@ thread_local! {
     pub static ADMISSION_TRANSACTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// A change a test makes to the store between preparing a sealing chunk and taking its writer.
+#[cfg(test)]
+type SealHook = Box<dyn FnOnce(&Store)>;
+
 #[cfg(test)]
 thread_local! {
     static ADMISSION_MEMBERSHIP_FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     // One-shot deterministic control between preparing authority and acquiring its writer.
     static BEFORE_ADMISSION_LOAN: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
     // One-shot change to the store between preparing a sealing chunk and taking its writer.
-    static SEAL_BEFORE_LOAN: std::cell::RefCell<Option<Box<dyn FnOnce(&Store)>>> = const { std::cell::RefCell::new(None) };
+    static SEAL_BEFORE_LOAN: std::cell::RefCell<Option<SealHook>> = const { std::cell::RefCell::new(None) };
     /// Sealing chunks this thread prepared again because their store changed before the loan.
     static SEALS_PREPARED_AGAIN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
