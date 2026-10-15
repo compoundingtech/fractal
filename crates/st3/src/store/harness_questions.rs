@@ -126,9 +126,20 @@ impl Store {
         &self,
         observation: &QuestionObservation,
     ) -> Result<HarnessQuestion, St3Error> {
+        self.observe_harness_question_after_read(observation, || {})
+    }
+
+    fn observe_harness_question_after_read(
+        &self,
+        observation: &QuestionObservation,
+        after_read: impl FnOnce(),
+    ) -> Result<HarnessQuestion, St3Error> {
         let subject = subject(&observation.agent, &observation.session, &observation.native_id);
         let current = self.harness_question_held(&subject)?;
-        let head = self.latest_claim(&subject, None).map_err(internal)?.map(|claim| claim.id);
+        // Fence the observation we inspected, not a head that may already contain a
+        // concurrent resolution or replacement observation.
+        let expected = current.as_ref().map(|question| question.revision.clone());
+        after_read();
         if let Some(current) = current {
             if current.resolution.is_some() {
                 return Err(St3Error::new(
@@ -142,7 +153,7 @@ impl Store {
             {
                 return Ok(current);
             }
-        } else if head.is_some() {
+        } else if self.latest_claim(&subject, None).map_err(internal)?.is_some() {
             // Only a question resolved and dropped leaves nothing to fold; it stays ended.
             return Err(St3Error::new("harness-question-resolved", "the question already ended")
                 .with_detail("question", subject));
@@ -159,7 +170,7 @@ impl Store {
                 "questions": observation.questions,
             })),
             evidence: Vec::new(),
-            expected_subject: Some(head),
+            expected_subject: Some(expected),
             idempotency_key: None,
         })?;
         self.harness_question_held(&subject)?
@@ -267,6 +278,32 @@ mod tests {
         let second = store.observe_harness_question(&changed).unwrap();
         assert_ne!(second.revision, first.revision);
         assert_eq!(second.id, first.id);
+    }
+
+    #[test]
+    fn a_resolution_between_observation_read_and_append_refuses_new_content() {
+        let store = Store::open_memory("operator").unwrap();
+        let question = store.observe_harness_question(&observation()).unwrap();
+        let mut changed = observation();
+        changed.questions[0].options = 3;
+        let error = store
+            .observe_harness_question_after_read(&changed, || {
+                store
+                    .resolve_harness_question(
+                        &question.id,
+                        Status::Answered,
+                        &question.revision,
+                        &answer(1),
+                        None,
+                    )
+                    .unwrap();
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "stale-subject");
+        let held = store.harness_question_held(&question.id).unwrap().unwrap();
+        assert_eq!(held.revision, question.revision);
+        assert_eq!(held.questions, question.questions);
+        assert_eq!(held.resolution.unwrap().revision, question.revision);
     }
 
     #[test]
