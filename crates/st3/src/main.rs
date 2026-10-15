@@ -623,7 +623,7 @@ async fn lock_fleet_admission(
 }
 
 async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool) -> Result<()> {
-    let mut config = Config::load_client_unvalidated(None)?.0;
+    let mut config = Config::load_unvalidated(None)?;
     // Explicit admissions can repair a pin after their prior attempt saved membership.
     // Other controls must use the daemon's resolved identity, including leave's runtime check.
     if !matches!(&command, FleetCommand::Join(_) | FleetCommand::Create(_)) {
@@ -1357,7 +1357,7 @@ fn directory_is_empty(path: &Path) -> bool {
 }
 
 async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
-    let config = Config::load_client_unvalidated(None)?.0;
+    let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
     let config_dir = Config::default_path()
         .parent()
@@ -5124,7 +5124,7 @@ fn run_admission(command: AdmissionCommand, json_output: bool) -> Result<()> {
     };
     let state_dir = match build.state_dir {
         Some(path) => path,
-        None => Config::load_client_unvalidated(None)?.0.state_dir,
+        None => Config::load_unvalidated(None)?.state_dir,
     };
     let cache = state_dir.join("drivers/sessions/harness-admission");
     let driver = if build.harness == "omp" {

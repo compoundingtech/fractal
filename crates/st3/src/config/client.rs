@@ -336,6 +336,15 @@ future_route = 7
         assert!(super::super::Config::load_unvalidated(Some(&path)).is_err());
         assert!(super::super::Config::load(Some(&path)).is_err());
         assert!(super::super::Config::load_with_fleet(Some(&path)).is_err());
+        // An unknown key in a nested peer row is independently rejected by the real
+        // strict loader; client support does not change PeerConfig's shared derive.
+        std::fs::write(
+            &path,
+            "[[peers]]\nname = 'peer'\nurl = 'http://127.0.0.1:9000'\nfuture_peer_key = true\n",
+        )
+        .unwrap();
+        assert!(super::super::Config::load_client_unvalidated(Some(&path)).is_ok());
+        assert!(super::super::Config::load_unvalidated(Some(&path)).is_err());
     }
 
     #[test]
@@ -344,5 +353,19 @@ future_route = 7
         let (parsed, unknown) = parse(&toml::to_string(&config).unwrap()).unwrap();
         assert_eq!(parsed, config);
         assert!(unknown.is_empty());
+    }
+    #[test]
+    fn client_warning_caps_paths_and_names_in_one_diagnostic() {
+        let text = (0..20)
+            .map(|index| format!("{}_{index} = 'hidden-value'\n", "k".repeat(500)))
+            .collect::<String>();
+        let (_, unknown) = parse(&text).unwrap();
+        assert_eq!(unknown.len(), 20);
+        let warning = super::super::Config::unknown_client_keys_message(&unknown);
+        assert!(warning.len() < 4096);
+        assert_eq!(warning.lines().count(), 1);
+        assert!(!warning.contains(&"k".repeat(161)));
+        assert!(warning.contains("and 4 more key paths"));
+        assert!(!warning.contains("hidden-value"));
     }
 }

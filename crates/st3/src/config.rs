@@ -447,10 +447,31 @@ impl Config {
         Ok((config, unknown))
     }
 
+    /// One bounded diagnostic, including shell completion; unknown values are never shown.
     pub fn unknown_client_keys_message(unknown: &[String]) -> String {
+        const MAX_NAMES: usize = 16;
+        const MAX_PATH_CHARS: usize = 160;
+        let mut names = unknown
+            .iter()
+            .take(MAX_NAMES)
+            .map(|path| {
+                let mut chars = path.chars();
+                let mut shown: String = chars.by_ref().take(MAX_PATH_CHARS).collect();
+                if chars.next().is_some() {
+                    shown.push_str("...");
+                }
+                shown
+            })
+            .collect::<Vec<_>>();
+        if unknown.len() > MAX_NAMES {
+            names.push(format!(
+                "... and {} more key paths",
+                unknown.len() - MAX_NAMES
+            ));
+        }
         format!(
             "ignoring unknown client config keys: {}; daemon configuration remains strict",
-            unknown.join(", ")
+            names.join(", ")
         )
     }
 

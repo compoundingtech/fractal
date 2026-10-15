@@ -113,9 +113,15 @@ restart the affected sessions through the normal coordinated lifecycle. Compare 
 Replacing installed files does not update a session pinned to an older executable or Nix path.
 
 New clients ignore unknown top-level and nested config keys with one stderr warning that lists
-escaped key paths, never their values. `st doctor` also lists those names. Known values still
-use the existing typed parser and validation; daemon startup, replication and policy reloads
-remain strict about unknown settings. Setup keeps unknown keys when it merges configuration.
+escaped key paths, never their values. This warning is once per process, including shell
+completion: at most 16 paths, each capped at 160 characters, with explicit truncation notices.
+`st doctor` lists the same bounded names and `--strict` fails on the warning. Known values
+still use the existing typed parser and validation. Daemon startup, replication, policy reloads
+and local configuration/state management (including fleet, uninstall and admission commands)
+remain strict about unknown settings. Setup rejects unknown keys before rewriting; it keeps
+its existing raw-TOML merge, which can reformat comments/order rather than preserving the
+original text. New restrictive client-visible settings must not rely on older clients honoring
+them: those clients can ignore an unknown restriction with only this warning.
 
 This change cannot repair clients already deployed with the older strict parser: the next
 key-adding upgrade still breaks those old clients once. Any install that adds a key must call

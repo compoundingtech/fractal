@@ -4720,6 +4720,26 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
     }
     let root = tempfile::tempdir().unwrap();
     let config_root = root.path().join("config");
+    // Make build-tools independently PASS so only the config warning can make
+    // strict doctor fail; none of these marker executables may be invoked.
+    let bin = root.path().join("tools");
+    std::fs::create_dir(&bin).unwrap();
+    std::os::unix::fs::symlink(
+        st_runtime::resolve_executable("env", &std::env::vars().collect()).unwrap(),
+        bin.join("env"),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    for tool in ["cargo", "rustc", "sccache", "git", "nix", "mold"] {
+        let path = bin.join(tool);
+        std::fs::write(&path, "#!/bin/sh\nexit 33\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(
+        root.path().join(".bash_profile"),
+        format!("export PATH='{}'\n", bin.display()),
+    )
+    .unwrap();
     std::fs::create_dir_all(config_root.join("st3")).unwrap();
     std::fs::write(config_root.join("st3/config.toml"),
         "node = 'fixture'\nseat_priority = 'normal'\nfuture_root = 'never-print-this'\n[github]\nfuture_nested = 'also-private'\n").unwrap();
@@ -4739,6 +4759,13 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
     );
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     let checks = json["checks"].as_array().unwrap();
+    assert_eq!(
+        checks
+            .iter()
+            .find(|row| row["name"] == "build-tools")
+            .unwrap()["status"],
+        "pass"
+    );
     let check = checks
         .iter()
         .find(|row| row["name"] == "client-config")
@@ -4758,4 +4785,85 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
         assert!(!text.contains("never-print-this"));
         assert!(!text.contains("also-private"));
     }
+    let strict = st3::test_support::command(test_bin!("st3-fixture"))
+        .env_remove("ST_AGENT")
+        .env_remove("ST_MISSION_RUN")
+        .env("HOME", root.path())
+        .env("XDG_CONFIG_HOME", &config_root)
+        .env("XDG_STATE_HOME", root.path().join("state"))
+        .args(["--json", "doctor", "--developer", "--strict"])
+        .output()
+        .unwrap();
+    assert!(
+        !strict.status.success(),
+        "strict doctor must fail on ignored config keys"
+    );
+    let strict_json: Value = serde_json::from_slice(&strict.stdout).unwrap();
+    assert_eq!(strict_json["status"], "warn");
+    assert!(
+        strict_json["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"] == "client-config")
+    );
+    assert!(String::from_utf8_lossy(&strict.stderr).contains("strict mode"));
+    std::fs::write(
+        config_root.join("st3/config.toml"),
+        "node = 'fixture'\nseat_priority = 'normal'\n",
+    )
+    .unwrap();
+    let valid = st3::test_support::command(test_bin!("st3-fixture"))
+        .env_remove("ST_AGENT")
+        .env_remove("ST_MISSION_RUN")
+        .env("HOME", root.path())
+        .env("XDG_CONFIG_HOME", &config_root)
+        .env("XDG_STATE_HOME", root.path().join("state"))
+        .args(["--json", "doctor", "--developer", "--strict"])
+        .output()
+        .unwrap();
+    assert!(
+        valid.status.success(),
+        "strict doctor must succeed after the unknown keys are removed: {valid:?}"
+    );
+    let valid_json: Value = serde_json::from_slice(&valid.stdout).unwrap();
+    assert_eq!(valid_json["status"], "pass");
+    assert!(
+        !String::from_utf8_lossy(&valid.stderr).contains("ignoring unknown client config keys:")
+    );
+}
+
+#[test]
+fn setup_rejects_unknown_config_before_any_rewrite() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    let original = b"# retain this text\nnode = 'fixture'\nfuture_root = 'fixture-secret'\n[github]\nfuture_nested = true\n";
+    std::fs::write(&path, original).unwrap();
+    let output = st3::test_support::command(test_bin!("st3-fixture"))
+        .env_remove("ST_AGENT")
+        .env_remove("ST_MISSION_RUN")
+        .env("HOME", root.path())
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .env("XDG_STATE_HOME", root.path().join("state"))
+        .args(["setup", "--config"])
+        .arg(&path)
+        .args([
+            "--yes",
+            "--start",
+            "false",
+            "--install",
+            "false",
+            "--service",
+            "false",
+            "--harness",
+            "none",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown field"));
+    assert_eq!(std::fs::read(path).unwrap(), original);
 }
