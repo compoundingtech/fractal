@@ -1673,8 +1673,8 @@ fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> V
 }
 
 fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
-    // The work list's refresher ended: nothing publishes it until the daemon restarts.
-    if code == Some(published_lists::WORK_LIST_ENDED) {
+    // An ended list publishes nothing until the daemon restarts.
+    if matches!(code, Some(published_lists::WORK_LIST_ENDED | "runtime-list-ended")) {
         return false;
     }
     // An unconfirmed mutation needs the exact original request, not a generic
@@ -1749,6 +1749,8 @@ fn client_error_code(code: Option<&str>) -> String {
         | "rate-limited"
         | "runtime-not-local"
         | "runtime-authority-indeterminate"
+        | "runtime-list-not-ready"
+        | "runtime-list-ended"
         | "remote-unavailable"
         | "terminal-unavailable"
         | "conversation-content-invalidated"

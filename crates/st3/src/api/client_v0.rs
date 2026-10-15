@@ -12498,6 +12498,65 @@ mod tests {
             "an unchanged store index does not rebuild the list");
     }
 
+    #[tokio::test]
+    async fn published_runtimes_readiness_errors_survive_http_encoding() {
+        for ended in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            if ended {
+                let list = state.store.published_runtime_list();
+                let _wake = list.start();
+                list.end();
+            }
+            let session = ClientSession::for_tests_scoped("person/reader", "person/reader", &["read.projections"]);
+            let error = runtimes(State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session), Query(ClientListQuery::default())).await.unwrap_err();
+            let response = super::super::response_body::Context {
+                state, client_request: true, observation_report: false,
+                request_id: "request/runtime-readiness".into(), client_snapshot: None,
+                server: None, roster: false,
+            }.wrap(error.into_response()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(envelope["code"], if ended { "runtime-list-ended" } else { "runtime-list-not-ready" });
+            assert_eq!(envelope["retryable"], !ended);
+            assert_eq!(envelope["error_version"], "st3.client.error.v0");
+            assert_eq!(envelope["details"], json!({}));
+        }
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_repeated_first_pages_keep_existing_cursors() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for subject in ["agent/cache-a", "agent/cache-b", "agent/cache-c"] {
+            observe_published_runtime(&state, subject, "running", false);
+        }
+        publish_runtimes_once(&state);
+        let snapshot = new_client_snapshot(&state);
+        let query = ClientListQuery { limit: Some(1), ..ClientListQuery::default() };
+        let other = client_page_read(&state, &snapshot, "runtime-cache-probe",
+            vec![json!({"id":"first"}), json!({"id":"second"})], &query, true).unwrap();
+        let session = ClientSession::for_tests_scoped("person/reader", "person/reader", &["read.projections"]);
+        let (_, Json(first)) = runtimes(State(state.clone()), Extension(snapshot.clone()),
+            Extension(session.clone()), Query(query.clone())).await.unwrap();
+        let original = first.page.next_cursor.unwrap();
+        for _ in 0..33 {
+            let (_, Json(repeated)) = runtimes(State(state.clone()), Extension(snapshot.clone()),
+                Extension(session.clone()), Query(query.clone())).await.unwrap();
+            assert_eq!(repeated.page.next_cursor.as_deref(), Some(original.as_str()),
+                "identical first pages reuse the original cache entry and expiry");
+        }
+        let cursor = decode_client_cursor(&original).unwrap();
+        let (_, Json(next)) = runtimes(State(state.clone()), Extension(cursor.snapshot),
+            Extension(session), Query(ClientListQuery { cursor: Some(original), ..query.clone() })).await.unwrap();
+        assert_eq!(next.items[0]["owner_id"], "agent/cache-b");
+        let next_other = client_page_read(&state, &snapshot, "runtime-cache-probe", Vec::new(),
+            &ClientListQuery { cursor: other.page.next_cursor, ..query }, true).unwrap();
+        assert_eq!(next_other.items[0]["id"], "second");
+    }
+
     fn observe_published_runtime(state: &AppState, subject: &str, status: &str, terminal: bool) {
         state.store.append_claim(&ClaimInput {
             subject: subject.into(), kind: "runtime.observed".into(),

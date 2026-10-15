@@ -12,9 +12,11 @@ under that publication's snapshot and `published_at` time. Reads clone only the 
 page: they do not reduce runtime status or hash the complete collection. The shared
 collection refresher coalesces commits, runs one rebuild at a time, and pauses at least
 one second and as long as the preceding rebuild between attempts. Before the first
-publication, reads return HTTP 503 `runtime-list-not-ready`; a stopped refresher returns
-`runtime-list-ended`. Continuations retain the first page's frozen collection until its
-existing cursor expiry, including across republishes. Terminal permissions are applied to
+publication, reads return HTTP 503 `runtime-list-not-ready` with `retryable=true`; a
+stopped refresher returns `runtime-list-ended` with `retryable=false` and requires a restart.
+Continuations retain the first page's frozen collection until its existing cursor expiry,
+including across republishes. Repeated first-page reads reuse that collection's cache entry
+and original expiry. Terminal permissions are applied to
 each returned page for its authenticated caller. `history=true` and exact runtime detail
 reads keep their existing snapshot reductions.
 

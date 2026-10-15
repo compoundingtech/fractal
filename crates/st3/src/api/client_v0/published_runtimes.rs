@@ -95,20 +95,27 @@ pub(super) fn page(
         let items = &publication.rows.items;
         let end = limit.min(items.len());
         let has_more = end < items.len();
-        let expires_at_unix_ms = client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS);
+        let mut expires_at_unix_ms = client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS);
         let next_cursor = if has_more {
             let mut cache = client_page_cache().lock().expect("client page cache poisoned");
             cache.retain(|entry| entry.expires_at_unix_ms > client_now_ms());
-            while cache.len() >= CLIENT_PAGE_CACHE_CAPACITY {
-                cache.pop_front();
+            if let Some(cached) = cache.iter().find(|entry| {
+                entry.snapshot_id == snapshot.id && entry.collection == "runtimes"
+                    && entry.items_digest == publication.rows.digest
+            }) {
+                expires_at_unix_ms = cached.expires_at_unix_ms;
+            } else {
+                while cache.len() >= CLIENT_PAGE_CACHE_CAPACITY {
+                    cache.pop_front();
+                }
+                cache.push_back(CachedClientPage {
+                    snapshot_id: snapshot.id.clone(),
+                    collection: "runtimes".into(),
+                    items_digest: publication.rows.digest.clone(),
+                    items: Arc::clone(items),
+                    expires_at_unix_ms,
+                });
             }
-            cache.push_back(CachedClientPage {
-                snapshot_id: snapshot.id.clone(),
-                collection: "runtimes".into(),
-                items_digest: publication.rows.digest.clone(),
-                items: Arc::clone(items),
-                expires_at_unix_ms,
-            });
             Some(encode_client_cursor(&ClientPageCursor {
                 snapshot: snapshot.clone(), collection: "runtimes".into(), offset: end, limit,
                 history: false, person: query.person.clone(), actor: query.actor.clone(),
