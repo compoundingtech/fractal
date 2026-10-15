@@ -23,7 +23,7 @@ fn accepts_person(argument: &clap::Arg) -> bool {
                 .long("as")
                 .value_parser(argument.get_value_parser().clone()),
         )
-        .try_get_matches_from(["actor-probe", "--as", "person/contract-probe"])
+        .try_get_matches_from(["actor-probe", "--as", "person/probe"])
         .is_ok()
 }
 
@@ -168,13 +168,9 @@ mod tests {
         ] {
             assert_eq!(commands[path]["can_carry_person"], false, "{path}");
         }
-        assert!(st3::handoff::document_name("person/contract-probe").is_none());
-        assert!(
-            super::super::configured_human(Some("person/contract-probe"), None, "contract").is_ok()
-        );
-        assert!(
-            super::super::configured_actor(Some("person/contract-probe"), None, "contract").is_ok()
-        );
+        assert!(st3::handoff::document_name("person/probe").is_none());
+        assert!(super::super::configured_human(Some("person/probe"), None, "contract").is_ok());
+        assert!(super::super::configured_actor(Some("person/probe"), None, "contract").is_ok());
     }
 
     #[test]
@@ -212,7 +208,7 @@ mod tests {
         fn check(command: &clap::Command, path: &str, contract: &Value) {
             if let Some(entry) = contract["contract"]["commands"].get(path) {
                 let mut argv = path.split_whitespace().collect::<Vec<_>>();
-                argv.extend(["--as", "person/contract-probe"]);
+                argv.extend(["--as", "person/probe"]);
                 let actual = super::super::Cli::command().try_get_matches_from(argv);
                 if entry["actor"] == "none" {
                     assert_eq!(
@@ -241,7 +237,7 @@ mod tests {
                 let supplied =
                     parser
                         .clone()
-                        .try_get_matches_from(["probe", "--as", "person/contract-probe"]);
+                        .try_get_matches_from(["probe", "--as", "person/probe"]);
                 if entry["actor"] == "none" {
                     assert_eq!(
                         supplied.unwrap_err().kind(),
