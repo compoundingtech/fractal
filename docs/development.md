@@ -206,7 +206,8 @@ device-local cursor is scoped by origin, product, and deployment channel; `live`
 and `stable` do not share cursors. Seen IDs survive rollbacks and skipped builds. No version
 string or timestamp comparison decides whether a change is new. First visits show “Recent
 changes”; subsequent visits show “New since you last looked” followed by “Recent”.
-The Changes trigger mounts next to the build version in the existing status bar.
+The Changes trigger is the `changelog` segment of the shared developer bar, next to the build
+version. When the bar overflows, the kit's +N control mirrors its unread dot.
 Its React Aria popover anchors to the visible bar with an 8px gap and restores focus
 on dismissal. It uses the shared light/dark theme, glass surface, and change-kind pills.
 The contract and compiler do not depend on a status-bar package or disclosure slot.

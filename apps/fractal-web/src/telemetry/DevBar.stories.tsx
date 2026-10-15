@@ -20,7 +20,8 @@ const meta = {
         Requests in flight, p50/p95 HTTP response-header latency over the latest 256 requests, HTTP
         errors, shared socket subscriptions and incoming messages per second. The row also shows the
         shared display version, including dirty-source semantics; expanded details retain the full
-        source revision and deployment identity. The Counters panel retains sorted app measurements,
+        source revision and deployment identity. Changes opens recent changes and marks unread
+        entries with a dot. The Counters panel retains sorted app measurements,
         including render commits, decode time, retained entries, socket errors, resyncs and retries.
         Meter strips share one collector session and can be frozen independently.
       </p>

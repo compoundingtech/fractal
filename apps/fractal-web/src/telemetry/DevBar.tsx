@@ -20,6 +20,7 @@ import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
 import { buildIdentity, deploymentId } from 'virtual:build-identity'
 
+import { Changelog, useChangelogUnseen } from '../changelog/Changelog.tsx'
 import { counters } from './measurement/index.ts'
 import { persistedAtom } from '../state/persistence.ts'
 import { transportSnapshot } from './transport.ts'
@@ -142,8 +143,7 @@ const MessageRateSegment = () => {
   const rate = useAtomValue(transportSnapshot, (snapshot) => snapshot.messagesPerSecond)
   return <span {...stylex.props(styles.segment)}>{rate.toFixed(1)} msg/s</span>
 }
-const segments: readonly DevbarSegment[] = [
-  { id: 'version', render: () => <BuildIdentitySegment identity={buildIdentity} /> },
+const transportSegments: readonly DevbarSegment[] = [
   { id: 'websocket', render: () => <WebSocketSegment /> },
   { id: 'http', render: () => <HttpSegment /> },
   { id: 'subscriptions', render: () => <SubscriptionsSegment /> },
@@ -201,6 +201,13 @@ const DevBarContent = ({ defaultVisible = import.meta.env?.DEV ?? false }: { rea
     { id: 'counters', label: 'Counters', render: () => <CountersPanel /> },
     { id: 'meters', label: 'Meters', render: () => <MetersPanel dark={dark} /> },
   ], [dark])
+  const hasUnseen = useChangelogUnseen()
+  const segments = React.useMemo<readonly DevbarSegment[]>(() => [
+    { id: 'version', render: () => <BuildIdentitySegment identity={buildIdentity} /> },
+    // Recent changes outlast transport detail; when overflowed, the +N control mirrors the unseen dot.
+    { id: 'changelog', priority: 1, hasAlert: hasUnseen, render: () => <Changelog dark={dark} /> },
+    ...transportSegments,
+  ], [dark, hasUnseen])
   if (!shown) return null
   return (
     <div data-testid="wf-devbar" {...stylex.props(dark ? darkDevbarTheme : lightDevbarTheme)}>
