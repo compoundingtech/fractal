@@ -451,6 +451,10 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get(
+        "GET /v1/harness-prompts/answer",
+        "/v1/harness-prompts/answer?agent={seat}&episode={prompt_episode}",
+    ),
     // Offline reads exercise populated local receipts without network timing. The sync
     // probe exercises the named non-owner refusal; real fetch/import is tested in changes::service.
     get("GET /v1/client/changes", "/v1/client/changes?repository=cost/garden&offline=true&limit=10"),
@@ -2108,7 +2112,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .await
             .unwrap()
     };
-    {
+    let prompt_episode = {
         // The first seat runs, so its driver may publish harness events.
         let seat = subjects.seats[0].clone();
         let mut running = claim_input("runtime.observed", "cost-seat-0-running", 0, "");
@@ -2119,9 +2123,16 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         running
             .fields
             .insert("incarnation_id".into(), json!(SEAT_RUNTIME));
-        store.append_claim(&running).unwrap();
-    }
+        store.append_claim(&running).unwrap().id
+    };
     let mut fixture = fixture(&person, &client, subjects).await;
+    // A known episode of this seat reaches both the ownership lookup and answer index.
+    fixture.items.insert("prompt_episode", prompt_episode);
+    let prompt_answer: Value = client
+        .get(&fixture.fill("/v1/harness-prompts/answer?agent={seat}&episode={prompt_episode}", 0))
+        .await
+        .expect("the prompt answer cost probe must read the owning seat's unanswered episode");
+    assert_eq!(prompt_answer, json!({"answer":null}));
     fixture.items.insert("usage_since", usage_window.0.to_string());
     fixture.items.insert("usage_until", usage_window.1.to_string());
     // Measure a successful owner descriptor, including sealed endpoint selection, without
