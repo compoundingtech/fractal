@@ -1170,6 +1170,61 @@ async fn response_envelope_unbounded(
             }
             response
         }
+        (None, Ok(_)) if smallclaims::read_budget::current().is_none() => {
+            // A mutation's synchronous poll can borrow the writer. Its async waits must
+            // own neither a writer permit nor a parked blocking parent (including bodies).
+            let handler_profile = profile.clone();
+            let cpu_kind = request_route.clone();
+            let cpu_client = caller.clone();
+            let mut handler_queue = profile.as_ref().map(|op| op.wall_span("handler/queue"));
+            let mut diagnostic_queue = Some(crate::relay_trace::span(crate::relay_trace::Phase::HandlerQueue));
+            let mut diagnostic_handler = crate::relay_trace::span(crate::relay_trace::Phase::Handler);
+            let diagnostic = crate::relay_trace::current();
+            let handler_enqueued = Instant::now();
+            let first_poll = Arc::new(std::sync::OnceLock::<Instant>::new());
+            let first_work = first_poll.clone();
+            let server_trace = otel.clone();
+            let writer_wait = server_trace.as_ref().map(|_| {
+                Arc::new(smallclaims::sqlite::telemetry::WriterWait::default())
+            });
+            let polled_writer_wait = writer_wait.clone();
+            let remote = served_remote.clone();
+            let result = read_deadline::spawn_mutation_handler(
+                state.store.clone(),
+                track_remote_reads(remote, next.run(request)),
+                move |mut future, cx| {
+                    if first_work.set(Instant::now()).is_ok() {
+                        drop(handler_queue.take());
+                        if let Some(mut queue) = diagnostic_queue.take() {
+                            queue.finish(crate::relay_trace::Outcome::Completed);
+                        }
+                        if let Some(profile) = &handler_profile { profile.queued(); }
+                    }
+                    let _server = server_trace.as_ref().map(|span| span.enter());
+                    let _writer_scope = smallclaims::sqlite::telemetry::enter_request(polled_writer_wait.clone());
+                    let _entered = crate::profile::enter(handler_profile.as_ref());
+                    crate::relay_trace::blocking(diagnostic.clone(), || {
+                        crate::performance::with_cpu(Some(&cpu_kind), Some(&cpu_client), || {
+                            future.as_mut().poll(cx)
+                        })
+                    })
+                },
+            ).await;
+            let response = result.unwrap_or_else(|error| ApiError::internal(error).into_response());
+            diagnostic_handler.finish(if response.status().is_success() {
+                crate::relay_trace::Outcome::Completed
+            } else {
+                crate::relay_trace::Outcome::Failed
+            });
+            if let (Some(server), Some(started)) = (otel.as_ref(), first_poll.get()) {
+                server.record("st.handler.queue_ms", started.duration_since(handler_enqueued).as_millis() as i64);
+                server.record("st.handler.duration_ms", started.elapsed().as_millis() as i64);
+                if let Some(wait) = writer_wait.as_ref() {
+                    crate::otel::record_writer_wait(server, wait.totals());
+                }
+            }
+            response
+        }
         (None, Ok(_)) => {
             let runtime = tokio::runtime::Handle::current();
             let handler_profile = profile.clone();
@@ -1187,7 +1242,10 @@ async fn response_envelope_unbounded(
             let (_body_owner, body_cancelled) = tokio::sync::oneshot::channel::<()>();
             let remote = served_remote.clone();
             let roster_trace = (request_route == "/v1/client/agents").then(|| server_trace.clone()).flatten();
-            match crate::api::read_deadline::spawn_handler(roster_trace, move || {
+            match crate::api::read_deadline::spawn_handler(
+                roster_trace,
+                None,
+                move || {
                 diagnostic_queue.finish(crate::relay_trace::Outcome::Completed);
                 drop(handler_queue);
                 let queue_ms = handler_enqueued.elapsed().as_millis() as i64;
@@ -6518,6 +6576,24 @@ where
     blocking_store(move || roster_worker(true, submitted, None, operation)).await
 }
 
+/// Blocking external work that does not borrow the live-store SQLite writer. Mutation polls
+/// yield while this runs, so provider/RPC/git waits retain no writer capacity.
+/// Keep this explicit: a callback that writes must use the admitted store path.
+async fn blocking_external<T, F>(operation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let profile = crate::profile::current();
+    let cpu_kind = crate::performance::current();
+    let trace = crate::otel::export_enabled().then(tracing::Span::current);
+    tokio::task::spawn_blocking(move || {
+        let _trace = trace.as_ref().map(tracing::Span::enter);
+        let _entered = crate::profile::enter(profile.as_ref());
+        crate::performance::with_charged(cpu_kind, operation)
+    }).await.map_err(ApiError::internal)
+}
+
 async fn blocking_store<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
@@ -8963,11 +9039,15 @@ async fn checkpoint_plan(
         Some(day) => crate::store::checkpoint_cut(day).map_err(ApiError::bad)?,
         None => crate::store::newest_due_cut(client_now_ms()),
     };
-    let store = state.store.clone();
     let scratch = state.state_dir.join("checkpoint");
-    blocking_store(move || store.checkpoint_plan_view(cut, &scratch))
-        .await
-        .map(Json)
+    let capture_dir = scratch.join("plan");
+    let capture = state.store.clone();
+    let staged = blocking_store(move || capture.checkpoint_staged_set(cut, None, &capture_dir)).await?;
+    let store = state.store.clone();
+    // The capture may seal/register the live writer. Planning and proof on the
+    // scratch copy do not borrow it and must not occupy its worker capacity.
+    blocking_external(move || store.checkpoint_plan_view_from_staged(cut, staged, &scratch))
+        .await?.map(Json).map_err(ApiError::internal)
 }
 
 async fn checkpoint_status(
@@ -11286,7 +11366,7 @@ async fn start_gate_check(
         )));
     }
     let (node, state_dir, pty_root) = (state.node, state.state_dir, state.pty_root);
-    let view = crate::api::read_deadline::spawn_blocking(move || {
+    let view = blocking_external(move || {
         crate::gate_check::start(
             crate::gate_check::CheckHost {
                 node: &node,
@@ -11298,8 +11378,7 @@ async fn start_gate_check(
             &request.inputs,
         )
     })
-    .await
-    .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?
+    .await?
     .map_err(ApiError::internal)?;
     Ok(Json(view))
 }
@@ -11403,7 +11482,7 @@ async fn publication_refusals(
     let store = state.store.clone();
     let node = state.node.clone();
     let intent = intent.clone();
-    blocking_action(move || {
+    blocking_external(move || {
         let references = store.unresolved_references(&intent)?;
         let publication = intent.subjects.values().collect::<Vec<_>>();
         // Render reads the workspace and asks git about tracked files, so it runs only for a
@@ -11421,7 +11500,7 @@ async fn publication_refusals(
             renders,
         })
     })
-    .await
+    .await?.map_err(ApiError::bad)
 }
 
 #[derive(Deserialize)]
@@ -15771,7 +15850,7 @@ async fn sekrets_attest(
             "attestations are only given over the local socket",
         )));
     };
-    crate::api::read_deadline::spawn_blocking(move || {
+    blocking_external(move || {
         crate::sekrets::daemon::attest(
             &state.store,
             &state.node,
@@ -15781,8 +15860,7 @@ async fn sekrets_attest(
             &request.nonce,
         )
     })
-    .await
-    .map_err(ApiError::internal)?
+    .await?
     .map(Json)
     .map_err(ApiError::bad)
 }
@@ -16090,7 +16168,7 @@ fn stage_eval_documents(
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct LiveSession {
     runtime_id: String,
     incarnation_id: String,
@@ -16412,21 +16490,23 @@ async fn input_session_as(
             idempotency_key: Some(request_key),
         })
         .map_err(ApiError::bad)?;
-    let effect = daemon_pty(state).and_then(|runtime| match request.mode {
+    let effect_state = state.clone();
+    let effect_session = session.clone();
+    let effect = blocking_external(move || daemon_pty(&effect_state).and_then(|runtime| match request.mode {
         SessionInputMode::Line => runtime.send_line_if(
-            &session.runtime_id,
+            &effect_session.runtime_id,
             &request.value,
-            Some(&session.incarnation_id),
+            Some(&effect_session.incarnation_id),
         ),
         SessionInputMode::Raw => {
-            runtime.send_raw_if(&session.runtime_id, &bytes, Some(&session.incarnation_id))
+            runtime.send_raw_if(&effect_session.runtime_id, &bytes, Some(&effect_session.incarnation_id))
         }
         SessionInputMode::Key => runtime.send_key_if(
-            &session.runtime_id,
+            &effect_session.runtime_id,
             &request.value,
-            Some(&session.incarnation_id),
+            Some(&effect_session.incarnation_id),
         ),
-    });
+    })).await?;
     finish_session_control(
         state,
         &subject,
@@ -16501,9 +16581,11 @@ async fn clear_context(
             idempotency_key: Some(request_key),
         })
         .map_err(ApiError::bad)?;
-    let effect = daemon_pty(&state).and_then(|runtime| {
-        runtime.send_line_if(&session.runtime_id, "/clear", Some(&session.incarnation_id))
-    });
+    let effect_state = state.clone();
+    let effect_session = session.clone();
+    let effect = blocking_external(move || daemon_pty(&effect_state).and_then(|runtime| {
+        runtime.send_line_if(&effect_session.runtime_id, "/clear", Some(&effect_session.incarnation_id))
+    })).await?;
     finish_session_control(
         &state,
         &subject,
@@ -16599,14 +16681,16 @@ async fn signal_session_as(
             idempotency_key: Some(request_key),
         })
         .map_err(ApiError::bad)?;
-    let effect = if session.terminal {
-        daemon_pty(&state).and_then(|runtime| {
-            runtime.signal_if(&session.runtime_id, Some(&session.incarnation_id), signal)
+    let effect_state = state.clone();
+    let effect_session = session.clone();
+    let effect = blocking_external(move || if effect_session.terminal {
+        daemon_pty(&effect_state).and_then(|runtime| {
+            runtime.signal_if(&effect_session.runtime_id, Some(&effect_session.incarnation_id), signal)
         })
     } else {
-        st_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"))
-            .signal_if(&session.runtime_id, Some(&session.incarnation_id), signal)
-    };
+        st_runtime::ExecRuntime::new(effect_state.state_dir.join("exec"), effect_state.state_dir.join("logs"))
+            .signal_if(&effect_session.runtime_id, Some(&effect_session.incarnation_id), signal)
+    }).await?;
     finish_session_control(
         &state,
         &subject,
