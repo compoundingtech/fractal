@@ -156,6 +156,9 @@ with tempfile.TemporaryDirectory() as scratch:
     app = commit(repo, "app only", write=["apps/fractal-web/src/app.ts"])
     git(repo, "checkout", "--quiet", "-b", "kit", base)
     kit = commit(repo, "kit", write=["packages/fractal-ui/src/button.tsx"])
+    # A strings-only app commit after a kit change must not inherit that kit input.
+    strings = commit(repo, "app strings", write=["apps/fractal-web/src/strings.ts"])
+    trailing_rust = commit(repo, "trailing Rust", write=["src/main.rs"])
     git(repo, "checkout", "--quiet", "-b", "flake", base)
     flake = commit(repo, "Chromium lock", write=["flake.lock"])
     git(repo, "checkout", "--quiet", "-b", "workflow", base)
@@ -193,11 +196,29 @@ with tempfile.TemporaryDirectory() as scratch:
               (0, "kit-inputs=true"))
         check(f"{event}: fixture workspace dependency change runs kit lanes",
               detect(repo, event, base, dependency_change, kit=True), (0, "kit-inputs=true"))
+        check(f"{event}: strings-only app diff executes app lanes",
+              detect(repo, event, kit, strings), (0, "relevant=true"))
+        check(f"{event}: strings-only app diff skips kit plays",
+              detect(repo, event, kit, strings, kit=True), (0, "kit-inputs=false"))
+    for event in ("merge_group", "push"):
+        check(f"{event}: exact base excludes earlier kit inputs",
+              detect(repo, event, kit, trailing_rust, kit=True), (0, "kit-inputs=false"))
+        check(f"{event}: multi-commit range includes app change before final Rust commit",
+              detect(repo, event, kit, trailing_rust), (0, "relevant=true"))
     for event in ("pull_request", "merge_group", "push"):
-        check(f"{event}: missing head fails closed", detect(repo, event, base, ""), (1, ""))
-        check(f"{event}: malformed base fails closed", detect(repo, event, "main", rust), (1, ""))
-        check(f"{event}: unknown commit fails closed", detect(repo, event, base, "f" * 40), (1, ""))
-        check(f"{event}: unreachable remote fails closed", detect(Path(scratch, "missing"), event, base, rust), (1, ""))
+        for name, remote, before, after in (
+            ("missing head", repo, base, ""),
+            ("missing base", repo, "", app),
+            ("malformed base", repo, "main", rust),
+            ("zero push base", repo, "0" * 40, app),
+            ("unknown base", repo, "f" * 40, app),
+            ("unknown head", repo, base, "f" * 40),
+            ("unreachable remote", Path(scratch, "missing"), base, rust),
+        ):
+            for kit_output in (False, True):
+                key = "kit-inputs" if kit_output else "relevant"
+                check(f"{event}: {name} runs all lanes ({key})",
+                      detect(remote, event, before, after, kit=kit_output), (0, f"{key}=true"))
     check("unknown event fails closed", detect(repo, "unknown", base, rust), (1, ""))
 
 gate = [
@@ -274,7 +295,7 @@ for required in (False, True):
         result = subprocess.run(["bash", "-c", harness], check=True, capture_output=True, text=True,
                                 env={**os.environ, "KIT_INPUTS": str(required).lower(),
                                      "BASE_SHA": "base", "HEAD_SHA": "head", "GITHUB_STEP_SUMMARY": str(summary)})
-        for name in ("UI kit play index contracts", "UI kit Storybook", "UI kit strict plays"):
+        for name in ("UI kit play index contracts", "UI kit context isolation controls", "UI kit Storybook", "UI kit strict plays"):
             assert (name in result.stdout) == required, result.stdout
         if not required:
             assert "skipped: no kit inputs changed (base..head)" in summary.read_text()

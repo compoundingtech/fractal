@@ -291,12 +291,14 @@ export const evidenceStageNames = [
 ] as const
 const evidenceHelper = '"$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"'
 /**
- * Only the merge queue and main reach the `evidence-signing` environment (and so the key). On any other
- * event the expression is empty and the job runs without an environment, exactly as before. The
+ * Only the merge queue, main and pull requests from this repository reach the `evidence-signing`
+ * environment (and so the key); a fork's pull request and any other event get an empty expression and run
+ * without an environment, exactly as before. A same-repository author controls the workflow file its own
+ * pull request runs, so its code can read the key (known defect 20). The
  * environment's own deployment-branch policy comes after this conditional exists.
  */
 export const evidenceEnvironment =
-  "${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}"
+  "${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}"
 export const evidenceStageJob = (name: string) =>
   (evidenceStageNames as readonly string[]).includes(name) ? { environment: evidenceEnvironment } : {}
 
@@ -307,6 +309,16 @@ export const evidenceStageJob = (name: string) =>
  */
 export const evidenceStepNames = ['genie-freshness', 'typescript-client', 'isolation-vm'] as const
 export const evidenceStepJob = () => ({ environment: evidenceEnvironment })
+
+// The evidence gate(s) that can cover a job's work. A job that took such a skip must not sign a note for a run in
+// which it did not run its work: the signing helper refuses when this is 'true' (and so makes no note), whatever the
+// job's log or step outcomes say. Every gate named here must be in that job's `needs`.
+export const gateSkipExpression = (name: string): string => {
+  const gates = name === 'mail-redelivery-canaries'
+    ? ['linux-gate', 'mail-redelivery-canaries']
+    : (evidenceStepNames as readonly string[]).includes(name) ? [name] : ['linux-gate']
+  return '${{ ' + gates.map((gate) => `needs.evidence-gate-${gate}.outputs.skip == 'true'`).join(' || ') + ' }}'
+}
 
 const signingCore = (
   name: string,
@@ -334,7 +346,12 @@ git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
       name: 'May this job use the signing key?',
       id: 'evidence-guard',
       if: "${{ always() && steps.evidence-base.outcome == 'success' }}",
-      env: { PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}' },
+      env: {
+        PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+        PR_BASE_SHA: '${{ github.event.pull_request.base.sha }}',
+        PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+        PR_USER: '${{ github.event.pull_request.user.login }}',
+      },
       run: `python3 ${evidenceHelper} guard`,
     },
     {
@@ -350,7 +367,7 @@ python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
       ...soft,
       name: `Sign this ${facts.helper === 'stage-facts' ? 'stage' : 'job'} result`,
       if: "${{ always() && steps.evidence-configure.outcome == 'success' }}",
-      env: facts.env,
+      env: { ...facts.env, GATE_SKIP: gateSkipExpression(name) },
       run: `helper=${evidenceHelper}
 python3 "$helper" once ${facts.helper === 'stage-facts' ? '"$STAGE_JOB"' : '"$STEP_CHECK"'}
 python3 "$helper" ${facts.helper} "$RUNNER_TEMP/job-facts.json"
