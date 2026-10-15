@@ -372,3 +372,34 @@ fn the_last_replicated_lease_seeks_each_kinds_newest_millisecond() {
         "{plan:#?}"
     );
 }
+
+#[test]
+fn renewal_poll_and_driver_share_all_held_states_including_blocked_and_verifying() {
+    let renewal = claimed_step(0);
+    let actor = "agent/node.worker";
+    for status in ["claimed", "working", "verifying", "blocked"] {
+        let before = now_ms() + 10_000;
+        renewal.store.connection.write().execute(
+            "UPDATE step_runs SET status=?2,lease_expires_at_unix_ms=?3 WHERE subject=?1",
+            params![renewal.subject, status, before.to_string()],
+        ).unwrap();
+        STEP_TIMING_FOLD_CALLS.with(|calls| calls.set(0));
+        let held = renewal.store.work_for_renewal(actor).unwrap();
+        assert_eq!(STEP_TIMING_FOLD_CALLS.with(std::cell::Cell::get), 0);
+        assert_eq!(held.len(), 1, "the driver renews held {status} steps");
+        assert_eq!(held[0].status, status);
+        assert!(held[0].work_claim_is_held_by(actor));
+        let renewed = renewal.store.work_action(
+            &held[0].subject, "renew", &request(&format!("renew-held-{status}"), None),
+        ).unwrap();
+        assert_eq!(renewed.status, status);
+        assert!(renewed.claim_expires_at_unix_ms.is_some_and(|expiry| expiry > before));
+    }
+    for status in ["ready", "pending", "completed", "cancelled", "failed"] {
+        renewal.store.connection.write().execute(
+            "UPDATE step_runs SET status=?2 WHERE subject=?1",
+            params![renewal.subject, status],
+        ).unwrap();
+        assert!(renewal.store.work_for_renewal(actor).unwrap().is_empty(), "{status}");
+    }
+}
