@@ -642,7 +642,7 @@ mod tests {
         append(&state,granted.subject.clone(),POLICY,ISSUER,expired,Some(&granted)).unwrap();
         assert_eq!(update_policy(State(state.clone()),Extension(ClientSession::local(Some(ISSUER)).unwrap()),
             AxumPath(id.clone()),Json(policy())).await.unwrap_err().status,StatusCode::FORBIDDEN);
-        append(&state,granted.subject.clone(),REVOKED,ISSUER,fields(&granted).unwrap().clone(),None).unwrap();
+        let _ = revoke(State(state.clone()),Extension(ClientSession::local(Some(ISSUER)).unwrap()),AxumPath(id.clone())).await.unwrap();
         assert_eq!(update_policy(State(state),Extension(ClientSession::local(Some(ISSUER)).unwrap()),
             AxumPath(id),Json(policy())).await.unwrap_err().status,StatusCode::FORBIDDEN);
     }

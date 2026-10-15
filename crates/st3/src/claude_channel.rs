@@ -943,6 +943,7 @@ mod tests {
             content: "doc/missing".into(), status: "staged".into(), title: None, in_reply_to: None,
             tags: Vec::new(), body_ref: None, body_bytes: None, body_origin: None,
             created_index: sent.store_index, attachments: Vec::new(),
+            sender_class: None, assistant_grant_id: None,
         };
         let error = body(&client, &message).await.unwrap_err();
         let reason = format!("FIFO head preparation failed; retrying: {error:#}");
@@ -989,6 +990,7 @@ mod tests {
             content: name.into(), status: "staged".into(), title: None, in_reply_to: None,
             tags: Vec::new(), body_ref: None, body_bytes: None, body_origin: None,
             created_index: index as u64 + 1, attachments: Vec::new(),
+            sender_class: None, assistant_grant_id: None,
         }).collect();
         let mut content = BTreeMap::from([
             ("message/later".into(), "later envelope".into()),
