@@ -31,6 +31,9 @@
 //!
 //! Arrangement probes keep one live resource's register heads fixed while its edit history grows
 //! with the generated scale, so both the owner-selected list and detail must be history-independent.
+//! Per-subject conversation-owner probes grow sparse identity history at fixed answer size,
+//! including other-origin actual-state claims without a rival runtime. SQL VM row work and
+//! statement counts must stay bounded; this path has no `KNOWN_GROWTH` exemption.
 //!
 //! - `ST_COST_SCALES` sets the two generated scales, smaller first. The default is `0.01,0.1`.
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
@@ -1760,6 +1763,105 @@ fn coordination_bootstrap_work_is_bounded_independently_of_history_size() {
     );
     assert!(samples[1].vm_steps <= samples[0].vm_steps * 2 + SLACK);
     assert!(samples[1].fullscan_steps <= samples[0].fullscan_steps + 8);
+}
+
+#[test]
+fn conversation_owner_sql_work_is_bounded_independently_of_subject_history() {
+    conversation_owner_history_cost(false);
+}
+
+#[test]
+fn conversation_owner_sql_work_is_bounded_with_other_origin_actual_history() {
+    conversation_owner_history_cost(true);
+}
+
+/// VM steps count indexed row visits too: a constant SQL call count alone cannot detect
+/// repeatedly reading one subject's history inside a single statement.
+fn conversation_owner_history_cost(other_origin: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("tester.sqlite3"), "tester").unwrap();
+    let reviewer = Store::open(&root.path().join("reviewer.sqlite3"), "reviewer").unwrap();
+    let append = |store: &Store, kind: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: "agent/ada".into(),
+            kind: kind.into(),
+            actor: Some("agent/ada".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    };
+    append(&store, "runtime.observed", json!({
+        "status": "running", "incarnation_id": "ada", "runtime_id": "tester",
+    }));
+    let mut measurements = Vec::new();
+    let mut earlier = None;
+    for history in 1..=1000 {
+        // Keep identity fields on the first observation only. Seeking an inherited field
+        // must not scan every intervening heartbeat, even when the current fields omit it.
+        append(&store, "runtime.observed", json!({"status": "running"}));
+        append(&store, "harness.observed", json!({
+            "incarnation_id": "ada", "status": "idle",
+        }));
+        // Ordinary resource observations participate in the actual-state field fold;
+        // their presence alone must not force a historical owner reduction.
+        append(&store, "resource.observed", json!({
+            "kind": "custom.tester", "facts": {"opened_by": "person/alex"},
+        }));
+        if other_origin {
+            append(&reviewer, "runtime.reconcile-decision", json!({
+                "decision": "hold", "reason": "historical observation",
+            }));
+            // Opener attribution receipts are not runtime identity, even if their
+            // recorded fields look like a different managed session.
+            append(&reviewer, "resource.observed", json!({
+                "kind": "vcs.issue", "attribution_only": true,
+                "facts": {"opened_by": "person/alex", "number": history},
+                "incarnation_id": "reviewer", "runtime_id": "reviewer",
+            }));
+        }
+        if !matches!(history, 100 | 1000) {
+            continue;
+        }
+        if other_origin {
+            sync(&reviewer, "reviewer", &store);
+        }
+        let frontier = store.index().unwrap();
+        // The full status fold is the semantic oracle, outside the measured owner lookup.
+        let status = store.status_at(Some("agent/ada"), None, Some(frontier)).unwrap();
+        let actual = status.subjects[0].actual.as_ref().unwrap();
+        let mut samples = Vec::new();
+        for _ in 0..4 {
+            let scope = work::SqliteWorkScope::start();
+            let owner = store.conversation_owner_at("agent/ada", frontier).unwrap().unwrap();
+            let spent = scope.finish();
+            assert_eq!(owner.subject, "agent/ada");
+            assert_eq!(owner.incarnation.as_deref(), actual["incarnation_id"].as_str());
+            assert_eq!(owner.runtime.as_deref(), actual["runtime_id"].as_str());
+            assert_eq!(owner.origin.as_deref(), Some("tester"));
+            samples.push(spent);
+        }
+        measurements.push(samples.into_iter().skip(1).min_by_key(|spent| spent.vm_steps).unwrap());
+        if let Some((old_frontier, old_owner)) = &earlier {
+            assert_eq!(
+                store.conversation_owner_at("agent/ada", *old_frontier).unwrap(),
+                *old_owner,
+                "later subject history must not change a pinned owner",
+            );
+        } else {
+            earlier = Some((frontier, store.conversation_owner_at("agent/ada", frontier).unwrap()));
+        }
+    }
+    let (small, large) = (measurements[0], measurements[1]);
+    println!("conversation owner 100 -> 1000 subject observations (other_origin={other_origin}): {small:?} -> {large:?}");
+    assert!(small.statements > 0, "owner SQL work must be traced");
+    assert!(large.statements <= small.statements + 2,
+        "owner SQL calls grew with subject history: {small:?} -> {large:?}");
+    assert!(large.vm_steps <= small.vm_steps + SLACK,
+        "owner indexed row work grew with subject history: {small:?} -> {large:?}");
+    assert!(large.fullscan_steps <= small.fullscan_steps + 8,
+        "owner scanned subject history: {small:?} -> {large:?}");
 }
 
 /// `METHOD /path` for every `.route(...)` in the router's source.

@@ -41,6 +41,18 @@ History cursors and page order are local to the serving daemon, like raw claim-h
 they are not shared state folds. Reason selection uses canonical claim order, including recovery
 from an earlier transition, so replicated arrival order cannot choose a different reason.
 
+Conversation routing resolves an exact agent's runtime and incarnation at the request's captured
+claim frontier. Sparse identity fields use newest-first partial-index seeks, including explicit
+nulls and state-transition resets, rather than replaying every heartbeat or harness report.
+Runtime authority selects the newest canonical observation per origin; rival origins retain
+the desired-host and checkpoint-aware ancestry rules. Resource identity fields use the same
+bounded seeks; attribution-only opener receipts do not replace identity. These reads introduce
+no routing cache or wire format change.
+
+Transport routes likewise seek the newest canonical observation per observer/host pair instead
+of ranking the complete transport history. Original success timestamps, clock-skew limits,
+expiry, and dial-out membership exclusions still decide whether that evidence is usable.
+
 ```sh
 st doctor
 st doctor --performance

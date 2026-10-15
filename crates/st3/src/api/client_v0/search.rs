@@ -209,12 +209,12 @@ fn inventory(
             continue;
         };
         let owner = resource["owner_id"].as_str().unwrap_or_default();
-        let remote = match conversation_owner_host(
-            &state,
-            &session,
-            id,
-            owner.starts_with("agent/").then_some(owner),
-        ) {
+        let managed = if owner.starts_with("agent/") {
+            super::super::managed_session_owner_for_subject_at(&state.store, snapshot.store_index, id, owner)?
+        } else {
+            super::super::managed_session_owner_at(&state.store, snapshot.store_index, id)?
+        };
+        let remote = match conversation_owner_host(&state, &session, managed.as_ref()) {
             Ok(remote) => remote,
             Err(error) => {
                 incomplete.push(format!("{id}: {}", error.message));
