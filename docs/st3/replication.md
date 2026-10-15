@@ -769,9 +769,10 @@ divergences at that interval, never more often than hourly; unset or zero, it ne
 check is cheap by construction. Exchanges already compare digests; with the check on, a
 comparison that first finds a difference also keeps what a reproduction needs, with one pass over
 the inventory in memory, and a difference that lasts keeps the range it opened with. The check
-reads those comparisons in memory and the newest divergence faults on its own and its peers'
-daemon subjects with one indexed read on the reader pool. It skips a round while the store's writer or a write transaction ran over its target
-in the last minute, or replication is catching up or has put projection off, waiting a minute and
+reads those comparisons in memory and, with one indexed read on the reader pool, every divergence
+fault and recovery on its own and its peers' daemon subjects, however old: an episode is open while
+a failure in it has no recovery that names it. It skips a round while the store's writer or a
+write transaction ran over its target in the last minute, or replication is catching up or has put projection off, waiting a minute and
 then doubling. It writes only to open or end a fault.
 
 Each divergence is one `operational.failure` claim on the daemon subject (`daemon/NODE`) of the

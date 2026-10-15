@@ -127,7 +127,8 @@ fn a_projection_divergence_is_one_p1_fault_that_nothing_repairs() {
     assert_eq!(right.open_divergences_at_last_check(), Some(1));
     let fault = open.values().next().unwrap();
     assert_eq!(fault.members, ["right", "left"]);
-    let claim = right.claim_by_id(&fault.failure).unwrap().unwrap();
+    assert_eq!(fault.failures.len(), 1);
+    let claim = right.claim_by_id(&fault.failures[0]).unwrap().unwrap();
     assert_eq!(claim.subject, "daemon/right");
     assert_eq!(claim.kind, "operational.failure");
     let fields = &claim.body["fields"];
@@ -197,17 +198,13 @@ fn without_the_check_an_exchange_keeps_nothing_for_a_reproduction() {
     );
 }
 
-/// What one check costs on a member with many past divergence faults, and what capturing the
-/// claim range costs on a large inventory. Prints the numbers; run with `--ignored --nocapture`.
-#[test]
-#[ignore = "measurement"]
-fn measure_projection_divergence_check_cost() {
-    let (left, right) = two_members_in_step();
-    // 300 faults that opened and ended between invented members, as months of history might.
-    for index in 0..300 {
-        let failure = right
+/// `count` divergence faults between invented members, every other one ended, as months of
+/// history might leave on `store`'s daemon subject.
+fn past_divergence_faults(store: &Store, count: usize) {
+    for index in 0..count {
+        let failure = store
             .append_claim(&crate::model::ClaimInput {
-                subject: projection_divergence_subject("right"),
+                subject: projection_divergence_subject(store.origin()),
                 kind: "operational.failure".into(),
                 actor: Some("daemon/runtime".into()),
                 fields: BTreeMap::from([
@@ -220,9 +217,9 @@ fn measure_projection_divergence_check_cost() {
             })
             .unwrap();
         if index % 2 == 0 {
-            right
+            store
                 .append_claim(&crate::model::ClaimInput {
-                    subject: projection_divergence_subject("right"),
+                    subject: projection_divergence_subject(store.origin()),
                     kind: "operational.recovered".into(),
                     actor: Some("daemon/runtime".into()),
                     fields: BTreeMap::from([
@@ -236,6 +233,36 @@ fn measure_projection_divergence_check_cost() {
                 .unwrap();
         }
     }
+}
+
+#[test]
+fn an_old_open_divergence_is_not_recorded_again_after_many_newer_faults() {
+    let (left, right) = two_members_in_step();
+    project_wrongly(&right);
+    compare(&left, &right, "left");
+    outlast_projection(&right, "left");
+    compare(&left, &right, "left");
+    assert_eq!(right.check_projection_divergences().unwrap().opened, 1);
+    let episode = right.open_projection_divergences().unwrap().into_keys().next().unwrap();
+
+    // More divergence faults than any newest-first window would read.
+    past_divergence_faults(&right, 300);
+    compare(&left, &right, "left");
+    let check = right.check_projection_divergences().unwrap();
+    assert_eq!((check.divergences, check.opened), (1, 0), "the old episode is still open");
+    let open = right.open_projection_divergences().unwrap();
+    assert_eq!(open[&episode].failures.len(), 1);
+    assert_eq!(open.len(), 1 + 150);
+    assert_eq!(right.open_divergences_at_last_check(), Some(151));
+}
+
+/// What one check costs on a member with many past divergence faults, and what capturing the
+/// claim range costs on a large inventory. Prints the numbers; run with `--ignored --nocapture`.
+#[test]
+#[ignore = "measurement"]
+fn measure_projection_divergence_check_cost() {
+    let (left, right) = two_members_in_step();
+    past_divergence_faults(&right, 300);
     compare(&left, &right, "left");
     let rounds = 1_000;
     let started = std::time::Instant::now();

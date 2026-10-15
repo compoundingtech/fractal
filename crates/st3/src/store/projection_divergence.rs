@@ -6,8 +6,8 @@
 //!
 //! Looking for one stays rare and cheap. The check is off unless the daemon sets
 //! `ST3_DIVERGENCE_CHECK_INTERVAL_MS`, runs at most hourly, reads only the digest comparisons
-//! exchanges already made (in memory) and one indexed read of the open faults on the reader
-//! pool, and skips while the daemon is busy. It writes only to open or end a fault, on the
+//! exchanges already made (in memory) and one indexed read of the divergence faults on the
+//! reader pool, and skips while the daemon is busy. It writes only to open or end a fault, on the
 //! recording member's own `daemon/NODE` subject.
 use super::*;
 use smallclaims::replication::ProjectionDivergence;
@@ -21,10 +21,6 @@ const EPISODE_PREFIX: &str = "projection-divergence/";
 pub(crate) fn projection_divergence_subject(node: &str) -> String {
     format!("daemon/{node}")
 }
-/// The most open faults one check reads. Each is a P1 bug, so more than this is already an
-/// emergency the first ones describe.
-const OPEN_FAULT_READ_LIMIT: i64 = 256;
-
 /// One divergence per member pair and projection, whichever member records it first. A
 /// divergence that lasts while the members keep writing stays the one episode.
 fn episode(local: &str, divergence: &ProjectionDivergence) -> String {
@@ -47,10 +43,11 @@ pub struct DivergenceCheck {
     pub recovered: usize,
 }
 
-/// One open divergence fault.
+/// One open divergence episode. Both members can record the same episode before either sees
+/// the other's claim, so it can hold more than one failure; it ends when each is recovered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenDivergence {
-    pub failure: String,
+    pub failures: Vec<String>,
     pub members: Vec<String>,
 }
 
@@ -79,31 +76,33 @@ impl Store {
                 .members
                 .iter()
                 .find(|member| **member != local)
-                .filter(|_| fault.members.iter().any(|member| *member == local))
+                .filter(|_| fault.members.contains(&local))
             else {
                 continue;
             };
             if !self.replication_projections_agree(peer) {
                 continue;
             }
-            self.append_claim(&ClaimInput {
-                subject: projection_divergence_subject(&local),
-                kind: "operational.recovered".into(),
-                actor: Some("daemon/runtime".into()),
-                fields: BTreeMap::from([
-                    ("episode".into(), json!(episode)),
-                    ("failure".into(), json!(fault.failure)),
-                    (
-                        "reason".into(),
-                        json!(format!(
-                            "{local} and {peer} project the same envelopes the same way again"
-                        )),
-                    ),
-                ]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some(format!("{}:recovered", fault.failure)),
-            })?;
+            for failure in &fault.failures {
+                self.append_claim(&ClaimInput {
+                    subject: projection_divergence_subject(&local),
+                    kind: "operational.recovered".into(),
+                    actor: Some("daemon/runtime".into()),
+                    fields: BTreeMap::from([
+                        ("episode".into(), json!(episode)),
+                        ("failure".into(), json!(failure)),
+                        (
+                            "reason".into(),
+                            json!(format!(
+                                "{local} and {peer} project the same envelopes the same way again"
+                            )),
+                        ),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("{failure}:recovered")),
+                })?;
+            }
             check.recovered += 1;
         }
         *self.smalltalk.open_divergences.lock().unwrap() =
@@ -182,8 +181,10 @@ impl Store {
         Ok(())
     }
 
-    /// Open divergence faults by episode, from at most the newest few hundred divergence fault
-    /// claims on this member's and its peers' daemon subjects.
+    /// Open divergence episodes: every divergence failure on this member's and its peers' daemon
+    /// subjects that no recovery names, however old. Each is a P1 bug, so these claims stay few.
+    /// The read never stops at the newest of them, since an older episode that is still open
+    /// would then look closed and open again as a second failure.
     pub(crate) fn open_projection_divergences(&self) -> Result<BTreeMap<String, OpenDivergence>> {
         let mut nodes = self.compared_peers();
         nodes.push(self.origin().to_owned());
@@ -195,50 +196,46 @@ impl Store {
         )
         .to_string();
         let connection = self.readers.get();
-        let mut query = connection.prepare(&canonical_sql(
-            "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+        let mut query = connection.prepare(
+            "SELECT id, kind, json_extract(body,'$.fields.episode'),
+                    json_extract(body,'$.fields.failure'),
+                    json_extract(body,'$.fields.reproduction.members')
              FROM claims WHERE subject IN (SELECT value FROM json_each(?1))
                AND kind IN ('operational.failure','operational.recovered')
-               AND json_extract(body,'$.fields.episode') LIKE ?2
-             ORDER BY CANONICAL_DESC(claims) LIMIT ?3",
-        ))?;
-        let mut claims = query
-            .query_map(
-                params![subjects, format!("{EPISODE_PREFIX}%"), OPEN_FAULT_READ_LIMIT],
-                claim_from_row,
-            )?
+               AND json_extract(body,'$.fields.episode') LIKE ?2",
+        )?;
+        let rows = query
+            .query_map(params![subjects, format!("{EPISODE_PREFIX}%")], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        // Oldest first, so a recovery follows the failure it ends.
-        claims.reverse();
+        let recovered: BTreeSet<&str> = rows
+            .iter()
+            .filter(|(_, kind, ..)| kind == "operational.recovered")
+            .filter_map(|(.., failure, _)| failure.as_deref())
+            .collect();
         let mut open: BTreeMap<String, OpenDivergence> = BTreeMap::new();
-        for claim in claims {
-            let fields = &claim.body["fields"];
-            let Some(episode) = fields["episode"].as_str() else {
-                continue;
-            };
-            if claim.kind == "operational.recovered" {
-                if open
-                    .get(episode)
-                    .is_some_and(|fault| fields["failure"] == fault.failure.as_str())
-                {
-                    open.remove(episode);
-                }
+        for (id, kind, episode, _, members) in &rows {
+            if kind != "operational.failure" || recovered.contains(id.as_str()) {
                 continue;
             }
-            let members = fields["reproduction"]["members"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect();
-            open.insert(
-                episode.to_owned(),
-                OpenDivergence {
-                    failure: claim.id.clone(),
-                    members,
-                },
-            );
+            let fault = open.entry(episode.clone()).or_insert_with(|| OpenDivergence {
+                failures: Vec::new(),
+                members: members
+                    .as_deref()
+                    .and_then(|members| serde_json::from_str(members).ok())
+                    .unwrap_or_default(),
+            });
+            fault.failures.push(id.clone());
+        }
+        for fault in open.values_mut() {
+            fault.failures.sort();
         }
         Ok(open)
     }
