@@ -194,6 +194,37 @@ fn dismissal_refuses_missing_wrong_revoked_and_forged_delegation_without_source_
 }
 
 #[test]
+fn replacing_a_policy_with_the_same_actions_fences_the_old_proof() {
+    let (store, denial, mut proof) = denial_fixture(&["close-item"]);
+    let old_policy = proof.policy.clone();
+    let replacement = store
+        .set_delegation_policy(&DelegationPolicyRequest {
+            person: proof.person.clone(),
+            actor: proof.person.clone(),
+            actions: vec!["close-item".into()],
+            evidence: vec![old_policy.clone()],
+            idempotency_key: "replace-with-same-actions".into(),
+        })
+        .unwrap();
+    assert_ne!(replacement.id, old_policy);
+    assert_eq!(
+        store
+            .respond_native_prompt(SEAT, &denial.id, "dismiss", ACTOR, Some(&proof))
+            .unwrap_err()
+            .code,
+        "delegation-refused"
+    );
+    assert_eq!(store.prompt_answer(&denial.id).unwrap().answer, None);
+    assert!(store.messages(Some(SEAT), true).unwrap().is_empty());
+    proof.policy = replacement.id;
+    let recorded = store
+        .respond_native_prompt(SEAT, &denial.id, "dismiss", ACTOR, Some(&proof))
+        .unwrap();
+    assert_eq!(recorded.body["fields"]["delegation"], json!(proof));
+    assert_eq!(store.messages(Some(SEAT), true).unwrap().len(), 1);
+}
+
+#[test]
 fn close_item_never_authorizes_allow_kind_or_an_unproved_generic_harness_answer() {
     let (store, denial, proof) = denial_fixture(&["close-item"]);
     for answer in ["allow", "deny", "approve", "approve-once", "approve-kind"] {
