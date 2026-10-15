@@ -149,7 +149,7 @@ export function ThreadHeader({
   /** When the sidebar is collapsed its separator is gone; the header carries the expand toggle. */
   sidebarCollapsed?: boolean
   onToggleSidebar?: () => void
-  /** The host is below its drawer breakpoint: the header keeps the title and status, and one Agent details button opens `panelOpen`'s sheet. */
+  /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, and one Agent details button opens `panelOpen`'s sheet. */
   narrow?: boolean
 }) {
   const terminalReasonId = React.useId()
@@ -161,8 +161,8 @@ export function ThreadHeader({
         </button>
       ) : null}
       <nav aria-label="Breadcrumb" {...stylex.props(styles.breadcrumb)}>
-        {folder !== undefined && !narrow ? <>
-          <span {...stylex.props(styles.crumbFolder)}>{folder}</span>
+        {folder !== undefined ? <>
+          <span {...stylex.props(styles.crumbFolder, narrow && styles.crumbFolderShrink)}>{folder}</span>
           <span aria-hidden="true" {...stylex.props(styles.crumbSlash)}>/</span>
         </> : null}
         <span {...stylex.props(styles.crumbTitle)}>{title}</span>
@@ -210,6 +210,7 @@ const styles = stylex.create({
   splitHorizontal: { height: 1, width: '100%', backgroundColor: c.borderStrong, cursor: 'row-resize', position: 'relative', flexShrink: 0, touchAction: 'none', '::after': { content: '""', insetInline: 0, insetBlock: -3, position: 'absolute' }, ':focus-visible': { outline: `2px solid ${c.primary}`, outlineOffset: -1 } },
   header: { height: g.band, display: 'flex', alignItems: 'center', gap: g.gutter, paddingInline: g.gutter, flexShrink: 0, minWidth: 0 },
   breadcrumb: { display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  crumbFolderShrink: { flexShrink: 1, minWidth: 0 },
   crumbFolder: { color: c.fgMuted, maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flexShrink: 0 },
   crumbSlash: { color: c.fgMuted },
   crumbTitle: { color: c.fg, fontWeight: t.weightMedium, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },

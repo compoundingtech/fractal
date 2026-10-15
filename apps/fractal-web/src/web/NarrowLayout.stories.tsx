@@ -45,9 +45,12 @@ const workspace = async (canvasElement: HTMLElement) => {
   const narrow = window.innerWidth < narrowLayoutBreakpoint
   return { canvas: within(canvasElement), narrow, header: within(within(canvasElement).getByTestId('thread-header')) }
 }
-/** Wide windows keep the full header cluster and the inline Details panel. */
+/** Wide windows keep the docked sidebar, the full header cluster and the inline Details panel. */
 const assertWide = async (canvasElement: HTMLElement) => {
-  const { header } = await workspace(canvasElement)
+  const { canvas, header } = await workspace(canvasElement)
+  await expect(canvas.getByRole('complementary', { name: 'Agents' })).toBeVisible()
+  await expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull()
+  await expect(header.queryByRole('button', { name: 'Expand sidebar' })).toBeNull()
   await expect(header.getByRole('button', { name: 'Toggle right panel' })).toBeVisible()
   await expect(header.getByRole('button', { name: 'Agent actions for WorkbenchShell' })).toBeVisible()
   await expect(header.getByText('build-host-a')).toBeVisible()
@@ -61,15 +64,22 @@ const openWideDetails = async (canvasElement: HTMLElement) => {
   await expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull()
 }
 
-/** The header keeps the agent name, its status and one Agent details button. */
+/** The thread fills the window; the header keeps the chevron, host / agent breadcrumb, status and one Agent details button. */
 export const Drawers: Story = { play: async ({ canvasElement }) => {
-  const { narrow, header } = await workspace(canvasElement)
+  const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) return assertWide(canvasElement)
+  // The sidebar is not in the layout until opened.
+  await expect(canvas.queryByRole('complementary', { name: 'Agents' })).toBeNull()
+  await expect(canvas.queryByRole('navigation', { name: 'Agent roster' })).toBeNull()
+  await expect(Math.abs(canvas.getByRole('region', { name: 'Agent workspace' }).getBoundingClientRect().width - window.innerWidth)).toBeLessThanOrEqual(1)
+  await expect(header.getByRole('button', { name: 'Expand sidebar' })).toBeVisible()
   const opener = header.getByRole('button', { name: 'Agent details' })
   await expect(opener).toHaveAttribute('aria-expanded', 'false')
   await expect(opener).toHaveAttribute('aria-haspopup', 'dialog')
-  await expect(header.getByRole('navigation', { name: 'Breadcrumb' })).toHaveTextContent('WorkbenchShell')
-  await expect(header.queryByText('build-host-a')).toBeNull()
+  const breadcrumb = header.getByRole('navigation', { name: 'Breadcrumb' })
+  await expect(breadcrumb).toHaveTextContent('build-host-a')
+  await expect(breadcrumb).toHaveTextContent('WorkbenchShell')
+  await expect(breadcrumb.getBoundingClientRect().right).toBeLessThanOrEqual(opener.getBoundingClientRect().left)
   for (const name of ['Agent actions for WorkbenchShell', 'Resources', 'Conversation menu', 'Toggle terminal drawer', 'Toggle right panel']) await expect(header.queryByRole('button', { name })).toBeNull()
 } }
 export const DrawersLight: Story = { ...Drawers, args: { scheme: 'light' } }
@@ -83,7 +93,7 @@ const openDetailsSheet = async (canvasElement: HTMLElement) => {
   await waitFor(() => expect(sheet.contains(document.activeElement)).toBe(true))
   return { canvas, sheet, opener }
 }
-/** The sheet: the agent's actions in one row above Changes. */
+/** The right sheet: the agent's actions in one row above Changes, which scrolls as one column. */
 export const DrawersOpen: Story = { play: async ({ canvasElement }) => {
   const { narrow } = await workspace(canvasElement)
   if (!narrow) return openWideDetails(canvasElement)
@@ -93,11 +103,42 @@ export const DrawersOpen: Story = { play: async ({ canvasElement }) => {
   for (const name of ['Agent actions for WorkbenchShell', 'Resources', 'Conversation menu', 'Terminal']) await expect(within(actions).getByRole('button', { name })).toBeInTheDocument()
   await expect(within(sheet).getByRole('button', { name: 'Close agent details' })).toBeVisible()
   await expect(canvasElement.querySelector('[data-testid="live-agent-workspace"] > aside[aria-label="Changes"]')).toBeNull()
+  // The captured-change rows sit above the 'Captured change' header, never under it.
+  const header = await within(sheet).findByRole('heading', { name: 'Captured change' })
+  const rows = [...sheet.querySelectorAll('[data-captured-change]')]
+  await expect(rows.length).toBeGreaterThan(0)
+  const headerTop = header.getBoundingClientRect().top
+  for (const row of rows) await expect(row.getBoundingClientRect().bottom).toBeLessThanOrEqual(headerTop)
+  const changes = within(sheet).getByRole('complementary', { name: 'Changes' })
+  await expect(changes.getBoundingClientRect().width).toBeLessThanOrEqual(sheet.getBoundingClientRect().width)
 } }
-/** Keyboard path: Enter on Agent details opens the sheet with focus inside; Escape closes it and focus returns to the button. */
+/** Keyboard path through both sheets: each opens with focus inside, Escape or the backdrop closes it, and focus returns to its opener. */
 export const DrawersFlow: Story = { play: async ({ canvasElement }) => {
   const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) return assertWide(canvasElement)
+  // Agents, from the left.
+  const chevron = header.getByRole('button', { name: 'Expand sidebar' })
+  await userEvent.hover(chevron)
+  chevron.focus()
+  await userEvent.keyboard('{Enter}')
+  const agents = await canvas.findByRole('dialog', { name: 'Agents' })
+  await expect(within(agents).getByRole('navigation', { name: 'Agent roster' })).toBeVisible()
+  await expect(agents.getBoundingClientRect().left).toBe(0)
+  await waitFor(() => expect(agents.contains(document.activeElement)).toBe(true))
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
+  await waitFor(() => expect(chevron).toHaveFocus())
+  await userEvent.keyboard('{Enter}')
+  const backdrop = (await canvas.findByRole('dialog', { name: 'Agents' })).parentElement!.parentElement!
+  await userEvent.click(backdrop)
+  await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
+  await waitFor(() => expect(chevron).toHaveFocus())
+  // Choosing an agent closes the sheet on its thread.
+  await userEvent.keyboard('{Enter}')
+  await userEvent.click(within(await canvas.findByRole('dialog', { name: 'Agents' })).getByRole('button', { name: 'MissionsUi' }))
+  await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
+  await waitFor(() => expect(header.getByRole('navigation', { name: 'Breadcrumb' })).toHaveTextContent('MissionsUi'))
+  // Agent details, from the right.
   const opener = header.getByRole('button', { name: 'Agent details' })
   await userEvent.hover(opener)
   opener.focus()
