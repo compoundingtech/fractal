@@ -285,6 +285,54 @@ print("passed: deterministic SDK tests and isolated frame CPU budgets have separ
 assert lanes.index('lane "CSS asset guard" node --test apps/fractal-web/scripts/vite-css-assets.node-test.mjs') < lanes.index('lane "App production build" production_build')
 assert "fractalCssAssets()" in (root / "apps/fractal-web/vite.config.ts").read_text()
 print("passed: the CSS asset guard proves its negatives before guarding the app production build")
+assert 'node packages/fractal-ui/scripts/kit-play-gate.mjs apps/fractal-web/storybook-static "$receipt_dir"' in lanes
+app_lanes = lanes[lanes.index('lane "App Storybook"'):lanes.index('case "${KIT_INPUTS:-true}" in')]
+for required in (False, True):
+    result = subprocess.run(["bash", "-c", 'set -eu\nlane() { printf "%s\\n" "$1"; }\n' + app_lanes],
+                            check=True, capture_output=True, text=True,
+                            env={**os.environ, "KIT_INPUTS": str(required).lower()})
+    assert "App Storybook" in result.stdout and "App strict plays" in result.stdout
+print("passed: app stories use the strict kit runner regardless of the kit input filter")
+
+# Exercise the real lane and receipt publication under errexit, replacing only
+# the expensive browser command with a deterministic completed receipt.
+lane_function = lanes[lanes.index("lane() {"):lanes.index("\ntoolchain()")]
+app_function = lanes[lanes.index("app_plays() ("):lanes.index('\nlane "Toolchain')]
+for status, passed in ((0, 8), (7, 6)):
+    with tempfile.TemporaryDirectory() as scratch:
+        scratch = Path(scratch)
+        summary = scratch / "summary"
+        receipt = scratch / "fixture.json"
+        receipt_directory = scratch / "receipt-directory"
+        receipt.write_text(json.dumps({
+            "pass": status == 0, "stories": 2, "cases": 8, "expectedCases": 8,
+            "elapsedSeconds": 90, "rows": [{"pass": index < passed} for index in range(8)],
+        }))
+        harness = 'set -euo pipefail\nsummary=$GITHUB_STEP_SUMMARY\n' + lane_function + app_function + """
+node() {
+  if [ "$1" = packages/fractal-ui/scripts/kit-play-gate.mjs ]; then
+    cp "$APP_TEST_RECEIPT" "$3/receipt.json"
+    printf '%s' "$3" > "$APP_TEST_RECEIPT_DIRECTORY"
+    return "$APP_TEST_EXIT"
+  fi
+  command node "$@"
+}
+lane "App strict plays (440/1440 × dark/light)" app_plays
+lane "UI kit strict plays (440/1440 × dark/light)" true
+"""
+        result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True,
+                                env={**os.environ, "TMPDIR": str(scratch),
+                                     "GITHUB_STEP_SUMMARY": str(summary),
+                                     "APP_TEST_RECEIPT": str(receipt),
+                                     "APP_TEST_RECEIPT_DIRECTORY": str(receipt_directory),
+                                     "APP_TEST_EXIT": str(status)})
+        assert result.returncode == status, (result.returncode, result.stderr)
+        outcome = "PASS" if status == 0 else "FAIL"
+        text = summary.read_text()
+        assert f"| 2 | 8/8 | {passed} | {8 - passed} | {outcome} | 1.50 |" in text, text
+        assert ("| UI kit strict plays" in text) == (status == 0), text
+        assert not Path(receipt_directory.read_text()).exists(), "receipt cleanup must still run"
+        print(f"passed: app {outcome} receipt reaches the summary before gate status {status} propagates")
 
 # Exercise the actual conditional lane wiring without launching browsers or installing dependencies.
 kit_lanes = lanes[lanes.index('case "${KIT_INPUTS:-true}" in'):]

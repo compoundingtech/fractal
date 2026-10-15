@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Run app-owned Fractal web Storybook stories through the existing strict kit play runner in the web CI execution step, independently of the kit input filter.",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No database or wire schema changes."},
+  "rules": {"status": "none", "detail": "No protocol or checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "CI adds an app-only story index and the same 440/1440 dark/light strict play matrix with the a11y addon. The independent kit index is unchanged."},
+  "downtime": {"status": "none", "detail": "No runtime deployment change."},
+  "manual": {"status": "none", "detail": "The existing CI execution step runs app plays automatically; local build and play commands are documented in the kit README."},
+  "recovery": {"status": "none", "detail": "Revert the CI/configuration change; no persistent data changes."}
+}

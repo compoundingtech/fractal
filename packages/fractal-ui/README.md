@@ -43,6 +43,32 @@ The dev server binds to localhost on a fixed port (53705). To view it from anoth
 
 Every `ci-fractal-web` proof discovers every story from the built `index.json` and runs its play at 440×900 and 1440×900, each with dark and light browser color schemes. Each isolated page must report successful `storyFinished` evidence without play exceptions, page errors or unexpected console errors. Only the strict guard's two exact missing development/favicon resources are allowed; missing story assets still fail. The Nix web shell supplies Playwright and Chromium without npm dependencies. The gate serves the static build on an ephemeral localhost port and prints the complete JSON receipt (case evidence, failures and elapsed seconds) into the CI log, failing the proof if any case fails.
 The runner uses one Chromium with up to six concurrent isolated pages, bounded by the available CPU allowance. The receipt records the actual worker count; every indexed case is still required.
+
+### App-owned plays
+
+`apps/fractal-web/.storybook` indexes only `apps/fractal-web/src/**/*.stories.tsx`.
+It uses the production app stylesheet, system theme initialization, StyleX compiler
+and checkout build identity, without the app's live gateway or extension build.
+The kit config and story index remain independent of app code.
+
+```sh
+pnpm --filter fractal-web storybook        # http://127.0.0.1:53706
+pnpm --filter fractal-web build-storybook  # apps/fractal-web/storybook-static/
+node packages/fractal-ui/scripts/kit-play-gate.mjs apps/fractal-web/storybook-static /var/tmp/fractal-app-plays
+```
+
+The existing `scripts/ci-fractal-web` execution step builds and plays this second
+index with the same strict runner, four-case viewport/theme matrix and error-level
+a11y addon. App plays always run when web execution is required, including app-only
+changes for which `KIT_INPUTS=false` skips kit plays. CI records app build and play
+timings separately; the runner receipt includes story count, expected/actual cases,
+per-case lifecycle/a11y reporter evidence and elapsed play seconds.
+Before removing the temporary app receipt, CI also publishes a separate app result
+table to `GITHUB_STEP_SUMMARY`: story count, completed/expected cases, passed/failed
+case counts, overall result and play-only minutes. This happens on both successful
+and failed gates, before the original runner exit code propagates. App build time
+remains a separate lane timing, and kit results are not combined with app counts.
+
 Before selecting stories, the gate validates every index entry: its type must be `story` or `docs`, and both `id` and `importPath` must be nonempty strings. Unknown or malformed entries fail the gate instead of silently shrinking its required matrix. The CI index-contract test includes a malformed built-index fixture that must exit nonzero before browser execution.
 Navigation waits for DOM readiness, then the unchanged strict guard waits for the story's lifecycle completion; global network idleness is not substituted for a successful play.
 
