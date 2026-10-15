@@ -21,7 +21,7 @@ assert.equal(missionWord(served(mission('a', 'running', [step('s', 'blocked')]),
 // An older st serves none, and a word this phone does not know is not guessed at.
 assert.equal(missionWord(mission('a', 'running', [step('s', 'running')])), 'unknown');
 assert.equal(missionWord(served(mission('a', 'running'), 'becalmed')), 'unknown');
-assert.equal(missionLabel(mission('a', 'running')), 'running · older st');
+assert.equal(missionLabel(mission('a', 'running')), 'running · st does not say');
 assert.equal(missionLabel(served(mission('a', 'running'), 'decision')), 'needs you');
 assert.equal(wordName('not_started'), 'not started');
 
@@ -50,11 +50,11 @@ assert.deepEqual(rows.map(row => [row.word, row.title, row.done, row.total]), [[
 assert.equal(hidden, 1);
 assert.deepEqual(missionSections(rows).map(section => section.title), ['working', 'idle']);
 assert.equal(missionRows(missions, true).rows.length, 3);
-// Rows from an older st list last, under "older st", with their raw state.
+// Rows from an older st list last, under "st does not say", with their raw state.
 {
   const { rows } = missionRows([mission('fleet/c/old', 'running'), ...missions], true);
-  assert.equal(rows.at(-1).label, 'running · older st');
-  assert.equal(missionSections(rows).at(-1).title, 'older st');
+  assert.equal(rows.at(-1).label, 'running · st does not say');
+  assert.equal(missionSections(rows).at(-1).title, 'st does not say');
 }
 
 // A failed mission ages out of the list after the day it settled, and showing hidden ones brings it back.

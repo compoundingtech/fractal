@@ -42,10 +42,11 @@ export function missionWord(mission: Pick<Mission, 'presentation'>): Word {
   return word !== undefined && (WORDS as ReadonlyArray<string>).includes(word) ? word as Word : 'unknown';
 }
 
-/** What a list calls a mission: its word, or an older st's raw state and that it is older. */
+/** What a list calls a mission: its word, or, when st serves none (an older st, or one that has
+ *  not read its agents yet), its raw state and that st does not say. */
 export function missionLabel(mission: Pick<Mission, 'presentation' | 'state'>): string {
   const word = missionWord(mission);
-  return word === 'unknown' && mission.state ? `${mission.state} · older st` : wordName(word);
+  return word === 'unknown' && mission.state ? `${mission.state} · st does not say` : wordName(word);
 }
 
 /** Who st says holds a step or must act: "you" for the reader. */
@@ -110,7 +111,7 @@ export function missionSections(rows: MissionRow[]): MissionSection[] {
   for (const row of rows) {
     const last = sections.at(-1);
     if (last?.word === row.word) { last.rows.push(row); last.count++; }
-    else sections.push({ word: row.word, title: row.word === 'unknown' ? 'older st' : wordName(row.word), count: 1, rows: [row] });
+    else sections.push({ word: row.word, title: row.word === 'unknown' ? 'st does not say' : wordName(row.word), count: 1, rows: [row] });
   }
   return sections;
 }

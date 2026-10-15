@@ -95,7 +95,7 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
   useLayoutEffect(() => { navigation.setOptions({ title: route.params.title ?? (mission ? missionTitle(mission) : 'Mission') }); }, [navigation, route.params.title, mission]);
   if (!mission) return <Screen><Banners /><Empty text={status === 'online' ? 'Loading this mission…' : 'This mission is not in the last loaded data.'} /></Screen>;
   const word = missionWord(mission);
-  // The steps st presents, in its order; an older st's steps read unknown.
+  // The steps st presents, in its order; steps st serves no presentation for read unknown.
   const raw = new Map(missionSteps(mission).map(step => [step.id, step]));
   const steps = mission.presentation
     ? mission.presentation.steps.map(shown => ({ shown, step: raw.get(shown.id) }))
