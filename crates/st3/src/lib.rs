@@ -57,6 +57,8 @@ pub mod mailbox;
 pub mod message_body;
 /// Bounded local maintenance workers shared by daemon startup and lifecycle fixtures.
 pub mod maintenance;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub mod malloc_trim;
 pub(crate) mod memory;
 pub(crate) mod read_cache;
 pub mod mission;
@@ -122,6 +124,8 @@ pub mod test_support;
 /// Attaches a local terminal to another fleet host's PTY session over Fabric, without st daemons.
 pub mod terminal_fabric;
 pub mod terminal_binding;
+/// Runs each agent as its own Unix user, in its own namespaces and root-owned cgroup.
+pub mod tiles;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
 pub use model::{NormalizedIntent, St3Error};

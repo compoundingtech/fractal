@@ -11,6 +11,7 @@ pub struct SmalltalkRuntime {
     /// Committed launch-source invalidation, independent of append frontiers.
     pub(crate) publication_cache_epoch: Mutex<Option<(i64, bool)>>,
     pub(crate) publication_cache_observer: Mutex<Option<smallclaims::sqlite::CommitObserver>>,
+    pub(crate) git_change_registry: std::sync::OnceLock<Arc<crate::changes::service::Registry>>,
     /// One registry per graph. Registration alone does not certify source coverage.
     pub(crate) ivm_views: Option<Arc<smallclaims::ivm::Views>>,
     /// Receipt waits and collection sockets share this one commit observer. Publisher
@@ -120,6 +121,7 @@ impl SmalltalkRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
         connection.execute_batch(git_changes::SCHEMA)?;
+        retirements::create_selection_triggers(connection)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
         backfill_message_index(connection)?;
@@ -137,6 +139,7 @@ impl SmalltalkRuntime {
         custom::create_schema(connection)?;
         agent_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
+        stop_deferral::create_schema(connection)?;
         publication_facts::create_schema(connection)?;
         glass_heads::create_schema(connection)?;
         directive_notes::create_schema(connection)?;
@@ -543,11 +546,13 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.execute_batch(SCHEMA)?;
         transaction.execute_batch(&RUNTIME_ID_INDEX)?;
         transaction.execute_batch(arrangements::SCHEMA)?;
+        transaction.execute_batch(retirements::SCHEMA)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(SCHEMA)?;
         connection.execute_batch(&RUNTIME_ID_INDEX)?;
         connection.execute_batch(arrangements::SCHEMA)?;
+        connection.execute_batch(retirements::SCHEMA)?;
     }
     Ok(())
 }
