@@ -52,7 +52,7 @@ function RunStopStory({ scheme, refuse, onStopRequest }: { scheme: Scheme; refus
   return <main aria-label="Thread" data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'dark' && darkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && lightTheme)}>
     <EmbraceRuntimeProvider options={options}>
       <ThreadHeader
-        folder="dev5" title="Row projection" status={running ? 'working' : 'idle'} statusLabel={running ? 'working' : 'idle'} statusSince={Date.parse(startedAt)} freshness="live" now={now}
+        folder="workstation-a" title="Row projection" status={running ? 'working' : 'idle'} statusLabel={running ? 'working' : 'idle'} statusSince={Date.parse(startedAt)} freshness="live" now={now}
         terminalAvailable panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}}
       />
       <div {...stylex.props(styles.transcript)}><Transcript viewportKey="run" title="Row projection" turns={[turn]} sync={sync} now={now} observedAt={now - 3000} onOpenTool={() => {}} /></div>
