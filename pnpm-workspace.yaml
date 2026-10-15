@@ -33,6 +33,7 @@ peerDependencyRules:
     typescript: ">=6.0.0"
     vitest: ">=4.0.0"
     unplugin: ">=3.0.0"
+    "@overeng/devbar>@overeng/utils": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils"
 
 minimumReleaseAgeExclude: ["@types/node"]
 

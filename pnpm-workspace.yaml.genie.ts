@@ -23,6 +23,13 @@ export default pnpmWorkspaceYaml.root({
     // platform-node 4.0.0 declares shared ^4.0.0; the latest shared requires effect ^4.0.4.
     '@effect/platform-node>@effect/platform-node-shared': '4.0.0',
   },
+  peerDependencyRules: {
+    ...pnpmPolicy.peerDependencyRules,
+    allowedVersions: {
+      ...pnpmPolicy.peerDependencyRules?.allowedVersions,
+      ...diagnosticsSourceInputs.peerDependencyRules.allowedVersions,
+    },
+  },
   minimumReleaseAgeExclude: ['@types/node'],
   nodeLinker: 'hoisted',
 })
