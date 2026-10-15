@@ -137,7 +137,7 @@ check("merge chooses the common priority role on either host", [{'runners': [ci2
       'ci1-priority', EVENT='merge_group')
 check("release chooses the same common priority role", [{'runners': [ci2_priority]}],
       'ci1-priority', EVENT='push', MODE='priority')
-overflow = 'namespace-profile-linux-x86-64;job.priority=1;github.run-id=123'
+overflow = 'namespace-profile-linux-x86-64;job.priority=2;github.run-id=123'
 check("saturated merge overflows on a positive census", [{'runners':[runner('ci1-priority',busy=True)]}],
       overflow, EVENT='merge_group',MERGE_OVERFLOW='on')
 check("below initial three-job capacity overflows", [{'runners':[ci2_priority]}],
@@ -172,13 +172,13 @@ check("fork cannot use common pool metadata", [{'runners': [ci2_worker]}],
 # Supporting PR jobs must never spend ordinary work on priority/merge capacity.
 import re
 blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", workflow.split("\njobs:\n", 1)[1]))
-required_priority = "github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3"
+required_priority = "job.priority=2"
 for job in ("linux-clippy", "linux-fleet-compat", "isolation-vm", "perf-cost"):
     assert (job == "perf-cost" or "github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1" in blocks[job]), (job, "supporting merge job uses chosen priority pool")
-    assert (required_priority if job != "perf-cost" else "github.event_name == 'merge_group' && 1 || 3") in blocks[job], (job, "merge precedes PR; optional cost stays separate")
+    assert (required_priority if job != "perf-cost" else "job.priority=5") in blocks[job], (job, "delivery and optional cost use shared project classes")
     assert "github.run-id=" in blocks[job], (job, "prevent cross-run assignment")
     if job == 'isolation-vm':
-        assert "namespace-profile-linux-x86-64;job.priority={1};github.run-id=" in blocks[job], (job, "profile controls must be inline")
+        assert "namespace-profile-linux-x86-64;job.priority=2;github.run-id=" in blocks[job], (job, "profile controls must be inline")
         assert "namespace-features:" not in blocks[job], (job, "separate feature labels are unsupported with profiles")
     else:
         assert "namespace-features:github.run-id=" in blocks[job], (job, "shape labels need a separate features label")
@@ -189,7 +189,7 @@ for job in ('genie-freshness', 'typescript-client'):
 for job, output in [('linux-tests-shard-2', 'ci1_secondary'), ('mail-redelivery-canaries', 'ci1_mail')]:
     assert f'outputs.{output}) ||' in blocks[job], (job, 'extra jobs need their own idle-slot output')
     assert "github.event_name != 'merge_group' && needs.pick-runner.outputs." + output in blocks[job], (job, 'PR extras must use their own distinct slot')
-    assert 'job.priority={1}' in blocks[job] and 'github.run-id={0}' in blocks[job], (job, 'Namespace fallback must evaluate priority and run affinity')
+    assert 'job.priority=2' in blocks[job] and 'github.run-id={0}' in blocks[job], (job, 'Namespace fallback must evaluate priority and run affinity')
     assert required_priority in blocks[job], job
 assert "outputs.ci1" in blocks["linux-tests"], "primary shard must retain reserved routing"
 canaries = blocks['mail-redelivery-canaries']
@@ -220,14 +220,18 @@ assert 'Keep valid same-source build outputs' in blocks['linux-test-build'], 'sh
 assert 'CI_TEST_PARTITION' not in canaries, "every required canary must run"
 assert 'mail_redelivery' not in blocks['linux-tests'] and 'scripts/ci-mail-redelivery-canaries' not in blocks['linux-tests'], "canaries cannot serialize the primary shard"
 assert 'needs.mail-redelivery-canaries.result' in blocks['linux-gate'], "failures and skips must still fail the Linux gate"
-assert "job.priority={1}" in blocks["linux-tests"] and "github.run-id={0}" in blocks["linux-tests"], "event priority and evaluated run id in Namespace fallback"
+assert "job.priority=2" in blocks["linux-tests"] and "github.run-id={0}" in blocks["linux-tests"], "delivery priority and evaluated run id in Namespace fallback"
+macos = (ROOT / '.github/workflows/macos.yml').read_text()
+assert 'namespace-profile-macos-arm64;job.priority=2;github.run-id=' in macos, 'macOS verification is delivery work'
+assert 'namespace-profile-linux-x86-64;job.priority=5;github.run-id=' in blocks['namespace-capacity'], 'manual capacity report is background on its original profile'
 performance = (ROOT / ".github/workflows/perf.yml").read_text()
-assert "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3" in performance
+assert "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=5" in performance
 assert "github.run-id=" in performance
 for path in ("main-upkeep.yml",):
     generated = (ROOT / ".github/workflows" / path).read_text()
-    assert ";job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}" in generated, (path, "non-merge Linux work keeps the second class")
+    assert ";job.priority=5" in generated, (path, "cache maintenance uses the background class")
     assert "github.run-id=" in generated, (path, "avoid nondeterministic runner pickup")
+    assert ";job.priority=2" not in generated, (path, "cache warming and optional cost are all background work")
     assert ";job.priority=10" not in generated, path
 for path in ("public-repo.yml", "release-daily.yml", "release-smalltalk.yml", "macos.yml"):
     generated = (ROOT / ".github/workflows" / path).read_text()
@@ -266,14 +270,14 @@ for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'isolation
     for event in ('pull_request', 'workflow_dispatch'):
         ordinary = route(job, event)
         assert ordinary == route(job, event, 'queue-reserved', merge_ci1='on'), (job, 'PRs cannot consume reserved profile')
-        assert f"job.priority={2 if event == 'pull_request' else 3}" in ordinary[0], (job, 'ordinary fallback retains its queue class')
+        assert "job.priority=2" in ordinary[0], (job, 'ordinary fallback retains its queue class')
 for n in (3,4):
     job = f'linux-tests-shard-{n}'
     assert f'CI_TEST_PARTITION: "hash:{n}/4"' in blocks[job]
     assert "github.event_name == 'merge_group'" in blocks[job]
     assert job in blocks['linux-gate']
     assert route(job,'merge_group',picked='["ci1-priority"]') == ['ci1-merge']
-    assert route(job,'merge_group',picked='["namespace-profile-linux-x86-64;job.priority=1;github.run-id=123"]') == ['namespace-profile-linux-x86-64;job.priority=1;github.run-id=123']
+    assert route(job,'merge_group',picked='["namespace-profile-linux-x86-64;job.priority=2;github.run-id=123"]') == ['namespace-profile-linux-x86-64;job.priority=2;github.run-id=123']
 # Execute the generated aggregate. Every merge shard must really pass; normal
 # events must prove the two additional merge-only jobs were skipped.
 gate_script = textwrap.dedent(blocks['linux-gate'].split('run: |\n',1)[1].split('\n      - ',1)[0])
@@ -338,8 +342,8 @@ print('passed: an evidence skip lets the aggregate accept skipped stages only wh
 
 assert 'runs-on: ubuntu-latest' in (ROOT / '.github/workflows/public-repo.yml').read_text()
 assert required_priority not in blocks['perf-cost'], 'optional cost must not join required PR priority'
-assert "job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}" in blocks['perf-cost']
-print('passed: release/merge precede PR checks, then optional/manual; reservations, shapes and affinity preserved')
+assert "job.priority=5" in blocks['perf-cost']
+print('passed: Smalltalk delivery uses 2, background uses 5; reservations, shapes and affinity preserved')
 
 # Exercise the actual generated step predicates, including restoring ordinary behavior.
 cache_conditions = re.findall(

@@ -165,7 +165,7 @@ for action in ['labeled', 'unlabeled']:
     for job in ['scope', 'perf-load']:
         assert not admits(job, action=action, label='reviewed', output='true', result='failure')
         assert admits(job, action=action, label='ci-perf', output='true')
-assert 'nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3' in workflow
+assert 'nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=5' in workflow
 print('Performance scope controls passed: every main/nightly/manual, labels, read paths, renames and uncertain lookup fail-open')
 
 subprocess.run(['python3', str(ROOT / 'scripts/ci-perf-evidence-test')], check=True)

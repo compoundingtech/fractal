@@ -121,7 +121,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (!(github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf')) && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')) }}
     runs-on:
       [
-        nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3,
+        nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=5,
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 30
@@ -219,7 +219,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')) }}
     runs-on:
       [
-        nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3,
+        nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=5,
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 45

@@ -90,13 +90,32 @@ only its pending successor, so the newest pending source starts after the active
 finishes. PR release validation replaces its own obsolete head; independent tag/manual
 identities remain intact. A cancelled pending run is not evidence of active-run
 cancellation; the run-level concurrency state distinguishes them. Required PR checks
-use priority 2, and optional benchmarks, main upkeep and manual Workspace work use
-priority 3. Release workflow PR validation uses priority 2. Assembly, tag publishing
-and daily publishing use GitHub-hosted `ubuntu-latest`: these jobs verify or publish
-existing artifacts and need no build runner. Priorities order waiting jobs, without
-preempting active jobs or reserving capacity. PR picking, Namespace shapes/affinity, tests
-and required checks are retained. Already queued runs retain
-the labels from their workflow revision.
+use Namespace priority 2, as do main/manual verification and release validation.
+Assembly, tag publishing and daily publishing use GitHub-hosted `ubuntu-latest`.
+
+### Shared sponsored Namespace capacity policy
+
+| Priority | Work |
+| --- | --- |
+| 1 | effect-utils delivery |
+| 2 | Smalltalk, PTY and tooling delivery |
+| 3 | LiveStore delivery |
+| 4 | effect-utils background |
+| 5 | Smalltalk, PTY and tooling background |
+| 6 | LiveStore background |
+
+Delivery includes merge-required checks, their prerequisite builds, main verification,
+and actual releases/deployments. Optional benchmarks, advisory reports and maintenance
+are background work. Trigger type alone does not change classification.
+
+Smalltalk's Workspace build/tests/Clippy/fleet-compatibility/canary/isolation jobs,
+macOS verification and release validation use 2. `perf-cost`, Performance load/hog
+benchmarks, Main upkeep cache warming and the manual Namespace capacity report use 5.
+GitHub-hosted metadata/gate/report jobs and owned-runner routing are unchanged.
+Priorities order waiting jobs without preempting active jobs or reserving capacity;
+Linux and macOS keep their independent platform limits. There is no new concurrency
+cap, runner shape, cache policy, check requirement or background-test frequency change.
+Already queued runs retain the labels from their workflow revision.
 
 Performance runs on every main push, nightly schedule and manual dispatch; it does not
 start a load test for merge groups.
@@ -106,7 +125,7 @@ checks the PR head before and after its bounded changed-file inventory, includin
 sources. Only an explicit successful `run=false` skips the optional workload; malformed
 metadata, head drift or failed admission retain coverage. Unrelated label events cannot
 cancel a running load test. The existing load test and its budgets are unchanged.
-Its Namespace priority is always 3. A busy queue can delay optional
+Its Namespace priority is always 5. A busy queue can delay optional
 loads and main baseline reports until required work drains; priority does not reserve a slot.
 
 The standing-rule before window is 2026-10-12 12:15–18:15 UTC. A finite 445-request
@@ -154,7 +173,7 @@ This motivates queue ordering; it does not establish a cache or compiler defect,
 that the 20-minute run SLO is met under overload.
 
 Profile labels carry affinity inline, for example
-`namespace-profile-linux-x86-64;job.priority=1;github.run-id=${{ github.run_id }}`.
+`namespace-profile-linux-x86-64;job.priority=2;github.run-id=${{ github.run_id }}`.
 Shape labels retain `-with-features` and a separate
 `namespace-features:github.run-id=${{ github.run_id }}` label. Namespace does not support a
 separate `namespace-features:` label with profiles; see the
@@ -605,7 +624,7 @@ the host controller must retain its release/merge-first classification and bound
 profile when a valid group-3 census has fewer than `CI_MERGE_MIN_IDLE` idle
 priority runners (default three, for the initial producer, Clippy and fleet
 compatibility jobs). All required jobs follow the same picker output, with
-Namespace priority 1 and affinity to that run. An unset switch keeps the owned
+Namespace priority 2 and affinity to that run. An unset switch keeps the owned
 priority lane. Invalid metadata, an invalid minimum or run ID, and missing
 credentials retain that lane; they do not establish saturation. Priority PRs
 and releases keep their reservations. This changes admission capacity, not

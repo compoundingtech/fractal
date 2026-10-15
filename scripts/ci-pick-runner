@@ -83,7 +83,7 @@ def main():
             if len(candidates("ci1-priority")) < int(merge_need):
                 # The existing Linux profile supplies the same tools and KVM.
                 # Every required merge job follows this single, run-bound choice.
-                emit("ci1", f"namespace-profile-linux-x86-64;job.priority=1;github.run-id={run_id}")
+                emit("ci1", f"namespace-profile-linux-x86-64;job.priority=2;github.run-id={run_id}")
                 print('Merge overflow: **Namespace** (qualified pool census below admission minimum)', file=summary)
                 return
         else:

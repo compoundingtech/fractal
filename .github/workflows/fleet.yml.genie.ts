@@ -24,6 +24,8 @@ import {
   evidenceStepNames,
   evidenceStepSteps,
   linuxStageRunner,
+  performanceRunner,
+  backgroundLinuxRunner,
   linuxStageRunsOn,
   perfStoresCache,
   mailStageRunsOn,
@@ -298,7 +300,7 @@ export default githubWorkflow(withQueueWatch(readyPRJobs(auditCaches({
   // actionlint must know the Namespace shape label the stage jobs use.
   actionlint: {
     ...defaultActionlintConfig,
-    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner],
+    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner, ...performanceRunner, ...backgroundLinuxRunner],
   },
   jobs: wireEvidenceSkips({
     [pickRunnerJobId]: pickRunnerJob,
@@ -362,7 +364,7 @@ fi`,
     'namespace-capacity': {
       name: 'namespace-capacity',
       if: "github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group'",
-      'runs-on': `\${{ fromJSON(github.event_name == 'merge_group' && '["ubuntu-latest"]' || format('${JSON.stringify(linuxRunner).replaceAll('${{ github.run_id }}', '{0}').replaceAll("${{ github.event_name == 'merge_group' && 1 || 3 }}", '{1}')}', github.run_id, github.event_name == 'merge_group' && 1 || 3)) }}`,
+      'runs-on': `\${{ fromJSON(github.event_name == 'merge_group' && '["ubuntu-latest"]' || format('${JSON.stringify(backgroundLinuxRunner).replaceAll('${{ github.run_id }}', '{0}')}', github.run_id)) }}`,
       'timeout-minutes': 120,
       permissions: { contents: 'read', actions: 'write' },
       defaults: { run: { shell: 'bash' } },
@@ -689,7 +691,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
     'perf-cost': namespaceStageJob({
       name: 'perf-cost',
       stage: 'cost',
-      runsOn: linuxStageRunner,
+      runsOn: performanceRunner,
       condition: "github.event_name != 'merge_group'",
       setup: commonSetupSteps,
       description: 'Run the cost check',

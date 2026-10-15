@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Align Smalltalk Namespace delivery and background work with the shared sponsored-capacity priorities",
+  "replay": {
+    "status": "none",
+    "detail": "CI scheduling labels only; no replay behavior changes for existing installations."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema or migration changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or fleet coordination changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No runtime, client, protocol or harness changes; only Namespace runner admission priority changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service activation or interruption is introduced."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No installation action is required. Existing queued workflow revisions keep their runner labels; newly admitted runs use the new priorities."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No state migration or runtime recovery change; reverting these workflow sources restores the previous queue priorities for future runs."
+  }
+}

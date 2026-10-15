@@ -8,15 +8,16 @@ import {
 } from '../../repos/effect-utils/genie/external.ts'
 
 // Profiles require controls inline; namespace-features labels apply only to shape labels.
-// Merge groups and releases precede required PR checks; optional work follows both.
+// Shared sponsored-capacity policy: Smalltalk delivery is 2; background work is 5.
 // This orders waiting jobs; it does not preempt active jobs or reserve a runner.
-const linuxJobPriority = "${{ github.event_name == 'merge_group' && 1 || 3 }}"
+const linuxJobPriority = '2'
 export const linuxRunnerProfile = `namespace-profile-linux-x86-64;job.priority=${linuxJobPriority}`
-const releaseJobPriority = "${{ github.event_name == 'pull_request' && 2 || 1 }}"
+const releaseJobPriority = '2'
 export const releaseLinuxRunnerProfile = `namespace-profile-linux-x86-64;job.priority=${releaseJobPriority}`
 export const releaseMacosRunnerProfile = `namespace-profile-macos-arm64;job.priority=${releaseJobPriority}`
 export const releaseLinuxRunner = "${{ fromJSON(needs['pick-runner'].outputs.ci1 || '[\"ci1-priority\"]') }}"
-export const macosRunnerProfile = 'namespace-profile-macos-arm64'
+export const macosRunnerProfile = 'namespace-profile-macos-arm64;job.priority=2'
+export const backgroundLinuxRunner = ['namespace-profile-linux-x86-64;job.priority=5;github.run-id=${{ github.run_id }}'] as const
 export const linuxRunner = [`${linuxRunnerProfile};github.run-id=\${{ github.run_id }}`] as const
 /**
  * The Linux gate's stage jobs. On 2026-10-03 the shape label `nscloud-ubuntu-24.04-amd64-16x32`
@@ -25,14 +26,14 @@ export const linuxRunner = [`${linuxRunnerProfile};github.run-id=\${{ github.run
  * got runners at once.
  */
 const linuxStageShape = 'nscloud-ubuntu-24.04-amd64-8x16-with-features'
-/** All non-merge Linux work retains one class; merge groups have the first queue class. */
+/** Required checks and their build producers share the Smalltalk delivery class. */
 export const linuxStageRunner = [
   `${linuxStageShape};job.priority=${linuxJobPriority}`,
   'namespace-features:github.run-id=${{ github.run_id }}',
 ] as const
-// Optional load benchmarks follow required PR checks, merge groups and releases.
+// Optional benchmarks and maintenance share the Smalltalk background class.
 export const performanceRunner = [
-  `${linuxStageShape};job.priority=3`,
+  `${linuxStageShape};job.priority=5`,
   'namespace-features:github.run-id=${{ github.run_id }}',
 ] as const
 export const macosRunner = [`${macosRunnerProfile};github.run-id=\${{ github.run_id }}`] as const
@@ -96,14 +97,12 @@ const mergeCi1Labels = `github.event_name == 'merge_group' && (needs.${pickRunne
 const pickedOr = (namespaceLabels: string, output = 'ci1') =>
   `\${{ fromJSON(${mergeCi1Labels} || (github.event_name != 'merge_group' && needs.${pickRunnerJobId}.outputs.${output}) || ${namespaceLabels}) }}`
 
-// Deployment and merge progress take precedence during saturation. Required PR
-// checks precede optional/manual work; local reservations remain unchanged.
-const workspaceJobPriority = "github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3"
+// Namespace priorities do not change owned-runner reservations or routing.
 // Set this repository variable only after a runner administrator has provisioned
 // the profile with the existing image/cache and left it capacity outside the PR pool.
 // An unset variable retains the existing shapes and Workspace priority policy.
 const namespaceLabels = (labels: readonly string[]) =>
-  `github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('${JSON.stringify(labels).replaceAll('${{ github.run_id }}', '{0}').replaceAll(linuxJobPriority, '{1}')}', github.run_id, ${workspaceJobPriority})`
+  `github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=2;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('${JSON.stringify(labels).replaceAll('${{ github.run_id }}', '{0}')}', github.run_id)`
 /** `runs-on` for a stage job: picked ci1, else the shared Namespace queue class. */
 export const linuxStageRunsOn = pickedOr(
   namespaceLabels(linuxStageRunner),

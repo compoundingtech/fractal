@@ -9,6 +9,7 @@ import {
   linuxRunner,
   linuxStageJob,
   linuxStageRunner,
+  performanceRunner,
   nixCacheStep,
   perfStoresCache,
   pnpmStoreEnv,
@@ -27,7 +28,7 @@ const whenMissing = (steps: readonly unknown[], conditionMissing = missing) => s
 // exact entries before provisioning Nix or restoring gigabytes; fill only missing entries.
 const warmJob = (stage: string, setup: readonly unknown[], nixOnly = false) => ({
   name: `warm-${stage}`,
-  'runs-on': stage === 'genie' ? 'ubuntu-latest' : linuxStageRunner,
+  'runs-on': stage === 'genie' ? 'ubuntu-latest' : performanceRunner,
   'timeout-minutes': 120,
   defaults: { run: { shell: 'bash' } },
   env: { ...buildEnv, CI_CACHE_DEV_SHELL: stage === 'genie' ? 'genie' : 'default' },
@@ -76,7 +77,7 @@ export default githubWorkflow(auditCaches({
   },
   actionlint: {
     ...defaultActionlintConfig,
-    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner],
+    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner, ...performanceRunner],
   },
   jobs: {
     'main-checks': {
@@ -150,7 +151,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     },
     // This check never ran in merge_group; keep its main measurements and generated-store cache.
     'perf-cost': linuxStageJob({
-      name: 'perf-cost', stage: 'cost', setup: commonSetupSteps,
+      name: 'perf-cost', stage: 'cost', setup: commonSetupSteps, runsOn: performanceRunner,
       description: 'Run the cost check', command: ['bash', 'scripts/ci-perf', 'cost'],
       env: { CARGO_PROFILE_DEV_OPT_LEVEL: '1' }, extraLogs: '${{ runner.temp }}/perf/',
       before: [perfStoresCache('cost')],
