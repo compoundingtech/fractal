@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "none",
-    "detail": "No database or public client schema changes. Delivery correlations and native replay high-water marks remain internal."
+    "detail": "No database or public client schema changes. Delivery correlations, native replay high-water marks, and stream first-frame context remain internal."
   },
   "rules": {
     "status": "none",

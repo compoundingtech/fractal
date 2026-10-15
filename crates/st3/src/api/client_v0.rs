@@ -20143,7 +20143,7 @@ mission "example/zero-run" state="ready" {
                 let session_id = socket_session_id.clone();
                 async move {
                     upgrade.on_upgrade(move |socket| conversation_stream_socket(
-                        socket, state, session, session_id, query.after, None,
+                        socket, state, session, session_id, query.after, None, (None, None),
                     ))
                 }
             },
