@@ -62,6 +62,12 @@ describe('Show menu model', () => {
     expect(machinesToRemember('compiler is:asking', hosts)).toEqual([])
   })
 
+  it('does not confuse duplicate machine values with a different remembered choice', () => {
+    const remembered = machinesToRemember('machine:host-a,host-a', ['host-a', 'host-b'])
+    expect(withRememberedMachines({ query: 'machine:host-a,host-b', remembered })).toBe('machine:host-a,host-a')
+    expect(withRememberedMachines({ query: 'machine:host-a', remembered })).toBe('machine:host-a')
+  })
+
   it('clears a gateway query’s stale machine tokens when machines were explicitly cleared in this browser', () => {
     expect(withRememberedMachines({ query: 'machine:host-a', remembered: [] })).toBe('')
     expect(withRememberedMachines({ query: 'is:asking machine:host-a compiler', remembered: [] })).toBe('is:asking compiler')

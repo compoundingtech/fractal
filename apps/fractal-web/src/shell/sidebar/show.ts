@@ -16,7 +16,7 @@ export const machineKey = (machine: string): string => `machine:${machine}`
 /** Every machine value in the query's machine tokens, first occurrence first. */
 export const selectedMachines = (parsedQuery: SidebarQuery): readonly string[] => [...new Set(parsedQuery.machines.flat())]
 const sameMachines = (left: readonly string[], right: readonly string[]): boolean =>
-  left.length === right.length && right.every((machine) => left.includes(machine))
+  left.every((machine) => right.includes(machine)) && right.every((machine) => left.includes(machine))
 /** Checked Show entries derived from the query. */
 export const selectedShowKeys = (parsedQuery: SidebarQuery): ReadonlySet<string> =>
   new Set([...(parsedQuery.asking ? [askingToken] : []), ...selectedMachines(parsedQuery).map(machineKey)])

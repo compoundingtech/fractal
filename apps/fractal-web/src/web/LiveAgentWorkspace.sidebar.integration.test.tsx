@@ -220,4 +220,24 @@ describe('shipped live sidebar machine query', () => {
     expect(input().value).toBe('machine:host-a machine:host-b')
     expect(roster().querySelectorAll('[data-testid="taste-agent-row"]')).toHaveLength(0)
   })
+
+  it('updates remembered machines after a token with duplicate values changes', async () => {
+    registry.set(agents, observed({ value: [
+      { ...agent, id: 'agent/a', host_id: Option.some('host/host-a') },
+      { ...agent, id: 'agent/b', host_id: Option.some('host/host-b') },
+    ] }))
+    await mount(1440)
+    const input = () => sidebar().querySelector<HTMLInputElement>('input')!
+    for (const query of ['machine:host-a,host-a', 'machine:host-a,host-b']) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input(), query)
+        input().dispatchEvent(new Event('input', { bubbles: true }))
+      })
+    }
+    await act(async () => root.unmount())
+    root = createRoot(host)
+    await mount(1440)
+    expect(input().value).toBe('machine:host-a,host-b')
+    expect(roster().querySelectorAll('[data-testid="taste-agent-row"]')).toHaveLength(2)
+  })
 })
