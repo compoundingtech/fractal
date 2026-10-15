@@ -1,4 +1,4 @@
-import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
+import { readyPRJobs } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow, nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import { readFileSync } from 'node:fs'
 import { buildEnv, linuxRunner, linuxStageRunner, performanceRunner, readOnlyBinaryCaches } from './workspace-ci.ts'
@@ -49,7 +49,7 @@ export default githubWorkflow(readyPRJobs({
   on: {
     push: { branches: ['main'] },
     schedule: [{ cron: '23 2 * * *' }],
-    pull_request: { types: [...readyPullRequestTypes, 'labeled', 'unlabeled'] },
+    // Preserve main/nightly/manual baselines without automatic PR load demand.
     workflow_dispatch: {},
   },
   permissions: { contents: 'read', actions: 'read', 'pull-requests': 'read' },
