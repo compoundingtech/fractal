@@ -147,6 +147,7 @@ pub fn attention_style(kind: &AttentionKind) -> (&'static str, Color) {
         AttentionKind::Fault { .. } => ("✕", theme::FAULT),
         AttentionKind::Message { .. } => ("✉", theme::SAPPHIRE),
         AttentionKind::Update { .. } => ("✦", theme::GREEN),
+        AttentionKind::Unplaced { .. } => ("?", theme::OVERLAY1),
     }
 }
 
@@ -1329,6 +1330,11 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 ),
                 inner,
             );
+        }
+        AttentionKind::Unplaced { text: body, why, .. } => {
+            card.lines(text::markdown(body, inner, theme::text()));
+            card.blank();
+            card.wrap(&text::inline(why, theme::dim()), inner);
         }
         AttentionKind::Message { from, body } => {
             card.line(Line::from(vec![
