@@ -31,6 +31,8 @@ observing the same content again writes nothing, so the revision holds; new cont
 option count, another runtime incarnation) is a new observation and a new revision. Settling the
 question writes the resolution and leaves the revision unchanged. A resolution names the revision
 it settled and is written only while that is still the newest observation.
+An observation is fenced on the revision inspected before appending (or on absence for a new
+question), so a concurrent resolution cannot be followed by an observation of new content.
 
 The question reader (`Store::harness_question`) is the only reader contract for these subjects.
 The generic subject views (claims, actual state) show the claims while the store holds them.
