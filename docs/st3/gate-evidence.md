@@ -707,6 +707,26 @@ different command and extra inputs, while each signer is still held to exactly i
 and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
 `host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only, with `enforce` false.
 
+### Which tree a pull request run asks about
+
+A `pull_request` run checks out GitHub's merge of the head into the CURRENT base, a new tree whenever main moved, so a note for the tree an agent
+built and signed would nearly always miss. The gate therefore asks the verifier about the tree of the **pull request head commit**
+(`github.event.pull_request.head.sha`; GitHub attaches the required checks to that sha) when every one of these holds, and about the merge tree
+otherwise: the head repository is this repository and the pull request is not a draft; the payload head and base are full object ids and the opener,
+actor and triggering actor are known; the head commit is present or fetchable; the checked-out commit is the merge whose second parent is that head
+(or the head itself); the opener, the actor and the triggering actor are on `.st/evidence-authors.json` at the base and every non-merge commit of
+the branch has a listed author and committer (the signing guard's own `check_authors`, loaded from the base's `ci-evidence-signing`); and no
+protected file differs between the branch point and the head, the base, or the current tip of the merge's first parent. The gate, verifier, policy,
+keys and author rule are all taken from the base, never from the checkout. The decision line says which: `tree_of=head|merge`, `pr_head=`,
+`merge_tree=` and `head_tree=used` or `head_tree=fallback:<why>`. A `merge_group` run never uses a head tree: only a note for its own tree can skip
+it, and a head-tree decision on any other event is refused (`pull_request_target` is not `pull_request`: it never uses a head tree and never skips). The line also
+says `notes_fetch=ok|failed` and the first 16 hex digits of the base-tip policy and key-registry hashes it used (`policy_sha256`, `keys_sha256`), and input-keyed lookups use
+the key of the tree the run asks about (the head's, in head mode). The signer is not checked against the author list: signers are the keys of
+`.st/evidence-keys` (the trust root, read from the base), authors are GitHub accounts; the two answer different questions and a host key has no login. **Time
+dependence:** a skip now depends on state outside the pull request. The same head can run when the gate looks (no note yet) and skip on a re-run once the
+agent has signed and pushed the note, or the reverse if a note is later superseded by a failing record; a skip is the decision at that run, not a property of the sha. A skip on a pull request therefore means "the head tree passed on a trusted host", not
+"the merge with today's main passes"; a break caused only by main moving is caught in the merge queue, which still tests the integrated tree.
+
 ### Running the checks locally (`scripts/st-test`)
 
 `scripts/st-test` runs each required check that has a local command (today `genie-freshness` and
@@ -733,6 +753,7 @@ you have checked out, the hook asks `st-test --status`; if every check is covere
 group) and the push goes. A push from an agent (`ST_AGENT` set, or no terminal on stderr) runs inside a tool call with a short timeout, so there the hook
 waits at most `ST_EVIDENCE_AGENT_LIMIT` seconds (default 120), prints that signing continues in the background with its log path, and lets the push go;
 the notes are pushed when the run finishes, and agents should run `scripts/st-test --push origin` before pushing so the first CI run already sees them.
+**The hook's environment is scrubbed (st2#3014).** git exports `GIT_DIR` (and `GIT_PREFIX`, `GIT_EXEC_PATH`, ...) to a hook, and `GIT_DIR` is set whenever the push is made from a linked worktree, which every agent seat uses. A script run with it that makes its own repository or says `git -C elsewhere ...` still acts on the CALLER's repository, because `GIT_DIR` wins over `-C` and over the working directory. The repository's own fixture tests do exactly that; run from the hook they committed on the caller's branches, rewrote the shared repository's identity and pushed. The stub, `evidence-prepush`, `st-test` and `ci-genie-freshness` (through `scripts/git-env-clean`) now drop the variables that select a repository or an identity (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`, `GIT_PREFIX`, `GIT_QUARANTINE_PATH`, `GIT_AUTHOR_*`, `GIT_COMMITTER_*`, `GIT_PUSH_OPTION*`, ...) before they start anything; transport and credential variables (`GIT_SSH_COMMAND`, `GIT_ASKPASS`, `GIT_TERMINAL_PROMPT`, `GIT_HTTP_*`, `GIT_CONFIG_*`) stay, because the notes push needs them. The shell scrub uses only `export -p` (the non-interactive bash of a nix shell has no `compgen`, which made its first version a silent no-op there) and checks its own result: a scrub that did not work stops the caller, and makes the stub skip the hook with a message. The stub is a copy in each repository's hooks directory but runs `evidence-prepush` and `st-test` as they are on `origin/main`, so a stub installed before this change is covered as soon as it is on main; `install-git-hooks` replaces an older stub carrying its marker on the next shell entry. Tests push from a linked worktree through the real hook, also with `compgen` disabled, and require the caller's config, HEAD, status, branches and tags to be byte-identical.
 It never blocks a push: a failing check is recorded and printed, a timeout is printed, and so is every other failure (an exception, a missing `python3`,
 a slow fetch, a signer that `.st/evidence-keys` on main does not list, a missing signing key). `ST_SKIP_EVIDENCE=1` skips it and says so. Tags, deletes,
 other branches and the base branch are pushed untouched, and the notes push inside the run does not run the hook again. A new tree always takes the slow
