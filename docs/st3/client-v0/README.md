@@ -574,7 +574,7 @@ across a period, from the daemon's local observation log (one reading a minute, 
 it is not in the graph and does not replicate). The period defaults to the 24 hours ending now,
 spans at most seven days and answers in `steps` equal steps (default 120, 1 to 1000); a period
 that ends before it starts, is longer than seven days or asks for another number of steps is
-`invalid-slo-period`. The value is `SloHistory { id, since_ms, until_ms, samples, steps }`: each
+`validation-failed` (HTTP 422). The value is `SloHistory { id, since_ms, until_ms, samples, steps }`: each
 step holds its lowest reading, and a step with no reading is null, so a gap means "not measured",
 never "spent". A daemon that has run for less than the period has fewer readings than steps. An
 id the daemon has no rows for answers with no readings (`samples` 0 and every step null), not an

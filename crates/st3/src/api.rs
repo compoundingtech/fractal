@@ -1709,7 +1709,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "database-locked"
         | "message-send-unconfirmed"
         | "internal" => code.unwrap_or("internal").to_owned(),
-        "too-many-attachments" | "invalid-blob-reference" => "validation-failed".into(),
+        "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
         "launch-review-not-authorized"
         | "wrong-message-recipient"
         | "lane-approval-denied"
@@ -18874,9 +18874,8 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         // Clients read the same rows and the same history, typed.
         let (status, client_list) = get_request(app.clone(), "/v1/client/slo").await;
         assert_eq!(status, StatusCode::OK, "{client_list}");
-        assert_eq!(client_list["api_version"], "st3.client.v0", "{client_list}");
-        assert!(client_list["snapshot"]["store_index"].is_u64(), "{client_list}");
-        let typed: st3_client::SloList = serde_json::from_value(client_list["value"].clone()).unwrap();
+        // get_request unwraps the client envelope, asserting its version, snapshot and request id.
+        let typed: st3_client::SloList = serde_json::from_value(client_list.clone()).unwrap();
         let weekly = typed.rows.iter().find(|row| row.id == "ada/claude-1/weekly").unwrap();
         assert_eq!((weekly.kind.as_str(), weekly.remaining_percent), ("budget", Some(70.0)));
         assert!(weekly.resets_at_unix_ms.is_none() && weekly.measured_at_unix_ms.is_some());
@@ -18887,8 +18886,7 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{client_history}");
-        assert_eq!(client_history["api_version"], "st3.client.v0", "{client_history}");
-        let typed: st3_client::SloHistory = serde_json::from_value(client_history["value"].clone()).unwrap();
+        let typed: st3_client::SloHistory = serde_json::from_value(client_history.clone()).unwrap();
         assert_eq!((typed.id.as_str(), typed.samples, typed.steps), ("cpu", 2, vec![Some(80.0), Some(60.0)]));
         for query in [
             format!("id=cpu&since_ms={now}&until_ms={now}"),
@@ -18897,10 +18895,10 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         ] {
             let (status, _) = get_request(app.clone(), &format!("/v1/slo/history?{query}")).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
-            // The client route refuses a bad period the same way, with the same code.
+            // The client route refuses a bad period the same way, as a validation failure in the client vocabulary.
             let (status, refused) = get_request(app.clone(), &format!("/v1/client/slo/history?{query}")).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}: {refused}");
-            assert_eq!(refused["code"], "invalid-slo-period", "{query}: {refused}");
+            assert_eq!(refused["code"], "validation-failed", "{query}: {refused}");
         }
         // A client session without read.projections reads neither route.
         let session = || Extension(client_v0::ClientSession::for_tests_scoped("person/fixture", "person/fixture", &["read.attention"]));
