@@ -140,12 +140,12 @@ fn flow_metrics_substantive_activity_excludes_quiet_and_other_incarnations() {
         ("work.claimed", json!({}), true),
     ] {
         let store = fixture();
-        step(&store, "step", "claimed", None, Some("agent/example/holder"), Some(9_000_000), 1000);
+        step(&store, "step-run/example/step", "claimed", None, Some("agent/example/holder"), Some(9_000_000), 1000);
         store.set_write_clock_at(1_500_000).unwrap();
         {
             let mut connection = store.connection.write();
             let tx = connection.transaction().unwrap();
-            let subject = if kind.starts_with("work.") { "step" } else { "agent/example/holder" };
+            let subject = if kind.starts_with("work.") { "step-run/example/step" } else { "agent/example/holder" };
             append_claim_tx(&tx, &store.origin, subject, kind, Some("agent/example/holder"),
                 &json!({"fields":fields}), &[], None).unwrap();
             tx.commit().unwrap();
