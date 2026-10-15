@@ -12267,7 +12267,10 @@ mod tests {
         assert!(state.client_relay.is_none(), "metadata never contacts the terminal owner");
         assert!(!session.scopes.contains("terminal.control"));
         session.scopes.remove("terminal.read");
-        assert_eq!(terminal_route(State(state), Extension(session), AxumPath("agent/demo/worker".into())).await.unwrap_err().status, StatusCode::FORBIDDEN);
+        let denied = terminal_route(State(state), Extension(session), AxumPath("agent/demo/worker".into())).await.unwrap_err();
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+        assert_eq!(denied.code, "forbidden");
+        assert_eq!(denied.message, "the authenticated client session is not granted `terminal.read`");
     }
 
     #[tokio::test]
@@ -12292,10 +12295,27 @@ mod tests {
     async fn terminal_route_over_fabric_requires_the_normal_paired_credential() {
         use tower::ServiceExt as _;
         let root = tempfile::tempdir().unwrap();
-        let response = super::super::fabric_router(terminal_route_fixture(root.path())).oneshot(
-            axum::http::Request::builder().uri("/v1/client/terminals/agent%2Fdemo%2Fworker/route")
-                .body(axum::body::Body::empty()).unwrap()).await.unwrap();
-        assert!(!response.status().is_success());
+        let app = super::super::fabric_router(terminal_route_fixture(root.path()));
+        for (credential, reason) in [
+            (None, "the Fabric-loopback client credential is required"),
+            (Some("Bearer unknown-test-credential"), "the client credential is unknown or expired"),
+        ] {
+            let mut request = axum::http::Request::builder()
+                .uri("/v1/client/terminals/agent%2Fdemo%2Fworker/route");
+            if let Some(credential) = credential {
+                request = request.header(axum::http::header::AUTHORIZATION, credential);
+            }
+            let response = app.clone().oneshot(request.body(axum::body::Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let bytes = axum::body::to_bytes(response.into_body(), 16_384).await.unwrap();
+            let denied: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(denied["api_version"], "st3.client.v0");
+            assert_eq!(denied["error_version"], "st3.client.error.v0");
+            assert_eq!(denied["code"], "forbidden");
+            assert_eq!(denied["message"], reason);
+            assert_eq!(denied["retryable"], false);
+            assert!(denied.get("value").is_none(), "no owner descriptor is disclosed: {denied}");
+        }
     }
 
     #[tokio::test]

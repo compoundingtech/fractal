@@ -820,10 +820,16 @@ mod tests {
                     "{response}"
                 );
             } else {
-                assert!(
-                    status.contains(" 401 ") || status.contains(" 403 "),
-                    "{response}"
+                assert_eq!(status.split_whitespace().nth(1), Some("403"), "{response}");
+                let denied: serde_json::Value = serde_json::from_str(body)?;
+                assert_eq!(denied["api_version"], "st3.client.v0");
+                assert_eq!(denied["error_version"], "st3.client.error.v0");
+                assert_eq!(denied["code"], "forbidden");
+                assert_eq!(
+                    denied["message"],
+                    "the Fabric-loopback client credential is required"
                 );
+                assert_eq!(denied["retryable"], false);
             }
         }
         bridge.stop().await;
