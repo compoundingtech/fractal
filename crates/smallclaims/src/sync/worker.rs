@@ -1127,13 +1127,13 @@ async fn dial_peer<B: Backend>(
                     .cloned();
                 if let Some(offered) = offered
                     && let Ok(current) = backend
-                        .guard_summary(auth.fleet_id())
+                        .authority_digest(auth.fleet_id())
                         .await
                 {
                     // The other side already knows this inventory and is draining both
                     // queues. Notifications from that exchange must not trigger a reverse
                     // connection. A genuinely new local envelope still requests a push.
-                    if current.exchange.authority_digest == offered {
+                    if current == offered {
                         must_send = false;
                     }
                 }

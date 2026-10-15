@@ -69,6 +69,10 @@ pub mod principals;
 pub mod projection_digest;
 pub mod runtime;
 
+#[cfg(test)]
+#[path = "store/authority_digest_tests.rs"]
+mod authority_digest_tests;
+
 pub use runtime::{IncrementalProjection, ReplayProgress, Runtime};
 
 pub use canonical::{CANONICAL_ORDER, CANONICAL_ORDER_DESC, canonical_sql};
@@ -5995,21 +5999,32 @@ impl Store {
         Ok(snapshot)
     }
 
+    /// The guard needs the same fresh authority as an exchange, including sealing and judging,
+    /// but none of the summary's bucket/projection copies or signature/checkpoint queries.
+    pub fn replication_authority_digest(&self) -> Result<String> {
+        Ok(self.replication_snapshot()?.authority_digest.clone())
+    }
+
     pub fn export_replication_summary(&self, fleet_id: &str) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
         let _timing = time_stage(&self.replication_timers.export);
         let signature_requests = self.replication_signature_requests()?;
+        let buckets = snapshot.buckets.clone();
+        let projection_digests = snapshot.projection_digests.clone();
+        // Count logical entries actually copied by this assembly, only in the test binary.
+        #[cfg(test)]
+        authority_digest_tests::record_summary_clones(buckets.len(), projection_digests.len());
         Ok(ReplicationExchange {
             peer: self.origin.clone(),
             fleet_id: fleet_id.to_owned(),
             schema_digest: self.runtime.schema_digest(),
             authority_digest: snapshot.authority_digest.clone(),
             graph_digest: snapshot.legacy_graph_digest.clone(),
-            projection_digests: snapshot.projection_digests.clone(),
+            projection_digests,
             inventory: ReplicationInventory {
                 digest: snapshot.inventory.digest.clone(),
                 envelopes: Vec::new(),
-                buckets: snapshot.buckets.clone(),
+                buckets,
                 accepts: Some(replication_accepts()),
                 checkpoint: self.trimmed_checkpoint()?,
             },

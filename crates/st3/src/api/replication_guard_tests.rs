@@ -13,6 +13,7 @@ fn request(summary_only: bool, authority_guard: bool) -> ReplicationExportReques
         inventory: Default::default(),
         summary_only,
         authority_guard,
+        authority_only: false,
         signature_requests: Vec::new(),
     }
 }
@@ -132,13 +133,13 @@ async fn guard_summary_uses_unchanged_default_backend_and_old_local_handler() {
         smallclaims::store::Store::open_memory("legacy", Arc::new(smallclaims::store::runtime::Plain)).unwrap()
     ));
     let normal = local.export(FLEET, &Default::default(), true, &[]).await.unwrap();
-    let guard = local.guard_summary(FLEET).await.unwrap();
-    assert_eq!(serde_json::to_vec(&guard).unwrap(), serde_json::to_vec(&normal).unwrap());
+    let guard = local.authority_digest(FLEET).await.unwrap();
+    assert_eq!(guard, normal.exchange.authority_digest);
     let expected = ReplicationExportResponse {
         exchange: graph.export_replication_summary(FLEET).unwrap(),
         store_index: graph.index().unwrap(),
     };
-    let expected_bytes = serde_json::to_vec(&expected).unwrap();
+    let expected_digest = expected.exchange.authority_digest.clone();
     let answer = serde_json::to_value(expected).unwrap();
     let old_app = Router::new().route("/v1/internal/replication/export", axum::routing::post(
         move |Json(old): Json<OldExportRequest>| {
@@ -159,8 +160,108 @@ async fn guard_summary_uses_unchanged_default_backend_and_old_local_handler() {
     });
     tokio::time::timeout(Duration::from_secs(5), bound).await.unwrap().unwrap();
     let main = crate::peer::MainBackend::new(socket);
-    let received = main.guard_summary(FLEET).await.unwrap();
-    assert_eq!(serde_json::to_vec(&received).unwrap(), expected_bytes);
+    let received = main.authority_digest(FLEET).await.unwrap();
+    assert_eq!(received, expected_digest);
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn compact_guard_response_is_bucket_independent_and_ordinary_exports_stay_full() {
+    if crate::test_support::supervise_test() { return; }
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    state.store.bind_fleet(FLEET).unwrap();
+    let mut compact_size = None;
+    for count in [1, 64] {
+        {
+            let mut connection = state.store.connection.write();
+            let tx = connection.transaction().unwrap();
+            for writer in 0..count {
+                tx.execute("INSERT OR IGNORE INTO checkpoint_envelopes VALUES (?1,0,?2,0,'checkpoint/fixture')",
+                    rusqlite::params![format!("retired-{writer}"), "a".repeat(64)]).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        state.store.replica_rows_changed();
+        let normal = replication_export(State(state.clone()), Json(request(true, false))).await.unwrap().0;
+        let mut compact_request = request(true, true);
+        compact_request.authority_only = true;
+        let compact = replication_export(State(state.clone()), Json(compact_request)).await.unwrap().0;
+        assert_eq!(compact.exchange.authority_digest, normal.exchange.authority_digest);
+        assert_eq!(compact.store_index, state.store.index().unwrap());
+        assert!(normal.exchange.inventory.buckets.len() >= count);
+        assert!(compact.exchange.inventory.buckets.is_empty());
+        assert!(compact.exchange.projection_digests.is_empty());
+        assert!(compact.exchange.signature_requests.is_empty());
+        assert!(compact.exchange.inventory.checkpoint.is_none());
+        let size = serde_json::to_vec(&compact.exchange).unwrap().len();
+        assert_eq!(*compact_size.get_or_insert(size), size, "compact bytes grew with bucket count");
+        let old_summary = serde_json::to_vec(&normal).unwrap();
+        let marked = replication_export(State(state.clone()), Json(request(true, true))).await.unwrap().0;
+        assert_eq!(serde_json::to_vec(&marked).unwrap(), old_summary,
+            "old workers asking for a full marked summary still get it");
+        let full = replication_export(State(state.clone()), Json(request(false, false))).await.unwrap().0;
+        let mut impossible = request(false, true);
+        impossible.authority_only = true;
+        let full_marked = replication_export(State(state.clone()), Json(impossible)).await.unwrap().0;
+        assert_eq!(serde_json::to_vec(&full_marked).unwrap(), serde_json::to_vec(&full).unwrap(),
+            "a compact flag cannot change a full peer exchange");
+    }
+    let mut unmarked = request(true, false);
+    unmarked.authority_only = true;
+    assert!(replication_export(State(state), Json(unmarked)).await.is_err());
+}
+
+#[tokio::test]
+async fn only_typed_authority_backend_sends_compact_flag_and_bad_digests_are_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    state.store.bind_fleet(FLEET).unwrap();
+    let response = ReplicationExportResponse {
+        exchange: state.store.export_replication_summary(FLEET).unwrap(),
+        store_index: state.store.index().unwrap(),
+    };
+    let expected = response.exchange.authority_digest.clone();
+    let answer = Arc::new(std::sync::Mutex::new(serde_json::to_value(response).unwrap()));
+    let requests = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let returned = answer.clone();
+    let captured = requests.clone();
+    let app = Router::new().route("/v1/internal/replication/export", axum::routing::post(
+        move |Json(request): Json<Value>| {
+            captured.lock().unwrap().push(request);
+            let value = returned.lock().unwrap().clone();
+            async move { Json(json!({"api_version":"st3.v1", "value":value})) }
+        }
+    ));
+    let socket = root.path().join("compact.sock");
+    let serving = socket.clone();
+    let (ready, bound) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        serve_unix_with_ready(&serving, app, || { let _ = ready.send(()); }).await.unwrap();
+    });
+    tokio::time::timeout(Duration::from_secs(5), bound).await.unwrap().unwrap();
+    let backend = crate::peer::MainBackend::new(socket);
+    for summary_only in [false, true] {
+        backend.export(FLEET, &Default::default(), summary_only, &[]).await.unwrap();
+    }
+    assert_eq!(backend.authority_digest(FLEET).await.unwrap(), expected);
+    {
+        let captured = requests.lock().unwrap();
+        for normal in &captured[..2] {
+            assert!(normal.get("authority_only").is_none());
+            assert!(normal.get("authority_guard").is_none());
+        }
+        assert_eq!(captured[2]["authority_only"], true);
+        assert_eq!(captured[2]["authority_guard"], true);
+        assert_eq!(captured[2]["summary_only"], true);
+    }
+    for invalid in [String::new(), "not-a-digest".to_owned(), "z".repeat(64)] {
+        answer.lock().unwrap()["exchange"]["authority_digest"] = json!(invalid);
+        assert!(backend.authority_digest(FLEET).await.is_err());
+    }
+    *answer.lock().unwrap() = json!({"wrong":"response"});
+    assert!(backend.authority_digest(FLEET).await.is_err(), "decode errors must not become a matching digest");
     server.abort();
     let _ = server.await;
 }

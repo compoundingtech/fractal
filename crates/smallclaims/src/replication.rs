@@ -109,10 +109,14 @@ pub struct ReplicationExportRequest {
     pub inventory: ReplicationInventory,
     #[serde(default)]
     pub summary_only: bool,
-    /// Classify a full summary requested only by the local recent-inbound guard.
+    /// Classify a summary store call requested only by the local recent-inbound guard.
     /// Older local daemons ignore this field; it never changes the exported exchange.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authority_guard: bool,
+    /// Only the local guard asks for an authority digest in the unchanged response envelope.
+    /// An old daemon ignores this flag and returns its complete summary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authority_only: bool,
     /// The other side's signature requests, to answer in the exported exchange.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signature_requests: Vec<ReplicaEnvelopeId>,
