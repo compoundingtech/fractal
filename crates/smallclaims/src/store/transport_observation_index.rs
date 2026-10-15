@@ -58,6 +58,7 @@ INSERT OR IGNORE INTO transport_observation_backfill
 SELECT 1, COALESCE(MAX(store_index),0), 0, 0 FROM claims;
 "#;
 
+#[derive(Debug)]
 pub struct Page {
     pub ready: bool,
     pub copied: usize,
