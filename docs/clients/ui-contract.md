@@ -350,7 +350,8 @@ agents list, so no bound on that wait is promised.
 The terminal UI reads it: `st3-ui-model::missions::adapt` takes each mission's and step's word,
 owner and note from the presentation and derives none of them. A row without a presentation, or
 with a word the client does not know, reads `unknown` (in `words.json`), and the list shows the
-row's raw `state` with "older st". The summary's count of active missions reads
+row's raw `state` with "st does not say", which is true of an older st and of a card st leaves
+unsaid until its first agents roster. The summary's count of active missions reads
 `missions::row_word`, the word from the row and its gates alone.
 
 | Field | Meaning |

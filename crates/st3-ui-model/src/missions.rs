@@ -28,8 +28,8 @@ pub enum Word {
     Cancelled,
     /// Published, and nobody has started a run of it.
     NotStarted,
-    /// st serves no presentation this client reads: an older st, or a word this client does not
-    /// know. A client keeps no derivation of its own.
+    /// st serves no presentation this client reads: an older st, one that has not read its agents
+    /// yet, or a word this client does not know. A client keeps no derivation of its own.
     Unknown,
 }
 
@@ -79,7 +79,7 @@ impl Word {
             Word::Failed => "a step failed and nothing retried it",
             Word::Cancelled => "it was stopped before it finished",
             Word::NotStarted => "published, and never started",
-            Word::Unknown => "this st does not say; an older st",
+            Word::Unknown => "st does not say: an older st, or one that has not read its agents yet",
         }
     }
 }
@@ -160,11 +160,11 @@ pub struct Mission {
 }
 
 impl Mission {
-    /// What a list calls the mission: its word, or, from an st too old to serve one, its raw
-    /// state and that st is older (docs/clients/ui-contract.md, Presentation projections).
+    /// What a list calls the mission: its word, or, when st serves none (an older st, or one
+    /// that has not read its agents yet), its raw state and that st does not say.
     pub fn label(&self) -> String {
         match self.word {
-            Word::Unknown if !self.state.is_empty() => format!("{} · older st", self.state),
+            Word::Unknown if !self.state.is_empty() => format!("{} · st does not say", self.state),
             word => word.name().into(),
         }
     }
