@@ -30,7 +30,8 @@
     "test:side-panel": "node --test --test-force-exit src/assistant-ui/composition/SidePanel.integration.test.mjs",
     "test:work-log": "node --test --test-force-exit src/assistant-ui/taste/work-log.unit.test.mjs",
     "test:tab-strip": "node --experimental-strip-types src/assistant-ui/workbench/tab-strip-layout.unit.test.ts",
-    "check:details": "node scripts/details-run-gates.mjs"
+    "check:details": "node scripts/details-run-gates.mjs",
+    "check:sidebar-fitting": "node scripts/check-sidebar-fitting.mjs"
   },
   "dependencies": {
     "react": "19.2.3",

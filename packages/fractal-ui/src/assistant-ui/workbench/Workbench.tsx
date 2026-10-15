@@ -591,5 +591,5 @@ const styles = stylex.create({
   placeholderUri: { fontFamily: t.fontMono, fontSize: t.codeSize, color: tx.fgMuted },
   placeholderHint: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: tx.fgMuted },
   placeholderMeta: { display: 'flex', gap: s.xs },
-  chip: { fontFamily: t.fontMono, fontSize: t.denseSize, color: tx.fgFaint, borderWidth: g.hairline, borderStyle: 'solid', borderColor: bd.border, borderRadius: r.sm, paddingInline: s.xs2 },
+  chip: { fontFamily: t.fontMono, fontSize: t.denseSize, color: tx.fgMuted, borderWidth: g.hairline, borderStyle: 'solid', borderColor: bd.border, borderRadius: r.sm, paddingInline: s.xs2 },
 })

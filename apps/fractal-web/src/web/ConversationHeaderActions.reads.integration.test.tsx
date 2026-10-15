@@ -14,7 +14,7 @@ import { todoAgent, todoAgentRef } from '../conversation/todos/fixtures.ts'
 import { projectTodos } from '../conversation/todos/model.ts'
 import { observed } from '../data/source.ts'
 
-vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'test-animation', props: () => ({}) }))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const snapshot = { id: 'snapshot/example', host_id: 'host/example', store_index: 1, projection_version: 'client-projection.v0', created_at: '2026-10-09T00:00:00Z' }
 let root: Root
 let host: HTMLDivElement

@@ -26,6 +26,7 @@ use std::process::Command;
 use anyhow::{Context as _, Result, bail};
 
 use super::registry::{self, Registry, Tile};
+use super::uids;
 
 /// Where a tile's own directories appear inside it.
 pub const TILE_HOME: &str = "/tile/home";
@@ -95,9 +96,10 @@ pub fn run_plan(
 /// `st tiles run`: start the tile's tools unit with `command` and wait for it.
 pub fn run(registry_path: &Path, name: &str, terminal: bool, command: &[OsString]) -> Result<i32> {
     require_root("st tiles run")?;
-    let registry = Registry::load(registry_path)?;
-    let tile = registry.tile(name)?;
-    check_account(name, tile)?;
+    let mut registry = Registry::load(registry_path)?;
+    let tile = registry.tile(name)?.clone();
+    root_dir(&registry.state_root, 0o755)?;
+    uids::allocate(&mut registry, name)?;
     let st = std::env::current_exe().context("find this st executable")?;
     registry::root_controlled(&st).with_context(|| {
         format!(
@@ -109,7 +111,7 @@ pub fn run(registry_path: &Path, name: &str, terminal: bool, command: &[OsString
     if command.is_empty() {
         bail!("name a command to run in the tile, after `--`");
     }
-    let plan = run_plan(registry_path, name, tile, &st, terminal, command);
+    let plan = run_plan(registry_path, name, &tile, &st, terminal, command);
     let status = Command::new(&plan.program)
         .args(&plan.args)
         .env_clear()
@@ -123,10 +125,57 @@ pub fn run(registry_path: &Path, name: &str, terminal: bool, command: &[OsString
 /// serve the endpoint before the first launch.
 pub fn prepare(registry_path: &Path, name: &str) -> Result<()> {
     require_root("st tiles prepare")?;
-    let registry = Registry::load(registry_path)?;
-    let tile = registry.tile(name)?;
-    check_account(name, tile)?;
-    prepare_directories(&registry, name, tile).map(|_| ())
+    let mut registry = Registry::load(registry_path)?;
+    let tile = registry.tile(name)?.clone();
+    root_dir(&registry.state_root, 0o755)?;
+    let uid = uids::allocate(&mut registry, name)?;
+    prepare_directories(&registry, name, &tile, uid).map(|_| ())
+}
+
+/// `st tiles remove`: end the tile, remove its state and runtime directories, and give its user
+/// ID back. Root's registry entry stays until root removes it; a later launch allocates afresh,
+/// with nothing of the old tile left to inherit.
+pub fn remove(registry_path: &Path, name: &str) -> Result<()> {
+    require_root("st tiles remove")?;
+    registry::check_name(name)?;
+    let mut registry = Registry::load(registry_path)?;
+    // Stopping a unit that is not loaded fails; what matters is that none is left.
+    let _ = Command::new("systemctl")
+        .args([
+            "stop",
+            &registry::tools_unit(name),
+            &registry::slice_unit(name),
+        ])
+        .status()
+        .context("run systemctl stop")?;
+    let slice =
+        Path::new("/sys/fs/cgroup").join(registry::slice_cgroup(name).trim_start_matches('/'));
+    if slice.exists() {
+        bail!(
+            "{} is still running after systemctl stop; its user ID stays allocated",
+            registry::slice_unit(name)
+        );
+    }
+    if fs::symlink_metadata(&registry.state_root).is_err() {
+        return Ok(());
+    }
+    // What is removed as root must be root's to remove.
+    registry::root_controlled(&registry.state_root)?;
+    if fs::symlink_metadata(&registry.runtime_root).is_ok() {
+        registry::root_controlled(&registry.runtime_root)?;
+    }
+    uids::release(&mut registry, name, |registry| {
+        for path in [registry.tile_runtime(name), registry.tile_state(name)] {
+            match fs::remove_dir_all(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("remove {}", path.display()));
+                }
+            }
+        }
+        Ok(())
+    })
 }
 
 /// `st tiles stop`: end every process of the tile's tools unit.
@@ -155,81 +204,6 @@ fn require_root(what: &str) -> Result<()> {
     Ok(())
 }
 
-/// The tile's Unix user must exist with the registry's group and look like no one's login: no
-/// home under /home and a shell that refuses logins. This is a check against an obvious
-/// mistake, not the authority: root's registry says which user is a tile, and root must never
-/// list a person's account there.
-fn check_account(name: &str, tile: &Tile) -> Result<()> {
-    let Some(entry) = account(tile.uid) else {
-        bail!(
-            "tile {name}: Unix user {} does not exist; create it as a system user with no login",
-            tile.uid
-        );
-    };
-    if entry.gid != tile.gid {
-        bail!(
-            "tile {name}: Unix user {} has group {}, but the registry says {}",
-            entry.name,
-            entry.gid,
-            tile.gid
-        );
-    }
-    if entry.home.starts_with("/home/") {
-        bail!(
-            "tile {name}: Unix user {} has a login home {}; a tile is not a login user",
-            entry.name,
-            entry.home
-        );
-    }
-    let shell = Path::new(&entry.shell).file_name().and_then(OsStr::to_str);
-    if !matches!(shell, Some("nologin" | "false")) {
-        bail!(
-            "tile {name}: Unix user {} has the login shell `{}`; give it nologin",
-            entry.name,
-            entry.shell
-        );
-    }
-    Ok(())
-}
-
-struct Account {
-    name: String,
-    gid: u32,
-    home: String,
-    shell: String,
-}
-
-fn account(uid: u32) -> Option<Account> {
-    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut buffer = vec![0 as libc::c_char; 16 * 1024];
-    let mut result = std::ptr::null_mut();
-    // SAFETY: the buffer and entry outlive the call, and the result is read only on success.
-    let code = unsafe {
-        libc::getpwuid_r(
-            uid,
-            &mut entry,
-            buffer.as_mut_ptr(),
-            buffer.len(),
-            &mut result,
-        )
-    };
-    if code != 0 || result.is_null() {
-        return None;
-    }
-    // SAFETY: getpwuid_r filled these NUL-terminated strings inside the buffer.
-    let text = |pointer: *const libc::c_char| unsafe {
-        std::ffi::CStr::from_ptr(pointer)
-            .to_string_lossy()
-            .into_owned()
-    };
-    Some(Account {
-        name: text(entry.pw_name),
-        gid: entry.pw_gid,
-        home: text(entry.pw_dir),
-        shell: text(entry.pw_shell),
-    })
-}
-
 /// `st tiles enter`: build the tile and run `command` in it. Runs as the main process of the
 /// tile's tools unit and never returns on success paths it controls; its exit status is the
 /// command's.
@@ -237,7 +211,12 @@ pub fn enter(registry_path: &Path, name: &str, command: &[OsString]) -> Result<i
     require_root("st tiles enter")?;
     let registry = Registry::load(registry_path)?;
     let tile = registry.tile(name)?.clone();
-    check_account(name, &tile)?;
+    // `st tiles run` allocated it; `enter` never allocates, so it runs as no ID root's launcher
+    // did not record.
+    let uid = registry
+        .uid(name)
+        .with_context(|| format!("tile {name} has no user ID yet; start it with `st tiles run`"))?;
+    uids::check_unclaimed(name, uid)?;
     if command.is_empty() {
         bail!("name a command to run in the tile");
     }
@@ -253,8 +232,8 @@ pub fn enter(registry_path: &Path, name: &str, command: &[OsString]) -> Result<i
         );
     }
     single_threaded()?;
-    let dirs = prepare_directories(&registry, name, &tile)?;
-    let setup = Setup::new(&registry, name, &tile, &dirs, command)?;
+    let dirs = prepare_directories(&registry, name, &tile, uid)?;
+    let setup = Setup::new(&registry, name, &tile, uid, &dirs, command)?;
 
     let namespaces = libc::CLONE_NEWNS
         | libc::CLONE_NEWPID
@@ -303,12 +282,17 @@ struct Directories {
 
 /// Make the tile's directories: its state, owned by the tile and private to it, and its
 /// runtime directories, owned by root except the endpoint directory, which its supervisor owns.
-fn prepare_directories(registry: &Registry, name: &str, tile: &Tile) -> Result<Directories> {
+fn prepare_directories(
+    registry: &Registry,
+    name: &str,
+    tile: &Tile,
+    uid: u32,
+) -> Result<Directories> {
     root_dir(&registry.state_root, 0o755)?;
     let state = registry.tile_state(name);
     root_dir(&state, 0o700)?;
-    let home = tile_dir(&state.join("home"), tile)?;
-    let work = tile_dir(&state.join("work"), tile)?;
+    let home = tile_dir(&state.join("home"), uid)?;
+    let work = tile_dir(&state.join("work"), uid)?;
     root_dir(&registry.runtime_root, 0o755)?;
     let runtime = registry.tile_runtime(name);
     root_dir(&runtime, 0o755)?;
@@ -328,8 +312,9 @@ fn root_dir(path: &Path, mode: u32) -> Result<()> {
     owned_dir(path, 0, 0, mode)
 }
 
-fn tile_dir(path: &Path, tile: &Tile) -> Result<PathBuf> {
-    owned_dir(path, tile.uid, tile.gid, 0o700)?;
+/// A tile's own directory; its group ID is its user ID.
+fn tile_dir(path: &Path, uid: u32) -> Result<PathBuf> {
+    owned_dir(path, uid, uid, 0o700)?;
     Ok(path.to_owned())
 }
 
@@ -393,6 +378,7 @@ impl Setup {
         registry: &Registry,
         name: &str,
         tile: &Tile,
+        uid: u32,
         dirs: &Directories,
         command: &[OsString],
     ) -> Result<Self> {
@@ -444,8 +430,8 @@ impl Setup {
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             name: name.to_owned(),
-            uid: tile.uid,
-            gid: tile.gid,
+            uid,
+            gid: uid,
             root: dirs.root.clone(),
             home: dirs.home.clone(),
             work: dirs.work.clone(),
@@ -453,10 +439,9 @@ impl Setup {
             read_only,
             sekrets: registry.sekrets_socket.clone(),
             passwd: format!(
-                "root:x:0:0::/:/nonexistent\n{TILE_USER}:x:{}:{}::{TILE_HOME}:/nonexistent\n",
-                tile.uid, tile.gid
+                "root:x:0:0::/:/nonexistent\n{TILE_USER}:x:{uid}:{uid}::{TILE_HOME}:/nonexistent\n"
             ),
-            group: format!("root:x:0:\n{TILE_USER}:x:{}:\n", tile.gid),
+            group: format!("root:x:0:\n{TILE_USER}:x:{uid}:\n"),
             program,
             search: registry.path.clone(),
             argv,
@@ -837,8 +822,6 @@ mod tests {
     #[test]
     fn a_run_starts_the_tools_unit_in_the_tile_slice_with_its_ceilings() {
         let tile = Tile {
-            uid: 61001,
-            gid: 61001,
             agent: "agent/fleet/fixture-example/atlas".into(),
             person: "person/ada".into(),
             supervisor_uid: Some(1000),
