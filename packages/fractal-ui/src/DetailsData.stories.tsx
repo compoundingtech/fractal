@@ -208,86 +208,62 @@ function falsifyText(root:HTMLElement,selector:string,value:string):HTMLElement 
  return wrong
 }
 
-export const PartialIdleActivity: Story = {
-  args: { state: 'partial', overview: { ...detailsStoryInputs('idle').overview, activity: 'idle' } },
+/** Reported activity under partial observation: idle, working and omitted activity side by side. */
+const activityOverviews = {
+  idle: { ...detailsStoryInputs('idle').overview, activity: 'idle' },
+  working: { ...detailsStoryInputs('busy').overview, activity: 'working' },
+  unreported: { ...detailsStoryInputs('busy').overview, activity: undefined },
+} satisfies Record<string, DetailsOverview>
+export const PartialActivity: Story = {
+  args: { state: 'partial' },
+  render: ({ scheme, width, ...props }) => <div {...stylex.props(styles.comparison)}>{Object.entries(activityOverviews).map(([name, overview]) => <section key={name} aria-label={`${name} activity`} {...stylex.props(styles.frame, styles.width(width), ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
+    <ThemePortal><Workbench resources={workbenchResources} layout={group([{ uri: 'agent:worker-1', view: 'details' }])} workspaceId={`details-data-activity-${name}`} scheme={scheme}
+      renderPane={() => <DetailsLabelContext.Provider value={`${name} `}><DetailsPane {...props} {...scenarioProps('independent', props)} overview={overview} trace={native} pendingTrace={native} /></DetailsLabelContext.Provider>}/></ThemePortal>
+  </section>)}</div>,
   play: async ({ canvasElement }) => {
-    const overview = within(pane(canvasElement)).getByRole('region', { name: 'Overview' })
-    requireContract(within(overview).queryByRole('img', { name: /^Working;/ }) === null, 'Partial observation invented working activity')
-    requireContract(within(overview).getByRole('img', { name: /^Idle;/ }), 'Reported idle activity disappeared')
-  },
-}
-export const PartialWorkingActivity: Story = {
-  args: { state: 'partial', overview: { ...detailsStoryInputs('busy').overview, activity: 'working' } },
-  play: async ({ canvasElement }) => {
-    const overview = within(pane(canvasElement)).getByRole('region', { name: 'Overview' })
-    requireContract(within(overview).getByRole('img', { name: /^Working;/ }), 'Partial observation hid reported working activity')
-  },
-}
-export const PartialUnreportedActivity: Story = {
-  args: { state: 'partial', overview: { ...detailsStoryInputs('busy').overview, activity: undefined } },
-  play: async ({ canvasElement }) => {
-    const overview = within(pane(canvasElement)).getByRole('region', { name: 'Overview' })
-    requireContract(within(overview).queryByRole('img') === null, 'Unreported activity invented a status glyph')
+    const overview = (name: keyof typeof activityOverviews) => within(pane(canvasElement.querySelector<HTMLElement>(`section[aria-label="${name} activity"]`)!)).getByRole('region', { name: `${name} Overview` })
+    requireContract(within(overview('idle')).queryByRole('img', { name: /^Working;/ }) === null, 'Partial observation invented working activity')
+    requireContract(within(overview('idle')).getByRole('img', { name: /^Idle;/ }), 'Reported idle activity disappeared')
+    requireContract(within(overview('working')).getByRole('img', { name: /^Working;/ }), 'Partial observation hid reported working activity')
+    requireContract(within(overview('unreported')).queryByRole('img') === null, 'Unreported activity invented a status glyph')
   },
 }
 
-export const PartialCoverage: Story = {
-  args: { scenario: 'partial' },
-  play: async ({ canvasElement }) => {
-    const root = pane(canvasElement)
-    assertPartial(root, 'Partial · 62% attributed')
-    await rejectsControl('Coverage rounding or attribution copy differs', () => assertPartial(falsifyText(root,'[data-details-coverage]','Complete'), 'Partial · 62% attributed'))
-    requireContract(root.textContent?.includes('Showing 1 of 4 traced sessions'), 'Retained descendants masqueraded as the full list')
-  },
+/** Single-scenario contracts read their pane from AllStates, which mounts every scenario exactly as a lone story would. */
+function scenarioPane(canvas: HTMLElement, name: keyof typeof scenarios): HTMLElement {
+  const section = canvas.querySelector<HTMLElement>(`section[aria-label="${name}"]`)
+  requireContract(section, 'AllStates omitted a named scenario')
+  return pane(section)
 }
-export const PartialRoundingBoundary: Story = {
-  args: { scenario: 'boundary' },
-  play: async ({ canvasElement }) => {
-    const root = pane(canvasElement)
-    assertPartial(root, 'Partial · 99% attributed')
-    await rejectsControl('Coverage rounding or attribution copy differs', () => assertPartial(falsifyText(root,'[data-details-coverage]','Partial · 100% attributed'), 'Partial · 99% attributed'))
-  },
+
+/** Coverage copy rounds down, never claims 100% and keeps a legal 0%; each case falsifies its nearest wrong copy. */
+const coverageCases = [
+  { scenario: 'partial', expected: 'Partial · 62% attributed', wrong: ['Complete'] },
+  { scenario: 'boundary', expected: 'Partial · 99% attributed', wrong: ['Partial · 100% attributed'] },
+  { scenario: 'boundary995', expected: 'Partial · 99% attributed', wrong: ['Complete', 'Partial · 100% attributed'] },
+  { scenario: 'zeroCoverage', expected: 'Partial · 0% attributed', wrong: ['Partial · 1% attributed'] },
+  { scenario: 'fullPartial', expected: 'Partial · 99% attributed', wrong: ['Partial · 100% attributed'] },
+] as const
+async function checkCoverage(canvasElement: HTMLElement) {
+  for (const { scenario, expected, wrong } of coverageCases) {
+    const root = scenarioPane(canvasElement, scenario)
+    assertPartial(root, expected)
+    for (const value of wrong) await rejectsControl('Coverage rounding or attribution copy differs', () => assertPartial(falsifyText(root, '[data-details-coverage]', value), expected))
+  }
+  requireContract(scenarioPane(canvasElement, 'partial').textContent?.includes('Showing 1 of 4 traced sessions'), 'Retained descendants masqueraded as the full list')
 }
-export const NotCovered: Story = {
-  args: { scenario: 'notCovered' },
-  play: async ({ canvasElement }) => {
-    const root = pane(canvasElement)
-    const trigger = within(spend(root)).getByRole('button', { name: 'Not tracked for Claude Code' })
-    trigger.focus()
-    requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Coverage explanation is not keyboard reachable')
-    await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
-    await waitFor(() => requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Keyboard navigation skipped the coverage trigger'))
-    await waitFor(() => requireContract(within(canvasElement.ownerDocument.body).getByRole('tooltip').textContent === 'Spend is recorded only for OMP sessions today.', 'Not-covered explanation differs'))
-    const wrong=falsifyText(root,'[data-details-coverage]','Not tracked for Codex')
-    await rejectsControl('Not-covered harness display name differs', () => requireContract(wrong.querySelector('[data-details-coverage]')?.textContent === 'Not tracked for Claude Code', 'Not-covered harness display name differs'))
-    requireContract(spend(root).textContent?.includes('$12.34') && spend(root).textContent?.includes('480'), 'Not-covered descendants erased native metrics')
-    await userEvent.keyboard('{Escape}')
-  },
-}
-export const PartialRoundingUpperBoundary:Story={
- args:{scenario:'boundary995'},
- play:async({canvasElement})=>{
-  const root=pane(canvasElement)
-  assertPartial(root,'Partial · 99% attributed')
-  await rejectsControl('Coverage rounding or attribution copy differs',()=>assertPartial(falsifyText(root,'[data-details-coverage]','Complete'),'Partial · 99% attributed'))
-  await rejectsControl('Coverage rounding or attribution copy differs',()=>assertPartial(falsifyText(root,'[data-details-coverage]','Partial · 100% attributed'),'Partial · 99% attributed'))
- },
-}
-export const PartialZeroCoverage:Story={
- args:{scenario:'zeroCoverage'},
- play:async({canvasElement})=>{
-  const root=pane(canvasElement)
-  assertPartial(root,'Partial · 0% attributed')
-  await rejectsControl('Coverage rounding or attribution copy differs',()=>assertPartial(falsifyText(root,'[data-details-coverage]','Partial · 1% attributed'),'Partial · 0% attributed'))
- },
-}
-export const PartialCappedCoverage:Story={
- args:{scenario:'fullPartial'},
- play:async({canvasElement})=>{
-  const root=pane(canvasElement)
-  assertPartial(root,'Partial · 99% attributed')
-  await rejectsControl('Coverage rounding or attribution copy differs',()=>assertPartial(falsifyText(root,'[data-details-coverage]','Partial · 100% attributed'),'Partial · 99% attributed'))
- },
+async function checkNotCovered(canvasElement: HTMLElement) {
+  const root = scenarioPane(canvasElement, 'notCovered')
+  const trigger = within(spend(root)).getByRole('button', { name: 'Not tracked for Claude Code' })
+  trigger.focus()
+  requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Coverage explanation is not keyboard reachable')
+  await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
+  await waitFor(() => requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Keyboard navigation skipped the coverage trigger'))
+  await waitFor(() => requireContract(within(canvasElement.ownerDocument.body).getByRole('tooltip').textContent === 'Spend is recorded only for OMP sessions today.', 'Not-covered explanation differs'))
+  const wrong=falsifyText(root,'[data-details-coverage]','Not tracked for Codex')
+  await rejectsControl('Not-covered harness display name differs', () => requireContract(wrong.querySelector('[data-details-coverage]')?.textContent === 'Not tracked for Claude Code', 'Not-covered harness display name differs'))
+  requireContract(spend(root).textContent?.includes('$12.34') && spend(root).textContent?.includes('480'), 'Not-covered descendants erased native metrics')
+  await userEvent.keyboard('{Escape}')
 }
 function assertDescendantListWindow(root:HTMLElement) {
  const label=root.querySelector('[data-details-subagent-window]')?.textContent
@@ -296,21 +272,16 @@ function assertDescendantListWindow(root:HTMLElement) {
  requireContract(spendLabel===label,'Descendant spend breakdown lost its list window')
  requireContract(root.querySelector('[data-details-metric="main-usd"]')?.textContent?.includes('UTC'),'Native session lost its independent exact window')
 }
-export const DescendantListWindow:Story={
- args:{scenario:'mixedWindows'},
- play:async({canvasElement})=>{
-  const root=pane(canvasElement)
+async function checkDescendantListWindow(canvasElement: HTMLElement) {
+  const root=scenarioPane(canvasElement,'mixedWindows')
   assertDescendantListWindow(root)
   const nativePeriod=root.querySelector('[data-details-metric="main-usd"] [data-details-metric-period]')?.textContent
   requireContract(nativePeriod,'Missing native-window negative control')
   const wrong=falsifyText(root,'[data-details-subagent-window]',nativePeriod)
   await rejectsControl('Descendant list inherited the native session window',()=>assertDescendantListWindow(wrong))
- },
 }
-export const IndependentMetricScopes: Story = {
-  args: { scenario: 'independent' },
-  play: async ({ canvasElement }) => {
-    const root = pane(canvasElement)
+async function checkIndependentMetricScopes(canvasElement: HTMLElement) {
+    const root = scenarioPane(canvasElement, 'independent')
     assertIndependent(root)
     await rejectsControl('Token scope inherited monetary scope', () => assertIndependent(falsifyText(root,'[data-details-token-label]','Cumulative tokens · this agent')))
     const monetaryWindow=spend(root).querySelector('[data-details-metric="total-usd"] [data-details-metric-period]')?.textContent
@@ -325,7 +296,6 @@ export const IndependentMetricScopes: Story = {
       tokenLabel.parentElement.append(period)
       await rejectsControl('Token accumulation window was fabricated',()=>assertIndependent(wrong))
     }
-  },
 }
 function assertNativeWindow(root:HTMLElement) {
  const section=spend(root)
@@ -337,10 +307,8 @@ function assertNativeWindow(root:HTMLElement) {
  requireContract(totalText?.includes('reported window · 7d')&&!totalText.includes('UTC'), 'Producer window fabricated exact boundaries')
  requireContract(mainText.includes('$12.34')&&totalText.includes('$100.00'), 'Independent monetary amounts were derived from one another')
 }
-export const NativeAndInclusiveWindows:Story={
- args:{scenario:'mixedWindows'},
- play:async({canvasElement})=>{
-  const root=pane(canvasElement)
+async function checkNativeWindows(canvasElement: HTMLElement) {
+  const root=scenarioPane(canvasElement,'mixedWindows')
   assertNativeWindow(root)
   const wrong=root.cloneNode(true) as HTMLElement
   const main=wrong.querySelector('[data-details-metric="main-usd"] dt')
@@ -348,17 +316,11 @@ export const NativeAndInclusiveWindows:Story={
   requireContract(main&&total,'Missing monetary metadata control rows')
   main.textContent=total.textContent
   await rejectsControl('Native monetary metadata inherited inclusive metadata',()=>assertNativeWindow(wrong))
- },
-}
-export const NativeWithUnattributedTotal:Story={
- args:{scenario:'unknownTotalScope'},
- play:async({canvasElement})=>{
-  const root=pane(canvasElement)
-  assertNativeWindow(root)
-  const wrong=root.cloneNode(true) as HTMLElement
-  wrong.querySelector('[data-details-metric="main-usd"]')?.remove()
-  await rejectsControl('Native monetary metadata inherited inclusive metadata',()=>assertNativeWindow(wrong))
- },
+  const unattributed=scenarioPane(canvasElement,'unknownTotalScope')
+  assertNativeWindow(unattributed)
+  const withoutNative=unattributed.cloneNode(true) as HTMLElement
+  withoutNative.querySelector('[data-details-metric="main-usd"]')?.remove()
+  await rejectsControl('Native monetary metadata inherited inclusive metadata',()=>assertNativeWindow(withoutNative))
 }
 function assertSession(root:HTMLElement) {
  const section=spend(root)
@@ -469,19 +431,14 @@ function assertAllStates(root:HTMLElement) {
  requireContract(timingRoot, 'AllStates omitted the timing control')
  assertTiming(timingRoot)
 }
-export const SessionVersusDescendants: Story = {
-  args: { scenario: 'session' },
-  play: async ({ canvasElement }) => {
-    const root=pane(canvasElement)
+async function checkSession(canvasElement: HTMLElement) {
+    const root=scenarioPane(canvasElement,'session')
     assertSession(root)
     const wrong=falsifyText(root,'[data-details-metric="main-usd"] dd','$15.55')
     await rejectsControl('Session and descendants were conflated',()=>assertSession(wrong))
-  },
 }
-export const PartialDescendantFacts: Story = {
-  args: { scenario: 'partialFacts' },
-  play: async ({ canvasElement }) => {
-    const root = pane(canvasElement)
+async function checkPartialDescendantFacts(canvasElement: HTMLElement) {
+    const root = scenarioPane(canvasElement, 'partialFacts')
     assertPartialFacts(root)
     const card=Array.from(root.querySelectorAll<HTMLElement>('[data-resource-card]')).find(item=>item.textContent?.includes('native-child')),facts=card?.querySelector<HTMLElement>('[data-resource-detail]')
     requireContract(card&&facts,'Missing descendant facts negative control target')
@@ -506,17 +463,13 @@ export const PartialDescendantFacts: Story = {
       } finally { title.textContent=titleText }
     } finally { invented.remove(); facts.textContent=original; facts.style.removeProperty('visibility') }
     assertPartialFacts(root)
-  },
 }
-export const ContextPercentOnly: Story = {
-  args: { scenario: 'percentOnly' },
-  play: async ({ canvasElement }) => {
-    const root = pane(canvasElement)
+async function checkContextPercentOnly(canvasElement: HTMLElement) {
+    const root = scenarioPane(canvasElement, 'percentOnly')
     assertPercentOnly(root)
     const wrong=root.cloneNode(true) as HTMLElement
     within(wrong).getByRole('meter',{name:'Context occupancy'}).setAttribute('aria-valuemax','1000000')
     await rejectsControl('Reported-percent-only context was discarded', () => assertPercentOnly(wrong))
-  },
 }
 export const ContextSamplesPercentOnly: Story = {
   args: { scenario: 'percentSamples', variants: { overview: 'O2', context: 'C3', spend: 'S1', resources: 'R1', empty: 'E3' } },
@@ -527,24 +480,25 @@ export const ContextSamplesPercentOnly: Story = {
     await rejectsControl('Historical occupancy escaped percentage units',()=>assertContextSamples(wrong))
   },
 }
-function assertInvalidCoverageSurvives(canvas:HTMLElement) {
+function assertInvalidCoverageSurvives(canvas:HTMLElement,prefix:string) {
  const root=canvas.querySelector<HTMLElement>('[data-testid="details-pane"]')
  requireContract(root,'Invalid row blanked the Details pane')
  requireContract(root.querySelector('[data-details-metric="total-usd"] [data-details-coverage]')?.textContent==='Partial','Invalid fraction fabricated an attribution percentage')
  requireContract(root.querySelector('[data-details-metric="main-usd"]')?.textContent?.includes('$12.34')&&root.querySelector('[data-details-metric="subagent-usd"]')?.textContent?.includes('$3.21'),'Invalid coverage erased valid monetary rows')
- requireContract(root.querySelector('section[aria-label="Overview"]')&&root.querySelector('[data-details-chart^="C"]')&&root.querySelector('section[aria-label="Workspace"]'),'Invalid coverage erased sibling sections')
+ requireContract(root.querySelector(`section[aria-label="${prefix}Overview"]`)&&root.querySelector('[data-details-chart^="C"]')&&root.querySelector(`section[aria-label="${prefix}Workspace"]`),'Invalid coverage erased sibling sections')
 }
-const invalidPartialPlay=async({canvasElement}:{canvasElement:HTMLElement})=>{
- assertInvalidCoverageSurvives(canvasElement)
- const blank=canvasElement.cloneNode(true) as HTMLElement
- blank.querySelector('[data-testid="details-pane"]')?.remove()
- await rejectsControl('Invalid row blanked the Details pane',()=>assertInvalidCoverageSurvives(blank))
- const percentage=falsifyText(canvasElement,'[data-details-metric="total-usd"] [data-details-coverage]','Partial · NaN% attributed')
- await rejectsControl('Invalid fraction fabricated an attribution percentage',()=>assertInvalidCoverageSurvives(percentage))
+async function checkInvalidCoverage(canvasElement: HTMLElement) {
+ for(const name of ['invalidNaN','invalidNegative','invalidOverflow'] as const){
+  const section=canvasElement.querySelector<HTMLElement>(`section[aria-label="${name}"]`)
+  requireContract(section,'AllStates omitted a named scenario')
+  assertInvalidCoverageSurvives(section,`${name} `)
+  const blank=section.cloneNode(true) as HTMLElement
+  blank.querySelector('[data-testid="details-pane"]')?.remove()
+  await rejectsControl('Invalid row blanked the Details pane',()=>assertInvalidCoverageSurvives(blank,`${name} `))
+  const percentage=falsifyText(section,'[data-details-metric="total-usd"] [data-details-coverage]','Partial · NaN% attributed')
+  await rejectsControl('Invalid fraction fabricated an attribution percentage',()=>assertInvalidCoverageSurvives(percentage,`${name} `))
+ }
 }
-export const InvalidPartialNaN:Story={args:{scenario:'invalidNaN'},play:invalidPartialPlay}
-export const InvalidPartialNegative:Story={args:{scenario:'invalidNegative'},play:invalidPartialPlay}
-export const InvalidPartialOverflow:Story={args:{scenario:'invalidOverflow'},play:invalidPartialPlay}
 export const AllStates: Story = {
   render: ({ scheme, width, ...props }) => <div {...stylex.props(styles.comparison)}>{Object.entries(scenarios).map(([name, trace]) => <section key={name} aria-label={name} {...stylex.props(styles.frame, styles.width(width), ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
     <ThemePortal><Workbench resources={workbenchResources} layout={group([{ uri: 'agent:worker-1', view: 'details' }])} workspaceId={`details-data-all-${name}`} scheme={scheme}
@@ -567,6 +521,8 @@ export const AllStates: Story = {
     await rejectsControl('Settled resource stayed pending',()=>assertAllStates(mutated(canvasElement,'section[aria-label="settledUnavailable"] [data-details-unreported-section="Workspace"]',node=>node.setAttribute('aria-busy','true'))))
     await rejectsControl('Known-empty resources became unavailable',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="knownEmpty Workspace"] p','Unavailable')))
     await rejectsControl('First-read timing rendered a settled value',()=>assertAllStates(mutated(canvasElement,'section[aria-label="timing"] [data-details-skeleton="duration"]',node=>node.remove())))
+    // Every scenario pane here is the state a single-scenario story would mount, so its contract runs in place.
+    for (const check of [checkCoverage, checkNotCovered, checkDescendantListWindow, checkIndependentMetricScopes, checkNativeWindows, checkSession, checkPartialDescendantFacts, checkContextPercentOnly, checkInvalidCoverage, checkTiming, checkFirstReadResources]) await check(canvasElement)
   },
 }
 /** Clones the canvas and applies one mutation to every match, so the live tree stays intact. */
@@ -617,10 +573,8 @@ async function tooltipFor(canvas: HTMLElement, trigger: HTMLElement, expected: s
   requireContract(tooltip, cause)
   return tooltip
 }
-export const TimingProvenance: Story = {
-  args: { scenario: 'timing' },
-  play: async ({ canvasElement }) => {
-    const root = pane(canvasElement)
+async function checkTiming(canvasElement: HTMLElement) {
+    const root = scenarioPane(canvasElement, 'timing')
     await waitFor(() => assertTiming(root))
     await rejectsControl('First-read timing rendered a settled value', () => assertTiming(mutated(root, '[data-details-skeleton="duration"]', node => node.remove())))
     await rejectsControl('Settled timing stayed pending', () => assertTiming(mutated(root, `[data-details-missing-value][aria-label="${ageLabel}: unavailable"]`, node => node.closest('[data-details-description-row]')?.setAttribute('aria-busy', 'true'))))
@@ -635,23 +589,22 @@ export const TimingProvenance: Story = {
     requireContract(value, 'Missing known timing value')
     const provenance = await tooltipFor(canvasElement, value, `42m${timingProvenance}`, 'Known timing tooltip lost host provenance')
     requireContract(provenance.querySelector('[data-details-value-detail]')?.textContent === timingProvenance, 'Known timing tooltip lost host provenance')
-  },
+    await userEvent.keyboard('{Escape}')
 }
-export const FirstReadResources: Story = {
-  args: { scenario: 'firstRead' },
-  play: async ({ canvasElement }) => {
-    const root = pane(canvasElement)
-    await waitFor(() => assertResourceRead(root, 'firstRead', ''))
-    await rejectsControl('First-read resource rendered settled-unavailable instead of a pending skeleton', () => assertResourceRead(mutated(root, 'section[aria-label="Workspace"] [data-details-skeleton]', node => node.removeAttribute('data-details-skeleton')), 'firstRead', ''))
-    await rejectsControl('First-read resource exposed settled-unavailable copy', () => assertResourceRead(mutated(root, 'section[aria-label="Workspace"]', node => { const note = document.createElement('p'); note.setAttribute('data-details-unavailable', ''); node.append(note) }), 'firstRead', ''))
-    await rejectsControl('Static unreported section became pending', () => assertResourceRead(mutated(root, '[data-details-unreported-section="Reviews"]', node => node.setAttribute('aria-busy', 'true')), 'firstRead', ''))
-    await rejectsControl('Resource read replaced loaded sibling details', () => assertResourceRead(mutated(root, '[data-details-content-slot]', node => node.closest('[data-testid="details-pane"]')?.setAttribute('data-details-pane-state', 'loading')), 'firstRead', ''))
-    await rejectsControl('First-read or settled resource section was filtered out', () => assertResourceRead(mutated(root, 'section[aria-label="Declared bindings"]', node => node.remove()), 'firstRead', ''))
+async function checkFirstReadResources(canvasElement: HTMLElement) {
+    const root = scenarioPane(canvasElement, 'firstRead')
+    const prefix = 'firstRead '
+    await waitFor(() => assertResourceRead(root, 'firstRead', prefix))
+    await rejectsControl('First-read resource rendered settled-unavailable instead of a pending skeleton', () => assertResourceRead(mutated(root, `section[aria-label="${prefix}Workspace"] [data-details-skeleton]`, node => node.removeAttribute('data-details-skeleton')), 'firstRead', prefix))
+    await rejectsControl('First-read resource exposed settled-unavailable copy', () => assertResourceRead(mutated(root, `section[aria-label="${prefix}Workspace"]`, node => { const note = document.createElement('p'); note.setAttribute('data-details-unavailable', ''); node.append(note) }), 'firstRead', prefix))
+    await rejectsControl('Static unreported section became pending', () => assertResourceRead(mutated(root, '[data-details-unreported-section="Reviews"]', node => node.setAttribute('aria-busy', 'true')), 'firstRead', prefix))
+    await rejectsControl('Resource read replaced loaded sibling details', () => assertResourceRead(mutated(root, '[data-details-content-slot]', node => node.closest('[data-testid="details-pane"]')?.setAttribute('data-details-pane-state', 'loading')), 'firstRead', prefix))
+    await rejectsControl('First-read or settled resource section was filtered out', () => assertResourceRead(mutated(root, `section[aria-label="${prefix}Declared bindings"]`, node => node.remove()), 'firstRead', prefix))
     const trigger = root.querySelector<HTMLElement>('[data-details-unreported-section="Reviews"]')
     requireContract(trigger, 'Reviews absence is not keyboard reachable')
     trigger.focus()
     await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
     await waitFor(() => requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Keyboard navigation skipped the Reviews absence'))
     await waitFor(() => requireContract(within(canvasElement.ownerDocument.body).getByRole('tooltip').textContent === 'Reviews are not supplied by this source.', 'Reviews absence lost its source reason'))
-  },
+    await userEvent.keyboard('{Escape}')
 }

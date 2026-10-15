@@ -57,15 +57,12 @@ const nonModalPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEle
   root.dataset.proof = 'passed'
 }
 
-const meta = { title: 'Fractal/Shell/Side panel', component: PanelSurface, parameters: { layout: 'fullscreen' } } satisfies Meta<typeof PanelSurface>
+// The kit gate runs every story at 440/1440 in both schemes and passes `scheme` as an arg; `width` clamps to the viewport.
+const meta = { title: 'Fractal/Shell/Side panel', component: PanelSurface, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440 } } satisfies Meta<typeof PanelSurface>
 export default meta
 type Story = StoryObj<typeof meta>
-export const Dark1440: Story = { args: { scheme: 'dark', width: 1440 }, play: nonModalPlay }
-export const Light1440: Story = { args: { scheme: 'light', width: 1440 }, play: nonModalPlay }
-export const Dark440: Story = { args: { scheme: 'dark', width: 440 }, play: nonModalPlay }
-export const Light440: Story = { args: { scheme: 'light', width: 440 }, play: nonModalPlay }
-export const OpenDark: Story = { args: { scheme: 'dark', initiallyOpen: true } }
-export const OpenLight: Story = { args: { scheme: 'light', initiallyOpen: true } }
+export const NonModal: Story = { play: nonModalPlay }
+export const Open: Story = { args: { initiallyOpen: true } }
 
 const styles = stylex.create({
   surface: { position: 'relative', height: 900, display: 'flex', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize },

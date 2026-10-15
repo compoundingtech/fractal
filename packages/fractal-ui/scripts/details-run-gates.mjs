@@ -25,9 +25,7 @@ const canonicalIds = [
   'wide', 'threshold',
   'mounted-159-selected-first', 'mounted-160-selected-first',
   'mounted-159-selected-last', 'mounted-160-selected-last',
-  'mounted-159-selected-first-light', 'mounted-160-selected-first-light',
-  'mounted-159-selected-last-light', 'mounted-160-selected-last-light',
-  'many-tabs', 'light', 'dark',
+  'many-tabs',
   'raw-stability', 'raw-stability-159', 'raw-stability-160', 'all-states',
 ].map(storyId)
 const paintedIds = [

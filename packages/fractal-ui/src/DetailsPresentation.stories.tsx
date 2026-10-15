@@ -58,10 +58,8 @@ async function play({canvasElement}:{canvasElement:HTMLElement}){
   await userEvent.keyboard('{Escape}');await waitFor(assertClosed)
   opener.focus();await userEvent.click(opener);await userEvent.click(canvas.getByRole('button',{name:'Close details'}));await waitFor(assertClosed)
 }
-export const NarrowDark:Story={args:{width:440,scheme:'dark'},play}
-export const NarrowLight:Story={args:{width:440,scheme:'light'},play}
-export const WideDark:Story={args:{width:1440,scheme:'dark'},play}
-export const WideLight:Story={args:{width:1440,scheme:'light'},play}
+// The kit gate supplies the 440/1440 and dark/light matrix; the 1440px frame clamps to a 440px viewport.
+export const Opening:Story={args:{width:1440},play}
 async function removedOpenerPlay({canvasElement}:{canvasElement:HTMLElement}){
   const canvas=within(canvasElement),doc=canvasElement.ownerDocument,opener=canvas.getByRole('button',{name:'Open details'}),fallback=canvas.getByTestId('details-return-region')
   await userEvent.click(opener);await canvas.findByTestId('details-pane')
@@ -72,10 +70,7 @@ async function removedOpenerPlay({canvasElement}:{canvasElement:HTMLElement}){
   await userEvent.click(canvas.getByRole('button',{name:'Remove opener'}));await rejectsControl('Removed opener lost its stable focus fallback',assertFallback)
   fallback.focus();assertFallback()
 }
-export const NarrowRemovedOpenerDark:Story={args:{width:440,scheme:'dark'},play:removedOpenerPlay}
-export const NarrowRemovedOpenerLight:Story={args:{width:440,scheme:'light'},play:removedOpenerPlay}
-export const WideRemovedOpenerDark:Story={args:{width:1440,scheme:'dark'},play:removedOpenerPlay}
-export const WideRemovedOpenerLight:Story={args:{width:1440,scheme:'light'},play:removedOpenerPlay}
+export const RemovedOpener:Story={args:{width:1440},play:removedOpenerPlay}
 async function restoredPlay({canvasElement}:{canvasElement:HTMLElement}){
   const canvas=within(canvasElement),doc=canvasElement.ownerDocument,opener=canvas.getByRole('button',{name:'Open details'})
   opener.focus();await userEvent.click(opener);await canvas.findByTestId('details-pane')
@@ -88,10 +83,7 @@ async function restoredPlay({canvasElement}:{canvasElement:HTMLElement}){
   expect(canvas.getByRole('button',{name:'Close details'})).toHaveFocus()
   await userEvent.keyboard('{Escape}');await waitFor(()=>requireContract(!canvas.queryByTestId('details-pane')&&doc.activeElement===control,'UserOpened control lost its opener focus'))
 }
-export const RestoredNarrowDark:Story={args:{width:440,scheme:'dark',opening:'Restored'},play:restoredPlay}
-export const RestoredNarrowLight:Story={args:{width:440,scheme:'light',opening:'Restored'},play:restoredPlay}
-export const RestoredWideDark:Story={args:{width:1440,scheme:'dark',opening:'Restored'},play:restoredPlay}
-export const RestoredWideLight:Story={args:{width:1440,scheme:'light',opening:'Restored'},play:restoredPlay}
+export const Restored:Story={args:{width:1440,opening:'Restored'},play:restoredPlay}
 
 const combinedStates=['busy','partial','unknown','new','idle','absent','loading','error'] as const
 function assertCombined(root:HTMLElement,states:readonly string[]){

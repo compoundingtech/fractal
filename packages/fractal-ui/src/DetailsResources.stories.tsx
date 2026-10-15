@@ -399,54 +399,91 @@ export const Interactions: Story = { play: async ({ canvasElement }) => {
 export const PresentationMatrix: Story = { args: { cases: presentationCases }, play: async ({ canvasElement, args }) => {
   await eachCase(canvasElement, args.cases, (pane, item) => assertCraft(pane, item)); await humanControl(paneFor(canvasElement)); await contrastControl(paneFor(canvasElement), args.cases.at(-1)!)
 } }
-export const TraceContracts: Story = { args: { cases: [...sourceCases, example('turn-only context', 400, 'busy', {}, { ...full, series: missing }), example('null-turn context', 400, 'busy', {}, full.turns._tag === 'Known' ? { ...full, turns: { ...full.turns, value: { ...full.turns.value, points: full.turns.value.points.map((point, index) => index === 0 ? { ...point, contextTokens: null, contextPercent: null } : point) } } } : full)] }, play: async ({ canvasElement, args }) => {
+const traceCases = [...sourceCases, example('turn-only context', 400, 'busy', {}, { ...full, series: missing }), example('null-turn context', 400, 'busy', {}, full.turns._tag === 'Known' ? { ...full, turns: { ...full.turns, value: { ...full.turns.value, points: full.turns.value.points.map((point, index) => index === 0 ? { ...point, contextTokens: null, contextPercent: null } : point) } } } : full)]
+const bucketCases = widths.map(width => example(`bucket/${width}`, width, 'busy', {}, detailsTraceFixtures.bucketOnly))
+export const TraceContracts: Story = { args: { cases: [...traceCases, ...bucketCases] }, play: async ({ canvasElement, args }) => {
   assertFixtureFacts()
-  await eachCase(canvasElement, args.cases, (pane, item) => {
-    const trace = item.trace!, projected = adaptTrace(trace), meter = trace.meters.spend
+  const bucketProjection = adaptTrace(detailsTraceFixtures.bucketOnly)
+  requireContract(bucketProjection !== undefined, 'Retained buckets lack a chart projection')
+  requireContract(detailsTraceFixtures.bucketOnly.turns._tag === 'Unknown' && detailsTraceFixtures.bucketOnly.turns.reason === 'not-covered' && JSON.stringify(detailsTraceFixtures.bucketOnly.series) === JSON.stringify(full.series) && bucketProjection.lane.turnSamples === undefined, 'Bucket-only provider fabricates turns or changes source buckets')
+  await eachCase(canvasElement, args.cases, async (pane, item) => {
+    const trace = item.trace!
+    if (item.name.startsWith('bucket/')) {
+      assertContext(pane, trace)
+      if (item.name !== bucketCases.at(-1)!.name) return
+      const axis = pane.querySelector<HTMLElement>('[data-chart-axis-label]')!, text = axis.textContent
+      try { axis.textContent = 'per turn'; await rejectsControl('Context axis renames buckets as turns', () => assertContext(pane, trace)) } finally { axis.textContent = text }
+      assertContext(pane, trace)
+      return
+    }
+    const projected = adaptTrace(trace), meter = trace.meters.spend
     requireContract(projected !== undefined, 'Retained sources lack a chart projection')
     requireContract(projected.lane.totalUsd === meter.mainUsd && projected.descendantSpend.totalUsd === meter.subagentUsd, 'Projection loses tagged source totals')
     assertHuman(pane); assertContext(pane, trace)
+    if (item.name === traceCases.at(-1)!.name) {
+      const chart = pane.querySelector<HTMLElement>('[data-chart-samples]')!, circle = chart.querySelector('circle')!
+      circle.remove(); await rejectsControl('Context plot does not match retained source samples', () => assertContext(pane, trace)); chart.querySelector('svg')!.append(circle)
+    }
     if (!item.name.includes('/')) return
     const spend = pane.querySelector('section[aria-label="Spend"]')!, text = spend.textContent ?? '', amounts = text.match(/\$\d[\d,.]*/g) ?? []
     if (item.name.includes('/unknown/')) requireContract(amounts.length === 0 && spend.querySelector('[data-details-missing-value]'), 'Unknown spend source renders inferred currency')
     else if (item.name.includes('/zero/')) requireContract(amounts.length > 0 && amounts.every(amount => amount === '$0.00'), 'Known zero spend is absent or fabricated')
     else requireContract(meter.mainUsd._tag === 'Known' && text.includes(`$${meter.mainUsd.value.toFixed(2)}`), 'Known source spend total is omitted')
   })
-  const chart = paneFor(canvasElement).querySelector<HTMLElement>('[data-chart-samples]')!, circle = chart.querySelector('circle')!
-  circle.remove(); await rejectsControl('Context plot does not match retained source samples', () => assertContext(paneFor(canvasElement), args.cases.at(-1)!.trace!)); chart.querySelector('svg')!.append(circle)
-} }
-export const BucketFallback: Story = { args: { cases: widths.map(width => example(`bucket/${width}`, width, 'busy', {}, detailsTraceFixtures.bucketOnly)) }, play: async ({ canvasElement, args }) => {
-  const projected = adaptTrace(detailsTraceFixtures.bucketOnly)
-  requireContract(projected !== undefined, 'Retained buckets lack a chart projection')
-  requireContract(detailsTraceFixtures.bucketOnly.turns._tag === 'Unknown' && detailsTraceFixtures.bucketOnly.turns.reason === 'not-covered' && JSON.stringify(detailsTraceFixtures.bucketOnly.series) === JSON.stringify(full.series) && projected.lane.turnSamples === undefined, 'Bucket-only provider fabricates turns or changes source buckets')
-  await eachCase(canvasElement, args.cases, (pane, item) => assertContext(pane, item.trace!))
-  const pane = paneFor(canvasElement), axis = pane.querySelector<HTMLElement>('[data-chart-axis-label]')!, text = axis.textContent
-  try { axis.textContent = 'per turn'; await rejectsControl('Context axis renames buckets as turns', () => assertContext(pane, detailsTraceFixtures.bucketOnly)) } finally { axis.textContent = text }
-  assertContext(pane, detailsTraceFixtures.bucketOnly)
 } }
 const scopeCases = widths.flatMap(width => [example(`including/${width}`, width, 'busy', {}, full), example(`self-all-time/${width}`, width, 'busy', {}, { ...full, meters: { ...full.meters, spend: { ...full.meters.spend, usdScope: { _tag: 'Self' }, tokensScope: { _tag: 'Self' }, tokensWindow: { ...zero, value: { _tag: 'AllTime' } } } } }), example(`unreported-window/${width}`, width, 'busy', {}, { ...full, meters: { ...full.meters, spend: { ...full.meters.spend, tokensWindow: missing } } })])
-async function scopePlay(canvasElement: HTMLElement, cases: readonly Case[]) {
-  await eachCase(canvasElement, cases, (pane, item) => { assertCraft(pane, item); assertScope(pane, item.trace!) })
-  const pane = paneFor(canvasElement), label = pane.querySelector<HTMLElement>('[data-details-token-label]')!, text = label.textContent
-  try { label.textContent = 'Cumulative tokens · invented attribution'; const reason = cases.at(-1)!.trace!.meters.spend.tokensScope._tag === 'Unknown' ? 'Unreported total makes an unproven scope claim' : 'Reported token scope is absent from its inline label'; if (reason.startsWith('Unreported')) label.textContent = 'Cumulative tokens · this agent'; await rejectsControl(reason, () => assertScope(pane, cases.at(-1)!.trace!)) } finally { label.textContent = text }
-  assertScope(pane, cases.at(-1)!.trace!)
-}
-export const ReportedSpendScope: Story = { args: { cases: scopeCases }, play: ({ canvasElement, args }) => scopePlay(canvasElement, args.cases) }
-export const UnreportedSpendScope: Story = { args: { cases: widths.map(width => example(`unreported/${width}`, width, 'partial', {}, detailsTraceFixtures.partial)) }, play: ({ canvasElement, args }) => scopePlay(canvasElement, args.cases) }
-export const ResourceFit: Story = { args: { cases: resourceCases(['R1', 'R2', 'R3'], ['busy', 'partial'], widths) }, play: async ({ canvasElement, args }) => {
-  await eachCase(canvasElement, args.cases, (pane, item) => { assertFit(pane, item); assertCraft(pane, item) })
-  const pane = paneFor(canvasElement), slot = [...pane.querySelectorAll<HTMLElement>('[data-resource-meta]')].find(meta => meta.dataset.resourceMetaFit === 'whole')!, original = slot.dataset.resourceMetaFit
-  requireContract(slot, 'Fit negative control has no whole metadata')
-  try { slot.dataset.resourceMetaFit = 'absent'; await rejectsControl('Metadata is neither whole nor absent', () => assertFit(pane, args.cases.at(-1)!)) } finally { slot.dataset.resourceMetaFit = original }
-  assertFit(pane, args.cases.at(-1)!)
-} }
-export const ContainmentRegression: Story = { args: { cases: resourceCases(['R1', 'R2', 'R3'], ['busy'], widths) }, play: ({ canvasElement, args }) => eachCase(canvasElement, args.cases, containmentGate) }
-export const ChevronColumns: Story = { args: { cases: widths.map(width => example(`chevrons/${width}`, width)) }, play: async ({ canvasElement, args }) => {
-  await eachCase(canvasElement, args.cases, assertChevron)
-  const pane = paneFor(canvasElement), svg = pane.querySelector<SVGElement>('section[aria-label="Workspace"] button[aria-expanded] svg')!, original = svg.style.transform
-  try { svg.style.transform = 'translateX(2px)'; await rejectsControl('Section chevrons do not share the Overview column', () => assertChevron(pane)) } finally { svg.style.transform = original }
-  assertChevron(pane)
-} }
+const unreportedScopeCases = widths.map(width => example(`unreported/${width}`, width, 'partial', {}, detailsTraceFixtures.partial))
+/** Reported and unreported token scopes each falsify their inline label on their widest pane. */
+const scopeControlCases = [scopeCases.at(-1)!.name, unreportedScopeCases.at(-1)!.name]
+export const SpendScope: Story = { args: { cases: [...scopeCases, ...unreportedScopeCases] }, play: ({ canvasElement, args }) => eachCase(canvasElement, args.cases, async (pane, item) => {
+  const trace = item.trace!
+  assertCraft(pane, item); assertScope(pane, trace)
+  if (!scopeControlCases.includes(item.name)) return
+  const label = pane.querySelector<HTMLElement>('[data-details-token-label]')!, text = label.textContent
+  try { label.textContent = 'Cumulative tokens · invented attribution'; const reason = trace.meters.spend.tokensScope._tag === 'Unknown' ? 'Unreported total makes an unproven scope claim' : 'Reported token scope is absent from its inline label'; if (reason.startsWith('Unreported')) label.textContent = 'Cumulative tokens · this agent'; await rejectsControl(reason, () => assertScope(pane, trace)) } finally { label.textContent = text }
+  assertScope(pane, trace)
+}) }
+/**
+ * One mount per resource form, state and width owns fit, containment, identity wrap, branch orphans,
+ * mission titles and chevron columns; each falsifying control runs on the pane its former story ended on.
+ * R3 never wraps identities, so the 240px column covers R1/R2 only.
+ */
+const geometryCases = resourceCases(['R1', 'R2', 'R3'], ['busy', 'partial'], [240, ...widths]).filter(item => item.width !== 240 || item.variants.resources !== 'R3')
+export const ResourceGeometry: Story = { args: { cases: geometryCases }, play: ({ canvasElement, args }) => eachCase(canvasElement, args.cases, async (pane, item) => {
+  const form = item.variants.resources, fitted = widths.includes(item.width)
+  if (fitted) { assertFit(pane, item); assertCraft(pane, item) }
+  if (fitted && item.state === 'busy') await containmentGate(pane)
+  if (form !== 'R3') assertIdentity(pane)
+  if (fitted && form === 'R2' && item.state === 'busy') assertChevron(pane)
+  if (fitted && form === 'R2' && item.state === 'partial') assertBranch(pane)
+  if (item.name === 'R1/busy/320') {
+    assertMissions(pane)
+    const title = [...pane.querySelectorAll<HTMLElement>('[data-details-resource-title]')].find(title => title.textContent === 'Review the source projection')!, original = title.style.textOverflow
+    try { title.style.textOverflow = 'ellipsis'; await rejectsControl('Mission title is truncated', () => assertMissions(pane)) } finally { title.style.textOverflow = original }
+    assertMissions(pane)
+  }
+  if (item.name === 'R2/busy/520') {
+    const svg = pane.querySelector<SVGElement>('section[aria-label="Workspace"] button[aria-expanded] svg')!, original = svg.style.transform
+    try { svg.style.transform = 'translateX(2px)'; await rejectsControl('Section chevrons do not share the Overview column', () => assertChevron(pane)) } finally { svg.style.transform = original }
+    assertChevron(pane)
+  }
+  if (item.name === 'R2/partial/520') {
+    const title = pane.querySelector<HTMLElement>('[data-resource-title-lines="wrap"]')!, originalText = title.textContent, originalWhiteSpace = title.style.whiteSpace, originalClamp = title.style.webkitLineClamp
+    try {
+      title.textContent = 'declared branch\norphan'; title.style.whiteSpace = 'pre'
+      await rejectsControl('Wrapped identity leaves an orphaned final word', () => assertBranch(pane))
+    } finally { title.textContent = originalText; title.style.whiteSpace = originalWhiteSpace }
+    assertBranch(pane)
+    try { title.style.webkitLineClamp = '1'; await rejectsControl('Resource identity is clamped instead of wrapping in full', () => assertIdentity(pane)) } finally { title.style.webkitLineClamp = originalClamp }
+    assertIdentity(pane)
+  }
+  if (item.name === 'R3/partial/520') {
+    const slot = [...pane.querySelectorAll<HTMLElement>('[data-resource-meta]')].find(meta => meta.dataset.resourceMetaFit === 'whole')!, original = slot.dataset.resourceMetaFit
+    requireContract(slot, 'Fit negative control has no whole metadata')
+    try { slot.dataset.resourceMetaFit = 'absent'; await rejectsControl('Metadata is neither whole nor absent', () => assertFit(pane, item)) } finally { slot.dataset.resourceMetaFit = original }
+    assertFit(pane, item)
+  }
+}) }
 export const OrientationAnchor: Story = { args: { cases: widths.map(width => example(`orientation/${width}`, width, 'idle')) }, play: async ({ canvasElement, args }) => {
   await eachCase(canvasElement, args.cases, async pane => {
     const top = () => { pane.scrollTop = 0; return pane.querySelector('section')!.getBoundingClientRect().top - pane.getBoundingClientRect().top }
@@ -456,27 +493,6 @@ export const OrientationAnchor: Story = { args: { cases: widths.map(width => exa
     try { section.style.marginTop = '4px'; await rejectsControl('Orientation displaces the first Details section', assertAnchor) } finally { section.style.marginTop = original }
     assertAnchor()
   })
-} }
-export const MissionTitleFit: Story = { args: { cases: [example('missions/320/R1', 320, 'busy', { resources: 'R1' })] }, play: async ({ canvasElement, args }) => {
-  await eachCase(canvasElement, args.cases, assertMissions)
-  const pane = paneFor(canvasElement), title = [...pane.querySelectorAll<HTMLElement>('[data-details-resource-title]')].find(title => title.textContent === 'Review the source projection')!, original = title.style.textOverflow
-  try { title.style.textOverflow = 'ellipsis'; await rejectsControl('Mission title is truncated', () => assertMissions(pane)) } finally { title.style.textOverflow = original }
-  assertMissions(pane)
-} }
-export const BranchOrphan: Story = { args: { cases: widths.map(width => example(`branch/${width}`, width, 'partial')) }, play: async ({ canvasElement, args }) => {
-  await eachCase(canvasElement, args.cases, assertBranch)
-  const pane = paneFor(canvasElement), title = pane.querySelector<HTMLElement>('[data-resource-title-lines="wrap"]')!, originalText = title.textContent, originalWhiteSpace = title.style.whiteSpace
-  try {
-    title.textContent = 'declared branch\norphan'; title.style.whiteSpace = 'pre'
-    await rejectsControl('Wrapped identity leaves an orphaned final word', () => assertBranch(pane))
-  } finally { title.textContent = originalText; title.style.whiteSpace = originalWhiteSpace }
-  assertBranch(pane)
-} }
-export const IdentityClamp: Story = { args: { cases: resourceCases(['R1', 'R2'], ['busy', 'partial'], [240, 320, 400, 520]) }, play: async ({ canvasElement, args }) => {
-  await eachCase(canvasElement, args.cases, assertIdentity)
-  const pane = paneFor(canvasElement), title = pane.querySelector<HTMLElement>('[data-resource-title-lines="wrap"]')!, original = title.style.webkitLineClamp
-  try { title.style.webkitLineClamp = '1'; await rejectsControl('Resource identity is clamped instead of wrapping in full', () => assertIdentity(pane)) } finally { title.style.webkitLineClamp = original }
-  assertIdentity(pane)
 } }
 export const AllStates: Story = { args: { cases: allStatesCases, comparison: true }, play: async ({ canvasElement, args }) => {
   await ready(canvasElement)

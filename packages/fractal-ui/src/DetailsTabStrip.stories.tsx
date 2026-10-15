@@ -402,19 +402,14 @@ async function stabilityPlay({ canvasElement }: { canvasElement: HTMLElement }) 
   } finally { observer.disconnect() }
 }
 
+// Every story runs in both schemes through the kit gate's `scheme` arg, so stories vary only state.
 export const Wide: Story = { play: interactionPlay }
 export const Threshold: Story = { args: { layout: group(panes.slice(0, 2)), mountedWidth: 376 }, play: thresholdPlay }
 export const Mounted159SelectedFirst: Story = { args: { mountedWidth: 159, focusedPaneKey: paneKey(panes[0]!) }, play: containmentPlay }
 export const Mounted160SelectedFirst: Story = { args: { mountedWidth: 160, focusedPaneKey: paneKey(panes[0]!) }, play: containmentPlay }
 export const Mounted159SelectedLast: Story = { args: { mountedWidth: 159, focusedPaneKey: paneKey(panes.at(-1)!) }, play: containmentPlay }
 export const Mounted160SelectedLast: Story = { args: { mountedWidth: 160, focusedPaneKey: paneKey(panes.at(-1)!) }, play: containmentPlay }
-export const Mounted159SelectedFirstLight: Story = { args: { scheme: 'light', mountedWidth: 159, focusedPaneKey: paneKey(panes[0]!) }, play: containmentPlay }
-export const Mounted160SelectedFirstLight: Story = { args: { scheme: 'light', mountedWidth: 160, focusedPaneKey: paneKey(panes[0]!) }, play: containmentPlay }
-export const Mounted159SelectedLastLight: Story = { args: { scheme: 'light', mountedWidth: 159, focusedPaneKey: paneKey(panes.at(-1)!) }, play: containmentPlay }
-export const Mounted160SelectedLastLight: Story = { args: { scheme: 'light', mountedWidth: 160, focusedPaneKey: paneKey(panes.at(-1)!) }, play: containmentPlay }
 export const ManyTabs: Story = { args: { mountedWidth: 240 }, play: interactionPlay }
-export const Light: Story = { args: { scheme: 'light' }, play: interactionPlay }
-export const Dark: Story = { play: interactionPlay }
 export const RawStability: Story = { play: stabilityPlay }
 export const RawStability159: Story = { args: { mountedWidth: 159 }, play: stabilityPlay }
 export const RawStability160: Story = { args: { mountedWidth: 160 }, play: stabilityPlay }
