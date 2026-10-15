@@ -144,14 +144,18 @@ def trusted_tools(path, strict=False):
         found = shutil.which(name, path=path)
         if not found:
             raise Refused(f'{name} is not in the signer\'s own path ({path})')
-        # The tool itself, after symlinks, must also live where the same rules hold.
-        reason = unsafe_directory(os.path.dirname(os.path.realpath(found)))
+        # The tool itself, after symlinks, must also live where the same rules hold. What is checked is what is
+        # run: the resolved path, so a link cannot be repointed between the check and the exec. (A multi-call
+        # binary that chooses its behaviour from the name it was started under would need its link name; git and
+        # ssh-keygen are real programs, and a host where they are not is refused rather than guessed at.)
+        real = os.path.realpath(found)
+        reason = unsafe_directory(os.path.dirname(real))
         if reason:
-            raise Refused(f'{name} resolves to {os.path.realpath(found)}, whose directory {reason}')
-        reason = unsafe_file(os.path.realpath(found))
+            raise Refused(f'{name} resolves to {real}, whose directory {reason}')
+        reason = unsafe_file(real)
         if reason:
-            raise Refused(f'{name} resolves to {os.path.realpath(found)}, which {reason}')
-        TOOLS[name] = found
+            raise Refused(f'{name} resolves to {real}, which {reason}')
+        TOOLS[name] = real
     TOOLS['PATH'] = path
 
 

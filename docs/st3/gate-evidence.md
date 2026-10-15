@@ -355,7 +355,12 @@ directory and masks every key line; `once CHECK` refuses a second signature for 
 `cleanup` overwrites and removes the key, and runs even when earlier steps failed. The wrapper and
 signer scripts must come from the base commit of the change, never from the tree under test.
 Signer launch controls (`scripts/evidence-sign`): each resolved git and ssh-keygen file must be a regular executable file owned
-by root and closed to group and others, in addition to the directory rules; git and ssh-keygen receive only PATH (the
+by root and closed to group and others, in addition to the directory rules, and the signer runs that resolved file, not the
+link it found. git and ssh-keygen are the only programs the script starts itself; the helper programs git starts come from git's
+own installation, which the launcher's pinned git provides and this script does not enumerate, and the interpreter is the
+launcher's concern too. Inside a Nix build sandbox store files can show another owner, so a root-owned rule that holds on a
+host may refuse them there; the signer is not run in that sandbox, and the hardening test judges the host git from its owner and
+mode instead of assuming either. git and ssh-keygen receive only PATH (the
 signer's own), LC_ALL, HOME, TMPDIR and git settings the signer sets itself (no system or global git configuration; HOME
 and TMPDIR are passed as given, so for a privileged integration only the fixed trusted launcher or profile may supply them,
 and passing them proves nothing about an arbitrary inherited path; the "no global git configuration" setting needs Git 2.32 or

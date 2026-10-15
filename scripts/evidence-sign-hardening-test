@@ -46,13 +46,21 @@ with tempfile.TemporaryDirectory() as directory:
     if os.geteuid() != 0:
         assert 'not owned by root' in signer.unsafe_file(str(tool)), 'a file owned by the running user is not root-owned'
     tool.chmod(0o777)
-    assert 'writable by group or others' in signer.unsafe_file(str(tool)) or os.geteuid() != 0
+    # Owner first: a non-root run reports the owner, a root run (its files are root-owned) reports the mode.
+    expected = 'writable by group or others' if os.geteuid() == 0 else 'not owned by root'
+    assert expected in signer.unsafe_file(str(tool)), signer.unsafe_file(str(tool))
     link = Path(directory) / 'link'
     link.symlink_to(tool)
-    assert signer.unsafe_file(os.path.realpath(link)) is not None
+    assert signer.unsafe_file(os.path.realpath(link)) == signer.unsafe_file(str(tool)), 'a link is judged by what it resolves to'
+    # The host git, judged by the script and by this test's own reading of the same file: the file may be root-owned
+    # (a system package, a Nix store file on a host) or owned by the build user (inside the Nix sandbox, where the
+    # store shows another owner), so the expected answer is computed from the file, not assumed.
     real_git = next((str(Path(d) / 'git') for d in os.environ['PATH'].split(':') if 'recorder' not in d and (Path(d) / 'git').exists()), None)
-    assert real_git is None or signer.unsafe_file(os.path.realpath(real_git)) is None, 'the host git passes (system or Nix store file)'
-print('passed: the same rules hold on real files; the host git and its symlinks resolve to an acceptable file')
+    assert real_git is not None, 'this test needs a git on PATH, as every CI script does'
+    found = os.stat(os.path.realpath(real_git))
+    acceptable = stat_module.S_ISREG(found.st_mode) and found.st_uid == 0 and not found.st_mode & 0o022 and bool(found.st_mode & 0o100)
+    assert (signer.unsafe_file(os.path.realpath(real_git)) is None) == acceptable, (real_git, oct(found.st_mode), found.st_uid)
+print('passed: the same rules hold on real files, links are judged by their target, and the host git is judged the way its owner and mode say')
 
 # trusted_tools refuses a directory-clean path whose tool file is wrong (the directory rule is stubbed, the file rule is real)
 with tempfile.TemporaryDirectory() as directory:
@@ -60,20 +68,41 @@ with tempfile.TemporaryDirectory() as directory:
     bin_dir.mkdir()
     for name in ('git', 'ssh-keygen'):
         (bin_dir / name).write_text('#!/bin/sh\n')
-        (bin_dir / name).chmod(0o755)
+        # 0777: refused for its mode when this run is root (its files are root-owned), for its owner otherwise
+        (bin_dir / name).chmod(0o777)
     saved = signer.unsafe_directory
     signer.unsafe_directory = lambda d: None
     try:
-        if os.geteuid() != 0:
-            try:
-                signer.trusted_tools(str(bin_dir), strict=True)
-            except signer.Refused as refusal:
-                assert 'not owned by root' in str(refusal) and 'git resolves to' in str(refusal), str(refusal)
-            else:
-                raise AssertionError('a user-owned git in a clean-looking directory must be refused')
+        expected = 'writable by group or others' if os.geteuid() == 0 else 'not owned by root'
+        try:
+            signer.trusted_tools(str(bin_dir), strict=True)
+        except signer.Refused as refusal:
+            assert expected in str(refusal) and 'git resolves to' in str(refusal), str(refusal)
+        else:
+            raise AssertionError('a git that is not root-owned or is writable, in a clean-looking directory, must be refused')
+        assert 'git' not in signer.TOOLS, 'a refused tool is not recorded'
     finally:
         signer.unsafe_directory = saved
-print('passed: a tool file that is not root-owned is refused even when its directory looks clean')
+print('passed: a tool file that is not root-owned (or is writable) is refused even when its directory looks clean')
+
+# the path that is run is the resolved one, not the link that was found
+with tempfile.TemporaryDirectory() as directory:
+    real_dir = Path(directory) / 'real'
+    real_dir.mkdir()
+    for name in ('git', 'ssh-keygen'):
+        (real_dir / f'{name}-real').write_text('#!/bin/sh\n')
+        (Path(directory) / name).symlink_to(real_dir / f'{name}-real')
+    saved_directory, saved_file = signer.unsafe_directory, signer.unsafe_file
+    signer.unsafe_directory = lambda d: None
+    signer.unsafe_file = lambda real, status=None: None
+    try:
+        signer.TOOLS.clear()
+        signer.trusted_tools(directory, strict=True)
+        assert signer.TOOLS['git'] == os.path.realpath(real_dir / 'git-real') and signer.TOOLS['ssh-keygen'] == os.path.realpath(real_dir / 'ssh-keygen-real'), signer.TOOLS
+    finally:
+        signer.unsafe_directory, signer.unsafe_file = saved_directory, saved_file
+        signer.TOOLS.clear()
+print('passed: the signer runs the resolved file it checked, not the link it found')
 
 # --- the environment passed on is an allowlist
 signer.TOOLS['PATH'] = '/usr/bin:/bin'
