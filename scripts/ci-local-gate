@@ -190,9 +190,7 @@ def main(argv, table=None, setup=None):
         environment = dict(os.environ, **(setup or prepare)(work))
         if shim_dir and os.access(Path(shim_dir) / 'build-admission', os.X_OK):
             environment.setdefault('BUILD_ADMISSION_BIN', str(Path(shim_dir) / 'build-admission'))  # HOME is isolated below
-        needs_shared = any(name not in ('upgrade-impact',) for name in chosen) and table is None
-        if needs_shared:
-            environment.update(shared_environment(environment))
+        shared = []  # built lazily, by the process that runs the steps (inside the stage slot when there is one)
         for name in chosen:
             started = time.monotonic()
             code = 0
@@ -205,6 +203,9 @@ def main(argv, table=None, setup=None):
                 if code != 0 and args.fail_fast:
                     return 1
                 continue
+            if table is None and name not in LIGHT and not shared:
+                environment.update(shared_environment(environment))
+                shared.append(True)
             for command, extra in plan[name]:
                 if MERGE in command:
                     command = [merge_commit(args.base, environment) if part == MERGE else part for part in command]
