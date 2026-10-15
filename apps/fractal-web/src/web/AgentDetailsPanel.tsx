@@ -97,7 +97,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
   const inspection = resource !== undefined ? { label: resource.card.label, detail: resource.card.detail }
     : traced === undefined ? undefined : {
       label: traced.label._tag === 'Known' ? traced.label.value : 'Traced descendant',
-      detail: `Session ${traced.sessionId} · ${traced.requests} reported requests · $${traced.usd.toFixed(2)} · ${traced.model._tag === 'Known' ? traced.model.value : 'model unreported'} · 7d as reported; parent and first/last timestamps are not supplied`,
+      detail: `Role ${traced.label._tag === 'Known' ? traced.label.value : 'unreported'} · Session ${traced.sessionId} · ${traced.requests} reported requests · $${traced.usd.toFixed(2)} · ${traced.model._tag === 'Known' ? traced.model.value : 'model unreported'} · 7d as reported; parent and first/last timestamps are not supplied`,
     }
   const status: SyncStatus = native.syncStatus ?? (native.state === 'loading'
     ? { _tag: 'Requested', since: requestedAt }
@@ -110,7 +110,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
     {native.harness === 'omp' && <p role="status" data-details-supplement-state={supplement._tag} {...stylex.props(styles.coverage)}>
       {supplement._tag === 'Waiting' ? 'Descendant observations are loading independently of native session facts.'
         : supplement._tag === 'Unavailable' ? `Descendant observations unavailable: ${supplement.detail}`
-          : supplement.freshness === 'stale' ? `Last good descendant read ${supplement.value.receivedAtMs === undefined ? '(age unreported)' : `${Math.max(0, Math.floor((now - supplement.value.receivedAtMs) / 1000))}s ago`} · retained/stale. ${supplement.error?.detail ?? 'Last successful read retained while revalidating.'} Coverage is window-global monetary attribution, not root completeness.` : 'Descendant ledger coverage · 7d as reported. Percentages describe window-global monetary attribution, not root completeness; exact cut bounds and producer observation time are not supplied.'}
+          : supplement.freshness === 'stale' ? `Last good descendant read ${supplement.value.receivedAtMs === undefined ? '(age unreported)' : `${Math.max(0, Math.floor((now - supplement.value.receivedAtMs) / 1000))}s ago`} · retained/stale. ${supplement.error?.detail ?? 'Last successful read retained while revalidating.'} · Coverage is window-global monetary attribution, not root completeness.` : 'Descendant ledger coverage · 7d as reported. Percentages describe window-global monetary attribution, not root completeness; exact cut bounds and producer observation time are not supplied.'}
     </p>}
     {data.accountingNote !== undefined && <p data-details-accounting-note {...stylex.props(styles.coverage)}>{data.accountingNote}</p>}
     <DetailsPane overview={data.overview} sections={sections} trace={data.trace} now={now}

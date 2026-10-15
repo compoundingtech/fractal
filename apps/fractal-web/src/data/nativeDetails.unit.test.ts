@@ -142,6 +142,17 @@ describe('fixture-free native Details projection', () => {
     expect(pendingRow.nativeRootPending).toBe(true)
     expect(pendingRow.sections.find(section => section.title === 'Declared bindings')?.pending).toBe(true)
   })
+  it('shows managed elapsed and age pending until the session first read settles', () => {
+    const pending = project({ sessionFeed: { _tag: 'Waiting' } })
+    expect(pending.overview.durations?.map(item => ({ value: item.value, pending: item.pending }))).toEqual([
+      { value: 'Loading', pending: true }, { value: 'Loading', pending: true },
+    ])
+    expect(pending.overview.title).toBe('Real seat')
+    expect(project({ sessionFeed: missing }).overview.durations?.map(item => ({ value: item.value, pending: item.pending }))).toEqual([
+      { value: 'Unreported', pending: false }, { value: 'Unreported', pending: false },
+    ])
+    expect(project().overview.durations?.every(item => item.pending === false)).toBe(true)
+  })
   it('uses the identical occupancy calculation as sidebar, not cumulative totals', () => {
     const agent = createProjections().fleetFromAgents([row]).agents[0]!
     const occupancy = sidebarRow({ agent, now: 10000, stale: false }).context

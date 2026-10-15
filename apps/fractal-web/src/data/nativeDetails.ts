@@ -130,6 +130,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   const unsupported = unknown<number>('Native source does not report descendant-inclusive spend.')
   const timing = row === undefined ? {} : nativeDetailsTiming({ row, session, snapshotCreatedAt: sessionFeed._tag === 'Observed' ? sessionFeed.snapshotCreatedAt : undefined, now })
   const timingDetail = timing.detail ?? (sessionFeed._tag === 'Unavailable' ? sessionFeed.detail : undefined)
+  const timingPending = rowFeed._tag === 'Waiting' || sessionFeed._tag === 'Waiting'
   const syncStatus = rowSyncStatus(rowFeed)
   const statusSince = row === undefined ? undefined : Option.getOrUndefined(row.since)
   const model = contextValid && context?.model !== undefined && context.model.trim().length > 0 && context.model !== '.unknown' ? context.model : undefined
@@ -164,8 +165,8 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   return {
     overview: { title: row?.name, status: projected?.status, machine: projected?.host, harness: projected?.harness, model, mission,
       durations: [
-        { label: 'Managed-session elapsed (from session start to end or now; wall time, not active)', value: timing.elapsedMs === undefined ? 'Unreported' : durationText(timing.elapsedMs), ...(timing.elapsedMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },
-        { label: 'Current-incarnation session age (from managed session start; native launch not reported)', value: timing.sessionAgeMs === undefined ? 'Unreported' : durationText(timing.sessionAgeMs), ...(timing.sessionAgeMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },
+        { label: 'Managed-session elapsed (from session start to end or now; wall time, not active)', value: timingPending ? 'Loading' : timing.elapsedMs === undefined ? 'Unreported' : durationText(timing.elapsedMs), pending: timingPending, ...(timing.elapsedMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },
+        { label: 'Current-incarnation session age (from managed session start; native launch not reported)', value: timingPending ? 'Loading' : timing.sessionAgeMs === undefined ? 'Unreported' : durationText(timing.sessionAgeMs), pending: timingPending, ...(timing.sessionAgeMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },
       ],
       since: statusSince === undefined || DateTime.toEpochMillis(statusSince) > now ? undefined : durationText(now - DateTime.toEpochMillis(statusSince)),
       age: 'Incarnation launch age unreported',

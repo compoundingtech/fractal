@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { DetailsResources } from '../../../../packages/fractal-ui/src/assistant-ui/details/DetailsResources.tsx'
+import { DetailsResources, traceSubagentSection } from '../../../../packages/fractal-ui/src/assistant-ui/details/DetailsResources.tsx'
+import { DetailsPane } from '../../../../packages/fractal-ui/src/assistant-ui/details/DetailsPane.tsx'
 import type { DetailsOverview, TraceSeries, TraceFact } from '@smalltalk/fractal-ui/assistant-ui'
 import { detailsWithSupplement } from './detailsSupplement.ts'
 import type { DetailsSupplement } from '../extensions/contract.ts'
@@ -115,4 +116,30 @@ it('shows the reported traced count in the heading, not the bounded list size or
   expect(heading(render(known(309)))).toBe('Subagents309')
   expect(heading(render(known(0)))).toBe('Subagents0')
   expect(heading(render(missing))).toBe('Subagents')
+})
+
+it('keeps elapsed/age acquiring independently and renders a shared guard reason only once', () => {
+  const render = (durations: DetailsOverview['durations']) => renderToStaticMarkup(createElement(DetailsPane, {
+    state: 'partial', overview: { ...overview, durations }, trace: trace(), sections: [], now: 2000,
+    variants: { overview: 'O2', context: 'C3', spend: 'S2', resources: 'R1', empty: 'E3' },
+    intent: { hiddenSections: [] }, onIntentChange: () => {}, onOpen: () => {}, onRetry: () => {},
+  }))
+  const pending = render(['Managed elapsed', 'Session age'].map(label => ({ label, value: 'Loading', pending: true })))
+  expect(pending.match(/data-details-duration-pending="true"/g)).toHaveLength(2)
+  expect(pending.match(/data-details-skeleton="duration"/g)).toHaveLength(2)
+  expect(pending).toContain('Synthetic seat')
+  expect(pending).not.toContain('Unreported')
+  const reason = 'Session start matches the producer snapshot time; elapsed time and age are unreported.'
+  const rejected = render(['Managed elapsed', 'Session age'].map(label => ({ label, value: 'Unreported', detail: reason })))
+  expect(rejected.match(/data-details-duration-reason/g)).toHaveLength(1)
+  expect(rejected.match(/Session start matches/g)).toHaveLength(1)
+  expect(rejected).not.toContain('data-details-duration-pending')
+})
+
+it('labels an unreported descendant role before the full identity without fabricating a model', () => {
+  const section = traceSubagentSection({ ...trace(), subagents: known([{
+    sessionId: 'native-child', parentSessionId: missing, label: missing, model: missing,
+    usd: 1, requests: 1, firstMs: missing, lastMs: missing,
+  }]) })
+  expect(section.items._tag === 'Known' ? section.items.value[0]?.card.label : undefined).toBe('role unreported · native-child')
 })
