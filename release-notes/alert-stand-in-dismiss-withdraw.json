@@ -11,19 +11,19 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "The existing close-item policy can dismiss a current auto-denial only, checked under the writer with agent actor, represented person, instruction, policy and episode. It cannot approve a call or kind; unproved agent native-prompt answers are refused."
+    "detail": "Expand existing close-item policy meaning to dismissal of a current auto-denial only, with writer checks of agent actor, represented person, instruction, policy and episode. This interpretation requires recorded authority acceptance even though no new policy claim is written. No call/kind approval; unproved agent answers are refused."
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Optional delegation proof and dismiss answer in prompt.respond clients; CLI alerts withdraw now accepts an informational update source or exact episode/card and returns its step disposition. Ordinary person answers omit the proof. Old readers/binaries and mixed-build acceptance need qualification."
+    "detail": "Optional proof and public dismiss enum on prompt.respond; dismiss already worked for person callers. An old server ignores proof then refuses the agent via person-only checks. An old registry holds the new diagnostic as unknown-claim-field, but may admit the known seat notice; no mixed-fleet delegated use. alerts withdraw formerly refused; it now takes exact episode/key and returns a step disposition. The expected receive outcomes have an authored UNRUN fixture."
   },
   "downtime": {
     "status": "none",
     "detail": "No deployment or restart is performed by this source change."
   },
   "manual": {
-    "status": "none",
-    "detail": "No policy is created or changed. A delegated caller supplies the actual existing person policy and verbatim prior instruction; missing authority is refused."
+    "status": "changed",
+    "detail": "Before any real delegated denial answer, Operations must verify that every admitted replication member and eligible receiver, including offline/rejoining members, runs this schema/rule. Mixed or unverified receivers keep dismissal unavailable. No membership or policy change is performed."
   },
   "recovery": {
     "status": "changed",

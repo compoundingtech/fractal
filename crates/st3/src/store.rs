@@ -138,6 +138,7 @@ pub(crate) use roster_admission::AdmissionGuard;
 mod adhoc_work;
 #[cfg(test)]
 pub(crate) mod alert_action_controls;
+pub(crate) mod attention_history;
 mod attention_snapshot;
 pub(crate) use attention_snapshot::{
     CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
@@ -18102,7 +18103,16 @@ impl Store {
     /// Prefer a bound account person, then follow declaration authors and mission requesters.
     /// Missing or cyclic ownership remains unknown; it never selects a global operator.
     pub(crate) fn agent_person(&self, agent: &str) -> Result<Option<String>> {
-        agent_person_at(&self.readers.get(), agent)
+        // Keep the existing public read's full mission view, errors and touched
+        // dependencies. Only the new writer path uses a bounded header lookup.
+        agent_person_walk(
+            agent,
+            |subject| self.desired_subject_with_writer(subject),
+            |run| {
+                self.mission_run(run)
+                    .map(|view| view.map(|view| view.requester))
+            },
+        )
     }
 
     pub fn current_harness(
@@ -24359,8 +24369,45 @@ fn desired_subject_with_writer_at(
         .map_err(Into::into)
 }
 
-/// The same ownership walk on the caller's pinned read or writer transaction.
+/// The new writer's ownership lookup stays on its transaction. Its requester
+/// query uses the same authoritative header join as the existing public view.
 fn agent_person_at(connection: &Connection, agent: &str) -> Result<Option<String>> {
+    agent_person_walk(
+        agent,
+        |subject| desired_subject_with_writer_at(connection, subject),
+        |run| {
+            smallclaims::touched::note_read(|| {
+                format!(
+                    "mission-run/{}",
+                    run.strip_prefix("mission-run/").unwrap_or(run)
+                )
+            });
+            connection
+                    .query_row(
+                        // Match mission_run_header_tx's current-generation join: a
+                        // header with no generation has no requester to follow.
+                        "SELECT mission_runs.requester FROM mission_runs
+                         JOIN run_generations ON run_generations.id=mission_runs.current_generation_id
+                         WHERE mission_runs.id=?1",
+                        [run.strip_prefix("mission-run/").unwrap_or(run)],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional().map_err(Into::into)
+        },
+    )
+}
+
+/// One bounded ownership precedence/cycle walk. Public reads retain their original
+/// full-view resolver; writer admission supplies its same-transaction resolver.
+fn agent_person_walk<D, R>(
+    agent: &str,
+    mut lookup_desired: D,
+    mut lookup_requester: R,
+) -> Result<Option<String>>
+where
+    D: FnMut(&str) -> Result<Option<(DesiredSubject, Option<String>)>>,
+    R: FnMut(&str) -> Result<Option<String>>,
+{
     let mut actor = agent.to_owned();
     let mut seen = BTreeSet::new();
     for _ in 0..16 {
@@ -24370,7 +24417,7 @@ fn agent_person_at(connection: &Connection, agent: &str) -> Result<Option<String
         if !seen.insert(actor.clone()) {
             return Ok(None);
         }
-        let Some((desired, writer)) = desired_subject_with_writer_at(connection, &actor)? else {
+        let Some((desired, writer)) = lookup_desired(&actor)? else {
             return Ok(None);
         };
         if actor == agent {
@@ -24379,7 +24426,7 @@ fn agent_person_at(connection: &Connection, agent: &str) -> Result<Option<String
             {
                 Some(crate::accounts::Binding::Pool(person)) => Some(person),
                 Some(crate::accounts::Binding::Account(account)) => {
-                    desired_subject_with_writer_at(connection, &format!("account/{account}"))?
+                    lookup_desired(&format!("account/{account}"))?
                         .and_then(|(account, _)| {
                             crate::accounts::parse_account(&account.subject, &account.desired)
                         })
@@ -24394,21 +24441,7 @@ fn agent_person_at(connection: &Connection, agent: &str) -> Result<Option<String
         let requester = desired
             .owner_run
             .as_deref()
-            .map(|run| {
-                smallclaims::touched::note_read(|| {
-                    format!(
-                        "mission-run/{}",
-                        run.strip_prefix("mission-run/").unwrap_or(run)
-                    )
-                });
-                connection
-                    .query_row(
-                        "SELECT requester FROM mission_runs WHERE id=?1",
-                        [run.strip_prefix("mission-run/").unwrap_or(run)],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-            })
+            .map(&mut lookup_requester)
             .transpose()?
             .flatten();
         let Some(next) = requester.or(writer) else {

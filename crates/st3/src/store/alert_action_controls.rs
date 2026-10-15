@@ -5,6 +5,188 @@ use crate::model::{DelegationPolicyRequest, DelegationProof};
 const SEAT: &str = "agent/alder.worker";
 const ACTOR: &str = "agent/alder.helper";
 
+#[test]
+fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
+    let (store, denial, proof) = denial_fixture(&["close-item"]);
+    store
+        .respond_native_prompt(SEAT, &denial.id, "dismiss", ACTOR, Some(&proof))
+        .unwrap();
+    for number in 0..40 {
+        append(
+            &store,
+            SEAT,
+            "harness.diagnostic",
+            SEAT,
+            json!({"code":"history-fixture","reason":format!("candidate {number}"),"severity":"info"}),
+            &format!("history-candidate-{number}"),
+        );
+    }
+    let before = store.index().unwrap();
+    let rows = store
+        .read_snapshot(|cut| store.attention_history_candidates(cut, i64::MAX as u64, 200))
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        33,
+        "32 candidates and one lookahead, before filtering"
+    );
+    assert_eq!(store.index().unwrap(), before);
+    let latest = store
+        .latest_claim(SEAT, Some("harness.diagnostic"))
+        .unwrap()
+        .unwrap();
+    // Authored wide-cell fixture, not a valid signed replacement: the read must
+    // refuse it before retrieving/decoding its unbounded body or claiming completeness.
+    let wide = json!({"fields":{"reason":"x".repeat(1_048_577)}}).to_string();
+    store
+        .connection
+        .batched(|tx| -> Result<()> {
+            tx.execute(
+                "UPDATE claims SET body=?1 WHERE id=?2",
+                params![wide, latest.id],
+            )?;
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    let before = store.index().unwrap();
+    assert!(
+        store
+            .read_snapshot(|cut| store.attention_history_candidates(cut, i64::MAX as u64, 1))
+            .is_err()
+    );
+    assert_eq!(store.index().unwrap(), before);
+    store
+        .connection
+        .batched(|tx| -> Result<()> {
+            tx.execute(
+                "UPDATE claims SET body=?1 WHERE id=?2",
+                params![serde_json::to_string(&latest.body)?, latest.id],
+            )?;
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .read_snapshot(|cut| store.attention_history_candidates(cut, i64::MAX as u64, 1))
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn mission_owned_person_walk_matches_the_public_run_requester() {
+    let (store, origin, _) = person_work::tests::fixture();
+    let run_id = origin
+        .run
+        .strip_prefix("mission-run/")
+        .unwrap_or(&origin.run);
+    for owner_run in [run_id.to_owned(), format!("mission-run/{run_id}")] {
+        for status in ["running", "blocked", "completed", "failed", "cancelled"] {
+            store
+                .connection
+                .batched(|tx| -> Result<()> {
+                    tx.execute(
+                        "UPDATE desired SET owner_run=?1 WHERE subject='agent/alder.asker'",
+                        [&owner_run],
+                    )?;
+                    tx.execute(
+                        "UPDATE mission_runs SET status=?1 WHERE id=?2",
+                        params![status, run_id],
+                    )?;
+                    Ok(())
+                })
+                .unwrap()
+                .unwrap();
+            let public = store.mission_run(&owner_run).unwrap().unwrap().requester;
+            assert_eq!(public, "person/avery");
+            assert_eq!(
+                store.agent_person("agent/alder.asker").unwrap(),
+                Some(public.clone())
+            );
+            assert_eq!(
+                store
+                    .connection
+                    .batched(|tx| agent_person_at(tx, "agent/alder.asker"))
+                    .unwrap()
+                    .unwrap(),
+                Some(public)
+            );
+        }
+    }
+    // mission_run's inner join cannot return a header without its current
+    // generation; the ownership walk must take its original writer fallback.
+    store.connection.batched(|tx| -> Result<()> {
+        tx.execute("UPDATE mission_runs SET current_generation_id='missing-fixture-generation' WHERE id=?1", [run_id])?;
+        Ok(())
+    }).unwrap().unwrap();
+    assert!(store.mission_run(run_id).unwrap().is_none());
+    assert_eq!(store.agent_person("agent/alder.asker").unwrap(), None);
+    assert_eq!(
+        store
+            .connection
+            .batched(|tx| agent_person_at(tx, "agent/alder.asker"))
+            .unwrap()
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn an_old_registry_holds_the_delegated_answer_but_admits_its_known_notice() {
+    use super::fleet_admission_tests::{admit, key, node, sync};
+    let anchor = key();
+    let peer_key = key();
+    let current = node("alder", Some(&anchor), Some(&anchor));
+    admit(&current, "alder", &anchor, "anchor", None);
+    admit(&current, "older", &peer_key, "invite", None);
+    let older = node("older", Some(&peer_key), Some(&anchor));
+    let mut old_registry = st3_schema::registry().clone();
+    let diagnostic = old_registry.claims.get_mut("harness.diagnostic").unwrap();
+    diagnostic.fields.remove("acted_for").unwrap();
+    diagnostic.fields.remove("delegation").unwrap();
+    older.set_claim_registry(old_registry);
+    let (denial, proof) = seed_denial(&current, &["close-item"]);
+    sync(&current, &older);
+    let answer = current
+        .respond_native_prompt(SEAT, &denial.id, "dismiss", ACTOR, Some(&proof))
+        .unwrap();
+    let notice = current.messages(Some(SEAT), true).unwrap().remove(0);
+    let notice_claim = current
+        .latest_claim(&notice.subject, Some("message.sent"))
+        .unwrap()
+        .unwrap();
+    let admission = sync(&current, &older);
+    assert_eq!(admission.unknown, 1);
+    assert_eq!(admission.invalid, 0);
+    assert!(older.claim_by_id(&answer.id).unwrap().is_none());
+    assert_eq!(older.prompt_answer(&denial.id).unwrap().answer, None);
+    assert!(older.claim_by_id(&notice_claim.id).unwrap().is_some());
+    assert_eq!(older.messages(Some(SEAT), true).unwrap().len(), 1);
+    let held = older.replica_records(true).unwrap();
+    assert!(held.iter().any(
+        |record| record.claim_id.as_deref() == Some(answer.id.as_str())
+            && record.error_code.as_deref() == Some("unknown-claim-field")
+    ));
+    // Installing the current registry admits the original authenticated bytes;
+    // it neither rewrites the answer nor repeats its already-admitted notice.
+    older.set_claim_registry(st3_schema::registry().clone());
+    older.validate_replication_backlog().unwrap();
+    older.apply_replication_repairs().unwrap();
+    older.project_replication_backlog().unwrap();
+    assert_eq!(
+        older.claim_by_id(&answer.id).unwrap().unwrap().body,
+        answer.body
+    );
+    assert_eq!(
+        older.prompt_answer(&denial.id).unwrap().answer.as_deref(),
+        Some("dismiss")
+    );
+    assert_eq!(older.messages(Some(SEAT), true).unwrap().len(), 1);
+}
+
 fn append(
     store: &Store,
     subject: &str,

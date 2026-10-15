@@ -5169,6 +5169,9 @@ pub(super) async fn now(
     let mut effective_query = query.clone();
     effective_query.person.clone_from(&person);
     let (history, actor, owner_run) = (query.history, query.actor.clone(), query.owner_run.clone());
+    if history && actor.is_none() && owner_run.is_none() {
+        return super::attention_history::page(state, snapshot, effective_query, "now").await;
+    }
     client_snapshot_page(
         &state,
         snapshot,

@@ -81,8 +81,16 @@ mod mail_backlog;
 pub(crate) mod mission_eligibility_doctor;
 mod read_deadline;
 mod response_body;
-mod owned_sets;
-mod published_attention;
+#[cfg(test)]
+mod terminal_gate_evidence;
+#[cfg(test)]
+mod terminal_gate_evidence;
+#[cfg(test)]
+mod terminal_gate_evidence;
+#[cfg(test)]
+mod terminal_gate_evidence;
+#[cfg(test)]
+mod terminal_gate_evidence;
 pub use published_attention::start_attention_list;
 #[cfg(test)]
 pub(crate) use published_attention::{published_attention_rows, refresh_attention_list};
@@ -1852,7 +1860,9 @@ fn decode_client_cursor(cursor: &str) -> Result<ClientPageCursor, ApiError> {
 }
 
 fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
-    if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
+    if cursor.starts_with(attention_history::CURSOR_PREFIX) {
+        attention_history::cursor_snapshot(cursor)
+    } else if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
         client_v0::native_page_cursor_snapshot(cursor)
     } else {
         decode_client_cursor(cursor).map(|cursor| cursor.snapshot)
@@ -6141,6 +6151,9 @@ async fn client_attention(
     let person = client_v0::person_filter(&session, query.person.as_deref())?;
     let mut effective_query = query.clone();
     effective_query.person.clone_from(&person);
+    if query.history {
+        return attention_history::page(state, snapshot, effective_query, "attention").await;
+    }
     let history = query.history;
     client_snapshot_page(
         &state,
@@ -6161,12 +6174,18 @@ async fn client_attention_detail(
     Extension(session): Extension<client_v0::ClientSession>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<ClientListQuery>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let person = client_v0::person_filter(&session, query.person.as_deref())?;
-    let mut items = client_attention_resources_with_previews(&state, person.as_deref(), query.history)
-        .map_err(ApiError::internal)?;
+    if let Some(claim) = attention_history::closed_claim_id(&id) {
+        return attention_history::detail(state, claim.to_owned(), person)
+            .await
+            .map(IntoResponse::into_response);
+    }
+    let mut items =
+        client_attention_resources_with_previews(&state, person.as_deref(), query.history)
+            .map_err(ApiError::internal)?;
     client_attention_compatibility(&mut items, session.custom_forms);
-    client_detail(items, "attention", &id)
+    client_detail(items, "attention", &id).map(IntoResponse::into_response)
 }
 
 async fn client_messages(

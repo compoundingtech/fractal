@@ -75,9 +75,63 @@ once, and allowing a kind are outside this grant; they are refused rather than i
 `close-item`. `prompt.respond` carries the same optional proof in client-v0; its actor is the
 authenticated session authority, never a parameter supplied by the client.
 
+The instructed agent need not be the seat that raised the denial. A person may instruct a
+different agent to dismiss a denial on any seat currently owned by that person; the source
+seat receives the notice. The writer rechecks the seat's person, the current policy and the
+exact episode. This extends the meaning of an existing `close-item` policy, even though it
+does not write a new policy claim; it requires the recorded authority-contract acceptance.
+
+Both new actions require a compatible rollout so the owner can read their retained history.
+Delegated denial dismissal is unavailable on a mixed-build fleet. Before anyone records the
+new diagnostic or uses sender withdrawal, Operations must verify that **every admitted
+replication member**, every other eligible receiver and the recipient's client-serving daemon
+have a build with this claim schema, source rule and history endpoints. The known four
+deployment hosts do not define that set. An offline or unverified admitted member keeps the
+operation unavailable; a removed member must upgrade before re-admission or replay/rejoin.
+Do not resume an older receiver against this history before it upgrades. This is a rollout
+order, not an automatic capability gate or permission to change membership.
+
+An older registry does not ignore the extra audit fields: it holds the authenticated denial
+answer as `unknown-claim-field`, outside admitted/projected claims, for later revalidation.
+The separate ordinary seat notice has known fields and can be admitted meanwhile. The older
+member can therefore show a still-open denial alongside that notice. After upgrade, backlog
+validation admits the original answer bytes; it does not send the notice again. The private
+old-registry signed-exchange control pins these expected receive outcomes; its execution is
+required before qualification. An older client-v0 server ignores the optional proof parameter
+and then refuses the agent through its ordinary person-only answer check, possibly with a
+misleading person-only answer error. Use a server containing this change before sending proof.
+`dismiss` already worked on the person's server path; this change adds it to the public enum.
+On the wire, ordinary person requests still omit the proof. Swift's initializer defaults it
+to nil and TypeScript's property is optional. Rust callers using a struct literal must add
+`delegation: None` or use the existing default; this is a source adjustment for those callers.
+
 An agent can withdraw an informational update it sent without acting for the recipient:
 `st alerts withdraw STEP_RUN --as AGENT --reason REASON --idempotency-key KEY`. To use the
 attention card ID instead, also supply the update's original `work.person-asked` claim as
 `--episode`. This cancels that update source, preserves its history and leaves unrelated
 claimed work alone. It cannot withdraw another sender's update or use this route to cancel
 a question; an explicit ask keeps `st work cancel-ask` semantics.
+
+Withdrawal removes the update from open Home, not from its recipient's client history.
+`GET /v1/client/attention?history=true` (also `/v1/client/alerts`) lists resolved source
+records for sender withdrawals and delegated denial dismissals. With no work filter,
+`GET /v1/client/now?history=true` serves the same history. The original update title/text
+and request remain readable, marked withdrawn by the sender with its reason. A dismissed
+denial retains its original reason, the agent and represented person, instruction reference
+and quote, policy and episode. These rows offer no action and are not open alerts.
+
+Each closed resource has an `attention/closed/CLAIM_ID` ID naming its immutable resolution;
+select that ID through the ordinary attention/detail endpoint. The old hashed open-card ID
+is an open projection identity, not this closed source identity. Recipient filtering uses
+the original update recipient or the recorded represented person, so a later seat owner
+cannot take over the previous person's history. A person's authenticated session cannot
+select another person's item or change the cursor's recipient.
+
+History pages scan at most 32 candidates plus one lookahead from the two indexed source
+kinds before recipient/type filtering. An empty page can still carry `next_cursor`; clients
+must follow it. The signed cursor fixes the original cut, recipient and filters for five
+minutes and expires on daemon restart; refresh to see newer resolutions. Detail is a direct
+claim lookup. Reads never write, backfill or rebuild. Existing durable update/message and
+cited-evidence retention keeps the update and the denial's answer/instruction/episode chain;
+this adds no retention expiry or deletion. Oversized stored cells or exhausted read/response
+budgets return an error instead of a truncated successful history result.
