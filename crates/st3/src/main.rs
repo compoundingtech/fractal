@@ -20515,6 +20515,7 @@ async fn drive_st2_native(
                     && let Err(error) = sync_native_delivery_control(client, subject, &mut paths, &mailbox, &inbox, "opencode-server").await {
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
+                if control_retry.ready() {
                 let tick: Result<()> = async {
                     if observations.enabled { return Ok(()) }
                     // The wrapper writes admission before claiming a new harness session. Wait
@@ -20638,9 +20639,10 @@ async fn drive_st2_native(
                 match tick {
                     Ok(()) => control_retry.succeeded(),
                     Err(error) => {
-                        interval.reset_after(control_retry.failed(&error));
+                        control_retry.failed(&error);
                         note_driver_tick_failure(subject, error, &mut last_control_warning);
                     }
+                }
                 }
                 if let Some(subagents) = subagents.as_mut()
                     && let Err(error) = subagents.tick(client).await
@@ -20653,16 +20655,18 @@ async fn drive_st2_native(
                 let tick: Result<()> = async {
                     if let Some(minute) = renewal_minute(subject)?
                         && renewed_minute != Some(minute)
+                        && work_retry.ready()
                     {
                         renew_claimed_work(client, subject, minute, &mut work_retry).await?;
+                        work_retry.succeeded();
                         renewed_minute = Some(minute);
                     }
                     Ok(())
                 }.await;
                 match tick {
-                    Ok(()) => work_retry.succeeded(),
+                    Ok(()) => {}
                     Err(error) => {
-                        work_interval.reset_after(work_retry.failed(&error));
+                        work_retry.failed(&error);
                         note_driver_tick_failure(subject, error, &mut last_control_warning);
                     }
                 }
@@ -23639,6 +23643,7 @@ async fn drive_codex_native(
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
                 }
+                if control_retry.ready() {
                 let tick: Result<()> = async {
                     if !loop_state.ready && std::fs::read(state_dir.join("binding.json"))
                         .ok()
@@ -23762,9 +23767,10 @@ async fn drive_codex_native(
                 match tick {
                     Ok(()) => control_retry.succeeded(),
                     Err(error) => {
-                        interval.reset_after(control_retry.failed(&error));
+                        control_retry.failed(&error);
                         note_driver_tick_failure(subject, error, &mut last_control_warning);
                     }
+                }
                 }
                 subagents.set_timeline_incarnation(
                     st_drivers::codex_app_server::current_runtime_incarnation(
@@ -23786,16 +23792,18 @@ async fn drive_codex_native(
                 let tick: Result<()> = async {
                     if let Some(minute) = renewal_minute(subject)?
                         && renewed_minute != Some(minute)
+                        && work_retry.ready()
                     {
                         renew_claimed_work(client, subject, minute, &mut work_retry).await?;
+                        work_retry.succeeded();
                         renewed_minute = Some(minute);
                     }
                     Ok(())
                 }.await;
                 match tick {
-                    Ok(()) => work_retry.succeeded(),
+                    Ok(()) => {}
                     Err(error) => {
-                        work_interval.reset_after(work_retry.failed(&error));
+                        work_retry.failed(&error);
                         note_driver_tick_failure(subject, error, &mut last_control_warning);
                     }
                 }

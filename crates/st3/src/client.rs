@@ -2134,6 +2134,28 @@ mod tests {
         assert!(retry.failed(&error) <= Duration::from_secs(1));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn driver_retry_keeps_idle_ticks_and_other_successes_from_clearing_failure() {
+        let mut renewal = DriverRetry::default();
+        let mut control = DriverRetry::default();
+        let error = deadline_error("test", "response", Duration::from_secs(30));
+        for _ in 0..6 { renewal.failed(&error); }
+        let due = renewal.retry_at.unwrap();
+        for _ in 0..10 {
+            // A control tick can succeed while renewal is not due or has no scheduled minute.
+            control.succeeded();
+            assert!(!renewal.ready());
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        assert_eq!(renewal.failures, 6);
+        assert_eq!(renewal.retry_at, Some(due));
+        assert!(control.ready(), "unrelated delivery and control work stays runnable");
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(renewal.ready());
+        renewal.succeeded();
+        assert_eq!(renewal.failures, 0);
+    }
+
     #[tokio::test]
     async fn an_outage_wait_ends_by_saying_how_long_it_waited_and_that_nothing_was_sent() {
         let directory = tempfile::tempdir().unwrap();
