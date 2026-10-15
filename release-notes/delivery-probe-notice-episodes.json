@@ -7,5 +7,5 @@
   "compatibility": {"status": "changed", "detail": "Offline still pauses without failure or fabricated recovery. Resuming or refreshing a probe does not send another outage notice for the same episode. Saved request keys and bodies stay stable after ambiguous responses. Older probes ignore the new local episode fields and may reintroduce flap duplicates after downgrade."},
   "manual": {"status": "none", "detail": "No manual state conversion. Actual installation requires the reviewed source and probe configuration pins."},
   "recovery": {"status": "none", "detail": "Recipient reads clear the current episode; delivered, closed, wrong-actor reads and exchanges do not. Pending sends and consumed receipts remain durable."},
-  "downtime": {"status": "unknown", "detail": "Probe rollout is separate from this source change; no host or probe restart performed and no installed-bluey cause or native-runtime qualification claimed."}
+  "downtime": {"status": "unknown", "detail": "Probe rollout is separate from this source change; no host or probe restart performed and no installed-source cause or native-runtime qualification claimed."}
 }
