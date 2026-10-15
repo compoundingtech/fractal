@@ -139,11 +139,13 @@ function CohortList() {
   return <div data-frame-rows {...stylex.props(styles.list)}>{cohortRows.map((row, index) => <SidebarAgentRow key={row.ref} item={row} now={storyNow} active={index === 0} />)}</div>
 }
 
-/** A themed surface whose overlays portal through ThemePortal; the hidden probe resolves the surface's own tokens. */
+/** A themed surface whose overlays portal through ThemePortal; the hidden probe resolves the surface's own tokens. Rows are openable, so their buttons take keyboard focus. */
 function ThemedOverlays({ scheme }: { readonly scheme: Scheme }) {
+  const [openedRef, setOpenedRef] = React.useState(cohortRows[0]!.ref)
+  const open = React.useCallback((row: Row) => setOpenedRef(row.ref), [])
   return <main data-testid="themed-overlays" data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
     <span aria-hidden="true" data-token-probe="" {...stylex.props(styles.tokenProbe)} />
-    <CohortList />
+    <div data-frame-rows {...stylex.props(styles.list)}>{cohortRows.slice(0, 3).map(row => <SidebarAgentRow key={row.ref} item={row} now={storyNow} onOpen={open} active={openedRef === row.ref} />)}</div>
   </ThemePortal></main>
 }
 async function assertThemedOverlay(surfaceElement: HTMLElement, overlay: Element, raised: string) {
