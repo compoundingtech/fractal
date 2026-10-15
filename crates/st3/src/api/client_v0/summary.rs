@@ -312,7 +312,7 @@ pub(in crate::api) fn refresh_published(
             store.start_summary_shared();
             store.note_summary_shared_failed(false);
             if starting {
-                tracing::info!(
+                tracing::debug!(
                     event = "summary.startup",
                     outcome = "published",
                     selections = selections.len(),
