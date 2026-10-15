@@ -2188,7 +2188,9 @@ mod tests {
             retry.tick(&mut interval).await;
             if retry.ready() { break; }
         }
-        assert_eq!(failed_at.elapsed(), pause);
+        // Tokio rounds sub-millisecond deadlines up to its next timer tick.
+        assert!(failed_at.elapsed() >= pause, "a retry must not wake early");
+        assert!(failed_at.elapsed() <= pause + Duration::from_millis(1));
         assert!(failed_at.elapsed() <= Duration::from_secs(1));
         let after_retry = tokio::time::Instant::now();
         retry.tick(&mut interval).await;
