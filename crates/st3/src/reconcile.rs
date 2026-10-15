@@ -999,6 +999,9 @@ pub struct Reconciler<R = NativeRuntime> {
     stop_observation_retries: Mutex<HashMap<String, StopObservationRetry>>,
     /// The kill deadline already logged for each active stop operation.
     reported_kill_survivors: Mutex<HashMap<String, String>>,
+    /// This pass's nested tasks of each stopped root, by root subject: (task subject, runtime
+    /// id, terminal). A root is not settled while one of them still runs on this host.
+    stopped_root_tasks: Mutex<BTreeMap<String, Vec<(String, String, bool)>>>,
     /// When each batched subscription may next send what it collected.
     batch_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     /// When a failed `checkout` may run Git again, and why it failed, by agent subject.
@@ -1164,6 +1167,7 @@ impl Reconciler<NativeRuntime> {
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
+            stopped_root_tasks: Mutex::new(BTreeMap::new()),
             batch_deadlines: Arc::new(Mutex::new(HashMap::new())),
             checkout_retries: Arc::new(Mutex::new(HashMap::new())),
             checkout_conflicts: Mutex::new(HashMap::new()),
@@ -1307,6 +1311,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
+            stopped_root_tasks: Mutex::new(BTreeMap::new()),
             batch_deadlines: Arc::new(Mutex::new(HashMap::new())),
             checkout_retries: Arc::new(Mutex::new(HashMap::new())),
             checkout_conflicts: Mutex::new(HashMap::new()),
@@ -2490,6 +2495,41 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject.kind = "stop".into();
             }
         }
+        // A stopped root ends every task it declared: each runs the exec's own stop below and is
+        // not launched or restarted meanwhile. Starting the root again declares them again.
+        let stopped_roots = desired
+            .iter()
+            .filter(|subject| subject.kind == "stop" && subject.subject.starts_with("agent/"))
+            .map(|subject| subject.subject.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut root_tasks = BTreeMap::<String, Vec<(String, String, bool)>>::new();
+        let mut task_stops = BTreeSet::new();
+        if !stopped_roots.is_empty() {
+            for subject in &desired {
+                let Some(member) = subject.member.as_ref().filter(|_| {
+                    matches!(subject.kind.as_str(), "exec" | "pty")
+                }) else {
+                    continue;
+                };
+                let Some(root) = member.tags.get("st3.agent") else {
+                    continue;
+                };
+                if !stopped_roots.contains(root.as_str()) {
+                    continue;
+                }
+                task_stops.insert(subject.subject.clone());
+                if member.host == self.host {
+                    root_tasks
+                        .entry(root.clone())
+                        .or_default()
+                        .push((subject.subject.clone(), member.runtime_id.clone(), member.terminal));
+                }
+            }
+        }
+        *self
+            .stopped_root_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = root_tasks;
         let mut pty_span = crate::reconcile_telemetry::phase("pass/pty-snapshot");
         let ptys = self.runtime.snapshot_ptys();
         if let Ok(snapshot) = &ptys { pty_span.items(snapshot.len()); }
@@ -2536,7 +2576,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .collect()
         }));
 
-        let active = desired.iter().collect::<Vec<_>>();
+        let task_stop_subjects = desired
+            .iter()
+            .filter(|subject| task_stops.contains(&subject.subject))
+            .collect::<Vec<_>>();
+        let active = desired
+            .iter()
+            .filter(|subject| !task_stops.contains(&subject.subject))
+            .collect::<Vec<_>>();
         let eligible = match self.store.owned_desired_subjects(&desired) {
             Ok(eligible) => {
                 self.prune_stop_state(&gate_runners, &eligible);
@@ -2809,6 +2856,30 @@ impl<R: RuntimeControl> Reconciler<R> {
         drop(unreadable_span);
         let mut members_span = crate::reconcile_telemetry::phase("pass/members");
         members_span.items(active.len());
+        // Tasks of a stopped root stop first, so the root settles in the same pass.
+        for subject in &task_stop_subjects {
+            if !eligible(subject) {
+                continue;
+            }
+            let item = format!("stop:{}", subject.subject);
+            stops.insert(item.clone());
+            if skip_stops && !self.incremental.needs(&item, now_ms()) {
+                continue;
+            }
+            if !self.owned_desired_ready(subject) {
+                stops.remove(&item);
+                continue;
+            }
+            let _member_span = members_span.member(true);
+            self.reconcile_stop_item(
+                subject,
+                &item,
+                skip_stops,
+                ptys.as_ref(),
+                &live_workspaces,
+                &mut diagnostic_errors,
+            );
+        }
         for subject in &active {
             if !eligible(subject) {
                 continue;
@@ -5801,6 +5872,41 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
+    /// The tasks of stopped root `root` that still run on this host. A root is not settled
+    /// while one does: its stop is reported once every exec it started has ended.
+    fn running_root_tasks(&self, root: &str) -> Result<Vec<String>> {
+        let tasks = self
+            .stopped_root_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(root)
+            .cloned()
+            .unwrap_or_default();
+        let mut running = Vec::new();
+        for (subject, runtime_id, terminal) in tasks {
+            let live = if terminal {
+                // A PTY task's state is its last observation; its own stop records `stopped`.
+                self.store
+                    .latest_actual_value(&subject)?
+                    .and_then(|actual| {
+                        actual_field(&actual, "status")
+                            .and_then(Value::as_str)
+                            .map(|status| !matches!(status, "stopped" | "exited" | "absent" | "vanished"))
+                    })
+                    .unwrap_or(false)
+            } else {
+                smallclaims::touched::note_read(|| format!("exec:{runtime_id}"));
+                self.runtime
+                    .observe_exec(&runtime_id)?
+                    .is_some_and(|observation| observation.status == "running")
+            };
+            if live {
+                running.push(subject);
+            }
+        }
+        Ok(running)
+    }
+
     fn reconcile_stop_with_origin(
         &self,
         subject: &DesiredSubject,
@@ -5825,6 +5931,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .as_deref()
                     == Some(self.host.as_str())
             {
+                // A root with no process of its own is stopped once its tasks have ended.
+                if !self.running_root_tasks(&subject.subject)?.is_empty() {
+                    return Ok(());
+                }
                 self.record_once(
                     &subject.subject,
                     "runtime.observed",
@@ -6470,6 +6580,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(subject);
+            // A root's primary process has ended, but its tasks are its processes too: it is
+            // not stopped while one still runs. Their own stops report the failure.
+            if !self.running_root_tasks(subject)?.is_empty() {
+                return Ok(false);
+            }
             // A harness that ended before the stop, or a stop that could not finish, can leave
             // processes in the runtime's work scope. They end with it.
             self.runtime.end_leftovers(runtime_id, terminal);
@@ -22748,6 +22863,152 @@ agent "good" { workspace "/tmp"; command "true" }
                 .unwrap()
                 .contains("fake stop failed")
         );
+    }
+
+    /// A headless root `app` with the named execs, applied and launched once, each exec
+    /// observed running.
+    fn headless_root_with_running_execs(
+        names: &[&str],
+    ) -> (Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>) {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let execs = names
+            .iter()
+            .map(|name| format!("  exec \"{name}\" {{ command \"sleep infinity\" }}\n"))
+            .collect::<String>();
+        apply_source(
+            &store,
+            &format!("version 2\nagent \"app\" {{\n  workspace \"/tmp\"\n  restart \"always\"\n{execs}}}\n"),
+            "headless-root",
+        );
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        for name in names {
+            runtime.execs.lock().unwrap().insert(
+                format!("exec.node.app.{name}"),
+                RuntimeObservation {
+                    runtime_id: format!("exec.node.app.{name}"),
+                    terminal: false,
+                    status: "running".into(),
+                    exit_code: None,
+                    incarnation_id: Some(format!("{name}-one")),
+                },
+            );
+        }
+        reconciler.reconcile_once().unwrap();
+        (store, runtime, reconciler)
+    }
+
+    fn actual_status(store: &Store, subject: &str) -> Option<String> {
+        store
+            .latest_actual_value(subject)
+            .unwrap()
+            .and_then(|actual| {
+                actual_field(&actual, "status")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+    }
+
+    fn end_exec(runtime: &FakeRuntime, runtime_id: &str, status: &str) {
+        runtime
+            .execs
+            .lock()
+            .unwrap()
+            .get_mut(runtime_id)
+            .unwrap()
+            .status = status.into();
+    }
+
+    #[test]
+    fn headless_root_stop_stops_its_nested_execs_and_settles_after_they_end() {
+        let (store, runtime, reconciler) = headless_root_with_running_execs(&["web", "worker"]);
+        let started = runtime.starts.lock().unwrap().len();
+        assert_eq!(started, 2, "both execs launch: {:?}", runtime.starts.lock().unwrap());
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        let mut stops = runtime.stops.lock().unwrap().clone();
+        stops.sort();
+        assert_eq!(stops, ["exec.node.app.web", "exec.node.app.worker"]);
+        // Both still run: the root is not stopped, and nothing starts again.
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("stopped"));
+        assert_eq!(runtime.starts.lock().unwrap().len(), started);
+        end_exec(&runtime, "exec.node.app.web", "stopped");
+        reconciler.reconcile_once().unwrap();
+        assert_ne!(
+            actual_status(&store, "agent/node.app").as_deref(),
+            Some("absent"),
+            "one exec still runs"
+        );
+        end_exec(&runtime, "exec.node.app.worker", "stopped");
+        reconciler.reconcile_once().unwrap();
+        for subject in ["exec/node.app/web", "exec/node.app/worker"] {
+            assert_eq!(actual_status(&store, subject).as_deref(), Some("stopped"));
+        }
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        // Restart always does not bring either back.
+        end_exec(&runtime, "exec.node.app.web", "exited");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.starts.lock().unwrap().len(), started);
+    }
+
+    #[test]
+    fn headless_root_second_stop_changes_nothing() {
+        let (store, runtime, reconciler) = headless_root_with_running_execs(&["web"]);
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        end_exec(&runtime, "exec.node.app.web", "stopped");
+        reconciler.reconcile_once().unwrap();
+        let stops = runtime.stops.lock().unwrap().len();
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root-again");
+        reconciler.reconcile_once().unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.stops.lock().unwrap().len(), stops);
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn headless_root_stop_cleans_up_an_exec_that_exited_on_its_own() {
+        let (store, runtime, reconciler) = headless_root_with_running_execs(&["web"]);
+        end_exec(&runtime, "exec.node.app.web", "exited");
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        assert_eq!(
+            &*runtime.leftovers.lock().unwrap(),
+            &[("exec.node.app.web".to_owned(), false)]
+        );
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn headless_root_stays_unsettled_and_reports_a_failed_exec_stop() {
+        let (store, runtime, reconciler) = headless_root_with_running_execs(&["web", "worker"]);
+        runtime
+            .failed_stops
+            .lock()
+            .unwrap()
+            .insert("exec.node.app.web".into());
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        // The healthy exec's stop is not starved by the failing one.
+        assert!(runtime.stops.lock().unwrap().contains(&"exec.node.app.worker".to_owned()));
+        assert!(
+            store
+                .member_reconcile_fault("exec/node.app/web", None)
+                .unwrap()
+                .unwrap()
+                .contains("fake stop failed")
+        );
+        end_exec(&runtime, "exec.node.app.worker", "stopped");
+        reconciler.reconcile_once().unwrap();
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
     }
 
     #[test]
