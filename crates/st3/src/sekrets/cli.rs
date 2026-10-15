@@ -398,9 +398,11 @@ fn daemon_endpoint(
     configured: impl FnOnce() -> Result<PathBuf>,
 ) -> Result<crate::client::Endpoint> {
     match flag.or(environment).filter(|value| !value.is_empty()) {
+        // The value is not echoed: a URL can carry a password or a token.
         Some(endpoint) => match crate::client::Endpoint::parse(&endpoint) {
             crate::client::Endpoint::Http(_) => bail!(
-                "sekrets reaches this host's daemon only through its Unix socket, not {endpoint}"
+                "sekrets reaches this host's daemon only through its Unix socket, not an http(s) \
+                 endpoint (value omitted)"
             ),
             unix => Ok(unix),
         },
@@ -804,14 +806,15 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            daemon_endpoint(
-                Some("https://example.invalid".into()),
-                None,
-                || unreachable!()
-            )
-            .is_err()
-        );
+        let refused = daemon_endpoint(
+            Some("https://ada:hunter2@example.invalid/?token=t0ken".into()),
+            None,
+            || unreachable!(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(refused.contains("only through its Unix socket"));
+        assert!(!refused.contains("hunter2") && !refused.contains("t0ken"));
     }
 
     #[test]
