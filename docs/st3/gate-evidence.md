@@ -700,14 +700,22 @@ matching and the check runs.
 Write `scripts/evidence-verify --policy-from BASE
 --repository OWNER/NAME` to apply it by hand.
 
+A kind's rule may also name `by_level`: for one signer level (the first part of the principal), its own `command`, `required_inputs`,
+`bind_inputs` and `events` (`pull_request` and/or `merge_group`; `events` is required, so an override can never silently cover every event) replace the kind's. The level must be one the kind accepts. It is how a
+host-signed local note (its command is the `nix develop ...` line `scripts/st-test` runs) can satisfy a check whose CI step wrapper records a
+different command and extra inputs, while each signer is still held to exactly its own rule. The verifier reports the `events` that apply
+and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
+`host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only, with `enforce` false.
+
 ### Running the checks locally (`scripts/st-test`)
 
 `scripts/st-test` runs each required check that has a local command (today `genie-freshness` and
-`typescript-client`; `--list` prints them) once, through `evidence-wrap`, on the tree the pull request will be
-tested as, and the host's signer records the exit code and output digest. GitHub tests the merge of the branch into
-its base, so when the branch does not hold the base's tip the script computes the merge tree (`git merge-tree`) and
-makes a merge commit with that tree; a merge that conflicts stops it. The command always runs in a fresh throwaway
-worktree of that commit, so untracked or ignored files in your checkout cannot change the result. A failing run is
+`typescript-client`; `--list` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
+records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
+request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
+many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
+the integrated tree, and a pass of the merge tree is not made here. The command always runs in a fresh
+throwaway worktree of that commit, so untracked or ignored files in your checkout cannot change the result. A failing run is
 recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base. It prints one
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
 (`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or
