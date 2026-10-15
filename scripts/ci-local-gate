@@ -143,6 +143,9 @@ def prepare(work):
     return {'RUNNER_TEMP': str(temp), 'GITHUB_STEP_SUMMARY': str(temp / 'summary.md'),
             'HOME': str(home), 'XDG_CONFIG_HOME': str(home / '.config'), 'XDG_CACHE_HOME': str(home / '.cache'),
             'XDG_STATE_HOME': str(home / '.local/state'),
+            # The stages emulate CI: the default dev shell installs the pre-push hook unless CI is set, and a drill must not install hooks
+            # in the shared repository of every seat on the host (st2#3014 happened that way).
+            'CI': 'true',
             'CARGO_HOME': cargo_home(), 'CI_CACHE_DIR': str(Path(os.environ.get('XDG_CACHE_HOME') or Path(os.environ['HOME']) / '.cache') / 'ci-local-gate/st-ci-cache')}
 
 

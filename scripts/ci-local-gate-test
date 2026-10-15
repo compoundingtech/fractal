@@ -255,6 +255,7 @@ class Homes(unittest.TestCase):
             self.assertTrue(prepared['CI_CACHE_DIR'].startswith(str(Path(home) / '.cache')))
             self.assertFalse(prepared['CARGO_HOME'].startswith(work))
             self.assertTrue(prepared['HOME'].startswith(work))  # the tests' HOME is the isolated one
+            self.assertEqual(prepared['CI'], 'true')  # so the dev shell does not install the pre-push hook into the shared repository
 
 
 class Prepared(unittest.TestCase):
