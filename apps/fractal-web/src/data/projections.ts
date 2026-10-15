@@ -3,8 +3,8 @@
  *
  * Sources supply generated `St3.Agent` / `St3.Mission` / `St3.Attention` rows only; the fleet,
  * mission views and workbench subjects are projected here, so fixtures and live cannot derive
- * them differently. Open attention rows are the one inbox authority: a subject needs the user
- * exactly when an open attention row names it (`source_id`, `requester_id` or `mission_id`).
+ * them differently. Native actionable asks are the needs-you authority: a subject needs an
+ * answer when an answerable attention row names it (`source_id`, `requester_id` or `mission_id`).
  */
 import * as St3 from '@smalltalk/st3-client/schema'
 import * as DateTime from 'effect/DateTime'
@@ -13,6 +13,7 @@ import * as Schema from 'effect/Schema'
 
 import type { MissionView, ProposedMissionFields } from '../missions/model.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
+import { isWaitingForAnswer } from './attention.ts'
 import type { Agent, Fleet, Host, Known } from './source.ts'
 
 const isAgentId = Schema.is(St3.AgentId)
@@ -146,11 +147,11 @@ export const missionViews = ({
     proposed: proposed?.[mission.id],
   }))
 
-/** Refs an open attention row is about: what raised it, who asked and the mission it serves. */
+/** Refs an answerable native ask is about: what raised it, who asked and the mission it serves. */
 export const attentionRefs = (attention: readonly St3.Attention[]): ReadonlySet<string> =>
   new Set(
     attention
-      .filter((item) => item.state === 'open')
+      .filter(isWaitingForAnswer)
       .flatMap((item) => {
         const refs: string[] = [item.source_id]
         if (item.requester_id !== undefined) refs.push(item.requester_id)
@@ -219,7 +220,7 @@ export const subjectList = ({
         title: item.title,
         detail: `${item.attention_kind} · ${item.state}`,
         icon: 'attention',
-        ...(item.state === 'open' ? { attention: true } : {}),
+        ...(isWaitingForAnswer(item) ? { attention: true } : {}),
       }),
     ) ?? []),
   ]
@@ -381,7 +382,7 @@ export const createProjections = (): {
             title: item.title,
             detail: `${item.attention_kind} · ${item.state}`,
             icon: 'attention',
-            ...(item.state === 'open' ? { attention: true } : {}),
+            ...(isWaitingForAnswer(item) ? { attention: true } : {}),
           }
           attentionSubjects.set(item, subject)
         }
