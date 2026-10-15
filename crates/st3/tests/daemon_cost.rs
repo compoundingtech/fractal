@@ -2353,7 +2353,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
                 .post::<_, Value>("/v1/client/actions", &request)
                 .await
                 .expect_err("the unwired harness settle must refuse");
-            assert_eq!(st3::client::api_error_code(&error), Some("not-answerable"));
+            assert_eq!(st3::client::api_error_code(&error), Some("not-answerable"), "{error:#}");
             Ok(json!({"reason": "adapter_missing"}))
         })
         .await;
