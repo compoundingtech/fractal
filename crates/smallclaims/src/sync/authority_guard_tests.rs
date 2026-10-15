@@ -36,6 +36,10 @@ fn response(digest: String) -> ReplicationExportResponse {
             authority_digest: digest.clone(),
             graph_digest: String::new(),
             projection_digests: Default::default(),
+            projection_registry_digest: Some(
+                crate::store::runtime::Plain.projection_registry_digest(),
+            ),
+            projection_versions: crate::store::runtime::Plain.projection_versions(),
             inventory: ReplicationInventory {
                 digest,
                 ..Default::default()
