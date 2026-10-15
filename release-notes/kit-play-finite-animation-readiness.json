@@ -4,7 +4,7 @@
   "replay": { "status": "none", "detail": "No replay or rebuild." },
   "schema": { "status": "none", "detail": "No database or wire schema changes." },
   "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
-  "compatibility": { "status": "none", "detail": "All indexed stories and four viewport/theme cases remain required. Fresh page realms and cleared storage are retained. Finite animations reach their endpoints after play; infinite animations and Storybook's accessibility and strict storyFinished checks remain unchanged. Real fade endpoint and deliberately paused-state controls run through Storybook and axe, and isolation controls cover reduced motion and persisted theme globals." },
+  "compatibility": { "status": "none", "detail": "All indexed stories and four viewport/theme cases remain required. Fresh page realms and cleared storage are retained. A bounded stable drain finishes finite animations and onfinish chains after play; errors or instability by accessibility afterEach fail the strict proof. Infinite animations and strict storyFinished checks remain unchanged. Natural/accelerated WAAPI, CSS transition, no-fill/backwards-fill keyframes and animation-chain controls must pass axe at matching endpoints; a paused low-contrast control must fail specifically through axe color-contrast. Isolation controls cover reduced motion and persisted theme globals." },
   "downtime": { "status": "none", "detail": "None." },
   "manual": { "status": "none", "detail": "No manual step." },
   "recovery": { "status": "none", "detail": "Nothing to recover." }

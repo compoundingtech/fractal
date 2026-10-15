@@ -160,28 +160,41 @@ try {
   }))
   const rejected = results.filter(result => result.status === 'rejected')
   if (rejected.length) throw new AggregateError(rejected.map(result => result.reason), 'Kit play workers failed')
-  // Real Storybook + axe, not a replacement lifecycle. The ordinary matrix
-  // also runs this indexed story; these three additional controls prove that
-  // accelerating a 3s fade reaches the same endpoint and rejects a pause.
-  const controlId = 'fractal-ui-readiness-controls--finite-fade'
-  if (!ids.includes(controlId)) throw new Error('Missing finite-animation readiness control story')
+  // Every fixture traverses real Storybook + axe both naturally and accelerated.
+  const fixtures = [
+    ['finite-fade', 1], ['css-transition', 2], ['css-keyframes-none', 1],
+    ['css-keyframes-backwards', 1], ['finish-chain', 2],
+  ]
   const controlWorker = await createIsolatedKitWorker(browser, base)
   try {
-    const fixture = { id: controlId, scheme: 'light', width: 440 }
-    const baseline = await runCase(controlWorker, fixture, { finishFiniteAnimations: false, control: true })
-    const accelerated = await runCase(controlWorker, fixture, { control: true })
-    const intermediate = await runCase(controlWorker, fixture, { pauseAtMidpoint: true, control: true })
     const axePassed = row => row.strict.some(record => record.finished.some(event =>
       event.payload.reporters?.some(reporter => reporter.type === 'a11y' && reporter.status === 'passed')))
-    if (!baseline.pass || !accelerated.pass || !axePassed(baseline) || !axePassed(accelerated) ||
-        baseline.readiness?.finiteAnimationsFinished !== 0 || accelerated.readiness?.finiteAnimationsFinished !== 1 ||
-        intermediate.pass || !intermediate.error?.includes('strict-storybook-readiness')) {
-      throw new Error('Finite-animation readiness controls failed')
+    for (const [suffix, expectedFinished] of fixtures) {
+      const id = `fractal-ui-readiness-controls--${suffix}`
+      if (!ids.includes(id)) throw new Error(`Missing finite-animation readiness control story: ${id}`)
+      const fixture = { id, scheme: 'light', width: 440 }
+      const baseline = await runCase(controlWorker, fixture, { finishFiniteAnimations: false, control: true })
+      const accelerated = await runCase(controlWorker, fixture, { control: true })
+      if (!baseline.pass || !accelerated.pass || !axePassed(baseline) || !axePassed(accelerated) ||
+          baseline.readiness?.finiteAnimationsFinished !== 0 || accelerated.readiness?.finiteAnimationsFinished !== expectedFinished) {
+        throw new Error(`Finite-animation endpoint controls failed: ${id}`)
+      }
+      const baselineWait = baseline.timings.animationSettleMilliseconds
+      const acceleratedWait = accelerated.timings.animationSettleMilliseconds
+      if (!(baselineWait > 2000 && acceleratedWait < baselineWait - 1000)) {
+        throw new Error(`Finite-animation control did not remove its real completion wait: ${id}`)
+      }
     }
-    const baselineWait = baseline.timings.animationSettleMilliseconds
-    const acceleratedWait = accelerated.timings.animationSettleMilliseconds
-    if (!(baselineWait > 2000 && acceleratedWait < baselineWait - 1000)) {
-      throw new Error('Finite-animation control did not remove its real completion wait')
+    const intermediate = await runCase(controlWorker, {
+      id: 'fractal-ui-readiness-controls--finite-fade', scheme: 'light', width: 440,
+    }, { pauseAtMidpoint: true, control: true })
+    const contrastFailed = intermediate.events?.some(event => event.name === 'storyFinished' &&
+      event.payload.reporters?.some(reporter => reporter.type === 'a11y' && reporter.status === 'failed' &&
+        reporter.violations?.includes('color-contrast')))
+    if (intermediate.pass || !contrastFailed || intermediate.readiness?.animationErrors.length ||
+        !intermediate.readiness?.phases.some(phase => phase.phase === 'played') ||
+        intermediate.events?.some(event => event.name !== 'storyFinished')) {
+      throw new Error('Paused intermediate-state control must fail specifically through axe color-contrast, not a play/hook/guard error')
     }
   } finally {
     await controlWorker.close()

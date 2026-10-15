@@ -24,31 +24,44 @@ export async function strictStoryGuard(page, base, { finishFiniteAnimations = fa
       clearInterval(timer)
       const readiness = window.__dt10Readiness
       readiness.channelReady = performance.now()
+      let drainPending = false
       channel.on('storyRenderPhaseChanged', ({ storyId, newPhase, renderId }) => {
         readiness.phases.push({ storyId, phase: newPhase, renderId, milliseconds: performance.now() })
-        // Storybook emits completing after play and before its animation wait
-        // and axe afterEach. Finish, never pause, so axe sees the same endpoint.
-        if (!finishFiniteAnimations || newPhase !== 'completing') return
-        const roots = [document]
-        for (let index = 0; index < roots.length; index++) {
-          for (const element of roots[index].querySelectorAll('*')) {
-            if (element.shadowRoot) roots.push(element.shadowRoot)
-          }
+        if (!finishFiniteAnimations) return
+        if (newPhase === 'afterEach' && drainPending) {
+          readiness.animationErrors.push('Finite animation drain did not stabilize before accessibility afterEach')
         }
-        for (const animation of new Set(roots.flatMap(root => root.getAnimations()))) {
-          if (animation.playState !== 'running') continue
-          // Finite endTime includes iterations and delays. Leave infinite
-          // animations entirely alone, including Storybook's existing timeout.
-          if (!Number.isFinite(animation.effect?.getComputedTiming().endTime)) continue
-          try {
-            animation.finish()
-            readiness.finiteAnimationsFinished++
-          } catch (error) {
-            readiness.animationErrors.push(String(error))
+        // Finish after play, never pause. Re-scan after browser animation-event
+        // delivery so onfinish callbacks and React updates can start a chain.
+        if (newPhase !== 'completing') return
+        drainPending = true
+        void (async () => {
+          let stableRounds = 0
+          for (let round = 0; round < 32; round++) {
+            const roots = [document]
+            for (let index = 0; index < roots.length; index++) {
+              for (const element of roots[index].querySelectorAll('*')) {
+                if (element.shadowRoot) roots.push(element.shadowRoot)
+              }
+            }
+            let finished = 0
+            for (const animation of new Set(roots.flatMap(root => root.getAnimations()))) {
+              if (animation.playState !== 'running') continue
+              // Leave infinite animations and their Storybook handling alone.
+              if (!Number.isFinite(animation.effect?.getComputedTiming().endTime)) continue
+              animation.finish()
+              readiness.finiteAnimationsFinished++
+              finished++
+            }
+            readiness.animationDrainRounds = round + 1
+            stableRounds = finished ? 0 : stableRounds + 1
+            if (stableRounds === 2) return
+            await new Promise(resolve => requestAnimationFrame(resolve))
           }
-        }
+          throw new Error('Finite animation drain exceeded 32 rounds')
+        })().catch(error => readiness.animationErrors.push(String(error))).finally(() => { drainPending = false })
       })
-      for (const name of ['storyFinished', 'playFunctionThrewException', 'storyThrewException', 'storyErrored']) channel.on(name, payload => window.__dt10StrictEvents.push({ name, payload: name === 'storyFinished' ? { storyId: payload?.storyId, status: payload?.status, reporters: payload?.reporters?.map(({ type, status }) => ({ type, status })) } : { message: typeof payload === 'string' ? payload : payload?.message, stack: payload?.stack } }))
+      for (const name of ['storyFinished', 'playFunctionThrewException', 'storyThrewException', 'storyErrored']) channel.on(name, payload => window.__dt10StrictEvents.push({ name, payload: name === 'storyFinished' ? { storyId: payload?.storyId, status: payload?.status, reporters: payload?.reporters?.map(({ type, status, result }) => ({ type, status, violations: result?.violations?.map(({ id }) => id) })) } : { message: typeof payload === 'string' ? payload : payload?.message, stack: payload?.stack } }))
     }, 5)
   }, { finishFiniteAnimations })
   const check = async () => {
