@@ -1,4 +1,4 @@
-import { sidebarRow } from './sidebarRow.ts'
+import { sidebarRow, sidebarRowNextChange } from './sidebarRow.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
@@ -25,6 +25,8 @@ import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider,
 import type { ResourcePanelState } from '../shell/state.ts'
 import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
+import { syncLineNextChange } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
+import { earliestChange } from '@smalltalk/fractal-ui/human-time/format'
 import { useGatewaySync } from '../data/react.tsx'
 import { matchesSidebarHost, parseSidebarQuery } from '../shell/sidebar/filter.ts'
 
@@ -123,7 +125,8 @@ const initialAgentFromUrl = () => {
 
 /** One authoritative agent thread per workspace; local geometry never grants backend authority. */
 export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void }) {
-  const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), now = useNow()
+  const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection()
+  const now = useNow(now => fleet._tag === 'Observed' ? earliestChange(now, fleet.value.agents.map(agent => sidebarRowNextChange(agent, now))) : undefined)
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
   const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [scheme, setScheme] = useAtom(palette)
   const viewport = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
@@ -330,7 +333,7 @@ const GatewayConnectionStatus = () => {
   const source = useDataSource()
   const network = useAtomValue(source.network ?? assumedOnline)
   const observation = useGatewaySync()
-  const now = useNow()
+  const now = useNow(now => observation === undefined ? undefined : syncLineNextChange({ ...observation, label: 'connection', now, socket: observation.status._tag !== 'Failed' }))
   if (observation === undefined) return null
   const line = syncLine({
     ...observation, label: 'connection', now,

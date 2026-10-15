@@ -2,6 +2,7 @@ import type * as Native from '@smalltalk/st3-client/schema'
 import type { DetailsOverview, DetailsSection, DetailsState, DetailsResource, TraceSeries, TraceFact, TraceCoverage, TraceAccumulationWindow } from '@smalltalk/fractal-ui/assistant-ui'
 import type { SyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync-status'
 import { DateTime, Duration, Option } from 'effect'
+import { earliestChange } from '@smalltalk/fractal-ui/human-time/format'
 import { contextOccupancy } from './contextOccupancy.ts'
 import type { Agent, Feed } from './source.ts'
 import type { NativeDeclarations } from './nativeDeclarations.ts'
@@ -23,6 +24,8 @@ export interface NativeDetailsObservation {
   /** Selected native row refusal; forbidden/unsupported never offer a same-request retry. */
   readonly syncStatus?: SyncStatus
   readonly onRetry: () => void
+  /** Next displayed duration step or future-observation fence; absent means no timed wake. */
+  readonly nextChangeAt?: number
 }
 /** Read-only display keys; `details:` URIs have no native route and must not be opened. */
 export const nativeDetailsUriPrefix = 'details:'
@@ -79,6 +82,12 @@ export const nativeDetailsTiming = ({ row, session, snapshotCreatedAt, now }: { 
 const durationText = (ms: number): string => {
   const seconds = Math.floor(ms / 1000)
   return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`
+}
+const elapsedChange = (at: number | undefined, now: number): number | undefined => {
+  if (at === undefined) return undefined
+  if (at > now) return at
+  const unit = now - at < 60_000 ? 1000 : 60_000
+  return at + (Math.floor((now - at) / unit) + 1) * unit
 }
 const factFailure = (feed: Feed<unknown>): string => feed._tag === 'Waiting' ? 'Loading native observation.'
   : feed._tag === 'Unavailable' ? feed.reason === 'ungranted' ? 'Native read is not granted.' : feed.reason === 'unsupported' ? 'Native observation is unsupported.' : 'Native observation failed.'
@@ -162,6 +171,13 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
     ] }, unavailableReason: 'Selected-agent attention state is not observed.' },
     ...(['Pull requests', 'CI runs', 'Reviews', 'Files touched', 'History'] as const).map(title => ({ title, items: { _tag: 'Unknown' as const }, unavailableReason: `${title} observations are not supplied by this native Details feed.` })),
   ]
+  const nextChangeAt = earliestChange(now, [
+    elapsedChange(session === undefined ? undefined : DateTime.toEpochMillis(session.started_at), now),
+    session === undefined ? undefined : Option.match(session.ended_at, { onNone: () => undefined, onSome: at => DateTime.toEpochMillis(at) }),
+    elapsedChange(statusSince === undefined ? undefined : DateTime.toEpochMillis(statusSince), now),
+    contextAsOf,
+    projected?.usage._tag === 'Known' && projected.usage.value.context !== undefined ? DateTime.toEpochMillis(projected.usage.value.context.observed_at_unix_ms) : undefined,
+  ])
   return {
     overview: { title: row?.name, status: projected?.status, machine: projected?.host, harness: projected?.harness, model, mission,
       durations: [
@@ -183,5 +199,6 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
     nativeRootPending: rowFeed._tag === 'Waiting' || periodFeed._tag === 'Waiting',
     ...(incarnationId === undefined ? {} : { incarnationId }), ...(nativeHost === undefined ? {} : { host: nativeHost }), ...(projected?.harness === undefined ? {} : { harness: projected.harness }),
     ...(syncStatus === undefined ? {} : { syncStatus }), onRetry,
+    ...(nextChangeAt === undefined ? {} : { nextChangeAt }),
   }
 }

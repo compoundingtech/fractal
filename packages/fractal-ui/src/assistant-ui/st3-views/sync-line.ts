@@ -1,4 +1,5 @@
 // The host owns decoded facts and the clock.
+import { earliestChange } from '../../time/human-time'
 import type { SyncStatus, SyncFailureCause } from './sync-status'
 export type { SyncStatus, SyncStage, StaleReason, SyncFailureCause } from './sync-status'
 export interface SyncLineValue { readonly text: string; readonly tone: 'neutral' | 'warning' | 'error'; readonly animate: boolean; readonly announce: string }
@@ -102,4 +103,33 @@ export function syncLine({ status, label, now, observedAt, gateway, socket = fal
       break
   }
   return { text, tone, animate, announce }
+}
+
+/** Main's sync copy uses whole seconds, including long waits; preserve that vocabulary. */
+const nextSecond = (start: number, now: number): number => start + (Math.floor(Math.max(0, now - start) / 1000) + 1) * 1000
+
+/** The next visibility threshold or displayed-second step of syncLine. */
+export function syncLineNextChange({ status, now, observedAt, socket = false }: SyncLineInput): number | undefined {
+  switch (status._tag) {
+    case 'Connecting': return earliestChange(now, [observedAt + 400, socket ? nextSecond(observedAt, now) : undefined])
+    case 'Requested': return earliestChange(now, [observedAt + 400, observedAt + 5000, nextSecond(observedAt, now)])
+    case 'Progress': {
+      const start = status.reportedAt - status.elapsedMs
+      return earliestChange(now, [start + 400, status.reportedAt + 5000, observedAt + 10_000, nextSecond(start, now), now - status.reportedAt >= 5000 ? nextSecond(status.reportedAt, now) : undefined])
+    }
+    case 'Stale':
+      switch (status.reason._tag) {
+        case 'Unknown': return nextSecond(status.lastLiveAt ?? observedAt, now)
+        case 'Quiet': return nextSecond(status.reason.lastFrameAt, now)
+        case 'Resync': return earliestChange(now, [observedAt + 400])
+        case 'Reconnecting': {
+          const target = status.reason.nextAt
+          const remaining = target - now
+          return earliestChange(now, [observedAt + 2000, socket && remaining > 0 ? target - (Math.ceil(remaining / 1000) - 1) * 1000 : undefined])
+        }
+        case 'Evicted': return undefined
+      }
+    case 'Live':
+    case 'Failed': return undefined
+  }
 }

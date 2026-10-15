@@ -6,7 +6,10 @@ import { DetailsPane, Workbench } from '@smalltalk/fractal-ui/assistant-ui'
 import type { DetailsLayoutIntent, DetailsSection, DetailsVariants, TraceSeries, WorkbenchLayout, WorkbenchResources } from '@smalltalk/fractal-ui/assistant-ui'
 import type { SyncStatus } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-status.ts'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { useGatewaySync, useNow } from '../data/react.tsx'
+import { useGatewaySync } from '../data/react.tsx'
+import { useClockTime, useClockWake } from '@smalltalk/fractal-ui/human-time/clock'
+import { syncLineNextChange } from '@smalltalk/fractal-ui/assistant-ui/sync-status'
+import { earliestChange } from '@smalltalk/fractal-ui/human-time/format'
 import { useDetailsSections, useDetailsSupplement } from '../extensions/build.ts'
 import { useNativeDetails } from './useNativeDetails.ts'
 import { detailsWithSupplement } from './detailsSupplement.ts'
@@ -72,7 +75,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
   const [inspectedUri, setInspectedUri] = React.useState<string>()
   const portalContainer = React.useRef<HTMLDivElement>(null)
   const resource = suppliedSections.flatMap(section => section.items._tag === 'Known' ? section.items.value : []).find(item => item.uri === inspectedUri)
-  const now = useNow()
+  const now = useClockTime()
   const [requestedAt] = React.useState(now)
   const gateway = useGatewaySync()
   const scopedRoot = native.trace.nativeSessionId._tag === 'Known' ? native.trace.nativeSessionId.value : undefined
@@ -106,6 +109,11 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
       : native.stale
         ? gateway?.status._tag === 'Stale' ? gateway.status : { _tag: 'Stale', reason: { _tag: 'Unknown' }, ...(native.observedAt === undefined ? {} : { lastLiveAt: native.observedAt }) }
         : gateway?.status ?? { _tag: 'Live', since: native.observedAt ?? requestedAt })
+  const receivedAt = supplement._tag === 'Observed' && supplement.freshness === 'stale' ? supplement.value.receivedAtMs : undefined
+  useClockWake(earliestChange(now, [
+    syncLineNextChange({ status, label: 'agent details', now, observedAt: native.observedAt ?? requestedAt }),
+    receivedAt === undefined ? undefined : receivedAt + (Math.floor(Math.max(0, now - receivedAt) / 1000) + 1) * 1000,
+  ]))
   return <div ref={portalContainer} {...stylex.props(styles.content)}>
     {native.harness === 'omp' && <p role="status" data-details-supplement-state={supplement._tag} {...stylex.props(styles.coverage)}>
       {supplement._tag === 'Waiting' ? 'Descendant observations are loading independently of native session facts.'

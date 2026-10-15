@@ -204,6 +204,14 @@ prefetch the resource and queue reads.
 Closing releases UI demand, while the intent-created read keeps polling for 60 seconds
 so a reopen shows the retained observation.
 
+Live time labels share a visibility-aware deadline clock instead of a global 1 Hz
+render cadence. Each view schedules its next displayed duration/age or synchronization
+threshold; hidden pages arm no timer and catch up once on return. Native Details keeps
+main's existing formatting and observation guards. Atom-side invalidation runs once
+per wall minute, retaining the pending minute until its callback fires. Fixture `now`
+atoms remain externally driven. Conversation presentation time freezes on transport
+loss without changing the source's independent freshness verdict.
+
 ## Fractal web transcript switch paint
 
 The conversation pane reports `ux.transcriptCommitted(ref)` only after its scoped DOM

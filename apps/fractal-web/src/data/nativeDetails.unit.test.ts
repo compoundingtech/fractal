@@ -224,4 +224,15 @@ describe('fixture-free native Details projection', () => {
     expect(projectNativeDeclarations({ declaration: { ...declaration, tree: { name: 'agent', children: [{ name: 'env', arguments: {} }] } } })).toBeUndefined()
     expect(projectNativeDeclarations({ declaration: { ...declaration, tree: { name: 'agent', children: [] } } })?.bindings).toEqual([])
   })
+  it('schedules main duration text at seconds then minutes and wakes future observation fences', () => {
+    const projectAt = (now: number) => projectNativeDetails({
+      agentRef: row.id, row: observed({ value: row }), agent: observed({ value: createProjections().fleetFromAgents([row]).agents[0] }),
+      period: observed({ value: period }), session: observed({ value: session }), declarations: missing, missions: observed({ value: [] }), now, onRetry: () => undefined,
+    })
+    expect(projectAt(1500).nextChangeAt).toBe(2000)
+    expect(projectAt(10_000).nextChangeAt).toBe(11_000)
+    expect(projectAt(121_500).nextChangeAt).toBe(181_000)
+    // Main's hours-and-minutes string keeps minute precision even after a day.
+    expect(projectAt(90_001_500).nextChangeAt).toBe(90_061_000)
+  })
 })

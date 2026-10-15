@@ -8,8 +8,8 @@ import { DateTime } from 'effect'
 import { Icon as CompositionIcon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { SidePanel } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SidePanel.tsx'
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { compactTime } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
-import { useDataSource, useNow } from '../data/react.tsx'
+import { HumanTime } from '@smalltalk/fractal-ui/human-time'
+import { useDataSource } from '../data/react.tsx'
 import { unavailable, waiting, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
 import { resourceState, resourceTitle, type ResourcePage } from '../resources/agent/model.ts'
@@ -101,7 +101,6 @@ const ResourceContents = ({ agentRef, resources, opening, cache }: {
 }) => {
   const source = useDataSource()
   const queue = useAtomValue(retainedResourceAtoms(source).queue(agentRef))
-  const now = useNow()
   React.useLayoutEffect(() => {
     if (resources._tag !== 'Waiting') opening?.phase('data', { 'wf.ux.cache': cache })
     if (queue._tag !== 'Waiting') opening?.phase('queue')
@@ -127,10 +126,9 @@ const ResourceContents = ({ agentRef, resources, opening, cache }: {
         {resources.freshness === 'stale' ? <p role="status">Showing the last verified resources while reconnecting.</p> : null}
         {resources.value.items.length === 0 ? <p>No resources observed for this agent.</p> : <ul {...stylex.props(styles.list)}>{resources.value.items.map(resource => {
           const state = resourceState(resource)
-          const observedAt = DateTime.formatIso(resource.observed_at)
           return <li key={resource.id} {...stylex.props(styles.resource)}>
             <div {...stylex.props(styles.resourceHeading)}><span {...stylex.props(styles.resourceTitle)}>{resourceTitle(resource)}</span>{state === undefined ? null : <span {...stylex.props(styles.resourceState)}>{state.replaceAll('_', ' ')}</span>}</div>
-            <div {...stylex.props(styles.resourceMetadata)}><span>{resource.kind}</span><time dateTime={observedAt} title={observedAt} aria-label={`Resource observed ${observedAt}`}>{compactTime({ at: DateTime.toEpochMillis(resource.observed_at), now })} ago</time></div>
+            <div {...stylex.props(styles.resourceMetadata)}><span>{resource.kind}</span><HumanTime at={DateTime.toEpochMillis(resource.observed_at)} kind="relative" aria-label="Resource observed" /></div>
           </li>
         })}</ul>}
         {resources.value.pagingError === undefined ? null : <p role="status" data-wf-resource-paging="failed">More resources could not be loaded; refresh to try again.</p>}

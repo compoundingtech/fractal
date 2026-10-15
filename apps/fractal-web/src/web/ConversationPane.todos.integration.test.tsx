@@ -15,7 +15,7 @@ vi.mock('@stylexjs/stylex', () => ({
 vi.mock('@effect/atom-react', () => ({ useAtomValue: () => false }))
 vi.mock('../data/react.tsx', () => ({
   useDataSource: () => ({}), useConversation: () => state.tag === 'Waiting' ? { _tag: 'Waiting' } : { _tag: 'Unavailable', reason: 'failed', detail: 'example' },
-  useConversationSync: () => undefined, useFeedInterest: () => {}, useGrants: () => ({ messageSend: 'ungranted' }), useNow: () => 0,
+  useConversationSync: () => undefined, useFeedInterest: () => {}, useGrants: () => ({ messageSend: 'ungranted' }), useObservedNow: () => ({ _tag: 'Live', now: 0 }),
 }))
 vi.mock('../conversation/todos/AgentTodos.tsx', () => ({ LiveAgentTodos: () => <details aria-label="Harness todos"><summary>Todos · Example phase 1/2</summary></details> }))
 import { ConversationPane } from './ConversationPane.tsx'

@@ -20,9 +20,15 @@ zone supplied to `HumanClockProvider` (for example `{ locale: 'en-GB', timeZone:
 Neither bare ISO-date parsing nor machine-local midnight respects a pinned zone.
 `aria-label` is a name prefix; `HumanTime` appends the complete visible text, including
 visible prefix/suffix, exactly once. Callers must not repeat the formatted value.
-String projections must receive a ticking `now`; the host may intentionally pause an
-observation clock while disconnected so retained facts do not imply that fresh
-observations are arriving.
+String projections read `useClockTime` and call `useClockWake(nextChangeAt)` from
+`./human-time/clock`, or use `useClockLabel(label, nextChange)`. The shared system
+clock arms one timer for the earliest deadline, sleeps while hidden, and catches
+up once on visibility recovery. Pure `nextDurationChange`, `nextRelativeChange`,
+`nextCountdownChange` and `nextCivilChange` helpers describe label boundaries;
+`syncLineNextChange` preserves the sync line's displayed-second thresholds.
+Externally driven fixture clocks may ignore the optional subscribe deadline.
+Hosts may pause presentation time while disconnected so retained facts do not
+imply fresh observations. Run `pnpm test:clock` and `pnpm test:human-time` here.
 
 ## Run
 
