@@ -6827,6 +6827,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let store = Arc::new(startup_telemetry.task("startup open-store", || {
         Store::open(&config.state_dir.join("claims.sqlite3"), &config.node)
     })?);
+    st3::otel::register_work_metrics(store.clone());
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
     }

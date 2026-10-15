@@ -751,6 +751,71 @@ pub struct Telemetry {
     cli_backoff: Option<PathBuf>,
 }
 
+/// Attach the daemon store after startup. All callbacks share a 60-second sample;
+/// SQLite runs on the SDK-owned blocking metric reader, never on a Tokio worker.
+pub fn register_work_metrics(store: std::sync::Arc<crate::store::Store>) {
+    if !metrics_enabled() { return; }
+    register_work_metrics_on(opentelemetry::global::meter("st3"), store);
+}
+
+pub(crate) fn register_work_metrics_on(
+    meter: opentelemetry::metrics::Meter,
+    store: std::sync::Arc<crate::store::Store>,
+) {
+    use crate::store::flow_metrics::{FlowSnapshot, WORK_STATES};
+    struct Cache {
+        sampled: Option<Instant>,
+        value: Option<FlowSnapshot>,
+    }
+    let cache = std::sync::Arc::new(std::sync::Mutex::new(Cache { sampled: None, value: None }));
+    let sample = std::sync::Arc::new(move || {
+        let mut cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache.sampled.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
+            cache.sampled = Some(Instant::now());
+            // A failed read is absent, never a fabricated zero or stale sample.
+            cache.value = store.flow_snapshot(
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
+            ).ok();
+        }
+        cache.value.clone()
+    });
+    let counts = sample.clone();
+    meter.u64_observable_gauge("st.work.items")
+        .with_unit("{item}")
+        .with_description("Current nonterminal fleet work by bounded state")
+        .with_callback(move |observer| {
+            if let Some(value) = counts() {
+                for (state, count) in WORK_STATES.into_iter().zip(value.counts) {
+                    observer.observe(count, &[KeyValue::new("st.work.state", state)]);
+                }
+            }
+        }).build();
+    let ages = sample.clone();
+    meter.f64_observable_gauge("st.work.oldest_age")
+        .with_unit("s")
+        .with_description("Age since creation of the oldest current fleet work item")
+        .with_callback(move |observer| {
+            if let Some(value) = ages() {
+                for (state, age) in WORK_STATES.into_iter().zip(value.oldest_seconds) {
+                    observer.observe(age, &[KeyValue::new("st.work.state", state)]);
+                }
+            }
+        }).build();
+    let holders = sample.clone();
+    meter.u64_observable_gauge("st.agents.with_work")
+        .with_unit("{agent}")
+        .with_description("Distinct fleet agents holding unexpired work leases")
+        .with_callback(move |observer| {
+            if let Some(value) = holders() { observer.observe(value.with_work, &[]); }
+        }).build();
+    meter.u64_observable_gauge("st.agents.idle_with_work")
+        .with_unit("{agent}")
+        .with_description("Work holders with no replicated substantive activity for over 600 seconds")
+        .with_callback(move |observer| {
+            if let Some(value) = sample() { observer.observe(value.idle_with_work, &[]); }
+        }).build();
+}
+
 impl Telemetry {
     pub fn init(unit: Unit, node: Option<&str>) -> Self {
         let mut telemetry = Self {

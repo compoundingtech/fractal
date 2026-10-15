@@ -274,3 +274,64 @@ Each PR lands CI-green independently; PR2/PR3 depend on PR1's plumbing only.
 
 The current daemon, CLI, replication worker and hook-exporter reference is
 [st observability](../../st3/observability.md).
+
+### Fleet work flow metrics (O11Y-R18)
+
+`current open steps -> reader-only snapshot -> shared 60-second cache -> daemon OTLP`
+
+| Instrument | Type | Unit | Labels | Source |
+| --- | --- | --- | --- | --- |
+| `st.work.items` | gauge | `{item}` | `st.work.state` | Current-generation nonterminal step projection |
+| `st.work.oldest_age` | gauge | `s` | `st.work.state` | Seconds since creation of the oldest item in each bucket; empty buckets are zero |
+| `st.agents.with_work` | gauge | `{agent}` | none | Distinct agents with unexpired work leases |
+| `st.agents.idle_with_work` | gauge | `{agent}` | none | Holders whose latest substantive replicated activity or claim start is more than 600 seconds old |
+
+Only these four state labels are emitted:
+
+| Projection state | Metric bucket |
+| --- | --- |
+| `ready` | `ready` |
+| `claimed`, `working`, `verifying` | `claimed` |
+| `waiting-person`, or `ready`/`pending` assigned to a person | `waiting_person` |
+| `pending`, `blocked`, other nonterminal states | `blocked` |
+
+An expired held lease becomes ready before bucketing. Terminal steps, terminal owning
+runs/root runs/generations, and superseded generations are excluded. These are materialized
+projection measurements, refreshed by the existing reconciler; they do not independently
+re-run readiness or person-ask resolution. A blocked step with a valid agent lease counts
+as a holder, even though its work bucket is blocked.
+
+Substantive activity uses the existing last-activity evidence categories: `work.progress`,
+`work.submitted`, sent/received `message.sent`, and current claim-incarnation
+`harness.timeline` entries of type `message`, `content`, `tool_call`, or `tool_result`.
+Renewals, heartbeats and usage do not reset the idle clock. Latest `work.claimed` acceptance
+time (creation time if absent) starts that clock for a newly acquired lease. When an agent
+holds several steps/incarnations its newest activity wins. Owner-local timeline observations
+are deliberately excluded: replicas must measure the same replicated evidence. Consequently,
+unreplicated native activity is not visible to this signal; it measures replicated inactivity,
+not proof that the native process is stopped.
+
+All nodes report fleet-wide values from their replicated projection. Do not sum nodes.
+After convergence `max()` yields one fleet count; during lag it is an upper envelope, not an
+atomic fleet snapshot. Prometheus's standard OTLP name translation gives:
+
+```promql
+max by (st_work_state) (st_work_items)
+max by (st_work_state) (st_work_oldest_age_seconds)
+max(st_agents_idle_with_work) / max(st_agents_with_work)
+```
+
+Use the existing resource/`target_info` join for host attribution rather than adding a host
+label. No subject, agent, work identifier, free text, process identifier, revision or PR is
+a metric attribute. There are exactly ten gauge points per daemon sample.
+
+The SDK-owned blocking metric reader performs one reader-pool statement at most every
+60 seconds, shared by every gauge callback; it never takes the writer or enters a Tokio
+worker. It walks only `step_runs_open_index`, joins owners by primary key, and performs
+one indexed latest-claim seek per open step plus four indexed latest-activity seeks per
+distinct `(holder, incarnation)`. Thus the hard probe cap is `W + 4H`, where `W` is current
+open projected work and `H <= W` is distinct held agent/incarnation pairs, independent of
+completed history. Snapshot memory is O(W + H); export callback output is constant size.
+Failed refreshes omit samples rather than export stale values or fabricated zeros.
+`flow_metrics_cost_is_independent_of_completed_history` records elapsed time and SQLite VM
+work at two completed-history sizes and asserts bounded growth.

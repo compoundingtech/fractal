@@ -1,4 +1,5 @@
 mod trace_principal;
+pub(crate) mod flow_metrics;
 #[cfg(test)]
 mod accountable_tests;
 pub mod custom;

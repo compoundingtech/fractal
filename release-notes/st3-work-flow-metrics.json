@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Export bounded fleet work-state, oldest-work and idle-with-work gauges through daemon OTLP metrics",
+  "replay": { "status": "none", "detail": "No claim or replay changes." },
+  "schema": { "status": "none", "detail": "Uses existing sparse work and activity indexes without migrations." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "Adds metrics only; no client, peer or harness protocol changes." },
+  "downtime": { "status": "none", "detail": "No interruption beyond a normal daemon upgrade." },
+  "manual": { "status": "none", "detail": "Uses existing OTLP configuration. Fleet dashboards aggregate replicas with max, not sum." },
+  "recovery": { "status": "none", "detail": "No persistent changes; existing binary rollback remains unchanged." }
+}
