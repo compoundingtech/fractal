@@ -1,44 +1,44 @@
 /**
- * Native omp records as st3 serves them on the conversation timeline.
+ * Synthetic native omp records, shaped the way st3 serves them on the conversation timeline.
  *
- * `toolExecutionStartRecord` is the record captured from the main preview build c21a31af4cb1
- * (thread "Agent attention", 2026-10-15T21:41Z), where it rendered as transcript text. The entry
- * envelope is what st3's `external_sessions.rs` builds for an omp `custom` record with a typed view:
- * fallback text `[omp tool start <tool>]\n{"raw":…}`, a `status` block with view `tool_start`
- * and visibility `internal`, and the `source_record` block (fixtures/clients/transcripts/omp-parity.json).
+ * `toolExecutionStartEntry` follows `external_sessions.rs` for an omp `custom` record that has a
+ * typed view: `push_native_block` writes the fallback text `[omp tool start <tool>]\n{"raw":…}`, the
+ * `status` block takes view `tool_start` and visibility `internal` from `native_views.rs`
+ * (`omp_record_view`), and a `source_record` block carries the native record
+ * (fixtures/clients/transcripts/omp-parity.json). All ids, timestamps and text are invented.
  */
 export const toolExecutionStartRecord = {
   type: 'custom',
   customType: 'tool_execution_start',
   data: {
-    toolCallId: 'toolu_01BPSh4b7Vcq35u9GoEhGRhx',
+    toolCallId: 'toolu_example_eval_1',
     toolName: 'eval',
-    startedAt: '2026-10-15T21:41:34.878Z',
-    intent: 'running python',
+    startedAt: '2026-01-15T12:00:01.000Z',
+    intent: 'Example intent',
   },
-  id: 'aa72510f',
-  parentId: 'c7f073e4',
-  timestamp: '2026-10-15T21:41:34.878Z',
+  id: 'a1b2c3d4',
+  parentId: 'a0b1c2d3',
+  timestamp: '2026-01-15T12:00:01.000Z',
 } as const
 
 /** The assistant's call that `toolExecutionStartRecord` announces. */
 export const toolExecutionStartCall = {
-  id: 'timeline-entry/native-call-aa72510f',
+  id: 'timeline-entry/native-example-call',
   sequence: 40,
   revision: 1,
   final: true,
-  timestamp: '2026-10-15T21:41:34.870Z',
+  timestamp: '2026-01-15T12:00:00.000Z',
   type: 'tool_call',
   role: 'assistant',
-  body: { call_id: 'toolu_01BPSh4b7Vcq35u9GoEhGRhx', name: 'eval', arguments: { i: 'running python' } },
+  body: { call_id: 'toolu_example_eval_1', name: 'eval', arguments: { i: 'Example intent' } },
 } as const
 
 export const toolExecutionStartEntry = {
-  id: 'timeline-entry/native-aa72510f',
+  id: 'timeline-entry/native-example-start',
   sequence: 41,
   revision: 1,
   final: true,
-  timestamp: '2026-10-15T21:41:34.878Z',
+  timestamp: '2026-01-15T12:00:01.000Z',
   type: 'content',
   role: 'system',
   body: {
@@ -53,9 +53,9 @@ export const toolExecutionStartEntry = {
         payload: { raw: toolExecutionStartRecord },
         view: {
           type: 'tool_start',
-          call_id: 'toolu_01BPSh4b7Vcq35u9GoEhGRhx',
+          call_id: 'toolu_example_eval_1',
           tool: 'eval',
-          started_at: '2026-10-15T21:41:34.878Z',
+          started_at: '2026-01-15T12:00:01.000Z',
         },
       },
       {
@@ -74,17 +74,17 @@ export const unknownCustomRecord = {
   type: 'custom',
   customType: 'plan_mode_toggled',
   data: { enabled: true },
-  id: 'b81c09d2',
-  parentId: 'aa72510f',
-  timestamp: '2026-10-15T21:41:35.002Z',
+  id: 'b2c3d4e5',
+  parentId: 'a1b2c3d4',
+  timestamp: '2026-01-15T12:00:02.000Z',
 } as const
 
 export const unknownCustomEntry = {
-  id: 'timeline-entry/native-b81c09d2',
+  id: 'timeline-entry/native-example-unknown',
   sequence: 42,
   revision: 1,
   final: true,
-  timestamp: '2026-10-15T21:41:35.002Z',
+  timestamp: '2026-01-15T12:00:02.000Z',
   type: 'content',
   role: 'system',
   body: {

@@ -74,7 +74,7 @@ describe('kit transcript turn mapping', () => {
     expect(inspected[0]!.items.filter(item => item._tag === 'Notice')).toHaveLength(2)
     expect(JSON.stringify(inspected)).not.toContain('private-event')
   })
-  it('renders a captured omp tool start as its tool row only, with the record behind system events', () => {
+  it('renders an omp tool start as its tool row only, with the record behind system events', () => {
     const entries = [toolExecutionStartCall, toolExecutionStartEntry].map(entry => Schema.decodeUnknownSync(TimelineEntry)(entry))
     const items = timelineItems([{ replace: true, hasMore: false, entries }])
     const [turn] = transcriptTurnsForItems(items, { firstTurnComplete: true })

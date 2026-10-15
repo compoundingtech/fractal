@@ -684,10 +684,10 @@ describe('internal native records', () => {
     return timeline.project().items
   }
 
-  it('keeps a captured omp tool_execution_start out of prose and inspectable beside its call', () => {
+  it('keeps an omp tool_execution_start out of prose and inspectable beside its call', () => {
     const items = project(toolExecutionStartCall, toolExecutionStartEntry)
     expect(items.map(item => item._tag)).toEqual(['ToolCall', 'UnknownEvent'])
-    expect(items[0]).toMatchObject({ callId: 'toolu_01BPSh4b7Vcq35u9GoEhGRhx', name: 'eval' })
+    expect(items[0]).toMatchObject({ callId: toolExecutionStartRecord.data.toolCallId, name: 'eval' })
     expect(items[1]).toMatchObject({ id: toolExecutionStartEntry.id, eventType: 'tool_start' })
     expect(items[1]).toHaveProperty('data.blocks.0.payload.raw', toolExecutionStartRecord)
     expect(items.some(item => item._tag === 'Text')).toBe(false)
