@@ -15,7 +15,7 @@ read and preserve the proofs in [st2 invariants](st2/invariants.md).
 `st actor-contract --json` prints the actor syntax of the binary that runs it. It
 does not read config or call a daemon. The versioned `contract` has one entry for
 each callable clap command path, including hidden commands and optional parent
-commands. `aliases` maps other names to canonical commands. `contract_sha256` is
+commands. `aliases` lists other names under each canonical command. `contract_sha256` is
 the SHA-256 of compact JSON for `contract`, not of the formatted output.
 
 `actor` means whether argv accepts `--as`: `none`, `optional`, or `required`.
@@ -23,8 +23,13 @@ the SHA-256 of compact JSON for `contract`, not of the formatted output.
 means the real argument value parser accepts `person/NAME`; it does not grant
 person authority. An optional flag can still need an actor from config or the
 environment at run time. A command with no flag can still use a configured
-identity. `ignores_actor` identifies the read flags that are accepted but ignored.
-Do not use this syntax contract as an authorization decision.
+identity. `can_carry_person` records whether a command can carry a person actor,
+including configured-person fallbacks and the separate `note --actor` option.
+This does not mean an agent may use that person: identity guards and daemon
+authorization still apply. `as_role` distinguishes an actor from the document
+name in `documents put --as` and the ignored compatibility flags on reads.
+`ignores_actor` identifies those ignored flags. Do not use this contract as an
+authorization decision.
 
 Add `--effective` to include the selected instance, config path and state
 directory. This uses the normal CLI instance activation and config loader, so

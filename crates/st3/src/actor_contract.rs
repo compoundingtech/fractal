@@ -6,7 +6,10 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 fn actor_argument(command: &clap::Command) -> Option<&clap::Arg> {
-    command.get_arguments().find(|argument| argument.get_long() == Some("as"))
+    command.get_arguments().find(|argument| {
+        argument.get_long() == Some("as")
+            || argument.get_all_aliases().is_some_and(|aliases| aliases.contains(&"as"))
+    })
 }
 
 // Probe the real value parser, without other arguments, environment defaults, or conflicts.
@@ -18,6 +21,16 @@ fn accepts_person(argument: &clap::Arg) -> bool {
         .is_ok()
 }
 
+// These paths carry a configured person without an --as actor argument. Keep this
+// small semantic supplement next to the generated syntax, not in an operator wrapper.
+fn implicit_person(path: &str) -> bool {
+    path == "st setup"
+        || path == "st note"
+        || path.starts_with("st note ")
+        || (path.starts_with("st changes ")
+            && !matches!(path, "st changes list" | "st changes show"))
+}
+
 fn walk(command: &clap::Command, path: &str, commands: &mut BTreeMap<String, Value>) {
     let children = command.get_subcommands().filter(|child| child.get_name() != "help").collect::<Vec<_>>();
     if path != "st" && (children.is_empty() || !command.is_subcommand_required_set()) {
@@ -27,11 +40,21 @@ fn walk(command: &clap::Command, path: &str, commands: &mut BTreeMap<String, Val
             Some(argument) if argument.is_required_set() => "required",
             Some(_) => "optional",
         };
+        let ignored = argument.is_some_and(|argument| argument.get_id() == "ignored_actor");
+        let document_name = path == "st documents put";
+        let person = argument.is_some_and(accepts_person);
+        let alternate_actor = command.get_arguments().find(|argument| argument.get_long() == Some("actor"));
         commands.insert(path.to_owned(), json!({
             "actor": requirement,
-            "accepts_person": argument.is_some_and(accepts_person),
+            "accepts_person": person,
+            "can_carry_person": !path.starts_with("st agents handoff ")
+                && (implicit_person(path)
+                    || (!ignored && !document_name && person)
+                    || alternate_actor.is_some_and(accepts_person)),
+            "as_role": if document_name { "document_name" } else if ignored { "ignored" } else if argument.is_some() { "actor" } else { "none" },
+            "alternate_actor_option": alternate_actor.and_then(clap::Arg::get_long),
             "actor_environment": argument.and_then(|argument| argument.get_env()).map(|name| name.to_string_lossy()),
-            "ignores_actor": argument.is_some_and(|argument| argument.get_id() == "ignored_actor"),
+            "ignores_actor": ignored,
         }));
     }
     for child in children {
@@ -50,6 +73,9 @@ pub(super) fn generate(mut command: clap::Command) -> Value {
         "semantics": {
             "actor": "Whether this command accepts --as in argv; required can also be supplied by actor_environment. Optional does not mean that the operation needs no identity.",
             "accepts_person": "Whether the --as value parser accepts person/NAME. This is not a grant of person authority; runtime and daemon checks still apply.",
+            "can_carry_person": "Whether this command can carry a person actor, through an actor option or a configured-person fallback. It is a capability, not a grant: ST_AGENT identity guards and daemon authorization still apply.",
+            "as_role": "The --as spelling is also used for a document name and for ignored read compatibility flags; these do not carry an actor.",
+            "identity_resolution": "configured_actor resolves explicit actor, then ST_AGENT when it starts with agent/, then configured person. configured_human resolves explicit or configured person. Command-specific defaults and guards remain unchanged.",
             "scope": "Canonical clap command paths, including hidden commands and callable parents; aliases resolve to their canonical path.",
         },
         "commands": commands,
@@ -78,6 +104,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn actor_contract_records_aliases_and_runtime_person_exceptions() {
+        let value = generate(super::super::Cli::command());
+        let commands = &value["contract"]["commands"];
+        for path in ["st conversations send", "st conversations reply"] {
+            assert_eq!(commands[path]["actor"], "required", "{path}");
+            assert_eq!(commands[path]["can_carry_person"], true, "{path}");
+        }
+        assert_eq!(commands["st documents put"]["as_role"], "document_name");
+        assert_eq!(commands["st documents put"]["can_carry_person"], false);
+        assert_eq!(commands["st missions show"]["can_carry_person"], false);
+        assert_eq!(commands["st work show"]["can_carry_person"], false);
+        assert_eq!(commands["st note"]["alternate_actor_option"], "actor");
+        for path in ["st note", "st note set", "st note clear", "st setup", "st changes sync"] {
+            assert_eq!(commands[path]["can_carry_person"], true, "{path}");
+        }
+        for path in ["st changes list", "st changes show", "st agents handoff write", "st agents handoff ready", "st agents handoff show"] {
+            assert_eq!(commands[path]["can_carry_person"], false, "{path}");
+        }
+        assert!(st3::handoff::document_name("person/contract-probe").is_none());
+        assert!(super::super::configured_human(Some("person/contract-probe"), None, "contract").is_ok());
+        assert!(super::super::configured_actor(Some("person/contract-probe"), None, "contract").is_ok());
+    }
+
+    #[test]
     fn actor_contract_has_no_unclassified_commands() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/st3/actor-contract.json");
         let published: Value = serde_json::from_slice(&std::fs::read(path).expect("generate with st actor-contract --json")).unwrap();
@@ -97,6 +147,14 @@ mod tests {
     fn actor_contract_matches_actual_as_acceptance() {
         fn check(command: &clap::Command, path: &str, contract: &Value) {
             if let Some(entry) = contract["contract"]["commands"].get(path) {
+                let mut argv = path.split_whitespace().collect::<Vec<_>>();
+                argv.extend(["--as", "person/contract-probe"]);
+                let actual = super::super::Cli::command().try_get_matches_from(argv);
+                if entry["actor"] == "none" {
+                    assert_eq!(actual.unwrap_err().kind(), clap::error::ErrorKind::UnknownArgument, "{path}");
+                } else if let Err(error) = actual {
+                    assert_ne!(error.kind(), clap::error::ErrorKind::UnknownArgument, "{path}: {error}");
+                }
                 // Keep the real argument's required bit and value parser. Remove unrelated
                 // arguments so a missing positional or conflicting option cannot hide --as.
                 let mut parser = clap::Command::new("probe");
