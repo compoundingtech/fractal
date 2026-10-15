@@ -230,7 +230,8 @@ async fn non_trace_missing_page_requires_upgrade_without_reading_health_or_histo
         .await
         .err()
         .unwrap();
-    assert!(error.to_string().contains("upgrade the daemon"));
+    assert!(error.to_string().contains("2026-10-16 13:50 UTC"));
+    assert!(error.to_string().contains("--edge --no-run"));
     assert!(error.to_string().contains("st service restart"));
     assert_eq!(client.follow_test_result().0.len(), 1);
 }
