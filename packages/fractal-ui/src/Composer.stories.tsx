@@ -267,7 +267,7 @@ export const AllStates: Story = {
 }
 export const AllStatesLight: Story = { ...AllStates, args: { scheme: 'light' } }
 
-/** Readout and picker tooltips: keyboard and pointer reach the full value once, without native titles. */
+/** Readout and picker tooltips: keyboard focus reaches the full value once, without native titles. */
 export const TargetTooltips: Story = {
   beforeEach: clearDrafts,
   args: { state: 'running' },
@@ -289,16 +289,15 @@ export const TargetTooltips: Story = {
     await expect(readout.closest('[data-testid="composer-footer"]')!.querySelectorAll('[title]')).toHaveLength(0)
     await userEvent.keyboard('{Escape}')
     await waitFor(() => expect(page.queryByRole('tooltip')).toBeNull())
-    // RAC ignores restored hover in keyboard modality; start pointer checks
-    // with the same real textbox click used by the reviewed native gate.
+    // Keyboard focus opens each picker tooltip at once; a hover would wait out the open delay.
     await userEvent.click(canvasElement.querySelector<HTMLElement>('[data-composer-frame="tooltip.K3"] [role="textbox"]')!)
     for (const [name, value] of [['Select recipient', recipients[0].label], ['Select model', recipients[0].model]] as const) {
       const control = within(canvasElement.querySelector<HTMLElement>('[data-composer-frame="tooltip.K3"]')!).getByRole('button', { name: `${name}: ${value}` })
       const label = control.querySelector('[data-composer-picker-label]')?.textContent
-      await userEvent.hover(control)
+      await tabTo(control)
       await tooltipFor(control, label ?? '')
       await expect(control.querySelectorAll('[title]')).toHaveLength(0)
-      await userEvent.unhover(control)
+      await userEvent.keyboard('{Escape}')
       await waitFor(() => expect(page.queryByRole('tooltip')).toBeNull())
     }
   },
