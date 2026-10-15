@@ -51,7 +51,9 @@ LOCK = 'fake flake.lock contents\n'
 # Written out here, not read from the script, so removing a path from the script cannot hide it.
 EXPECTED_PROTECTED = (
     'scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
-    '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts',
+    '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts', '.github/workflows/workspace-ci.ts',
+    'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
+    '.st/evidence-authors.json', 'scripts/ci-evidence-signing',
 )
 
 
@@ -76,6 +78,8 @@ def enforcing(path):
     doc = json.loads(Path(path).read_text())
     for entry in doc['checks'].values():
         entry['enforce'] = True
+        entry['sample_one_in'] = 1  # sampling is tested on its own; here a matching note must always skip
+        entry.pop('inputs', None)  # these tests use exact-tree notes
     return json.dumps(doc)
 
 
@@ -115,11 +119,31 @@ class Decide(unittest.TestCase):
         now = gate.datetime.now(gate.timezone.utc).isoformat()
         context = {'check': 'linux-gate', 'fork': 'false', 'event': 'merge_group', 'protected_changed': []}
         result = {'satisfied': True, 'policy': True, 'enforce': True, 'tier': 'full', 'kind': 'observed', 'trust_level': 'fleet',
-                  'tree': 'b' * 40, 'check': 'linux-gate', 'record': record, 'signer': 'fleet/ci', 'observed_at': now}
+                  'tree': 'b' * 40, 'check': 'linux-gate', 'record': record, 'signer': 'fleet/ci', 'observed_at': now,
+                  'sample_one_in': 1}
         return context, result, 'b' * 40
 
     def test_all_conditions_together_skip(self):
         context, result, tree = self.good()
+        self.assertEqual(gate.decide(context, 'satisfied', result, tree)[0], 'skip')
+
+    def test_a_result_without_the_sampling_rule_runs(self):
+        context, result, tree = self.good()
+        del result['sample_one_in']
+        decision, reason = gate.decide(context, 'satisfied', result, tree)
+        self.assertEqual(decision, 'run')
+        self.assertTrue(reason.startswith('sampled:'), reason)
+
+    def test_a_note_valid_only_for_some_events_does_not_skip_another_event(self):
+        context, result, tree = self.good()
+        result['events'] = ['pull_request']
+        context['event'] = 'pull_request'
+        self.assertEqual(gate.decide(context, 'satisfied', result, tree)[0], 'skip')
+        context['event'] = 'merge_group'
+        decision, reason = gate.decide(context, 'satisfied', result, tree)
+        self.assertEqual(decision, 'run')
+        self.assertIn('covers pull requests only', reason)
+        result['events'] = None
         self.assertEqual(gate.decide(context, 'satisfied', result, tree)[0], 'skip')
 
     def test_removing_any_one_condition_runs(self):
@@ -278,6 +302,247 @@ class EndToEnd(unittest.TestCase):
         for check in CHECKS[1:]:
             with self.subTest('uncovered ' + check):
                 self.assertRuns(base, check=check)
+
+    # ---- a pull request run asks about the PULL REQUEST HEAD tree, not the merge ref --------------------------
+
+    AUTHORS = {'about': 'test', 'logins': ['alice', 'bob'], 'emails': ['fixture@example.invalid'], 'noreply_logins': [],
+               'committers_also': []}
+
+    def pull_request(self, main_moves=True, signing=True, head_files=None, main_files=None, head_email=None, policy=None,
+                     base_files=None, authors_text=None):
+        """Base B (with the gate, verifier, policy, keys, author list and signing script), a branch head H on it, and the
+        merge M of H into a main that moved (B2), as GitHub's merge ref is. The repository's HEAD is M, as the checkout."""
+        repo = self.f.repo
+        (repo / 'scripts').mkdir(exist_ok=True)
+        if signing:
+            shutil.copy(ROOT / 'scripts/ci-evidence-signing', repo / 'scripts/ci-evidence-signing')
+        (repo / '.st').mkdir(exist_ok=True)
+        (repo / '.st/evidence-authors.json').write_text(authors_text if authors_text is not None else json.dumps(self.AUTHORS))
+        for name, content in (base_files or {}).items():
+            (repo / name).write_text(content)
+        base = self.commit_base(policy=policy or skip_policy())
+        self.f.git('config', 'uploadpack.allowAnySHA1InWant', 'true')
+        self.f.git('config', 'uploadpack.allowFilter', 'true')
+        for name, content in (head_files or {}).items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(content)
+        if head_email:
+            (repo / 'file.txt').write_text('head')
+            self.f.git('add', '-A')
+            self.f.git('-c', f'user.email={head_email}', 'commit', '-q', '-m', 'head', '--author', f'Other <{head_email}>')
+            head, head_tree = self.f.git('rev-parse', 'HEAD'), self.f.git('rev-parse', 'HEAD^{tree}')
+        else:
+            head, head_tree = self.head()
+        self.f.git('checkout', '-q', '--detach', base)
+        for name, content in ((main_files or {'moved.txt': 'main moved'}) if main_moves else {}).items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(content)
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '--allow-empty', '-m', 'main moves')
+        tip = self.f.git('rev-parse', 'HEAD')
+        merged_tree = self.f.git('merge-tree', '--write-tree', '--no-messages', tip, head).splitlines()[0]
+        merge = self.f.git('commit-tree', merged_tree, '-p', tip, '-p', head, '-m', 'merge ref')
+        self.f.git('checkout', '-q', '--detach', merge)
+        return dict(base=base, base_tree=self.f.git('rev-parse', base + '^{tree}'), head=head, head_tree=head_tree, tip=tip, merge=merge,
+                    merge_tree=merged_tree)
+
+    def pr_env(self, scenario, **overrides):
+        env = dict(EVENT_NAME='pull_request', PR_HEAD_SHA=scenario['head'], PR_USER='alice', ACTOR='alice',
+                   TRIGGERING_ACTOR='alice', PR_NUMBER='7', HEAD_SHA=scenario['merge'], PR_DRAFT='false')
+        env.update(overrides)
+        return env
+
+    def test_a_pull_request_run_skips_on_the_note_for_its_head_tree_although_main_moved(self):
+        s = self.pull_request()
+        self.assertNotEqual(s['head_tree'], s['merge_tree'])
+        record = self.note(s['head'], s['head_tree'], seconds=1)
+        fields, outputs = self.run_gate(s['base'], **self.pr_env(s))
+        self.assertEqual((fields['decision'], fields['tree_of'], fields['head_tree'], outputs['record']), ('skip', 'head', 'used', record))
+        self.assertEqual((fields['tree'], fields['pr_head'], fields['merge_tree']), (s['head_tree'], s['head'], s['merge_tree']))
+        # The runner's checkout is depth 1; the gate deepened it itself (the head commit and the merge's history are present now).
+        shallow = Path(self.work_dir.name) / 'precondition'
+        subprocess.run(['git', 'clone', '-q', '--depth=1', 'file://' + str(self.f.repo), str(shallow)], check=True, capture_output=True)
+        self.assertEqual(subprocess.run(['git', '-C', str(shallow), 'rev-parse', '--is-shallow-repository'], capture_output=True, text=True).stdout.strip(), 'true')
+        self.assertNotEqual(subprocess.run(['git', '-C', str(shallow), 'cat-file', '-e', s['head'] + '^{commit}'], capture_output=True).returncode, 0)
+        work = Path(self.work_dir.name) / 'work'
+        self.assertEqual(subprocess.run(['git', '-C', str(work), 'cat-file', '-e', s['head'] + '^{commit}'], capture_output=True).returncode, 0)
+        self.assertGreater(int(subprocess.run(['git', '-C', str(work), 'rev-list', '--count', s['merge']], capture_output=True, text=True).stdout), 3)
+        self.assertEqual(fields['notes_fetch'], 'ok')
+        self.assertRegex(fields['policy_sha256'], r'^[0-9a-f]{16}$')
+        self.assertRegex(fields['keys_sha256'], r'^[0-9a-f]{16}$')
+
+    def test_a_note_for_the_merge_tree_alone_does_not_cover_a_pull_request_head(self):
+        s = self.pull_request()
+        self.note(s['merge'], s['merge_tree'], seconds=1)
+        fields = self.assertRuns(s['base'], 'merge-tree note only', **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['tree'], fields['outcome']), ('head', s['head_tree'], 'no_note'))
+
+    def test_a_merge_group_run_never_uses_a_head_tree_note(self):
+        s = self.pull_request()
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['base'], 'merge group with a valid head-tree note', **self.pr_env(s, EVENT_NAME='merge_group'))
+        self.assertEqual((fields['tree_of'], fields['tree'], fields['head_tree']), ('merge', s['merge_tree'], 'not-a-pull-request'))
+        # And with a note for the merge group's own tree, only that may skip there.
+        self.note(s['merge'], s['merge_tree'], seconds=2)
+        fields, _ = self.run_gate(s['base'], **self.pr_env(s, EVENT_NAME='merge_group'))
+        self.assertEqual((fields['decision'], fields['tree_of'], fields['tree']), ('skip', 'merge', s['merge_tree']))
+
+    def test_every_failed_condition_falls_back_to_the_merge_tree_and_never_skips_on_the_head_note(self):
+        s = self.pull_request()
+        self.note(s['head'], s['head_tree'], seconds=1)
+        other = self.f.git('rev-parse', s['tip'])
+        cases = {
+            'a fork': dict(HEAD_REPOSITORY='someone/fork'),
+            'a draft': dict(PR_DRAFT='true'),
+            'a draft flag that is not positively false': dict(PR_DRAFT=''),
+            'pull_request_target': dict(EVENT_NAME='pull_request_target'),
+            'a stale head (not the merge\'s second parent)': dict(PR_HEAD_SHA=other),
+            'a short head sha': dict(PR_HEAD_SHA=s['head'][:12]),
+            'a head object nobody has': dict(PR_HEAD_SHA='a' * 40),
+            'no head sha': dict(PR_HEAD_SHA=''),
+            'an author not on the list': dict(PR_USER='mallory'),
+            'an actor not on the list': dict(ACTOR='mallory'),
+            'a re-run by someone not on the list': dict(TRIGGERING_ACTOR='mallory'),
+            'no actor at all': dict(ACTOR='', TRIGGERING_ACTOR=''),
+            'no accepted base': dict(BASE_SHA=''),
+        }
+        for name, extra in cases.items():
+            with self.subTest(name):
+                env = self.pr_env(s, **extra)
+                fields = self.assertRuns(env.pop('BASE_SHA', s['base']), name, **env)
+                self.assertEqual(fields['tree_of'], 'merge', name)
+                self.assertTrue(fields['head_tree'].startswith('fallback:') or fields['head_tree'] in ('-', 'not-a-pull-request'), (name, fields['head_tree']))
+                self.assertEqual(fields['tree'], s['merge_tree'] if fields['tree'] != '-' else '-', name)
+
+    def test_the_input_keyed_lookup_uses_the_head_trees_key_not_the_merge_trees(self):
+        doc = json.loads(skip_policy())
+        for entry in doc['checks'].values():
+            entry['inputs'] = ['inputs.txt']
+        s = self.pull_request(policy=json.dumps(doc), base_files={'inputs.txt': 'declared'}, main_files={'inputs.txt': 'main changed it'})
+        key = fixtures.evidence_verify.project(str(self.f.repo), s['base_tree'], ('inputs.txt',))
+        self.assertEqual(key, fixtures.evidence_verify.project(str(self.f.repo), s['head_tree'], ('inputs.txt',)))
+        self.assertNotEqual(key, fixtures.evidence_verify.project(str(self.f.repo), s['merge_tree'], ('inputs.txt',)))  # main moved the input
+        record = self.note(s['base'], s['base_tree'], inputs={'source_inputs': key}, seconds=1)
+        self.f.git('update-ref', f'refs/notes/evidence-input/linux-gate/{key}/{record}', record)
+        fields, outputs = self.run_gate(s['base'], **self.pr_env(s))
+        self.assertEqual((fields['decision'], fields['tree_of'], fields['match'], fields['source_inputs'], outputs['record']),
+                         ('skip', 'head', 'inputs', key, record))
+        # The same run asking about the merge tree (a fork-like fallback) misses: its key moved with main.
+        fields = self.assertRuns(s['base'], 'merge tree key', **self.pr_env(s, PR_USER='mallory'))
+        self.assertEqual((fields['tree_of'], fields['outcome']), ('merge', 'no_note'))
+
+    def test_a_repository_with_no_notes_yet_fetches_nothing_without_failing_and_the_check_runs(self):
+        # Whether git calls a glob refspec that matches nothing a failure depends on its version and protocol (here: the one
+        # in the test environment); either way the line says which, the outcome is no_note and the check runs.
+        s = self.pull_request()
+        fields = self.assertRuns(s['base'], 'no notes at all', **self.pr_env(s))
+        self.assertIn(fields['notes_fetch'], ('ok', 'failed'))
+        self.assertEqual((fields['outcome'], fields['tree_of']), ('no_note', 'head'))
+
+    def test_a_notes_fetch_that_fails_is_logged_as_failed_not_as_no_note(self):
+        calls = []
+        real_run = gate.run
+
+        def fake(*command, **kwargs):
+            calls.append(command)
+            done = real_run('true')
+            if command[:2] == ('git', 'fetch') and any(str(part).startswith('refs/notes/evidence/*') for part in command):
+                return real_run('false')
+            return done
+        context = gate.context_from({'CHECK': 'linux-gate', 'REPOSITORY': REPOSITORY, 'BASE_SHA': 'a' * 40, 'EVENT_NAME': 'pull_request'})
+        gate.run = fake
+        try:
+            outcome, result, detail, sha = gate.observe(context, 'HEAD')
+        finally:
+            gate.run = real_run
+        self.assertEqual(context['notes_fetch'], 'failed')
+        self.assertTrue(any(str(part).startswith('refs/notes/evidence/*') for call in calls for part in call))
+        self.assertEqual(outcome, 'unavailable')  # and the check runs
+
+    def test_an_unreadable_policy_or_author_file_means_run(self):
+        s = self.pull_request(policy='{ not json')
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['base'], 'unparseable policy', **self.pr_env(s))
+        self.assertEqual(fields['outcome'], 'unavailable')
+        self.tmp_reset()
+        s = self.pull_request(authors_text='{ not json')
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['base'], 'unparseable author list', **self.pr_env(s))
+        self.assertEqual(fields['tree_of'], 'merge')
+        self.assertIn('authors', fields['head_tree'])
+
+    def test_a_note_for_an_earlier_head_does_not_cover_a_force_pushed_head(self):
+        s = self.pull_request()
+        older = self.f.git('rev-parse', s['base'])
+        self.note(older, s['base_tree'], seconds=1)  # signed for what the head was before the force-push
+        fields = self.assertRuns(s['base'], 'older head signed', **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['outcome']), ('head', 'no_note'))
+
+    def test_the_same_head_can_run_and_then_skip_on_a_re_run_once_a_note_exists(self):
+        s = self.pull_request()
+        self.assertRuns(s['base'], 'before the agent signed', **self.pr_env(s))
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields, _ = self.run_gate(s['base'], **self.pr_env(s, RUN_ATTEMPT='2'))
+        self.assertEqual((fields['decision'], fields['tree_of']), ('skip', 'head'))
+
+    def test_the_base_copy_of_the_gate_runs_when_the_branch_rewrites_it(self):
+        poison = ("import os\nopen(os.environ['GITHUB_OUTPUT'], 'a').write('outcome=satisfied\\nskip=true\\nrecord=" + 'a' * 40 +
+                  "\\n')\nprint('POISON evidence-decision v1 decision=skip')\n")
+        s = self.pull_request(head_files={'scripts/ci-evidence-gate': poison})
+        self.note(s['head'], s['head_tree'], seconds=1)
+        outputs, printed = self.run_step(s['base'], **self.pr_env(s))
+        self.assertEqual(outputs['skip'], 'false')
+        self.assertNotIn('POISON', printed)
+        self.assertIn('evidence-decision v1', printed)
+
+    def test_after_a_fallback_the_old_merge_tree_note_still_works_as_before(self):
+        s = self.pull_request()
+        self.note(s['merge'], s['merge_tree'], seconds=1)
+        fields, _ = self.run_gate(s['base'], **self.pr_env(s, PR_USER='mallory'))
+        self.assertEqual((fields['decision'], fields['tree_of'], fields['tree']), ('skip', 'merge', s['merge_tree']))
+
+    def test_a_commit_by_an_unlisted_email_in_the_branch_falls_back(self):
+        s = self.pull_request(head_email='stranger@example.invalid')
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['base'], 'unlisted commit author', **self.pr_env(s))
+        self.assertEqual(fields['tree_of'], 'merge')
+        self.assertIn('authors', fields['head_tree'])
+
+    def test_a_branch_that_edits_a_protected_file_falls_back_even_with_a_valid_head_note(self):
+        for path in ('scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
+                     '.github/workflows/fleet.yml'):
+            with self.subTest(path):
+                self.tmp_reset()
+                s = self.pull_request(head_files={path: 'edited by the branch\n'})
+                self.note(s['head'], s['head_tree'], seconds=1)
+                fields = self.assertRuns(s['base'], path, **self.pr_env(s))
+                self.assertEqual((fields['tree_of'], fields['head_tree']), ('merge', 'fallback:protected_files_differ_from_the_branch_point'))
+
+    def test_main_changing_a_protected_file_after_the_branch_point_falls_back(self):
+        s = self.pull_request(main_files={'.st/evidence-skip-policy.json': skip_policy(trust_levels=['fleet']) + '\n'})
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['base'], 'main moved a protected file', **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['head_tree']), ('merge', 'fallback:protected_files_differ_from_the_branch_point'))
+
+    def test_a_base_without_the_signing_script_falls_back(self):
+        s = self.pull_request(signing=False)
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['base'], 'no author rule at the base', **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['head_tree']), ('merge', 'fallback:the_accepted_base_has_no_ci-evidence-signing'))
+
+    def test_a_head_note_with_the_wrong_check_command_or_signer_does_not_skip_either(self):
+        s = self.pull_request()
+        self.note(s['head'], s['head_tree'], key=self.stranger, seconds=1)
+        self.assertEqual(self.assertRuns(s['base'], 'stranger', **self.pr_env(s))['outcome'], 'rejected')
+
+    def tmp_reset(self):
+        """A fresh repository for the next scenario inside one test."""
+        self.f.tmp.cleanup()
+        self.f = fixtures.Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'fleet/ci')
+        self.stranger = self.f.key('stranger')
+        self.machine = self.f.key('machine', 'machine/box')
 
     # ---- every way a note can fail to cover the check --------------------------------------
 
@@ -481,6 +746,64 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
         for check, entry in policy['checks'].items():
             self.assertIn(entry.get('enforce', False), (True, False), check)
+
+    def input_scenario(self, **per_check):
+        """A base whose policy declares `inputs.txt` as the only input of every check; head 1 has a note."""
+        doc = json.loads(skip_policy())
+        for entry in doc['checks'].values():
+            entry['inputs'] = ['inputs.txt']
+            entry.update(per_check)
+        self.f = fixtures.Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'fleet/ci')
+        (self.f.repo / 'inputs.txt').write_text('declared')
+        base = self.commit_base(policy=json.dumps(doc))
+        commit, tree = self.head()
+        key = fixtures.evidence_verify.project(str(self.f.repo), tree, ('inputs.txt',))
+        record = self.note(commit, tree, inputs={'source_inputs': key})
+        self.f.git('update-ref', f'refs/notes/evidence-input/linux-gate/{key}/{record}', record)
+        return base, key, record
+
+    def test_a_record_of_another_tree_with_the_same_input_key_skips_and_says_so(self):
+        base, key, record = self.input_scenario()
+        self.f.commit('an undeclared file changed')
+        fields, outputs = self.run_gate(base)
+        self.assertEqual((fields['decision'], fields['outcome'], fields['match'], fields['source_inputs'], outputs['record']),
+                         ('skip', 'satisfied', 'inputs', key, record))
+        (self.f.repo / 'inputs.txt').write_text('a declared file changed')
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'declared')
+        self.assertEqual(self.assertRuns(base)['outcome'], 'no_note')  # nothing matches the new key, so the check runs
+
+    def test_sampling_keeps_running_a_deterministic_share_of_matching_runs(self):
+        base, key, record = self.input_scenario(sample_one_in=1)
+        self.f.commit('two')
+        self.assertEqual(self.run_gate(base)[0]['decision'], 'skip')
+        decisions = set()
+        for n in range(12):  # twelve different heads: with one in 3 some are sampled and some are not
+            base, key, record = self.input_scenario(sample_one_in=3)
+            self.f.commit(f'head {n}')
+            first = self.run_gate(base)[0]
+            decisions.add(first['decision'])
+            self.assertEqual(first['decision'], self.run_gate(base)[0]['decision'])  # a retry behaves the same
+            if first['decision'] == 'run':
+                self.assertEqual(first['outcome'], 'satisfied')
+                self.assertTrue(first['reason'].startswith('satisfied_but_not_skipped:_sampled:'), first['reason'])
+        self.assertEqual(decisions, {'skip', 'run'})
+        self.assertTrue(gate.sampled({'check': 'c', 'head': 'h'}, {'sample_one_in': 'x'}, 't'))  # unreadable: sample
+        self.assertFalse(gate.sampled({'check': 'c', 'head': 'h'}, {'sample_one_in': 1}, 't'))
+        # A result without the rule at all (an older or faulty verifier) samples: it must never skip.
+        for result in ({}, {'sample_one_in': None}, {'sample_one_in': True}, {'sample_one_in': 0}, {'sample_one_in': 2.0}):
+            self.assertTrue(gate.sampled({'check': 'c', 'head': 'h'}, result, 't'), result)
+
+    def test_the_index_ref_alone_proves_nothing_in_the_gate(self):
+        base, key, record = self.input_scenario()
+        self.f.commit('two')
+        wrong = fixtures.evidence_verify.project(str(self.f.repo), self.f.git('rev-parse', 'HEAD^{tree}'), ('file.txt',))
+        self.f.git('update-ref', '-d', f'refs/notes/evidence-input/linux-gate/{key}/{record}')
+        self.f.git('update-ref', f'refs/notes/evidence-input/linux-gate/{key}/{"2" * len(record)}', record)  # wrong suffix
+        self.f.git('update-ref', f'refs/notes/evidence-input/linux-gate/{wrong}/{record}', record)  # another key
+        self.assertEqual(self.assertRuns(base)['outcome'], 'no_note')
 
     def test_adding_a_required_input_tightens_future_notes_without_breaking_anything(self):
         entry = {'trust_levels': ['fleet'], 'enforce': True, 'kinds': {'observed': {
@@ -773,6 +1096,10 @@ class EndToEnd(unittest.TestCase):
                 (self.f.repo / '.github/workflows').mkdir(parents=True, exist_ok=True)
                 (self.f.repo / '.github/workflows/fleet.yml').write_text('name: x\n')
                 (self.f.repo / '.github/workflows/fleet.yml.genie.ts').write_text('export default 1\n')
+                for name in ('.github/workflows/workspace-ci.ts', 'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
+                             '.st/evidence-authors.json', 'scripts/ci-evidence-signing'):
+                    (self.f.repo / name).parent.mkdir(parents=True, exist_ok=True)
+                    (self.f.repo / name).write_text('placeholder\n')
                 base = self.commit_base()
                 (self.f.repo / 'moved-away').mkdir(exist_ok=True)
                 self.f.git('mv', path, 'moved-away/' + path.replace('/', '_'))
@@ -797,7 +1124,8 @@ class EndToEnd(unittest.TestCase):
         fields, outputs = self.run_gate(base, PR_NUMBER='123', EVENT_NAME='pull_request')
         self.assertEqual(list(fields), [
             'check', 'decision', 'outcome', 'reason', 'record', 'signer', 'trust_level', 'kind', 'tier',
-            'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'tree', 'head', 'base', 'event', 'pr', 'repo', 'run',
+            'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'match', 'source_inputs', 'tree', 'tree_of', 'pr_head', 'merge_tree',
+            'head_tree', 'notes_fetch', 'policy_sha256', 'keys_sha256', 'head', 'base', 'event', 'pr', 'repo', 'run',
             'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
         self.assertEqual((fields['pr'], fields['repo'], fields['run'], fields['attempt'], fields['fork']),
                          ('123', REPOSITORY, '42', '1', 'false'))
@@ -934,9 +1262,18 @@ class WorkflowStructure(unittest.TestCase):
         stage_names = re.findall(r'needs\.([a-z0-9-]+)\.result', re.search(r'^          RESULTS: (.*)$', aggregate, re.M).group(1))
         self.assertEqual(len(stage_names), 7)
 
-        def accepts(event, results, skip):
+        flags_line = re.search(r'^          STAGE_SKIPS: (.*)$', aggregate, re.M).group(1)
+
+        def stage_flags(gates):
+            """The per-stage skip flags the workflow would compute for these gate decisions."""
+            tokens = re.findall(r'\$\{\{.*?\}\}|\S+', json.loads(flags_line))
+            return [str(self.truth(t, gates, 'merge_group')).lower() if t.startswith('${{') else t for t in tokens]
+
+        def accepts(event, results, skip, gates=None, flags=None):
+            flags = flags if flags is not None else stage_flags(gates or {})
             env = {**os.environ, 'EVENT': event, 'RESULTS': ' '.join(results[n] for n in stage_names),
-                   'MERGE_RESULTS': f"{results['linux-tests-shard-3']} {results['linux-tests-shard-4']}"}
+                   'MERGE_RESULTS': f"{results['linux-tests-shard-3']} {results['linux-tests-shard-4']}",
+                   'STAGE_SKIPS': ' '.join(flags)}
             env.pop('GATE_SKIP', None)
             if skip is not None:
                 env['GATE_SKIP'] = skip
@@ -966,22 +1303,103 @@ class WorkflowStructure(unittest.TestCase):
             # The real aggregate accepts the consistent outcome...
             results = {n: ('success' if runs.get(n, True) else 'skipped') for n in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']}
             skip = 'true' if lg else None
-            self.assertTrue(accepts(event, results, skip), label)
+            self.assertTrue(accepts(event, results, skip, gates), label)
             # ...and rejects a failure in ANY job that ran, even under a skip.
             for victim in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']:
                 if results[victim] == 'success':
                     broken = {**results, victim: 'failure'}
-                    self.assertFalse(accepts(event, broken, skip), label + (victim,))
+                    self.assertFalse(accepts(event, broken, skip, gates), label + (victim,))
             # ...and rejects a skipped upgrade-impact or canaries even under a skip: they are never covered by it.
             if lg:
                 for never in ('upgrade-impact', 'mail-redelivery-canaries'):
-                    self.assertFalse(accepts(event, {**results, never: 'skipped'}, 'true'), label + (never,))
+                    self.assertFalse(accepts(event, {**results, never: 'skipped'}, 'true', gates), label + (never,))
             # ...and rejects skipped stages if its own gate had not said skip.
             if any(v == 'skipped' for n, v in results.items() if n not in ('linux-tests-shard-3', 'linux-tests-shard-4')):
                 self.assertTrue(lg, label)  # a stage can only be skipped when the aggregate's gate decided skip
-                self.assertFalse(accepts(event, results, None), label)
+                self.assertFalse(accepts(event, results, None, gates), label)
             checked += 1
         self.assertEqual(checked, 16)
+
+    def test_a_stage_skipped_for_an_unrelated_reason_fails_even_when_the_aggregate_gate_said_skip(self):
+        aggregate = self.blocks()['linux-gate']
+        script = __import__('textwrap').dedent(aggregate.split('run: |\n', 1)[1].split('\n      - ', 1)[0])
+        stage_names = re.findall(r'needs\.([a-z0-9-]+)\.result', re.search(r'^          RESULTS: (.*)$', aggregate, re.M).group(1))
+        flags = re.search(r'^          STAGE_SKIPS: (.*)$', aggregate, re.M).group(1)
+        positions = len(re.findall(r'\$\{\{.*?\}\}|\S+', json.loads(flags)))
+        self.assertEqual(positions, 9)  # the seven base stages and the two merge-only shards, in the aggregate's order
+
+        def accepts(event, results, flags):
+            env = {**os.environ, 'EVENT': event, 'GATE_SKIP': 'true', 'RESULTS': ' '.join(results[n] for n in stage_names),
+                   'MERGE_RESULTS': f"{results['linux-tests-shard-3']} {results['linux-tests-shard-4']}", 'STAGE_SKIPS': ' '.join(flags)}
+            return subprocess.run(['bash', '-c', script], env=env, capture_output=True).returncode == 0
+
+        covered = {n: 'skipped' for n in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']}
+        covered.update({'upgrade-impact': 'success', 'mail-redelivery-canaries': 'success'})
+        all_true = ['true', 'false', 'true', 'true', 'true', 'true', 'false', 'true', 'true']
+        self.assertTrue(accepts('merge_group', covered, all_true), 'everything covered by its own rule')
+        for index, stage in enumerate(stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']):
+            if all_true[index] == 'true':
+                with self.subTest(stage):
+                    # The gate said skip but this stage's own rule does not: its skip has another cause.
+                    flags_off = list(all_true)
+                    flags_off[index] = 'false'
+                    self.assertFalse(accepts('merge_group', covered, flags_off), stage)
+        # Without the flags at all nothing is accepted as skipped.
+        self.assertFalse(accepts('merge_group', covered, []))
+
+    def test_no_condition_in_the_workflow_has_markers_inside_it(self):
+        """A condition is either bare or one whole `${{ ... }}`. Combining two conditions as text would leave markers
+        inside the other (GitHub then reads the string as a literal that is always true), so none may exist; the
+        genie helper that combines them refuses such a condition when it generates (proved by the test after this one)."""
+        workflow = (ROOT / '.github/workflows/fleet.yml').read_text()
+        source = (ROOT / '.github/workflows/fleet.yml.genie.ts').read_text()
+        conditions = re.findall(r'^\s*(?:-\s+)?if:\s*(.+)$', workflow, re.M)
+        self.assertGreater(len(conditions), 50)
+        for condition in conditions:
+            value = condition.strip().strip('"\'')
+            inner = value[3:-2] if value.startswith('${{') and value.endswith('}}') else value
+            self.assertNotIn('${{', inner, condition)
+            self.assertNotIn('}}', inner, condition)
+
+    def test_the_genie_helper_that_combines_conditions_refuses_markers_inside_one_when_it_runs(self):
+        """Executes the helper through genie itself on a copy of the workflow source: a step condition made of two
+        separate `${{ }}` markers makes generation fail, and a whole one is accepted (so the failure is the rule's)."""
+        genie = shutil.which('genie')
+        self.assertIsNotNone(genie, 'genie must be on PATH: the genie-freshness check runs this test with it')
+        source = (ROOT / '.github/workflows/fleet.yml.genie.ts').read_text()
+        anchor = "const gateSkip = "
+        self.assertEqual(source.count(anchor), 1)
+
+        def generate(probe):
+            with tempfile.TemporaryDirectory() as scratch:
+                work = Path(scratch)
+                (work / '.github/workflows').mkdir(parents=True)
+                for name in ('queue-watch.ts', 'ready-pr.ts', 'build-snapshot.ts', 'cache-audit.ts', 'workspace-ci.ts'):
+                    shutil.copy(ROOT / '.github/workflows' / name, work / '.github/workflows' / name)
+                (work / '.github/workflows/fleet.yml.genie.ts').write_text(source.replace(anchor, f'{probe}\n{anchor}', 1))
+                for name in ('repos', 'scripts'):
+                    (work / name).symlink_to(ROOT / name)
+                done = subprocess.run([genie, '--dry-run', '--json'], cwd=work, capture_output=True, text=True, timeout=300,
+                                      env=dict(os.environ, HOME=scratch))
+                return done.returncode, done.stdout + done.stderr
+
+        code, output = generate("bareCondition('${{ always() }}')")
+        self.assertEqual(code, 0, output)
+        code, output = generate("bareCondition('${{ always() }} && ${{ true }}')")
+        self.assertNotEqual(code, 0, output)
+        self.assertIn('markers inside it', output)
+
+    def test_every_gate_job_passes_the_pull_request_payload_the_head_tree_choice_checks(self):
+        blocks = self.blocks()
+        for check in CHECKS:
+            with self.subTest(check):
+                block = blocks[f'evidence-gate-{check}']
+                for name, expression in (('PR_HEAD_SHA', 'github.event.pull_request.head.sha'), ('PR_USER', 'github.event.pull_request.user.login'),
+                                         ('PR_DRAFT', 'github.event.pull_request.draft'), ('ACTOR', 'github.actor'),
+                                         ('TRIGGERING_ACTOR', 'github.triggering_actor')):
+                    self.assertRegex(block, rf"{name}: .*\${{{{ {re.escape(expression)} }}}}")
+                # The gate itself is still taken from the accepted base, never from the checkout.
+                self.assertIn('BASE_SHA:scripts/ci-evidence-gate', block)
 
     def test_the_required_checks_that_are_jobs_keep_running_and_skip_only_their_steps(self):
         blocks = self.blocks()

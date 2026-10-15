@@ -3,7 +3,6 @@
 This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
-Digest: `e121f09d6ca89e52195402b47be30ddf41624fa6c7b0775eeff7e86a309718ee`
 Storage version: `19`
 Storage digest: `1dcbc0927e291e822470da735e497deec0a5ad4f1cd6cb7e00679a0e44fab099`
 
