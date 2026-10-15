@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "On producer failure inspect the test-build-memory artifact and job log. Cumulative counters and peaks alone do not establish OOM; compiler/server cgroup membership remains unknown."
+    "detail": "On producer build-step failure inspect the test-build-memory artifact and job log. A positive job-cgroup oom_kill delta is a strong lead; zero or UNKNOWN does not rule OOM out when the compiler/cache server or Nix build is in another cgroup. Kernel termination evidence is not collected; cumulative counters and peaks alone do not establish OOM."
   },
   "recovery": {
     "status": "none",

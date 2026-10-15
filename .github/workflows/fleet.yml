@@ -1188,10 +1188,10 @@ jobs:
         env:
           BUILD_STEP_OUTCOME: ${{ steps.archive.outcome }}
         run: 'mkdir -p "$RUNNER_TEMP/ci-build-memory"; (free -m || echo "::warning::free unavailable") | tee "$RUNNER_TEMP/ci-build-memory/free.txt"; python3 scripts/ci-build-memory failure'
-        if: ${{ failure() }}
+        if: ${{ failure() && steps.archive.outcome == 'failure' }}
         continue-on-error: true
       - name: Retain failure memory evidence
-        if: ${{ failure() }}
+        if: ${{ failure() && steps.archive.outcome == 'failure' }}
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
