@@ -147,11 +147,11 @@ export const missionViews = ({
     proposed: proposed?.[mission.id],
   }))
 
-/** Refs an answerable native ask is about: what raised it, who asked and the mission it serves. */
+/** Open-card linkage for unread ownership, including informational/non-answerable cards. */
 export const attentionRefs = (attention: readonly St3.Attention[]): ReadonlySet<string> =>
   new Set(
     attention
-      .filter(isWaitingForAnswer)
+      .filter((item) => item.state === 'open')
       .flatMap((item) => {
         const refs: string[] = [item.source_id]
         if (item.requester_id !== undefined) refs.push(item.requester_id)
@@ -200,7 +200,7 @@ export const subjectList = ({
   readonly missions?: readonly St3.Mission[]
   readonly attention?: readonly St3.Attention[]
 }): SubjectSummary[] => {
-  const needsYou = attention === undefined ? undefined : attentionRefs(attention)
+  const needsYou = attention === undefined ? undefined : attentionRefs(attention.filter(isWaitingForAnswer))
   return [
     ...(fleet?.agents.flatMap((agent) =>
       agentSubjectPair({ agent, needsYou: needsYou?.has(agent.ref) === true }),
@@ -346,7 +346,7 @@ export const createProjections = (): {
       return previousViews
     },
     subjectList: ({ fleet, missions, attention }) => {
-      const needsYou = attention === undefined ? undefined : attentionRefs(attention)
+      const needsYou = attention === undefined ? undefined : attentionRefs(attention.filter(isWaitingForAnswer))
       const next: SubjectSummary[] = []
       for (const agent of fleet?.agents ?? []) {
         let subjects = agentSubjects.get(agent)

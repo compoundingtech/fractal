@@ -8,13 +8,13 @@ import { attentionRefs, createProjections, subjectList } from './projections.ts'
 
 it.each(attentionAnswerFixtures)('$name: waiting=$waiting', ({ item, waiting }) => {
   expect(isWaitingForAnswer(item)).toBe(waiting)
-  expect(attentionRefs([item]).has(item.source_id)).toBe(waiting)
+  expect(attentionRefs([item].filter(isWaitingForAnswer)).has(item.source_id)).toBe(waiting)
   expect(subjectList({ attention: [item] })[0]?.attention === true).toBe(waiting)
   expect(createProjections().subjectList({ attention: [item] })[0]?.attention === true).toBe(waiting)
 })
 
 it.each(attentionAnswerFixtures)('Needs me filter uses answerability for $name, not harness status', ({ item, waiting }) => {
-  const needsMe = attentionRefs([item]).has(item.source_id)
+  const needsMe = attentionRefs([item].filter(isWaitingForAnswer)).has(item.source_id)
   const row = {
     workspace: { id: item.source_id, title: 'Synthetic', host: 'synthetic', layout: dailyDriver, unread: [], notifications: [] },
     agent: undefined, status: 'waiting' as const, needsMe,
