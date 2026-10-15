@@ -1739,7 +1739,7 @@ pub fn run(context: Context) -> Result<()> {
 
         // The grace for a restart of st ends on its own clock: draw the link as offline then.
         match extras.offline_since {
-            Some(since) if !offline_drawn && since.elapsed() >= adapt::OFFLINE_GRACE => {
+            Some(since) if !offline_drawn && since.elapsed() >= adapt::offline_grace() => {
                 offline_drawn = true;
                 changed = true;
             }

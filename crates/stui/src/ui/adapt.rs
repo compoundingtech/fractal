@@ -134,10 +134,23 @@ fn missions(model: &Model) -> Vec<Mission> {
 /// How long st may stay silent before the screen calls the link offline, not reconnecting.
 pub const OFFLINE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// `OFFLINE_GRACE`, unless `STUI_OFFLINE_GRACE_MS` says otherwise. Only the end-to-end tests set it,
+/// so they need not wait a minute to see the offline word.
+pub fn offline_grace() -> std::time::Duration {
+    static GRACE: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *GRACE.get_or_init(|| {
+        std::env::var("STUI_OFFLINE_GRACE_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(OFFLINE_GRACE)
+    })
+}
+
 pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     let restarting = extras
         .offline_since
-        .is_some_and(|since| since.elapsed() < OFFLINE_GRACE);
+        .is_some_and(|since| since.elapsed() < offline_grace());
     let link = if extras.offline.is_some() && !restarting {
         Link::Offline(match &model.last_connected {
             Some(at) => format!("Last connected at {at} · reconnecting · r retry now"),
