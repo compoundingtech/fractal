@@ -15,7 +15,7 @@ import unittest
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
 # Hermetic: nothing of the caller's ST_*/EVIDENCE_* settings, git config or HOME reaches the hook.
-CLEAN = {k: v for k, v in os.environ.items() if not k.startswith(('ST_', 'EVIDENCE_', 'GIT_', 'STUB_'))}
+CLEAN = {k: v for k, v in os.environ.items() if not k.startswith(('ST_', 'EVIDENCE_', 'GIT_', 'STUB_')) and k not in ('GITHUB_ACTIONS', 'CI')}
 CLEAN.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
              GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
 STUB = '''#!/usr/bin/env python3
@@ -29,7 +29,7 @@ if '--status' in sys.argv:
 signal.signal(signal.SIGTERM, lambda *a: (open(os.environ['STUB_LOG'], 'a').write('{"terminated": true}\\n'), sys.exit(143)))
 if os.environ.get('STUB_GRANDCHILD'):
     import subprocess
-    grand = subprocess.Popen(['sleep', '120'])
+    grand = subprocess.Popen(['sh', '-c', 'trap "" TERM; sleep 120'])  # ignores TERM: only KILL of the group ends it
     with open(os.environ['STUB_LOG'], 'a') as log:
         log.write(json.dumps({'grandchild': grand.pid}) + '\\n')
 time.sleep(float(os.environ.get('STUB_SLEEP', '0')))

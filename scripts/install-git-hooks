@@ -4,8 +4,9 @@
 #
 # The hook is a small stub. At push time it does NOT run anything from the tree being pushed: it takes
 # scripts/evidence-prepush and scripts/st-test from the base branch of the remote (<remote>/main) into a temporary
-# directory and runs those copies, so pushing someone else's branch never runs that branch's code with the host's
-# signing key within reach. When the base has no such files (before this change is on main) the stub does nothing.
+# directory and runs those copies, so the hook and the runner are never the pushed branch's. (The checks the runner then
+# runs, nix develop, pnpm install and the tests, are the tree's code, on this machine as this user with the key within
+# reach: cooperative trust, known defect 22.) When the base has no such files the stub does nothing.
 # It does nothing in CI (GITHUB_ACTIONS or CI set).
 set -euo pipefail
 cd "$(dirname "$0")/.."

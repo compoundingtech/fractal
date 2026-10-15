@@ -597,9 +597,10 @@ line per check: result, seconds, and whether the verifier, from the base, now co
 
 A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
 one line the first time and does nothing when `GITHUB_ACTIONS` or `CI` is set) installs a stub in the repository's hooks directory, never replacing
-a hook it did not write and leaving a configured `core.hooksPath` alone. **The stub does not run anything from the tree being pushed:** it takes
+a hook it did not write and leaving a configured `core.hooksPath` alone. **The hook and the runner are not the pushed branch's:** the stub takes
 `scripts/evidence-prepush` and `scripts/st-test` from `<remote>/main` into a temporary directory and runs those copies (when the base has none it
-does nothing), so pushing someone else's branch never runs that branch's hook code with this host's signing key in reach. When you push the branch
+does nothing). The checks they run are the tree's code (`nix develop`, `pnpm install`, the tests), on this machine as you with the host's signing key
+within reach: that is cooperative trust (known defect 22), not something the base-pinned hook protects against. When you push the branch
 you have checked out, the hook asks `st-test --status`; if every check is covered the push goes, silently. Otherwise it runs `st-test --push REMOTE`
 (an interactive push waits for it up to `ST_EVIDENCE_TIME_LIMIT`, default 1200 seconds, then stops it with TERM and KILL of its whole process
 group) and the push goes. A push from an agent (`ST_AGENT` set, or no terminal on stderr) runs inside a tool call with a short timeout, so there the hook

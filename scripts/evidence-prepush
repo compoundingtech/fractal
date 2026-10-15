@@ -6,9 +6,10 @@ every check that has a local command is covered the push goes, silently. If not,
 once on this machine, the host's signer records them, the notes are pushed, and then the push goes.
 
 The installed hook runs THIS file and scripts/st-test from the base branch of the remote (<remote>/main), copied to a
-temporary directory, never from the tree being pushed: pushing someone else's branch does not run that branch's code
-with your signing key in reach. (st-test itself then runs the checks, `nix develop` and `pnpm install`, in a clean
-worktree of the merge tree, and that code is the tree's: that is what is being tested, on a machine we trust.)
+temporary directory, never from the tree being pushed: the hook and the runner are not the pushed branch's. The checks
+are: st-test runs `nix develop`, `pnpm install` and the tests of the merge tree in a clean worktree, so the pushed
+tree's code does run on this machine, as you, with your signing key within reach. That is what testing it means on a
+machine we trust (cooperative trust, known defect 22); it is not something the base-pinned hook protects against.
 
   * It never blocks a push. Every failure path (an exception, a missing python3, a hung fetch, a signer that refuses,
     a failing check, a timeout) is printed and the push goes. Ctrl-C stops the run and everything under it (its process
