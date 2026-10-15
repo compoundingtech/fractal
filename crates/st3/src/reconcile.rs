@@ -13737,7 +13737,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             scheduled_at
         };
-        let standby_detail = if spec.host == self.host { None } else {
+        // Before a future tick, arm only its ordinary occurrence timer. The expensive
+        // all-member/legacy fence and heartbeat admission belong to a due standby path.
+        let standby_detail = if spec.host == self.host || scheduled_at > now_ms() as i64 { None } else {
             // A known reached/run fact defeats a fresh standby start, regardless of origin.
             if self.store.mission_run(&Store::scheduled_mission_run_subject(&schedule.subject, occurrence))?.is_some() {
                 return Ok(());
@@ -18095,6 +18097,7 @@ pub(crate) mod tests {
     mod gate_on_demand;
     mod github_watch_selection;
     mod incremental_deadlines;
+    mod schedule_standby_parent;
     pub(crate) mod mission_eval_reuse;
     mod ownership_guard_tests;
     mod pull_request_run_tests;

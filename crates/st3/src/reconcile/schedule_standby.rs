@@ -138,22 +138,22 @@ pub(crate) fn add_detail(fields: &mut BTreeMap<String, Value>, detail: Option<&V
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::fleet::MemberKey;
     use crate::model::ClaimInput;
     use std::sync::Arc;
 
-    const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+    pub(crate) const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     fn now() -> u128 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() }
     fn append(store: &Store, subject: &str, kind: &str, fields: Value) {
         store.append_claim(&ClaimInput { subject: subject.into(), kind: kind.into(), actor: None,
             fields: serde_json::from_value(fields).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None }).unwrap();
     }
-    fn advertise(store: &Store, feature: u8) {
+    pub(crate) fn advertise(store: &Store, feature: u8) {
         append(store, &format!("daemon/{}", store.origin), "daemon.started", json!({"status":"running","features":{"schedule_standby":feature}}));
     }
-    fn sync(from: &Store, to: &Store) {
+    pub(crate) fn sync(from: &Store, to: &Store) {
         let exchange = from.export_replication_exchange_answering(FLEET, &to.replication_inventory().unwrap(), &to.replication_signature_requests().unwrap()).unwrap();
         to.receive_replication_exchange(&from.origin, FLEET, &exchange).unwrap();
         let admission = to.validate_replication_backlog().unwrap();
@@ -161,7 +161,7 @@ mod tests {
         to.apply_replication_repairs().unwrap();
         to.project_replication_backlog().unwrap();
     }
-    fn pair() -> (Store, Store, ScheduleSpec) {
+    pub(crate) fn pair() -> (Store, Store, ScheduleSpec) {
         let primary = Store::open_memory("ivory").unwrap();
         let anchor = Arc::new(MemberKey::generate().unwrap().0);
         primary.bind_fleet(FLEET).unwrap();

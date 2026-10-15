@@ -60,10 +60,14 @@ async fn publish_pair(primary: &Node, standby: &Node, name: &str, source: &str) 
     let file = primary.root.join(format!("{name}.kdl"));
     fs::write(&file, source).unwrap();
     primary.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
-    wait_until("standby received the schedule and observed primary", 60, || async {
+    wait_until("standby applied schedule and complete primary exchange before due", 60, || async {
         let status: Value = standby.client().get(&format!("/v1/status?subject=schedule%2F{name}")).await.unwrap();
-        status["subjects"].as_array().is_some_and(|subjects| subjects.iter().any(|subject|
-            subject["actual"]["schedule_standby"]["heartbeat_basis"] == "current-incarnation"))
+        let replicated = status["subjects"].as_array().is_some_and(|subjects| subjects.iter().any(|subject|
+            subject["desired"].is_object()));
+        let sync: Value = standby.client().get("/v1/replication/status").await.unwrap();
+        replicated && sync["peers"].as_array().is_some_and(|peers| peers.iter().any(|peer|
+            peer["peer"] == "ivory" && peer["sync"]["peer_only_envelopes"] == 0
+                && peer["sync"]["measured_at_unix_ms"].as_u64().is_some()))
     }).await;
 }
 
@@ -144,7 +148,7 @@ async fn restarted_standby_exposes_skip_limit_and_does_not_use_persisted_success
     let root = tempfile::tempdir().unwrap();
     let (mut primary, mut standby) = available_pair(root.path()).await;
     let at = (chrono::Utc::now() + chrono::Duration::seconds(6)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let declaration = source(root.path(), "cold", &format!("at {at:?}"), "1s", &root.path().join("work"));
+    let declaration = source(root.path(), "cold", &format!("every \"8s\"; anchor {at:?}; catch-up \"latest\""), "1s", &root.path().join("work"));
     publish_pair(&primary, &standby, "cold", &declaration).await;
     primary.stop();
     standby.restart().await;
@@ -158,6 +162,20 @@ async fn restarted_standby_exposes_skip_limit_and_does_not_use_persisted_success
     assert!(text.contains(st3::schedule_standby::COLD_STANDBY_LIMIT));
     let history = standby.st_ok(&["subject", "history", "schedule/cold"]);
     assert!(history.contains(st3::schedule_standby::COLD_STANDBY_LIMIT));
+    // The returning daemon's authenticated replication/startup facts and the existing
+    // stage/schedule-sync retry are related wakes. Reads below do not force reconciliation.
+    primary.start().await;
+    wait_until("primary exchange/schedule-sync wake seeds the cold standby heartbeat", 60, || async {
+        let status: Value = standby.client().get("/v1/status?subject=schedule%2Fcold").await.unwrap();
+        status["subjects"].as_array().is_some_and(|subjects| subjects.iter().any(|subject|
+            subject["actual"]["schedule_standby"]["heartbeat_basis"] == "current-incarnation"))
+    }).await;
+    primary.stop();
+    // No unrelated user write or explicit reconcile call: the source-owned occurrence and
+    // standby-eligibility deadlines alone must eventually perform a later due job.
+    wait_until("heard-primary standby deadline actually performs a later occurrence", 60, || async {
+        starts(root.path()).iter().any(|(home, _)| home.contains("/jade/home"))
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

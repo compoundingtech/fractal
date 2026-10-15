@@ -2,6 +2,13 @@
 //! No storage, replication writer, retention or primary-only admission change.
 use super::*;
 
+const WRITER_TABLES: [(&str, &str); 3] = [
+    ("replica_envelopes", "writer"), ("batches", "origin"), ("checkpoint_envelopes", "writer"),
+];
+fn writer_seek(table: &str, column: &str) -> String {
+    format!("SELECT {column} FROM {table} WHERE {column}>?1 ORDER BY {column} LIMIT 1")
+}
+
 fn refused(reason: impl Into<String>) -> St3Error {
     St3Error::new("schedule-standby-unavailable", reason)
 }
@@ -65,10 +72,9 @@ fn adoption_epoch(connection: &Connection, origin: &str, spec: &crate::model::Sc
         epochs.push((member.name.clone(), member.start, claim));
     }
     let fenced = membership.legacy_removed_names().collect::<BTreeSet<_>>();
-    for (table, column) in [("replica_envelopes", "writer"), ("batches", "origin"), ("checkpoint_envelopes", "writer")] {
+    for (table, column) in WRITER_TABLES {
         let mut previous = String::new();
-        let mut statement = connection.prepare(&format!(
-            "SELECT {column} FROM {table} WHERE {column}>?1 ORDER BY {column} LIMIT 1")).map_err(internal)?;
+        let mut statement = connection.prepare(&writer_seek(table, column)).map_err(internal)?;
         while let Some(writer) = statement.query_row([&previous], |row| row.get::<_, String>(0)).optional().map_err(internal)? {
             if !membership.is_keyed_writer(&writer) && !fenced.contains(&writer) {
                 return Err(refused("unfenced legacy writer prevents standby adoption"));
@@ -93,5 +99,46 @@ impl Store {
         let unknown: bool = self.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM replica_records WHERE state='unknown')", [], |row| row.get(0))?;
         Ok(!unknown)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::StatementStatus;
+
+    // Synthetic retained-row reader cost controls, NOT authenticated admission evidence.
+    #[test]
+    fn standby_legacy_writer_seeks_use_prefix_indexes_not_claim_volume() {
+        let store = Store::open_memory("jade").unwrap();
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        let mut before = Vec::new();
+        for upper in [8, 4_000] {
+            for index in if upper == 8 { 0..8 } else { 8..4_000 } {
+                let id = format!("fixture-{index}");
+                tx.execute("INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES(?1,'legacy',?2,?1,'1')", params![id,index+1]).unwrap();
+                tx.execute("INSERT INTO replica_envelopes(writer,sequence,envelope_hash,accepted_at_unix_ms,payload,batch_id,relay,receipt_state,received_at_unix_ms) VALUES('legacy',?1,?2,'1',X'00',?2,'legacy','pending','1')", params![index+1,id]).unwrap();
+                tx.execute("INSERT INTO checkpoint_envelopes(writer,sequence,envelope_hash,accepted_at_unix_ms,checkpoint) VALUES('legacy',?1,?2,1,'checkpoint/fixture')", params![index+1,id]).unwrap();
+            }
+            let mut measured = Vec::new();
+            for (table, column) in WRITER_TABLES {
+                let sql = writer_seek(table, column);
+                let plan = tx.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+                    .query_map([""], |row| row.get::<_,String>(3)).unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>().unwrap().join("; ");
+                assert!(plan.contains("SEARCH") && !plan.contains("SCAN ") && !plan.contains("TEMP B-TREE"), "{table}: {plan}");
+                let mut statement = tx.prepare(&sql).unwrap();
+                statement.reset_status(StatementStatus::VmStep);
+                assert_eq!(statement.query_row([""], |row| row.get::<_,String>(0)).unwrap(), "legacy");
+                let _ = statement.query_row(["legacy"], |row| row.get::<_,String>(0)).optional().unwrap();
+                measured.push(statement.get_status(StatementStatus::VmStep));
+            }
+            if upper == 8 { before = measured; } else {
+                for (small, large) in before.iter().zip(measured) {
+                    assert!(large <= small + 16, "writer seek grew with payload volume: {small} -> {large}");
+                }
+            }
+        }
     }
 }

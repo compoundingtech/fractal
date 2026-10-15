@@ -43,7 +43,9 @@ exchange with the primary, in either direction. Another member's observation of
 the primary is not a heartbeat. Age uses monotonic elapsed time, conservatively
 starting at zero when observed. An age equal to `after` is still fresh; takeover
 requires an older observation. Wall-clock jumps and peer clock skew cannot supply
-elapsed monotonic time. A newer exchange refreshes the observation.
+elapsed monotonic time. A newer exchange refreshes the observation. On a standby host that suspends,
+monotonic time may stop while wall time advances. Resume then drops the sample
+and restarts the wait conservatively; suspended time never proves silence.
 
 The standby needs a complete applied primary exchange in its current daemon
 incarnation and the schedule's durable occurrence history. Unknown, missing,
