@@ -30,14 +30,19 @@ function createRuntimeAdoption() {
 const noSubscription = () => () => undefined
 const noMessages: readonly ConversationItem[] = []
 /** Internal viewport demand, not a second pending-send or host-history API. */
-export const RuntimeVisibleIds = React.createContext<((ids: readonly string[]) => void) | undefined>(undefined)
+export const RuntimeVisibleIds = React.createContext<((viewport: symbol, ids: readonly string[] | undefined) => void) | undefined>(undefined)
 export function EmbraceRuntimeProvider({ options, virtualizeMessages = false, children }: { readonly options: ConversationRuntimeOptions; readonly virtualizeMessages?: boolean; readonly children: React.ReactNode }) {
   const measurable = React.useSyncExternalStore(noSubscription, () => true, () => false)
   const [visibleIds, setVisibleIds] = React.useState<ReadonlySet<string>>()
+  const windows = React.useRef(new Map<symbol, readonly string[]>())
   const source = options.messages ?? noMessages
   const messages = React.useMemo(() => !virtualizeMessages || !measurable ? source : visibleIds === undefined ? noMessages : source.filter(item => visibleIds.has(item.id)), [source, measurable, visibleIds, virtualizeMessages])
-  const visible = React.useCallback((ids: readonly string[]) => {
-    setVisibleIds(previous => previous !== undefined && previous.size === ids.length && ids.every(id => previous.has(id)) ? previous : new Set(ids))
+  const visible = React.useCallback((viewport: symbol, ids: readonly string[] | undefined) => {
+    if (ids === undefined) windows.current.delete(viewport)
+    else windows.current.set(viewport, ids)
+    const union = new Set<string>()
+    for (const window of windows.current.values()) for (const id of window) union.add(id)
+    setVisibleIds(previous => previous !== undefined && previous.size === union.size && [...union].every(id => previous.has(id)) ? previous : union)
   }, [])
   const runtime = useConversationRuntime({ ...options, messages })
   const [adoption] = React.useState(createRuntimeAdoption)

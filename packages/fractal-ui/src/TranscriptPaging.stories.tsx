@@ -2,6 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { renderToString } from 'react-dom/server'
 import { hydrateRoot } from 'react-dom/client'
+import { useAuiState } from '@assistant-ui/react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Transcript, type TranscriptHandle, type TranscriptHistory, type TranscriptTurn } from './assistant-ui/composition/Transcript'
@@ -110,10 +111,46 @@ function AdoptionJump({ scheme = 'dark' }: { scheme?: Scheme }) {
     <section aria-label="Jump during runtime adoption" {...stylex.props(styles.frame)}><EmbraceRuntimeProvider virtualizeMessages options={{ messages, onNew: async () => {} }}><Transcript ref={ref} title="Adoption jump" turns={loaded} history={{ _tag: 'Complete' }} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} /></EmbraceRuntimeProvider></section>
   </main>
 }
+function RuntimeIds() {
+  const ids = useAuiState(state => state.thread.messages.map(message => message.id).join(' '))
+  return <output data-testid="runtime-ids">{ids}</output>
+}
+const sharedFirst = [turns[100]!]
+const sharedSecond = [turns[150]!]
+// The second answer is deliberately absent from the runtime source: a settled missing item.
+const sharedMessages = [sharedFirst[0]!.prompt!, ...sharedFirst[0]!.items, sharedSecond[0]!.prompt!]
+function SharedWindows({ scheme = 'dark' }: { scheme?: Scheme }) {
+  const [second, setSecond] = React.useState(true)
+  return <main {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <button type="button" onClick={() => setSecond(false)}>Close second viewport</button>
+    <EmbraceRuntimeProvider virtualizeMessages options={{ messages: sharedMessages, onNew: async () => {} }}>
+      <RuntimeIds />
+      <section aria-label="First window" {...stylex.props(styles.frame)}><Transcript title="First window" turns={sharedFirst} history={{ _tag: 'Complete' }} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} /></section>
+      {second && <section aria-label="Second window" {...stylex.props(styles.frame)}><Transcript title="Second window" turns={sharedSecond} history={{ _tag: 'Complete' }} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} /></section>}
+    </EmbraceRuntimeProvider>
+  </main>
+}
 const meta = { title: 'Fractal UI/Transcript paging', component: Paging, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', state: 'more' }, argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] }, state: { control: 'select', options: ['more', 'complete', 'loading', 'error'] } } } satisfies Meta<typeof Paging>
 export default meta
 type Story = StoryObj<typeof meta>
 const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+export const SharedRuntimeWindows: Story = { render: args => <SharedWindows scheme={args.scheme} />, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const ids = canvas.getByTestId('runtime-ids')
+  await waitFor(() => {
+    expect(ids).toHaveTextContent('paging/100/prompt')
+    expect(ids).toHaveTextContent('paging/100/answer')
+    expect(ids).toHaveTextContent('paging/150/prompt')
+    expect(canvasElement.querySelector('[data-testid="transcript-stranded"][data-item-id="paging/150/answer"]')).toHaveTextContent('Checkpoint 150')
+    expect(canvasElement.querySelector('[data-testid="agent-message"][data-item-id="paging/100/answer"]')).not.toBeNull()
+  })
+  await userEvent.click(canvas.getByRole('button', { name: 'Close second viewport' }))
+  await waitFor(() => {
+    expect(ids).not.toHaveTextContent('paging/150/prompt')
+    expect(ids).toHaveTextContent('paging/100/answer')
+    expect(canvasElement.querySelector('[data-testid="agent-message"][data-item-id="paging/100/answer"]')).not.toBeNull()
+  })
+} }
 export const JumpDuringAdoption: Story = { render: args => <AdoptionJump scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const host = canvasElement.querySelector('[data-before-adoption]')!

@@ -408,6 +408,8 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
   const collectionReady = React.useRef(false)
   collectionReady.current = collectionCount >= items.length
   const publishVisible = React.useContext(RuntimeVisibleIds)
+  const demandOwner = React.useRef(Symbol('transcript viewport'))
+  React.useLayoutEffect(() => () => publishVisible?.(demandOwner.current, undefined), [publishVisible])
   const rowsById = React.useMemo(() => new Map(items.map(item => [item.id, item])), [items])
   const rowsRef = React.useRef(rowsById)
   rowsRef.current = rowsById
@@ -552,7 +554,7 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
         const item = rowsRef.current.get(row.dataset['embraceEntryId'] ?? '')
         if (item !== undefined) ids.push(...(item.targetIds ?? [item.id]))
       }
-      publishVisible(ids)
+      publishVisible(demandOwner.current, ids)
     }
     const observer = new MutationObserver(publish)
     observer.observe(node, { childList: true, subtree: true })

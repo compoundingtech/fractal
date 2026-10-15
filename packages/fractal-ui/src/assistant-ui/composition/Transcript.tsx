@@ -221,18 +221,27 @@ const contentVersion = (item: ConversationItem): string => {
 }
 const WindowedTurn = React.memo(function WindowedTurn(props: React.ComponentProps<typeof PreparedTurn>) {
   const messages = useAuiState(state => state.thread.messages)
-  const turn = React.useMemo(() => {
+  const adoption = React.useContext(RuntimeAdoptedIds)
+  const held = React.useSyncExternalStore(adoption?.subscribe ?? staticSubscription, adoption?.get ?? (() => undefined), () => undefined)
+  const { turn, stranded } = React.useMemo(() => {
     const ids = new Set(messages.map(message => message.id))
     const source = props.turn
-    if (source.prompt !== undefined && !ids.has(source.prompt.id)) return undefined
-    const pending = source.items.findIndex(item => !ids.has(item.id))
-    if (pending === -1) return source
+    const stranded = new Set<string>()
+    const visible = (id: string) => {
+      if (ids.has(id)) return true
+      if (held === undefined || held.has(id)) return false
+      stranded.add(id)
+      return true
+    }
+    if (source.prompt !== undefined && !visible(source.prompt.id)) return { turn: undefined, stranded }
+    const pending = source.items.findIndex(item => !visible(item.id))
+    if (pending === -1) return { turn: source, stranded }
     const items = source.items.slice(0, pending)
-    if (source.prompt === undefined && items.length === 0) return undefined
+    if (source.prompt === undefined && items.length === 0) return { turn: undefined, stranded }
     const itemIds = new Set(items.map(item => item.id))
-    return { ...source, items, work: { ...source.work, calls: source.work.calls.filter(call => itemIds.has(call.id)) } }
-  }, [messages, props.turn])
-  return turn === undefined ? <div data-testid="transcript-row-pending" style={{ minHeight: 160 }} /> : <PreparedTurn {...props} turn={turn} />
+    return { turn: { ...source, items, work: { ...source.work, calls: source.work.calls.filter(call => itemIds.has(call.id)) } }, stranded }
+  }, [messages, props.turn, held])
+  return turn === undefined ? <div data-testid="transcript-row-pending" style={{ minHeight: 160 }} /> : <PreparedTurn {...props} turn={turn} stranded={stranded.size === 0 ? undefined : stranded} />
 })
 const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; now: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
   const detail = React.useCallback((call: WorkLogCall) => <ToolDetailPreview call={call} onOpen={onOpenTool} />, [onOpenTool])
