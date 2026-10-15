@@ -10,11 +10,9 @@ pub use smallclaims::claim::{
 #[cfg(test)]
 pub use smallclaims::replication::{ReplicaRange, ReplicationBatch, ReplicationResponse};
 pub use smallclaims::replication::{
-    ClaimRange, ClaimRangeDigest, ClaimSubjectDigest, HealClaim, InventoryCheckpoint,
-    ReplicaRecordView, ReplicationExchange, ReplicationExportRequest, ReplicationExportResponse,
-    ReplicationFirstSync, ReplicationHealAnswer, ReplicationHealAnswerRequest,
-    ReplicationHealNextRequest, ReplicationHealQuery, ReplicationHealReport,
-    ReplicationHealRequest, ReplicationHealStep, ReplicationInventory, ReplicationInventoryBucket,
+    InventoryCheckpoint, ReplicaRecordView, ReplicationExchange, ReplicationExportRequest,
+    ReplicationExportResponse, ReplicationFirstSync, ReplicationInventory,
+    ReplicationInventoryBucket,
     ReplicationPeerFailureRequest, ReplicationPeerStatus, ReplicationPeerSync, ReplicationReceipt,
     ReplicationReceiveRequest, ReplicationReceiveResponse, ReplicationRepairRequest,
     ReplicationStatus, ReplicationTimings, UnhealthyProjection,
@@ -1521,7 +1519,13 @@ pub struct SubjectStatus {
     pub harness: Option<CurrentHarnessView>,
     pub conflicts: Vec<String>,
     pub claims: Vec<String>,
-    pub owner_run: Option<String>,
+    /// The bounded claims facts a `Summary` claims reduction carries instead of the full
+    /// vector above: the canonically-first and -latest claim ids, the claim count at the cut, and — once
+    /// the count passes [`SESSION_CLAIMS`] — the window's last canonical id. Never
+    /// serialized: public status responses always carry the full vector in `claims`.
+    #[serde(skip)]
+    pub claims_summary: ClaimsSummary,
+     pub owner_run: Option<String>,
     pub gap: Option<String>,
     pub reachability: String,
     pub reason: Option<String>,
@@ -1529,6 +1533,21 @@ pub struct SubjectStatus {
     pub under: Vec<UnderSpec>,
     #[serde(default)]
     pub projection: OperationalAnnotation,
+}
+
+/// How many of a subject's claims, oldest first, date its session in the session list.
+pub const SESSION_CLAIMS: usize = 10_000;
+
+/// The bounded per-subject claims facts internal reducers read instead of the full canonical
+/// id vector: the canonically-first claim id (a session's fallback start date), the
+/// canonically-latest one (an agent card's fallback revision), the claim count at the cut, and the session-dating window's last canonical id once the count passes
+/// it. Filled only by reductions asked for a summary; `Default` elsewhere.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClaimsSummary {
+    pub first: Option<String>,
+    pub latest: Option<String>,
+    pub count: usize,
+    pub session_boundary: Option<String>,
 }
 
 /// The status conditions `st trace wait --for` accepts, which an attention request can also use
@@ -1631,7 +1650,19 @@ pub struct ClientSyncNotice {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ClientExchangeTransport {
+    pub at: String,
+    pub carrier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_route: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClientSyncPeer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_successful_exchange: Option<ClientExchangeTransport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failed_exchange: Option<ClientExchangeTransport>,
     pub host_id: String,
     pub peer_only_envelopes: u64,
     pub local_only_envelopes: u64,
@@ -2080,6 +2111,50 @@ pub struct MessageView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_origin: Option<String>,
     pub created_index: u64,
+}
+
+/// A definitive first-send refusal. Transport loss remains MessageSendUnconfirmed.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "variant")]
+pub enum MessageSendRefusal {
+    Retired {
+        recipient: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        successor: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transfer: Option<String>,
+    },
+    LifecycleUnavailable {
+        recipient: String,
+        reason: LifecycleUnavailableReason,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LifecycleUnavailableReason {
+    Unavailable,
+    Conflict,
+}
+
+impl MessageSendRefusal {
+    pub fn into_error(self) -> St3Error {
+        let (code, variant, recipient) = match &self {
+            Self::Retired { recipient, .. } => ("recipient-retired", "Retired", recipient),
+            Self::LifecycleUnavailable { recipient, .. } => {
+                ("lifecycle-unavailable", "LifecycleUnavailable", recipient)
+            }
+        };
+        St3Error::new(
+            code,
+            format!("{variant}: recipient `{recipient}` refuses this first send"),
+        )
+        .with_detail("applied", "none")
+        .with_detail(
+            "refusal",
+            serde_json::to_value(&self).expect("refusal serializes"),
+        )
+    }
 }
 
 impl MessageView {

@@ -121,6 +121,7 @@
     "work.publish-mission": { "capability": "control.work", "parameters": "WorkPublishMissionParameters" },
     "agent.create": { "capability": "control.runtimes", "parameters": "AgentCreateParameters" },
     "agent.stop": { "capability": "control.runtimes", "parameters": "AgentStopParameters" },
+    "agent.retire": { "capability": "control.runtimes", "parameters": "AgentRetireParameters" },
     "agent.start": { "capability": "control.runtimes", "parameters": "AgentStartParameters" },
     "agent.suspend": { "capability": "control.runtimes", "parameters": "AgentSuspendParameters" },
     "agent.resume": { "capability": "control.runtimes", "parameters": "AgentResumeParameters" },
@@ -160,6 +161,12 @@
     "max_arrangement_folders": 1024,
     "max_arrangement_placements": 4096,
     "pairing_ttl_seconds": 300  },
+  "constants": {
+    "sidebar_arrangement_uuid": {
+      "value": "00000000-0000-7000-8000-000000000001",
+      "about": "Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043)."
+    }
+  },
   "idempotency_contract": {
     "storage": "local-sqlite-completed-response-rows",
     "minimum_retention_seconds": 604800,
