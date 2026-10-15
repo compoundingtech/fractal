@@ -23,7 +23,7 @@ use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 use tokio::sync::{Notify, watch};
 use tower::ServiceExt as _;
 
@@ -7030,7 +7030,7 @@ mod gateway_listener_tests {
         let (ready, serving) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(super::serve_reserved_unix_with_ready(
             reserved,
-            axum::Router::new().route("/ready", axum::routing::get(|| async { "initialized" })),
+            axum::Router::new().fallback(|| async { "initialized" }),
             false,
             move || ready.send(()).unwrap(),
         ));

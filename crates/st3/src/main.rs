@@ -6812,7 +6812,6 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let startup = Arc::new(st3::startup::Startup::begin(&config.socket)?);
     startup_phases.configuration_ms = phase_elapsed_ms();
     startup.phase("bind-listeners");
-    startup_telemetry.phase("bind-listeners");
     let state_socket = config.state_dir.join("run/st3.sock");
     let (local_reserved, gateway_reserved) = tokio::try_join!(
         st3::api::reserve_unix_socket(&config.socket, Some(&state_socket)),
