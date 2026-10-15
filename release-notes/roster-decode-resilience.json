@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep the web roster visible across daemon leaf-field version skew and disclose undecodable agents without presenting an empty roster as fact",
+  "replay": { "status": "none", "detail": "No daemon claim replay or persistent recovery changes. The web SDK retains the last good roster when every row of a later snapshot fails decoding." },
+  "schema": { "status": "none", "detail": "Web-only SDK decoding change. Generated wire schemas and generator output are unchanged; no database migrations." },
+  "rules": { "status": "none", "detail": "No checkpoint rules, digest changes, or coordinated member upgrade." },
+  "compatibility": { "status": "none", "detail": "The SDK tolerates unrecognized leaf literals while retaining their raw values, and reports row identity failures independently. Deploy the web app without upgrading the daemon." },
+  "downtime": { "status": "none", "detail": "No additional startup work or expected interruption." },
+  "manual": { "status": "none", "detail": "No operator actions, pairing, or configuration changes." },
+  "recovery": { "status": "none", "detail": "No persistent state changes or rollback restrictions." }
+}

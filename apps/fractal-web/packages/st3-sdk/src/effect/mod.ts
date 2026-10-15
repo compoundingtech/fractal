@@ -8,10 +8,11 @@
  * Follows hold socket slots under the admission rules in `admission.ts`; an evicted follow's
  * stream ends with a final `Stale`. Every follow also exposes its freshness verdict
  * (`freshness.ts`), folded only from transport events the SDK really observes.
- * Rejected window rows are omitted from decoded items and reported through `onDiagnostics`
- * as `RowDecode` (collection, rowId, revision), once while that rejected revision remains in
- * the window. Reporting state drops departed/recovered rows and superseded revisions.
- * No row contents or decoder errors go to the console.
+ * Resource rows decode independently. Agent literal/enum leaves are open tagged values,
+ * preserving their raw case in-place and in SDK decode metadata. Structurally bad rows become
+ * Undecodable notices. All-bad windows retain last-good items with decodeStale.
+ * ResourceDecode diagnostics count failures per resource/path; each distinct path produces
+ * one trace event per SDK session. No row contents or decoder errors go to the console.
  *
  * `messageSend` uses the generated HTTP action client and decodes its acknowledgement; it does
  * not retry ambiguous delivery. Daemon refusals retain the complete error envelope and HTTP
@@ -27,7 +28,6 @@
  * `adoptEarlyCollections` adopts the socket `index.html` opened before the bundle (`early.ts`).
  */
 import {
-  type Resource as ResourceWire,
   ClientError,
   type ActionOf,
   type CollectionSocket,
@@ -43,12 +43,10 @@ import {
 import {
   ActionResult,
   type Capabilities,
-  type Agent,
   Capabilities as CapabilitiesCodec,
   decodeUnknownSync,
   Resource,
   Runtime,
-  Page,
   TerminalScreen,
   TimelineEntry,
   Snapshot,
@@ -64,6 +62,7 @@ import * as Stream from 'effect/Stream'
 import * as SubscriptionRef from 'effect/SubscriptionRef'
 import type * as Tracer from 'effect/Tracer'
 
+import * as Exit from 'effect/Exit'
 import { makeAdmission } from './admission.ts'
 import { takeEarlyCollections } from './early.ts'
 import { makeFirstFrames, type FirstFrameAttempt, type FirstFrameOutcome } from './firstFrame.ts'
@@ -76,6 +75,8 @@ import {
 } from './freshness.ts'
 import { type ConnectionState, type St3Diagnostic, makeChannel } from './socket.ts'
 import { makeWindowIngest, type ProcessedWindow } from './windowIngest.ts'
+import { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, type DecodedAgent, type DecodedResource, type Undecodable } from './resourceDecode.ts'
+export { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, decodedUsageEquivalence, openAgent, type Open, type DecodedAgent, type DecodedUsageSummary, type DecodedResource, type Undecodable, type Unrecognized, type UnrecognizedLeaf } from './resourceDecode.ts'
 import type { SyncStatus } from './sync-status.ts'
 import { syncStatusFromFreshness, syncStatusFromFailure } from './sync-projection.ts'
 import { browserSocket, type TraceContext, traceContextOf, traceQuerySocket } from './trace.ts'
@@ -242,10 +243,12 @@ export const followKey = (spec: FollowSpec): string => {
 
 /** A collection window: decoded rows in the server's order. */
 export interface WindowValue {
-  readonly items: readonly Resource[]
+  readonly items: readonly DecodedResource[]
   readonly hasMore: boolean
   readonly snapshot: ProcessedWindow<Resource>['snapshot']
   readonly rawItems: readonly unknown[]
+  readonly undecodable: readonly Undecodable[]
+  readonly decodeStale: boolean
 }
 
 /** A timeline entry the contract codec rejected, kept so it can render as a notice. */
@@ -291,7 +294,12 @@ export class St3 extends Context.Service<
     readonly snapshot: Effect.Effect<string, ActionFailure>
     readonly messageSend: (request: MessageSendInput) => Effect.Effect<ActionResult, ActionFailure>
     /** One bounded published roster page, without the daemon's fresh-read wait. */
-    readonly readAgents: Effect.Effect<{ readonly value: readonly Agent[]; readonly hasMore: boolean }, AttachFailure>
+    readonly readAgents: Effect.Effect<{
+      readonly value: readonly DecodedAgent[]
+      readonly hasMore: boolean
+      readonly undecodable: readonly Undecodable[]
+      readonly decodeStale: boolean
+    }, AttachFailure>
     readonly followWindow: (
       spec: Extract<FollowSpec, { _tag: 'Window' }>,
     ) => Stream.Stream<FollowEvent<WindowValue>>
@@ -354,7 +362,6 @@ export interface St3Options {
   readonly adoptEarlyCollections?: boolean
 }
 
-const decodeResource = decodeUnknownSync(Resource)
 
 const decodeEntry = decodeUnknownSync(TimelineEntry)
 const decodeScreen = decodeUnknownSync(TerminalScreen)
@@ -871,29 +878,45 @@ const make = (options: St3Options) =>
         }),
       )
 
+    const decodeTracer = yield* Effect.tracer
+    const reportDecode = makeDecodeDiagnostics((resource, path, count, first) => {
+      options.onDiagnostics?.({ _tag: 'ResourceDecode', resource, path, count })
+      if (first) {
+        const at = BigInt(Date.now()) * 1_000_000n
+        const parent = options.parentSpan?.()
+        const span = decodeTracer.span({
+          name: 'st3.resource.decode', parent: Option.fromUndefinedOr(parent),
+          annotations: Context.empty(), links: [], startTime: at,
+          kind: 'client', root: parent === undefined, sampled: true,
+        })
+        span.event('st3.resource.decode_failure', at, { resource, path })
+        span.end(at, Exit.void)
+      }
+    })
+    let lastReadAgents: readonly DecodedAgent[] = []
+
     const followWindow = (spec: Extract<FollowSpec, { _tag: 'Window' }>) =>
       follow<WindowValue>({
         spec,
         makeProtocol: (observe) => {
-          const ingest = makeWindowIngest<Resource>({
+          const ingest = makeWindowIngest<DecodedResource>({
             publish: (window) => observe(window, window.snapshot),
             ...(options.onDiagnostics === undefined
               ? {}
               : {
                   onSlice: (elapsedMs: number) =>
                     options.onDiagnostics?.({ _tag: 'Decode', elapsedMs }),
-                  onRejected: (row: ResourceWire) =>
+                  onRejected: (row) =>
                     options.onDiagnostics?.({
                       _tag: 'RowDecode', collection: spec.collection,
                       rowId: row.id, revision: row.revision,
                     }),
                 }),
-            decode: (row) => {
-              try {
-                return decodeResource(row)
-              } catch {
-                return undefined
-              }
+            decode: (row) => decodeResourceRow(row).value,
+            decodeDetailed: (row) => {
+              const decoded = decodeResourceRow(row)
+              reportDecode(spec.collection, decoded.undecodable)
+              return decoded
             },
           })
           return {
@@ -1074,10 +1097,17 @@ const make = (options: St3Options) =>
         }).pipe(
           Effect.flatMap((envelope) => Effect.try({
             try: () => {
-              const page = decodeUnknownSync(Page)(envelope.value)
+              const page = envelope.value
+              const decoded = decodeResourceRows(page.items)
+              reportDecode('agents', decoded.undecodable)
+              const agents = decoded.items.filter((row): row is DecodedAgent => row.kind === 'agent')
+              const decodeStale = page.items.length > 0 && agents.length === 0 && decoded.undecodable.length > 0
+              if (!decodeStale) lastReadAgents = agents
               return {
-                value: page.items.filter((row): row is Agent => row.kind === 'agent'),
+                value: decodeStale ? lastReadAgents : agents,
                 hasMore: page.page.has_more,
+                undecodable: decoded.undecodable,
+                decodeStale,
               }
             },
             catch: (error) => new AttachFailure({ message: errorMessage(error) }),

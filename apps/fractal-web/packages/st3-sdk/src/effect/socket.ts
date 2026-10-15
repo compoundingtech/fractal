@@ -64,6 +64,12 @@ export type St3Diagnostic =
       readonly rowId: string
       readonly revision: string
     }
+  | {
+      readonly _tag: 'ResourceDecode'
+      readonly resource: string
+      readonly path: string
+      readonly count: number
+    }
 
 /** One subscription on the socket, keyed by its registration id. */
 export interface Subscriber {

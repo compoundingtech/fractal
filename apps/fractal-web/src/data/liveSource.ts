@@ -1,12 +1,14 @@
 import { ClientError, St3Client, isTransient } from '@smalltalk/st3-client'
 import { Runtime, Snapshot, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import type { Agent, Attention, Mission, TerminalScreen } from '@smalltalk/st3-client/schema'
+import type { Attention, Mission, TerminalScreen } from '@smalltalk/st3-client/schema'
 import {
   St3,
   St3Live,
   AttachFailure,
   type FollowEvent,
   type FollowSpec,
+  type DecodedAgent,
+  type Undecodable,
   type ConnectionState,
   followKey,
   type St3Options,
@@ -53,6 +55,8 @@ import {
   type NetworkReachability,
   type Feed,
   type Grants,
+  type RosterDecode,
+  decodedRoster,
   observed,
   unavailable,
   waiting,
@@ -231,6 +235,10 @@ export const liveSource = ({
           case 'Decode':
             setDebug('Wf.decodeMs', event.elapsedMs)
             break
+          case 'ResourceDecode':
+            // Cumulative per session, resource and path; never row contents.
+            setDebug(`Wf.resourceDecode.${event.resource}.${event.path}`, event.count)
+            break
         }
         options.onDiagnostics?.(event)
       },
@@ -285,6 +293,7 @@ export const liveSource = ({
     onCommit,
     explicitInterest = false,
     onVisibilityChange,
+    observedFreshness,
     telemetryKind = 'window',
   }: {
     readonly resolve: (get: Atom.AtomContext) => Effect.Effect<TSpec, AttachFailure>
@@ -294,6 +303,8 @@ export const liveSource = ({
     }) => Stream.Stream<FollowEvent<A>>
     /** A published fallback after transport failure or a stalled first snapshot, never a parallel bootstrap read. */
     readonly initialRead?: (st3: St3['Service']) => Effect.Effect<{ readonly value: A; readonly hasMore: boolean }, AttachFailure>
+    /** Freshness of a decoded frame; a frame retaining last-good rows is stale, not live. */
+    readonly observedFreshness?: (value: A) => 'live' | 'stale'
     readonly keepAlive?: boolean
     readonly onCommit?: (value: A) => void
     readonly explicitInterest?: boolean
@@ -472,7 +483,7 @@ export const liveSource = ({
                 if (event._tag === 'Observed') {
                   initialReadDeadlineFiber?.interruptUnsafe()
                   initialReadDeadlineFiber = undefined
-                  latest = observed({ value: event.value })
+                  latest = observed({ value: event.value, freshness: observedFreshness?.(event.value) ?? 'live' })
                   syncLatest = observeFeedSync(syncLatest, event.value, Date.now())
                 } else if (event._tag === 'Failed') {
                   const failure = syncStatusFromFailure(event.error)
@@ -642,19 +653,38 @@ export const liveSource = ({
     return retained
   }
 
-  const agentsRetained = retain<readonly Agent[], Extract<FollowSpec, { _tag: 'Window' }>>({
+  const rosterDecode = Atom.keepAlive(Atom.make<RosterDecode>(decodedRoster))
+  /** Rows the SDK retained as last-good because every row of the latest frame failed to decode. */
+  const decodeStaleRosters = new WeakSet<readonly DecodedAgent[]>()
+  const sameUndecodable = (left: readonly Undecodable[], right: readonly Undecodable[]) =>
+    left.length === right.length && left.every((entry, index) => {
+      const other = right[index]!
+      return entry.id === other.id && entry.path === other.path && entry.reason === other.reason
+    })
+  const recordRosterDecode = (next: RosterDecode) => {
+    const current = registry.get(rosterDecode)
+    if (current.decodeStale === next.decodeStale && sameUndecodable(current.undecodable, next.undecodable)) return
+    registry.set(rosterDecode, next.undecodable.length === 0 && !next.decodeStale ? decodedRoster : next)
+  }
+  const agentsRetained = retain<readonly DecodedAgent[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'agents', limit: 100 }),
-    initialRead: (st3) => st3.readAgents,
+    initialRead: (st3) => st3.readAgents.pipe(
+      Effect.map(({ value, hasMore, undecodable, decodeStale }) => {
+        recordRosterDecode({ undecodable, decodeStale })
+        return { value, hasMore }
+      }),
+    ),
+    observedFreshness: (value) => decodeStaleRosters.has(value) ? 'stale' : 'live',
     follow: ({ st3, spec }) =>
       st3.followWindow(spec).pipe(
-        Stream.map((event) =>
-          event._tag === 'Observed'
-            ? {
-                _tag: 'Observed' as const,
-                value: event.value.items.filter((row): row is Agent => row.kind === 'agent'),
-              }
-            : event,
-        ),
+        Stream.map((event) => {
+          if (event._tag !== 'Observed') return event
+          const { items, undecodable, decodeStale } = event.value
+          const value = items.filter((row): row is DecodedAgent => row.kind === 'agent')
+          if (decodeStale) decodeStaleRosters.add(value)
+          recordRosterDecode({ undecodable, decodeStale })
+          return { _tag: 'Observed' as const, value }
+        }),
       ),
   })
   const agents = agentsRetained.atom
@@ -1080,6 +1110,7 @@ export const liveSource = ({
         if (!disposed && sdk !== undefined) runtime.runFork(sdk.reconnectSockets)
       },
       agents,
+      rosterDecode,
       missions,
       attention,
       conversation,
