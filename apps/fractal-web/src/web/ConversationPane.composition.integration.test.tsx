@@ -763,35 +763,30 @@ describe('ConversationPane composition activation', () => {
     expect(source.submissions).toBe(0)
     expect(input.value).toBe('Offline draft')
     expect(source.send).not.toHaveBeenCalled()
-    const reconnect = [...container.querySelectorAll('button')].find(button => button.textContent === 'Reconnect now')!
-    await act(async () => { reconnect.click() })
-    expect(source.reconnect).toHaveBeenCalledOnce()
+    expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Reconnect now')).toBe(false)
+    expect(source.reconnect).not.toHaveBeenCalled()
     source.offline = false
     await mount()
     expect(input.value).toBe('Offline draft')
     expect(source.send).not.toHaveBeenCalled()
   })
 
-  it.each(['button', 'enter', 'form'] as const)('keeps revoked drafts editable through %s submission and access recovery', async method => {
+  it.each(['button', 'enter', 'form'] as const)('keeps revoked drafts editable through %s submission without adding pane recovery UI', async method => {
     source.sendEnabled = true
     source.send.mockResolvedValue({ _tag: 'Refused', reason: 'ungranted', status: 401, detail: 'Revoked' })
-    source.capabilities.mockResolvedValue({ _tag: 'Success', value: { upload: 'granted', send: 'granted', read: 'granted' } })
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false } }
     await mount()
     await editComposer('Initial send')
     await submitComposer()
-    expect(text()).toContain('credential was revoked')
+    expect(source.composerProps.at(-1)?.sendDisabled).toBe(true)
     const input = await editComposer('Revoked draft')
     expect(input.disabled).toBe(false)
     await submitComposer(method)
     expect(input.value).toBe('Revoked draft')
     expect(source.submissions).toBe(1)
     expect(source.send).toHaveBeenCalledOnce()
-    const check = [...container.querySelectorAll('button')].find(button => button.textContent === 'Check access')!
-    await act(async () => { check.click() })
-    expect(source.capabilities).toHaveBeenCalledOnce()
-    expect(input.value).toBe('Revoked draft')
-    expect(source.send).toHaveBeenCalledOnce()
+    expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Check access')).toBe(false)
+    expect(source.capabilities).not.toHaveBeenCalled()
   })
 
   it.each([false, true] as const)('renders Retry only for retryable=%s failed outbox rows', async retryable => {

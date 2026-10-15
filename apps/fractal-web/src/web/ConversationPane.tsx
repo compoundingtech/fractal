@@ -179,11 +179,6 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     <LiveAgentTodos agentRef={agentRef} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     <div data-testid="conversation-composer-dock" style={{ flexShrink: 0, paddingBottom: spaceVars.lg }}>
-      {binding.availability._tag === 'Offline' || binding.availability._tag === 'Revoked' ? <div role="status">
-        {binding.availability.detail}
-        {binding.availability._tag === 'Offline' && source.reconnect !== undefined ? <button type="button" onClick={source.reconnect}>Reconnect now</button> : null}
-        {binding.availability._tag === 'Revoked' ? <button type="button" onClick={() => { void binding.recover() }}>Check access</button> : null}
-      </div> : null}
       {attachmentAdapter === undefined ? null : <ComposerAttachments />}
       <EmbraceComposer variant="C1" readingColumn targetLabel={`${agentName} (${agentRef})${feed._tag === 'Observed' && feed.value.sessionId !== undefined ? ` · Session ${feed.value.sessionId}` : ''}`}
         onSendDraft={() => { submission.dispatch = binding.runtime.onNew }}
