@@ -5,7 +5,7 @@ import { createProjections } from './projections.ts'
 import { observed, unavailable, type Feed } from './source.ts'
 import { nativeDetailsRoot, nativeDetailsTiming, projectNativeDetails } from './nativeDetails.ts'
 import { projectNativeDeclarations, type NativeDeclarations } from './nativeDeclarations.ts'
-import { sidebarRow } from '../web/sidebarRow.ts'
+import { contextOccupancy } from './contextOccupancy.ts'
 
 const row = Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Real seat', state: 'running', reachability: 'local', runtime_ids: [], revision: '1', updated_at: '1970-01-01T00:00:05Z', incarnation_id: 'inc/current', current_session_id: 'session/current', driver: 'omp', workspace: '/private/checkout', checkout: { repository: '/private/repo', branch: 'private-branch', base: 'main' },
   usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 500, output_tokens: 500, cached_tokens: 0, total_tokens: 99999999, context: { used_tokens: 61206, window_tokens: 1000000, used_percent: 6.1206, observed_at_unix_ms: 4000, model: 'actual-model', compactions: 2, last_compaction_ms: 3000 } },
@@ -153,11 +153,12 @@ describe('fixture-free native Details projection', () => {
     ])
     expect(project().overview.durations?.every(item => item.pending === false)).toBe(true)
   })
-  it('uses the identical occupancy calculation as sidebar, not cumulative totals', () => {
+  it('uses reported occupancy rather than cumulative totals, preserving main sidebar scope', () => {
     const agent = createProjections().fleetFromAgents([row]).agents[0]!
-    const occupancy = sidebarRow({ agent, now: 10000, stale: false }).context
+    const occupancy = contextOccupancy({ usage: agent.usage, now: 10000, observedAfter: agent.contextObservedAfter })
     const details = project()
-    expect(details.trace.meters.context.reportedPercent).toMatchObject({ _tag: 'Known', value: occupancy?._tag === 'Known' ? occupancy.usedPercent : undefined, asOfMs: 4000 })
+    expect(occupancy).toMatchObject({ _tag: 'Known', usedPercent: 6.1206 })
+    expect(details.trace.meters.context.reportedPercent).toMatchObject({ _tag: 'Known', value: 6.1206, asOfMs: 4000 })
     expect(details.trace.meters.context.compactions).toMatchObject({ _tag: 'Known', value: 2 })
     expect(details.trace.meters.context.lastCompactionMs).toMatchObject({ _tag: 'Known', value: 3000 })
     const { context: _context, ...withoutContext } = Option.getOrThrow(row.usage)
