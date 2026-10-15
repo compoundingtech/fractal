@@ -233,7 +233,8 @@ const ACCEPT_BACKOFF_START: std::time::Duration = std::time::Duration::from_mill
 const ACCEPT_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Serve the endpoint of every tile this daemon's Unix user supervises, following root's
-/// registry as it changes and each tile's endpoint directory as root makes it.
+/// registry and the launcher's user IDs as they change, and each tile's endpoint directory as
+/// root makes it.
 pub fn spawn(state: AppState) {
     spawn_from(state, PathBuf::from(DEFAULT_REGISTRY));
 }
@@ -257,10 +258,17 @@ fn spawn_with(
     supervisor: u32,
 ) {
     tokio::spawn(async move {
-        let mut serving: BTreeMap<String, (Tile, tokio::task::JoinHandle<()>)> = BTreeMap::new();
+        // Each served tile with the user ID it was served for: a tile the launcher gives a new
+        // ID is served afresh, never under the ID it had.
+        type Served = (Tile, Option<u32>);
+        let mut serving: BTreeMap<String, (Served, tokio::task::JoinHandle<()>)> = BTreeMap::new();
         let mut reported = None;
+        // The launcher's record lives under the registry's state root, known once it is read.
+        let mut uids_path: Option<PathBuf> = None;
         loop {
+            // Both watches start before the read, so nothing written in between is missed.
             let changed = Change::watch(&registry_path);
+            let uids_changed = uids_path.as_deref().map(Change::watch);
             let registry = match load() {
                 Ok(registry) => Some(Arc::new(registry)),
                 Err(error) => {
@@ -277,6 +285,12 @@ fn spawn_with(
                     None
                 }
             };
+            if let Some(registry) = &registry
+                && uids_path.as_ref() != Some(&registry.uids_file())
+            {
+                uids_path = Some(registry.uids_file());
+                continue;
+            }
             let wanted = registry
                 .as_ref()
                 .map(|registry| {
@@ -284,19 +298,19 @@ fn spawn_with(
                         .tiles
                         .iter()
                         .filter(|(_, tile)| tile.supervisor_uid == Some(supervisor))
-                        .map(|(name, tile)| (name.clone(), tile.clone()))
+                        .map(|(name, tile)| (name.clone(), (tile.clone(), registry.uid(name))))
                         .collect::<BTreeMap<_, _>>()
                 })
                 .unwrap_or_default();
-            serving.retain(|name, (tile, task)| {
-                let keep = wanted.get(name) == Some(tile);
+            serving.retain(|name, (served, task)| {
+                let keep = wanted.get(name) == Some(served);
                 if !keep {
                     task.abort();
                 }
                 keep
             });
             if let Some(registry) = &registry {
-                for (name, tile) in wanted {
+                for (name, served) in wanted {
                     if serving.contains_key(&name) {
                         continue;
                     }
@@ -306,10 +320,18 @@ fn spawn_with(
                         name.clone(),
                         Arc::clone(&kernel),
                     ));
-                    serving.insert(name, (tile, task));
+                    serving.insert(name, (served, task));
                 }
             }
-            changed.await;
+            match uids_changed {
+                Some(uids_changed) => {
+                    tokio::select! {
+                        () = changed => {}
+                        () = uids_changed => {}
+                    }
+                }
+                None => changed.await,
+            }
         }
     });
 }
@@ -558,12 +580,13 @@ mod tests {
 
     fn registry(uid: u32) -> Registry {
         Registry::parse(&format!(
-            "[tiles.atlas]\nuid = {uid}\ngid = {uid}\nagent = \"agent/fleet/fixture-example/atlas\"\n\
-             person = \"person/ada\"\n\n[tiles.birch]\nuid = {}\ngid = {}\n\
-             agent = \"agent/fleet/fixture-example/birch\"\nperson = \"person/ada\"\n",
-            uid + 1,
+            "uids = {{ first = {uid}, last = {} }}\n[tiles.atlas]\n\
+             agent = \"agent/fleet/fixture-example/atlas\"\nperson = \"person/ada\"\n\n\
+             [tiles.birch]\nagent = \"agent/fleet/fixture-example/birch\"\nperson = \"person/ada\"\n",
             uid + 1
         ))
+        .unwrap()
+        .with_uids(&format!("atlas = {uid}\nbirch = {}\n", uid + 1))
         .unwrap()
     }
 
@@ -660,14 +683,21 @@ mod tests {
         // supervisor, so the registry can name both without a tile supervising itself.
         let supervisor = uid + 1;
         let runtime = root.path().join("run");
+        let state_root = root.path().join("state");
         let registry_path = root.path().join("etc").join("tiles.toml");
         let kernel = Arc::new(FakeKernel(Mutex::new(
             crate::tiles::registry::tools_cgroup("atlas"),
         )));
         let load = {
             let path = registry_path.clone();
-            // The daemon requires root's file; here the same text is parsed without that check.
-            move || Registry::parse(&std::fs::read_to_string(&path)?)
+            // The daemon requires root's files; here the same text is parsed without that check.
+            move || {
+                let registry = Registry::parse(&std::fs::read_to_string(&path)?)?;
+                match std::fs::read_to_string(registry.uids_file()) {
+                    Ok(uids) => registry.with_uids(&uids),
+                    Err(_) => Ok(registry),
+                }
+            }
         };
         spawn_with(
             state,
@@ -696,13 +726,41 @@ mod tests {
         // The registry appears after the daemon starts; then root makes the endpoint directory.
         std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
         let text = format!(
-            "runtime_root = {runtime:?}\n[tiles.atlas]\nuid = {uid}\ngid = {uid}\n\
-             agent = \"agent/fleet/fixture-example/atlas\"\nperson = \"person/ada\"\n\
-             supervisor_uid = {supervisor}\n"
+            "runtime_root = {runtime:?}\nstate_root = {state_root:?}\n\
+             uids = {{ first = {uid}, last = {uid} }}\n\
+             [tiles.atlas]\nagent = \"agent/fleet/fixture-example/atlas\"\n\
+             person = \"person/ada\"\nsupervisor_uid = {supervisor}\n"
         );
         std::fs::write(&registry_path, &text).unwrap();
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
         until(socket.clone(), true).await;
+
+        // Before the launcher gives the tile its user ID, nothing is the tile: this process's
+        // connection closes unanswered.
+        let whoami = |socket: PathBuf| {
+            tokio::task::block_in_place(|| {
+                let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+                keep_alive_get(&mut stream, "/v1/tile/whoami")
+            })
+        };
+        assert_eq!(
+            whoami(socket.clone()),
+            None,
+            "a tile with no user ID answered"
+        );
+        // Once the launcher records it, the daemon serves the tile under that ID.
+        std::fs::create_dir_all(&state_root).unwrap();
+        std::fs::write(state_root.join("uids.toml"), format!("atlas = {uid}\n")).unwrap();
+        let mut answered = None;
+        for _ in 0..200 {
+            answered = whoami(socket.clone());
+            if answered.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let answered = answered.expect("the endpoint never served the allocated tile");
+        assert!(answered.starts_with("HTTP/1.1 200"), "{answered}");
 
         // A connection kept open across requests acts as the tile...
         let mut open = std::os::unix::net::UnixStream::connect(&socket).unwrap();
