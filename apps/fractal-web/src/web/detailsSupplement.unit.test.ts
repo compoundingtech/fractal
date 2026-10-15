@@ -49,6 +49,17 @@ describe('independent Details metric composition', () => {
     // A cumulative-token substitution must fail the same occupancy criterion.
     expect(() => expect({ ...result.trace.meters.context, reportedPercent: known(480_035_214 / 1_000_000 * 100) }).toEqual(native.meters.context)).toThrow()
   })
+  it('explains independently sourced leaf totals without treating their difference as descendant spend', () => {
+    const native = trace()
+    const result = join({ ...native, meters: { ...native.meters, spend: { ...native.meters.spend, mainUsd: known(6.19) } } }, { ...supplement(), totalUsd: known(9.05), subagentCount: known(0) })
+    expect(result.accountingNote).toContain('Reported traced descendants: 0')
+    expect(result.accountingNote).toContain('separate accounting sources')
+    expect(result.accountingNote).toContain('not a reconciled split')
+    expect(result.accountingNote).toContain('Their difference is not descendant spend')
+    expect(result.trace.meters.spend.subagentUsd._tag).toBe('Unknown')
+    expect(join(native, { ...supplement(), nativeSessionId: 'unrelated-root' }).accountingNote).toBeUndefined()
+    expect(join({ ...native, meters: { ...native.meters, spend: { ...native.meters.spend, mainUsd: missing } } }, supplement()).accountingNote).toBeUndefined()
+  })
   it('never crosses roots, even when the observed supplement is retained', () => {
     const native = trace()
     const other = { ...supplement(), nativeSessionId: '00000000-0000-4000-8000-000000000002' }

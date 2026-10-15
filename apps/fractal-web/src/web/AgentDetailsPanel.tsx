@@ -111,6 +111,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
         : supplement._tag === 'Unavailable' ? `Descendant observations unavailable: ${supplement.detail}`
           : supplement.freshness === 'stale' ? `Last good descendant read ${supplement.value.receivedAtMs === undefined ? '(age unreported)' : `${Math.max(0, Math.floor((now - supplement.value.receivedAtMs) / 1000))}s ago`} · retained/stale. ${supplement.error?.detail ?? 'Last successful read retained while revalidating.'} Coverage is window-global monetary attribution, not root completeness.` : 'Descendant ledger coverage · 7d as reported. Percentages describe window-global monetary attribution, not root completeness; exact cut bounds and producer observation time are not supplied.'}
     </p>}
+    {data.accountingNote !== undefined && <p data-details-accounting-note {...stylex.props(styles.coverage)}>{data.accountingNote}</p>}
     <DetailsPane overview={data.overview} sections={sections} trace={data.trace} now={now}
       variants={variants} state={native.state} intent={intent} onIntentChange={onIntentChange}
       onOpen={(uri, split) => {
