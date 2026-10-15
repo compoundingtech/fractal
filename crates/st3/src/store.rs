@@ -161,6 +161,7 @@ mod revision_seats;
 pub(crate) mod delegation;
 mod limits;
 mod database_size;
+pub(crate) mod projection_divergence;
 pub use database_size::DatabaseSize;
 mod person_work;
 mod reconcile_work_context;
@@ -35697,6 +35698,11 @@ mod tests {
         include!("store/fault_history_tests.rs");
     }
 
+    mod projection_divergence_tests {
+        use super::*;
+        include!("store/projection_divergence_tests.rs");
+    }
+
     #[test]
     fn seat_rename_persists_across_a_real_store_reopen() {
         let directory = tempfile::tempdir().unwrap();
@@ -44855,6 +44861,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
                 .insert("0".repeat(64), b"wrong bytes".to_vec());
         });
         let input = ReplicationExchange {
+            build: None,
             projection_digests: Default::default(),
             peer: "source".into(),
             fleet_id: TEST_FLEET.into(),
@@ -44926,6 +44933,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
             .unwrap();
         });
         let make_exchange = |envelopes: Vec<ReplicaEnvelope>| ReplicationExchange {
+            build: None,
             projection_digests: Default::default(),
             peer: "source".into(),
             fleet_id: TEST_FLEET.into(),
@@ -44974,6 +44982,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
     /// One exchange carrying exactly `envelopes`, as a peer that holds only those would send it.
     pub(super) fn exchange_of(peer: &str, envelopes: Vec<ReplicaEnvelope>) -> ReplicationExchange {
         ReplicationExchange {
+            build: None,
             projection_digests: Default::default(),
             peer: peer.into(),
             fleet_id: TEST_FLEET.into(),
@@ -46043,6 +46052,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
                     "source",
                     FLEET,
                     &ReplicationExchange {
+                        build: None,
                         projection_digests: Default::default(),
                         peer: "source".into(),
                         fleet_id: FLEET.into(),

@@ -761,6 +761,36 @@ readmit envelopes a node already holds, does not replay its graph from nothing, 
 fetch a peer's projected rows. A member on an older build that still starts a heal gets an
 unsigned 404 from `/v1/peer/heal`, reports the heal as unavailable, and backs off.
 
+### A divergence is a P1 bug
+
+A divergence is a projection pure-function bug that needs a reproduction, never something to
+repair. Where the daemon's environment sets `ST3_DIVERGENCE_CHECK_INTERVAL_MS`, it looks for
+divergences at that interval, never more often than hourly; unset or zero, it never looks. The
+check is cheap by construction. Exchanges already compare digests; with the check on, a
+comparison that first finds a difference also keeps what a reproduction needs, with one pass over
+the inventory in memory, and a difference that lasts keeps the range it opened with. The check
+reads those comparisons in memory and the newest divergence faults on its own and its peers'
+daemon subjects with one indexed read on the reader pool. It skips a round while the store's writer or a write transaction ran over its target
+in the last minute, or replication is catching up or has put projection off, waiting a minute and
+then doubling. It writes only to open or end a fault.
+
+Each divergence is one `operational.failure` claim on the daemon subject (`daemon/NODE`) of the
+member that recorded it, with the condition `projection-divergence`, an episode starting
+`projection-divergence/` and severity `error`, so it shows as a high-priority fault for the
+fleet's fault agent. Its episode is one per member pair and projection, whichever member
+records it first. Its `reproduction` field names the projection, both members, the claim range
+(the inventory digest at the comparison that first found it and each writer's highest sequence
+in it), both members' digests for that projection, and both builds; a peer whose exchange does not
+say its build is recorded as `unknown`. Exchanges carry the sender's `build` for this; older peers
+leave it out. Nothing repairs the divergence. Its fault ends with an `operational.recovered`
+claim when a later comparison at the same envelopes finds the two members agree, and the same
+pair and projection diverging again reopens the same episode.
+
+The `projection-divergence` objective in `slo/targets.toml` counts open divergence faults
+fleet-wide, with a target of none. A daemon that runs the check keeps the count its last check
+read, so `st doctor` (as `slo/projection-divergence`), `st slo` and the SLO history read no claims
+for it; a daemon that never checks shows neither the line nor the row.
+
 ### First sync
 
 A machine that joins with `st fleet join` records a first sync. It ends, `verified`, at the first
