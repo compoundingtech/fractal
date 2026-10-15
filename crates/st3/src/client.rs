@@ -1279,6 +1279,24 @@ impl DriverRetry {
         self.retry_at.is_none_or(|at| tokio::time::Instant::now() >= at)
     }
 
+    /// Wake for regular local work or the exact retry deadline. A periodic timer alone can
+    /// round a refused-socket wait up to almost two seconds when a call ends between ticks.
+    pub async fn tick(&mut self, interval: &mut tokio::time::Interval) {
+        tokio::select! {
+            _ = interval.tick() => {},
+            _ = async {
+                match self.retry_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {},
+        }
+        if self.retry_at.is_some_and(|at| tokio::time::Instant::now() >= at) {
+            // Consuming a due wake does not clear failures. An idle tick is not success.
+            self.retry_at = None;
+        }
+    }
+
     pub fn succeeded(&mut self) {
         self.failures = 0;
         self.retry_at = None;
@@ -2154,6 +2172,27 @@ mod tests {
         assert!(renewal.ready());
         renewal.succeeded();
         assert_eq!(renewal.failures, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn driver_retry_refused_wakes_between_regular_ticks() {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        let mut retry = DriverRetry::default();
+        retry.tick(&mut interval).await;
+        tokio::time::advance(Duration::from_millis(750)).await;
+        let failed_at = tokio::time::Instant::now();
+        let error = DaemonUnreachable::connect_io("test", &std::io::Error::from_raw_os_error(libc::ECONNREFUSED));
+        let pause = retry.failed(&error.into());
+        // The regular tick at one second must not round the retry to two seconds.
+        loop {
+            retry.tick(&mut interval).await;
+            if retry.ready() { break; }
+        }
+        assert_eq!(failed_at.elapsed(), pause);
+        assert!(failed_at.elapsed() <= Duration::from_secs(1));
+        let after_retry = tokio::time::Instant::now();
+        retry.tick(&mut interval).await;
+        assert!(after_retry.elapsed() > Duration::ZERO, "a consumed retry cannot busy-loop");
     }
 
     #[tokio::test]

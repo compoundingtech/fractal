@@ -20353,7 +20353,7 @@ async fn drive_st2_native(
                 }).await?;
                 return outcome;
             }
-            _ = interval.tick(), if !completion_announced => {
+            _ = control_retry.tick(&mut interval), if !completion_announced => {
                 if driver == "claude" && mailbox.subscription.is_some()
                     && let Err(error) = check_claude_attachment(
                         client, subject, &incarnation, &mailbox, attach_started, &mut loop_state,
@@ -20651,7 +20651,7 @@ async fn drive_st2_native(
                 }
                 replacement.check();
             }
-            _ = work_interval.tick(), if !completion_announced => {
+            _ = work_retry.tick(&mut work_interval), if !completion_announced => {
                 let tick: Result<()> = async {
                     if let Some(minute) = renewal_minute(subject)?
                         && renewed_minute != Some(minute)
@@ -22575,7 +22575,7 @@ async fn run_pi_channel(
                     reader = Some(spawn_reader(input_tx.clone()));
                 }
             }
-            _ = work_interval.tick() => {
+            _ = work_retry.tick(&mut work_interval) => {
                 let minute = unix_minute()?;
                 if checked_todo_minute != Some(minute) {
                     checked_todo_minute = Some(minute);
@@ -23594,7 +23594,7 @@ async fn drive_codex_native(
                 }
                 return outcome;
             },
-            _ = interval.tick(), if !completion_announced => {
+            _ = control_retry.tick(&mut interval), if !completion_announced => {
                 if let Err(error) = observations.expire_due() {
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
@@ -23788,7 +23788,7 @@ async fn drive_codex_native(
                     replacement.check();
                 }
             }
-            _ = work_interval.tick(), if !completion_announced => {
+            _ = work_retry.tick(&mut work_interval), if !completion_announced => {
                 let tick: Result<()> = async {
                     if let Some(minute) = renewal_minute(subject)?
                         && renewed_minute != Some(minute)
