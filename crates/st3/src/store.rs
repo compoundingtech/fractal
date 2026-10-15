@@ -22,6 +22,8 @@ mod mailbox_lease;
 mod message_send_tests;
 #[cfg(test)]
 mod message_thread_legacy_rank_dependency_tests;
+#[cfg(test)]
+mod actual_state_sorter_tests;
 pub mod owned_sets;
 #[cfg(test)]
 mod owned_sets_tests;
@@ -134,7 +136,8 @@ pub(crate) use roster_admission::AdmissionGuard;
 mod adhoc_work;
 mod attention_snapshot;
 pub(crate) use attention_snapshot::{
-    NativePromptState, native_prompt_gone_key, screen_prompt_delivered_key, screen_prompt_gone_key,
+    CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
+    plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
     screen_prompt_undelivered_key,
 };
 pub(crate) mod attention_list;
@@ -608,9 +611,13 @@ WHERE kind IN ('work.claimed', 'work.progress');
 CREATE INDEX IF NOT EXISTS claims_subagent_appeared_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.appeared';
-CREATE INDEX IF NOT EXISTS claims_subagent_renewed_index
-ON claims(subject, json_extract(body, '$.fields.subagent_id'))
+-- Include the numeric lease so MAX for one live pair seeks its final index entry instead
+-- of folding all its renewals. A new name upgrades existing stores at schema initialization.
+CREATE INDEX IF NOT EXISTS claims_subagent_renewed_max_lease_index
+ON claims(subject, json_extract(body, '$.fields.subagent_id'),
+          CAST(json_extract(body, '$.fields.lease_expires_at_unix_ms') AS INTEGER))
 WHERE kind='subagent.renewed';
+DROP INDEX IF EXISTS claims_subagent_renewed_index;
 CREATE INDEX IF NOT EXISTS claims_subagent_ended_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.ended';
@@ -4534,8 +4541,18 @@ impl Store {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<String>> {
+        self.mission_collection_ids_at(history, offset, limit, now_ms())
+    }
+
+    pub(crate) fn mission_collection_ids_at(
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        at_unix_ms: u128,
+    ) -> Result<Vec<String>> {
         Ok(self
-            .mission_collection_page(history, offset, limit, None)?
+            .mission_collection_page_at(history, offset, limit, None, at_unix_ms)?
             .into_iter()
             .map(|(id, _)| id)
             .collect())
@@ -4548,7 +4565,18 @@ impl Store {
         limit: usize,
         after: Option<&(u128, String)>,
     ) -> Result<Vec<(String, u128)>> {
-        let ended_since = recently_ended_since();
+        self.mission_collection_page_at(history, offset, limit, after, now_ms())
+    }
+
+    pub(crate) fn mission_collection_page_at(
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        after: Option<&(u128, String)>,
+        at_unix_ms: u128,
+    ) -> Result<Vec<(String, u128)>> {
+        let ended_since = at_unix_ms.saturating_sub(RECENTLY_ENDED_MS);
         let connection = self.readers.get();
         let mut statement = connection.prepare(
             "WITH ids AS (
@@ -14862,8 +14890,12 @@ impl Store {
 
     /// Current runs waiting on person steps, human gates or approvals.
     pub fn human_attention_runs(&self) -> Result<BTreeSet<String>> {
+        self.human_attention_runs_at(now_ms())
+    }
+
+    pub(crate) fn human_attention_runs_at(&self, now: u128) -> Result<BTreeSet<String>> {
         let mut items = self.mission_run_attention_items(None)?;
-        items.extend(self.person_attention_items(None, now_ms())?);
+        items.extend(self.person_attention_items(None, now)?);
         Ok(items.into_iter().filter_map(|item| item.mission_run).collect())
     }
 
@@ -15005,7 +15037,7 @@ impl Store {
         let mut items = self.mission_run_attention_items(person)?;
         items.extend(self.person_attention_items(person, as_of)?);
         items.extend(self.harness_login_attention_items(person)?);
-        items.extend(self.harness_prompt_attention_items(person)?);
+        items.extend(self.harness_prompt_attention_items(person, as_of)?);
         items.extend(self.custom_attention_items(person)?);
         // A person who published a broken gate is the one to correct it.
         items.extend(
@@ -19419,6 +19451,14 @@ fn adopt_declared_mission_revision_tx(
             Some(batch_id),
         )
         .map_err(internal)?;
+        if status == "draining" {
+            transaction
+                .execute(
+                    "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
+                    params![run_id, claim.accepted_at_unix_ms.to_string()],
+                )
+                .map_err(internal)?;
+        }
         return Ok((vec![claim.id], true));
     }
 
@@ -23160,8 +23200,11 @@ fn latest_actual_at(
     // Folded in canonical order, so two nodes holding the same claims agree however they
     // received them. `NOT LIKE` also leaves out harness kinds in any letter case, as it always
     // has; the ranges let SQLite seek past the subject's harness reports.
+    // Only the integer identity and canonical keys enter SQLite's sorter. Keep its cursor
+    // open while fetching each body on this same connection: even an unpinned caller then
+    // reads both statements from one SQLite read cut, without retaining history bodies.
     let mut statement = connection.prepare_cached(&format!(
-        "SELECT claims.kind, claims.body
+        "SELECT claims.store_index
          FROM claims INDEXED BY claims_subject_kind_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
@@ -23169,35 +23212,40 @@ fn latest_actual_at(
            AND claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
          ORDER BY {CANONICAL_ORDER}"
     ))?;
-    let rows = statement
-        .query_map(params![subject, at_index], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    fold_latest_actual(rows)
+    let mut rows = statement.query(params![subject, at_index])?;
+    let mut bodies = connection
+        .prepare_cached("SELECT kind, body FROM claims WHERE store_index=?1")?;
+    fold_latest_parsed_values(std::iter::from_fn(|| {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => return None,
+            Err(error) => return Some(Err(error.into())),
+        };
+        Some((|| {
+            let index: u64 = row.get(0)?;
+            let (kind, body): (String, String) =
+                bodies.query_row([index], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok((kind, serde_json::from_str::<Value>(&body)?))
+        })())
+    }))
 }
 
-/// A subject's actual state from its actual-state claims, `(kind, body)` in canonical order.
-fn fold_latest_actual(
-    rows: impl IntoIterator<Item = (String, String)>,
-) -> Result<Option<Value>> {
-    let rows = rows
-        .into_iter()
-        .map(|(kind, body)| Ok((kind, serde_json::from_str::<Value>(&body)?)))
-        .collect::<Result<Vec<_>>>()?;
-    fold_latest_values(rows)
-}
-
-/// [`fold_latest_actual`] of claims already parsed, `(kind, body)` in canonical order. It takes
+/// A subject's actual state from already parsed claims in canonical order. It takes
 /// the bodies, so each field moves into the folded state instead of being copied.
 fn fold_latest_values(rows: impl IntoIterator<Item = (String, Value)>) -> Result<Option<Value>> {
-    let mut rows = rows.into_iter().peekable();
-    if rows.peek().is_none() {
-        return Ok(None);
-    }
+    fold_latest_parsed_values(rows.into_iter().map(Ok))
+}
+
+/// Fold one body at a time, propagating SQL/JSON errors without caching a partial answer.
+fn fold_latest_parsed_values(
+    rows: impl IntoIterator<Item = Result<(String, Value)>>,
+) -> Result<Option<Value>> {
     let mut merged = serde_json::Map::new();
     let registry = st3_schema::registry();
-    for (kind, value) in rows {
+    let mut any = false;
+    for row in rows {
+        let (kind, value) = row?;
+        any = true;
         let source = match value {
             Value::Object(mut body) => match body.remove("fields") {
                 Some(fields) => fields,
@@ -23227,7 +23275,7 @@ fn fold_latest_values(rows: impl IntoIterator<Item = (String, Value)>) -> Result
             }
         }
     }
-    Ok(Some(Value::Object(merged)))
+    Ok(any.then_some(Value::Object(merged)))
 }
 
 /// `columns` of subject `?1`'s claims of one `kind` at or before store index `?2`, newest first
@@ -34271,7 +34319,7 @@ fn terminalize_projected_run_tree_tx(
              SET status=CASE WHEN status IN ('running','standing','blocked') THEN 'cancelled' ELSE status END,
                  phase=CASE WHEN status IN ('running','standing','blocked') THEN 'terminal' ELSE phase END,
                  updated_at_unix_ms=?2
-             WHERE id=?1",
+             WHERE id=?1 AND status IN ('running','standing','blocked')",
             params![run_id, updated_at_unix_ms.to_string()],
         )
         .map_err(internal)?;
@@ -34280,7 +34328,7 @@ fn terminalize_projected_run_tree_tx(
             "UPDATE run_generations
              SET status=CASE WHEN status IN ('running','standing','blocked') THEN 'cancelled' ELSE status END,
                  updated_at_unix_ms=?2
-             WHERE id=?1",
+             WHERE id=?1 AND status IN ('running','standing','blocked')",
             params![generation, updated_at_unix_ms.to_string()],
         )
         .map_err(internal)?;
@@ -34299,7 +34347,7 @@ fn terminalize_projected_run_tree_tx(
                  SET status=CASE WHEN status IN ('running','standing','blocked') THEN 'cancelled' ELSE status END,
                      phase=CASE WHEN status IN ('running','standing','blocked') THEN 'terminal' ELSE phase END,
                      updated_at_unix_ms=?2
-                 WHERE id=?1",
+                 WHERE id=?1 AND status IN ('running','standing','blocked')",
                 params![descendant, updated_at_unix_ms.to_string()],
             )
             .map_err(internal)?;
@@ -34308,7 +34356,7 @@ fn terminalize_projected_run_tree_tx(
                 "UPDATE run_generations
                  SET status=CASE WHEN status IN ('running','standing','blocked') THEN 'cancelled' ELSE status END,
                      updated_at_unix_ms=?2
-                 WHERE id=?1",
+                 WHERE id=?1 AND status IN ('running','standing','blocked')",
                 params![child_generation, updated_at_unix_ms.to_string()],
             )
             .map_err(internal)?;
@@ -35248,6 +35296,16 @@ mod tests {
     use crate::graph::parse_test_intent as parse_intent;
     use proptest::prelude::*;
 
+    mod resource_pending_receive_tests {
+        use super::*;
+        include!("store/resource_pending_receive_tests.rs");
+    }
+
+    mod terminal_projection_date_tests {
+        use super::*;
+        include!("store/terminal_projection_date_tests.rs");
+    }
+
     mod mission_eval_reuse_tests {
         include!("store/mission_eval_reuse_tests.rs");
     }
@@ -35627,6 +35685,11 @@ mod tests {
     mod canonical_audit {
         use super::*;
         include!("store/canonical_audit.rs");
+    }
+
+    mod declarative_revision_timestamp_tests {
+        use super::*;
+        include!("store/declarative_revision_timestamp_tests.rs");
     }
 
     mod actual_purity_tests {
@@ -48736,6 +48799,273 @@ mission "external-blocker" state="ready" {
     }
 
     #[test]
+    fn terminal_cascade_preserves_completed_children_across_three_members() {
+        use smallclaims::store::set_thread_clock;
+        struct ResetClock;
+        impl Drop for ResetClock {
+            fn drop(&mut self) {
+                set_thread_clock(None);
+            }
+        }
+        let _reset = ResetClock;
+        let source = Store::open_memory("alder").unwrap();
+        let birch = Store::open_memory("birch").unwrap();
+        let cedar = Store::open_memory("cedar").unwrap();
+        let members = [&source, &birch, &cedar];
+        let start = now_ms() + 60_000;
+        let at = |time| {
+            set_thread_clock(Some(time));
+            source.set_write_clock_at(time).unwrap();
+        };
+        at(start);
+        publish_mission(
+            &source,
+            r#"version 2
+    mission "terminal-stamps-root" state="ready" {
+      goal "Keep each completed child's own completion time."
+      step "work" { agentless }
+    }
+    mission "terminal-stamps-child" state="ready" {
+      goal "Complete one child before admitting the next."
+      step "work" { agentless }
+    }"#,
+            "terminal-stamps-mission",
+        );
+        let request = |mission: &str, key: &str| MissionRunRequest {
+            mission: mission.into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        };
+        let root = source
+            .create_mission_run(&request("terminal-stamps-root", "root"))
+            .unwrap();
+        let exchange_all = || {
+            for sender in members {
+                for receiver in members {
+                    if sender.origin != receiver.origin {
+                        let exchange =
+                            exchange_from(sender, &receiver.replication_inventory().unwrap());
+                        assert_eq!(
+                            receive_and_project(receiver, &sender.origin, &exchange).invalid,
+                            0
+                        );
+                    }
+                }
+            }
+        };
+        // Retain the actual immutable lifecycle inputs, not a synthesized receipt or wall-clock
+        // estimate. Sorting by id compares bytes independently of local arrival/store positions.
+        let lifecycle_inputs = |member: &Store| {
+            let connection = member.readers.get();
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, subject, kind, accepted_at_unix_ms, body, predecessors
+                     FROM claims WHERE kind IN ('mission-run.state','run-generation.state')
+                     ORDER BY id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok([
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ])
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        exchange_all();
+        // Both declarations retain the default one-active-run limit. Complete and project
+        // each child before admitting the next child; the distinct root remains active.
+        let children = ["child-one", "child-two"].map(|key| {
+            let index = if key == "child-one" { 0 } else { 1 };
+            at(start + index * 1_000 + 500);
+            let child = source
+                .create_child_mission_run(
+                    &request("terminal-stamps-child", key),
+                    &root,
+                    &root.steps[0].subject,
+                    None,
+                )
+                .unwrap();
+            exchange_all();
+            at(start + (index + 1) * 1_000);
+            assert!(
+                source
+                    .set_mission_run_state(&child.id, "completed", "terminal", None)
+                    .unwrap()
+            );
+            assert_eq!(
+                source.mission_run_status(&child.id).unwrap().as_deref(),
+                Some("completed"),
+                "the child must release its mission capacity before the next admission"
+            );
+            assert_eq!(
+                source.mission_run_status(&root.id).unwrap().as_deref(),
+                Some("running"),
+                "the root stays live until its separate later terminal claim"
+            );
+            exchange_all();
+            child
+        });
+        let child_inputs = lifecycle_inputs(&source);
+        assert_eq!(
+            child_inputs.len(),
+            4,
+            "two actual terminal claims per child"
+        );
+        at(start + 3_000);
+        assert!(
+            source
+                .set_mission_run_state(&root.id, "completed", "terminal", None)
+                .unwrap()
+        );
+        exchange_all();
+        let expected_inputs = lifecycle_inputs(&source);
+        assert_eq!(expected_inputs.len(), 6, "root plus two completed children");
+        assert_eq!(
+            expected_inputs
+                .iter()
+                .filter(|input| child_inputs.iter().any(|child| child[0] == input[0]))
+                .cloned()
+                .collect::<Vec<_>>(),
+            child_inputs,
+            "a later parent claim never replaces the children's immutable inputs"
+        );
+        let runs = [&children[0], &children[1], &root];
+        let expected = runs.map(|run| {
+            let generation: String = source
+                .readers
+                .get()
+                .query_row(
+                    "SELECT current_generation_id FROM mission_runs WHERE id=?1",
+                    [&run.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let accepted = |subject: String, kind: &str| {
+                let claims = expected_inputs
+                    .iter()
+                    .filter(|input| input[1] == subject && input[2] == kind)
+                    .collect::<Vec<_>>();
+                assert_eq!(claims.len(), 1, "one real terminal state for {subject}");
+                let body: Value = serde_json::from_str(&claims[0][4]).unwrap();
+                assert_eq!(body["fields"]["status"], "completed");
+                assert_eq!(body["fields"]["phase"], "terminal");
+                claims[0][3].clone()
+            };
+            let run_time = accepted(format!("mission-run/{}", run.id), "mission-run.state");
+            let generation_time = accepted(
+                format!("run-generation/{generation}"),
+                "run-generation.state",
+            );
+            (generation, run_time, generation_time)
+        });
+        for child in &expected[..2] {
+            assert_ne!(
+                child.1, expected[2].1,
+                "distinct child/root run times discriminate retiming"
+            );
+            assert_ne!(
+                child.2, expected[2].2,
+                "distinct child/root generation times discriminate retiming"
+            );
+        }
+        let inventory = source.replication_inventory().unwrap();
+        let mut captures = Vec::new();
+        // Check every member's actual inputs and terminal state BEFORE any date/digest assertion.
+        for member in members {
+            assert_eq!(
+                member.replication_inventory().unwrap().digest,
+                inventory.digest,
+                "same envelope cut: {}",
+                member.origin
+            );
+            assert_eq!(
+                lifecycle_inputs(member),
+                expected_inputs,
+                "same lifecycle bytes: {}",
+                member.origin
+            );
+            let connection = member.readers.get();
+            let mut states = Vec::new();
+            for (index, run) in runs.iter().enumerate() {
+                let state = connection
+                    .query_row(
+                        "SELECT g.id, r.status, r.phase, r.updated_at_unix_ms,
+                            g.status, g.updated_at_unix_ms
+                     FROM mission_runs r JOIN run_generations g ON g.id=r.current_generation_id
+                     WHERE r.id=?1",
+                        [&run.id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                                row.get::<_, String>(4)?,
+                                row.get::<_, String>(5)?,
+                            ))
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(
+                    state.0, expected[index].0,
+                    "exact generation: {} {}",
+                    member.origin, run.id
+                );
+                assert_eq!(
+                    (state.1.as_str(), state.2.as_str(), state.4.as_str()),
+                    ("completed", "terminal", "completed"),
+                    "status before date: {} {}",
+                    member.origin,
+                    run.id
+                );
+                states.push(state);
+            }
+            captures.push((member.origin.clone(), states));
+        }
+        for (member, states) in captures {
+            for (index, state) in states.iter().enumerate() {
+                assert_eq!(
+                    (&state.3, &state.5),
+                    (&expected[index].1, &expected[index].2),
+                    "immutable completion dates: {member} {}",
+                    runs[index].id
+                );
+            }
+        }
+        // The tiny-fixture full-row oracle is independent of the maintained digest cache.
+        let expected_digests = projection_digest::oracle(&source.readers.get()).unwrap();
+        for member in members {
+            let reader = member.readers.get();
+            let cached = projection_digest::tables(&reader).unwrap();
+            let oracle = projection_digest::oracle(&reader).unwrap();
+            for table in ["mission_runs", "run_generations"] {
+                assert_eq!(
+                    cached[table], oracle[table],
+                    "{}: {table} cache/rows",
+                    member.origin
+                );
+                assert_eq!(
+                    oracle[table], expected_digests[table],
+                    "{}: {table} three-member parity",
+                    member.origin
+                );
+            }
+        }
+    }
+
+    #[test]
     fn terminal_owners_retire_every_work_state_across_restart_and_replication() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("terminal-owner.sqlite3");
@@ -57000,6 +57330,93 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         );
     }
 
+    /// A Claude prompt is answered from a client only while its permission hook still waits: one
+    /// that has waited longer is answered in the terminal, so no answer is recorded that nothing
+    /// would deliver. The hook still waiting on it is told it is gone, and exits.
+    #[test]
+    fn a_claude_prompt_older_than_its_hook_is_answered_in_the_terminal() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "late-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        let prompt = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .find(|item| item.kind == "harness-prompt")
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
+        let now = now_ms() as u64;
+        let window = CLAUDE_PROMPT_ANSWER_WAIT_MS as u64;
+        let asked = |observed_at: u64, transition: u64| {
+            append(
+                "harness.observed",
+                json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                    "blocked_on":"human", "ask":"permission", "reason":"Read",
+                    "observed_at_ms": observed_at,
+                    "ownership_sequence":1, "transition_sequence":transition}),
+            )
+        };
+        // Within the hook's wait, the prompt is answered here.
+        asked(now - window + 60_000, 3);
+        assert_eq!(prompt().unwrap().answers, vec!["allow".to_owned(), "deny".to_owned()]);
+        // The next prompt opened before the hook's wait: still an alert, answered in the terminal,
+        // and so is each restatement of it, which keeps when it opened.
+        append(
+            "harness.observed",
+            json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":null, "ask":null, "ownership_sequence":1, "transition_sequence":4}),
+        );
+        asked(now - window - 1_000, 5);
+        let late = asked(now, 5);
+        let shown = prompt().expect("a late prompt is still an alert");
+        assert!(shown.answers.is_empty(), "{:?}", shown.answers);
+        assert!(shown.detail.contains("waited longer than st can answer it"), "{}", shown.detail);
+        assert_eq!(
+            shown.requested_at_unix_ms,
+            u128::from(now - window - 1_000),
+            "it has waited since it opened, not since its latest restatement"
+        );
+        assert_eq!(
+            store
+                .answer_native_prompt(seat, &late.id, "allow", "person/avery")
+                .unwrap_err()
+                .code,
+            "stale-fence"
+        );
+        assert_eq!(store.native_prompt_state(seat, 1, 5).unwrap(), NativePromptState::Gone);
+    }
+
     /// A driver writes each prompt as its own transition, so a later prompt for the same tool is
     /// another prompt: an answer to it never reaches the earlier prompt's waiter. A restatement
     /// of the same transition, or a credential edge, is still the same prompt.
@@ -57272,6 +57689,108 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
             NativePromptState::Answered {
                 answer: "deny".into()
             }
+        );
+    }
+
+    /// A call Claude's auto mode classifier denied waits on the seat's person: an alert until they
+    /// answer it, and the answer (allow once, allow its kind, or dismiss) is what the seat's
+    /// `PreToolUse` hook reads; the seat is told, so it runs the call again or leaves it.
+    #[test]
+    fn a_classifier_denial_is_an_alert_whose_answer_the_seat_hears() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "denial-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value, key: Option<&str>| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: key.map(str::to_owned),
+                })
+                .unwrap()
+        };
+        let denied = |call: &str| {
+            append(
+                "harness.diagnostic",
+                json!({"severity":"warning", "status":"Bash", "code":"permission-denied",
+                    "reason":"Irreversible Local Destruction", "driver":"claude",
+                    "session_id":"session-1", "matched_line": json!({"call_id": call}).to_string()}),
+                Some(&format!("claude-permission-denied:{seat}:{call}")),
+            )
+        };
+        let alerts = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .filter(|item| item.kind == "harness-prompt")
+                .collect::<Vec<_>>()
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}), None);
+        let first = denied("toolu_1");
+        let shown = alerts();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].episode, first.id);
+        assert_eq!(shown[0].answers, vec!["approve-once", "approve-kind", "dismiss"]);
+        assert!(shown[0].title.ends_with("needs you to allow a Bash call"));
+        assert!(shown[0].detail.contains("(Irreversible Local Destruction)"), "{}", shown[0].detail);
+        assert_eq!(
+            store.answer_native_prompt(seat, &first.id, "allow", "person/avery").unwrap_err().code,
+            "invalid-answer"
+        );
+        assert_eq!(
+            store.answer_native_prompt(seat, &first.id, "approve-once", "person/other").unwrap_err().code,
+            "forbidden"
+        );
+        assert_eq!(store.prompt_answer(&first.id).unwrap().answer, None);
+        store.answer_native_prompt(seat, &first.id, "approve-once", "person/avery").unwrap();
+        assert_eq!(store.prompt_answer(&first.id).unwrap().answer.as_deref(), Some("approve-once"));
+        assert!(alerts().is_empty(), "an answered denial is no longer an alert");
+        // The seat hears it, from st, and runs the call again.
+        let told = store
+            .claims_for(&format!(
+                "message/{}",
+                &hex::encode(sha2::Sha256::digest(format!("st3-denial-answer:{}", first.id).as_bytes()))[..16]
+            ), Some("message.sent"))
+            .unwrap();
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].body["fields"]["to"], seat);
+        assert!(told[0].body["fields"]["content"].as_str().unwrap().contains("Run that same call again"));
+        assert_eq!(
+            store.answer_native_prompt(seat, &first.id, "dismiss", "person/avery").unwrap_err().code,
+            "stale-fence",
+            "an answer is final"
+        );
+        // A denial from before the seat restarted waits on nobody.
+        let old = denied("toolu_2");
+        assert_eq!(alerts().len(), 1);
+        append("runtime.observed", json!({"status":"exited", "incarnation_id":"one"}), None);
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"two"}), None);
+        assert!(alerts().is_empty());
+        assert_eq!(
+            store.answer_native_prompt(seat, &old.id, "approve-kind", "person/avery").unwrap_err().code,
+            "stale-fence"
         );
     }
 

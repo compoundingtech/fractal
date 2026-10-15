@@ -153,8 +153,8 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         .is_some_and(|since| since.elapsed() < offline_grace());
     let link = if extras.offline.is_some() && !restarting {
         Link::Offline(match &model.last_connected {
-            Some(at) => format!("Last connected at {at} · reconnecting · r retry now"),
-            None => "No member reachable · reconnecting · r retry now".into(),
+            Some(at) => format!("Last connected at {at} · reconnecting · Ctrl+R retry now"),
+            None => "No member reachable · reconnecting · Ctrl+R retry now".into(),
         })
     } else if extras.live && extras.offline.is_none() {
         Link::Live
