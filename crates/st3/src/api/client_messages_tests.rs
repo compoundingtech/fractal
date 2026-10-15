@@ -82,6 +82,7 @@ async fn messages_upgrade_serves_before_first_selector_cut() {
     ).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{pending}");
     assert_eq!(pending["code"], "message-selectors-not-ready");
+    assert_eq!(pending["retryable"], true, "wire readiness refusal must remain retryable");
 }
 
 #[tokio::test]
