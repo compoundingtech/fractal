@@ -1412,12 +1412,16 @@ fn a_tiles_directory_is_never_bound_into_a_command() {
     *fixture.kernel.cgroup.lock().unwrap() = crate::tiles::registry::tools_cgroup("atlas");
     // Even a directory under the checkout roots, which a seat's call would bind.
     let cwd = fixture.checkout("tile-work");
-    let output = run(Connection::open(&socket).unwrap(), None, &["where", "here"], &cwd);
-    if sandbox_available() {
-        assert_eq!(output.result.as_ref().unwrap(), &0, "{}", output.stderr);
-        assert!(!output.stdout.contains("tile-work"), "{}", output.stdout);
-    }
-    // The call is logged in the profile's home, with or without a sandbox to run it in.
+    let output = run(
+        Connection::open(&socket).unwrap(),
+        None,
+        &["where", "here"],
+        &cwd,
+    );
+    // A Nix build sandbox may expose `/` as a different UID. The gateway must
+    // refuse the tool before preparing a call when any ancestor is untrusted.
+    let tool_trust = super::sandbox::trusted_path(&fixture.tools.join("where"), fixture.uid);
+    // With trusted tools, the call is logged even when bubblewrap is unavailable.
     let log = Connection::open(&socket)
         .unwrap()
         .manage(&Request::Log {
@@ -1426,6 +1430,38 @@ fn a_tiles_directory_is_never_bound_into_a_command() {
             wait_ms: 0,
         })
         .unwrap();
+    if std::env::var_os("NIX_BUILD_TOP").is_some()
+        && let Err(reason) = &tool_trust
+    {
+        let reason = format!("{reason:#}");
+        let error = output
+            .result
+            .as_ref()
+            .expect_err("an untrusted tool is refused");
+        assert!(format!("{error:#}").contains(&reason), "{error:#}");
+        let entries = log.as_array().unwrap();
+        assert!(
+            entries.iter().all(|entry| entry["event"] != "call"),
+            "{log}"
+        );
+        assert!(
+            entries.iter().any(|entry| {
+                entry["event"] == "refused"
+                    && entry["actor"] == TILE_AGENT
+                    && entry["detail"]["reason"] == reason
+            }),
+            "{log}"
+        );
+        eprintln!(
+            "tile directory execution coverage unavailable: tool trust prerequisite: {reason}"
+        );
+        return;
+    }
+    tool_trust.expect("outside a Nix build sandbox, the fixture tool must be trusted");
+    if sandbox_available() {
+        assert_eq!(output.result.as_ref().unwrap(), &0, "{}", output.stderr);
+        assert!(!output.stdout.contains("tile-work"), "{}", output.stdout);
+    }
     let call = log
         .as_array()
         .unwrap()
