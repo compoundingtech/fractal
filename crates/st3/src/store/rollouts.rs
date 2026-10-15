@@ -351,6 +351,15 @@ pub(super) fn message_allowed_at_cutover(
     restart_prepare_message(connection, message)
 }
 
+/// The one control message that crosses a restart cutover: the daemon's "Prepare for restart".
+///
+/// The message must be the claim the daemon itself wrote for the prepare decision of the
+/// current cutover, not just a message that names a prepare claim:
+/// - the prepare decision and the message are both newer than the current cutover request, so
+///   a prepare from an earlier (aborted or superseded) cycle never opens this fence;
+/// - the message's `message.sent` claim is acted by `daemon/runtime` and carries the prepare
+///   claim as its evidence. `send_message` accepts any `from` the caller names, but always
+///   records empty evidence, so a conversation sender cannot produce this claim.
 fn restart_prepare_message(
     connection: &Connection,
     message: &MessageView,
@@ -361,6 +370,33 @@ fn restart_prepare_message(
     {
         return Ok(false);
     }
+    let Some(cutover) = restart_cutover_request(connection, &message.to).map_err(internal)? else {
+        return Ok(false);
+    };
+    // The message view is built from the earliest send claim of its subject.
+    let sent: Option<ClaimRecord> = connection
+        .query_row(
+            "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+             FROM claims WHERE subject=?1 AND kind='message.sent'
+             ORDER BY CAST(accepted_at_unix_ms AS INTEGER),id LIMIT 1",
+            [&message.subject],
+            claim_from_row,
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some(sent) = sent.filter(|sent| {
+        sent.actor.as_deref() == Some("daemon/runtime") && sent.store_index > cutover.store_index
+    }) else {
+        return Ok(false);
+    };
+    let evidence: Vec<&str> = sent
+        .body
+        .get("evidence")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
     for tag in &message.tags {
         let Some(request) = tag.strip_prefix(crate::handoff::PREPARE_TAG_PREFIX) else {
             continue;
@@ -368,8 +404,10 @@ fn restart_prepare_message(
         let Some(prepare) = claim_by_id_tx(connection, request).map_err(internal)? else {
             continue;
         };
-        if prepare.subject == message.to
+        if evidence == [prepare.id.as_str()]
+            && prepare.subject == message.to
             && prepare.kind == "runtime.reconcile-decision"
+            && prepare.store_index > cutover.store_index
             && prepare.body["fields"]["key"] == "restart-prepare"
             && prepare.body["fields"]["decision"] == "prepare"
         {

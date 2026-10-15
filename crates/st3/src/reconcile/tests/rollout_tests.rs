@@ -901,6 +901,81 @@ fn apply_restart_cutover_allows_only_authentic_restart_prepare_control_mail() {
 }
 
 
+fn prepare_decision(seat: &Seat) -> crate::model::ClaimRecord {
+    seat.store.append_claim(&ClaimInput {
+        subject: SUBJECT.into(), kind: "runtime.reconcile-decision".into(), actor: None,
+        fields: serde_json::from_value(json!({
+            "key":"restart-prepare","decision":"prepare","reason":"apply",
+            "restart_at_unix_ms":"9999999999999",
+        })).unwrap(), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap()
+}
+
+/// Appends a "Prepare for restart" message the way the given sender would produce it.
+fn prepare_message(seat: &Seat, name: &str, actor: &str, prepare: &crate::model::ClaimRecord, evidence: Vec<String>) -> crate::model::MessageView {
+    let subject = format!("message/{name}");
+    seat.store.append_claim(&ClaimInput {
+        subject: subject.clone(), kind: "message.sent".into(), actor: Some(actor.into()),
+        fields: serde_json::from_value(json!({
+            "status":"sent","from":"daemon/runtime","to":SUBJECT,"title":"Prepare for restart",
+            "content":crate::handoff::render_prepare("apply", 9999999999999, 0),
+            "in_reply_to":null,
+            "tags":[format!("{}{}", crate::handoff::PREPARE_TAG_PREFIX, prepare.id)],
+        })).unwrap(), evidence, expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    seat.store.message(&subject).unwrap().unwrap()
+}
+
+#[test]
+fn apply_restart_cutover_refuses_a_stale_restart_prepare() {
+    let seat = Seat::new_with_owned_publication(false);
+    seat.publish_plain("second", Some(&Policy::when_idle(1_800_000, false)), "stale-prepare-intake");
+    seat.busy(false);
+    // An earlier cycle's prepare decision exists before this cutover is committed. (Its message
+    // is sent afterwards: unread mail to the seat would itself keep the safe point from opening.)
+    let stale = prepare_decision(&seat);
+    seat.plain_step();
+    assert!(seat.store.restart_cutover(SUBJECT).unwrap());
+    let stale_message = prepare_message(&seat, "stale", "daemon/runtime", &stale, vec![stale.id.clone()]);
+    assert!(!seat.store.rollout_message_allowed(&stale_message).unwrap());
+    let hold = seat.store.rollout_intake_hold(SUBJECT).unwrap();
+    assert!(!seat.store.rollout_message_allowed_under(&hold, &stale_message).unwrap());
+    // A message written for the same cutover, naming the same seat, is still admitted.
+    let current = prepare_decision(&seat);
+    let current_message = prepare_message(&seat, "current", "daemon/runtime", &current, vec![current.id.clone()]);
+    assert!(seat.store.rollout_message_allowed(&current_message).unwrap());
+    // A current message cannot borrow the stale decision either.
+    let borrowed = prepare_message(&seat, "borrowed", "daemon/runtime", &stale, vec![stale.id.clone()]);
+    assert!(!seat.store.rollout_message_allowed(&borrowed).unwrap());
+}
+
+#[test]
+fn apply_restart_cutover_refuses_a_restart_prepare_not_written_by_the_daemon() {
+    let seat = Seat::new_with_owned_publication(false);
+    seat.publish_plain("second", Some(&Policy::when_idle(1_800_000, false)), "spoof-prepare-intake");
+    seat.busy(false);
+    seat.plain_step();
+    assert!(seat.store.restart_cutover(SUBJECT).unwrap());
+    let prepare = prepare_decision(&seat);
+    // `send_message` takes `from` from the request, records it as the claim actor and never
+    // records evidence: a conversation sender naming `daemon/runtime` produces these claims.
+    let spoofed_by_send = prepare_message(&seat, "spoof-send", "daemon/runtime", &prepare, Vec::new());
+    // A claim acted by another identity cannot pass even with the daemon's evidence.
+    let spoofed_actor = prepare_message(&seat, "spoof-actor", "agent/mallory", &prepare, vec![prepare.id.clone()]);
+    // Evidence naming some other claim is not the prepare decision.
+    let other = prepare_decision(&seat);
+    let other_evidence = prepare_message(&seat, "spoof-evidence", "daemon/runtime", &prepare, vec![other.id.clone()]);
+    for message in [&spoofed_by_send, &spoofed_actor, &other_evidence] {
+        assert_eq!(message.from, "daemon/runtime");
+        assert!(!seat.store.rollout_message_allowed(message).unwrap(), "{}", message.subject);
+        let hold = seat.store.rollout_intake_hold(SUBJECT).unwrap();
+        assert!(!seat.store.rollout_message_allowed_under(&hold, message).unwrap(), "{}", message.subject);
+    }
+    // The genuine message for the same decision is admitted.
+    let genuine = prepare_message(&seat, "genuine", "daemon/runtime", &prepare, vec![prepare.id.clone()]);
+    assert!(seat.store.rollout_message_allowed(&genuine).unwrap());
+}
+
 #[test]
 fn apply_restart_blocked_leased_work_is_not_a_safe_point() {
     let seat = Seat::new_with_owned_publication(false);
