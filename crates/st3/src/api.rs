@@ -3530,7 +3530,7 @@ fn managed_session_owner_for_subject_at(
         if managed_session_id(&owner.subject, identity) != session_id {
             return Ok(None);
         }
-        Ok(Some((owner.subject.clone(), owner.incarnation.clone(), owner.origin.clone())))
+        Ok(Some((owner.subject, owner.incarnation, owner.origin)))
     })
 }
 
