@@ -701,7 +701,10 @@ class CommittedPolicy(unittest.TestCase):
 
     def test_declared_inputs_are_exactly_the_reviewed_list_and_all_exist(self):
         # Written out here: changing what a check depends on is a reviewed change to the policy AND to this list.
-        declared = {'typescript-client': sorted([
+        declared = {'linux-gate': sorted([
+            '.cargo', '.config/nextest.toml', '.github', 'Cargo.lock', 'Cargo.toml', 'clients', 'components', 'crates', 'docs/st3',
+            'docs/vrs', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix', 'scripts', 'src', 'templates', 'tests', 'vendor',
+            'wit']), 'typescript-client': sorted([
             'apps/fractal-web/package.json', 'apps/fractal-web/packages/st3-sdk/package.json', 'apps/ios',
             'clients/typescript', 'crates/stui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
             'fixtures/clients', 'flake.lock', 'flake.nix', 'package.json', 'packages/fractal-ui/package.json',
@@ -712,6 +715,7 @@ class CommittedPolicy(unittest.TestCase):
             for path in rules['inputs'] or ():
                 self.assertTrue((ROOT / path).exists(), f'{check} declares {path}, which does not exist')
         self.assertEqual(self.rules('typescript-client')['sample_one_in'], 5)
+        self.assertEqual(self.rules('linux-gate')['sample_one_in'], 5)
 
     def test_the_host_level_is_admitted_for_exactly_two_checks_wrapper_kind_and_covers_pull_requests_only(self):
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
