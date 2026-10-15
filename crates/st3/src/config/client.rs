@@ -36,7 +36,7 @@ impl<'de> Deserializer<'de> for ClientValue<'_> {
     fn deserialize_struct<V: Visitor<'de>>(mut self, _name: &'static str, fields: &'static [&'static str], visitor: V) -> Result<V::Value, Self::Error> {
         if let toml::Value::Table(table) = &mut self.value {
             table.retain(|key, _| {
-                if fields.contains(&key.as_str()) { return true; }
+                if fields.contains(&key) { return true; }
                 self.unknown.push(child_path(&self.path, key));
                 false
             });

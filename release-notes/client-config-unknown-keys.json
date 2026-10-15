@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Client config reads tolerate unknown top-level and nested keys with one naming warning; st doctor lists them and daemon loading remains strict.",
+  "replay": { "status": "none", "detail": "No claim replay or projection changes." },
+  "schema": { "status": "none", "detail": "No persisted schema or config version field changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rules or coordinated fleet-upgrade changes." },
+  "compatibility": { "status": "changed", "detail": "Clients ignore unknown config keys while preserving validation of known values. Daemons and configuration mutation paths retain strict parsing. Already-deployed older clients still reject newly introduced keys." },
+  "downtime": { "status": "none", "detail": "No daemon restart or lifecycle change is introduced." },
+  "manual": { "status": "changed", "detail": "Restart sessions after installing an upgrade that adds configuration keys, so old clients on their PATH are replaced. Use st doctor to list unknown keys." },
+  "recovery": { "status": "none", "detail": "No stored data changes. An older client can still reject keys written by a newer build; restart sessions using the upgraded client." }
+}
