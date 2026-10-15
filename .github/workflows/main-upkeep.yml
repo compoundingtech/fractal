@@ -703,7 +703,9 @@ jobs:
       - name: Materialize megarepo members
         env:
           MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
-        run: 'nix run "github:overengineeringstudio/effect-utils/$(jq -r ''.nodes["effect-utils"].locked.rev'' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https'
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
         if: success() && (steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Build missing cache contents
         shell: bash
@@ -974,7 +976,9 @@ jobs:
       - name: Materialize megarepo members
         env:
           MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
-        run: 'nix run "github:overengineeringstudio/effect-utils/$(jq -r ''.nodes["effect-utils"].locked.rev'' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https'
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
         if: steps.pnpm-store.outputs.cache-hit != 'true'
       - name: Fetch the locked packages
         shell: bash

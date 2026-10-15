@@ -844,7 +844,9 @@ jobs:
       - name: Materialize megarepo members
         env:
           MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
-        run: 'nix run "github:overengineeringstudio/effect-utils/$(jq -r ''.nodes["effect-utils"].locked.rev'' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https'
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
         if: needs.evidence-gate-genie-freshness.outputs.skip != 'true'
       - name: Check license coverage, runner selection and generated files
         shell: bash
@@ -959,7 +961,9 @@ jobs:
       - name: Materialize megarepo members
         env:
           MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
-        run: 'nix run "github:overengineeringstudio/effect-utils/$(jq -r ''.nodes["effect-utils"].locked.rev'' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https'
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - uses: actions/setup-node@v4
         with:
@@ -3318,7 +3322,9 @@ jobs:
       - name: Materialize megarepo members
         env:
           MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
-        run: 'nix run "github:overengineeringstudio/effect-utils/$(jq -r ''.nodes["effect-utils"].locked.rev'' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https'
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
       - name: Restore the pnpm store
         id: pnpm-store
         uses: actions/cache/restore@v4
