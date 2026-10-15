@@ -16,7 +16,10 @@ read and preserve the proofs in [st2 invariants](st2/invariants.md).
 does not read config or call a daemon. The versioned `contract` has one entry for
 each callable clap command path, including hidden commands and optional parent
 commands. `aliases` lists other names under each canonical command. `contract_sha256` is
-the SHA-256 of compact JSON for `contract`, not of the formatted output.
+the SHA-256 of compact JSON for `contract`, not of the formatted output. The
+printer computes this digest; the checked-in snapshot omits it and the equality
+test compares the contract body. The printed `actor_semantics` reminder comes
+first: actor: none means no --as syntax.
 
 `actor` means whether argv accepts `--as`: `none`, `optional`, or `required`.
 `actor_environment` names an environment default, if one exists. `accepts_person`
@@ -41,11 +44,13 @@ After a deliberate CLI change, review the changed actor entries and regenerate
 the checked-in contract:
 
 ```sh
-st actor-contract --json > docs/st3/actor-contract.json
+st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
 cargo nextest run -p st3 -E 'test(actor_contract)'
 ```
 
-Use the binary built from the changed source. The snapshot test fails if a
+Use the binary built from the changed source. Resolve any rebase conflict in
+`docs/st3/actor-contract.json` by running that regeneration command, never by
+hand-merging the JSON. The snapshot test fails if a
 command is added or removed, if its actor parser changes the published fields, or
 if an alias changes. Host, account, repository and harness policy remains in the
 operator layer. Person-authority enforcement is a separate daemon change.

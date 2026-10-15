@@ -24,6 +24,8 @@ fn actor_contract_prints_without_daemon_or_config() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["actor_semantics"], "actor: none means no --as syntax");
+    assert!(value["contract_sha256"].as_str().is_some());
     assert_eq!(value["contract"]["kind"], "st3.actor-contract.v1");
     assert_eq!(
         value["contract"]["commands"]["st actor-contract"]["actor"],

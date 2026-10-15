@@ -29,6 +29,17 @@ fn accepts_person(argument: &clap::Arg) -> bool {
 
 // These paths carry a configured person without an --as actor argument. Keep this
 // small semantic supplement next to the generated syntax, not in an operator wrapper.
+// Call-site map (review these handlers when their identity handling changes):
+// - st setup: setup::run reads config.person to select default_person, then records
+//   the selected person in config.person (crates/st3/src/setup.rs).
+// - st ui: main::run_terminal_ui calls stui::run, which falls back to
+//   configured_person() and passes that actor to Client::unix_as (crates/stui/src/lib.rs).
+// - st note and its subcommands: main's Command::Note passes config.person to
+//   directive_note::run, which resolves it with configured_actor before dispatch.
+// - st changes except list/show: main's Command::Changes resolves config.person
+//   with parse_person_subject before constructing Client::unix_as.
+// A parser-only test cannot prove these runtime fallbacks; keep their source
+// anchors explicit rather than asserting source text or requiring live setup/UI.
 fn implicit_person(path: &str) -> bool {
     path == "st setup"
         || path == "st ui"
@@ -100,7 +111,11 @@ pub(super) fn generate(mut command: clap::Command) -> Value {
         "{:x}",
         Sha256::digest(serde_json::to_vec(&contract).expect("contract JSON"))
     );
-    json!({"contract": contract, "contract_sha256": digest})
+    json!({
+        "actor_semantics": "actor: none means no --as syntax",
+        "contract": contract,
+        "contract_sha256": digest,
+    })
 }
 
 pub(super) fn print(effective: bool) -> anyhow::Result<()> {
@@ -167,13 +182,14 @@ mod tests {
         let path = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/st3/actor-contract.json");
         let published: Value = serde_json::from_slice(
-            &std::fs::read(path).expect("generate with st actor-contract --json"),
+            &std::fs::read(path).expect("regenerate with: st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json"),
         )
         .unwrap();
+        assert!(published.get("contract_sha256").is_none());
         assert_eq!(
-            generate(super::super::Cli::command()),
-            published,
-            "the CLI actor surface changed; review every changed command and regenerate docs/st3/actor-contract.json with st actor-contract --json"
+            generate(super::super::Cli::command())["contract"],
+            published["contract"],
+            "the CLI actor surface changed; review every changed command and regenerate with: st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json; resolve rebase conflicts by regenerating, never by hand-merging"
         );
     }
 
