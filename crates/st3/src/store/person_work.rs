@@ -1072,6 +1072,11 @@ pub(super) fn project_minimal_run(
 pub(super) fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, St3Error> {
     let fields = &claim.body["fields"];
     if claim.kind == "work.person-reassigned" {
+        let accepted: bool = tx.query_row(
+            &format!("SELECT {} FROM claims reassignment WHERE reassignment.id=?1",
+                person_rename::accepted_reassignment_sql("reassignment", "previous_person", "person")),
+            [&claim.id], |row| row.get(0)).map_err(internal)?;
+        if !accepted { return Ok(true); }
         let Some(view) = step(tx, &claim.subject).map_err(internal)? else {
             return Ok(true);
         };
@@ -2793,9 +2798,25 @@ mission "writer-load" state="ready" {
         PersonRenameRequest {
             old_person: "person/avery".into(),
             new_person: "person/robin".into(),
-            actor: "person/operator".into(),
+            actor: "person/avery".into(),
             idempotency_key: "repair-avery".into(),
         }
+    }
+
+    fn known_rename_person(store: &Store) {
+        store.append_claim(&ClaimInput {
+            subject: "message/rename-destination-known".into(),
+            kind: "message.sent".into(),
+            actor: Some("person/robin".into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!("person/robin")),
+                ("to".into(), json!("agent/alder.asker")),
+                ("content".into(), json!("This person already participates in the graph.")),
+                ("status".into(), json!("sent")),
+            ]),
+            expected_subject: None,
+            idempotency_key: Some("rename-destination-known".into()),
+        }).unwrap();
     }
 
     fn rename_claim_count(store: &Store) -> u64 {
@@ -2805,6 +2826,7 @@ mission "writer-load" state="ready" {
     #[test]
     fn rename_moves_authored_and_asked_inboxes_without_changing_history() {
         let (store, origin, input) = fixture();
+        known_rename_person(&store);
         let ask = store.ask_person(&input).unwrap();
         let original = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
         let run = store.mission_run(&origin.run).unwrap().unwrap();
@@ -2863,6 +2885,7 @@ mission "writer-load" state="ready" {
     #[test]
     fn rename_preserves_pending_episode_and_requester_cancel_authority() {
         let (store, origin, input) = fixture();
+        known_rename_person(&store);
         let ask = store.ask_person(&input).unwrap();
         let review = store.mission_run(&origin.run).unwrap().unwrap().steps.into_iter()
             .find(|step| step.step == "review").unwrap();
@@ -2893,6 +2916,7 @@ mission "writer-load" state="ready" {
     fn rename_leaves_retired_stale_and_answered_asks_untouched() {
         for invalidation in ["retired", "retry", "answered", "owner-ended"] {
             let (store, origin, input) = fixture();
+            known_rename_person(&store);
             let ask = store.ask_person(&input).unwrap();
             match invalidation {
                 "retired" => {
@@ -2934,6 +2958,7 @@ mission "writer-load" state="ready" {
     #[test]
     fn rename_before_ask_replication_converges_and_receipt_survives_reopen() {
         let (source, origin, input) = fixture();
+        known_rename_person(&source);
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("rename.sqlite3");
         let target = Store::open(&path, "birch").unwrap();

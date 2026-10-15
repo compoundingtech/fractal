@@ -9,13 +9,19 @@ pub(super) fn reviewer_sql(request: &str, answer: Option<&str>) -> String {
     let before_answer = answer
         .map(|answer| format!(" AND {}", canonical::after_sql(answer, "reassignment")))
         .unwrap_or_default();
+    let accepted = person_rename::accepted_reassignment_sql(
+        "reassignment",
+        "previous_reviewer",
+        "reviewer",
+    );
     format!(
         "COALESCE((SELECT json_extract(reassignment.body, '$.fields.reviewer')
-           FROM claims reassignment
+           FROM claims reassignment INDEXED BY claims_human_gate_reassignment_request_index
            WHERE reassignment.subject={request}.subject
              AND reassignment.kind='gate.reviewer-reassigned'
              AND json_extract(reassignment.body, '$.fields.request')={request}.id
              AND json_extract(reassignment.body, '$.fields.owner')=json_extract({request}.body, '$.fields.owner')
+             AND {accepted}
              {before_answer}
            ORDER BY {} LIMIT 1), json_extract({request}.body, '$.fields.reviewer'))",
         canonical::order_sql("reassignment", true),
@@ -34,6 +40,70 @@ pub(super) fn reviewer_tx(connection: &Connection, request: &ClaimRecord) -> Res
             |row| row.get(0),
         )
         .context("the human review request does not name a reviewer")
+}
+
+/// Restrict inbox hydration to the requested effective reviewer and unresolved, newest
+/// episodes. Candidate routing includes repairs received before their immutable request.
+/// Supersession uses the original reviewer, never the repaired reviewer: neither answering
+/// nor moving the newest request may revive a superseded copy in OLD's inbox.
+pub(super) fn pending_requests_sql(filtered: bool) -> String {
+    let candidates = if filtered {
+        "SELECT id FROM claims INDEXED BY claims_human_gate_request_index
+         WHERE kind='gate.requested' AND json_extract(body, '$.fields.reviewer') IS NOT NULL
+           AND json_extract(body, '$.fields.reviewer')=?1
+         UNION
+         SELECT json_extract(body, '$.fields.request')
+         FROM claims INDEXED BY claims_human_gate_reassignment_reviewer_index
+         WHERE kind='gate.reviewer-reassigned' AND json_extract(body, '$.fields.reviewer')=?1"
+    } else {
+        // Keep the parameter shape identical to the reviewer-filtered query.
+        "SELECT id FROM claims INDEXED BY claims_human_gate_request_index
+         WHERE kind='gate.requested' AND json_extract(body, '$.fields.reviewer') IS NOT NULL
+           AND ?1 IS NULL"
+    };
+    let episode = |alias: &str| {
+        ["owner", "reviewer", "attempt", "mission_revision", "step_definition"]
+            .map(|field| {
+                format!(
+                    "json_extract({alias}.body, '$.fields.{field}')=json_extract(request.body, '$.fields.{field}')"
+                )
+            })
+            .join(" AND ")
+    };
+    let effective_reviewer = reviewer_sql("request", None);
+    canonical_sql(&format!(
+        "WITH candidates(id) AS ({candidates})
+         SELECT request.id, request.store_index, request.batch_id, request.subject,
+                request.kind, request.origin, request.actor, request.body,
+                request.predecessors, request.accepted_at_unix_ms,
+                first.accepted_at_unix_ms
+         FROM candidates
+         JOIN claims request ON request.id=candidates.id
+         JOIN claims first ON first.id=(
+             SELECT earliest.id FROM claims earliest INDEXED BY claims_human_gate_episode_index
+             WHERE earliest.kind='gate.requested'
+               AND json_extract(earliest.body, '$.fields.reviewer') IS NOT NULL
+               AND {}
+             ORDER BY {} LIMIT 1)
+         WHERE request.kind='gate.requested'
+           AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
+           AND (?1 IS NULL OR {effective_reviewer}=?1)
+           AND NOT EXISTS (
+               SELECT 1 FROM claims result INDEXED BY claims_human_gate_answer_request_index
+               WHERE {})
+           AND NOT EXISTS (
+               SELECT 1 FROM claims newer INDEXED BY claims_human_gate_episode_index
+               WHERE newer.kind='gate.requested'
+                 AND json_extract(newer.body, '$.fields.reviewer') IS NOT NULL
+                 AND {} AND {})
+         ORDER BY {}",
+        episode("earliest"),
+        canonical::order_sql("earliest", false),
+        reviewer_answer_sql("result"),
+        episode("newer"),
+        canonical::after_sql("newer", "request"),
+        canonical::order_sql("first", false),
+    ))
 }
 
 /// Append one reassignment per current, unanswered request under the rename transaction's
@@ -388,5 +458,137 @@ mission "review-repair" state="ready" {
                 Some(OLD),
             );
         }
+    }
+
+    #[test]
+    fn indexed_candidates_exclude_answered_and_unrelated_history_before_hydration() {
+        let (store, run) = fixture();
+        let pending = request(&store, &run, "pending", "indexed-pending", 0);
+        // Separate owners keep this a history/routing test, not a supersession shortcut.
+        for index in 0..512 {
+            for answered in [false, true] {
+                let mut fields: BTreeMap<String, Value> =
+                    serde_json::from_value(pending.body["fields"].clone()).unwrap();
+                fields.insert("owner".into(), json!(format!("step-run/history/{answered}/{index}")));
+                fields.insert(
+                    "reviewer".into(),
+                    json!(if answered { OLD } else { "person/unrelated" }),
+                );
+                let historical = store.append_claim(&ClaimInput {
+                    subject: format!("gate-operation/history/{answered}/{index}"),
+                    kind: "gate.requested".into(),
+                    actor: Some("daemon/runtime".into()),
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                }).unwrap();
+                if answered {
+                    answer(&store, &historical, OLD, &format!("history-answer-{index}"));
+                }
+            }
+        }
+        let selected = |reviewer: &str| {
+            let connection = store.readers.get();
+            let mut statement = connection.prepare(&pending_requests_sql(true)).unwrap();
+            statement.query_map([reviewer], |row| row.get::<_, String>(0)).unwrap()
+                .collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(selected(OLD), vec![pending.id.clone()]);
+        assert!(selected(NEW).is_empty());
+        repair(&store, OLD, NEW, "indexed-rename");
+        assert!(selected(OLD).is_empty());
+        assert_eq!(selected(NEW), vec![pending.id.clone()]);
+        assert_eq!(store.pending_human_reviews(Some(NEW)).unwrap()[0].request, pending.id);
+
+        let connection = store.readers.get();
+        let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {}", pending_requests_sql(true)))
+            .unwrap().query_map([NEW], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        for index in [
+            "claims_human_gate_request_index",
+            "claims_human_gate_reassignment_reviewer_index",
+            "claims_human_gate_reassignment_request_index",
+            "claims_human_gate_answer_request_index",
+            "claims_human_gate_episode_index",
+        ] {
+            assert!(plan.iter().any(|step| step.contains("SEARCH") && step.contains(index)),
+                "{index}: {plan:?}");
+        }
+        assert!(!plan.iter().any(|step|
+            step.starts_with("SCAN request") || step.starts_with("SCAN result")
+                || step.starts_with("SCAN reassignment") || step.starts_with("SCAN newer")),
+            "{plan:?}");
+    }
+
+    #[test]
+    fn indexed_routing_converges_when_reassignment_arrives_before_request() {
+        let (source, run) = fixture();
+        let target = Store::open_memory("birch").unwrap();
+        target.project_replication_backlog().unwrap();
+        receive(&source, &target);
+        let request = request(&source, &run, "pending", "late-request", 0);
+        target.set_write_clock_at(request.accepted_at_unix_ms + 1).unwrap();
+        target.append_claim(&ClaimInput {
+            subject: request.subject.clone(),
+            kind: "gate.reviewer-reassigned".into(),
+            actor: Some(OLD.into()),
+            fields: BTreeMap::from([
+                ("request".into(), json!(request.id)),
+                ("owner".into(), request.body["fields"]["owner"].clone()),
+                ("previous_reviewer".into(), json!(OLD)),
+                ("reviewer".into(), json!(NEW)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert!(target.pending_human_reviews(Some(NEW)).unwrap().is_empty());
+        receive(&source, &target);
+        receive(&target, &source);
+        for store in [&source, &target] {
+            assert!(store.pending_human_reviews(Some(OLD)).unwrap().is_empty());
+            assert_eq!(store.pending_human_reviews(Some(NEW)).unwrap()[0].request, request.id);
+        }
+        let verdict = answer(&source, &request, NEW, "late-request-answer");
+        receive(&source, &target);
+        for store in [&source, &target] {
+            assert!(store.pending_human_reviews(None).unwrap().is_empty());
+            assert_eq!(store.human_review_answer(&request.id).unwrap().unwrap().id, verdict.id);
+        }
+    }
+
+    #[test]
+    fn review_indexes_are_transactional_and_reinstalled_on_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("review-indexes.sqlite3");
+        let store = Store::open(&path, "alder").unwrap();
+        let drop_indexes = "
+            DROP INDEX claims_human_gate_reassignment_request_index;
+            DROP INDEX claims_human_gate_reassignment_reviewer_index;
+            DROP INDEX claims_human_gate_answer_request_index;
+            DROP INDEX claims_human_gate_episode_index;";
+        {
+            let connection = store.connection.lock().unwrap();
+            let tx = connection.unchecked_transaction().unwrap();
+            tx.execute_batch(drop_indexes).unwrap();
+            tx.rollback().unwrap();
+            connection.prepare(&pending_requests_sql(true)).unwrap();
+            // Simulate an existing store from before these additive local indexes.
+            connection.execute_batch(drop_indexes).unwrap();
+        }
+        drop(store);
+        let reopened = Store::open(&path, "alder").unwrap();
+        assert!(reopened.pending_human_reviews(Some(NEW)).unwrap().is_empty());
+        let connection = reopened.readers.get();
+        let indexes: u64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name IN (
+                'claims_human_gate_reassignment_request_index',
+                'claims_human_gate_reassignment_reviewer_index',
+                'claims_human_gate_answer_request_index',
+                'claims_human_gate_episode_index')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(indexes, 4);
     }
 }

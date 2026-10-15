@@ -29261,6 +29261,66 @@ mod tests {
         visit(&command, &["st".into()]);
     }
 
+    #[test]
+    fn top_level_surface_exactly_matches_the_pristine_v0_inventory() {
+        let contract: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/operational-state/cli-commands.json"
+        ))
+        .unwrap();
+        let expected = contract["canonical_roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let command = Cli::command();
+        let visible = command
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
+            .map(|subcommand| subcommand.get_name().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(visible, expected);
+
+        let mut help = command.clone();
+        let help = help.render_long_help().to_string();
+        assert!(help.contains("Usage: st ["), "{help}");
+        assert!(
+            command
+                .find_subcommand("claude-channel")
+                .is_some_and(|command| command.is_hide_set()),
+            "the expert ST3 channel lifecycle must remain callable but hidden"
+        );
+
+        for legacy in [
+            "claude",
+            "codex",
+            "preview",
+            "planning",
+            "mission",
+            "publish",
+            "exec",
+            "logs",
+            "pty",
+            "inspect",
+            "wait",
+            "doc",
+            "eval",
+            "graph",
+            "status",
+            "runtime",
+            "context",
+            "resource",
+            "review",
+            "message",
+            "gate-result",
+        ] {
+            assert!(
+                command.find_subcommand(legacy).is_none(),
+                "legacy root `{legacy}` remains public"
+            );
+        }
+    }
+
 
     #[test]
     fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {

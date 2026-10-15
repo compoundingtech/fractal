@@ -407,10 +407,12 @@ impl ApiError {
             | "stale-launch-preview"
             | "fleet-leaving"
             | "glass-deleted"
+            | "person-rename-conflict"
             | "glass-limit" => StatusCode::CONFLICT,
             "launch-review-not-authorized"
             | "wrong-message-recipient"
             | "lane-approval-denied"
+            | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
             "database-busy" | "database-locked" => StatusCode::SERVICE_UNAVAILABLE,
@@ -1711,12 +1713,15 @@ fn client_error_code(code: Option<&str>) -> String {
         | "wrong-message-recipient"
         | "lane-approval-denied"
         | "glass-owner-forbidden"
+        | "person-rename-forbidden"
         | "foreign-agent-actor" => "forbidden".into(),
         "lane-not-found" => "not-found".into(),
         "invalid-person-ask"
         | "invalid-person-response"
         | "invalid-person-request"
         | "invalid-person-answer"
+        | "invalid-person-rename"
+        | "unknown-person"
         | "answer-required"
         | "unsupported-person-request"
         | "missing-ask-owner"
@@ -1730,6 +1735,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "invalid-review-decision"
         | "feedback-gate-needs-step" => "validation-failed".into(),
         "wrong-reviewer" => "forbidden".into(),
+        "person-rename-conflict" => "conflict".into(),
         "stale-work-ask"
         | "stale-subject"
         | "missing-subject-token"
@@ -28539,10 +28545,42 @@ version 2
             json!(mission_request.accepted_at_unix_ms)
         );
 
+        let index_before_refusals = store.index().unwrap();
+        for actor in ["agent/test.operator", "person/unrelated"] {
+            let (status, error) = json_request(app.clone(), "/v1/persons/rename", json!({
+                "old_person": "person/alex",
+                "new_person": "person/robin",
+                "actor": actor,
+                "idempotency_key": format!("review-api-refused-{actor}"),
+            })).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+            assert_eq!(store.index().unwrap(), index_before_refusals);
+        }
+        let (status, error) = json_request(app.clone(), "/v1/persons/rename", json!({
+            "old_person": "person/alex",
+            "new_person": "person/robin",
+            "actor": "person/alex",
+            "idempotency_key": "review-api-unknown-person",
+        })).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+        assert_eq!(store.index().unwrap(), index_before_refusals);
+        store.append_claim(&ClaimInput {
+            subject: "message/review-api-known-robin".into(),
+            kind: "message.sent".into(),
+            actor: Some("person/robin".into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!("person/robin")),
+                ("to".into(), json!(claimant)),
+                ("content".into(), json!("The new person already participates in the graph.")),
+                ("status".into(), json!("sent")),
+            ]),
+            expected_subject: None,
+            idempotency_key: Some("review-api-known-robin".into()),
+        }).unwrap();
         let repair = json!({
             "old_person": "person/alex",
             "new_person": "person/robin",
-            "actor": "person/operator",
+            "actor": "person/alex",
             "idempotency_key": "review-api-person-rename",
         });
         let (status, renamed) =

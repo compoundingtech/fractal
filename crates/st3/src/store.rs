@@ -673,6 +673,21 @@ WHERE kind='intent.desired'
 CREATE INDEX IF NOT EXISTS claims_human_gate_request_index
 ON claims(json_extract(body, '$.fields.reviewer'), store_index)
 WHERE kind='gate.requested' AND json_extract(body, '$.fields.reviewer') IS NOT NULL;
+-- Exact-request repairs and answers must be sought without reading other gate episodes.
+CREATE INDEX IF NOT EXISTS claims_human_gate_reassignment_request_index
+ON claims(json_extract(body, '$.fields.request'), subject)
+WHERE kind='gate.reviewer-reassigned';
+CREATE INDEX IF NOT EXISTS claims_human_gate_reassignment_reviewer_index
+ON claims(json_extract(body, '$.fields.reviewer'), json_extract(body, '$.fields.request'))
+WHERE kind='gate.reviewer-reassigned';
+CREATE INDEX IF NOT EXISTS claims_human_gate_answer_request_index
+ON claims(json_extract(body, '$.fields.request'), subject)
+WHERE kind='gate.result';
+CREATE INDEX IF NOT EXISTS claims_human_gate_episode_index
+ON claims(json_extract(body, '$.fields.owner'), json_extract(body, '$.fields.reviewer'),
+          json_extract(body, '$.fields.attempt'), json_extract(body, '$.fields.mission_revision'),
+          json_extract(body, '$.fields.step_definition'))
+WHERE kind='gate.requested' AND json_extract(body, '$.fields.reviewer') IS NOT NULL;
 -- The subjects that ever observed a runtime, found one seek per subject (RUNTIME_SUBJECTS)
 -- instead of reading every runtime observation. It holds runtime observations alone, so queries
 -- of other kinds plan as they did.
@@ -24629,7 +24644,7 @@ fn human_review_answer_tx(connection: &Connection, request: &str) -> Result<Opti
                 "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject,
                         claims.kind, claims.origin, claims.actor, claims.body,
                         claims.predecessors, claims.accepted_at_unix_ms
-                 FROM claims request JOIN claims ON {}
+                 FROM claims request JOIN claims INDEXED BY claims_human_gate_answer_request_index ON {}
                  WHERE request.id=?1 AND request.kind='gate.requested'
                  ORDER BY CANONICAL_ASC(claims) LIMIT 1",
                 reviewer_answer_sql("claims")
@@ -24689,50 +24704,18 @@ fn pending_human_reviews_tx(
     reviewer: Option<&str>,
 ) -> Result<Vec<HumanReviewView>> {
     let requests = {
-        let mut statement = connection.prepare(&canonical_sql(
-            "SELECT request.id, request.store_index, request.batch_id, request.subject,
-                    request.kind, request.origin, request.actor, request.body,
-                    request.predecessors, request.accepted_at_unix_ms
-             FROM claims request INDEXED BY claims_human_gate_request_index
-             WHERE request.kind='gate.requested'
-               AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
-             ORDER BY CANONICAL_ASC(request)",
-        ))?;
+        let mut statement =
+            connection.prepare(&human_review_reassignment::pending_requests_sql(reviewer.is_some()))?;
         statement
-            .query_map([], claim_from_row)?
+            .query_map([reviewer], |row| {
+                Ok((claim_from_row(row)?, row.get::<_, String>(10)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?
     };
-    // A differently worded request supersedes an older copy of the same published gate.
-    // Group by its original reviewer before filtering effective assignments or answers:
-    // repairing or answering the newest copy must never reopen the superseded OLD card.
-    let mut reviews: Vec<(HumanReviewView, String)> = Vec::new();
-    for request in requests {
-        let original_reviewer = request.body["fields"]["reviewer"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        let Some(review) = current_human_review(connection, request)? else {
-            continue;
-        };
-        match reviews.iter_mut().find(|(kept, original)| {
-            kept.owner == review.owner
-                && *original == original_reviewer
-                && kept.attempt == review.attempt
-        }) {
-            Some((kept, _)) => {
-                let first = kept.requested_at_unix_ms.min(review.requested_at_unix_ms);
-                // Requests arrive here in the canonical total order, including time ties.
-                *kept = review;
-                kept.requested_at_unix_ms = first;
-            }
-            None => reviews.push((review, original_reviewer)),
-        }
-    }
-    let mut pending = Vec::with_capacity(reviews.len());
-    for (review, _) in reviews {
-        if reviewer.is_none_or(|person| person == review.reviewer)
-            && human_review_answer_tx(connection, &review.request)?.is_none()
-        {
+    let mut pending = Vec::with_capacity(requests.len());
+    for (request, first_requested_at) in requests {
+        if let Some(mut review) = current_human_review(connection, request)? {
+            review.requested_at_unix_ms = first_requested_at.parse()?;
             pending.push(review);
         }
     }
@@ -29804,6 +29787,26 @@ fn try_project_simple_replication_tx(
             .map_err(|error| incremental_claim_error(error, claim, "aggregate-owner"))?
         {
             mark_dirty(&mut dirty, aggregate, "person ask, answer or cancel");
+        }
+        // A receipt chooses one destination for independent concurrent repairs. It can arrive
+        // after either repair's work claims, so rebuild their trees when that choice changes.
+        if claim.kind == "person.rename.completed" {
+            let mut repaired_work = transaction.prepare(
+                "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+                 FROM claims WHERE kind='work.person-reassigned'
+                 AND json_extract(body,'$.fields.previous_person')=?1",
+            ).map_err(|error| incremental_claim_error(internal(error), claim, "rename-work-dependency"))?;
+            let dependencies = repaired_work.query_map([&claim.subject], claim_from_row)
+                .map_err(|error| incremental_claim_error(internal(error), claim, "rename-work-dependency"))?;
+            for dependency in dependencies {
+                let dependency = dependency
+                    .map_err(|error| incremental_claim_error(internal(error), claim, "rename-work-dependency"))?;
+                if let Some(aggregate) = aggregate_of_tx(transaction, &dependency)
+                    .map_err(|error| incremental_claim_error(error, claim, "rename-work-aggregate"))?
+                {
+                    mark_dirty(&mut dirty, aggregate, "person rename receipt selected its destination");
+                }
+            }
         }
         if !Store::simple_replication_kind(&claim.kind) {
             let key = canonical::claim_key(transaction, &claim.id).map_err(|error| {
