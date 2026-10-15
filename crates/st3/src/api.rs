@@ -672,6 +672,13 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/client/pairings", post(client_v0::pairing_begin))
         .route("/v1/client/assistant/grants/{id}", get(client_v0::assistant::inspect))
         .route("/v1/client/assistant/grants/{id}/revoke", post(client_v0::assistant::revoke))
+        .route("/v1/client/assistant/grants/{id}/read-trust", post(client_v0::assistant::pin_read_trust))
+        .route("/v1/client/assistant/summary", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/attention", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/missions", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/agents", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/conversation-content", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/terminal-content", get(client_v0::assistant::read_projection))
         .route("/v1/client/assistant/grants/{id}/policy", post(client_v0::assistant::update_policy))
         .route(
             "/v1/client/pairings/{id}/complete",
@@ -1774,6 +1781,8 @@ fn client_error_code(code: Option<&str>) -> String {
         | "database-busy"
         | "database-locked"
         | "message-send-unconfirmed"
+        | "response-budget-exceeded"
+        | "content-not-text"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" => "validation-failed".into(),
         "launch-review-not-authorized"
@@ -2214,6 +2223,8 @@ async fn client_capabilities(
         "limits": {
             "max_page_items": CLIENT_MAX_PAGE_ITEMS,
             "max_event_items": 500,
+            "max_assistant_response_bytes": 16384,
+            "default_assistant_response_bytes": 4096,
             "max_response_bytes": CLIENT_MAX_RESPONSE_BYTES,
             "max_wait_ms": 30_000,
             "max_message_bytes": max_message_bytes,
