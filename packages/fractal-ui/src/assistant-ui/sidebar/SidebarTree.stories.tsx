@@ -230,7 +230,8 @@ const box = (element: Element) => { const { width, height } = element.getBoundin
 /** Real and pinned disclosure chevrons are the same kit SVG at the same 24px box and 12px glyph; the negative controls prove the check rejects a Unicode glyph and the wrong state. */
 export const ChevronIcons: Story = { render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement)
-  await frames(); await scroll(yes); await scroll(no)
+  // At 100px the outer parents are pinned while deeper parent rows are still mounted; at the default 600 only leaves stay mounted.
+  await frames(); await scroll(yes, 100); await scroll(no)
   const realChevrons = [...yes.querySelectorAll('[data-sidebar-tree-key] button')]
   const pinnedChevrons = [...stack(yes).querySelectorAll('[data-pinned-chevron]')]
   await expect(realChevrons.length).toBeGreaterThan(0)
