@@ -57842,13 +57842,14 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
                 Some(&format!("claude-permission-denied:{seat}:{call}")),
             )
         };
-        let observed = |state: &str, since: u128| {
-            append(
-                "harness.observed",
-                json!({"state": state, "driver": "claude", "blocked_on": "none", "ask": "none",
-                    "observed_since_ms": since as u64}),
-                None,
-            )
+        // The driver names when it saw each state; the store keeps that as the state's start when
+        // the state changes, and carries the start over a refresh of the same state.
+        let observed = |state: &str, at: Option<u128>| {
+            let mut fields = json!({"state": state, "driver": "claude", "blocked_on": "none", "ask": "none"});
+            if let Some(at) = at {
+                fields["observed_at_ms"] = json!(at as u64);
+            }
+            append("harness.observed", fields, None)
         };
         let alerts = || {
             store
@@ -57861,25 +57862,20 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         };
         append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}), None);
         let first = denied("toolu_1");
-        // The turn that ended in the denial, then the seat at rest: still waiting on the person.
-        observed("working", first.accepted_at_unix_ms - 1_000);
-        observed("idle", first.accepted_at_unix_ms);
+        // The turn that ended in the denial, then the seat at rest, both seen before the `Stop` hook
+        // raised it: still waiting on the person.
+        let ending = observed("working", Some(first.accepted_at_unix_ms - 1_000));
+        assert_eq!(ending.body["fields"]["observed_since_ms"], (first.accepted_at_unix_ms - 1_000) as u64);
+        observed("idle", Some(first.accepted_at_unix_ms - 500));
         assert_eq!(alerts(), vec![first.id.clone()]);
         // However long the seat rests, refreshed as it is, the call still waits.
-        let observed_at = |state: &str, since: u128, at: u128| {
-            append(
-                "harness.observed",
-                json!({"state": state, "driver": "claude", "blocked_on": "none", "ask": "none",
-                    "observed_since_ms": since as u64, "observed_at_ms": at as u64}),
-                None,
-            )
-        };
         for refresh in 1..=40 {
-            observed_at("idle", first.accepted_at_unix_ms, first.accepted_at_unix_ms + refresh * 300_000);
+            observed("idle", Some(first.accepted_at_unix_ms + refresh * 300_000));
         }
         assert_eq!(alerts(), vec![first.id.clone()], "a resting seat's call still waits");
         // Another turn begins: the call waits on nobody.
-        observed("working", first.accepted_at_unix_ms + 1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        observed("working", None);
         assert!(alerts().is_empty(), "the seat moved on");
         assert_eq!(
             store.answer_native_prompt(seat, &first.id, "approve-once", "person/avery").unwrap_err().code,
@@ -57888,7 +57884,7 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         // A session that ends leaves nothing waiting either.
         let second = denied("toolu_2");
         assert_eq!(alerts(), vec![second.id.clone()]);
-        observed("ended", second.accepted_at_unix_ms);
+        observed("ended", None);
         assert!(alerts().is_empty(), "the session ended");
     }
 
