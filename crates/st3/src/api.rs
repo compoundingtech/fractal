@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::os::fd::AsRawFd as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -21,7 +23,7 @@ use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 use tokio::sync::{Notify, watch};
 use tower::ServiceExt as _;
 
@@ -3071,7 +3073,12 @@ fn client_agent_resources_uncached(
     history: bool,
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
-    let status = store.status_for_subject_prefix_at("agent/", Some(snapshot_index), history)?;
+    let status = store.status_for_subject_prefix_at(
+        "agent/",
+        Some(snapshot_index),
+        history,
+        crate::store::ClaimsReduction::Summary,
+    )?;
     client_agent_resources_from_status(store, history, snapshot_index, None, status)
 }
 
@@ -3404,7 +3411,7 @@ fn client_agent_cards_presented(
             let revision = subject
                 .desired_revision
                 .clone()
-                .or_else(|| subject.claims.last().cloned())
+                .or_else(|| subject.claims_summary.latest.clone())
                 .unwrap_or_else(|| format!("agent/{}", subject.subject));
             let queue = queues.queues
                 .get(&subject.subject)
@@ -3546,8 +3553,6 @@ fn managed_session_owner_for_subject_at(
     })
 }
 
-/// Bound the legacy runtime-only scan; incarnation dating uses two index seeks instead.
-const SESSION_CLAIMS: usize = 10_000;
 
 fn client_session_resources(
     store: &Arc<Store>,
@@ -3674,7 +3679,12 @@ fn managed_session_resources(
     at: &str,
     snapshot_index: u64,
 ) -> anyhow::Result<(Vec<Value>, BTreeSet<String>)> {
-    let status = store.status_for_subject_prefix_at("agent/", Some(snapshot_index), history)?;
+    let status = store.status_for_subject_prefix_at(
+        "agent/",
+        Some(snapshot_index),
+        history,
+        crate::store::ClaimsReduction::Summary,
+    )?;
     let mut sessions = Vec::new();
     for subject in status
         .subjects
@@ -3717,17 +3727,19 @@ fn managed_session_resources(
         };
         // Keep the old page bound only for runtime-only identities, which scan subject history.
         // Incarnation spans are index-bounded and must include incarnations after that page.
+        // The summary's boundary is set exactly while the count passes the window.
         let through_claim = subject
-            .claims
-            .get(SESSION_CLAIMS - 1)
-            .filter(|_| incarnation.is_none() && subject.claims.len() > SESSION_CLAIMS);
+            .claims_summary
+            .session_boundary
+            .as_deref()
+            .filter(|_| incarnation.is_none());
         let mut accepted_times = store
             .runtime_claim_span_at(
                 &subject.subject,
                 incarnation,
                 runtime,
                 snapshot_index,
-                through_claim.map(String::as_str),
+                through_claim,
             )?
             .map(|(first, last)| vec![first, last])
             .unwrap_or_default();
@@ -3748,7 +3760,7 @@ fn managed_session_resources(
             None => subject
                 .actual_claim
                 .as_deref()
-                .or_else(|| subject.claims.first().map(String::as_str))
+                .or(subject.claims_summary.first.as_deref())
                 .map(|id| store.claim_by_id(id))
                 .transpose()?
                 .flatten()
@@ -6880,7 +6892,7 @@ pub async fn serve_unix_bound(
     serve_unix_bound_with_ready(socket, state_socket, app, || {}).await
 }
 
-/// Readiness is published only once the local API is bound and discoverable.
+/// Readiness is published only once the initialized local API can accept requests.
 pub async fn serve_unix_bound_with_ready(
     socket: &Path,
     state_socket: &Path,
@@ -6920,15 +6932,59 @@ async fn serve_unix_with_ancestor_ready(
     ancestor: fn(u32) -> Option<String>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    // Only st3-fixture initializes this process-local state. Disable host ancestry while
-    // retaining native-driver identification, which mailbox subscriptions require.
-    #[cfg(feature = "test-support")]
-    let bind_ancestry = bind_harness && crate::test_support::login_shell().is_none();
-    #[cfg(not(feature = "test-support"))]
-    let bind_ancestry = bind_harness;
+    let reserved = reserve_unix_socket(socket, state_socket).await?;
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bind_harness, ancestor, ready).await
+}
+
+/// An address reservation, not a listener. Connect attempts remain refused until
+/// the initialized application calls `serve_reserved_unix_with_ready`.
+pub struct ReservedUnixSocket {
+    socket: tokio::net::UnixSocket,
+    // The existing connect probe protects a listening predecessor. This lock also
+    // protects a new daemon's bound-but-not-listening address during startup.
+    reservation: File,
+}
+
+pub fn unix_reservation_path(socket: &Path) -> std::path::PathBuf {
+    // Discovery aliases and parent aliases must refer to the same reservation.
+    let socket = fs::canonicalize(socket).unwrap_or_else(|_| {
+        socket
+            .parent()
+            .and_then(|parent| fs::canonicalize(parent).ok())
+            .zip(socket.file_name())
+            .map(|(parent, name)| parent.join(name))
+            .unwrap_or_else(|| socket.to_path_buf())
+    });
+    let mut path = socket.as_os_str().to_owned();
+    path.push(".reservation.lock");
+    path.into()
+}
+
+/// Bind the address and publish discovery without listening or queueing clients.
+/// Retain the per-address reservation for the entire serving lifetime; never
+/// unlink its lock file while another process could hold its inode.
+pub async fn reserve_unix_socket(
+    socket: &Path,
+    state_socket: Option<&Path>,
+) -> anyhow::Result<ReservedUnixSocket> {
     crate::config::validate_unix_socket_path(socket, "--socket or --client-gateway-socket")?;
     if let Some(parent) = socket.parent() {
         fs::create_dir_all(parent)?;
+    }
+    let reservation = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(unix_reservation_path(socket))?;
+    if unsafe { libc::flock(reservation.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        anyhow::bail!(
+            "refusing to replace reserved Unix socket at {}: {}",
+            socket.display(),
+            std::io::Error::last_os_error()
+        );
     }
     // A second daemon must never detach an active listener by unlinking its pathname.
     if tokio::net::UnixStream::connect(socket).await.is_ok() {
@@ -6942,11 +6998,47 @@ async fn serve_unix_with_ancestor_ready(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let listener = UnixListener::bind(socket)?;
+    let listener = tokio::net::UnixSocket::new_stream()?;
+    listener.bind(socket)?;
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
     if let Some(state_socket) = state_socket {
         publish_state_socket(socket, state_socket)?;
     }
+    Ok(ReservedUnixSocket {
+        socket: listener,
+        reservation,
+    })
+}
+
+/// Only a fully initialized router may turn the reservation into a listener.
+pub async fn serve_reserved_unix_with_ready(
+    reserved: ReservedUnixSocket,
+    app: Router,
+    bind_harness: bool,
+    ready: impl FnOnce(),
+) -> anyhow::Result<()> {
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bind_harness, harness_ancestor, ready)
+        .await
+}
+
+async fn serve_reserved_unix_with_ancestor_ready(
+    reserved: ReservedUnixSocket,
+    app: Router,
+    bind_harness: bool,
+    ancestor: fn(u32) -> Option<String>,
+    ready: impl FnOnce(),
+) -> anyhow::Result<()> {
+    let ReservedUnixSocket {
+        socket,
+        reservation: _reservation,
+    } = reserved;
+    let listener = socket.listen(1024)?;
+    // Only st3-fixture initializes this process-local state. Disable host ancestry while
+    // retaining native-driver identification, which mailbox subscriptions require.
+    #[cfg(feature = "test-support")]
+    let bind_ancestry = bind_harness && crate::test_support::login_shell().is_none();
+    #[cfg(not(feature = "test-support"))]
+    let bind_ancestry = bind_harness;
     ready();
     let mut accept_failures = AcceptFailures::default();
     loop {
@@ -7099,6 +7191,88 @@ mod gateway_listener_tests {
         );
         assert!(tokio::net::UnixStream::connect(&socket).await.is_ok());
         drop(listener);
+    }
+
+    #[tokio::test]
+    async fn reserved_addresses_refuse_connections_until_initialized_serving() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("api.sock");
+        let discovery = root.path().join("state/run/st3.sock");
+        let reserved = super::reserve_unix_socket(&socket, Some(&discovery))
+            .await
+            .unwrap();
+        assert!(socket.exists());
+        for path in [&socket, &discovery] {
+            let error = tokio::net::UnixStream::connect(path).await.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+        }
+
+        let (ready, serving) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(super::serve_reserved_unix_with_ready(
+            reserved,
+            axum::Router::new().fallback(|| async { "initialized" }),
+            false,
+            move || ready.send(()).unwrap(),
+        ));
+        serving.await.unwrap();
+        let error = super::reserve_unix_socket(&socket, None)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to replace reserved Unix socket"),
+            "{error}"
+        );
+        let mut stream = tokio::net::UnixStream::connect(&discovery).await.unwrap();
+        stream
+            .write_all(b"GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_string(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.ends_with("initialized"), "{response}");
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn a_starting_socket_reservation_cannot_be_unlinked_even_through_discovery() {
+        use std::os::unix::fs::MetadataExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("api.sock");
+        let discovery = root.path().join("state/run/st3.sock");
+        let reserved = super::reserve_unix_socket(&socket, Some(&discovery))
+            .await
+            .unwrap();
+        let inode = std::fs::metadata(&socket).unwrap().ino();
+        for path in [&socket, &discovery] {
+            let error = super::reserve_unix_socket(path, None).await.err().unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("refusing to replace reserved Unix socket"),
+                "{error}"
+            );
+            assert_eq!(std::fs::metadata(path).unwrap().ino(), inode);
+        }
+        drop(reserved);
+        // A released/crashed reservation is not a permanent latch.
+        let next = super::reserve_unix_socket(&socket, Some(&discovery))
+            .await
+            .unwrap();
+        assert!(tokio::net::UnixStream::connect(&socket).await.is_err());
+        drop(next);
     }
 }
 
@@ -7561,6 +7735,7 @@ async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, Api
         &crate::resource::github_usage_report(),
         client_now_ms(),
     ));
+    report.checks.extend(crate::github_admission::doctor_lines(client_now_ms()));
     report.checks.push(reader_store.mailbox_wake_health());
     report.checks.push(descriptor_check());
     report.checks.push(reader_memory_check(
@@ -17164,6 +17339,7 @@ fn normalize_message_party(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SESSION_CLAIMS;
     use axum::body::to_bytes;
     use axum::http::Request;
     use std::path::PathBuf;
@@ -23819,6 +23995,88 @@ mission "visible-agentless" state="ready" {
         );
     }
 
+    /// Mission rows mark st's keep-open steps and system missions from the declaration, and from
+    /// the names the fleet used for revisions published before those flags.
+    #[test]
+    fn mission_rows_carry_keep_open_and_system_flags() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let state = state(root.path());
+        let kdl = r#"version 2
+mission "observer" state="ready" {
+  system
+  goal "Watch for work."
+  step "hold" { agentless; keep-open }
+  step "keep-watch" { agentless }
+  step "work" { agentless }
+}
+mission "plain" state="ready" {
+  goal "Do work."
+  step "work" { agentless }
+}"#;
+        let intent = parse_intent(kdl, "node").unwrap();
+        let preview = state
+            .store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: kdl.into(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .apply(&intent, &preview.subject_tokens, "flags")
+            .unwrap();
+        for mission in ["observer", "plain"] {
+            state
+                .store
+                .create_mission_run(&MissionRunRequest {
+                    mission: mission.into(),
+                    revision: None,
+                    workspace: workspace.display().to_string(),
+                    requester: Some("person/operator".into()),
+                    mode: None,
+                    inputs: BTreeMap::new(),
+                    idempotency_key: format!("flags-{mission}"),
+                })
+                .unwrap();
+        }
+        let index = state.store.index().unwrap();
+        let detail = |id: &str| {
+            client_v0::mission_resources(&state.store, index, false, Some(id))
+                .unwrap()
+                .remove(0)
+        };
+        let observer = detail("mission/observer");
+        assert_eq!(observer["system"], true);
+        let keep_open = observer["run_details"][0]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| (step["path"].as_str().unwrap().to_owned(), step["keep_open"].clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(keep_open["hold"], true, "declared");
+        assert_eq!(keep_open["keep-watch"], true, "a fleet name, before the flag");
+        assert_eq!(keep_open["work"], false);
+        assert_eq!(detail("mission/plain")["system"], false);
+        let cards = client_v0::mission_list_cards_with(
+            &state.store,
+            &["mission/observer".into(), "mission/plain".into()],
+            client_now_ms(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        let system = cards
+            .iter()
+            .map(|card| (card["id"].as_str().unwrap().to_owned(), card["system"].clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(system["mission/observer"], true);
+        assert_eq!(system["mission/plain"], false);
+    }
+
     /// A work item is the resource the work history lists for it, read without enriching every
     /// other step the store has run.
     #[test]
@@ -27036,7 +27294,12 @@ mission "wake" state="ready" {
                 let cards = client_agent_resources_selected(store, false, index, None)?;
                 assert_eq!(Sha256::digest(serde_json::to_vec(&cards)?),
                     Sha256::digest(serde_json::to_vec(&full)?));
-                let status = store.status_for_subject_prefix_at("agent/", Some(index), false)?;
+                let status = store.status_for_subject_prefix_at(
+                    "agent/",
+                    Some(index),
+                    false,
+                    crate::store::ClaimsReduction::Full,
+                )?;
                 let declared = status.subjects.iter().find(|s| s.subject == "agent/node.declared").unwrap();
                 assert_eq!(cards.iter().find(|c| c["id"] == declared.subject).unwrap()["revision"],
                     declared.desired_revision.as_ref().unwrap().as_str());
@@ -27061,7 +27324,7 @@ mission "wake" state="ready" {
         let full = client_agent_resources_uncached(store, false, index).unwrap();
         let cards = client_agent_resources_selected(store, false, index, None).unwrap();
         assert_eq!(Sha256::digest(serde_json::to_vec(&cards).unwrap()),
-            Sha256::digest(serde_json::to_vec(&full).unwrap()));
+            Sha256::digest(serde_json::to_vec(&full).unwrap()), "cards={cards:?}\nfull={full:?}");
         assert_eq!(cards.iter().find(|c| c["id"] == "agent/undeclared").unwrap()["revision"],
             runtime.id);
     }
