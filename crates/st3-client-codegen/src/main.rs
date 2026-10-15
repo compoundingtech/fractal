@@ -1407,6 +1407,51 @@ mod tests {
         ))
     }
 
+    /// Two changes adding different cases to one enum conflict if the enum is one line, in the
+    /// schema and in every generated file; from `ONE_PER_LINE_FROM` cases each has its own line.
+    #[test]
+    fn large_enums_are_one_case_per_line_in_the_schema_and_the_generated_typescript() -> Result<()> {
+        let many = rich::ONE_PER_LINE_FROM;
+        let schema_text = include_str!("../../../docs/st3/client-v0/schemas/client-v0.schema.json");
+        for line in schema_text.lines() {
+            if let Some(start) = line.find("\"enum\": [") {
+                let list = line[start..].split(']').next().unwrap_or_default();
+                assert!(
+                    list.matches("\", \"").count() + 1 < many,
+                    "an enum of {many} or more cases shares one line: {}",
+                    &line[..line.len().min(120)]
+                );
+            }
+        }
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let schema: Value = serde_json::from_str(schema_text)?;
+        let models = typescript_models(&schema, &operations, &contract_constants(&operations)?)?;
+        let rich = rich::models(&schema)?;
+        for line in models.lines() {
+            assert!(
+                line.matches("\" | \"").count() + 1 < many,
+                "Models.generated.ts puts {many} or more enum cases on one line: {}",
+                &line[..line.len().min(120)]
+            );
+        }
+        for line in rich.lines() {
+            for opener in ["openEnum([", "Schema.Literals(["] {
+                if let Some(start) = line.find(opener) {
+                    let list = line[start..].split(']').next().unwrap_or_default();
+                    assert!(
+                        list.matches(',').count() + 1 < many,
+                        "Schema.generated.ts puts {many} or more enum cases on one line: {}",
+                        &line[..line.len().min(120)]
+                    );
+                }
+            }
+        }
+        assert!(models.contains("export type ErrorCode = (\n  \"recipient-retired\"\n  | "));
+        Ok(())
+    }
+
     #[test]
     fn check_rejects_model_and_route_drift_and_generation_restores_stable_bytes() -> Result<()> {
         let operations: Value = serde_json::from_str(include_str!(
