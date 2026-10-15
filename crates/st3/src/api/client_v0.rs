@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
+pub(super) mod published_runtimes;
+
 /// Socket ownership ends this root only after the first data frame reaches the client.
 struct FirstFrame {
     span: tracing::Span,
@@ -3732,20 +3734,32 @@ fn runtime_resources_from_status(
     session: &ClientSession,
     status: crate::model::StatusResponse,
 ) -> anyhow::Result<Vec<Value>> {
+    runtime_resources_from_status_access(&state.store, &snapshot.id, &snapshot.created_at, status,
+        session.allows("terminal.read"), session.allows("terminal.control"))
+}
+
+fn runtime_resources_from_status_access(
+    store: &Store,
+    _snapshot_id: &str,
+    created_at: &str,
+    status: crate::model::StatusResponse,
+    read: bool,
+    control: bool,
+) -> anyhow::Result<Vec<Value>> {
     #[cfg(test)]
     if let Some(count) = RUNTIME_DETAIL_SUBJECT_COUNTS.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&snapshot.id) {
+        .unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(_snapshot_id) {
         *count += status.subjects.len();
     }
     // Each runtime's declaration and observation time, in one statement apiece for the list.
-    let desired_tokens = state.store.selected_desired_tokens(
+    let desired_tokens = store.selected_desired_tokens(
         &status
             .subjects
             .iter()
             .map(|selected| selected.subject.as_str())
             .collect::<Vec<_>>(),
     )?;
-    let claim_times = state.store.claim_acceptance_times(
+    let claim_times = store.claim_acceptance_times(
         &status
             .subjects
             .iter()
@@ -3789,13 +3803,13 @@ fn runtime_resources_from_status(
         if !authoritative {
             runtime_state = "unreachable";
         }
-        let local = authoritative && observed == "running" && actual_origin == state.store.origin();
+        let local = authoritative && observed == "running" && actual_origin == store.origin();
         let incarnation_id = fields.get("incarnation_id").and_then(Value::as_str);
         let desired_revision = desired_tokens.get(&owner_id).cloned();
         let updated_at = claim_times
             .get(actual_claim)
             .map(|accepted_at| client_timestamp(*accepted_at))
-            .unwrap_or_else(|| snapshot.created_at.clone());
+            .unwrap_or_else(|| created_at.to_owned());
         let reasons = selected.reason.into_iter().collect::<Vec<_>>();
         values.push(json!({
             "id": format!("runtime/{runtime_id}"),
@@ -3814,9 +3828,9 @@ fn runtime_resources_from_status(
             // Screen fences come from terminal.screen, never from a graph projection.
             "terminal_sequence": null,
             "terminal_access": terminal.then(|| json!({
-                "read": if local && session.allows("terminal.read") { "granted" } else { "unavailable" },
-                "input": if local && session.allows("terminal.control") { "granted" } else { "unavailable" },
-                "resize": if local && session.allows("terminal.control") { "granted" } else { "unavailable" }
+                "read": if local && read { "granted" } else { "unavailable" },
+                "input": if local && control { "granted" } else { "unavailable" },
+                "resize": if local && control { "granted" } else { "unavailable" }
             })),
             "operational": {
                 "layer": selected.projection.layer,
@@ -5080,6 +5094,9 @@ pub(super) async fn runtimes(
     Query(query): Query<ClientListQuery>,
 ) -> Result<ClientPageResponse, ApiError> {
     require_scope(&session, "read.projections")?;
+    if !query.history {
+        return published_runtimes::page(&state, snapshot, &session, &query);
+    }
     let history = query.history;
     client_snapshot_page(
         &state,
@@ -12228,6 +12245,139 @@ mod published_attention_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn published_runtimes_refresher_publishes_after_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        observe_published_runtime(&state, "agent/published-before", "running", false);
+        let mut changes = state.store.published_runtime_list().subscribe();
+        super::super::published_lists::start_published_lists(&state);
+        let first_cut = state.store.index().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), changes.wait_for(|_| {
+            state.store.published_runtime_list().newest().is_some_and(|p| p.cut >= first_cut)
+        })).await.unwrap().unwrap();
+        observe_published_runtime(&state, "agent/published-after", "running", false);
+        let next_cut = state.store.index().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), changes.wait_for(|_| {
+            state.store.published_runtime_list().newest().is_some_and(|p| p.cut >= next_cut)
+        })).await.unwrap().unwrap();
+        let publication = state.store.published_runtime_list().newest().unwrap();
+        assert_eq!(publication.rows.items.len(), 2);
+        assert!(published_runtimes::fold(&state.store, Some(&publication)).unwrap().is_none(),
+            "an unchanged store index does not rebuild the list");
+    }
+
+    fn observe_published_runtime(state: &AppState, subject: &str, status: &str, terminal: bool) {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: serde_json::from_value(json!({
+                "status": status, "runtime_id": subject, "incarnation_id": "one", "terminal": terminal
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+
+    fn publish_runtimes_once(state: &AppState) {
+        let list = state.store.published_runtime_list();
+        let _wake = list.start();
+        let (base, generation) = list.base();
+        if let Some((publication, _)) = published_runtimes::fold(&state.store, base.as_deref()).unwrap() {
+            assert!(list.publish(publication, generation).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_match_legacy_and_freeze_cursors_across_republish() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let session = ClientSession::for_tests_scoped("person/reader", "person/reader",
+            &["read.projections", "terminal.read"]);
+        for (subject, status, terminal) in [
+            ("exec/runtime-c", "running", true),
+            ("agent/runtime-a", "running", false),
+            ("agent/runtime-b", "running", false),
+            ("exec/runtime-old", "stopped", true),
+        ] {
+            observe_published_runtime(&state, subject, status, terminal);
+        }
+        publish_runtimes_once(&state);
+        let snapshot = new_client_snapshot(&state);
+        let expected = runtime_resources(&state, false, &snapshot, &session).unwrap();
+        assert_eq!(expected.len(), 3);
+        let query = ClientListQuery { limit: Some(1), ..ClientListQuery::default() };
+        let (Extension(first_snapshot), Json(first)) = runtimes(State(state.clone()),
+            Extension(snapshot), Extension(session.clone()), Query(query.clone())).await.unwrap();
+        assert_eq!(first.items, expected[..1]);
+        observe_published_runtime(&state, "agent/runtime-0", "running", false);
+        observe_published_runtime(&state, "agent/runtime-b", "stopped", false);
+        publish_runtimes_once(&state);
+        let mut got = first.items;
+        let mut cursor = first.page.next_cursor;
+        while let Some(encoded) = cursor {
+            let continuation = decode_client_cursor(&encoded).unwrap();
+            let (Extension(next_snapshot), Json(next)) = runtimes(State(state.clone()),
+                Extension(continuation.snapshot), Extension(session.clone()),
+                Query(ClientListQuery { cursor: Some(encoded), ..query.clone() })).await.unwrap();
+            assert_eq!(next_snapshot.id, first_snapshot.id);
+            got.extend(next.items);
+            cursor = next.page.next_cursor;
+        }
+        assert_eq!(got, expected);
+        let (_, Json(newest)) = runtimes(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session.clone()), Query(ClientListQuery::default())).await.unwrap();
+        assert_eq!(newest.items, runtime_resources(&state, false, &new_client_snapshot(&state), &session).unwrap());
+        let (_, Json(history)) = runtimes(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session.clone()), Query(ClientListQuery { history: true, ..ClientListQuery::default() })).await.unwrap();
+        assert_eq!(history.items, runtime_resources(&state, true, &new_client_snapshot(&state), &session).unwrap());
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_not_ready_never_reduces_on_request() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        observe_published_runtime(&state, "agent/not-ready", "running", false);
+        let snapshot = new_client_snapshot(&state);
+        let session = ClientSession::for_tests_scoped("person/reader", "person/reader", &["read.projections"]);
+        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let error = runtimes(State(state.clone()), Extension(snapshot), Extension(session),
+            Query(ClientListQuery::default())).await.unwrap_err();
+        assert_eq!(work.finish(), smallclaims::sqlite::work::SqliteWork::default());
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "runtime-list-not-ready");
+    }
+
+    #[tokio::test]
+    async fn published_runtimes_page_cost_is_flat_with_historical_population() {
+        for historical in [10, 2000] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            for index in 0..historical {
+                let subject = format!("agent/old-{index:04}");
+                observe_published_runtime(&state, &subject, "running", false);
+                observe_published_runtime(&state, &subject, "stopped", false);
+            }
+            for index in 0..110 {
+                observe_published_runtime(&state, &format!("agent/live-{index:04}"), "running", false);
+            }
+            publish_runtimes_once(&state);
+            let snapshot = new_client_snapshot(&state);
+            let session = ClientSession::for_tests_scoped("person/reader", "person/reader", &["read.projections"]);
+            let work = smallclaims::sqlite::work::SqliteWorkScope::start();
+            let started = Instant::now();
+            let (_, Json(page)) = runtimes(State(state.clone()), Extension(snapshot), Extension(session),
+                Query(ClientListQuery { limit: Some(100), ..ClientListQuery::default() })).await.unwrap();
+            let elapsed = started.elapsed();
+            let cost = work.finish();
+            assert_eq!(cost, smallclaims::sqlite::work::SqliteWork::default(),
+                "published reads must execute zero SQLite VM steps or status queries at population {historical}");
+            assert_eq!(page.items.len(), 100);
+            assert!(page.page.has_more);
+            assert!(elapsed < Duration::from_millis(100), "published read took {elapsed:?}");
+            println!("published runtimes historical={historical} page=100 elapsed_us={} sqlite={cost:?}", elapsed.as_micros());
+        }
+    }
 
     #[tokio::test]
     async fn request_latency_keeps_scope_and_routes_with_a_memory_only_cost_snapshot() {
