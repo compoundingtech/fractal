@@ -13549,7 +13549,7 @@ mission "queue-parity" state="ready" {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn fresh_agent_roster_waits_for_a_healthy_attempt_and_plain_reads_do_not() {
+    async fn named_agent_roster_cut_waits_and_plain_and_legacy_reads_do_not() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let mut recorded = crate::api::roster_stage_recorded().subscribe();
@@ -13570,9 +13570,9 @@ mission "queue-parity" state="ready" {
         }).unwrap();
         let mut published = state.store.subscribe_agent_roster();
         crate::api::start_agent_roster(&state);
-        let list = |fresh: bool| client_agents(State(state.clone()),
+        let list = |min_cut: Option<u64>| client_agents(State(state.clone()),
             Extension(new_client_snapshot(&state)),
-            Query(ClientListQuery { fresh, ..ClientListQuery::default() }));
+            Query(ClientListQuery { min_cut, ..ClientListQuery::default() }));
         let publishes = |cut: u64| {
             let store = state.store.clone();
             move |_: &u64| store.published_agent_roster(store.index().unwrap(), false)
@@ -13581,7 +13581,7 @@ mission "queue-parity" state="ready" {
 
         // A plain read asks for a refresh; once it publishes, the refresher pauses a second.
         let working = append(json!({"state":"working", "driver":"codex", "incarnation_id":"one"}));
-        let _ = list(false).await;
+        let _ = list(None).await;
         tokio::time::timeout(Duration::from_secs(5), published.wait_for(publishes(working)))
             .await.expect("the refresher publishes the asked-for cut").unwrap();
 
@@ -13589,7 +13589,10 @@ mission "queue-parity" state="ready" {
         // short, however many ask.
         let idle = append(json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
         for _ in 0..3 {
-            let (Extension(snapshot), Json(page)) = list(false).await.unwrap();
+            let (Extension(snapshot), Json(page)) = tokio::time::timeout(Duration::from_millis(200),
+                client_agents(State(state.clone()), Extension(new_client_snapshot(&state)),
+                    Query(ClientListQuery { fresh: true, ..ClientListQuery::default() })))
+                .await.expect("legacy fresh must never wait on publication").unwrap();
             assert!(snapshot.store_index < idle, "a plain read answers from the publication");
             assert_eq!(page.items[0]["harness_state"], "working");
         }
@@ -13613,7 +13616,7 @@ mission "queue-parity" state="ready" {
         }));
         started_rx.await.unwrap();
         let started = std::time::Instant::now();
-        let read = list(true);
+        let read = list(Some(idle));
         tokio::pin!(read);
         assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err(),
             "a fresh read must wait while a healthy attempt is in flight");
@@ -13788,7 +13791,7 @@ mission "queue-parity" state="ready" {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn fresh_agent_roster_waits_only_for_claims_that_change_a_card() {
+    async fn named_agent_roster_cut_does_not_follow_the_global_head() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let subject = "agent/fresh-roster";
@@ -13808,24 +13811,25 @@ mission "queue-parity" state="ready" {
         let revision = *published.borrow_and_update();
         let (_, Json(before)) = client_agents(State(state.clone()),
             Extension(new_client_snapshot(&state)), Query(ClientListQuery::default())).await.unwrap();
-        let fresh = || async {
-            let started = std::time::Instant::now();
-            let (snapshot, Json(page)) = client_agents(State(state.clone()),
-                Extension(new_client_snapshot(&state)),
-                Query(ClientListQuery { fresh: true, ..ClientListQuery::default() })).await.unwrap();
-            (started.elapsed(), snapshot.0.store_index, page)
+        let fresh = |min_cut| {
+            let state = &state;
+            async move {
+                let started = std::time::Instant::now();
+                let (snapshot, Json(page)) = client_agents(State((*state).clone()),
+                    Extension(new_client_snapshot(state)),
+                    Query(ClientListQuery { min_cut: Some(min_cut), ..ClientListQuery::default() })).await.unwrap();
+                (started.elapsed(), snapshot.0.store_index, page)
+            }
         };
 
-        // Claims on subjects no card reads move the graph past the published cut. The paced
-        // refresher would publish the same cards, so a fresh read does not wait for it.
+        // Later unrelated claims move the head, but a caller naming the already-published
+        // mutation cut returns immediately under that cut.
         let cut = state.store.index().unwrap();
         for marker in 0..3 {
             append(&format!("custom/test/fresh-{marker}"), "custom.test.marker", json!({}));
         }
         assert!(state.store.index().unwrap() > cut);
-        assert!(state.store.published_agent_roster_unchanged_through(
-            state.store.index().unwrap(), false).unwrap());
-        let (waited, index, page) = fresh().await;
+        let (waited, index, page) = fresh(cut).await;
         assert!(waited < Duration::from_millis(500), "waited {waited:?} for an unchanged roster");
         assert_eq!(index, cut, "the unchanged roster is served under its own cut");
         assert_eq!(page.items, before.items);
@@ -13836,7 +13840,6 @@ mission "queue-parity" state="ready" {
         append(subject, "harness.observed", json!({"state":"working",
             "driver":"codex", "incarnation_id":"one"}));
         let written = state.store.index().unwrap();
-        assert!(!state.store.published_agent_roster_unchanged_through(written, false).unwrap());
         let store = state.store.clone();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -13846,7 +13849,7 @@ mission "queue-parity" state="ready" {
             crate::api::refresh_agent_roster(&store, false)
         }));
         started_rx.await.unwrap();
-        let read = fresh();
+        let read = fresh(written);
         tokio::pin!(read);
         assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err(),
             "a fresh read must wait while a healthy attempt is in flight");
@@ -13969,14 +13972,14 @@ mission "queue-parity" state="ready" {
             Extension(new_client_snapshot(&state)), Query(query));
 
         // A history page is folded by the refresher on request, never by the read: at once it
-        // is not ready, and a read asking for a fresh roster waits for the refresher.
+        // is not ready, and a read naming its mutation cut waits for the refresher.
         let builds = state.store.agent_resources_builds_for_test();
         let not_ready = list(ClientListQuery { history: true, ..ClientListQuery::default() })
             .await.unwrap_err();
         assert_eq!(not_ready.code, "agent-roster-not-ready");
         let (Extension(history_snapshot), Json(history)) = tokio::time::timeout(
             Duration::from_secs(5),
-            list(ClientListQuery { history: true, fresh: true, ..ClientListQuery::default() }),
+            list(ClientListQuery { history: true, min_cut: Some(state.store.index().unwrap()), ..ClientListQuery::default() }),
         ).await.unwrap().unwrap();
         assert_eq!(history.items.len(), 3);
         assert!(history_snapshot.published_at.is_some());

@@ -47,8 +47,6 @@ pub struct SmalltalkRuntime {
     /// When the oldest refresh request no refresh has answered yet was made, in Unix ms; 0
     /// when none waits. A refresh clears it only once it publishes.
     pub(crate) agent_roster_requested_at: std::sync::atomic::AtomicU64,
-    /// Bit 0: a refresh is in flight. Bit 1: the last attempt failed.
-    pub(crate) agent_roster_attempt: std::sync::atomic::AtomicU8,
     /// Fault retries due in this fold, and deadlines deferred to the next refresh.
     pub(crate) agent_roster_fault_retries: Mutex<AgentRosterFaultRetries>,
     /// When an agents list read last asked for the roster, in Unix ms; 0 before the first.

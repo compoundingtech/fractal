@@ -1843,19 +1843,27 @@ background refresher last published; no read folds the roster itself. Each page 
 that roster's own cut in its `snapshot` (`store_index`, `created_at`) and when it was folded
 (`published_at`). That cut can be older than the request, by about a second plus one fold.
 
-A first page answers at once. A client that prefers to see what was written before its request
-passes `fresh=true`. The daemon requests a refresh and waits up to two seconds for a publication
-at or after the request's cut, including while the refresher is idle. It returns the newest
-publication at once only if the latest attempt failed and no newer attempt is in flight.
-A failure while the read waits also wakes it. The retained publication's original `store_index`
-and `published_at` show its age. `st agents ls` and `st agents tree` ask for this fresh read;
-Rust exposes `agents_list_fresh`.
+An ordinary first page answers immediately from the latest publication, including `st agents ls`
+and `st agents tree`. Legacy `fresh=true` is accepted but has no effect for agents: it names no
+caller-specific read-after-write fence. It does not request a refresh or wait for publication.
 
-A read returns a retryable 503 (the stream sends `resync`) only before a usable roster of
-the requested mode has been published, or after a full projection reset clears it. Current
-and history rosters remain separate: a history read never substitutes current-only membership.
+A caller that needs read-after-write passes `min_cut=N`, using the `ClaimRecord.store_index`
+returned by its write on this same host. This is a host-local store index, not a fleet-wide
+sequence: a cut returned by host A must not be used as a fence on host B. The daemon requests a
+targeted refresh and waits at most two seconds for a publication whose `snapshot.store_index`
+is at least `min_cut`. If none is available by the deadline, it returns a retryable HTTP 503
+with `details.reason: "agent-roster-cut-not-ready"`, rather than silently serving an older
+publication. The existing `fresh-wait` timing stage measures this explicit cut wait.
+Current-work `fresh=true` behavior is unchanged.
+
+Without an explicit cut, a read returns a retryable 503 (the stream sends `resync`) only before
+a usable roster of the requested mode has been published, or after a full projection reset
+clears it. Current and history rosters remain separate: a history read never substitutes
+current-only membership.
 A continuation reads the roster published at its first page's cut; once that roster is gone
 it answers `page-cursor-expired`. A stream rereads on a new publication.
+Combining `min_cut` with a continuation `cursor` is rejected with `validation-failed`: the
+continuation is already pinned to its first page's cut.
 
 A card-faults read that reaches its deadline does not stop publication. Other card fields
 are current; each affected card keeps its previous `fault`, including a known null value.

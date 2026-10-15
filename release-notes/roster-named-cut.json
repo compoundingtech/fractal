@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Serve ordinary agents lists immediately from the latest published roster, with explicit host-local min_cut fences for read-after-write",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or recovery behavior changes. The change affects reads of the in-memory published agents roster."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites. min_cut uses the existing host-local ClaimRecord.store_index returned by writes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint, retention, authority or rules-version change; no coordinated member upgrade required."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Ordinary agents lists, including st agents ls and st agents tree, return the latest publication without waiting for a refresh. Legacy agents fresh=true remains accepted as a no-op because it names no caller-specific read-after-write fence. Clients needing that fence pass min_cut using the ClaimRecord.store_index from their write on the same host; a cut from host A is not a fence on host B. The daemon requests a targeted refresh and waits at most two seconds for a publication at or after min_cut, then returns a retryable HTTP 503 with details.reason agent-roster-cut-not-ready rather than older rows. Current-work fresh behavior is unchanged. The existing roster fresh-wait timing stage measures explicit cut waits."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup migration or expected service interruption. Reads still require an initial usable roster publication."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Callers relying on agents fresh=true for read-after-write must instead pass min_cut from the write receipt on the same host and handle the retryable cut-not-ready error. Ordinary listing callers need no operator action or configuration change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes or new rollback restrictions. Rolling back restores the previous agents fresh=true publication-wait behavior and removes the explicit min_cut fence."
+  }
+}

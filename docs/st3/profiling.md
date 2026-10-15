@@ -13,12 +13,13 @@ route totals, so do not add counts across scopes. The seven action buckets are i
 256 general-route limit.
 
 `GET /v1/client/agents` also gets `scope: "agents-read"` rows, `method: "GET"`, with `read` set to
-`first-page`, `fresh` or `continuation` (any page with a `cursor`). A `fresh=true` first page waits
-up to two seconds for a refresh to publish at or after the read's own cut, including when the
-refresher is idle. Only a failed latest attempt with no newer attempt in flight returns the
-newest publication at once. Its original snapshot cut and publication time show its age.
-The other two answer at once from a published roster. Count the fresh row against its own
-target: the route total includes it.
+`first-page`, `fresh` or `continuation` (any page with a `cursor`). A first page with an explicit
+`min_cut` waits up to two seconds for a refresh to publish at or after that host-local cut,
+which comes from the write's `ClaimRecord.store_index`. If the cut is not published in time,
+the read returns the retryable `agent-roster-cut-not-ready` error, never older rows as if they
+met the fence. Ordinary first pages answer immediately from the latest published roster;
+legacy agents `fresh=true` is a no-op and counts as an ordinary first page.
+Count the explicit-cut `fresh` row against its own target: the route total includes it.
 
 `scope: "agents-roster"` rows (also under route `/v1/client/agents`) time where that wait goes,
 each in its own last-512 sample, `duration_scope: "roster-stage"`. Stage `refresh` is one refresher
@@ -26,9 +27,9 @@ fold from the previous publication, `refresh-cold` one with no publication to st
 refolds every card from the log (the daemon's first complete roster, or after a chunked
 replication projection, a trim or a repair forgot every kept reduction), and `refresh-admission`
 its wait for roster admission (`population: "refresher-folds"`).
-Stage `fresh-wait` is a fresh read's wait for a publication at its cut (2 s at most), and
-`fresh-page` the page it then builds (`population: "fresh-reads"`). Stages are not requests: they
-add no route or path rows.
+Stage `fresh-wait` is an explicit `min_cut` read's wait for a publication at or after its named
+cut (2 s at most), and `fresh-page` the page it then builds (`population: "fresh-reads"`).
+Stages are not requests: they add no route or path rows.
 
 `scope: "work-list"` rows (under route `/v1/client/work`) time a current-work read served from
 the published work list, `duration_scope: "work-stage"`. Stage `fresh-wait` is a fresh read's wait
@@ -60,11 +61,12 @@ time from a subscription on the client collections socket to its first snapshot,
 page or terminal screen. A read the daemon relayed from another machine's owner counts toward
 the target's `remote_windows` and its remote target. A request that asks to wait (`wait_ms` above
 zero, or `wait=true`) is a long poll: it is kept under `METHOD /route (long poll)` and counts
-toward no target. An agents list asked to be fresh (`fresh=true`, which `st agents ls` and
-`st agents tree` always send) waits for one roster refresh by design but is still a wait a person
-sits through, so it is the path `GET /v1/client/agents (fresh)` with its own `person-read-fresh`
-target and counts toward no other: a first page is held to the 100 ms of `person-read`, a fresh
-list to 300 ms. The `sql-statement`, `transaction` (`read`, `write`, `writer_hold`) and `cpu`
+toward no target. An agents list with an explicit `min_cut` waits for its named publication
+cut but is still a wait a person sits through, so it is the path
+`GET /v1/client/agents (fresh)` with its own `person-read-fresh` target and counts toward no
+other: an ordinary first page, including `st agents ls`, `st agents tree` and legacy
+`fresh=true`, is held to the 100 ms of `person-read`, an explicit-cut list to 300 ms.
+The `sql-statement`, `transaction` (`read`, `write`, `writer_hold`) and `cpu`
 rows cover the store's statements, its read and write transactions, each hold of its single
 writer, and the process's CPU in cores.
 

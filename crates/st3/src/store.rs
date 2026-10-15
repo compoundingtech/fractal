@@ -3544,10 +3544,6 @@ impl Store {
         }
     }
 
-    /// Only a failed latest attempt with no newer attempt in flight permits immediate fallback.
-    pub(crate) fn agent_roster_refresh_failed(&self) -> bool {
-        self.smalltalk.agent_roster_attempt.load(std::sync::atomic::Ordering::Acquire) == 2
-    }
 
     pub(crate) fn previous_agent_faults(
         &self, index: u64, history: bool, subjects: &[String],
@@ -3656,41 +3652,6 @@ impl Store {
                 && entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)))
     }
 
-    /// Whether the newest complete roster published at or before `index` already shows every
-    /// card as it would at `index`: no claim since its cut changes a card's inputs (the same
-    /// delta the incremental fold trusts), no agent timeline row arrived, and no queue deadline
-    /// passed. A read that must see what was written before it need not wait for a refresh
-    /// that would fold nothing. One range read over the claims since the cut; it never folds.
-    pub(crate) fn published_agent_roster_unchanged_through(
-        &self,
-        index: u64,
-        history: bool,
-    ) -> Result<bool> {
-        if self.smalltalk.agent_roster_refresh.get().is_none()
-            || self.agent_roster_faults_pending(history) {
-            return Ok(false);
-        }
-        let Some((cut, local, valid_until, items)) = self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned").iter()
-            .filter(|entry| entry.history == history && entry.covered.is_none() && entry.index <= index)
-            .max_by_key(|entry| (entry.index, entry.local))
-            .map(|entry| (entry.index, entry.local, entry.valid_until_unix_ms, Arc::clone(&entry.items)))
-        else {
-            return Ok(false);
-        };
-        if valid_until.is_some_and(|expiry| now_ms() >= expiry)
-            || roster_local_frontier(&self.readers.get(), index)? != local
-        {
-            return Ok(false);
-        }
-        if cut == index {
-            return Ok(true);
-        }
-        Ok(match self.changed_agent_resources(cut, index, &items)? {
-            AgentResourcesChange::Delta(delta) => delta.subjects.is_empty() && !delta.queues && !delta.membership,
-            AgentResourcesChange::Invalidated { .. } => false,
-        })
-    }
 
     /// Note that an agents list read asked for the roster now, so a forget refolds it at once.
     pub(crate) fn note_agent_roster_read(&self) {
@@ -3748,20 +3709,17 @@ impl Store {
 
     /// Run one refresh, answering the requests made before it began only if it publishes.
     pub(crate) fn answer_agent_roster_requests<T>(&self, refresh: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.smalltalk.agent_roster_attempt.fetch_or(1, std::sync::atomic::Ordering::AcqRel);
-        struct Attempt<'a>(&'a SmalltalkRuntime, bool);
+        struct Attempt<'a>(&'a SmalltalkRuntime);
         impl Drop for Attempt<'_> {
             fn drop(&mut self) {
-                self.0.agent_roster_attempt.store(if self.1 { 0 } else { 2 }, std::sync::atomic::Ordering::Release);
                 // Failure (including an unwind) must also wake readers waiting for publication.
                 self.0.agent_roster_published.send_modify(|_| {});
             }
         }
-        let mut attempt = Attempt(&self.smalltalk, false);
+        let _attempt = Attempt(&self.smalltalk);
         let requested = &self.smalltalk.agent_roster_requested_at;
         let pending = requested.swap(0, std::sync::atomic::Ordering::AcqRel);
         let result = refresh();
-        attempt.1 = result.is_ok();
         if result.is_err() && pending != 0 {
             // Still unanswered: keep the oldest request time unless a newer request is waiting.
             let _ = requested.compare_exchange(0, pending, std::sync::atomic::Ordering::AcqRel,
