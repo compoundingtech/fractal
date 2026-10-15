@@ -82,6 +82,12 @@ struct Host {
 
 impl Host {
     fn new(tiles: &[&str], tasks_max: u32) -> Self {
+        Self::with(tiles, tasks_max, "", false)
+    }
+
+    /// A host whose registry also has `head`'s top-level settings, and whose tiles can run st
+    /// itself when `st_inside`.
+    fn with(tiles: &[&str], tasks_max: u32, head: &str, st_inside: bool) -> Self {
         let serial = SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -102,7 +108,14 @@ impl Host {
                 .map(std::ffi::OsStr::new)
                 .chain([dir.as_os_str()]),
         ));
-        let st = dir.join("st3");
+        let bin = dir.join("bin");
+        ok(sudo(
+            ["install", "-d", "-o", "root", "-g", "root", "-m", "0755"]
+                .iter()
+                .map(std::ffi::OsStr::new)
+                .chain([bin.as_os_str()]),
+        ));
+        let st = bin.join("st3");
         ok(sudo([
             "install".as_ref(),
             "-o".as_ref(),
@@ -151,20 +164,40 @@ impl Host {
             });
         }
         let python = std::fs::canonicalize(which("python3")).unwrap();
+        let mut roots = vec![python.clone()];
+        let mut path = vec![python.parent().unwrap().to_path_buf()];
+        let mut read_only = Vec::new();
+        if st_inside {
+            // st's own libraries, from the store paths its loader names.
+            let libraries = text(&ok(Command::new("ldd").arg(&host.st).output().unwrap()));
+            roots.extend(libraries.split_whitespace().filter_map(|word| {
+                let rest = word.strip_prefix("/nix/store/")?;
+                Some(PathBuf::from("/nix/store").join(rest.split('/').next()?))
+            }));
+            read_only.push(bin.display().to_string());
+            path.push(bin.clone());
+        }
         let closure = text(&ok(Command::new("nix-store")
             .arg("-qR")
-            .arg(&python)
+            .args(&roots)
             .output()
             .unwrap()));
+        read_only.extend(closure.lines().map(str::to_owned));
+        read_only.sort();
+        read_only.dedup();
         let mut registry = format!(
-            "state_root = \"{dir}/state\"\nruntime_root = \"{dir}/run\"\nread_only = [{closure}]\npath = [\"{bin}\"]\n",
+            "state_root = \"{dir}/state\"\nruntime_root = \"{dir}/run\"\nread_only = [{read_only}]\npath = [{path}]\n{head}",
             dir = host.dir.display(),
-            closure = closure
-                .lines()
+            read_only = read_only
+                .iter()
                 .map(|line| format!("\"{line}\""))
                 .collect::<Vec<_>>()
                 .join(", "),
-            bin = python.parent().unwrap().display(),
+            path = path
+                .iter()
+                .map(|dir| format!("\"{}\"", dir.display()))
+                .collect::<Vec<_>>()
+                .join(", "),
         );
         for tile in &host.tiles {
             registry.push_str(&format!(
@@ -1170,4 +1203,104 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
     assert!(b_seen.contains(&b_agent), "{b_seen}");
     assert!(!b_seen.contains(&a_agent), "{b_seen}");
     drop(runtime);
+}
+
+/// The kernel's word about a caller, read from /proc as the gateway itself does.
+struct ProcKernel;
+
+impl st3::sekrets::gateway::Kernel for ProcKernel {
+    fn cgroup(&self, pid: i32) -> Option<String> {
+        st3::sekrets::identity::process_cgroup(pid)
+    }
+    fn start(&self, pid: i32) -> Option<u64> {
+        st3::sekrets::identity::process_start(pid)
+    }
+}
+
+#[test]
+fn sekrets_names_a_tile_its_agent_and_its_user_outside_the_tile_no_one() {
+    if !enabled() {
+        return;
+    }
+    // A gateway like st-sekrets.service, run by this test's user over a disposable store.
+    let gateway_dir = tempfile::Builder::new()
+        .prefix("st-tiles-sekrets-")
+        .tempdir_in("/var/tmp")
+        .unwrap();
+    std::fs::set_permissions(gateway_dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let store = gateway_dir.path().join("store");
+    std::fs::create_dir(&store).unwrap();
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = gateway_dir.path().join("gateway.sock");
+    let host = Host::with(
+        &["a"],
+        64,
+        &format!("sekrets_socket = {:?}\n", socket),
+        true,
+    );
+    let a = host.tile("a");
+    let config: st3::sekrets::gateway::GatewayConfig = toml::from_str(&format!(
+        "socket = {socket:?}\nstore = {store:?}\npath = [\"/run/current-system/sw/bin\"]\n\
+         tile_registry = {registry:?}\n[people]\n",
+        registry = host.registry,
+    ))
+    .unwrap();
+    // The gateway reads root's registry the way it does in production: Registry::load.
+    let gateway = std::sync::Arc::new(
+        st3::sekrets::gateway::Gateway::new(
+            config,
+            unsafe { libc::getuid() },
+            None,
+            Box::new(ProcKernel),
+        )
+        .unwrap(),
+    );
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666)).unwrap();
+    std::thread::spawn(move || gateway.serve_listener(listener));
+
+    // Inside the tile, at the client's default socket, with no daemon to vouch for it.
+    let inside = ok(host
+        .command(a, &["st3", "sekrets", "whoami"])
+        .output()
+        .unwrap());
+    let said = text(&inside);
+    assert!(
+        said.contains(&format!(
+            "agent/fleet/fixture-example/{}, working for person/example",
+            a.name
+        )),
+        "{said}\n{}",
+        String::from_utf8_lossy(&inside.stderr)
+    );
+
+    // The same Unix user outside the tile is no one.
+    let outside = sudo([
+        "-u".as_ref(),
+        format!("#{}", a.uid).as_ref(),
+        "env".as_ref(),
+        "-i".as_ref(),
+        format!("ST_SEKRETS_SOCKET={}", socket.display()).as_ref(),
+        "HOME=/nonexistent".as_ref(),
+        host.st.as_os_str(),
+        "sekrets".as_ref(),
+        "whoami".as_ref(),
+    ]);
+    let said = format!(
+        "{}{}",
+        text(&outside),
+        String::from_utf8_lossy(&outside.stderr)
+    );
+    assert!(said.contains("outside the tile"), "{said}");
+    assert!(!said.contains(", working for"), "{said}");
+
+    // Without its gateway, a tile that should reach sekrets is refused, not started.
+    std::fs::remove_file(&socket).unwrap();
+    let refused = host.probe(a, "print('started')", "");
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("no socket there"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
 }
