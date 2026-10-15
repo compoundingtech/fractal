@@ -135,16 +135,18 @@ def policy_rules(text, check, repository):
             raise Failure('error', f'skip policy for {check}/{kind}: malformed runner_prefix')
         by_level = {}
         for level, override in (rule.get('by_level') or {}).items():
-            if not isinstance(level, str) or not level or not isinstance(override, dict) or set(override) - LEVEL_KEYS or 'command' not in override:
+            # `events` is required: an override that left it out would cover every event, the merge queue included.
+            if not isinstance(level, str) or not level or not isinstance(override, dict) or set(override) - LEVEL_KEYS \
+                    or not {'command', 'events'} <= set(override):
                 raise Failure('error', f'skip policy for {check}/{kind}: by_level {level!r} is not valid')
             if level not in (kind_levels or levels):
                 raise Failure('error', f'skip policy for {check}/{kind}: by_level {level!r} is not among the trust levels this kind accepts')
-            events = override.get('events')
-            if events is not None and not (isinstance(events, list) and events and all(e in EVENTS for e in events)):
+            events = override['events']
+            if not (isinstance(events, list) and events and len(set(events)) == len(events) and all(e in EVENTS for e in events)):
                 raise Failure('error', f'skip policy for {check}/{kind}: events must be a nonempty list of {", ".join(EVENTS)}')
             lcommand, lrequired, lbind = checked_command_inputs(override, f'{check}/{kind}/{level}')
             by_level[level] = {'command': [fill(v) for v in lcommand], 'required_inputs': sorted(set(lrequired) | set(lbind)),
-                               'bind_inputs': dict(lbind), 'events': list(events) if events else None}
+                               'bind_inputs': dict(lbind), 'events': list(events)}
         kinds[kind] = {'command': [fill(v) for v in command],
                        'runner_prefix': fill(prefix) if prefix else None,
                        # Binding an input also requires it, so the list can never be shorter than the binding.

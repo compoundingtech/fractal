@@ -358,6 +358,14 @@ catch a stray commit by someone else; a fork never signs); `configure` writes th
 directory and masks every key line; `once CHECK` refuses a second signature for a check in one job;
 `cleanup` overwrites and removes the key, and runs even when earlier steps failed. The wrapper and
 signer scripts must come from the base commit of the change, never from the tree under test.
+Input keys: when the skip policy at the base commit declares `inputs` for a check, the signing job asks the base commit's
+`scripts/evidence-verify --project` for the git tree of the tested tree reduced to those paths and signs it as
+`observed.inputs.source_inputs`; a base without `--project`, a check without inputs, or any error means an exact-tree
+record as before. `scripts/evidence-publish` then also writes `refs/notes/evidence-input/<check>/<source_inputs>/<record>`
+for every accepted record (pass or fail, one ref per record, never replaced) so a gate can find the records of
+another tree with the same inputs by one prefix fetch. The ref is only an index; a record is still accepted only
+by its signature, exact command, required inputs and tier.
+
 Accepted gap: code under test in a job that holds the key can read it. That now includes every pull
 request from this repository: its author controls the workflow file the run executes, so a person or agent with
 write access can read the key and sign any note; the author list narrows who gets a note, it does not
@@ -693,7 +701,7 @@ Write `scripts/evidence-verify --policy-from BASE
 --repository OWNER/NAME` to apply it by hand.
 
 A kind's rule may also name `by_level`: for one signer level (the first part of the principal), its own `command`, `required_inputs`,
-`bind_inputs` and `events` (`pull_request` and/or `merge_group`) replace the kind's. The level must be one the kind accepts. It is how a
+`bind_inputs` and `events` (`pull_request` and/or `merge_group`; `events` is required, so an override can never silently cover every event) replace the kind's. The level must be one the kind accepts. It is how a
 host-signed local note (its command is the `nix develop ...` line `scripts/st-test` runs) can satisfy a check whose CI step wrapper records a
 different command and extra inputs, while each signer is still held to exactly its own rule. The verifier reports the `events` that apply
 and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
@@ -718,6 +726,21 @@ the key of the tree the run asks about (the head's, in head mode). The signer is
 dependence:** a skip now depends on state outside the pull request. The same head can run when the gate looks (no note yet) and skip on a re-run once the
 agent has signed and pushed the note, or the reverse if a note is later superseded by a failing record; a skip is the decision at that run, not a property of the sha. A skip on a pull request therefore means "the head tree passed on a trusted host", not
 "the merge with today's main passes"; a break caused only by main moving is caught in the merge queue, which still tests the integrated tree.
+
+### Running the checks locally (`scripts/st-test`)
+
+`scripts/st-test` runs each required check that has a local command (today `genie-freshness` and
+`typescript-client`; `--list` prints them) once, through `evidence-wrap`, on the tree the pull request will be
+tested as, and the host's signer records the exit code and output digest. GitHub tests the merge of the branch into
+its base, so when the branch does not hold the base's tip the script computes the merge tree (`git merge-tree`) and
+makes a merge commit with that tree; a merge that conflicts stops it. The command always runs in a fresh throwaway
+worktree of that commit, so untracked or ignored files in your checkout cannot change the result. A failing run is
+recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base. It prints one
+line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
+(`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or
+`EVIDENCE_PUSH_TOKEN`); whether that identity may create `refs/notes/evidence/*` is a repository rule not yet confirmed for agent seats.
+It runs `nix develop` and `pnpm install` from the tree under test, on the signing host as its user: code in that tree runs
+there with the key within reach (cooperative trust, see Host keys). It changes no policy: a check skips only where `enforce` is true.
 
 ### When the gate says skip
 

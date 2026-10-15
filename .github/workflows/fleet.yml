@@ -911,6 +911,7 @@ jobs:
           STEP_COMMAND: '["bash","scripts/ci-genie-freshness"]'
           STEP_OUTCOMES: '{"freshness":"${{ steps.freshness.outcome }}"}'
           GATE_SKIP: ${{ needs.evidence-gate-genie-freshness.outputs.skip == 'true' }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STEP_CHECK"
@@ -1028,6 +1029,7 @@ jobs:
           STEP_COMMAND: '["bash","scripts/ci-typescript-client"]'
           STEP_OUTCOMES: '{"install":"${{ steps.install.outcome }}","client":"${{ steps.client.outcome }}"}'
           GATE_SKIP: ${{ needs.evidence-gate-typescript-client.outputs.skip == 'true' }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STEP_CHECK"
@@ -1363,6 +1365,7 @@ jobs:
           STAGE: tests
           STAGE_JOB: linux-tests
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -1539,6 +1542,7 @@ jobs:
           STAGE: tests
           STAGE_JOB: linux-tests-shard-2
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -1715,6 +1719,7 @@ jobs:
           STAGE: tests
           STAGE_JOB: linux-tests-shard-3
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -1891,6 +1896,7 @@ jobs:
           STAGE: tests
           STAGE_JOB: linux-tests-shard-4
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -2086,6 +2092,7 @@ jobs:
           STAGE: clippy
           STAGE_JOB: linux-clippy
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -2280,6 +2287,7 @@ jobs:
           STAGE: fleet-compat
           STAGE_JOB: linux-fleet-compat
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -2504,6 +2512,7 @@ jobs:
           STAGE: mail-redelivery-canaries
           STAGE_JOB: mail-redelivery-canaries
           GATE_SKIP: ${{ needs.evidence-gate-linux-gate.outputs.skip == 'true' || needs.evidence-gate-mail-redelivery-canaries.outputs.skip == 'true' }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -3065,6 +3074,7 @@ jobs:
           STEP_COMMAND: '["isolation-vm","nixos-test-driver","transport-isolation-vm","sekrets-vm"]'
           STEP_OUTCOMES: '{"kvm":"${{ steps.kvm.outcome }}","driver":"${{ steps.driver.outcome }}","vmtest":"${{ steps.vmtest.outcome }}","sekrets-driver":"${{ steps.sekrets-driver.outcome }}","sekrets-test":"${{ steps.sekrets-test.outcome }}"}'
           GATE_SKIP: ${{ needs.evidence-gate-isolation-vm.outputs.skip == 'true' }}
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STEP_CHECK"
