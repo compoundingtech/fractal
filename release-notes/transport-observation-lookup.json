@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Seek the latest transport observation by peer and originating writer",
+  "replay": {"status": "none", "detail": "Claim contents and canonical ordering are unchanged."},
+  "schema": {"status": "changed", "detail": "Store opening idempotently creates a partial claims index on subject, origin and numeric-text acceptance time for transport.observed. Existing stores build the index once; no backfill table or schema-version change is needed."},
+  "rules": {"status": "none", "detail": "Transport status, refresh windows and canonical timestamp ties retain their existing semantics."},
+  "compatibility": {"status": "none", "detail": "No wire or persisted claim changes. Older binaries can read the same store and ignore the additive index."},
+  "downtime": {"status": "changed", "detail": "The first open builds the index over existing claims before normal service startup."},
+  "manual": {"status": "none", "detail": "No manual migration is required."},
+  "recovery": {"status": "none", "detail": "Binary rollback does not require undoing the index."}
+}
