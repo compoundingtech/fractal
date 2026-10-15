@@ -13,6 +13,11 @@ import {
   activeTrigger, defaultCommands, draftFromText, insertToken, serializeDraft,
   type Draft, type DraftToken, type MentionToken, type SerializedDraft, type SlashCommand,
 } from './embrace-composer/draft'
+import { composerImagePolicy, imageSubmitBlock, type ComposerAvailability, type ComposerImage, type ComposerImagePolicy, type ComposerRecipientReadout, type ComposerReply } from './embrace-composer/send'
+import {
+  ComposerAttachImage, ComposerAvailabilityNotice, ComposerImageIntakeContext, ComposerImageTray, ComposerLiveStatus, ComposerRecipientControl, ComposerReplyChip, ComposerSubjectField,
+  sessionChangeNote, useComposerImageIntake, type ComposerImageIntake,
+} from './embrace-composer/SendSurface'
 
 export interface EmbraceComposerProps {
   readonly variant: 'C1' | 'C2' | 'C3'
@@ -58,6 +63,27 @@ export interface EmbraceComposerProps {
   readonly sendDisabled?: boolean
   /** Overrides the empty-field guidance; keyboard instructions stay in the footer, never here. */
   readonly placeholder?: string
+  /** Controlled `To <label>` readout; the canonical ref and active session stay accessible. */
+  readonly recipient?: ComposerRecipientReadout
+  /** Observed roster for recipient selection. */
+  readonly recipients?: readonly { readonly ref: string; readonly label: string }[]
+  /** Navigation only: called once with the chosen canonical ref; never sends or moves the draft. */
+  readonly onRecipientChange?: (ref: string) => void
+  /** Controlled image tray for the runtime's retained attachments; Uploading/Failed entries hold submit. */
+  readonly images?: readonly ComposerImage[]
+  readonly onRemoveImage?: (id: string) => void
+  /** Retries the runtime's retained File; never re-uploads a completed native reference. */
+  readonly onRetryImage?: (id: string) => void
+  /** Limits the attachments adapter declares; defaults to st's four PNG, JPEG, GIF or WebP images of 10 MiB. */
+  readonly imagePolicy?: ComposerImagePolicy
+  /** Send availability; anything but Ready keeps the draft editable and blocks submit. */
+  readonly availability?: ComposerAvailability
+  /** Reply context for an authoritative incoming mail row. */
+  readonly reply?: ComposerReply
+  readonly onClearReply?: () => void
+  /** Optional subject; the field renders only when the host handles changes. */
+  readonly subject?: string
+  readonly onSubjectChange?: (subject: string) => void
 }
 
 const styles = stylex.create({
@@ -95,6 +121,10 @@ const styles = stylex.create({
   availableReason: { display: 'block' },
   cancelVisibility: { display: { default: 'inline-flex', ':disabled': 'none' } },
   warning: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: status.attention },
+  context: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0, width: '100%' },
+  refusal: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: text.fg, overflowWrap: 'anywhere' },
+  // Context notes sit on the slab fill, where fgMuted at meta size falls below 4.5:1 in dark.
+  contextNote: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: text.fgSoft, overflowWrap: 'anywhere' },
   button: {
     minHeight: g.controlMd, flexShrink: 0, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.controlBorder,
     borderRadius: r.control, backgroundColor: surface.controlFill, color: text.fg,
@@ -151,6 +181,8 @@ const groupPreviewLimit = 4
 /** Requires the same assistant-ui thread/runtime provider as the transcript. */
 export function EmbraceComposer(props: EmbraceComposerProps) {
   const runtimeText = useAuiState(state => state.composer.text)
+  const threadDisabled = useAuiState(state => state.thread.isDisabled)
+  const intake = useComposerImageIntake(props.images?.length ?? 0, props.disabledReason !== undefined || threadDisabled, props.imagePolicy ?? composerImagePolicy)
   const root = React.useRef<HTMLDivElement>(null)
   const [wrapped, setWrapped] = React.useState(false)
   const [cramped, setCramped] = React.useState(false)
@@ -193,7 +225,7 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
       observer.disconnect()
       document.fonts.removeEventListener('loadingdone', measure)
     }
-  }, [density, iconOnly, pillLayout, props.toolbar, props.actions])
+  }, [density, iconOnly, pillLayout, props.toolbar, props.actions, props.recipient?.label, props.recipients, intake.available])
   React.useLayoutEffect(() => {
     const field = root.current?.querySelector<HTMLElement>('textarea, [role="textbox"]')
     const footer = root.current?.querySelector<HTMLElement>('[data-testid="composer-footer"]')
@@ -237,18 +269,24 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
       probe.remove()
     }
   }, [pillLayout, runtimeText, props.tokenDraft])
-  const stacked = props.variant === 'C2' || wrapped || cramped || runtimeText.includes('\n')
+  // Context rows (availability, reply, subject, images, refusals) always open the slab.
+  const hasContext = props.reply !== undefined || props.onSubjectChange !== undefined || (props.images?.length ?? 0) > 0 || intake.refused !== undefined
+    || (props.availability !== undefined && props.availability._tag !== 'Ready') || props.recipient?.sessionChanged === true
+  const stacked = props.variant === 'C2' || wrapped || cramped || runtimeText.includes('\n') || hasContext
   const composerProps = {
     ...props,
+    targetLabel: props.targetLabel ?? props.recipient?.label,
     style: [styles.adaptiveRoot, stacked ? styles.slab : props.variant === 'C3' ? styles.focusSlab : styles.pill, props.style],
     inputStyle: [styles.input, styles.growingEditor, props.inputStyle],
     fieldStyle: [stacked ? styles.field : styles.fieldRow, props.fieldStyle],
     footerStyle: [styles.adaptiveFooter, props.footerStyle],
     submitIcon: props.submitIcon ?? <Icon name="send" />,
   }
-  return <CompactComposerContext.Provider value={densityContext}><div ref={root} data-testid="kit-composer" {...stylex.props(props.readingColumn === true && readingColumnStyles.column)}>
+  return <CompactComposerContext.Provider value={densityContext}><ComposerImageIntakeContext.Provider value={intake}><div ref={root} data-testid="kit-composer" {...stylex.props(props.readingColumn === true && readingColumnStyles.column)}>
     {(props.plainText ?? props.variant === 'C1') || props.input !== undefined ? <PlainComposer {...composerProps} /> : <TokenComposer {...composerProps} />}
-  </div></CompactComposerContext.Provider>
+    {props.recipient !== undefined || props.availability !== undefined || props.images !== undefined
+      ? <ComposerLiveStatus recipient={props.recipient} availability={props.availability} images={props.images} /> : null}
+  </div></ComposerImageIntakeContext.Provider></CompactComposerContext.Provider>
 }
 
 const CompactComposerContext = React.createContext({ compact: false, iconOnly: false })
@@ -292,37 +330,74 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
       </MenuTrigger>}
       <EffortPicker {...effort} compact={compact} />
     </div>
-    <ComposerPrimitive.AddAttachment asChild><Button aria-label="Attach image" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="attach" /></Button></ComposerPrimitive.AddAttachment>
+    <ComposerAttachImage compact={compact} />
     {running && <ComposerPrimitive.Cancel asChild><Button aria-label="Stop run" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="stop" /></Button></ComposerPrimitive.Cancel>}
   </>
 }
 
-function PlainComposer({ targetLabel, disabledReason, toolbar, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, input, actions, placeholder = 'Message, @ mentions and / commands as text' }: EmbraceComposerProps) {
+/** Rows above the field: availability, session change, reply, subject, images and refusals. */
+function SendContext({ availability, recipient, reply, onClearReply, subject, onSubjectChange, images, imagePolicy, onRemoveImage, onRetryImage, readOnly, formRef }: EmbraceComposerProps & { readonly readOnly: boolean; readonly formRef: React.RefObject<HTMLFormElement | null> }) {
+  const intake = React.useContext(ComposerImageIntakeContext)
+  const imageBlock = imageSubmitBlock(images)
+  const unavailable = availability !== undefined && availability._tag !== 'Ready' ? availability : undefined
+  if (unavailable === undefined && recipient?.sessionChanged !== true && reply === undefined && onSubjectChange === undefined && (images?.length ?? 0) === 0 && intake?.refused === undefined) return null
+  // Removing the focused control would drop focus to the page; the draft field takes it instead.
+  const focusField = () => formRef.current?.querySelector<HTMLElement>('textarea, [role="textbox"]')?.focus()
+  return <div data-testid="composer-send-context" {...stylex.props(styles.context)}>
+    {unavailable !== undefined ? <ComposerAvailabilityNotice availability={unavailable} /> : null}
+    {recipient?.sessionChanged === true ? <div data-testid="composer-session-note" {...stylex.props(styles.contextNote)}>{sessionChangeNote(recipient)}</div> : null}
+    {reply !== undefined ? <ComposerReplyChip reply={reply} onClear={readOnly || onClearReply === undefined ? undefined : () => { onClearReply(); focusField() }} /> : null}
+    {onSubjectChange !== undefined ? <ComposerSubjectField subject={subject ?? ''} onSubjectChange={onSubjectChange} isReadOnly={readOnly} onEnter={focusField} /> : null}
+    {images !== undefined ? <ComposerImageTray images={images} maxCount={(imagePolicy ?? composerImagePolicy).maxCount} onRemoveImage={onRemoveImage === undefined ? undefined : id => { onRemoveImage(id); focusField() }} onRetryImage={onRetryImage} disabled={readOnly} /> : null}
+    {intake?.refused !== undefined ? <div role="alert" data-testid="composer-image-refusal" {...stylex.props(styles.refusal)}>{intake.refused}</div> : null}
+    {imageBlock !== undefined ? <div data-testid="composer-image-wait" {...stylex.props(styles.contextNote)}>{imageBlock}</div> : null}
+  </div>
+}
+/** Availability and retained-image state hold submit; the draft stays editable. */
+const sendBlocked = ({ availability, images }: EmbraceComposerProps) => (availability !== undefined && availability._tag !== 'Ready') || imageSubmitBlock(images) !== undefined
+/** Pasted files enter the runtime through the shared intake; text-only paste stays with the field. */
+const pasteImages = (event: React.ClipboardEvent, intake: ComposerImageIntake | undefined) => {
+  if (intake === undefined || !intake.available || event.clipboardData.files.length === 0) return
+  event.preventDefault()
+  event.stopPropagation()
+  intake.add([...event.clipboardData.files])
+}
+
+function PlainComposer(props: EmbraceComposerProps) {
+  const { targetLabel, disabledReason, toolbar, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, input, actions, placeholder = 'Message, @ mentions and / commands as text', recipient, recipients, onRecipientChange, images } = props
   const isDisabled = useAuiState((s) => s.thread.isDisabled)
   const readOnly = disabledReason !== undefined || isDisabled
+  const blocked = sendBlocked(props)
   const helpId = React.useId()
   const guidanceId = React.useId()
   const canSend = useAuiState(s => s.composer.canSend)
   const runtimeText = useAuiState(s => s.composer.text)
   const composing = React.useRef(false)
+  const formRef = React.useRef<HTMLFormElement>(null)
+  const intake = React.useContext(ComposerImageIntakeContext)
   const { compact } = React.useContext(CompactComposerContext)
   return (
     <ComposerPrimitive.Root
+      ref={formRef}
       {...stylex.props(styles.root, style)}
-      onSubmit={event => { if (readOnly || onRequestSubmit !== undefined) event.preventDefault(); if (!readOnly) onRequestSubmit?.(false) }}
+      onSubmit={event => { if (readOnly || blocked || onRequestSubmit !== undefined) event.preventDefault(); if (!readOnly && !blocked) onRequestSubmit?.(false) }}
       onCompositionStartCapture={() => { composing.current = true }}
       onCompositionEndCapture={() => { composing.current = false }}
+      onPasteCapture={event => pasteImages(event, intake)}
       onKeyDownCapture={event => {
         if (event.key !== 'Enter') return
         const target = event.target
-        if (!(target instanceof HTMLElement && (target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT'))) return
+        if (!(target instanceof HTMLElement && (target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')) || target.hasAttribute('data-composer-subject')) return
         if (event.nativeEvent.isComposing || composing.current || event.nativeEvent.keyCode === 229) { event.stopPropagation(); return }
         if (event.repeat) { event.preventDefault(); event.stopPropagation(); return }
+        // A held draft never leaves through the runtime's own modified-Enter steer/queue path.
+        if (blocked && (event.metaKey || event.ctrlKey)) { event.preventDefault(); event.stopPropagation(); return }
         if (onRequestSubmit !== undefined && !event.shiftKey && !(window.matchMedia('(pointer: coarse) and (not (any-pointer: fine))').matches && !event.metaKey && !event.ctrlKey)) {
-          event.preventDefault(); event.stopPropagation(); if (!readOnly) onRequestSubmit(event.metaKey || event.ctrlKey)
+          event.preventDefault(); event.stopPropagation(); if (!readOnly && !blocked) onRequestSubmit(event.metaKey || event.ctrlKey)
         }
       }}
     >
+      <SendContext {...props} readOnly={readOnly} formRef={formRef} />
       <div {...stylex.props(styles.fieldWrap, fieldStyle)}>
       {runtimeText === '' ? <span id={guidanceId} data-testid="composer-placeholder" {...stylex.props(styles.placeholder)}>{placeholder}</span> : null}
       {input !== undefined ? input(inputStyle ?? styles.input, [helpId, runtimeText === '' ? guidanceId : undefined].filter(Boolean).join(' ')) : <ComposerPrimitive.Input
@@ -330,6 +405,7 @@ function PlainComposer({ targetLabel, disabledReason, toolbar, style, onRequestS
         aria-describedby={[helpId, runtimeText === '' ? guidanceId : undefined].filter(Boolean).join(' ')}
         placeholder=""
         disabled={readOnly}
+        addAttachmentOnPaste={false}
         {...stylex.props(styles.input, inputStyle)}
       />}
       </div>
@@ -337,9 +413,11 @@ function PlainComposer({ targetLabel, disabledReason, toolbar, style, onRequestS
         <div id={helpId} {...stylex.props(styles.help, styles.helpVisibility, (disabledReason !== undefined || isDisabled) && styles.availableReason)}>
           {disabledReason ?? (isDisabled ? 'This conversation is read-only.' : targetLabel === undefined ? undefined : `To ${targetLabel}`)}
         </div>
+        {recipient !== undefined ? <ComposerRecipientControl recipient={recipient} recipients={recipients} onRecipientChange={onRecipientChange} compact={compact} /> : null}
         {toolbar}
         <div {...stylex.props(styles.grow)} />
-        {actions !== undefined ? actions(compact) : onRequestSubmit === undefined ? <ComposerPrimitive.Send disabled={readOnly} aria-label={submitIcon === undefined ? undefined : 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? 'Send'}</ComposerPrimitive.Send> : <Button isDisabled={readOnly || !canSend} onPress={() => onRequestSubmit(false)} aria-label={submitIcon === undefined ? undefined : submitLabel ?? 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? submitLabel ?? 'Send'}</Button>}
+        {toolbar === undefined && images !== undefined ? <ComposerAttachImage compact={compact} /> : null}
+        {actions !== undefined ? actions(compact) : onRequestSubmit === undefined ? <ComposerPrimitive.Send disabled={readOnly || blocked} aria-label={submitIcon === undefined ? undefined : 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? 'Send'}</ComposerPrimitive.Send> : <Button isDisabled={readOnly || blocked || !canSend} onPress={() => onRequestSubmit(false)} aria-label={submitIcon === undefined ? undefined : submitLabel ?? 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? submitLabel ?? 'Send'}</Button>}
       </div>
     </ComposerPrimitive.Root>
   )
@@ -354,14 +432,18 @@ interface Option {
   readonly unavailable?: string
 }
 
-function TokenComposer({
-  variant, history = emptyHistory, tokenHistory, targetLabel, disabledReason, cancelUnavailableReason, maxContentBytes, toolbar,
-  mentionCandidates = emptyCandidates, mentionHints, commands = defaultCommands,
-  tokenDraft, onTokenDraftChange, onSendDraft, renderToken, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, showQueue = true, sendDisabled = false,
-  placeholder = 'Message, @ to mention, / for commands',
-}: EmbraceComposerProps) {
+function TokenComposer(props: EmbraceComposerProps) {
+  const {
+    variant, history = emptyHistory, tokenHistory, targetLabel, disabledReason, cancelUnavailableReason, maxContentBytes, toolbar,
+    mentionCandidates = emptyCandidates, mentionHints, commands = defaultCommands,
+    tokenDraft, onTokenDraftChange, onSendDraft, renderToken, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, showQueue = true, sendDisabled = false,
+    placeholder = 'Message, @ to mention, / for commands', recipient, recipients, onRecipientChange, images,
+  } = props
   const aui = useAui()
   const composerStateNow = () => aui.composer.__internal_getRuntime?.().getState() ?? aui.composer.getState()
+  const blocked = sendBlocked(props)
+  const intake = React.useContext(ComposerImageIntakeContext)
+  const { compact } = React.useContext(CompactComposerContext)
   const runtimeText = useAuiState((s) => s.composer.text)
   const isDisabled = useAuiState((s) => s.thread.isDisabled)
   const isEditing = useAuiState((s) => s.composer.isEditing)
@@ -424,7 +506,7 @@ function TokenComposer({
     if (activeTrigger(next) === undefined) setDismissed(undefined)
   }
   const submit = (modified = false) => {
-    if (readOnly || sendDisabled || tooLarge || composing.current || (serialized.content === '' && !hasAttachments) || (isRunning && !canQueue)) return
+    if (readOnly || sendDisabled || blocked || tooLarge || composing.current || (serialized.content === '' && !hasAttachments) || (isRunning && !canQueue)) return
     bridge(draft)
     // The store client snapshot updates on React commit; the native runtime reflects this bridge immediately.
     if (!composerStateNow().canSend) return
@@ -457,7 +539,7 @@ function TokenComposer({
     inputRef.current?.focus()
   }
   const isEmpty = draft.segments.every((segment) => segment.type === 'text' && segment.text === '')
-  const canSubmit = !readOnly && !sendDisabled && !tooLarge && (serialized.content !== '' || hasAttachments) && (!isRunning || canQueue)
+  const canSubmit = !readOnly && !sendDisabled && !blocked && !tooLarge && (serialized.content !== '' || hasAttachments) && (!isRunning || canQueue)
 
   return (
     <ComposerPrimitive.Root
@@ -466,11 +548,12 @@ function TokenComposer({
       onSubmit={(event) => { event.preventDefault(); if (!open) submit() }}
       onCompositionStartCapture={() => { composing.current = true }}
       onCompositionEndCapture={() => { composing.current = false }}
+      onPasteCapture={event => pasteImages(event, intake)}
       onKeyDownCapture={(event) => {
         // Only the composer's own text field owns Enter-to-send; buttons inside the
-        // footer (menus, attach, send) keep their native key handling.
+        // footer (menus, attach, send) and the subject field keep their own key handling.
         const target = event.target
-        const inField = target instanceof HTMLElement && (target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')
+        const inField = target instanceof HTMLElement && (target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT') && !target.hasAttribute('data-composer-subject')
         if (!inField) return
         if (event.key === 'Enter' && event.repeat) {
           event.preventDefault()
@@ -490,6 +573,7 @@ function TokenComposer({
         }
       }}
     >
+      <SendContext {...props} readOnly={readOnly} formRef={formRef} />
       <Autocomplete>
         <div {...stylex.props(styles.fieldWrap, fieldStyle)}>
           {/* Input asChild/render still imposes a string value, target.value/selectionStart,
@@ -557,8 +641,10 @@ function TokenComposer({
       {tooLarge ? <div role="status" {...stylex.props(styles.warning)}>Message exceeds the {maxContentBytes} byte inline limit. Your draft is kept; shorten it to send.</div> : null}
       {variant === 'C3' && isRunning && !canQueue ? <div {...stylex.props(styles.warning)}>This runtime does not support queuing. Cancel the active run before sending.</div> : null}
       <div data-testid="composer-footer" {...stylex.props(styles.footer, footerStyle)}>
+        {recipient !== undefined ? <ComposerRecipientControl recipient={recipient} recipients={recipients} onRecipientChange={onRecipientChange} compact={compact} /> : null}
         {toolbar}
         <div {...stylex.props(styles.grow)} />
+        {toolbar === undefined && images !== undefined ? <ComposerAttachImage compact={compact} /> : null}
         {variant === 'C3' && toolbar === undefined ? <>
           <Button isDisabled={readOnly || history.length === 0} onPress={() => recallHistory('previous')}
             aria-label="Recall previous message" aria-description="ArrowUp on an empty field" {...stylex.props(styles.button, styles.historyIcon)}><Icon name="clock" /></Button>
