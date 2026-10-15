@@ -124,6 +124,13 @@ def heavy_step(command):
     return not (command[:2] == ['bash', '-c'] and 'nix build' not in command[2])
 
 
+def slot_environment(environment, real_home):
+    """The environment of the process that takes the host ticket: the seat's name stays, because the host ranks tickets by it
+    (the stage itself then drops it for what it runs)."""
+    kept = {k: os.environ[k] for k in ('ST_AGENT',) if k in os.environ}
+    return dict(environment, HOME=real_home, **kept)
+
+
 def merge_commit(base, env):
     """CI classifies the merge of the pull request into its base, not the branch's own commits; so do we."""
     def git(*args, **kw):
@@ -137,6 +144,17 @@ def merge_commit(base, env):
         raise RuntimeError(f'HEAD does not hold {base}; merge it first')
     tree = git('rev-parse', 'HEAD^{tree}')
     return git('commit-tree', tree, '-p', base, '-p', 'HEAD', '-m', 'ci-local-gate: effective merge source')
+
+
+SEAT_PREFIXES = ('ST_', 'ST2_', 'ST3_', 'CLAUDE', 'ANTHROPIC_')
+KEPT_SEAT = ('ST_EVIDENCE', 'ST_SKIP_EVIDENCE')
+
+
+def without_seat_variables(env):
+    """A CI runner has none of the variables an agent seat carries (its identity, mission, session, daemon endpoint, hook and
+    messaging settings). Tests that read them fail or behave differently under a seat: the first drill's four claude hook
+    tests failed that way. Drop them, except the evidence hook's own switches."""
+    return {k: v for k, v in env.items() if not (k.startswith(SEAT_PREFIXES) and not k.startswith(KEPT_SEAT))}
 
 
 def cargo_home():
@@ -236,7 +254,7 @@ def main(argv, table=None, setup=None, shim=None):
     shim_dir = shim or (str(Path(real_home) / '.local/bin') if real_home and os.access(Path(real_home) / '.local/bin/cargo', os.X_OK) else None)
     slotted = bool(shim_dir) and has_stage_slot(shim_dir)  # an older shim: the stage runs the old way, in this process
     with tempfile.TemporaryDirectory(prefix='ci-local-gate-') as work:
-        environment = dict(os.environ, **(setup or prepare)(work))
+        environment = dict(without_seat_variables(os.environ), **(setup or prepare)(work))
         if shim_dir and os.access(Path(shim_dir) / 'build-admission', os.X_OK):
             environment.setdefault('BUILD_ADMISSION_BIN', str(Path(shim_dir) / 'build-admission'))  # HOME is isolated below
         shared = []  # built lazily, by the process that runs the steps (inside the stage slot when there is one)
@@ -247,7 +265,7 @@ def main(argv, table=None, setup=None, shim=None):
                 # One ticket per step; the step runs this script again, directly, inside it. A light step takes none.
                 for index, (command, extra) in enumerate(plan[name]):
                     if heavy_step(command):
-                        code = subprocess.run(slot_command(name, shim_dir, args.base, index), env=dict(environment, HOME=real_home)).returncode
+                        code = subprocess.run(slot_command(name, shim_dir, args.base, index), env=slot_environment(environment, real_home)).returncode
                     else:
                         code = subprocess.run(command, env=dict(environment, **extra)).returncode
                     if code != 0:

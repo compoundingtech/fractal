@@ -293,6 +293,27 @@ class Failing(unittest.TestCase):
             self.assertEqual(document['output']['needs']['linux-fleet-compat'], 'success')  # the other stages still ran
 
 
+class SlotEnvironment(unittest.TestCase):
+    def test_the_ticket_keeps_the_seat_name_the_host_ranks_by_and_the_real_home(self):
+        old = dict(os.environ)
+        os.environ['ST_AGENT'] = 'agent/x'
+        try:
+            env = gate.slot_environment({'HOME': '/isolated', 'PATH': '/bin'}, '/home/real')
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+        self.assertEqual((env['ST_AGENT'], env['HOME'], env['PATH']), ('agent/x', '/home/real', '/bin'))
+
+
+class Seat(unittest.TestCase):
+    def test_seat_identity_and_session_variables_do_not_reach_the_stages_but_the_hook_switches_do(self):
+        env = {'ST_AGENT': 'a', 'ST_MISSION': 'm', 'ST2_X': '1', 'ST3_ENDPOINT': 'e', 'CLAUDECODE': '1', 'CLAUDE_CONFIG_DIR': '/c',
+               'ANTHROPIC_API_KEY': 'k', 'ST_SKIP_EVIDENCE': '1', 'ST_EVIDENCE_IN_HOOK': '1', 'ST_EVIDENCE_TIME_LIMIT': '9',
+               'PATH': '/bin', 'XDG_RUNTIME_DIR': '/run/user/1', 'TMPDIR': '/var/tmp', 'STORE': 'kept', 'CARGO_HOME': '/c'}
+        kept = gate.without_seat_variables(env)
+        self.assertEqual(sorted(kept), ['CARGO_HOME', 'PATH', 'STORE', 'ST_EVIDENCE_IN_HOOK', 'ST_EVIDENCE_TIME_LIMIT', 'ST_SKIP_EVIDENCE', 'TMPDIR', 'XDG_RUNTIME_DIR'])
+
+
 class Prepared(unittest.TestCase):
     def test_the_environment_is_the_ci_jobs_isolated_home_and_runner_temp(self):
         with tempfile.TemporaryDirectory() as work:
