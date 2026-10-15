@@ -1,3 +1,7 @@
+// A module import, not a document link: Vite resolves its @import into the entry stylesheet,
+// which `deferBuiltStylesheets` keeps from blocking the themed shell. First, so it precedes component rules.
+import './app.css'
+
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 
@@ -21,12 +25,9 @@ if (rootElement === null) {
 }
 
 const root = createRoot(rootElement)
-const appStylesheet = document.getElementById('wf-app-style')
-const appStylesReady = appStylesheet instanceof HTMLLinkElement && appStylesheet.sheet === null
-  ? new Promise<void>(resolve => appStylesheet.addEventListener('load', () => resolve(), { once: true }))
-  : Promise.resolve()
-// The dev runtime replaces its link with an inline stylesheet; link.sheet is no longer a readiness signal.
-const stylesReady = Promise.all([appStylesReady, window.__wfStylexReady])
+// Production: every deferred bundle stylesheet. Development: the StyleX runtime sheet; the
+// runtime replaces its link with an inline stylesheet, so link.sheet is no readiness signal.
+const stylesReady = window.__wfStylexReady
 let disposed = false
 installPageLifecycle({
   target: window,

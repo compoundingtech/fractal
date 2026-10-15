@@ -110,15 +110,6 @@
         globalThis[key] = handle
       })()
     </script>
-    <!-- After the early script: a pending stylesheet would block that classic script. -->
-    <link id="wf-app-style" rel="stylesheet" href="/app.css" media="print" />
-    <script data-wf-stylesheet-bootstrap>
-      ;(() => {
-        const sheet = document.getElementById('wf-app-style')
-        if (sheet.sheet) sheet.media = 'all'
-        else sheet.addEventListener('load', () => { sheet.media = 'all' }, { once: true })
-      })()
-    </script>
   </head>
   <body>
     <div id="root">

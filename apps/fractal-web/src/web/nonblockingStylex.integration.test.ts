@@ -77,6 +77,26 @@ describe('critical shell independence from development CSS', () => {
     await expect(window.__wfStylexReady).resolves.toBeUndefined()
     expect(link.media).toBe('all')
   })
+  it('enables several built stylesheets together only once every one has loaded', async () => {
+    const links = ['/assets/a.css', '/assets/b.css'].map(href => {
+      const link = document.createElement('link')
+      link.rel = 'stylesheet'; link.href = href; link.media = 'print'; link.dataset.wfStylexBootstrap = ''
+      document.head.append(link)
+      return link
+    })
+    const bootstrap = deferStylexDevTags(original)?.[2]?.children
+    if (typeof bootstrap !== 'string') throw new Error('Missing StyleX bootstrap')
+    new Function('document', bootstrap)(document)
+    let ready = false
+    void window.__wfStylexReady?.then(() => { ready = true })
+    links[0]!.dispatchEvent(new Event('load'))
+    await Promise.resolve()
+    expect(links.map(link => link.media)).toEqual(['print', 'print'])
+    expect(ready).toBe(false)
+    links[1]!.dispatchEvent(new Event('load'))
+    await window.__wfStylexReady
+    expect(links.map(link => link.media)).toEqual(['all', 'all'])
+  })
   it('keeps the old stylesheet as a failing render-blocking control', () => {
     expect(original[1]?.attrs?.media).toBeUndefined()
     expect(original[1]?.attrs?.rel).toBe('stylesheet')

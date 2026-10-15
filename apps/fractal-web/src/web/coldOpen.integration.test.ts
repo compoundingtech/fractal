@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from 'vitest'
 import html from './index.html?raw'
+import main from './main.tsx?raw'
 import { coldOpenDocument, type ColdOpenControl } from './coldOpen.fixtures.ts'
 
 const render = (saved?: string, control?: ColdOpenControl) => {
@@ -28,10 +29,13 @@ describe('first-paint document', () => {
   it.each([undefined, '{bad', savedTheme('unexpected')])('uses the product dark default for missing or unreadable preference', saved => {
     expect(render(saved).documentElement.dataset.scheme).toBe('dark')
   })
-  it('does not block the shell paint on the application stylesheet', () => {
+  it('does not block the shell paint on a document stylesheet link', () => {
+    // A source `<link media>` is copied, not processed: it shipped raw app.css as a CSP-blocked
+    // data: URL. The app stylesheet is a module import, deferred in builds by `deferBuiltStylesheets`.
     const document = new DOMParser().parseFromString(html, 'text/html')
-    expect(document.querySelector('#wf-app-style')?.getAttribute('media')).toBe('print')
-    expect(document.querySelector('[data-wf-stylesheet-bootstrap]')?.textContent).toContain("sheet.media = 'all'")
+    expect(document.querySelectorAll('link[rel~="stylesheet"]')).toHaveLength(0)
+    expect(main).toMatch(/^import '\.\/app\.css'$/m)
+    expect(main).not.toContain('wf-app-style')
   })
   it('rejects both original cold-open controls', () => {
     expect(render(savedTheme('dark'), 'white-page').documentElement.style.colorScheme).not.toBe('dark')
