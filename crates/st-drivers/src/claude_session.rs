@@ -171,8 +171,7 @@ pub fn run_controlled_paths_with_primary_ownership(
     crate::pretrust::pretrust_claude(std::slice::from_ref(&workspace))
         .with_context(|| format!("admitting Claude driver workspace {}", workspace.display()))?;
     install_signal_handler();
-    let observer = SessionObserver::new_claude_with_primary_ownership(
-        &paths.agent_dir, &identity, &runtime_id, primary_ownership)?;
+    let observer = SessionObserver::new_claude_with_primary_ownership(&paths.agent_dir, &identity, &runtime_id, primary_ownership)?;
     let mut env = vec![
         ("DISABLE_AUTOUPDATER".into(), "1".into()),
         (RUNTIME_ID_ENV.to_string(), runtime_id.clone()),
@@ -1347,8 +1346,14 @@ fn observe_payload(
 
 #[allow(clippy::too_many_arguments)]
 fn observe_payload_owned(
-    session_dir: &Path, agent_dir: &Path, native: bool, identity: &str,
-    runtime_id: Option<&str>, event: &str, raw: &str, var: &dyn Fn(&str) -> Option<String>,
+    session_dir: &Path,
+    agent_dir: &Path,
+    native: bool,
+    identity: &str,
+    runtime_id: Option<&str>,
+    event: &str,
+    raw: &str,
+    var: &dyn Fn(&str) -> Option<String>,
 ) -> Result<()> {
     // Counted only once the invocation has its application target: a hook for an undeclared
     // agent errors out before any state is applied and must not inflate `hook_invocations_total`.

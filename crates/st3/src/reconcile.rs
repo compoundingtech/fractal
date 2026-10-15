@@ -7791,6 +7791,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             // authenticated primary. Manual/required deployment intent keeps its old path.
             if channel_recovery::automatic_request(&request)
                 && observation.incarnation_id.as_deref().is_some_and(|incarnation|
+                    crate::api::claude_channel_proof_pending(&self.store, &subject.subject, incarnation)) {
+                return Ok(false); // Unknown proof cannot authorize a physical automatic stop.
+            }
+            if channel_recovery::automatic_request(&request)
+                && observation.incarnation_id.as_deref().is_some_and(|incarnation|
                     crate::api::claude_channel_attached(&self.store, &subject.subject, incarnation)) {
                 self.store.append_claim(&ClaimInput {
                     subject: subject.subject.clone(), kind: "runtime.action.succeeded".into(),
@@ -7814,7 +7819,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     } else {
                         "a restart was requested"
                     },
-                )?
+                        )?
             {
                 return Ok(true);
             }

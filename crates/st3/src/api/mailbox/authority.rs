@@ -216,6 +216,7 @@ fn physical_wrapper(
 }
 
 fn queue_legacy_shape(state: &AppState, fence: &Fence, peer: &NativeDeliveryPeer) {
+    if !delivery_presence::observation_enabled(&state.state_dir) { return; }
     if !delivery_presence::begin_legacy_shape(fence, peer.pid) {
         return;
     }
@@ -388,9 +389,7 @@ pub(super) fn admit_report(
     let observed = provider_authority(&current)?;
     if observed.harness.as_deref() == Some(&owner.provider)
         && observed.evidence_incarnation.as_deref() == Some(&owner.session)
-        && observed
-            .ownership_sequence
-            .is_some_and(|sequence| sequence > owner.sequence)
+        && observed.ownership_sequence.is_some_and(|sequence| sequence > owner.sequence)
     {
         // A surviving wrapper reclaims its provider record during re-exec. Re-admit
         // this exact capability under physical/provider and writer fences once, rather
@@ -482,14 +481,10 @@ pub(super) fn replay_proof_inputs(
     fence: &Fence,
     peer: &NativeDeliveryPeer,
 ) -> Result<ReplayProofInputs, St3Error> {
-    let lease_owner = state
-        .store
-        .mailbox_lease_authority(fence)?
+    let lease_owner = state.store.mailbox_lease_authority(fence)?
         .ok_or_else(|| refused("the consumed replay has no canonical lease"))?;
     let episode_key = episode(fence);
-    let failure = state
-        .store
-        .mailbox_failure_episode(fence, &episode_key)?
+    let failure = state.store.mailbox_failure_episode(fence, &episode_key)?
         .and_then(|(failure, pending)| pending.then_some(failure));
     Ok(ReplayProofInputs {
         failure,
@@ -526,27 +521,20 @@ impl ReplayProofInputs {
             && self.peer_pid == peer.pid
             && self.peer_archives_inbox == peer.archives_inbox
             && process_birth(peer.pid).is_ok_and(|birth| birth == self.process_birth)
-            && state
-                .store
-                .mailbox_replay_owner_matches(fence, &self.lease_owner)
+            && state.store.mailbox_replay_owner_matches(fence, &self.lease_owner)
                 .is_ok_and(|matches| matches)
-            && st_drivers::harness_events::read_runtime_state(&self.agent_dir, &fence.incarnation)
-                .ok()
-                .flatten()
-                .is_some_and(|raw| {
-                    provider_authority(&raw).is_ok_and(|owner| {
-                        owner.harness.as_deref() == Some(&self.lease_owner.provider)
-                            && owner.evidence_incarnation.as_deref()
-                                == Some(&self.lease_owner.session)
-                            && owner.ownership_sequence == Some(self.lease_owner.sequence)
-                    })
+            && st_drivers::harness_events::read_runtime_state(
+                &self.agent_dir, &fence.incarnation,
+            ).ok().flatten().is_some_and(|raw| {
+                provider_authority(&raw).is_ok_and(|owner| {
+                    owner.harness.as_deref() == Some(&self.lease_owner.provider)
+                        && owner.evidence_incarnation.as_deref() == Some(&self.lease_owner.session)
+                        && owner.ownership_sequence == Some(self.lease_owner.sequence)
                 })
-            && state
-                .store
-                .mailbox_failure_episode(fence, &self.episode_key)
+            })
+            && state.store.mailbox_failure_episode(fence, &self.episode_key)
                 .is_ok_and(|episode| {
-                    episode.and_then(|(failure, pending)| pending.then_some(failure))
-                        == self.failure
+                    episode.and_then(|(failure, pending)| pending.then_some(failure)) == self.failure
                 })
     }
 }
@@ -764,24 +752,13 @@ pub(super) fn with_argv_channel<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
-    action: impl FnOnce(
-        &crate::model::MemberSpec,
-        &dyn Fn() -> Result<(), St3Error>,
-    ) -> Result<T, St3Error>,
+    action: impl FnOnce(&crate::model::MemberSpec, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<Option<T>, St3Error> {
-    let desired = state
-        .store
-        .desired_subjects_named(std::slice::from_ref(&fence.subject))
-        .map_err(internal)?
-        .into_iter()
-        .next()
+    let desired = state.store.desired_subjects_named(std::slice::from_ref(&fence.subject))
+        .map_err(internal)?.into_iter().next()
         .ok_or_else(|| refused("the seat is no longer declared"))?;
-    let member = desired
-        .member
-        .ok_or_else(|| refused("the seat is intentionally stopped"))?;
-    if member.driver.is_some() {
-        return Ok(None);
-    }
+    let member = desired.member.ok_or_else(|| refused("the seat is intentionally stopped"))?;
+    if member.driver.is_some() { return Ok(None); }
     if desired.kind == "stop"
         || member.kind != crate::model::MemberKind::Agent
         || member.host != state.node
@@ -793,26 +770,14 @@ pub(super) fn with_argv_channel<T>(
         return Err(refused("this is not an explicit local argv channel seat"));
     }
     let physical = st_runtime::PtyRuntime::new(state.pty_root.clone())
-        .with_binary(state.pty_binary.to_string_lossy())
-        .snapshot()
-        .map_err(internal)?
-        .into_iter()
-        .find(|runtime| {
-            runtime.name == member.runtime_id
-                && runtime.status == "running"
-                && runtime
-                    .pid
-                    .zip(runtime.created_at.as_deref())
-                    .is_some_and(|(pid, stamp)| format!("{pid}:{stamp}") == fence.incarnation)
-        })
+        .with_binary(state.pty_binary.to_string_lossy()).snapshot().map_err(internal)?
+        .into_iter().find(|runtime| runtime.name == member.runtime_id
+            && runtime.status == "running"
+            && runtime.pid.zip(runtime.created_at.as_deref())
+                .is_some_and(|(pid, stamp)| format!("{pid}:{stamp}") == fence.incarnation))
         .ok_or_else(|| unavailable("the exact argv runtime is unavailable"))?;
-    let daemon_pid = physical
-        .pid
-        .ok_or_else(|| refused("missing argv runtime identity"))?;
-    let stamp = physical
-        .created_at
-        .as_deref()
-        .ok_or_else(|| refused("missing argv runtime generation"))?;
+    let daemon_pid = physical.pid.ok_or_else(|| refused("missing argv runtime identity"))?;
+    let stamp = physical.created_at.as_deref().ok_or_else(|| refused("missing argv runtime generation"))?;
     let stats = terminal_stats(state, &physical.name)?;
     let terminal_pid = terminal_identity(&physical.name, stamp, daemon_pid, &stats)?;
     let generations = [
@@ -830,9 +795,7 @@ pub(super) fn with_argv_channel<T>(
                 return Err(refused("the argv process generation was replaced"));
             }
         }
-        if !belongs_to_runtime(terminal_pid, daemon_pid)
-            || !belongs_to_runtime(peer.pid, terminal_pid)
-        {
+        if !belongs_to_runtime(terminal_pid, daemon_pid) || !belongs_to_runtime(peer.pid, terminal_pid) {
             return Err(refused("the channel is outside the exact argv process"));
         }
         Ok(())
@@ -845,10 +808,7 @@ pub(super) fn with_argv_channel<T>(
     _state: &AppState,
     _fence: &Fence,
     _peer: &NativeDeliveryPeer,
-    _action: impl FnOnce(
-        &crate::model::MemberSpec,
-        &dyn Fn() -> Result<(), St3Error>,
-    ) -> Result<T, St3Error>,
+    _action: impl FnOnce(&crate::model::MemberSpec, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<Option<T>, St3Error> {
     Ok(None)
 }
@@ -1084,9 +1044,7 @@ pub(super) fn with_authority<T>(
             // Terminal state may be written without changing session/sequence. Recheck
             // it while holding the record lock rather than admitting a completion race.
             current_provider(state, fence, &agent_dir, &authority)?;
-            state
-                .store
-                .promote_current_mailbox_ownership(fence, &authority)?;
+            state.store.promote_current_mailbox_ownership(fence, &authority)?;
             action(&authority, &|| Ok(())).map_err(anyhow::Error::new)
         },
     )
@@ -1405,5 +1363,35 @@ mod tests {
             assert!(decode_provider_authority(&raw).is_err());
         }
         assert!(decode_provider_authority(b"{broken").is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod observation_setting_controls {
+    use super::*;
+    #[test]
+    fn absent_observation_setting_never_reserves_or_schedules_a_capture() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests::state(root.path());
+        let fence = Fence::new("agent/observation-default-off", "fixture", "delivery");
+        let peer = NativeDeliveryPeer {
+            agent: fence.subject.clone(),
+            transport: "claude-channel",
+            pid: 0,
+            archives_inbox: false,
+        };
+        assert!(!delivery_presence::observation_enabled(&state.state_dir));
+        queue_legacy_shape(&state, &fence, &peer);
+        assert_eq!(
+            delivery_presence::legacy_capture_count(&fence.subject),
+            0,
+            "off must return BEFORE reservation, semaphore, runtime handle, pool task or physical inventory"
+        );
+        delivery_presence::configure_observation(&state.state_dir, true);
+        assert!(delivery_presence::observation_enabled(&state.state_dir));
+        delivery_presence::configure_observation(&state.state_dir, false);
+        queue_legacy_shape(&state, &fence, &peer);
+        assert_eq!(delivery_presence::legacy_capture_count(&fence.subject), 0);
     }
 }

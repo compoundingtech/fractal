@@ -84,12 +84,17 @@ pub(super) fn unprotected_reason(reason: &str) -> bool {
     reason.starts_with(LEGACY_REASON)
 }
 
+#[derive(Clone)]
+struct Uncertain { fence: crate::mailbox::Fence, owner: u64, since: Instant, failures: u8 }
+
 struct Presence {
     started: Instant,
     image: Option<String>,
     beats: Mutex<HashMap<String, Beat>>,
     monitors: Mutex<HashMap<String, Beat>>,
     ownership: Mutex<HashMap<String, Ownership>>,
+    observations: Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    uncertain: Mutex<HashMap<String, Uncertain>>,
 }
 
 fn presence() -> &'static Presence {
@@ -100,7 +105,77 @@ fn presence() -> &'static Presence {
         beats: Mutex::new(HashMap::new()),
         monitors: Mutex::new(HashMap::new()),
         ownership: Mutex::new(HashMap::new()),
+        observations: Mutex::default(),
+        uncertain: Mutex::default(),
     })
+}
+
+pub(super) fn configure_observation(root: &std::path::Path, enabled: bool) {
+    if let Ok(mut roots) = presence().observations.lock() {
+        if enabled {
+            roots.insert(root.into());
+        } else {
+            roots.remove(root);
+        }
+    }
+}
+pub(super) fn observation_enabled(root: &std::path::Path) -> bool {
+    presence()
+        .observations
+        .lock()
+        .ok()
+        .is_some_and(|roots| roots.contains(root))
+}
+pub(super) fn proof_pending(fence: &crate::mailbox::Fence, owner: u64, failures: u8) {
+    if fence.component != "delivery" {
+        return;
+    }
+    if let Ok(mut rows) = presence().uncertain.lock() {
+        if rows
+            .get(&fence.subject)
+            .is_some_and(|r| r.fence.incarnation == fence.incarnation && r.owner > owner)
+        {
+            return;
+        }
+        let row = rows
+            .entry(fence.subject.clone())
+            .or_insert_with(|| Uncertain {
+                fence: fence.clone(),
+                owner,
+                since: Instant::now(),
+                failures: 0,
+            });
+        if row.owner != owner {
+            *row = Uncertain {
+                fence: fence.clone(),
+                owner,
+                since: Instant::now(),
+                failures: 0,
+            };
+        }
+        row.failures = failures.min(3);
+    }
+}
+pub(super) fn clear_proof_pending(fence: &crate::mailbox::Fence, owner: u64, valid: bool) {
+    if let Ok(mut rows) = presence().uncertain.lock()
+        && rows.get(&fence.subject).is_some_and(|r| {
+            r.fence.incarnation == fence.incarnation
+                && r.fence.epoch == fence.epoch
+                && r.fence.token == fence.token
+                && (r.owner == owner || (valid && r.owner < owner))
+        })
+    {
+        rows.remove(&fence.subject);
+    }
+}
+pub(super) fn pending_proof(subject: &str, incarnation: &str) -> Option<crate::mailbox::Fence> {
+    presence()
+        .uncertain
+        .lock()
+        .ok()?
+        .get(subject)
+        .filter(|r| r.fence.incarnation == incarnation)
+        .map(|r| r.fence.clone())
 }
 
 /// Start the startup grace window now. The daemon calls this once when it serves its API.
@@ -159,6 +234,7 @@ pub(super) fn record_fenced(fence: &crate::mailbox::Fence, raw: &str) -> bool {
 }
 
 pub(super) fn attachment(recipient: &str, incarnation: &str) -> Option<crate::mailbox::Fence> {
+    if pending_proof(recipient, incarnation).is_some() { return None; }
     let beats = presence().beats.lock().ok()?;
     let beat = beats.get(recipient)?;
     let fence = beat.fence.as_ref()?;
@@ -166,11 +242,8 @@ pub(super) fn attachment(recipient: &str, incarnation: &str) -> Option<crate::ma
         && beat.at.elapsed() <= Duration::from_millis(CHANNEL_STALE_AFTER_MS)
         && beat.report.transport.as_deref() == Some("claude-channel")
         && beat.report.ready == Some(true)
-        && beat.report.channel.as_ref().is_some_and(|channel| {
-            channel
-                .age_ms
-                .is_some_and(|age| age <= CHANNEL_STALE_AFTER_MS)
-        }))
+        && beat.report.channel.as_ref().is_some_and(|channel|
+            channel.age_ms.is_some_and(|age| age <= CHANNEL_STALE_AFTER_MS)))
     .then(|| fence.clone())
 }
 
@@ -316,37 +389,20 @@ pub(crate) fn assess(recipient: &str, driver: &str) -> Assessment {
     assess_selected(recipient, driver, None, false)
 }
 
-pub(crate) fn assess_current(
-    recipient: &str,
-    driver: &str,
-    incarnation: Option<&str>,
-) -> Assessment {
+pub(crate) fn assess_current(recipient: &str, driver: &str, incarnation: Option<&str>) -> Assessment {
     assess_selected(recipient, driver, incarnation, true)
 }
 
-fn assess_selected(
-    recipient: &str,
-    driver: &str,
-    incarnation: Option<&str>,
-    current: bool,
-) -> Assessment {
+fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, current: bool) -> Assessment {
     let presence = presence();
     let eligible = |beat: &&Beat| {
-        if !current {
-            return true;
-        }
+        if !current { return true; }
         let transport = match driver {
-            "claude" => "claude-channel",
-            "codex" => "app-server",
-            "opencode" => "opencode-server",
-            "omp" => "omp-channel",
-            "pi" => "pi-channel",
-            _ => return false,
+            "claude" => "claude-channel", "codex" => "app-server", "opencode" => "opencode-server",
+            "omp" => "omp-channel", "pi" => "pi-channel", _ => return false,
         };
         beat.report.transport.as_deref() == Some(transport)
-            && beat.fence.as_ref().is_none_or(|fence| {
-                incarnation.is_none_or(|incarnation| fence.incarnation == incarnation)
-            })
+            && beat.fence.as_ref().is_none_or(|fence| incarnation.is_none_or(|incarnation| fence.incarnation == incarnation))
     };
     let captured = |beat: &Beat| {
         let mut report = beat.report.clone();
@@ -355,11 +411,12 @@ fn assess_selected(
         }
         (beat.at, report)
     };
-    let mut beat = presence
-        .beats
-        .lock()
-        .ok()
-        .and_then(|beats| beats.get(recipient).filter(eligible).map(captured));
+    let mut beat = presence.beats.lock().ok().and_then(|beats| {
+        beats
+            .get(recipient)
+            .filter(eligible)
+            .map(captured)
+    });
     if driver == "claude"
         && let Ok(monitors) = presence.monitors.lock()
         && let Some(monitor) = monitors.get(recipient).filter(eligible)
@@ -398,6 +455,12 @@ fn assess_selected(
                 at.elapsed().as_secs()
             ));
         }
+    }
+    if let Some(proof) = presence.uncertain.lock().ok().and_then(|rows|
+        rows.get(recipient).filter(|r| incarnation == Some(r.fence.incarnation.as_str())).cloned()) {
+        assessment.state = "unknown";
+        assessment.reason = Some(format!("ownership proof unavailable{}; established stream retained, new effects held and automatic recovery deferred; {}s",
+            if proof.failures >= 3 { ": suspect after three checks" } else { "" }, proof.since.elapsed().as_secs()));
     }
     assessment
 }
@@ -633,33 +696,18 @@ mod tests {
         record_legacy(recipient, "claude-channel", 7);
         assert_eq!(known(recipient).unwrap().state, "legacy");
         // A legacy poll proves transport liveness without asserting a fenced incarnation.
-        assert_eq!(
-            assess_current(recipient, "claude", Some("current")).state,
-            "legacy"
-        );
+        assert_eq!(assess_current(recipient, "claude", Some("current")).state, "legacy");
         assert!(assess_current(recipient, "codex", Some("current")).state != "legacy");
     }
 
     #[test]
     fn unfenced_reports_preserve_legacy_liveness_but_never_current_native_readiness() {
         let recipient = "agent/eval.unfenced-report";
-        record(
-            recipient,
-            &json!({"transport":"omp-channel","pid":7,"ready":true}).to_string(),
-        );
-        assert_eq!(
-            assess_current(recipient, "omp", Some("current")).state,
-            "legacy"
-        );
-        assert_ne!(
-            assess_current(recipient, "codex", Some("current")).state,
-            "legacy"
-        );
+        record(recipient, &json!({"transport":"omp-channel","pid":7,"ready":true}).to_string());
+        assert_eq!(assess_current(recipient, "omp", Some("current")).state, "legacy");
+        assert_ne!(assess_current(recipient, "codex", Some("current")).state, "legacy");
         let old = crate::mailbox::Fence::new(recipient, "old", "delivery");
-        record_fenced(
-            &old,
-            &json!({"transport":"omp-channel","pid":7,"ready":true}).to_string(),
-        );
+        record_fenced(&old, &json!({"transport":"omp-channel","pid":7,"ready":true}).to_string());
         let current = assess_current(recipient, "omp", Some("current"));
         assert!(matches!(current.state, "unknown" | "stale"));
         assert_eq!(current.transport, None);
@@ -922,4 +970,9 @@ mod legacy_shape_controls {
         assert!(row.shape.is_none());
         assert_eq!(row.used, SHAPE_LIMIT);
     }
+}
+
+#[cfg(test)]
+pub(super) fn legacy_capture_count(subject: &str) -> usize {
+    presence().ownership.lock().unwrap().get(subject).map_or(0, |row| row.used)
 }

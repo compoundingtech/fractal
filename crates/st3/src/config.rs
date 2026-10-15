@@ -24,6 +24,9 @@ pub struct Config {
     /// Absent/false is legacy admission; existing generations are never migrated by a toggle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_primary_ownership: Option<bool>,
+    /// Separate explicit opt-in for non-authorizing legacy topology observations. Off by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_primary_ownership_observe: Option<bool>,
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<st_runtime::SeatPriority>,
@@ -369,6 +372,7 @@ impl Default for Config {
             node: host_name(),
             access_mode: None,
             claude_primary_ownership: None,
+            claude_primary_ownership_observe: None,
             seat_priority: None,
             person: None,
             fleet_id: None,
@@ -969,6 +973,15 @@ mod tests {
     #[test]
     fn claude_primary_ownership_is_an_explicit_default_off_install_setting() {
         assert!(!Config::default().claude_primary_ownership_enabled());
+        for text in ["", "claude_primary_ownership_observe=false"] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert_ne!(config.claude_primary_ownership_observe, Some(true));
+        }
+        let observed: Config = toml::from_str("claude_primary_ownership_observe=true").unwrap();
+        assert_eq!(observed.claude_primary_ownership_observe, Some(true));
+        assert!(!observed.claude_primary_ownership_enabled(), "observation does not imply enforcement");
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("claude_primary_ownership_observe"));
+
         for text in ["", "claude_primary_ownership=false"] {
             let config: Config = toml::from_str(text).unwrap();
             assert!(!config.claude_primary_ownership_enabled());

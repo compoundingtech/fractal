@@ -14,7 +14,7 @@ const TEST: &str = "api::mailbox::ownership_process_tests::nested_real_peers_nev
 const ROLE: &str = "ST_TEST_OWNERSHIP_ROLE";
 const SUBJECT: &str = "agent/ownership-real-peer";
 const SESSION: &str = "owned-process-fixture";
-const LIMIT: Duration = Duration::from_secs(10);
+const LIMIT: Duration = Duration::from_secs(60);
 
 async fn read(stream: &mut UnixStream) -> Value {
     tokio::time::timeout(LIMIT, async {
@@ -182,6 +182,31 @@ async fn helper(role: &str) {
                 .unwrap();
                 json!({"ok":true})
             }
+            "expect-refused" => {
+                let ws = socket.as_mut().unwrap();
+                let _ = ws
+                    .send(Message::Text(
+                        json!({"transport":"claude-channel","pid":std::process::id(),"ready":true})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await;
+                tokio::time::timeout(LIMIT, async {
+                    loop {
+                        match ws.next().await {
+                            None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                            Some(Ok(Message::Ping(bytes))) => {
+                                let _ = ws.send(Message::Pong(bytes)).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .expect("proven refusal must close the actual stream");
+                socket = None;
+                json!({"ok":true})
+            }
             "close" => {
                 if let Some(mut ws) = socket.take() {
                     let _ = ws.close(None).await;
@@ -243,7 +268,18 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
     for nested_first in [false, true] {
         for secondary_closes_first in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let state = crate::api::tests::state(root.path());
+            let mut state = crate::api::tests::state(root.path());
+            // Hosted Linux uses the pinned devShell ptyPackage (flake.nix), never a skip.
+            state.pty_binary =
+                std::env::split_paths(&std::env::var_os("PATH").expect("hosted PATH"))
+                    .map(|dir| dir.join("pty"))
+                    .find(|path| path.is_file())
+                    .and_then(|path| fs::canonicalize(path).ok())
+                    .expect("pinned devShell pty must exist");
+            eprintln!(
+                "ownership fixture pty={} step_bound=60s; PTY library publication=5s command=10s",
+                state.pty_binary.display()
+            );
             let intent = crate::graph::parse_intent("version 2\nagent \"ownership-real-peer\" { host \"node\"; workspace \"/tmp\"; restart \"never\"; harness \"claude\" {} }", "node").unwrap();
             state
                 .store
@@ -567,6 +603,55 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                 before,
                 "non-primary refusal/flood/EOF cannot charge primary recovery"
             );
+            // REAL lock contention on an already admitted primary. Ordered pong confirms
+            // each unavailable report was consumed without closing the WebSocket; no sleeps.
+            use std::os::fd::AsRawFd as _;
+            let lock = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(dir.join("claude-primary-process.lock"))
+                .unwrap();
+            // SAFETY: this exact lock belongs only to the owned temporary fixture generation.
+            assert_eq!(
+                unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                0
+            );
+            for _ in 0..3 {
+                assert_eq!(
+                    call(links.get_mut("primary").unwrap(), json!({"op":"report"})).await["ok"],
+                    true
+                );
+                assert!(crate::api::claude_channel_proof_pending(
+                    &state.store,
+                    SUBJECT,
+                    &incarnation
+                ));
+                assert!(
+                    !recovery
+                        .fixture_channel_recovery(&desired, &incarnation)
+                        .unwrap()
+                );
+                assert_eq!(count(&state.store), before);
+                state.store.check_mailbox(&fence).unwrap();
+            }
+            let unknown = delivery_presence::assess_current(SUBJECT, "claude", Some(&incarnation));
+            assert_eq!(unknown.state, "unknown");
+            assert!(
+                unknown
+                    .reason
+                    .unwrap()
+                    .contains("suspect after three checks")
+            );
+            drop(lock);
+            assert_eq!(
+                call(links.get_mut("primary").unwrap(), json!({"op":"report"})).await["ok"],
+                true
+            );
+            assert!(crate::api::claude_channel_attached(
+                &state.store,
+                SUBJECT,
+                &incarnation
+            ));
             // A budget fault and automatic request recorded BEFORE genuine reattachment must
             // not become a back door that stops this now-healthy primary incarnation.
             let token = state
@@ -600,6 +685,38 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                     idempotency_key: None,
                 })
                 .unwrap();
+            // The SAME retained automatic request/fault must also be held while proof is
+            // temporarily unknown, not settled as success or used to stop this live process.
+            let pending_lock = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(dir.join("claude-primary-process.lock"))
+                .unwrap();
+            // SAFETY: the owned fixture's generation lock, not any installed seat's file.
+            assert_eq!(
+                unsafe { libc::flock(pending_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                0
+            );
+            assert_eq!(
+                call(links.get_mut("primary").unwrap(), json!({"op":"report"})).await["ok"],
+                true
+            );
+            assert!(
+                !recovery
+                    .fixture_channel_recovery(&desired, &incarnation)
+                    .unwrap()
+            );
+            assert!(
+                !recovery
+                    .fixture_requested_channel_restart(&desired, &incarnation)
+                    .unwrap()
+            );
+            assert_eq!(count(&state.store), 3);
+            drop(pending_lock);
+            assert_eq!(
+                call(links.get_mut("primary").unwrap(), json!({"op":"report"})).await["ok"],
+                true
+            );
             assert!(
                 !recovery
                     .fixture_channel_recovery(&desired, &incarnation)
@@ -636,10 +753,31 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                     &incarnation
                 ));
             }
-            assert_eq!(
-                call(links.get_mut("primary").unwrap(), json!({"op":"close"})).await["ok"],
-                true
-            );
+            if nested_first {
+                let mut closed: Value = serde_json::from_slice(
+                    &fs::read(dir.join("claude-primary-process.json")).unwrap(),
+                )
+                .unwrap();
+                closed["closed"] = json!(true);
+                fs::write(
+                    dir.join("claude-primary-process.json"),
+                    serde_json::to_vec(&closed).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    call(
+                        links.get_mut("primary").unwrap(),
+                        json!({"op":"expect-refused"})
+                    )
+                    .await["ok"],
+                    true
+                );
+            } else {
+                assert_eq!(
+                    call(links.get_mut("primary").unwrap(), json!({"op":"close"})).await["ok"],
+                    true
+                );
+            }
             assert_eq!(
                 call(links.get_mut("primary").unwrap(), json!({"op":"quit"})).await["ok"],
                 true

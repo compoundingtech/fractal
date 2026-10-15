@@ -7,7 +7,6 @@ mod authority;
 #[cfg(all(test, target_os = "linux"))]
 mod ownership_process_tests;
 
-
 pub(super) async fn subscribe(
     State(state): State<AppState>,
     Query(fence): Query<Fence>,
@@ -625,7 +624,7 @@ async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDe
         Some(((), timer))
     });
     let mut stream_control = StreamControl::new(native.then(|| peer.clone()));
-    stream_control.primary_peer = Some((peer.clone(), primary_wrapper));
+    stream_control.primary_peer = (peer.transport == "claude-channel").then(|| (peer.clone(), primary_wrapper));
     let stream = stream_with_timers_inner(state.clone(), fence.clone(), socket, raw_snapshot, safety, heartbeat, stream_control);
     #[cfg(not(feature = "test-support"))]
     stream.await;
@@ -717,6 +716,54 @@ async fn stream_with_timers<F, S, H>(
     stream_with_timers_inner(state, fence, socket, read, safety, heartbeat, StreamControl::new(None)).await;
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ProofDecision {
+    Valid,
+    Unavailable,
+    Refused,
+}
+struct StreamProof {
+    fence: Fence,
+    failures: u8,
+    owner: u64,
+}
+impl StreamProof {
+    fn new(fence: Fence) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            fence,
+            failures: 0,
+            owner: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+    fn observe<T, E>(&mut self, result: Result<Result<T, St3Error>, E>) -> ProofDecision {
+        match result {
+            Ok(Ok(_)) => {
+                self.failures = 0;
+                delivery_presence::clear_proof_pending(&self.fence, self.owner, true);
+                ProofDecision::Valid
+            }
+            Ok(Err(error)) if error.code == "stale-mailbox-session" => ProofDecision::Refused,
+            _ => {
+                let before = self.failures;
+                self.failures = self.failures.saturating_add(1).min(3);
+                delivery_presence::proof_pending(&self.fence, self.owner, self.failures);
+                if before == 0 || (before < 3 && self.failures == 3) {
+                    // Only two bounded diagnostics per episode: the first and the cap crossing.
+                    tracing::warn!(subject = %self.fence.subject, checks = self.failures,
+                        "Claude ownership proof unavailable; established stream retained; new effects held");
+                }
+                ProofDecision::Unavailable
+            }
+        }
+    }
+}
+impl Drop for StreamProof {
+    fn drop(&mut self) {
+        delivery_presence::clear_proof_pending(&self.fence, self.owner, false);
+    }
+}
+
 struct StreamControl {
     peer: Option<NativeDeliveryPeer>,
     primary_peer: Option<(NativeDeliveryPeer, Option<st_drivers::claude_process::Process>)>,
@@ -769,6 +816,7 @@ async fn stream_with_timers_inner<F, S, H>(
     let mut order = MailboxOrder::new();
     let own_posts = own_post_reactor(&state, &fence);
     let mut dirty = true;
+    let mut proof = StreamProof::new(fence.clone());
     let mut last: Option<(crate::store::MailboxWatermark, Snapshot)> = None;
     loop {
         #[cfg(test)]
@@ -782,7 +830,11 @@ async fn stream_with_timers_inner<F, S, H>(
                 let fence = fence.clone();
                 let admitted = crate::api::read_deadline::spawn_blocking(move ||
                     authority::with_claude_primary(&state, &fence, &primary, wrapper, || Ok(()))).await;
-                if !matches!(admitted, Ok(Ok(_))) { return; }
+                match proof.observe(admitted) {
+                    ProofDecision::Valid => {},
+                    ProofDecision::Refused => return,
+                    ProofDecision::Unavailable => { dirty = false; continue; },
+                }
             }
             // Retain consumed replay across ordinary wakes. A new unresolved loss
             // or changed authority input requires a fresh proof of the same nonce.
@@ -964,7 +1016,11 @@ async fn stream_with_timers_inner<F, S, H>(
                             let fence = fence.clone();
                             let checked = crate::api::read_deadline::spawn_blocking(move ||
                                 authority::with_claude_primary(&state, &fence, &primary, wrapper, || Ok(()))).await;
-                            if !matches!(checked, Ok(Ok(_))) { return; }
+                            match proof.observe(checked) {
+                                ProofDecision::Valid => {},
+                                ProofDecision::Refused => return,
+                                ProofDecision::Unavailable => { dirty = false; continue; },
+                            }
                         }
                         let authenticated = if let Some(peer) = peer.clone() {
                             let checked_state = state.clone();
@@ -1227,6 +1283,28 @@ mod tests {
         let mut title = current;
         title.component = "title".into();
         assert!(admitted_report(&title, &report).is_none());
+    }
+
+    #[test]
+    fn established_stream_unavailable_is_unknown_not_loss_and_refusal_is_distinct() {
+        let fence = Fence::new("agent/stream-proof-unit", "fixture", "delivery");
+        let mut old = StreamProof::new(fence.clone());
+        for _ in 0..4 {
+            assert_eq!(old.observe::<(), ()>(Ok(Err(St3Error::new("mailbox-authority-unavailable", "fixture")))), ProofDecision::Unavailable);
+        }
+        assert_eq!(old.failures, 3);
+        let assessment = delivery_presence::assess_current(&fence.subject, "claude", Some(&fence.incarnation));
+        assert_eq!(assessment.state, "unknown");
+        assert!(assessment.reason.unwrap().contains("suspect after three checks"));
+        let mut next = StreamProof::new(fence.clone());
+        assert_eq!(next.observe::<(), ()>(Ok(Ok(()))), ProofDecision::Valid);
+        assert!(delivery_presence::pending_proof(&fence.subject, &fence.incarnation).is_none());
+        assert_eq!(next.observe::<(), ()>(Err(())), ProofDecision::Unavailable);
+        drop(old);
+        assert!(delivery_presence::pending_proof(&fence.subject, &fence.incarnation).is_some(), "old stream drop cannot clear the replacement's uncertainty");
+        assert_eq!(next.observe::<(), ()>(Ok(Err(St3Error::new("stale-mailbox-session", "proven mismatch")))), ProofDecision::Refused);
+        drop(next);
+        assert!(delivery_presence::pending_proof(&fence.subject, &fence.incarnation).is_none());
     }
 
     #[test]

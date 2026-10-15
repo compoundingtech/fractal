@@ -81,6 +81,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(token) = self.store.selected_desired_token(&subject.subject)? else {
             return Ok(false);
         };
+        if let Some(incarnation) = observation.filter(|item| item.status == "running")
+            .and_then(|item| item.incarnation_id.as_deref())
+            && crate::api::claude_channel_proof_pending(&self.store, &subject.subject, incarnation) {
+            // An established stream is awaiting proof, not proven lost. Keep budget/faults,
+            // do not fabricate healthy attachment, and never charge a new restart for this.
+            self.arm_restart(&format!("channel-recovery:{}", subject.subject), now + 1_000);
+            return Ok(false);
+        }
         let requests = self
             .store
             .claims_for(&subject.subject, Some("runtime.action.requested"))?;
@@ -112,8 +120,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let attempts: Vec<_> = restarts
             .iter()
             .filter(|claim| {
-                claim.store_index > reset
-                    && claim.body["fields"]["operation"] == POLICY_OPERATION
+                claim.store_index > reset && claim.body["fields"]["operation"] == POLICY_OPERATION
                     && now.saturating_sub(claim.accepted_at_unix_ms) < ATTEMPT_WINDOW_MS
             })
             .collect();
@@ -161,13 +168,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 self.record_member(subject, observation, true)?;
                 self.reconcile_runtime_stop(
-                    &subject.subject,
-                    &member.runtime_id,
-                    member.terminal,
-                    observation.incarnation_id.as_deref(),
-                    member.shutdown_timeout_ms,
+                &subject.subject,
+                &member.runtime_id,
+                member.terminal,
+                observation
+                    .incarnation_id.as_deref(),
+                member.shutdown_timeout_ms,
                     Some(observation),
-                )?;
+            )?;
             }
             anyhow::bail!(
                 "{}",
