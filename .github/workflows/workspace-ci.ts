@@ -279,6 +279,122 @@ export const testArchiveConsumerSetup = [
 /** Everything a job that runs the workspace tests needs. */
 export const workspacePreparationSteps = [...commonSetupSteps, ...testBuildSteps]
 
+/**
+ * The stage jobs of `linux-gate` sign their own result. Every step is fail-soft and runs after the
+ * stage's logs are retained, so signing can never change a stage's outcome. The signer scripts come
+ * from the BASE commit of the change, never the tree under test. The note is written as a pack and
+ * uploaded; the aggregate note job (shallow checkouts cannot push) publishes it.
+ */
+export const evidenceStageNames = [
+  'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4',
+  'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries',
+] as const
+const evidenceHelper = '"$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"'
+/**
+ * Only the merge queue, main and pull requests from this repository reach the `evidence-signing`
+ * environment (and so the key); a fork's pull request and any other event get an empty expression and run
+ * without an environment, exactly as before. A same-repository author controls the workflow file its own
+ * pull request runs, so its code can read the key (known defect 20). The
+ * environment's own deployment-branch policy comes after this conditional exists.
+ */
+export const evidenceEnvironment =
+  "${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}"
+export const evidenceStageJob = (name: string) =>
+  (evidenceStageNames as readonly string[]).includes(name) ? { environment: evidenceEnvironment } : {}
+
+/**
+ * Jobs that are not `scripts/ci-linux` stages but are required checks too (genie-freshness,
+ * typescript-client, isolation-vm). They sign from the outcomes of their own steps; a step that did
+ * not run (for example because the job was covered by a trusted note) makes no note.
+ */
+export const evidenceStepNames = ['genie-freshness', 'typescript-client', 'isolation-vm'] as const
+export const evidenceStepJob = () => ({ environment: evidenceEnvironment })
+
+const signingCore = (
+  name: string,
+  facts: { helper: 'stage-facts' | 'step-facts'; env: Record<string, string>; toolchain: boolean },
+): unknown[] => {
+  const soft = { if: 'always()', 'continue-on-error': true } as const
+  // Without a toolchain override the wrapper asks nix for the dev shell derivation; jobs without a
+  // stage shell fingerprint what they ran on instead.
+  const toolchain = facts.toolchain
+    ? ` \\
+  --toolchain-sha256 "$(printf '%s|%s|%s|%s|%s|%s' "$RUNNER_OS" "$RUNNER_ARCH" "\${ImageVersion:-}" "$(nix --version 2>/dev/null)" "$(node --version 2>/dev/null)" "$(pnpm --version 2>/dev/null)" | sha256sum | cut -d' ' -f1)"`
+    : ''
+  return [
+    {
+      ...soft,
+      name: 'Take the evidence signer from the base commit',
+      id: 'evidence-base',
+      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
+    },
+    {
+      ...soft,
+      name: 'May this job use the signing key?',
+      id: 'evidence-guard',
+      if: "${{ always() && steps.evidence-base.outcome == 'success' }}",
+      env: {
+        PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+        PR_BASE_SHA: '${{ github.event.pull_request.base.sha }}',
+        PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+        PR_USER: '${{ github.event.pull_request.user.login }}',
+      },
+      run: `python3 ${evidenceHelper} guard`,
+    },
+    {
+      ...soft,
+      name: 'Write the signer configuration and key',
+      id: 'evidence-configure',
+      if: "${{ always() && steps.evidence-guard.outcome == 'success' }}",
+      env: { EVIDENCE_SIGNING_KEY: '${{ secrets.EVIDENCE_SIGNING_KEY }}' },
+      run: `set -o pipefail
+python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
+    },
+    {
+      ...soft,
+      name: `Sign this ${facts.helper === 'stage-facts' ? 'stage' : 'job'} result`,
+      if: "${{ always() && steps.evidence-configure.outcome == 'success' }}",
+      env: facts.env,
+      run: `helper=${evidenceHelper}
+python3 "$helper" once ${facts.helper === 'stage-facts' ? '"$STAGE_JOB"' : '"$STEP_CHECK"'}
+python3 "$helper" ${facts.helper} "$RUNNER_TEMP/job-facts.json"
+home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check ${facts.helper === 'stage-facts' ? '"$STAGE_JOB"' : '"$STEP_CHECK"'} \\
+  --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \\
+  --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \\
+  --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \\
+  --out "$RUNNER_TEMP/evidence-notes"${toolchain}`,
+    },
+    { ...soft, name: 'Remove the key', run: `python3 ${evidenceHelper} cleanup` },
+    {
+      ...soft,
+      name: 'Retain the signed note',
+      uses: 'actions/upload-artifact@v4',
+      with: { name: `evidence-note-${name}`, path: '${{ runner.temp }}/evidence-notes/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
+    },
+  ]
+}
+
+export const evidenceStageSteps = (name: string, stage: string): unknown[] =>
+  (evidenceStageNames as readonly string[]).includes(name)
+    ? signingCore(name, { helper: 'stage-facts', env: { STAGE: stage, STAGE_JOB: name }, toolchain: false })
+    : []
+
+/** Signing steps for a job made of steps: `command` names what they stand for, `steps` maps step ids to outcomes. */
+export const evidenceStepSteps = (name: string, command: string[], stepIds: string[]): unknown[] =>
+  signingCore(name, {
+    helper: 'step-facts',
+    env: {
+      STEP_CHECK: name,
+      STEP_COMMAND: JSON.stringify(command),
+      STEP_OUTCOMES: '{' + stepIds.map((id) => `"${id}":"\${{ steps.${id}.outcome }}"`).join(',') + '}',
+    },
+    toolchain: true,
+  })
+
 // One Linux stage: its own runner and caches, the common setup, then scripts/ci-linux (or the
 // command given), with steps before and after it.
 export const linuxStageJob = ({
@@ -311,6 +427,7 @@ export const linuxStageJob = ({
   name,
   ...(condition ? { if: condition } : {}),
   'runs-on': runsOn,
+  ...evidenceStageJob(name),
   'timeout-minutes': 120,
   defaults: { run: { shell: 'bash' } },
   env: { ...buildEnv, ...env, CI_CACHE_DEV_SHELL: 'default' },
@@ -340,6 +457,7 @@ export const linuxStageJob = ({
         'if-no-files-found': 'ignore',
       },
     },
+    ...evidenceStageSteps(name, stage),
   ],
 })
 

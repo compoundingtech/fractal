@@ -576,7 +576,16 @@ spans at most seven days and answers in `steps` equal steps (default 120, 1 to 1
 that ends before it starts, is longer than seven days or asks for another number of steps is
 `invalid-slo-period`. The value is `SloHistory { id, since_ms, until_ms, samples, steps }`: each
 step holds its lowest reading, and a step with no reading is null, so a gap means "not measured",
-never "spent". A daemon that has run for less than the period has fewer readings than steps.
+never "spent". A daemon that has run for less than the period has fewer readings than steps. An
+id the daemon has no rows for answers with no readings (`samples` 0 and every step null), not an
+error: a client that remembers an id should check it against the list.
+
+The objectives are this daemon's own: each member reports the targets and limits it measures, and
+nothing replicates between members. The wording in `about`, `target`, `current`, `window` and
+`explain` is display text built by the daemon for a person to read; it may change between builds,
+so a client shows it and does not parse it. The pair of reads is experimental while the TUI,
+the phone and the web app settle on what they need. The `slo` capability (version 1) is granted to
+a session with `read.projections`; an older daemon does not list it and answers both paths with 404.
 
 The Rust methods are `Client::slo_list()` and `Client::slo_history(id, since_ms, until_ms, steps)`;
 Swift has `sloList()` and `sloHistory(id:sinceMS:untilMS:steps:)`, and TypeScript `sloList()` and
@@ -2097,5 +2106,22 @@ matching, even when the expected incarnation is also missing. A summary is not r
 The optional claim field changes the registry digest. Older members keep new-field submissions
 as waiting records until upgrade; see [rolling upgrades](../replication.md#rolling-upgrades-and-waiting-claims).
 
-
 `agent.retire` permanently retires the identity at its declaring host. It requires `{ "agent": "agent/example/worker", "reason": "Work finished" }`, a selected desired claim ID in `fence.runtime_desired_revision`, and a stable idempotency key. Optional `runtime_incarnation` fences a selected process. Rust provides `agent_retire`; Swift and TypeScript provide `agentRetire`. See [terminal retirement](../agent-retirement.md) for the coordinated registry rollout and locally known retirement rule. Fresh sends to a known retired agent return 409 `recipient-retired` with `applied: "none"` and a typed `details.refusal.variant: "Retired"`. Exact accepted retries return their receipt; a lost reply remains unconfirmed. `lifecycle-unavailable` concerns incomplete/conflicting local evidence, never an offline owner alone.
+
+### Exchange carrier observations
+
+`SyncPeer` may include `last_successful_exchange` and `last_failed_exchange`, each
+an `ExchangeTransport` with `at` (ISO timestamp), `carrier` (an open string:
+`tailscale`, `fabric`, `loopback`, or `unknown` today), and optional `fabric_route`
+(`unknown` for Fabric today). They describe this serving host's last **locally initiated** exchange or attempt of
+each outcome, with its original timestamp, not replicated reachability or advertised
+endpoints. Success and failure records
+are independent: a successful fallback preserves the failed attempt's carrier.
+Incoming exchanges advance ordinary last-seen status and preserve the original
+outbound carrier record and timestamp; an inbound-only peer has no carrier record,
+which means evidence is unknown/unavailable. Fabric's loopback tunnel address cannot
+establish an incoming carrier. Restart clears these records, and probes never change
+them. Idle receipts outside the sync notice set do not notify client streams;
+repeated same-carrier failures likewise stay quiet when the graph is unchanged. Existing sync notice conditions
+remain the same. Older servers omit these optional fields; older clients ignore
+the additions. No API version, scope, operation or claim shape changes.

@@ -786,6 +786,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/mailbox", get(mailbox::subscribe))
         .route("/v1/harness-events", post(harness_events::publish))
         .route("/v1/harness-prompts/state", get(harness_events::prompt_state))
+        .route("/v1/harness-prompts/answer", get(harness_events::prompt_answer))
         .route("/v1/mailbox/bind", post(mailbox::bind))
         .route("/v1/mailbox/attachment", get(mailbox::attachment))
         .route("/v1/mailbox/receipts", post(mailbox::receipt))
@@ -1665,6 +1666,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "idempotency-conflict"
         | "idempotency-key-expired"
         | "issuer-required"
+        | "suspend-authored-session-selection"
         | "arrangement-exists"
         | "arrangement-folder-exists"
         | "arrangement-retired"
@@ -2055,24 +2057,36 @@ fn client_sync_notice(state: &AppState) -> Option<ClientSyncNotice> {
         .replication_peer_sync(&replication_peer_names(state))
         .into_iter()
         .filter(|(_, sync)| sync.catching_up || sync.diverged)
-        .map(|(peer, sync)| ClientSyncPeer {
-            host_id: client_host_id(&peer),
-            peer_only_envelopes: sync.peer_only_envelopes,
-            local_only_envelopes: sync.local_only_envelopes,
-            last_exchange_at: state
-                .store
-                .replication_peer_last_success(&peer)
-                .ok()
-                .flatten()
-                .map(client_timestamp),
-            estimated_catch_up_seconds: sync
-                .estimated_catch_up_seconds
-                .filter(|seconds| *seconds <= smallclaims::replication::MAX_SAFE_DURATION_SECONDS),
-            diverged_since: sync
-                .diverged
-                .then_some(sync.graph_differs_since_unix_ms)
-                .flatten()
-                .map(client_timestamp),
+        .map(|(peer, sync)| {
+            let (success, failure) = state.store.replication_peer_transport(&peer);
+            let transport = |record: smallclaims::replication::ReplicationExchangeTransport| {
+                crate::model::ClientExchangeTransport {
+                    at: client_timestamp(record.at_unix_ms),
+                    carrier: record.carrier.as_str().into(),
+                    fabric_route: record.fabric_route,
+                }
+            };
+            ClientSyncPeer {
+                last_successful_exchange: success.map(transport),
+                last_failed_exchange: failure.map(transport),
+                host_id: client_host_id(&peer),
+                peer_only_envelopes: sync.peer_only_envelopes,
+                local_only_envelopes: sync.local_only_envelopes,
+                last_exchange_at: state
+                    .store
+                    .replication_peer_last_success(&peer)
+                    .ok()
+                    .flatten()
+                    .map(client_timestamp),
+                estimated_catch_up_seconds: sync.estimated_catch_up_seconds.filter(|seconds| {
+                    *seconds <= smallclaims::replication::MAX_SAFE_DURATION_SECONDS
+                }),
+                diverged_since: sync
+                    .diverged
+                    .then_some(sync.graph_differs_since_unix_ms)
+                    .flatten()
+                    .map(client_timestamp),
+            }
         })
         .collect::<Vec<_>>();
     let sync_state = if peers.iter().any(|peer| peer.diverged_since.is_some()) {
@@ -2741,6 +2755,11 @@ fn add_agent_todos(store: &Store, items: &mut [Value], index: u64) -> anyhow::Re
 }
 
 /// Live presentation of already folded cards: freshness, delivery presence and subagents.
+/// The card's `reason` while rival hosts both claim a seat's runtime. A sentence, not a code:
+/// clients may print it as it is.
+pub(crate) const AUTHORITY_INDETERMINATE_REASON: &str =
+    "st cannot tell which host runs this agent; its processes may be running";
+
 fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
@@ -2828,6 +2847,12 @@ fn overlay_down(
     let Some(since) = launch_since.filter(|since| now_ms.saturating_sub(*since) > LAUNCH_WINDOW_MS) else {
         return;
     };
+    // A seat that spoke after it launched has had no session since it last spoke, not since it
+    // launched: days of earlier reports are not time spent down.
+    let since = report_age_ms
+        .map(|age| now_ms.saturating_sub(age))
+        .filter(|heard| *heard > since)
+        .unwrap_or(since);
     let since = client_timestamp(u128::from(since));
     item["state"] = json!("down");
     item["down_since"] = json!(since);
@@ -2866,7 +2891,10 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
 /// without a claim, so this is read per request rather than cached with the agents.
 fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
     let mut running = BTreeMap::<String, Vec<Value>>::new();
-    for subagent in store.running_subagents(client_now_ms() as u64)? {
+    let subagents = crate::otel::roster_phase("subagent_leases", || {
+        store.running_subagents(client_now_ms() as u64)
+    })?;
+    for subagent in subagents {
         running
             .entry(subagent.agent.clone())
             .or_default()
@@ -3248,6 +3276,13 @@ fn client_agent_cards_presented(
                 .transpose()?.flatten();
             let moving = handoff.as_ref().is_some_and(|h| h.phase != "running");
             let state = if member_fault.is_some() { "failed" } else if mailbox_fault.is_some() || moving { "waiting" } else { state };
+            // A session is observed but st cannot tell which host owns it (rival origins claim
+            // the runtime): the seat is neither running nor stopped as far as st can say.
+            let authority_unknown = member_fault.is_none()
+                && mailbox_fault.is_none()
+                && !moving
+                && subject.reachability == "indeterminate"
+                && matches!(observed, Some("running" | "ready" | "working" | "idle"));
             let suspension = if card_reads.may_have_suspension(&subject.subject) {
                 crate::suspension::current(store, &subject.subject)?
             } else {
@@ -3326,7 +3361,8 @@ fn client_agent_cards_presented(
                 "_launch_since_ms": launch_since_ms.map(|ms| ms as u64),
                 "blocked_on": subject.harness.as_ref().and_then(|harness| harness.blocked_on.as_deref()),
                 "ask": subject.harness.as_ref().and_then(|harness| harness.ask.as_deref()),
-                "reason": subject.harness.as_ref().and_then(|harness| harness.reason.as_deref()),
+                "reason": subject.harness.as_ref().and_then(|harness| harness.reason.as_deref())
+                    .or_else(|| authority_unknown.then_some(AUTHORITY_INDETERMINATE_REASON)),
                 // What the seat is doing that is neither work nor a wait on anyone: a status,
                 // never an alert.
                 "activity": subject
@@ -3785,7 +3821,27 @@ pub(crate) fn client_attention_resources_at(
     _history: bool,
     at_unix_ms: u128,
 ) -> anyhow::Result<Vec<Value>> {
-    let current = store.attention_snapshot(person, at_unix_ms)?;
+    let current = crate::performance::task("attention_collection/snapshot", || {
+        store.attention_snapshot(person, at_unix_ms)
+    })?;
+    client_attention_resources_from_items(store, current)
+}
+
+fn client_attention_resources_fenced_at(
+    store: &Store,
+    person: Option<&str>,
+    at_unix_ms: u128,
+) -> anyhow::Result<(Vec<Value>, Option<u128>)> {
+    let (current, valid_until) = crate::performance::task("attention_collection/snapshot", || {
+        store.attention_collection_snapshot(person, at_unix_ms)
+    })?;
+    Ok((client_attention_resources_from_items(store, current)?, valid_until))
+}
+
+fn client_attention_resources_from_items(
+    store: &Store,
+    current: Vec<crate::model::AttentionItemView>,
+) -> anyhow::Result<Vec<Value>> {
     let mut resources = Vec::new();
     for item in current {
         let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
@@ -9100,7 +9156,7 @@ async fn replication_receive(
     Json(request): Json<ReplicationReceiveRequest>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let store = state.store.clone();
-    let (response, reconcile_changed) = blocking_action(move || {
+    let (response, reconcile_changed, notice_visible) = blocking_action(move || {
         let before_index = store
             .index()
             .map_err(|error| St3Error::new("internal", error.to_string()))?;
@@ -9110,12 +9166,14 @@ async fn replication_receive(
         if let Some(round_trip_ms) = request.round_trip_ms {
             store.record_replication_round_trip(Duration::from_millis(round_trip_ms));
         }
+        let notice_was_visible = store.replication_peer_in_sync_notice(&request.peer);
         // Only the worker's own requests carry a round trip, and only they prove its route out.
-        let receipt = store.receive_replication_exchange_asking(
+        let receipt = store.receive_replication_exchange_via(
             &request.peer,
             &request.fleet_id,
             &request.exchange,
             request.round_trip_ms.is_some(),
+            request.carrier,
         )?;
         if store
             .observes_transport_to(&request.peer)
@@ -9199,14 +9257,20 @@ async fn replication_receive(
                 store_index,
             },
             changed && !quiet_only && projected,
+            notice_was_visible || store.replication_peer_in_sync_notice(&request.peer),
         ))
     })
     .await?;
-    if response.changed {
-        if reconcile_changed {
-            crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::ReplicationReceive, None);
-            state.notify.notify_one();
-        }
+    if response.changed && reconcile_changed {
+        crate::reconcile_telemetry::record_wake(
+            crate::reconcile_telemetry::WakeCause::ReplicationReceive,
+            None,
+        );
+        state.notify.notify_one();
+    }
+    // Outside the sync notice set, local carrier evidence has no client representation.
+    // Quiet exchanges must not wake every client stream merely to advance a timestamp.
+    if response.changed || notice_visible {
         state
             .event_notify
             .send_modify(|generation| *generation = generation.saturating_add(1));
@@ -9244,9 +9308,15 @@ async fn replication_peer_failure(
     Json(request): Json<ReplicationPeerFailureRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
-    let changed = blocking_store(move || {
+    let (changed, visible_carrier_changed) = blocking_store(move || {
         let before_index = store.index()?;
-        let stale = store.record_peer_failure(&request.peer, &request.status, &request.error)?;
+        let previous = store.replication_peer_transport(&request.peer).1;
+        let stale = store.record_peer_failure_via(
+            &request.peer,
+            &request.status,
+            &request.error,
+            request.carrier,
+        )?;
         if stale && store.observes_transport_to(&request.peer)? {
             store.record_transport_observation(
                 &request.peer,
@@ -9258,11 +9328,27 @@ async fn replication_peer_failure(
         // A peer that fails mid-sync sends no more exchanges, so project what it delivered.
         let projected = store.replication_projection_deferred()
             && store.project_replication_backlog_unless_catching_up()? == Some(true);
-        Ok(store.index()? != before_index || projected)
+        let current = store.replication_peer_transport(&request.peer).1;
+        // Repeated failures on the same carrier retain a fresh local timestamp without
+        // waking all clients. First evidence or a carrier change matters only in a notice.
+        let carrier = |record: &smallclaims::replication::ReplicationExchangeTransport| {
+            (record.carrier, record.fabric_route.clone())
+        };
+        let visible_carrier_changed = previous.as_ref().map(carrier)
+            != current.as_ref().map(carrier)
+            && store.replication_peer_in_sync_notice(&request.peer);
+        Ok((
+            store.index()? != before_index || projected,
+            visible_carrier_changed,
+        ))
     })
     .await?;
     if changed {
         signal_changed(&state);
+    } else if visible_carrier_changed {
+        state
+            .event_notify
+            .send_modify(|generation| *generation = generation.saturating_add(1));
     }
     Ok(Json(json!({ "recorded": true, "changed": changed })))
 }
@@ -11439,7 +11525,7 @@ async fn restart_agent(
     {
         return Err(ApiError::bad(St3Error::new(
             "restart-suspended",
-            "the seat is suspended; resume it with `st agents resume`",
+            "the seat is suspended; resume it with `st agents resume`. If resume refuses an authored session selection, use `st agents stop` then `st agents start`; this ends the suspension and launches the declaration without preserving the suspended session",
         )));
     }
     let status = state
@@ -11761,6 +11847,15 @@ pub(crate) fn request_suspend(
             ))
         })?;
     check_suspension_fence(fence.as_ref(), Some(incarnation), &token)?;
+    if let Some(selector) = crate::native_resume::authored_session_selection(&member) {
+        return Err(ApiError::bad(
+            St3Error::new(
+                "suspend-authored-session-selection",
+                format!("the seat declares its own session selection ({selector}); native resume would refuse it, so suspend leaves the seat running"),
+            )
+            .with_detail("selector", selector),
+        ));
+    }
     let blocking = crate::suspension::blockers(&state.store, &subject, incarnation)
         .map_err(ApiError::internal)?;
     if !blocking.is_empty() {
@@ -18779,7 +18874,9 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         // Clients read the same rows and the same history, typed.
         let (status, client_list) = get_request(app.clone(), "/v1/client/slo").await;
         assert_eq!(status, StatusCode::OK, "{client_list}");
-        let typed: st3_client::SloList = serde_json::from_value(client_list.get("value").unwrap_or(&client_list).clone()).unwrap();
+        assert_eq!(client_list["api_version"], "st3.client.v0", "{client_list}");
+        assert!(client_list["snapshot"]["store_index"].is_u64(), "{client_list}");
+        let typed: st3_client::SloList = serde_json::from_value(client_list["value"].clone()).unwrap();
         let weekly = typed.rows.iter().find(|row| row.id == "ada/claude-1/weekly").unwrap();
         assert_eq!((weekly.kind.as_str(), weekly.remaining_percent), ("budget", Some(70.0)));
         assert!(weekly.resets_at_unix_ms.is_none() && weekly.measured_at_unix_ms.is_some());
@@ -18790,7 +18887,8 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{client_history}");
-        let typed: st3_client::SloHistory = serde_json::from_value(client_history.get("value").unwrap_or(&client_history).clone()).unwrap();
+        assert_eq!(client_history["api_version"], "st3.client.v0", "{client_history}");
+        let typed: st3_client::SloHistory = serde_json::from_value(client_history["value"].clone()).unwrap();
         assert_eq!((typed.id.as_str(), typed.samples, typed.steps), ("cpu", 2, vec![Some(80.0), Some(60.0)]));
         for query in [
             format!("id=cpu&since_ms={now}&until_ms={now}"),
@@ -18799,7 +18897,23 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         ] {
             let (status, _) = get_request(app.clone(), &format!("/v1/slo/history?{query}")).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+            // The client route refuses a bad period the same way, with the same code.
+            let (status, refused) = get_request(app.clone(), &format!("/v1/client/slo/history?{query}")).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}: {refused}");
+            assert_eq!(refused["code"], "invalid-slo-period", "{query}: {refused}");
         }
+        // A client session without read.projections reads neither route.
+        let session = || Extension(client_v0::ClientSession::for_tests_scoped("person/fixture", "person/fixture", &["read.attention"]));
+        let denied = client_v0::slo_list(State(state.clone()), session()).await.unwrap_err();
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+        let denied = client_v0::slo_history(
+            State(state.clone()),
+            session(),
+            Query(SloHistoryQuery { id: "cpu".into(), since_ms: None, until_ms: None, steps: None }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -21560,6 +21674,152 @@ agent "good" {{ workspace {:?}; command "true" }}
         assert_eq!(response["peers"][0]["worker"]["next_retry_at_unix_ms"], json!(retry));
         assert!(response["peers"][0]["last_error"].is_null());
         assert_eq!(state.store.index().unwrap(), index);
+    }
+
+    #[tokio::test]
+    async fn idle_replication_receipts_do_not_wake_client_streams() {
+        const FLEET: &str = "94cd11ba-c582-4558-9c84-c3bda922eb6d";
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        state.configured_peers = vec!["cedar".into()];
+        state.store.bind_fleet(FLEET).unwrap();
+        state
+            .store
+            .record_transport_observation("cedar", "up", None, None)
+            .unwrap();
+        let source = Store::open_memory("cedar").unwrap();
+        source.bind_fleet(FLEET).unwrap();
+        let exchange = source.export_replication_summary(FLEET).unwrap();
+        let events = state.event_notify.subscribe();
+        let app = router(state.clone());
+        for carrier in ["fabric", "fabric", "loopback"] {
+            let (status, response) = json_request(
+                app.clone(),
+                "/v1/internal/replication/receive",
+                json!({
+                    "peer": "cedar", "fleet_id": FLEET, "exchange": exchange,
+                    "round_trip_ms": 10, "carrier": carrier
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(response["changed"], false, "{response}");
+            assert!(
+                !events.has_changed().unwrap(),
+                "idle receipts have no visible client notice"
+            );
+        }
+        // Leaving the notice set is visible even if no envelope or claim changed.
+        state
+            .store
+            .replication_sync
+            .lock()
+            .unwrap()
+            .get_mut("cedar")
+            .unwrap()
+            .observe(0, Some((1_000, 0)), smallclaims::store::now_ms());
+        assert!(state.store.replication_peer_in_sync_notice("cedar"));
+        let (status, response) = json_request(
+            app,
+            "/v1/internal/replication/receive",
+            json!({
+                "peer": "cedar", "fleet_id": FLEET, "exchange": exchange,
+                "round_trip_ms": 10, "carrier": "loopback"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["changed"], false);
+        assert!(
+            events.has_changed().unwrap(),
+            "a disappearing sync notice must notify clients"
+        );
+    }
+
+    #[tokio::test]
+    async fn replication_exchange_carrier_status_notifies_clients_without_replicating_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        state.configured_peers = vec!["cedar".into()];
+        // Existing reachability is already unknown, so this refusal writes only local evidence.
+        state
+            .store
+            .record_transport_observation("cedar", "unknown", None, None)
+            .unwrap();
+        let index = state.store.index().unwrap();
+        state
+            .store
+            .replication_sync
+            .lock()
+            .unwrap()
+            .entry("cedar".into())
+            .or_default()
+            .observe(0, Some((1_000, 0)), smallclaims::store::now_ms());
+        let mut events = state.event_notify.subscribe();
+        let app = router(state.clone());
+        let (status, response) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
+            "peer": "cedar", "status": "refused", "error": "service grant refused", "carrier": "fabric"
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["changed"], false);
+        assert!(
+            events.has_changed().unwrap(),
+            "local evidence must notify client streams"
+        );
+        events.borrow_and_update();
+        let (status, response) = get_request(app.clone(), "/v1/replication/status").await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let failed = &response["peers"][0]["last_failed_exchange"];
+        assert_eq!(failed["carrier"], "fabric");
+        assert_eq!(failed["fabric_route"], "unknown");
+        assert!(failed["at_unix_ms"].as_u64().is_some());
+        assert!(
+            response["peers"][0]
+                .get("last_successful_exchange")
+                .is_none()
+        );
+        assert_eq!(state.store.index().unwrap(), index);
+        assert!(!state.state_dir.join("replication.wake").exists());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), state.notify.notified())
+                .await
+                .is_err()
+        );
+        let (status, _) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
+            "peer": "cedar", "status": "refused", "error": "service grant refused", "carrier": "fabric"
+        })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !events.has_changed().unwrap(),
+            "an unchanged-carrier repeat stays quiet"
+        );
+        state
+            .store
+            .replication_sync
+            .lock()
+            .unwrap()
+            .get_mut("cedar")
+            .unwrap()
+            .observe(0, Some((0, 0)), smallclaims::store::now_ms());
+        let (status, _) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
+            "peer": "cedar", "status": "refused", "error": "service grant refused", "carrier": "loopback"
+        })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !events.has_changed().unwrap(),
+            "an idle peer's carrier is not in client notices"
+        );
+        // Old-worker/liveness reports have no dial evidence and leave the record intact.
+        let (status, _) = json_request(
+            app,
+            "/v1/internal/replication/peer-failure",
+            json!({
+                "peer": "cedar", "status": "refused", "error": "service grant refused"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!events.has_changed().unwrap());
     }
 
     #[tokio::test]
