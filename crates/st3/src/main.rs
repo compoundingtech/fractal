@@ -7012,9 +7012,6 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(convert_envelope_payloads(store.clone()));
     tokio::spawn(migrate_event_payloads(store.clone()));
-    tokio::spawn(st3::maintenance::run_client_message_selectors(
-        Arc::downgrade(&store), notify.clone(), event_notify.clone(),
-    ));
     tokio::spawn(catch_up_coordination_counts(store.clone()));
     tokio::spawn(copy_stop_deferral_history(store.clone()));
     spawn_response_expiry(store.clone());
@@ -7166,6 +7163,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 ready_at.duration_since(started_at).as_secs_f64() * 1_000.0,
             );
             startup.serving();
+            // Index population must not compete with either API's first bind.
+            tokio::spawn(st3::maintenance::run_client_message_selectors(
+                Arc::downgrade(&store), notify.clone(), event_notify.clone(),
+            ));
             eprintln!("st: local API listening at {}", config.socket.display());
             eprintln!(
                 "st: paired client gateway listening at {}",

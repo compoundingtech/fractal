@@ -1369,10 +1369,13 @@ and repair/checkpoint deletion that makes the cut unavailable return `page-curso
 Fresh pages also respect current desired-projection availability: removing a desired-only
 declaration does not restore its recipient or content from retained `intent.desired` history.
 The local body-free selector projection maintains ordered recipient/actor ranges and current
-eligibility before the page limit. Opening an older store transactionally backfills these
-headers; changed ordering or eligibility creates a temporal header, but body-only writes do
-not copy bodies or churn header versions. Initial selector backfill completes before readers
-are exposed. While later selector maintenance lags, pages and issued cursors pin the last fully
+eligibility before the page limit. Opening an older store installs body-free tables, indexes
+and source capture without populating the headers. Once both APIs serve, a background worker
+builds the first cut in resumable, independently admitted writer chunks. Until publication,
+negotiated v2 message pages return HTTP 503 `message-selectors-not-ready`; legacy message
+reads and unrelated endpoints remain available. Changed ordering or eligibility creates a
+temporal header, but body-only writes do not copy bodies or churn header versions.
+While later selector maintenance lags, pages and issued cursors pin the last fully
 published frontier; pending rows are invisible rather than making message lists fail.
 Admitted remote declarations do not advance that frontier until the durable graph projection
 covers them. An interrupted initial backfill retains its resume state and exposes no initial

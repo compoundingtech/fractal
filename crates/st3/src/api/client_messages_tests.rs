@@ -36,6 +36,93 @@ async fn paging_request(
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
+fn selector_upgrade_state(root: &Path) -> AppState {
+    let mut state = super::tests::state(root);
+    let path = root.join("selector-upgrade.sqlite");
+    state.store = Arc::new(Store::open(&path, "node").unwrap());
+    paging_reader(&state, "upgrade-reader", &["read.projections"]);
+    for index in 0..32 {
+        append_fixture_claim(
+            &state.store, &format!("message/online-{index:02}"), "message.sent",
+            "person/robin", BTreeMap::from([
+                ("from".into(), json!("person/robin")),
+                ("to".into(), json!("person/alex")),
+                ("content".into(), json!(format!("online body {index}"))),
+                ("status".into(), json!("sent")),
+            ]),
+        );
+    }
+    // Model the first selector upgrade: authoritative messages already exist,
+    // but there is no published selector cut. Opening must not drain this work.
+    state.store.connection.write().execute(
+        "DELETE FROM meta WHERE key IN ('client_message_selectors_v1_cut','client_message_selectors_v1_backfill')",
+        [],
+    ).unwrap();
+    drop(std::mem::replace(&mut state.store, Arc::new(Store::open_memory("unused").unwrap())));
+    state.store = Arc::new(Store::open(&path, "node").unwrap());
+    state
+}
+
+#[tokio::test]
+async fn messages_upgrade_serves_before_first_selector_cut() {
+    let root = tempfile::tempdir().unwrap();
+    let state = selector_upgrade_state(root.path());
+    assert!(state.store.client_message_selectors_pending().unwrap());
+    let app = fabric_router(state);
+    let (status, capabilities) = paging_request(
+        app.clone(), "/v1/client/capabilities", Some("upgrade-reader"), None,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{capabilities}");
+    let uri = "/v1/client/messages?history=true&limit=100";
+    let (status, legacy) = paging_request(app.clone(), uri, Some("upgrade-reader"), None).await;
+    assert_eq!(status, StatusCode::OK, "{legacy}");
+    assert_eq!(legacy["value"]["items"].as_array().unwrap().len(), 32);
+    let (status, pending) = paging_request(
+        app, uri, Some("upgrade-reader"), Some("messages-paging.v2"),
+    ).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{pending}");
+    assert_eq!(pending["code"], "message-selectors-not-ready");
+}
+
+#[tokio::test]
+async fn messages_upgrade_publishes_complete_cut_after_online_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let state = selector_upgrade_state(root.path());
+    let app = fabric_router(state.clone());
+    let uri = "/v1/client/messages?history=true&limit=100";
+    assert!(state.store.maintain_client_message_selectors().unwrap());
+    // Capture remains live between independently admitted backfill loans.
+    append_fixture_claim(
+        &state.store, "message/online-during-build", "message.sent", "person/robin",
+        BTreeMap::from([
+            ("from".into(), json!("person/robin")),
+            ("to".into(), json!("person/alex")),
+            ("content".into(), json!("arrived while building")),
+            ("status".into(), json!("sent")),
+        ]),
+    );
+    let (_, before) = paging_request(app.clone(), uri, Some("upgrade-reader"), None).await;
+    let (events, _) = tokio::sync::watch::channel(0);
+    let worker = tokio::spawn(crate::maintenance::run_client_message_selectors(
+        Arc::downgrade(&state.store), state.notify.clone(), events,
+    ));
+    tokio::time::timeout(Duration::from_secs(10), state.notify.notified()).await.unwrap();
+    assert!(!state.store.client_message_selectors_pending().unwrap());
+    let (status, after) = paging_request(
+        app.clone(), uri, Some("upgrade-reader"), Some("messages-paging.v2"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    let mut expected = before["value"]["items"].as_array().unwrap().clone();
+    let mut actual = after["value"]["items"].as_array().unwrap().clone();
+    for item in expected.iter_mut().chain(actual.iter_mut()) {
+        item.as_object_mut().unwrap().remove("delivery");
+    }
+    assert_eq!(actual, expected);
+    drop(app);
+    drop(state);
+    tokio::time::timeout(Duration::from_secs(3), worker).await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn messages_paging_v2_requires_negotiation() {
     let root = tempfile::tempdir().unwrap();

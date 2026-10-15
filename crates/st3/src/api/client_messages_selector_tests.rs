@@ -534,7 +534,7 @@ fn benchmark_client_messages_selector_migration_copy() {
     let start = Instant::now();
     let store = Store::open(&path, "selector-migration-benchmark").unwrap();
     let migration = start.elapsed();
-    let startup_backfill = store.client_messages_selector_benchmark_open_stats();
+    let startup_backfill = store.client_messages_selector_benchmark_drain().unwrap();
     let live = storage(&path);
     let counts: (u64, u64) = store.readers.get().query_row(
         "SELECT (SELECT COUNT(*) FROM claims), (SELECT COUNT(*) FROM message_index)", [],
@@ -558,14 +558,14 @@ fn benchmark_client_messages_selector_migration_copy() {
     let reopened = Store::open(&path, "selector-migration-benchmark").unwrap();
     let reopen = start.elapsed();
     assert_eq!(page(&reopened, case, cut, None).items, first.items, "backfill must remain complete across reopen");
-    let reopen_backfill = reopened.client_messages_selector_benchmark_open_stats();
+    let reopen_backfill = reopened.client_messages_selector_benchmark_drain().unwrap();
     assert_eq!(reopen_backfill.transactions, 0, "populated reopen must not reset or rehydrate");
     assert_eq!(offline_source_counts(&source), source_counts, "source copy remains read-only and unchanged");
     eprintln!("{}", json!({"benchmark": "client_messages_selector_migration", "source_copy": source,
         "claims": source_counts.0, "messages": source_counts.1,
-        "open_including_backfill_ms": migration.as_secs_f64() * 1_000.0,
+        "open_excluding_online_backfill_ms": migration.as_secs_f64() * 1_000.0,
         "explicit_selector_header_rebuild_ms": rebuild.as_secs_f64() * 1_000.0,
-        "startup_selector_backfill": startup_backfill.benchmark_measurement(),
+        "online_selector_backfill": startup_backfill.benchmark_measurement(),
         "explicit_selector_rebuild": rebuild_backfill.benchmark_measurement(),
         "populated_reopen_selector_backfill": reopen_backfill.benchmark_measurement(),
         "populated_reopen_ms": reopen.as_secs_f64() * 1_000.0,
@@ -573,8 +573,8 @@ fn benchmark_client_messages_selector_migration_copy() {
         "after_explicit_rebuild_live_storage": rebuilt_live, "checkpointed_storage": checkpointed,
         "pre_rebuild_checkpoint": pre_rebuild_checkpoint, "post_rebuild_checkpoint": post_rebuild_checkpoint,
         "transaction_target_ms": 100, "target_kind": "max",
-        "transaction_scope": "every startup/rebuild chunk BEGIN through durable COMMIT, checkpoint separately; not total Store open or writer admission",
-        "wal_scope": "physical file sizes; backfill performs PASSIVE checkpoint before returning, so after-open/rebuild WAL is not cumulative bytes written",
+        "transaction_scope": "every online/rebuild chunk BEGIN through durable COMMIT, checkpoint separately; not total Store open or writer admission",
+        "wal_scope": "physical file sizes; this explicit benchmark drain performs PASSIVE checkpoint before returning; production uses the daemon recycler; WAL is not cumulative bytes written",
         "source_open_flags": "READ_ONLY", "mutated_database": "fresh temporary copy only"}));
     assert!(startup_backfill.subjects > 0,
         "offline migration input must need selector backfill, not already contain a completed selector projection");

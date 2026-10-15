@@ -76,9 +76,9 @@ pub trait Runtime: Send + Sync {
     /// is new, and a store on disk may need a replay after an upgrade.
     fn open_projections(&self, transaction: &Transaction<'_>, shared_memory: bool) -> Result<()>;
 
-    /// Finish startup work that needs bounded, independently committed transactions.
-    /// Called after `open_projections` commits and before readers or the store are exposed.
-    /// A failure must leave durable progress that the next open can resume.
+    /// Persist bounded initialization metadata after `open_projections` commits.
+    /// Called before readers are exposed; full projection builds belong to
+    /// post-serving maintenance, not this first-serving critical path.
     fn finish_open_projections(&self, _connection: &mut Connection) -> Result<()> {
         Ok(())
     }

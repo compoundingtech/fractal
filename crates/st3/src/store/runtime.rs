@@ -21,8 +21,6 @@ pub struct SmalltalkRuntime {
     #[cfg(test)]
     pub(crate) work_extension_roots_rebuilt: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
-    pub(crate) client_message_backfill_stats: Mutex<client_messages::BackfillStats>,
-    #[cfg(test)]
     pub(crate) client_message_commit_budget: Mutex<client_messages::FoldBudget>,
     /// Simulate different build registries on isolated nodes in compatibility tests.
     #[cfg(test)]
@@ -336,14 +334,7 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn finish_open_projections(&self, connection: &mut Connection) -> Result<()> {
-        let stats = client_messages::open(connection)?;
-        #[cfg(test)]
-        {
-            *self.client_message_backfill_stats.lock().unwrap_or_else(PoisonError::into_inner) = stats;
-        }
-        #[cfg(not(test))]
-        let _ = stats;
-        Ok(())
+        client_messages::open(connection)
     }
 
     fn schema_digest(&self) -> String {

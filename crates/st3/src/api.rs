@@ -432,7 +432,7 @@ impl ApiError {
             | "lane-approval-denied"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
-            "database-busy" | "database-locked" => StatusCode::SERVICE_UNAVAILABLE,
+            "database-busy" | "database-locked" | "message-selectors-not-ready" => StatusCode::SERVICE_UNAVAILABLE,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::UNPROCESSABLE_ENTITY,

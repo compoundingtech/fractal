@@ -539,6 +539,7 @@ fn record_cut(transaction: &Transaction<'_>,cut: u64) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BackfillStats {
     pub(crate) transactions: usize,
@@ -753,11 +754,10 @@ fn backfill_chunk(connection: &mut Connection, reset: bool) -> Result<Option<(us
     Ok(Some((processed, complete, budget)))
 }
 
+#[cfg(test)]
 fn open_chunks(connection: &mut Connection, reset: bool) -> Result<BackfillStats> {
-    // SQLite's automatic checkpoint runs inside COMMIT and can make an otherwise
-    // bounded transaction rewrite the preceding WAL. Both startup and explicit
-    // rebuild share this driver: checkpoint after the chunks, retain FULL
-    // synchronous commits, and restore the caller's policy even on failure.
+    // Explicit benchmark rebuilds checkpoint outside chunk transactions and restore
+    // the caller's policy even on failure. Production uses independent writer loans.
     let automatic: u32 = connection.pragma_query_value(None,"wal_autocheckpoint",|row|row.get(0))?;
     if automatic != 0 { connection.pragma_update(None,"wal_autocheckpoint",0)?; }
     let mut result = run_open_chunks(connection,reset);
@@ -774,6 +774,7 @@ fn open_chunks(connection: &mut Connection, reset: bool) -> Result<BackfillStats
     result
 }
 
+#[cfg(test)]
 fn run_open_chunks(connection: &mut Connection, mut reset: bool) -> Result<BackfillStats> {
     #[cfg(test)]
     if !connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)", [TABLE], |row| row.get::<_, bool>(0))? {
@@ -837,8 +838,27 @@ fn run_open_chunks(connection: &mut Connection, mut reset: bool) -> Result<Backf
     Ok(stats)
 }
 
-pub(super) fn open(connection: &mut Connection) -> Result<BackfillStats> {
-    open_chunks(connection, false)
+/// Opening installs capture, not the first full cut. An empty store can publish
+/// immediately; populated stores are built by the post-serving maintenance worker.
+pub(super) fn open(connection: &mut Connection) -> Result<()> {
+    let initialized: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1 OR key=?2)",
+        params![MARKER, BACKFILL_MARKER], |row| row.get(0),
+    )?;
+    if !initialized {
+        let transaction = connection.transaction()?;
+        let populated: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM message_index WHERE created_index>0)",
+            [], |row| row.get(0),
+        )?;
+        if populated {
+            begin_backfill(&transaction)?;
+        } else {
+            record_cut(&transaction, current_index_tx(&transaction)?)?;
+        }
+        transaction.commit()?;
+    }
+    Ok(())
 }
 
 /// The runtime's sole managed outer-COMMIT selector callback. Append, apply,
@@ -885,7 +905,7 @@ fn projection_blocks_selectors(connection: &Connection, subject: Option<&str>) -
 }
 
 /// One allowance per outer transaction: managed writers call only from their
-/// finalizer; startup calls once in each independently committed backfill chunk.
+/// finalizer; online backfill calls once in each independently committed chunk.
 /// Unfinished work survives COMMIT for the next worker loan.
 fn flush_pending(transaction: &Transaction<'_>, publish: bool) -> Result<FoldBudget> {
     let started = std::time::Instant::now();
@@ -1068,6 +1088,10 @@ fn page_sql(person: bool,actor: bool,history: bool,current: bool,after: bool) ->
     format!("SELECT subject,created_index,current FROM ({candidates}) WHERE (?1 IS NULL OR ?1 IS NOT NULL) AND (?2 IS NULL OR ?2 IS NOT NULL) AND (?3 IS NULL OR ?3 IS NOT NULL) AND (?4 IS NULL OR ?4 IS NOT NULL) AND (?5 IS NULL OR ?5 IS NOT NULL) ORDER BY sent_key DESC,subject")
 }
 
+fn selectors_not_ready() -> St3Error {
+    St3Error::new("message-selectors-not-ready", "message selector initialization is still in progress")
+}
+
 impl Store {
     pub(crate) fn client_messages_cut_epoch(&self) -> Result<u64> {
         Ok(self.readers.get().query_row("SELECT epoch FROM local_client_message_cut_epoch WHERE id=1",[],|row|row.get(0))?)
@@ -1077,7 +1101,8 @@ impl Store {
     /// Pending rows and partially folded replacement headers are never candidates.
     pub(crate) fn client_messages_page_cut(&self, through: u64) -> Result<u64> {
         let connection = self.readers.get();
-        let published: String = connection.query_row("SELECT value FROM meta WHERE key=?1", [MARKER], |row| row.get(0))?;
+        let published: String = connection.query_row("SELECT value FROM meta WHERE key=?1", [MARKER], |row| row.get(0))
+            .optional()?.ok_or_else(selectors_not_ready)?;
         Ok(if has_pending(&connection)? { through.min(published.parse()?) } else { through })
     }
 
@@ -1095,7 +1120,14 @@ impl Store {
         }
         let mut connection = self.connection.write_background();
         if backfill_incomplete(&connection)? {
-            backfill_chunk(&mut connection, false)?;
+            // Do not turn one bounded loan's COMMIT into a checkpoint of the whole
+            // backfill WAL. The daemon's WAL recycler owns checkpoint scheduling.
+            let automatic: u32 = connection.pragma_query_value(None, "wal_autocheckpoint", |row| row.get(0))?;
+            connection.pragma_update(None, "wal_autocheckpoint", 0)?;
+            let result = backfill_chunk(&mut connection, false);
+            let restore = connection.pragma_update(None, "wal_autocheckpoint", automatic);
+            restore?;
+            result?;
             return Ok(backfill_incomplete(&connection)? || has_pending(&connection)?);
         }
         let transaction = connection.transaction()?;
@@ -1108,7 +1140,7 @@ impl Store {
     pub(crate) fn client_messages_page(&self,person: Option<&str>,actor: Option<&str>,history: bool,through: u64,after: Option<&(u128,String)>,limit: usize) -> Result<Vec<(MessageView,Value,bool)>> {
         let connection=self.readers.get();
         let last_change: Option<String>=connection.prepare_cached("SELECT value FROM meta WHERE key=?1")?.query_row([MARKER],|row|row.get(0)).optional()?;
-        let last_change=last_change.ok_or_else(||anyhow::anyhow!("message selector backfill is incomplete"))?;
+        let last_change=last_change.ok_or_else(selectors_not_ready)?;
         let published = last_change.parse::<u64>()?;
         let pending = has_pending(&connection)?;
         let through = if pending { through.min(published) } else { through };
@@ -1158,8 +1190,8 @@ FROM ends JOIN claims first ON first.id=ends.first_id JOIN claims last ON last.i
     }
 
     #[cfg(test)]
-    pub(crate) fn client_messages_selector_benchmark_open_stats(&self) -> BackfillStats {
-        *self.smalltalk.client_message_backfill_stats.lock().unwrap_or_else(PoisonError::into_inner)
+    pub(crate) fn client_messages_selector_benchmark_drain(&self) -> Result<BackfillStats> {
+        open_chunks(&mut self.connection.write(), false)
     }
 
     #[cfg(test)]
@@ -1589,7 +1621,8 @@ mod tests {
                 "a committed partial backfill cannot serve pages");
             drop(store); // interruption: no in-memory progress survives
             let reopened = Store::open(&path, "backfill-resume").unwrap();
-            let stats = reopened.client_messages_selector_benchmark_open_stats();
+            assert!(reopened.client_message_selectors_pending().unwrap(), "reopen must leave the cut online");
+            let stats = reopened.client_messages_selector_benchmark_drain().unwrap();
             assert!(stats.transactions > 0);
             assert!(stats.max_subjects_per_transaction <= BACKFILL_SUBJECTS);
             assert_eq!(reopened.client_messages_cut_epoch().unwrap(), epoch + 1, "resume must not reset epoch");
@@ -1601,7 +1634,7 @@ mod tests {
             assert!(!reopened.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [BACKFILL_MARKER], |row| row.get::<_, bool>(0)).unwrap());
             drop(reopened);
             let populated = Store::open(&path, "backfill-resume").unwrap();
-            assert_eq!(populated.client_messages_selector_benchmark_open_stats().transactions, 0);
+            assert_eq!(populated.client_messages_selector_benchmark_drain().unwrap().transactions, 0);
             assert_eq!(populated.client_messages_cut_epoch().unwrap(), epoch + 1);
         }
     }
@@ -1637,6 +1670,8 @@ mod tests {
         drop(store);
         let reopened = Store::open(&path, "backfill-changes").unwrap();
         assert_eq!(reopened.index().unwrap(), cut);
+        assert!(reopened.client_message_selectors_pending().unwrap());
+        reopened.client_messages_selector_benchmark_drain().unwrap();
         let rows = paged_backfill_rows(&reopened, None, None, true);
         assert_eq!(rows.len(), BACKFILL_SUBJECTS * 3);
         assert!(!rows.iter().any(|row| row["message"]["subject"] == "message/backfill-0001"));
@@ -1660,7 +1695,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_runtime_finishes_selector_backfill_before_exposing_readers() {
+    fn graph_runtime_exposes_readers_before_selector_backfill_finishes() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("direct-runtime.sqlite");
         let store = Store::open(&path, "direct-runtime").unwrap();
@@ -1669,13 +1704,10 @@ mod tests {
         drop(store);
         let graph = GraphStore::open(&path, "direct-runtime", runtime()).unwrap();
         let reader = graph.readers.get();
-        assert!(reader.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [MARKER], |row| row.get::<_, bool>(0)).unwrap());
-        assert!(!reader.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [BACKFILL_MARKER], |row| row.get::<_, bool>(0)).unwrap());
-        let headers: usize = reader.query_row(
-            "SELECT COUNT(*) FROM local_client_message_selectors_v1 WHERE born_index>=0 AND retired_index IS NULL",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(headers, BACKFILL_SUBJECTS * 2);
+        assert!(!reader.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [MARKER], |row| row.get::<_, bool>(0)).unwrap());
+        assert!(reader.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [BACKFILL_MARKER], |row| row.get::<_, bool>(0)).unwrap());
+        assert_eq!(reader.query_row("SELECT COUNT(*) FROM message_index", [], |row| row.get::<_, usize>(0)).unwrap(),
+            BACKFILL_SUBJECTS * 2, "authoritative reads are available before the selector cut");
     }
 
     fn deferred_claim(transaction: &Transaction<'_>, subject: &str, kind: &str, fields: Value, batch: Option<&str>) -> smallclaims::ClaimRecord {
@@ -1839,7 +1871,8 @@ mod tests {
         }
         drop(store);
         let reopened = Store::open(&path,"node").unwrap();
-        let stats = reopened.client_messages_selector_benchmark_open_stats();
+        assert!(reopened.client_message_selectors_pending().unwrap());
+        let stats = reopened.client_messages_selector_benchmark_drain().unwrap();
         assert!(stats.transactions>1);
         assert!(stats.max_claims_per_transaction<=FOLD_CLAIMS);
         assert_eq!(reopened.readers.get().query_row("SELECT COUNT(*) FROM claims", [], |row|row.get::<_,u64>(0)).unwrap(),source_count);
@@ -1867,7 +1900,8 @@ mod tests {
         drop(store);
         let reopened = Store::open(&path,"node").unwrap();
         assert_eq!(reopened.index().unwrap(),claims);
-        assert_eq!(reopened.client_messages_selector_benchmark_open_stats().malformed_desired,1);
+        assert!(reopened.client_message_selectors_pending().unwrap());
+        assert_eq!(reopened.client_messages_selector_benchmark_drain().unwrap().malformed_desired,1);
         assert_eq!(malformed_count(&reopened.readers.get()).unwrap(),1);
         assert!(!reopened.client_message_selectors_pending().unwrap());
         let rows = paged_backfill_rows(&reopened,None,None,true);
