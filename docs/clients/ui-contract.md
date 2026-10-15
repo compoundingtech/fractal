@@ -497,15 +497,22 @@ daemon and goes once published missions declare their flags. Today the rule is c
 Each person has one Sidebar arrangement, at the reserved subject
 `arrangement/person/NAME/00000000-0000-7000-8000-000000000001`
 ([#2043](https://github.com/compoundingtech/smalltalk/issues/2043)). The generated Rust, Swift
-and TypeScript clients expose that id as a constant. A client follows the reserved subject. When
-it does not exist, the client shows a live legacy arrangement named "Sidebar" (the lowest id),
-and creates the reserved subject with that arrangement's contents on its first edit. When two
-clients create the reserved subject at once, the second gets `arrangement-exists` and adopts the
-first, and replicas converge under last-writer-wins.
+and TypeScript clients expose that UUID as `SIDEBAR_ARRANGEMENT_UUID` (Swift:
+`st3SidebarArrangementUuid`), from `constants` in `operations.json`. Every client picks the same
+Sidebar:
 
-Today the terminal UI (`crates/stui/src/ui/resource_sidebar.rs`, in two places) and the phone
-(`apps/ios/sidebarEdits.ts`, `sidebarView.ts`) pick by name and create random ids. Fractal
-(`apps/fractal-web/src/data/arrangements.ts`) already prefers this reserved id.
+1. the live reserved subject, whatever its name;
+2. otherwise the live arrangement named exactly "Sidebar" with the lowest id, which a client
+   created before the reserved id;
+3. otherwise none, and the first edit creates the reserved subject named "Sidebar". If st refuses
+   that create with `arrangement-retired`, the person removed their Sidebar: the client says
+   restoring a removed Sidebar is not available yet and never tries to create it again.
+
+A client edits the Sidebar it picked and never copies a legacy one, so an older client still
+editing it loses nothing. When two clients create the reserved subject at once, the second gets
+`arrangement-exists` and adopts the first, and replicas converge under last-writer-wins. The
+terminal UI (`crates/stui/src/ui/resource_sidebar.rs`), the phone (`apps/ios/sidebarEdits.ts`)
+and Fractal (`apps/fractal-web/src/data/arrangements.ts`) follow this rule.
 
 ### Conversation stream
 
