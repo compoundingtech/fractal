@@ -618,7 +618,7 @@ mod tests {
         });
         provider.force_flush().unwrap();
         let finished = exporter.get_finished_metrics().unwrap();
-        let metrics: Vec<_> = finished.iter().flat_map(|resource| resource.scope_metrics())
+        let metrics: Vec<_> = finished.iter().rev().flat_map(|resource| resource.scope_metrics())
             .flat_map(|scope| scope.metrics()).collect();
         let abandoned = metrics.iter().find(|metric| metric.name() == "st.write_workers.abandoned").unwrap();
         let AggregatedMetrics::U64(MetricData::Sum(sum)) = abandoned.data() else { panic!("abandoned counter"); };
