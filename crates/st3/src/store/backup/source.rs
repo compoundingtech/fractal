@@ -80,6 +80,14 @@ pub(super) fn owned_bodies(
     connection: &Connection,
     bodies: Option<&crate::message_body::Bodies>,
 ) -> Result<Vec<OwnedBody>> {
+    owned_bodies_with(bodies, |subject| message_at(connection, subject))
+}
+
+/// Keep the live Store's existing view/cache path while sharing sender/hash selection.
+pub(super) fn owned_bodies_with(
+    bodies: Option<&crate::message_body::Bodies>,
+    mut message: impl FnMut(&str) -> Result<Option<MessageView>>,
+) -> Result<Vec<OwnedBody>> {
     let mut owned: Vec<(String, String, String)> = Vec::new();
     if let Some(bodies) = bodies {
         for file in bodies
@@ -87,7 +95,7 @@ pub(super) fn owned_bodies(
             .into_iter()
             .filter(|file| !file.temporary && !file.expired) {
             let subject = format!("message/{}", file.id);
-            let Some(message) = message_at(connection, &subject)? else {
+            let Some(message) = message(&subject)? else {
                 continue;
             };
             let (Some(named), true) = (message.body_attachment(), bodies.holds(&message.from, &file))

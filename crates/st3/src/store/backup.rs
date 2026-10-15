@@ -28,7 +28,7 @@ impl Store {
         bodies: Option<&crate::message_body::Bodies>,
     ) -> Result<Header> {
         // This is the same original sender/hash selection, still before the live pin.
-        let owned = source::owned_bodies(&self.readers.get(), bodies)?;
+        let owned = source::owned_bodies_with(bodies, |subject| self.message(subject))?;
         loop {
             self.seal_local_batches()?;
             // Capture before pinning: another sealer may advance this atomic after our reader
