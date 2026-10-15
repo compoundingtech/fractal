@@ -318,7 +318,8 @@ export const ImageRefusal: Story = {
     // One selection crossing the limit keeps the accepted images and names only the fifth.
     await pickImages(canvasElement, [third, fourth, fifth])
     await waitFor(() => expect(notice).toHaveTextContent(countRefusal))
-    await expect(within(row).getAllByRole('img')).toHaveLength(4)
+    // Accepted previews appear once their object URLs resolve; the refusal is announced first.
+    await waitFor(() => expect(within(row).getAllByRole('img')).toHaveLength(4))
     await expect(within(row).queryByRole('img', { name: 'photo-5.png' })).toBeNull()
     // Removal is a valid change and clears it; the explicit dismiss does too.
     await userEvent.click(within(row).getByRole('button', { name: 'Remove photo-4.png' }))
