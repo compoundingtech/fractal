@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "none",
-    "detail": "No manual migration, identity change or claim-log maintenance is required. Clients restart pagination on page-cursor-expired."
+    "detail": "No manual migration, identity change or claim-log maintenance is required. Clients restart pagination on page-cursor-expired. Empty-source projection skips require an exact healthy frontier and no pending verdicts; ahead frontiers still run canonical recovery. Deferred replication projection commits leave selector work to its reactive maintenance loan instead of consuming that loan inside projection finalization."
   },
   "recovery": {
     "status": "changed",

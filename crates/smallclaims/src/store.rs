@@ -6932,7 +6932,8 @@ impl Store {
             // A healthy, already-projected source needs no projection transaction.
             // In particular, an empty peer wake must not spend another runtime's
             // deferred maintenance allowance. Missing/stale health still retries.
-            let source_empty = count == 0 && frontier >= target
+            let source_empty = count == 0 && frontier == target
+                && !self.verdicts_due.load(Ordering::Acquire)
                 && health.as_ref().is_some_and(|(frontier, status)| frontier.is_some() && status == "healthy");
             progress(ProjectionProgress {
                 phase: "project-incremental",
@@ -7053,7 +7054,7 @@ impl Store {
                                 error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
                             params![through, now_ms().to_string()],
                         )?;
-                        transaction.commit()?;
+                        transaction.commit_with_deferred_runtime()?;
                     }
                     if !replayed {
                         processed += count;

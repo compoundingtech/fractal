@@ -1296,7 +1296,7 @@ mod tests {
                     transaction.execute("DELETE FROM projection_health WHERE aggregate='graph'", []).unwrap();
                 } else {
                     transaction.execute(
-                        "UPDATE projection_health SET status='stale',last_good_store_index=NULL WHERE aggregate='graph'", [],
+                        "UPDATE projection_health SET status='stale',last_good_store_index=0 WHERE aggregate='graph'", [],
                     ).unwrap();
                 }
                 transaction.commit().unwrap();

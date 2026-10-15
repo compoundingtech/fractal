@@ -209,7 +209,7 @@ async fn sql_message_pages_preserve_local_body_references_without_inlining_text(
         assert_eq!(resource["content"], message.content);
         let Json(detail) = client_messages_detail(
             State(state.clone()),
-            Extension(client_v0::ClientSession::for_tests("person/alex", "person/alex", "unix")),
+            Extension(client_v0::ClientSession::for_tests(&message.to, &message.to, "unix")),
             AxumPath(message.subject.clone()),
             Query(ClientListQuery { history: true, ..Default::default() }),
         ).await.unwrap();
