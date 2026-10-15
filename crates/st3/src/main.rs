@@ -18900,7 +18900,12 @@ async fn read_message_after_lifecycle(
             "/v1/client/agents/{}", urlencoding::encode(&message.to),
         )).await {
             Ok(detail) => Some(detail),
-            Err(GeneratedClientError::Api(ClientErrorCode::NotFound, _, _)) => None,
+            Err(error)
+                if st3::client::api_error_parts(&error)
+                    .is_some_and(|(status, _, _, _)| status == 404) =>
+            {
+                None
+            }
             Err(error) => return Err(error.into()),
         };
         if detail.as_ref().and_then(|detail| detail["mail_custody"]["successor"].as_str())
