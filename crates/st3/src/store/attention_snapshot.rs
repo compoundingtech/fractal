@@ -1749,11 +1749,11 @@ impl Store {
         if person.is_some_and(|person| person != owner) {
             return Ok(Vec::new());
         }
-        let observations = observations_newest_first(connection, seat)?;
+        let last = last_turn_or_end(connection, seat)?;
         let mut items = Vec::new();
         for (claim, index, at, fields) in denials {
             if index < started
-                || moved_on(&observations, index, at)
+                || moved_on(last.as_ref(), index, at)
                 || native_prompt_answer(connection, &claim)?.is_some()
             {
                 continue;
@@ -1821,12 +1821,12 @@ impl Store {
         let connection = self.readers.get();
         let started = running_since(&connection, seat).map_err(internal)?;
         let answered = native_prompt_answer(&connection, episode).map_err(internal)?;
-        let observations = observations_newest_first(&connection, seat).map_err(internal)?;
+        let last = last_turn_or_end(&connection, seat).map_err(internal)?;
         drop(connection);
         let index = denial.store_index as i64;
         let at = denial.accepted_at_unix_ms;
         if started.is_none_or(|(started, _)| index < started)
-            || moved_on(&observations, index, at)
+            || moved_on(last.as_ref(), index, at)
             || answered.is_some()
         {
             return Err(St3Error::new(
@@ -1904,42 +1904,43 @@ fn running_since(connection: &Connection, seat: &str) -> Result<Option<(i64, Str
     Ok(Some((index, fields["incarnation_id"].as_str().unwrap_or_default().to_owned())))
 }
 
-/// The newest few harness observations of `seat`, newest first: their store positions and fields.
-fn observations_newest_first(connection: &Connection, seat: &str) -> Result<Vec<(i64, Value)>> {
+/// The newest observation of `seat` that began a turn or ended its session: its store position,
+/// state and when that state began. Observations of the seat at rest, which repeat as it is
+/// refreshed, lie after it and are passed over.
+fn last_turn_or_end(connection: &Connection, seat: &str) -> Result<Option<(i64, String, Option<u64>)>> {
     connection
         .prepare_cached(&format!(
-            "{} LIMIT {MOVED_ON_WINDOW}",
-            newest_claims_of_kind_query("claims.store_index, claims.body", "harness.observed")
+            "{} LIMIT 1",
+            newest_claims_of_kind_query("claims.store_index, claims.body", "harness.observed").replace(
+                " ORDER BY",
+                " AND json_extract(claims.body, '$.fields.state') IN ('working', 'ended') ORDER BY"
+            )
         ))?
-        .query_map(params![seat, i64::MAX], |row| {
+        .query_row(params![seat, i64::MAX], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?
-        .map(|row| -> Result<(i64, Value)> {
-            let (index, body) = row?;
-            let body: Value = serde_json::from_str(&body)?;
-            Ok((index, body.get("fields").cloned().unwrap_or(body)))
         })
-        .collect()
+        .optional()?
+        .map(|(index, body)| -> Result<(i64, String, Option<u64>)> {
+            let body: Value = serde_json::from_str(&body)?;
+            let fields = body.get("fields").unwrap_or(&body);
+            Ok((
+                index,
+                fields["state"].as_str().unwrap_or_default().to_owned(),
+                fields["observed_since_ms"].as_u64(),
+            ))
+        })
+        .transpose()
 }
 
-/// How many of a seat's newest observations show whether it moved on since a denial.
-const MOVED_ON_WINDOW: usize = 16;
-
 /// Whether the seat moved on after its hook raised a denial (at store position `index`, accepted
-/// at `at`): it began another turn, its session ended, or it was observed more often than
-/// `observations` holds. The denied call then waits on nobody, so its alert goes. The turn the
-/// denial ended is still observed working for a moment, but that state began before it.
-fn moved_on(observations: &[(i64, Value)], index: i64, at: u128) -> bool {
-    let mut newer = observations.iter().filter(|(observed, _)| *observed > index);
-    if newer.clone().count() == MOVED_ON_WINDOW {
-        return true;
-    }
-    newer.any(|(_, fields)| match fields["state"].as_str() {
-        Some("ended") => true,
-        Some("working") => fields["observed_since_ms"]
-            .as_u64()
-            .is_some_and(|since| u128::from(since) > at),
-        _ => false,
+/// at `at`), given its newest turn or end (see [`last_turn_or_end`]): it began another turn, or its
+/// session ended. The denied call then waits on nobody, so its alert goes. The `Stop` hook records
+/// the seat's state before it raises the denial, so the turn the denial ended, though it may still
+/// be observed working for a moment, began before it.
+fn moved_on(last: Option<&(i64, String, Option<u64>)>, index: i64, at: u128) -> bool {
+    last.is_some_and(|(observed, state, since)| {
+        *observed > index
+            && (state == "ended" || since.is_some_and(|since| u128::from(since) > at))
     })
 }
 

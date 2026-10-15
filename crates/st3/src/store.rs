@@ -57796,7 +57796,8 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
 
     /// A denied call waits on its person only until the seat moves on: once the seat begins another
     /// turn or its session ends, the alert goes and an answer is refused. The turn the denial ended
-    /// is still observed working for a moment, and that is no new turn.
+    /// is still observed working for a moment, and that is no new turn; nor is the seat at rest,
+    /// however often it is observed. The claims stay: only the alert they derived goes.
     #[test]
     fn a_classifier_denial_goes_once_the_seat_moves_on() {
         let store = Store::open_memory("node").unwrap();
@@ -57864,6 +57865,19 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         observed("working", first.accepted_at_unix_ms - 1_000);
         observed("idle", first.accepted_at_unix_ms);
         assert_eq!(alerts(), vec![first.id.clone()]);
+        // However long the seat rests, refreshed as it is, the call still waits.
+        let observed_at = |state: &str, since: u128, at: u128| {
+            append(
+                "harness.observed",
+                json!({"state": state, "driver": "claude", "blocked_on": "none", "ask": "none",
+                    "observed_since_ms": since as u64, "observed_at_ms": at as u64}),
+                None,
+            )
+        };
+        for refresh in 1..=40 {
+            observed_at("idle", first.accepted_at_unix_ms, first.accepted_at_unix_ms + refresh * 300_000);
+        }
+        assert_eq!(alerts(), vec![first.id.clone()], "a resting seat's call still waits");
         // Another turn begins: the call waits on nobody.
         observed("working", first.accepted_at_unix_ms + 1);
         assert!(alerts().is_empty(), "the seat moved on");

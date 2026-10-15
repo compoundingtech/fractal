@@ -451,6 +451,53 @@ mod tests {
         assert_eq!(reported.iter().map(|denial| denial.call_id.as_str()).collect::<Vec<_>>(), ["toolu_2"]);
     }
 
+    /// The mode that counts is the one in force at the denial: a turn that leaves auto mode keeps
+    /// the denial it had, and one that enters it raises only what follows. A ledger an earlier
+    /// version wrote holds no mode, so it raises nothing until the transcript names one, which it
+    /// does as each turn begins: it fails closed for the rest of that turn.
+    #[test]
+    fn the_mode_at_the_denial_counts_and_an_unknown_mode_raises_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_transcript(
+            dir.path(),
+            &[
+                mode("auto"),
+                prompt("prompt-1", "auto"),
+                tool_use("toolu_1", "git checkout --theirs a.txt"),
+                in_turn(denied("toolu_1"), "prompt-1"),
+                mode("bypassPermissions"),
+                tool_use("toolu_2", "git reset --hard"),
+                in_turn(denied("toolu_2"), "prompt-1"),
+            ],
+        );
+        let reported = new_denials(dir.path(), "session-1", &path).unwrap();
+        assert_eq!(reported.iter().map(|denial| denial.call_id.as_str()).collect::<Vec<_>>(), ["toolu_1"]);
+        // A second read at the next turn's end raises nothing it raised before.
+        assert!(new_denials(dir.path(), "session-1", &path).unwrap().is_empty());
+
+        // An earlier version's ledger: a cursor, and no mode.
+        let length = fs::metadata(&path).unwrap().len();
+        fs::write(
+            dir.path().join(LEDGER_FILE),
+            json!({"cursor": ["session-1", length], "entries": []}).to_string(),
+        )
+        .unwrap();
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str(&format!("{}\n{}\n", tool_use("toolu_3", "git clean -fdx"), in_turn(denied("toolu_3"), "prompt-1")));
+        fs::write(&path, &text).unwrap();
+        assert!(new_denials(dir.path(), "session-1", &path).unwrap().is_empty(), "fails closed");
+        text.push_str(&format!(
+            "{}\n{}\n{}\n{}\n",
+            mode("auto"),
+            prompt("prompt-2", "auto"),
+            tool_use("toolu_4", "git push --force"),
+            in_turn(denied("toolu_4"), "prompt-2")
+        ));
+        fs::write(&path, &text).unwrap();
+        let reported = new_denials(dir.path(), "session-1", &path).unwrap();
+        assert_eq!(reported.iter().map(|denial| denial.call_id.as_str()).collect::<Vec<_>>(), ["toolu_4"]);
+    }
+
     #[test]
     fn an_approval_lets_the_matching_call_through_once_or_for_its_kind() {
         let dir = tempfile::tempdir().unwrap();
