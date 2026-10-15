@@ -8,6 +8,7 @@ export type IconName =
   | 'attach' | 'copy' | 'send' | 'stop' | 'check' | 'x' | 'alert'
   | 'spinner' | 'folder' | 'message' | 'dot'
   | 'wrap' | 'whitespace' | 'pull-request' | 'stop-circle'
+  | 'terminal' | 'agents' | 'globe' | 'checklist'
 
 const PATHS: Record<IconName, React.ReactNode> = {
   search: <><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></>,
@@ -36,6 +37,10 @@ const PATHS: Record<IconName, React.ReactNode> = {
   whitespace: <><path d="M9 14V2h4M12 2v12M9 2H6a3 3 0 0 0 0 6h3" /><circle cx="3" cy="12" r=".6" fill="currentColor" /></>,
   'pull-request': <><circle cx="4" cy="3" r="1.5" /><circle cx="4" cy="13" r="1.5" /><circle cx="12" cy="13" r="1.5" /><path d="M4 4.5v7M12 11.5V6a3 3 0 0 0-3-3H7M9 1 7 3l2 2" /></>,
   'stop-circle': <><circle cx="8" cy="8" r="6" /><rect x="5" y="5" width="6" height="6" rx=".5" fill="currentColor" stroke="none" /></>,
+  terminal: <><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" /><path d="m4 5 3 3-3 3M9 11h3" /></>,
+  agents: <><circle cx="6" cy="5" r="2" /><path d="M1.5 13v-1a4.5 4.5 0 0 1 9 0v1M10 3a2 2 0 0 1 0 4M12 9a4 4 0 0 1 2.5 4" /></>,
+  globe: <><circle cx="8" cy="8" r="6" /><ellipse cx="8" cy="8" rx="2.5" ry="6" /><path d="M2 8h12" /></>,
+  checklist: <><path d="m2 4 1 1 2-2M7 4h7m-12 6 1 1 2-2M7 10h7" /></>,
 }
 
 /** One 16px stroke icon set; stroke inherits currentColor, fill none. */

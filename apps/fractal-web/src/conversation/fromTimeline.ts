@@ -7,6 +7,7 @@ import { DateTime, Option, Schema } from 'effect'
 
 import type { ConversationItem, ToolCallItem, ToolResult } from './model.ts'
 import { contentEvent, proseItem, withoutShownDeliveries } from './semantics.ts'
+import { blockFacts } from './blocks.ts'
 
 /**
  * Fixture-only D08 proposal, not part of the st3 wire contract.
@@ -44,12 +45,19 @@ const isActive = (lastStatus: Entry | undefined) =>
     ['completed', 'failed', 'cancelled'].includes(lastStatus.body.status)
   )
 
-const resultOf = (entry: ToolResultEntry): ToolResult => ({
-  content: entry.body.content,
-  mediaType: entry.body.media_type,
-  isError: entry.body.status === 'error',
-  at: entryTimestamp(entry),
-})
+const resultOf = (entry: ToolResultEntry): ToolResult => {
+  const facts = blockFacts(entry.body)
+  const metadata = facts.blocks?.find(block => block.kind === 'tool_output' && block.metadata !== undefined)?.metadata
+  return {
+    content: entry.body.content,
+    mediaType: entry.body.media_type,
+    isError: entry.body.status === 'error',
+    at: entryTimestamp(entry),
+    ...(facts.blocks === undefined ? {} : { blocks: facts.blocks }),
+    ...(facts.view === undefined ? {} : { view: facts.view }),
+    ...(metadata === undefined ? {} : { metadata }),
+  }
+}
 
 /** A call with its result joined (CAG.CLI.WEB.CNV-R04), or an orphan result rendered on its own. */
 const joinResult = ({
@@ -58,20 +66,26 @@ const joinResult = ({
 }: {
   readonly call: ToolCallItem | undefined
   readonly entry: ToolResultEntry
-}): ToolCallItem =>
-  call !== undefined
-    ? { ...call, status: entry.body.status, result: resultOf(entry) }
+}): ToolCallItem => {
+  const result = resultOf(entry)
+  const skipped = result.metadata?.__synthetic === true && result.metadata.source === 'interrupt_skipped'
+  const status = skipped ? 'success' : entry.body.status
+  const settled = skipped ? { ...result, isError: false } : result
+  return call !== undefined
+    ? { ...call, status, result: settled, ...(skipped ? { skipped: true } : {}) }
     : {
         _tag: 'ToolCall',
         id: entry.id,
         callId: entry.body.call_id,
         name: 'tool result',
         input: undefined,
-        status: entry.body.status,
-        result: resultOf(entry),
+        status,
+        result: settled,
+        ...(skipped ? { skipped: true } : {}),
         callSeen: false,
         at: entryTimestamp(entry),
       }
+}
 
 /**
  * st's native-transcript reader (`external_sessions.rs` `push_message`) emits a `message` entry
@@ -147,7 +161,7 @@ const parseNativeReasoning = (entry: Extract<Entry, { type: 'content' }>): Conve
 }
 
 /** Projects one entry that is not a tool result (results join their call instead). */
-const itemOf = ({
+const baseItemOf = ({
   entry,
   sessionActive,
 }: {
@@ -283,6 +297,12 @@ const itemOf = ({
     data: entry.body,
     at: entryTimestamp(entry),
   }
+}
+
+const itemOf = (args: Parameters<typeof baseItemOf>[0]): ConversationItem => {
+  const item = baseItemOf(args)
+  if (args.entry.type === 'unrecognized') return item
+  return { ...item, ...blockFacts(args.entry.body) }
 }
 
 /** Convenience for fixtures and one-shot reads, using the same fold as live chunks. */

@@ -15,6 +15,9 @@ import { documentReferences } from '../documents/DocumentLink.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import type * as Atom from 'effect/reactivity/Atom'
+import type { ToolCallItem } from '../conversation/model.ts'
+import { semanticToolDetail } from './semanticTool.tsx'
+import { TaskResultPreview } from './TaskResultPreview.tsx'
 
 /** The follow owns content and the kit owns its presentation. The display-contents host
  * boundary observes asynchronous runtime adoption without inventing a kit commit hook.
@@ -122,6 +125,10 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     event.stopPropagation()
     onOpenDocument(href)
   }
+  const renderSemanticDetail = React.useCallback((item: ToolCallItem) => {
+    const call = state._tag === 'Observed' ? state.turns.flatMap(turn => turn.work.calls).find(call => call.id === item.id) : undefined
+    return call?.kind === 'subagent' ? <TaskResultPreview call={call} onOpen={() => onOpenTool(call)} /> : semanticToolDetail(item, call === undefined ? undefined : () => onOpenTool(call))
+  }, [state, onOpenTool])
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: state._tag === 'Observed' && state.isRunning }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
@@ -134,6 +141,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       now={now}
       observedAt={transcriptObservedAt(observation, now)}
       onOpenTool={onOpenTool}
+      renderToolDetail={renderSemanticDetail}
       onRetrySync={state._tag === 'Unavailable' || retryConversation === undefined ? undefined : () => retryConversation(agentRef)}
       {...(renderInlineReference === undefined ? {} : { renderInlineReference })}
       onLoadImage={(src) => { const url = openableImageUrl(src); if (url !== undefined) window.open(url, '_blank', 'noopener,noreferrer') }}

@@ -15,6 +15,7 @@ import type { ConversationPage } from '../data/source.ts'
 import { decodeConversationChunk } from '@st3/sdk/effect'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import { createConversationTranscript } from './conversationTranscript.ts'
+import { paletteRecentsKey } from '../command-palette/LiveCommandPalette.tsx'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
 
@@ -59,7 +60,7 @@ describe('live header parity', () => {
   it('renders named Resources and Conversation controls in the owning header', async () => {
     const header = host.querySelector('[data-testid="thread-header"]')!
     const names = [...header.querySelectorAll('button')].map(node => node.getAttribute('aria-label') ?? node.textContent?.trim())
-    expect(names).toEqual(['Actions for Example Agent', 'Resources', 'Conversation menu', 'Toggle terminal drawer', 'Toggle right panel'])
+    expect(names).toEqual(['Switch agent', 'Actions for Example Agent', 'Resources', 'Conversation menu', 'Toggle terminal drawer', 'Toggle right panel'])
     await click('Conversation menu')
     const setting = document.querySelector('[role="menuitemcheckbox"]')
     expect(setting?.textContent).toContain('Show all system events')
@@ -73,6 +74,16 @@ describe('live header parity', () => {
     expect(host.textContent).not.toMatch(/credential_pin|future_kind|not-for-display/)
     await act(async () => document.querySelector('[role="menuitemcheckbox"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true })))
     expect(host.textContent).not.toContain('An event this view cannot show yet.')
+  })
+  it('names the Switch control independently of its visible shortcut chip', async () => {
+    const header = host.querySelector<HTMLElement>('[data-testid="thread-header"]')!
+    const trigger = header.querySelector<HTMLButtonElement>('button[aria-label="Switch agent"]')!
+    expect(trigger.textContent?.trim()).toBe('Switch')
+    expect(trigger.querySelector('kbd')).toBeNull()
+    expect(trigger.getAttribute('aria-keyshortcuts')).toMatch(/^(Meta|Control)\+K$/)
+    const shortcut = trigger.parentElement!.querySelector('kbd')!
+    expect(shortcut.getAttribute('aria-hidden')).toBe('true')
+    expect(shortcut.textContent).toMatch(/^(⌘K|Ctrl K)$/)
   })
   it('opens real resources and queue observations, and closes their inspector', async () => {
     await click('Resources')
@@ -126,19 +137,28 @@ describe('live header parity', () => {
       release()
     }
   })
-  it('persists the system-event view preference without any connection or agent identity in storage keys', async () => {
+  it('persists the global system-event preference and refs-only recents without identifying storage keys', async () => {
     await click('Conversation menu')
     await act(async () => document.querySelector('[role="menuitemcheckbox"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true })))
     // The persistence boundary flushes on pagehide; no debounce sleeps are needed.
     window.dispatchEvent(new Event('pagehide'))
     const stored = window.localStorage.getItem('wf.ui@1') ?? ''
-    expect(stored).toContain('"conversation.systemEvents":')
-    expect(stored).not.toContain(agent.id)
+    const persisted = JSON.parse(stored) as { entries: Record<string, { version: number; value: unknown }> }
+    const preference = persisted.entries['conversation.systemEvents']!
+    expect(preference).toMatchObject({ version: 1, value: true })
+    expect(JSON.stringify(preference)).not.toContain(agent.id)
+    // P2·G1 palette design permits bounded stable target refs, never copied roster or conversation content.
+    expect(persisted.entries[paletteRecentsKey(source.gateway)]).toMatchObject({ version: 1, value: [agent.id] })
+    const entryKeys = Object.keys(persisted.entries).join(' ')
+    const storageKeys = Object.keys(window.localStorage).join(' ')
+    for (const identity of [agent.id, source.label, source.gateway]) {
+      expect(entryKeys).not.toContain(identity)
+      expect(storageKeys).not.toContain(identity)
+    }
     expect(stored).not.toContain(source.label)
     expect(stored).not.toContain(source.gateway)
-    expect(Object.keys(window.localStorage).join(' ')).not.toContain(agent.id)
-    expect(Object.keys(window.localStorage).join(' ')).not.toContain(source.label)
-    expect(Object.keys(window.localStorage).join(' ')).not.toContain(source.gateway)
+    expect(stored).not.toContain(agent.name)
+    expect(stored).not.toMatch(/credential_pin|future_kind|not-for-display/)
     await click('Conversation menu')
     await act(async () => document.querySelector('[role="menuitemcheckbox"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true })))
   })
