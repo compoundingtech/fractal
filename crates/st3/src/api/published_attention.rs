@@ -224,11 +224,19 @@ fn refresh_waiting_summary(state: &AppState, starting: bool) -> Option<anyhow::R
 /// The clock is read inside the snapshot: every local claim in it was accepted before then.
 /// Each row carries its presentation, presented again when the agents it reads change.
 pub(crate) fn refresh_attention_list(store: &Store) -> anyhow::Result<()> {
+    refresh_attention_list_with(store, |previous| attention_fleet(store, previous))
+}
+
+/// `refresh_attention_list`, presenting with the fleet `fleet` gives for the previous
+/// publication's fleet.
+pub(crate) fn refresh_attention_list_with(
+    store: &Store,
+    fleet: impl FnOnce(Option<&Arc<AttentionFleet>>) -> Option<Arc<AttentionFleet>>,
+) -> anyhow::Result<()> {
     let (generation, previous) = store.newest_attention_list();
     let clock = ATTENTION_LIST_CLOCK.as_millis();
     // Read before the snapshot: a roster published in between presents again at the next wake.
-    let fleet = attention_fleet(
-        store,
+    let fleet = fleet(
         previous
             .as_ref()
             .and_then(|previous| previous.fleet.as_ref()),
@@ -319,8 +327,10 @@ pub(crate) fn refresh_attention_list(store: &Store) -> anyhow::Result<()> {
 }
 
 /// The newest published agents roster as the attention presentation reads it, reusing
-/// `previous` while no roster has been published since. None until a roster is published.
-fn attention_fleet(
+/// `previous` while no roster has been published since, and while none is available (its cache
+/// cleared, or no roster refresher), so rows keep their agents until the next roster. None
+/// until a roster is published.
+pub(crate) fn attention_fleet(
     store: &Store,
     previous: Option<&Arc<AttentionFleet>>,
 ) -> Option<Arc<AttentionFleet>> {
@@ -328,7 +338,9 @@ fn attention_fleet(
     if let Some(previous) = previous.filter(|previous| previous.revision == revision) {
         return Some(Arc::clone(previous));
     }
-    let (_, cards, _) = store.published_agent_roster(u64::MAX, false)?;
+    let Some((_, cards, _)) = store.published_agent_roster(u64::MAX, false) else {
+        return previous.cloned();
+    };
     Some(Arc::new(AttentionFleet::from_cards(revision, &cards)))
 }
 
@@ -356,8 +368,17 @@ impl st3_ui_model::attention::Fleet for Known<'_> {
 
 /// Give each row the presentation st serves for it (docs/clients/ui-contract.md, Attention
 /// row), reading `fleet`, or no agents before the first roster. A row it cannot read goes
-/// without one; it never fails the list for every client.
+/// without one, and a step whose path it cannot read is named on no card; neither fails the
+/// list for every client.
 pub(crate) fn present_attention(
+    store: &Store,
+    rows: &mut [Value],
+    fleet: Option<&AttentionFleet>,
+) -> anyhow::Result<()> {
+    crate::performance::task("attention/present", || present_rows(store, rows, fleet))
+}
+
+fn present_rows(
     store: &Store,
     rows: &mut [Value],
     fleet: Option<&AttentionFleet>,
@@ -365,10 +386,17 @@ pub(crate) fn present_attention(
     let none = AttentionFleet::default();
     let mut paths = HashMap::new();
     for step in rows.iter().filter_map(|row| row["step_run_id"].as_str()) {
-        if !paths.contains_key(step)
-            && let Some(path) = store.step_path(step)?
-        {
-            paths.insert(step.to_owned(), path);
+        if paths.contains_key(step) {
+            continue;
+        }
+        match store.step_path(step) {
+            Ok(Some(path)) => {
+                paths.insert(step.to_owned(), path);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("st3: WARN attention cannot read the path of {step}: {error:#}")
+            }
         }
     }
     let known = Known {

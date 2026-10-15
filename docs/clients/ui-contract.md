@@ -429,9 +429,9 @@ never infer it.
 
 | Field | Meaning |
 |---|---|
-| `tier` | The Now group: `stopped`, `alert`, `today`, `later` (`words.json` `tier`), or `null` for a row that is not a Now card (an unread message stays in its conversation). |
+| `tier` | The Now group: `stopped`, `alert`, `today`, `later` (`words.json` `tier`), or `null` for a row that is not on Now (an unread message stays in its conversation; a fault goes to its agent). `null` means not on Now, never "unknown". No card is in `alert` yet. |
 | `kind` | The card: `review`, `feedback`, `request`, `update`, `launch`, `revision`, `prompt`, `login` or `fault`, or `null` for a row that is no card at all (an unread message). |
-| `agent` | Who **Chat about this** reaches, `{id, label}`: the conversation, else the step's claimant, else an agent working in the mission, else the requester. `null` means the chief of staff. |
+| `agent` | Who **Chat about this** reaches, `{id, label}`: the conversation, else the step's claimant, else an agent working in the mission (the first in the agents roster's order, when several are), else the requester. `null` means the chief of staff. |
 | `raised_by`, `waiting` | Who raised it, `{id, label}`: the requester, else the agent behind it, with st's own actors (`daemon/…`, `agent/st3/reconciler`) labeled "st", else "the … mission" it came from; and the step it holds, `{step, path}`. A person's label is their id. |
 | `launch` | On a launch card: the newest variant's mission as `{variant, goals[], steps[], agents[], asks_you}`. Each step is `{path, title, assignee, after[], asks_you}`, in display order without `finally` steps. `assignee` is `{kind, agent, label}`, with `kind` one of `agent`, `any`, `st` or `none`. Each agent is `{id, label, harness, host}`. `asks_you` counts the steps that stop for a person. With no previewable variant it is `{unavailable: {reason, diagnostics[]}}`, with up to three diagnostics. |
 | `revision` | On a revision card: the changes (see [Revision changes](#revision-changes)). |
@@ -448,8 +448,9 @@ neither.
 An agent's label is its name's last segment in title case, without its own host's prefix
 (`st3_ui_model::agents::label`, which the terminal UI also uses); an agent st does not know reads
 as its id without `agent/`. The refresher presents each row when it folds the list, and again
-when the agents roster it reads changes; every route copies the row's presentation from that
-list.
+when the agents roster it reads changes; while no roster is available it keeps the agents it
+last read. Every route copies the row's presentation from that list. A `history` read returns the
+same open rows (st keeps no resolved attention rows), so it carries the same presentations.
 
 **Inputs:** the attention row; for a launch, its newest variant; for a prompt, the seat's
 conversation timeline at the observation; for `agent`, the step's claimant and the mission's

@@ -85,7 +85,10 @@ mod owned_sets;
 mod published_attention;
 pub use published_attention::start_attention_list;
 #[cfg(test)]
-pub(crate) use published_attention::{present_attention, published_attention_rows, refresh_attention_list};
+pub(crate) use published_attention::{
+    attention_fleet, present_attention, published_attention_rows, refresh_attention_list,
+    refresh_attention_list_with,
+};
 mod directive_notes;
 mod request_latency;
 mod client_observations;

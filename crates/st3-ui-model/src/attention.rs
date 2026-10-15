@@ -6,14 +6,13 @@
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
-/// The Now groups, by their `fixtures/clients/words.json` `tier` ids, in display order.
+/// The Now groups a card shows in, by their `fixtures/clients/words.json` `tier` ids, in display
+/// order. No card is in the words' `alert` group ("something broke") yet: a fault is on no Now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
     /// Somebody is stopped on the person.
     Stopped,
-    /// Something broke.
-    Alert,
     Today,
     /// When there is time.
     Later,
@@ -54,7 +53,7 @@ pub struct Waiting {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Presentation {
-    /// The Now group, or `None` for a row that is not a Now card.
+    /// The Now group, or `None` for a row that is not on Now (never "unknown").
     pub tier: Option<Tier>,
     /// The card, or `None` for a row that is no card at all (an unread message stays in its
     /// conversation).
