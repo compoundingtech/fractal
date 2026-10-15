@@ -14263,6 +14263,11 @@ async fn list_messages_page(
     let limit = query.limit.unwrap_or(100).clamp(1, 200);
     let to = query.to.as_deref().map(normalize_message_party);
     let acting_as = query.acting_as.as_deref().map(normalize_message_party);
+    if acting_as.is_some() && to.is_none() {
+        return Err(ApiError::bad(St3Error::new(
+            "validation-failed", "acting_as needs one explicit mailbox",
+        )));
+    }
     if let (Some(to), Some(actor)) = (to.as_deref(), acting_as.as_deref()) {
         let retirement = if to.starts_with("agent/") {
             state.store.agent_retirement(to).map_err(ApiError::bad)?
@@ -25047,6 +25052,8 @@ version 2
         let (status, detail) = get_request(app.clone(), "/v1/client/agents/example/old").await;
         assert_eq!(status, StatusCode::OK, "{detail}");
         assert_eq!(detail["mail_custody"], json!({"successor":"agent/example/new","state":"pending"}));
+        let (status, _) = get_request(app.clone(), "/v1/messages/page?acting_as=agent/example/new").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         let (status, denied) = get_request(app.clone(),
             "/v1/messages/page?to=agent/example/old&acting_as=agent/example/wrong&limit=1").await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");

@@ -607,6 +607,28 @@ mod tests {
     }
 
     #[test]
+    fn pre_retirement_peer_send_imports_late_into_successors_old_mailbox() {
+        let owner = Store::open_memory("orchid").unwrap();
+        let peer = Store::open_memory("birch").unwrap();
+        let (token, _) = declare_custody_pair(&owner);
+        peer.import_replication("orchid", &owner.export_replication(0).unwrap()).unwrap();
+        let sent = peer.append_claim(&send("late-peer-send")).unwrap();
+        let retirement = owner.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token,
+            None, "retire-before-peer-send-import", &[], Some("agent/example/successor")).unwrap().0;
+        owner.import_replication("birch", &peer.export_replication(0).unwrap()).unwrap();
+        assert!(owner.messages(Some(SUBJECT), false).unwrap().iter().any(|message| message.subject == sent.subject));
+        let read = owner.append_claim(&ClaimInput {
+            subject: sent.subject.clone(), kind: "message.read".into(),
+            actor: Some("agent/example/successor".into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("read")), ("acting_for".into(), json!(SUBJECT)),
+            ]), evidence: vec![retirement.id], expected_subject: None,
+            idempotency_key: Some("late-peer-custody-read".into()),
+        }).unwrap();
+        assert_eq!(read.body["fields"]["acting_for"], SUBJECT);
+    }
+
+    #[test]
     fn previous_reader_retains_old_mailbox_when_successor_field_is_unknown() {
         let owner = Store::open_memory("orchid").unwrap();
         let older = Store::open_memory("birch").unwrap();
