@@ -36,19 +36,21 @@ fn watch_git_inputs() {
             watch(&path);
         }
     }
-    if let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) {
-        if let Some(loose) = path_of(&branch) {
-            if std::path::Path::new(&loose).exists() {
-                watch(&loose);
-            } else {
-                if let Some(packed) = path_of("packed-refs") {
-                    watch(&packed);
-                }
-                if let Some(directory) = std::path::Path::new(&loose).parent().and_then(|p| p.to_str()) {
-                    watch(directory);
-                }
-            }
-        }
+    let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) else {
+        return;
+    };
+    let Some(loose) = path_of(&branch) else {
+        return;
+    };
+    if std::path::Path::new(&loose).exists() {
+        watch(&loose);
+        return;
+    }
+    if let Some(packed) = path_of("packed-refs") {
+        watch(&packed);
+    }
+    if let Some(directory) = std::path::Path::new(&loose).parent().and_then(|p| p.to_str()) {
+        watch(directory);
     }
 }
 
