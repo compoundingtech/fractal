@@ -594,6 +594,104 @@ mission "review-repair" state="ready" {
     }
 
     #[test]
+    fn unfiltered_reviews_cover_owner_shapes_and_deduplicate_overlapping_paths() {
+        let (store, run) = fixture();
+        let step_request = request(&store, &run, "pending", "owner-step", 0);
+        let parent = run.steps.iter().find(|step| step.step == "pending").unwrap();
+        let nested = run.steps.iter().find(|step| step.step == "answered").unwrap();
+        let nested_subject = format!("{}/nested", parent.subject);
+        // The nested loop owner is reachable both by its exact-owner seek and by the
+        // parent's descendant range. Keep both projected steps live to exercise UNION.
+        store.connection.write().execute(
+            "UPDATE step_runs SET subject=?1,step_path='pending/nested' WHERE subject=?2",
+            params![nested_subject, nested.subject],
+        ).unwrap();
+        let append = |owner: &str, definition: &str, attempt: u32, suffix: &str| {
+            let operation = format!("gate-operation/review-owner-shapes/{suffix}");
+            let mut fields: BTreeMap<String, Value> =
+                serde_json::from_value(step_request.body["fields"].clone()).unwrap();
+            fields.insert("owner".into(), json!(owner));
+            fields.insert("operation".into(), json!(operation));
+            fields.insert("step_definition".into(), json!(definition));
+            fields.insert("attempt".into(), json!(attempt));
+            store.append_claim(&ClaimInput {
+                subject: operation,
+                kind: "gate.requested".into(),
+                actor: Some("daemon/runtime".into()),
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("review-owner-shapes:{suffix}")),
+            }).unwrap()
+        };
+        let mission_request = append(&run.subject, &run.revision, 1, "mission");
+        let loop_step = run.steps.iter().find(|step| step.step == "stale").unwrap();
+        let loop_owner = format!(
+            "loop-run/{}/round/1/candidate/1",
+            loop_step.subject.strip_prefix("step-run/").unwrap(),
+        );
+        let loop_request = append(
+            &loop_owner, &loop_step.definition_hash, loop_step.attempt, "loop-descendant",
+        );
+        let overlap_owner = format!(
+            "loop-run/{}", nested_subject.strip_prefix("step-run/").unwrap(),
+        );
+        let overlap_request = append(
+            &overlap_owner, &nested.definition_hash, nested.attempt, "overlap",
+        );
+        let matching_owners: u64 = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM step_runs
+             WHERE ?1='loop-run/' || substr(subject,10)
+                OR (?1>='loop-run/' || substr(subject,10) || '/'
+                    AND ?1<'loop-run/' || substr(subject,10) || '0')",
+            [&overlap_owner], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(matching_owners, 2, "the fixture must exercise overlapping owner seeks");
+
+        let completed = store.create_mission_run(&MissionRunRequest {
+            mission: "review-repair".into(),
+            revision: None,
+            workspace: ".".into(),
+            requester: Some("person/operator".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "review-owner-shapes-completed".into(),
+        }).unwrap();
+        let completed_step = &completed.steps[0];
+        let completed_loop_owner = format!(
+            "loop-run/{}", completed_step.subject.strip_prefix("step-run/").unwrap(),
+        );
+        let closed_requests = [
+            append(&completed.subject, &completed.revision, 1, "closed-mission"),
+            append(
+                &completed_step.subject, &completed_step.definition_hash,
+                completed_step.attempt, "closed-step",
+            ),
+            append(
+                &completed_loop_owner, &completed_step.definition_hash,
+                completed_step.attempt, "closed-loop",
+            ),
+        ];
+        store.set_mission_run_state(
+            &completed.subject, "completed", "terminal", Some("owner-shape coverage"),
+        ).unwrap();
+
+        let reviews = store.pending_human_reviews(None).unwrap();
+        let expected = [
+            step_request.id, mission_request.id, loop_request.id, overlap_request.id.clone(),
+        ].into_iter().collect::<BTreeSet<_>>();
+        let actual = reviews.iter().map(|review| review.request.clone()).collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(reviews.len(), expected.len(), "overlapping owners duplicated a review");
+        assert_eq!(
+            reviews.iter().filter(|review| review.request == overlap_request.id).count(), 1,
+        );
+        for closed in closed_requests {
+            assert!(!actual.contains(&closed.id), "completed run leaked request {}", closed.id);
+        }
+    }
+
+    #[test]
     fn unfiltered_candidates_do_not_scan_unrelated_review_history() {
         let (store, run) = fixture();
         let pending = request(&store, &run, "pending", "unfiltered-pending", 0);
