@@ -1138,7 +1138,10 @@ async fn anonymous_pairing_advertisement_is_static_and_never_notes_presence() {
     let http = reqwest::Client::new();
     let expected = json!({
         "api_version": st3_client::API_VERSION,
-        "capabilities": [{"id": "device-key-proofs", "version": 1, "state": "granted"}],
+        "capabilities": [
+            {"id": "device-key-proofs", "version": 1, "state": "granted"},
+            {"id": "fabric-gateway-grant", "version": 1, "state": "granted"},
+        ],
     });
     for phase in 0..3 {
         if phase > 0 {
@@ -1237,6 +1240,7 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
                 code: challenge.code.clone(),
                 device_public_key: attacker.clone(),
                 key_storage: Some("software".into()),
+                fabric_node_id: None,
             },
         )
         .await;
@@ -1294,6 +1298,7 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
                 code: challenge.code.clone(),
                 device_public_key: attacker.clone(),
                 key_storage: Some("software".into()),
+                fabric_node_id: None,
             },
         )
         .await
@@ -1454,6 +1459,7 @@ async fn simultaneous_completions_consume_once_and_enroll_only_the_winning_key()
         code: challenge.code.clone(),
         device_public_key: public,
         key_storage: Some("software".into()),
+        fabric_node_id: None,
     };
     let first_request = request(Device::new().public());
     let second_request = request(Device::new().public());
@@ -1609,6 +1615,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
                 code: challenge.value.code,
                 device_public_key: phone.public(),
                 key_storage: Some("secure-enclave".into()),
+                fabric_node_id: None,
             },
         )
         .await
@@ -1650,6 +1657,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
                 code: limited.value.code,
                 device_public_key: viewer.public(),
                 key_storage: None,
+                fabric_node_id: None,
             },
         )
         .await

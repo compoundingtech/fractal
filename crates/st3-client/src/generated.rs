@@ -3726,6 +3726,9 @@ pub struct PairingComplete {
     /// Where the device keeps its signing key: `secure-enclave` or `software`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_storage: Option<String>,
+    /// The device's Fabric NodeID, sent only to a member that advertises `fabric-gateway-grant`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_node_id: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PairedSession {
@@ -3745,6 +3748,9 @@ pub struct PairedSession {
     pub device_key_proofs: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person_root_key_proof: Option<serde_json::Value>,
+    /// What the member did about the device's Fabric grant, when the pairing sent a NodeID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_grant: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

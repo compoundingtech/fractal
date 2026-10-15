@@ -62,9 +62,10 @@ Each member that should serve phones exposes only its paired-only client socket
 (`client_gateway_socket`, never `st3.sock`) as one fabric service and grants the phone's public node
 ID that one service, inbound-only (`fabric add PHONE_NODE_ID NAME --inbound-only --allow SERVICE`,
 fabric 0.2.41 or later), so the member serves the phone when it connects and never dials or probes it
-([grant](ios-fabric-protocol.md#member-exposure-and-authorization)). Operations does this the way it does the terminal exposure: one host at a time,
-a script with a revoke counterpart, a receipt per host. The phone shows its node ID in Fleet ›
-connection for the owner to send.
+([grant](ios-fabric-protocol.md#member-exposure-and-authorization)). `st devices fabric enable` exposes
+the socket once per member, and from then on pairing a phone grants it and `st devices revoke` removes
+the grant ([st grants paired phones](ios-fabric-protocol.md#st-grants-paired-phones)). The phone shows
+its node ID in Fleet › connection.
 
 ## Phone SLOs
 

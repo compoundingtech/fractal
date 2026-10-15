@@ -669,6 +669,7 @@ pub async fn complete_with_options(
                 code: code.trim().into(),
                 device_public_key: public.clone(),
                 key_storage: Some("software".into()),
+                fabric_node_id: None,
             },
         )
         .await
@@ -869,6 +870,7 @@ mod tests {
                     device_key_chain: serde_json::from_value(case["chain"].clone()).unwrap(),
                     device_key_proofs: Vec::new(),
                     person_root_key_proof: None,
+                    fabric_grant: None,
                 },
                 signing_key: Some(key.clone()),
             };

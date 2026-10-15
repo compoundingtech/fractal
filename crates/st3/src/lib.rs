@@ -34,6 +34,8 @@ pub(crate) mod external_sessions;
 pub(crate) mod native_views;
 pub(crate) mod conversation_header;
 pub(crate) mod subagent_sessions;
+/// Pairing grants a device the client gateway over Fabric; revoking it removes the grant.
+pub mod fabric_gateway;
 pub mod fleet;
 /// Silent messages are stored and readable without waking the recipient.
 pub mod silent;

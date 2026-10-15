@@ -825,6 +825,13 @@ export type EventPage = {
   resume_cursor: Cursor;
 };
 
+export type FabricGrant = {
+  detail?: string;
+  peer?: string;
+  service?: string;
+  state: "granted" | "already-trusted" | "not-enabled" | "failed";
+};
+
 export type Fence = {
   attempt?: number;
   mission_generation?: RunGenerationId;
@@ -1361,6 +1368,7 @@ export type PairedSession = {
 
 }>;
   expires_at: Timestamp;
+  fabric_grant?: FabricGrant;
   kind: "paired-session";
   person_id: string;
   person_root_key_proof?: {
@@ -1373,7 +1381,7 @@ export type PairedSession = {
 export type PairingAdvertisement = {
   api_version: "st3.client.v0";
   capabilities: Array<{
-  id: "device-key-proofs";
+  id: "device-key-proofs" | "fabric-gateway-grant";
   state: "granted";
   version: 1;
 }>;
@@ -1399,6 +1407,7 @@ export type PairingComplete = {
   api_version: "st3.client.v0";
   code: string;
   device_public_key: string;
+  fabric_node_id?: string;
   key_storage?: "secure-enclave" | "software";
 };
 
