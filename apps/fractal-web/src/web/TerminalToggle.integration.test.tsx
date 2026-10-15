@@ -157,7 +157,7 @@ describe('terminal failure stays local to the drawer', () => {
     await waitForThread()
     const before = retained()
     expect(toggle()?.disabled).toBe(true)
-    expect(host.querySelector('[data-testid="terminal-toggle-disabled"]')?.getAttribute('title')).toBe('This agent has no terminal.')
+    expect(toggle()?.closest('[title]')?.getAttribute('title')).toBe('This agent has no terminal.')
     await act(async () => toggle()!.click())
     expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
     expectThreadRetained(before)
