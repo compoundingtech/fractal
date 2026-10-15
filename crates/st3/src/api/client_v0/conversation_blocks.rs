@@ -1201,6 +1201,31 @@ mod tests {
     }
 
     #[test]
+    fn omp_admin_event_wire_text_carries_the_record_for_clients_without_the_view() {
+        for negotiated in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let native = fixture(root.path(), json!([]));
+            let record = json!({
+                "type":"session_init", "timestamp":"2026-10-06T12:00:01Z", "task":"visible-detail",
+            });
+            let header = std::fs::read_to_string(&native.transcript).unwrap();
+            let header = header.lines().next().unwrap();
+            std::fs::write(&native.transcript, format!("{header}\n{record}\n")).unwrap();
+            let mut session = ClientSession::local(Some("person/example")).unwrap();
+            session.conversation_blocks = negotiated;
+            let page = read(&native, &session, &native.id).unwrap();
+            let event = page
+                .iter()
+                .find(|item| {
+                    item["body"]["text"].as_str().is_some_and(|text| text.starts_with("[omp session_init]"))
+                })
+                .unwrap_or_else(|| panic!("no session_init text in {page:?}"));
+            let text = event["body"]["text"].as_str().unwrap();
+            assert!(text.contains("visible-detail"), "negotiated {negotiated}: {text}");
+        }
+    }
+
+    #[test]
     fn omp_event_wide_identities_keep_normal_events_and_cached_pages_readable() {
         let root = tempfile::tempdir().unwrap();
         let native = fixture(root.path(), json!([]));

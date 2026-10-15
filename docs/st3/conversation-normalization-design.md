@@ -58,7 +58,7 @@ direct owner reads. Fixture provenance is in `crates/st3/fixtures/native-records
 | Claude attachments other than queued commands and system records without text | Retain raw; queued prompts and textual notices keep their known display shape. |
 | Pi/OMP `session` | Omit the native session setup header. |
 | OMP `reset_boundary`, `credential_pin`, `title` | Retain raw plus typed status views; reset/title are quiet events, credential pins are internal bookkeeping hidden by default. |
-| Pi/OMP `custom_message` with explicit `display: false` | Omit because the native extension explicitly marks it hidden from its terminal. |
+| Pi/OMP `custom_message` with explicit `display: false` | Omit because the native extension explicitly marks it hidden from its terminal. (The administrative `model_usage`/`title_change`/`session_init`/`ttsr_injection` records are not in this row: they are retained, and `display: false` marks them `hidden-by-harness`.) |
 | Pi/OMP `custom`, `label`, `session_info`, model/thinking changes and summary records without text | Retain raw; summaries with text remain readable native notes. |
 | OpenCode `snapshot` | Retain raw; visibility is not established across releases. |
 | Claude documents | Retain the complete document payload, with a readable document fallback. |

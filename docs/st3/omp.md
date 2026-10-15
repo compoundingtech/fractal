@@ -203,7 +203,7 @@ and each is present only when the record carries it. Human, daemon, system, and 
 attribution are not inferred to be agents; the block's `payload.raw` is the complete native
 record, so attribution is available there for every custom message, typed or not. Mixed or
 multiple jobs remain one native event unless their body has an authoritative partition.
-`display: false` stays omitted, as main's omission table states. The 8 KiB native-value bound
+A `custom_message` with `display: false` stays omitted, as main's omission table states; this is the only `display: false` record that is dropped (the administrative records below are retained and marked instead). The 8 KiB native-value bound
 applies separately to the view's `content` and `details` (UTF-8 aware, and a string of exactly 8 KiB is kept whole), and kind and attribution are bounded separately to 256 bytes; an over-limit one becomes marked
 truncated text without corrupting the view's JSON, and the complete value stays in
 `payload.raw`.
@@ -212,8 +212,10 @@ within the 768 KiB page target (offset-cached and native keyset pages alike). Pa
 preserves each complete entry and advances the continuation cursor by the number actually
 returned; following it does not skip entries. A complete lone entry may exceed the target up to
 the hard response ceiling (1,048,576 minus 128,000 reserved bytes) and is served alone; an entry
-beyond that ceiling is refused rather than skipped, though the owner's visible size-limit
-bounding normally keeps entries well below it.
+beyond that ceiling is neither skipped nor allowed to fail its page: it is replaced in place by
+a visible `error` entry (`timeline-entry-too-large`, with its size) that keeps its id and
+sequence, and the cursor continues after it. The owner's visible size-limit bounding normally
+keeps entries well below the ceiling.
 Pi shares the native format and gets the same views.
 
 The observed administrative entry types `model_usage`, `title_change`, `session_init`, and
@@ -223,7 +225,8 @@ the `omp_event` view: `kind` is the native entry type, there is no `content`, an
 bounded native record, including its IDs and timestamp; native attribution is retained when
 present. `title_change` uses the existing `title` view. The timeline timestamp uses the same
 native/predecessor rule as conversation entries. An explicit `display: false` on one of these
-records is retained with the `hidden-by-harness` visibility hint rather than dropped. This applies
+administrative records is retained with the `hidden-by-harness` visibility hint rather than dropped,
+unlike a `custom_message` with `display: false`, which stays omitted (above). This applies
 to the observed kinds: genuinely unknown entry types retain their existing behavior, and the other
 bookkeeping records (`model_change`, `custom`, `credential_pin`, `title`) keep the views and
 visibility the conversation design gives them.

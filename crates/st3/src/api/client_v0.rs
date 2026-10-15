@@ -6001,7 +6001,7 @@ fn native_slice_page_at_generation(
     // A page never outgrows what a paired reader can take from a remote owner (its reads are
     // capped at 1 MiB): a seat with very large entries gets a shorter newest page and a cursor
     // for the rest. A lone entry can exceed the target budget, but not the hard ceiling.
-    has_more |= bound_page_bytes(&mut items, TIMELINE_PAGE_BYTE_BUDGET)?;
+    has_more |= bound_page_bytes(&mut items, TIMELINE_PAGE_BYTE_BUDGET);
     let next_cursor = if has_more {
         let boundary = items.last()
             .ok_or_else(|| ApiError::internal("native page has no boundary"))?.1.clone();
@@ -6040,34 +6040,45 @@ fn native_slice_page_at_generation(
 /// a remote client read for the envelope and the page header.
 pub(super) const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
 
+/// Replace a timeline entry that alone exceeds the response ceiling with a visible error entry
+/// that keeps its identity and place, so the page it is on still opens and continues past it.
+pub(super) fn cut_oversized_timeline_entry(item: &mut Value, size: usize) {
+    item["type"] = json!("error");
+    item["role"] = json!("system");
+    item["body"] = json!({
+        "code": "timeline-entry-too-large",
+        "message": format!("[st truncated this timeline entry: size limit; {size} bytes]"),
+        "retryable": false,
+        "details": {"size": size},
+    });
+}
+
 /// Keep complete newest entries within the target budget. One larger entry may be served
-/// alone up to the hard response ceiling; continuation uses the actual last returned key.
-fn bound_page_bytes<K>(items: &mut Vec<(Value, K)>, budget: usize) -> Result<bool, ApiError> {
+/// alone up to the hard response ceiling; one above the ceiling is replaced, keeping its
+/// identity and place, by a visible error entry that says it was cut. Continuation uses the
+/// actual last returned key.
+fn bound_page_bytes<K>(items: &mut Vec<(Value, K)>, budget: usize) -> bool {
+    let ceiling = CLIENT_MAX_RESPONSE_BYTES - 128_000;
     let mut bytes = 2usize; // JSON array delimiters.
     for index in 0..items.len() {
-        let size = serde_json::to_vec(&items[index].0)
-            .map_err(ApiError::internal)?
-            .len();
+        let size = serde_json::to_vec(&items[index].0).map_or(0, |encoded| encoded.len());
         bytes = bytes
             .saturating_add(size)
             .saturating_add(usize::from(index > 0));
         if bytes > budget {
-            if index == 0 {
-                // A lone complete entry above the target is served alone, up to the hard ceiling.
-                if bytes > CLIENT_MAX_RESPONSE_BYTES - 128_000 {
-                    return Err(validation(
-                        "a timeline entry exceeds the client response limit",
-                    ));
-                }
-                let more = items.len() > 1;
-                items.truncate(1);
-                return Ok(more);
+            if index > 0 {
+                items.truncate(index);
+                return true;
             }
-            items.truncate(index);
-            return Ok(true);
+            if bytes > ceiling {
+                cut_oversized_timeline_entry(&mut items[0].0, size);
+            }
+            let more = items.len() > 1;
+            items.truncate(1);
+            return more;
         }
     }
-    Ok(false)
+    false
 }
 
 /// What st3 established about a managed seat's native transcript.
@@ -14781,29 +14792,36 @@ mission "queue-parity" state="ready" {
         let entry = |size: usize| (json!({"body": "x".repeat(size)}), ());
         // Newest first: 300 KB, 300 KB, 300 KB, 10 bytes. Three would not fit in 768 KiB.
         let mut items = vec![entry(300_000), entry(300_000), entry(300_000), entry(10)];
-        assert!(bound_page_bytes(&mut items, 768 * 1024).unwrap());
+        assert!(bound_page_bytes(&mut items, 768 * 1024));
         assert_eq!(items.len(), 2, "the two newest fit, the page continues from the second");
         // Everything fits: nothing is dropped.
         let mut small = vec![entry(10), entry(10)];
-        assert!(!bound_page_bytes(&mut small, 768 * 1024).unwrap());
+        assert!(!bound_page_bytes(&mut small, 768 * 1024));
         assert_eq!(small.len(), 2);
         // Above the soft budget but below the hard ceiling: serve it alone and continue.
         // 896 KiB fits; 900 KiB exceeds the exact 920,576-byte ceiling before JSON overhead.
         let large = entry(896 * 1024);
         let mut lone = vec![large.clone()];
-        assert!(!bound_page_bytes(&mut lone, 768 * 1024).unwrap());
+        assert!(!bound_page_bytes(&mut lone, 768 * 1024));
         assert_eq!(lone, vec![large.clone()]);
         let mut followed = vec![large.clone(), entry(10)];
-        assert!(bound_page_bytes(&mut followed, 768 * 1024).unwrap());
+        assert!(bound_page_bytes(&mut followed, 768 * 1024));
         assert_eq!(followed, vec![large]);
-        // A single entry beyond the hard ceiling refuses without skipping or mutation.
-        let mut huge = vec![entry(2_000_000), entry(10)];
-        let original = huge.clone();
-        assert_eq!(
-            bound_page_bytes(&mut huge, 768 * 1024).unwrap_err().code,
-            "validation-failed"
-        );
-        assert_eq!(huge, original);
+        // A single entry beyond the hard ceiling is cut visibly: it keeps its place and the
+        // page continues after it, instead of failing the whole page.
+        let mut huge = vec![
+            (json!({"id":"timeline-entry/big","sequence":9,"body":{"text":"x".repeat(2_000_000)}}), ()),
+            entry(10),
+        ];
+        assert!(bound_page_bytes(&mut huge, 768 * 1024));
+        assert_eq!(huge.len(), 1);
+        let cut = &huge[0].0;
+        assert_eq!(cut["id"], "timeline-entry/big");
+        assert_eq!(cut["sequence"], 9);
+        assert_eq!(cut["type"], "error");
+        assert_eq!(cut["body"]["code"], "timeline-entry-too-large");
+        assert!(cut["body"]["message"].as_str().unwrap().contains("st truncated"));
+        assert!(serde_json::to_vec(cut).unwrap().len() < 1024);
     }
 
     #[test]

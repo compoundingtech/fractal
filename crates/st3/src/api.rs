@@ -1840,7 +1840,6 @@ fn client_timeline_page_end(
 
     // Match mission-card paging's reserve for the response, cursor and fleet notice.
     let budget = client_v0::TIMELINE_PAGE_BYTE_BUDGET;
-    let hard_ceiling = CLIENT_MAX_RESPONSE_BYTES - 128_000;
     let mut used = 2usize; // JSON array delimiters.
     let mut end = offset.min(items.len());
     for item in items.iter().skip(offset).take(limit) {
@@ -1849,13 +1848,9 @@ fn client_timeline_page_end(
         let bytes = encoded.0.saturating_add(usize::from(end > offset));
         if used.saturating_add(bytes) > budget {
             if end == offset {
-                if used.saturating_add(bytes) > hard_ceiling {
-                    return Err(ApiError::bad(St3Error::new(
-                        "validation-failed",
-                        "a timeline entry exceeds the client response limit",
-                    )));
-                }
-                end += 1; // A complete lone entry fits the hard ceiling.
+                // A lone entry above the target is served alone; one above the hard ceiling
+                // is cut visibly when the page is cut from the items.
+                end += 1;
             }
             break;
         }
@@ -1965,7 +1960,15 @@ fn client_page_read(
     } else {
         end
     };
-    let page_items = items.get(offset..end).unwrap_or_default().to_vec();
+    let mut page_items = items.get(offset..end).unwrap_or_default().to_vec();
+    if collection.starts_with("timeline/")
+        && let [only] = page_items.as_mut_slice()
+    {
+        let size = serde_json::to_vec(&*only).map_err(ApiError::internal)?.len();
+        if size.saturating_add(2) > CLIENT_MAX_RESPONSE_BYTES - 128_000 {
+            client_v0::cut_oversized_timeline_entry(only, size);
+        }
+    }
     let has_more = end < items.len();
     if query.cursor.is_none() && has_more {
         let mut cache = client_page_cache()
@@ -19919,24 +19922,36 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
     }
 
     #[test]
-    fn timeline_cached_page_refuses_one_oversized_entry_without_skipping_it() {
+    fn timeline_cached_page_cuts_one_oversized_entry_visibly_without_skipping_it() {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
         let snapshot = new_client_snapshot(&state);
         let large = json!({"id":"large", "body":{"text":"x".repeat(CLIENT_MAX_RESPONSE_BYTES)}});
-        let query = ClientListQuery::default();
-        assert_eq!(
-            client_page(
-                &state,
-                &snapshot,
-                "timeline/session/oversized",
-                vec![large, json!({"id":"small"})],
-                &query
-            )
-            .unwrap_err()
-            .code,
-            "validation-failed"
-        );
+        let mut query = ClientListQuery::default();
+        let page = client_page(
+            &state,
+            &snapshot,
+            "timeline/session/oversized",
+            vec![large, json!({"id":"small"})],
+            &query,
+        )
+        .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0]["id"], "large");
+        assert_eq!(page.items[0]["type"], "error");
+        assert_eq!(page.items[0]["body"]["code"], "timeline-entry-too-large");
+        assert!(serde_json::to_vec(&page).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
+        query.cursor = page.page.next_cursor;
+        assert!(query.cursor.is_some(), "the entry after it is not skipped");
+        let page = client_page(
+            &state,
+            &snapshot,
+            "timeline/session/oversized",
+            Vec::new(),
+            &query,
+        )
+        .unwrap();
+        assert_eq!(page.items, vec![json!({"id":"small"})]);
         assert_eq!(client_timeline_page_end(&[], 9, 10).unwrap(), 0);
         assert_eq!(
             client_timeline_page_end(&[json!({"id":"small"})], 9, 10).unwrap(),

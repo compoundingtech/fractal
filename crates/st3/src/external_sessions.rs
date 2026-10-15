@@ -6287,6 +6287,23 @@ mod tests {
     }
 
     #[test]
+    fn omp_admin_event_text_carries_its_bounded_record_for_clients_without_the_view() {
+        for kind in ["model_usage", "session_init", "ttsr_injection"] {
+            let mut items = Vec::new();
+            normalize_native_line(
+                ExternalDriver::Omp,
+                &json!({"type":kind,"timestamp":"2026-10-01T00:00:00Z","task":"visible-detail"}),
+                0,
+                "2026-10-01T00:00:00Z",
+                &mut items,
+            );
+            let text = items[0]["body"]["text"].as_str().unwrap();
+            assert!(text.starts_with(&format!("[omp {kind}]")), "{kind}: {text}");
+            assert!(text.contains("visible-detail"), "{kind}: {text}");
+        }
+    }
+
+    #[test]
     fn omp_admin_event_missing_timestamp_uses_predecessor_timestamp() {
         let mut items = Vec::new();
         normalize_native_line(
