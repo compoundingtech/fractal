@@ -4546,6 +4546,19 @@ async fn cli_persons_rename_migrates_current_work_and_reviews_across_restart() {
     const NEW_PERSON: &str = "person/robin";
     let mut daemon = Daemon::new().await;
     daemon.worker();
+    daemon.store().append_claim(&ClaimInput {
+        subject: "message/cli-known-rename-person".into(),
+        kind: "message.sent".into(),
+        actor: Some(NEW_PERSON.into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!(NEW_PERSON)),
+            ("to".into(), json!(WORKER)),
+            ("content".into(), json!("The new person already participates in the graph.")),
+            ("status".into(), json!("sent")),
+        ]),
+        expected_subject: None,
+        idempotency_key: Some("cli-known-rename-person".into()),
+    }).unwrap();
     daemon.apply(
         r#"version 2
 mission "example/person-rename" state="ready" {
