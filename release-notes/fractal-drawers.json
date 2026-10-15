@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Below 900 px the fractal-web thread header keeps the agent name, status and one 'Agent details' button; it opens a right sheet (new kit NarrowSheet and NarrowActionRow) with the agent's actions above Changes or the open tool, replacing the inline Details panel at that width. Wider windows are unchanged.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "changed", "detail": "New kit exports NarrowSheet and NarrowActionRow from @smalltalk/fractal-ui/assistant-ui/shell; ThreadHeader gains an optional `narrow` prop. The header Agent button's accessible name changes from 'Actions for <name>' to 'Agent actions for <name>'. Below 900 px the header has no host crumb, terminal toggle or right-panel toggle; its 'Agent details' button (aria-haspopup=dialog) opens the 'Agent details' dialog instead." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

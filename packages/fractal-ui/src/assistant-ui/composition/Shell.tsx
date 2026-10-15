@@ -121,6 +121,7 @@ export function ThreadHeader({
   onToggleDrawer,
   sidebarCollapsed = false,
   onToggleSidebar,
+  narrow = false,
 }: {
   /** Reported folder for the breadcrumb; omitted entirely when the host knows none. */
   folder?: string
@@ -148,6 +149,8 @@ export function ThreadHeader({
   /** When the sidebar is collapsed its separator is gone; the header carries the expand toggle. */
   sidebarCollapsed?: boolean
   onToggleSidebar?: () => void
+  /** The host is below its drawer breakpoint: the header keeps the title and status, and one Agent details button opens `panelOpen`'s sheet. */
+  narrow?: boolean
 }) {
   const terminalReasonId = React.useId()
   return (
@@ -158,7 +161,7 @@ export function ThreadHeader({
         </button>
       ) : null}
       <nav aria-label="Breadcrumb" {...stylex.props(styles.breadcrumb)}>
-        {folder !== undefined ? <>
+        {folder !== undefined && !narrow ? <>
           <span {...stylex.props(styles.crumbFolder)}>{folder}</span>
           <span aria-hidden="true" {...stylex.props(styles.crumbSlash)}>/</span>
         </> : null}
@@ -170,19 +173,21 @@ export function ThreadHeader({
         <div data-testid="native-action-slot" ref={actionPortalRef}>{nativeActions}</div>
         {onOpen !== undefined && <button type="button" onClick={onOpen} {...stylex.props(styles.outlineXs)}>Open <Icon name="chevron-down" size={12} /></button>}
         {onCommit !== undefined && <button type="button" onClick={onCommit} {...stylex.props(styles.outlineXs)}>Commit <Icon name="chevron-down" size={12} /></button>}
-        {terminalAvailable && <button type="button" aria-label="Toggle terminal drawer" title="Toggle terminal drawer" aria-pressed={drawerOpen} onClick={onToggleDrawer} {...stylex.props(styles.ghostMd, drawerOpen && styles.ghostOn)}>
+        {!narrow && terminalAvailable && <button type="button" aria-label="Toggle terminal drawer" title="Toggle terminal drawer" aria-pressed={drawerOpen} onClick={onToggleDrawer} {...stylex.props(styles.ghostMd, drawerOpen && styles.ghostOn)}>
           <Icon name="drawer" />
         </button>}
         {/* A disabled button receives no pointer events, so the hover title sits on its wrapper. */}
-        {!terminalAvailable && terminalDisabledReason !== undefined && <span data-testid="terminal-toggle-disabled" title={terminalDisabledReason} {...stylex.props(styles.disabledWrap)}>
+        {!narrow && !terminalAvailable && terminalDisabledReason !== undefined && <span data-testid="terminal-toggle-disabled" title={terminalDisabledReason} {...stylex.props(styles.disabledWrap)}>
           <Button isDisabled aria-label="Toggle terminal drawer" aria-describedby={terminalReasonId} {...stylex.props(styles.ghostMd, styles.ghostDisabled)}>
             <Icon name="drawer" />
           </Button>
           <span id={terminalReasonId} hidden>{terminalDisabledReason}</span>
         </span>}
-        <button type="button" aria-label="Toggle right panel" title="Toggle right panel" aria-pressed={panelOpen} onClick={onTogglePanel} {...stylex.props(styles.ghostMd, panelOpen && styles.ghostOn)}>
+        {narrow ? <Button aria-label="Agent details" aria-haspopup="dialog" aria-expanded={panelOpen} onPress={onTogglePanel} {...stylex.props(styles.ghostMd, panelOpen && styles.ghostOn)}>
           <Icon name="panel" />
-        </button>
+        </Button> : <button type="button" aria-label="Toggle right panel" title="Toggle right panel" aria-pressed={panelOpen} onClick={onTogglePanel} {...stylex.props(styles.ghostMd, panelOpen && styles.ghostOn)}>
+          <Icon name="panel" />
+        </button>}
       </div>
     </header>
   )
