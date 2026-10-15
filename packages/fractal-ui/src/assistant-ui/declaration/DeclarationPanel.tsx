@@ -68,7 +68,9 @@ export function DeclarationPanel({ title, state, actions }: DeclarationPanelProp
 const DeclarationCode = React.memo(function DeclarationCode({ title, text, language }: { readonly title: string; readonly text: string; readonly language: DeclarationLanguage }) {
   // One trailing newline ends the last line; it is not an extra numbered line. Copy keeps it.
   const lines = React.useMemo(() => tokenizeDeclaration(text.endsWith('\n') ? text.slice(0, -1) : text, language), [text, language])
-  return <div role="region" aria-label={`${title} declaration source`} tabIndex={0} data-testid="declaration-code" data-language={language} {...stylex.props(styles.scroller)}>
+  // Source is a named focusable group within its panel, not a page landmark:
+  // the same subject can appear in multiple panels (for example, scheme comparisons).
+  return <div role="group" aria-label={`${title} declaration source`} tabIndex={0} data-testid="declaration-code" data-language={language} {...stylex.props(styles.scroller)}>
     <pre {...stylex.props(styles.pre)}>{lines.map((line, index) => <span key={index} data-line={index + 1} {...stylex.props(styles.line)}>
       <span aria-hidden="true" data-line-number="" {...stylex.props(styles.lineNumber)}>{index + 1}</span>
       <code {...stylex.props(styles.code)}>{line.map((token, position) => token.kind === 'text' ? token.text : <span key={position} data-token={token.kind} {...stylex.props(tint[token.kind])}>{token.text}</span>)}</code>

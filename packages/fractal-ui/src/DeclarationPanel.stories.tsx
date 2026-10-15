@@ -40,7 +40,7 @@ const readyPlay = (text: string): Play => async ({ canvasElement }) => {
   const shown = [...panel.querySelectorAll('[data-line] code')].map(node => node.textContent).join('\n')
   if (shown !== expected.join('\n')) throw new Error('The code view must render the source verbatim')
   if (panel.querySelector('button[aria-label="Copy all declaration source"]') === null) throw new Error('Ready panels offer copy-all')
-  if (panel.querySelector('[role="region"][tabindex="0"]') === null) throw new Error('The code region must be keyboard scrollable')
+  if (panel.querySelector('[role="group"][tabindex="0"]') === null) throw new Error('The code group must be keyboard scrollable')
 }
 
 const meta = {
@@ -104,16 +104,21 @@ export const LongFile: Story = {
   play: async (context) => {
     await readyPlay(longDeclarationKdl)(context)
     const panel = panelIn(context.canvasElement)
-    const region = panel.querySelector<HTMLElement>('[role="region"]')!
-    if (region.scrollHeight <= region.clientHeight) throw new Error('A long file scrolls inside the code region, not the page')
+    const region = panel.querySelector<HTMLElement>('[role="group"]')!
+    if (region.scrollHeight <= region.clientHeight) throw new Error('A long file scrolls inside the code group, not the page')
     if (panelIn(context.canvasElement).getBoundingClientRect().bottom > window.innerHeight + 1) throw new Error('The panel must stay within the viewport')
     region.scrollLeft = region.scrollWidth
     const first = region.querySelector<HTMLElement>('[data-line-number]')!
     if (Math.abs(first.getBoundingClientRect().left - region.getBoundingClientRect().left) > 2) throw new Error('Line numbers stay pinned while scrolling sideways')
   },
 }
-export const Schemes: Story = { render: SchemesStory, play: async ({ canvasElement }) => {
-  if (canvasElement.querySelectorAll('[data-testid="declaration-panel"]').length !== 2) throw new Error('Both schemes render side by side')
+export const Schemes: Story = { render: SchemesStory, play: async ({ canvasElement, args }) => {
+  const panels = canvasElement.querySelectorAll<HTMLElement>('[data-testid="declaration-panel"]')
+  if (panels.length !== 2) throw new Error('Both schemes render side by side')
+  for (const panel of panels) {
+    const code = panel.querySelector<HTMLElement>('[data-testid="declaration-code"]')
+    if (code?.getAttribute('role') !== 'group' || code.tabIndex !== 0 || code.getAttribute('aria-label') !== `${args.title} declaration source`) throw new Error('Each repeated source must remain a named keyboard-scrollable group, not a duplicate landmark')
+  }
 } }
 
 const styles = stylex.create({
