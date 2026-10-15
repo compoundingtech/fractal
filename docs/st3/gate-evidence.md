@@ -654,6 +654,15 @@ key stops the skip by itself. Paths are literal and relative; an under-declared 
 keeps running the real job for one run in N even when a note matches, chosen by a hash of the check, the key and
 the head, so a retry behaves the same; the gate prints `decision=run` with a reason starting `sampled`.
 
+The projection reads names as bytes and passes them NUL-terminated both ways (`ls-tree -z`, `update-index -z`),
+so a newline in a name cannot split one file into two entries; symlinks and gitlinks keep their modes. When none
+of the declared paths exists the projection would be the empty tree that every such tree shares, so there is no
+key and nothing matches by it. Two limits are deliberate. The verifier does not recompute the projection of the
+record's own tree: it trusts the key the producer signed, so the producer is trusted exactly as far as for the
+tree rule. And sampling is a comparison sample, not a security control: the head is in the seed, so on a pull
+request an author can re-push to change whether a run is sampled (about five tries at one in five), while in a
+merge group the head is fixed. A result that does not carry the sampling rule at all is treated as sampled.
+
 Each kind has its own rule: the exact `command` the record must have run, an optional
 `runner_prefix`, optional per-kind `trust_levels`, the `required_inputs` it must carry (every one a nonempty string) and
 `bind_inputs`, which must equal the sha256 of a file as it is in the tree being verified. A kind's own

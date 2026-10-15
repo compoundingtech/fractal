@@ -100,12 +100,14 @@ def decide(context, outcome, result, tree):
 
 def sampled(context, result, tree):
     """True when this run is one the policy keeps running for real although a note matches (one in `sample_one_in`).
-    Deterministic in (check, input key, head), so a retry of the same run behaves the same."""
+    Deterministic in (check, input key, head), so a retry of the same run behaves the same.
+    The head is in the seed, so on a pull request an author can re-push to change whether a run is sampled
+    (about five tries at one in five); in a merge group the head is fixed. It is a comparison sample, not a security control."""
     every = result.get('sample_one_in')
-    if every is None or every == 1:
-        return False
     if isinstance(every, bool) or not isinstance(every, int) or every < 1:
-        return True  # an unreadable sampling rule samples
+        return True  # a missing or unreadable sampling rule samples: the verifier always reports it, so its absence is a fault
+    if every == 1:
+        return False
     seed = f"{context['check']}:{result.get('source_inputs') or tree}:{context.get('head', '')}"
     return int(hashlib.sha256(seed.encode()).hexdigest()[:8], 16) % every == 0
 

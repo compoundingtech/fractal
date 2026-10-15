@@ -118,12 +118,20 @@ class Decide(unittest.TestCase):
         now = gate.datetime.now(gate.timezone.utc).isoformat()
         context = {'check': 'linux-gate', 'fork': 'false', 'event': 'merge_group', 'protected_changed': []}
         result = {'satisfied': True, 'policy': True, 'enforce': True, 'tier': 'full', 'kind': 'observed', 'trust_level': 'fleet',
-                  'tree': 'b' * 40, 'check': 'linux-gate', 'record': record, 'signer': 'fleet/ci', 'observed_at': now}
+                  'tree': 'b' * 40, 'check': 'linux-gate', 'record': record, 'signer': 'fleet/ci', 'observed_at': now,
+                  'sample_one_in': 1}
         return context, result, 'b' * 40
 
     def test_all_conditions_together_skip(self):
         context, result, tree = self.good()
         self.assertEqual(gate.decide(context, 'satisfied', result, tree)[0], 'skip')
+
+    def test_a_result_without_the_sampling_rule_runs(self):
+        context, result, tree = self.good()
+        del result['sample_one_in']
+        decision, reason = gate.decide(context, 'satisfied', result, tree)
+        self.assertEqual(decision, 'run')
+        self.assertTrue(reason.startswith('sampled:'), reason)
 
     def test_removing_any_one_condition_runs(self):
         context, result, tree = self.good()
@@ -530,7 +538,9 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(decisions, {'skip', 'run'})
         self.assertTrue(gate.sampled({'check': 'c', 'head': 'h'}, {'sample_one_in': 'x'}, 't'))  # unreadable: sample
         self.assertFalse(gate.sampled({'check': 'c', 'head': 'h'}, {'sample_one_in': 1}, 't'))
-        self.assertFalse(gate.sampled({'check': 'c', 'head': 'h'}, {}, 't'))
+        # A result without the rule at all (an older or faulty verifier) samples: it must never skip.
+        for result in ({}, {'sample_one_in': None}, {'sample_one_in': True}, {'sample_one_in': 0}, {'sample_one_in': 2.0}):
+            self.assertTrue(gate.sampled({'check': 'c', 'head': 'h'}, result, 't'), result)
 
     def test_the_index_ref_alone_proves_nothing_in_the_gate(self):
         base, key, record = self.input_scenario()
@@ -1084,10 +1094,9 @@ class WorkflowStructure(unittest.TestCase):
     def test_no_condition_in_the_workflow_has_markers_inside_it(self):
         """A condition is either bare or one whole `${{ ... }}`. Combining two conditions as text would leave markers
         inside the other (GitHub then reads the string as a literal that is always true), so none may exist; the
-        genie helper that combines them refuses such a condition when it generates."""
+        genie helper that combines them refuses such a condition when it generates (proved by the test after this one)."""
         workflow = (ROOT / '.github/workflows/fleet.yml').read_text()
         source = (ROOT / '.github/workflows/fleet.yml.genie.ts').read_text()
-        self.assertIn("throw new Error(`step condition has markers inside it", source)
         conditions = re.findall(r'^\s*(?:-\s+)?if:\s*(.+)$', workflow, re.M)
         self.assertGreater(len(conditions), 50)
         for condition in conditions:
@@ -1095,6 +1104,34 @@ class WorkflowStructure(unittest.TestCase):
             inner = value[3:-2] if value.startswith('${{') and value.endswith('}}') else value
             self.assertNotIn('${{', inner, condition)
             self.assertNotIn('}}', inner, condition)
+
+    def test_the_genie_helper_that_combines_conditions_refuses_markers_inside_one_when_it_runs(self):
+        """Executes the helper through genie itself on a copy of the workflow source: a step condition made of two
+        separate `${{ }}` markers makes generation fail, and a whole one is accepted (so the failure is the rule's)."""
+        genie = shutil.which('genie')
+        self.assertIsNotNone(genie, 'genie must be on PATH: the genie-freshness check runs this test with it')
+        source = (ROOT / '.github/workflows/fleet.yml.genie.ts').read_text()
+        anchor = "const gateSkip = "
+        self.assertEqual(source.count(anchor), 1)
+
+        def generate(probe):
+            with tempfile.TemporaryDirectory() as scratch:
+                work = Path(scratch)
+                (work / '.github/workflows').mkdir(parents=True)
+                for name in ('queue-watch.ts', 'ready-pr.ts', 'build-snapshot.ts', 'cache-audit.ts', 'workspace-ci.ts'):
+                    shutil.copy(ROOT / '.github/workflows' / name, work / '.github/workflows' / name)
+                (work / '.github/workflows/fleet.yml.genie.ts').write_text(source.replace(anchor, f'{probe}\n{anchor}', 1))
+                for name in ('repos', 'scripts'):
+                    (work / name).symlink_to(ROOT / name)
+                done = subprocess.run([genie, '--dry-run', '--json'], cwd=work, capture_output=True, text=True, timeout=300,
+                                      env=dict(os.environ, HOME=scratch))
+                return done.returncode, done.stdout + done.stderr
+
+        code, output = generate("bareCondition('${{ always() }}')")
+        self.assertEqual(code, 0, output)
+        code, output = generate("bareCondition('${{ always() }} && ${{ true }}')")
+        self.assertNotEqual(code, 0, output)
+        self.assertIn('markers inside it', output)
 
     def test_the_required_checks_that_are_jobs_keep_running_and_skip_only_their_steps(self):
         blocks = self.blocks()

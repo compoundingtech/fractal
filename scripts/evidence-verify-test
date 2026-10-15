@@ -760,6 +760,66 @@ class InputKeyed(unittest.TestCase):
         _, locked = self.commit_files({'lock.txt': 'L2'})
         self.assertNotEqual(self.key(locked), self.key(removed))
 
+    def listing(self, tree, *paths):
+        return subprocess.run(['git', '-C', str(self.f.repo), 'ls-tree', '-r', '-z', '--full-tree', tree, '--', *paths],
+                              capture_output=True, check=True).stdout
+
+    def test_a_name_with_a_newline_cannot_project_one_file_as_two_entries(self):
+        blob = self.f.git('rev-parse', 'HEAD:lock.txt')
+        sneaky = f'src/x\n100644 {blob} 0\tsrc/injected'
+        self.commit_files({sneaky: 'content'})
+        tree = self.f.git('rev-parse', 'HEAD^{tree}')
+        key = self.key(tree)
+        # The projection holds exactly the entries the tree holds under the declared paths: the sneaky name is one file.
+        self.assertEqual(self.listing(key), self.listing(tree, 'src', 'lock.txt'))
+        names = [entry.partition(b'\t')[2] for entry in self.listing(key).split(b'\0') if entry]
+        self.assertIn(sneaky.encode(), names)
+        self.assertNotIn(b'src/injected', names)
+
+    def test_a_symlink_and_a_gitlink_keep_their_modes_in_the_projection(self):
+        link = self.f.repo / 'src/link'
+        link.symlink_to('a.txt')
+        gitlink = '1' * 40
+        self.f.git('add', '-A')
+        self.f.git('update-index', '--add', '--cacheinfo', f'160000,{gitlink},src/vendored')
+        self.f.git('commit', '-q', '-m', 'link and gitlink')
+        tree = self.f.git('rev-parse', 'HEAD^{tree}')
+        key = self.key(tree)
+        projected = self.listing(key)
+        self.assertEqual(projected, self.listing(tree, 'src', 'lock.txt'))
+        self.assertIn(b'120000 blob', projected)
+        self.assertIn(f'160000 commit {gitlink}'.encode(), projected)
+        # Retargeting the link or moving the gitlink changes the key.
+        link.unlink()
+        link.symlink_to('b.txt')
+        self.f.git('add', '-A')
+        self.f.git('update-index', '--add', '--cacheinfo', f'160000,{"2" * 40},src/vendored')
+        self.f.git('commit', '-q', '-m', 'retarget')
+        self.assertNotEqual(self.key(self.f.git('rev-parse', 'HEAD^{tree}')), key)
+
+    def test_declared_paths_that_all_miss_give_no_key_and_match_nothing(self):
+        self.assertIsNone(self.key(self.tree, ['nowhere', 'nothing/here']))
+        empty = self.f.git('hash-object', '-t', 'tree', '/dev/null')
+        # Even a record that claims the empty tree as its key and is indexed under it cannot be found by it.
+        self.observed(self.commit, self.tree, empty)
+        _, other = self.commit_files({'docs/readme.txt': 'edited'})
+        rules = evidence_verify.policy_rules(policy_text(inputs=['nowhere']), 'unit', 'org/repo')
+        code, result = self.f.verify(other, rules=rules)
+        self.assertEqual((code, result['reason']), (1, 'stale_tree'))
+        code, out, _ = self.f.cli('--project', '--check', 'unit', '--revision', 'HEAD', '--paths', 'nowhere')
+        self.assertEqual((code, json.loads(out)['source_inputs']), (0, None))
+
+    def test_the_reported_key_is_the_tree_key_even_when_the_rule_checks_required_inputs(self):
+        self.commit_files({'file.txt': 'one'})
+        commit, tree = self.f.git('rev-parse', 'HEAD'), self.f.git('rev-parse', 'HEAD^{tree}')
+        key = self.key(tree)
+        self.f.note(commit, tree, self.ci, 'machine/ci1', runner='wrapper', command=('make', 'test'),
+                    inputs={'flake_lock_sha256': hashlib.sha256(b'one').hexdigest(), 'toolchain_sha256': 'x'})
+        rules = evidence_verify.policy_rules(policy_text(inputs=self.PATHS), 'unit', 'org/repo')
+        code, result = self.f.verify(tree, rules=rules)
+        self.assertEqual(code, 0, result)
+        self.assertEqual((result['kind'], result['match'], result['source_inputs']), ('wrapper', 'tree', key))
+
     def test_the_key_depends_on_exactly_the_declared_paths(self):
         whole = self.key(self.tree, ['.'])
         self.assertEqual(whole, self.tree)  # declaring everything is the exact-tree rule
