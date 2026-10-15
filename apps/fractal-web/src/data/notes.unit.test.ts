@@ -45,6 +45,18 @@ describe('independent subject notes projection and generated writes', () => {
       { path: `/v1/subject-notes/${encodeURIComponent(note.id)}`, method: 'PUT', body: { text: null } },
     ])
   })
+  it('preserves exact multiline text, audience and target when retrying a refused create', async () => {
+    let refuse = true
+    const { actions, requests } = makePort({ response: () => refuse
+      ? Response.json({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'forbidden',
+        message: 'Notes control is not granted.', retryable: false, request_id: 'request/example', details: {} }, { status: 403 })
+      : Response.json({ api_version: 'st3.client.v0', snapshot: {}, value: { id: note.id, note: null } }) })
+    const draft = { target: 'mission/example', text: '  Keep this line\nand this pasted line.  ', audience: 'agent' as const }
+    await expect(actions.create(draft.target, draft.text, draft.audience)).rejects.toThrow('Notes control is not granted.')
+    refuse = false
+    await actions.create(draft.target, draft.text, draft.audience)
+    expect(requests.map(request => request.body)).toEqual([draft, draft])
+  })
   it('only sends agent-audience notes for an agent author', async () => {
     const { actions, requests } = makePort({ actor: 'agent/example/planner' })
     await expect(actions.create(note.target, note.text, 'self')).rejects.toThrow('must be shared')

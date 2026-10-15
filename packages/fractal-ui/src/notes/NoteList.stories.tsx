@@ -53,13 +53,19 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const rowOf = (id: string) => main.querySelector<HTMLElement>(`[data-note-id="${id}"]`)!
   await expect([...main.querySelectorAll('[data-testid="note-row"]')].map(row => row.getAttribute('data-note-id'))).toEqual(newestFirstIds)
 
-  // Audience: one mapping, agent marker as SVG, neutral label for future values.
+  // Audience: one mapping, agent marker as SVG, neutral label for future values. The agent label
+  // states that people can read shared notes too, and no audience copy claims delivery.
   await expect(within(rowOf(retireNote.id)).getByTestId('note-audience')).toHaveTextContent('Only me')
-  await expect(within(rowOf(diffNote.id)).getByTestId('note-audience')).toHaveTextContent('Shared with agent')
+  await expect(within(rowOf(diffNote.id)).getByTestId('note-audience')).toHaveTextContent('Shared with the agent (people can see it too)')
+  await expect(within(rowOf(diffNote.id)).getByTestId('note-audience').getAttribute('aria-description')).toMatch(/other people/)
   await expectVisibleAgentMarker(rowOf(diffNote.id))
   await expect(rowOf(retireNote.id).querySelector('svg[data-note-agent-marker]')).toBeNull()
+  await expect(within(rowOf(retireNote.id)).getByTestId('note-audience')).toHaveAttribute('aria-description', 'Only you can read this note.')
   await expect(within(rowOf(futureNote.id)).getByTestId('note-audience')).toHaveTextContent('Other audience')
   for (const forbidden of [futureAudience, 'Unknown']) await expect(main.textContent).not.toContain(forbidden)
+  for (const audience of main.querySelectorAll('[data-testid="note-audience"]')) {
+    await expect(`${audience.textContent} ${audience.getAttribute('aria-description') ?? ''}`).not.toMatch(/deliver|receiv|acknowledg|has read|next turn/i)
+  }
 
   // Attribution, session scope, expiry.
   await expect(within(rowOf(retireNote.id)).getByTestId('note-author')).toHaveTextContent('You')
