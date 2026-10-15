@@ -88,7 +88,7 @@ fn read_only_v2_preserves_owned_missing_mismatched_and_stray_body_semantics() {
     let bodies = crate::message_body::bodies(&state);
     let body = "a long body with UTF-8 é\n".repeat(500);
     for id in ["owned", "missing", "mismatch", "foreign-holder"] {
-        let sender = if id == "foreign-holder" { "person/blake" } else { "person/alex" };
+        let sender = if id == "foreign-holder" { "person/blair" } else { "person/alex" };
         store.append_claim(&ClaimInput {
             subject: format!("message/{id}"), kind: "message.sent".into(),
             actor: Some(sender.into()),
@@ -131,7 +131,7 @@ fn read_only_v2_preserves_owned_missing_mismatched_and_stray_body_semantics() {
         assert!(!restored.exists("person/alex", "message/mismatch"));
         assert!(!restored.exists("person/alex", "message/stray"));
         assert!(!restored.exists("person/alex", "message/foreign-holder"));
-        assert!(!restored.exists("person/blake", "message/foreign-holder"));
+        assert!(!restored.exists("person/blair", "message/foreign-holder"));
     }
 }
 
