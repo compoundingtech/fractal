@@ -196,15 +196,15 @@ failure, cancellation or skipping either shard fails the gate. Each shard retain
 durations in its logs, and the primary saves `ci-logs/test-partitions.json` with the tested SHA
 and all three inventories.
 
-The Linux `linux-test-build` job compiles the existing two selected Cargo groups once and
-publishes nextest archives. Both shards, the zero-retry mail job and isolation VM require that
+The Linux `linux-test-build` job compiles the workspace into one nextest archive
+and preserves the existing executed test selection. Both shards, the zero-retry mail job and isolation VM require that
 successful producer and download its exact artifact ID. They check the manifest SHA, source/tree,
-run, the successful producer attempt, architecture, nextest/rustc versions and each archive digest before extracting.
+run, the successful producer attempt, architecture, nextest/rustc versions, target-selection recipe and archive/gateway file digests before extracting.
 A failed-jobs-only rerun can inherit the earlier successful producer output; its attempt and
 manifest remain explicitly pinned, with the same run/source/tree/tool identities required. Cargo
 target caches remain on the producer; consumers restore only runtime/Nix fixtures. The producer also runs the unchanged standalone conversation-model tests (including doctests)
 and dependency boundary, and builds the gateway binary with its standalone production features.
-Its Cargo JSON and binary hash are retained alongside the archives; the VM does not substitute
+Its Cargo JSON and binary hash are retained alongside the archive; the VM does not substitute
 the workspace-unified test binary. A failed producer explicitly fails consumer checks and the gate.
 
 Tests resolve archived executables through nextest's runtime binary paths. A source guard rejects raw compiled binary, manifest and temporary-directory lookups in test code.
@@ -213,7 +213,8 @@ map each compiled package beneath the recorded producer root to the consumer che
 library fixtures launched by another package. Outside archives the original compiled path remains
 the fallback. Archive mode rejects missing or mismatched roots/binaries. Tests, assertions,
 partitions, retries, eight test threads, real VM checks and required contexts are unchanged.
-Local and macOS runs still use the existing build selection unless `CI_TEST_PARTITION` is set.
+Local and macOS runs use the same metadata-derived binary selection and CI profile;
+`CI_TEST_PARTITION` selects the shard.
 
 New test files and paths are checked automatically by `genie-freshness` on each PR and
 merge group. A guard failure names each file and line and points its author to `test_env!`
@@ -399,16 +400,15 @@ st3), the st-drivers `catalog*`, `resync` and `resource_profile_supervisor` modu
 and `resource_profile_supervisor_e2e` tests. No CI job runs these. Clippy still checks the whole
 workspace. List the selection with `bash scripts/ci-nextest list`.
 
-`scripts/ci-nextest` supplies Cargo's target selection for both the build-only step
-(`bash scripts/ci-nextest run --no-run`) and execution, on Linux and macOS. It runs two groups:
-the workspace excluding st2, then st2's `integration`, `agent_resource` and `driver_expansion`
-test targets. Both use the unchanged `ci` profile, and both run even if the first fails; any
-failure fails the stage. This avoids compiling st2's entirely excluded lib/bin unit-test
-targets, `event_e2e` and `resource_profile_supervisor_e2e`. Nextest filters alone do not avoid
-compiling them. Partially selected binaries (st2 `integration` and st-drivers' library tests)
-still compile in full, and the retained st2 tests still build the st2 executable they need.
-When adding a st2 test target or changing binary-level exclusions, update the script's
-retained target list alongside `.config/nextest.toml`.
+`scripts/ci-nextest` uses workspace metadata for binary selection
+(`bash scripts/ci-nextest run --no-run`) and execution on Linux and macOS. One workspace
+invocation retains every non-st2 binary and, while st2 remains a workspace member, its
+`integration`, `agent_resource` and `driver_expansion` test targets. Caller filtersets intersect
+that binary selection. The unchanged `ci` profile keeps fail-fast disabled and any test failure
+fails the stage. Collection compiles workspace targets, including excluded legacy binaries
+while st2 remains a member; the filters preserve execution coverage rather than avoid compilation.
+Matching rendered hooks are installed by a CI binary that calls the driver
+library directly, rather than by the legacy runner CLI.
 
 The old trusted fleet runner and st merge train are retired; there is no operations installation
 handoff. Namespace workflows use this script from the checkout and land through GitHub's merge
@@ -447,7 +447,8 @@ image does not boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) i
 1. Probe `/dev/kvm`: the job fails unless KVM can create a VM. Namespace offers nested
    virtualization on `linux/amd64`. QEMU is configured with `forceAccel`, and the test checks
    `systemd-detect-virt` reports `kvm`, so it never falls back to emulation.
-2. `cargo nextest archive -p st2 --test integration` builds the integration test binary and st2.
+2. The producer prebuilds the preserved workspace selection into one archive, including the
+   existing st2 integration test binary and its executable for these three VM tests.
 3. The job builds the VM test driver from the flake and runs it on the runner. The VM boots
    NixOS with a lingering user, copies in the archive, extracts it at the checkout's path (the
    test binary has st2's path compiled in) and runs both cascade tests and
@@ -472,7 +473,7 @@ The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Nod
 After the root frozen install, `bash scripts/ci-typescript-client` runs the client's
 contract/schema tests and both compiler projects, the views' tests and typecheck,
 `tsc --noEmit -p .` in `apps/ios`, and the iOS tests. The client packages pin TypeScript
-6.0.3 and Effect 4.0.0-rc.118. The iOS project allows explicit TypeScript import extensions
+6.0.3 and Effect 4.0.0 stable. The iOS project allows explicit TypeScript import extensions
 for generated-client consumers. The main ruleset requires `typescript-client`.
 
 ### Fractal web
@@ -491,9 +492,10 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `Models.generated.ts`, `Client.generated.ts`, `Schema.generated.ts`, `errors.ts`),
   `package.json`, `tsconfig.json`, `tsconfig.schema.json`, `types.test.ts` and `BUCK*`
   trigger web execution. Rust generators and their schema/docs inputs do not trigger it
-  without a changed generated client file; root flake-only changes also do not trigger it.
+  without a changed generated client file; root `flake.nix` changes also do not trigger it.
   Other relevant paths are
   root `package.json*`, `pnpm-workspace.yaml*`, `pnpm-lock.yaml`,
+  `megarepo.kdl`, `megarepo.lock`, `flake.lock`,
   `pnpm-install-contract.json*`, `.npmrc`, root `tsconfig*.json*`, `.buckroot*`,
   `.buckconfig*`, root `BUCK*`, `buck2/**`, `genie/**`, `nix/web/**`,
   `nix/fractal-web*.nix`, `scripts/ci-fractal-web*`,
@@ -798,6 +800,39 @@ cargo test -p st3 --test integration daemon_cost:: -- --nocapture --test-threads
 ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p st3 --features perf-load --test perf_load daemon_load:: -- --nocapture
 ```
 
+#### The daemon beside a seat-priority hog
+
+`daemon_load::a_seat_priority_hog_leaves_the_request_latency_targets_reported` runs the steady load
+twice on one generated store: alone, then beside a CPU and disk hog at the priority seats get by
+default. On Linux that is nice 10 and best-effort IO priority 7; on macOS, `taskpolicy -b`
+(background QoS). The test process may itself run niced (cargo's tests run in `builds.slice` on
+hetz2, which a host timer renices to 10), so the hog runs 10 nice levels below the test process, at
+most 19, and the report names both. The hog is twice the online CPUs in busy loops and two writers
+that `fsync` 128 MiB files; the timed load starts once the 1-minute load average is past the
+core count (`ST_LOAD_HOG_RAMP_SECONDS`, 180 by default), and the run fails if the load average was
+not past it at the start, at its lowest 5-second sample or at the end.
+
+Both runs add a faster measured mix: person reads and message sends at 2 a second and a fresh
+agents list at 1 a second, so each of the four measures has a p99 worth reading. The report pools
+every path a target in [`slo/targets.toml`](../slo/targets.toml) covers, the targets that
+`GET /v1/client/request-latency` serves: `person-read` (100 ms p99), `person-read-fresh` (300 ms),
+`write-ack` (100 ms) and `message-send` (a send against the write-ack target), each with and without
+the hog, and prints them as `summary.md`. A request that fails fails the run; a missed target does
+not, until `ST_LOAD_HOG_STRICT=1`.
+
+```sh
+ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out nix develop .#perf -c cargo test --release \
+  -p st3 --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
+nix develop .#perf -c bash scripts/ci-perf load-hog   # the same, in the perf slot on hetz2
+```
+
+The Performance workflow runs it as the `perf-load-hog` job, with `continue-on-error` and its table
+in the step summary and the `perf-load-hog-logs` artifact. It runs on pushes to main and manual
+dispatch, not on pull requests: it takes a second performance runner for up to 45 minutes. It is
+no required check until its numbers are stable. "Without the hog" is
+the host's load as it was: on a shared host that is not an idle machine, and the report gives the
+load average. Keep a Mac's load average under 10 outside the test window.
+
 #### Measuring a change on hetz2: the perf slot
 
 A builder measures a change with `nix develop .#perf -c bash scripts/ci-perf load`. Outside CI on
@@ -816,7 +851,7 @@ the machine.
 - A run past its timeout is stopped (SIGTERM, then SIGKILL after 10 s) and frees the slot. The
   timeout is two hours unless the run asks for less with `--timeout`; time in line does not
   count. A run stopped by it exits 124.
-- Only `load` is slotted, and only on hetz2. Anywhere else nothing shares the machine.
+- Only `load` and `load-hog` are slotted, and only on hetz2. Anywhere else nothing shares the machine.
   `scripts/ci-perf-slot-test` proves turns, order, kill, signals and timeout.
 
 The budgets that apply to a local run are the absolute ones: every request's p99 budget and the
@@ -1159,3 +1194,15 @@ requests retain their signal status. No compiler or test is retried. Source, run
 producer attempt, toolchain and individual file hashes are still checked before extraction.
 The job logs the ZIP size/digest and transfer attempt. This protects the transfer boundary;
 it does not establish the cause of earlier digest mismatches or a measured speedup.
+
+## Tests the sandboxed st3 check does not run
+
+`checks.st3` (the Nix build of the st3 workspace's tests) leaves out the tests named in
+`nix/st3-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
+Today these are 14 `setup::` and 12 `otel_export::` integration tests, which need a login shell the
+sandbox user does not have (the `otel_export` output says so in so many words; for the 14th `setup::`
+test the cause is inferred from the identical daemon exit status). Each entry has a reason, an owner and where it runs instead: central CI's `linux-tests`
+shards run every one of them, as do the wrapper path's runs, so nothing is dropped, only moved.
+The check fails if an entry no longer names exactly one test (the list has gone stale) and if any
+unlisted test fails. Do not add an entry to hide a failing test; add it only when the sandbox cannot
+provide what the test needs, and say what.

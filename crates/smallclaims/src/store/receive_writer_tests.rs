@@ -729,6 +729,116 @@ fn startup_admission_seals_new_batches_without_a_snapshot_or_recovery_search() {
     assert!(!*store.sealing_recovery.try_lock().unwrap());
 }
 
+/// After a downgrade an older binary can leave a batch behind the sealing frontier with no
+/// envelope. Startup admission seals only the batches after the frontier, so the first snapshot
+/// after serving seals the skipped one, after a newer batch. The envelope takes its writer,
+/// sequence and previous hash from the batch header written with the batch, so sealing later
+/// changes none of them: the writer's chain stays whole and a peer admits both batches.
+#[test]
+fn a_batch_skipped_behind_the_frontier_is_sealed_by_the_first_snapshot_after_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cedar.sqlite3");
+    let skipped = {
+        let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+        store.bind_fleet(FLEET).unwrap();
+        let exchange = page(&node("birch"), &node("cedar-view"), 3);
+        store
+            .receive_replication_exchange("birch", FLEET, &exchange)
+            .unwrap();
+        let skipped = recovery_note(&store, "note/written-by-an-older-binary");
+        // The older binary advanced the durable sealing cursor past a batch it never sealed.
+        store
+            .connection
+            .write()
+            .execute_batch(
+                "DELETE FROM meta WHERE key='batch_rowid_high_water';
+             INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid','8');",
+            )
+            .unwrap();
+        skipped
+    };
+    let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    store.bind_fleet(FLEET).unwrap();
+    let newer = recovery_note(&store, "note/written-after-the-upgrade");
+    let envelope = |claim: &crate::claim::ClaimRecord| -> Option<(String, i64)> {
+        store
+            .readers
+            .get()
+            .query_row(
+                "SELECT writer, sequence FROM replica_envelopes
+                 WHERE batch_id=(SELECT batch_id FROM claims WHERE id=?1)",
+                [&claim.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap()
+    };
+    let peer_verdicts = || -> Vec<(String, String)> {
+        let connection = store.readers.get();
+        let mut statement = connection
+            .prepare(
+                "SELECT claims.id, claim_verdicts.verdict FROM claims
+                 LEFT JOIN claim_verdicts ON claim_verdicts.claim_id=claims.id
+                 WHERE claims.subject LIKE 'note/catch-up/%' ORDER BY claims.id",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get::<_, Option<String>>(1)?.unwrap_or_default()))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+
+    assert_eq!(store.validate_replication_backlog().unwrap().valid, 3);
+    assert!(envelope(&newer).is_some(), "admission sealed the batch after the frontier");
+    assert!(envelope(&skipped).is_none(), "the skipped batch waits for the first snapshot");
+    let admitted = peer_verdicts();
+    assert_eq!(admitted.len(), 3);
+
+    store.replication_snapshot().unwrap();
+    let (writer, skipped_sequence) = envelope(&skipped).unwrap();
+    let (newer_writer, newer_sequence) = envelope(&newer).unwrap();
+    assert_eq!(writer, newer_writer);
+    assert!(skipped_sequence < newer_sequence, "sequences follow the batches, not the sealing");
+    let chain: Vec<(i64, String, Option<String>)> = {
+        let connection = store.readers.get();
+        let mut statement = connection
+            .prepare(
+                "SELECT replica_envelopes.sequence, batches.hash, replica_envelopes.previous_hash
+                 FROM replica_envelopes JOIN batches ON batches.id=replica_envelopes.batch_id
+                 WHERE replica_envelopes.writer=?1 ORDER BY replica_envelopes.sequence",
+            )
+            .unwrap();
+        statement
+            .query_map([&writer], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let first = chain[0].0;
+    for (offset, (sequence, _, previous)) in chain.iter().enumerate() {
+        assert_eq!(*sequence, first + offset as i64, "the writer's sequences have no gap");
+        if offset > 0 {
+            assert_eq!(previous.as_ref(), Some(&chain[offset - 1].1), "each links the batch before");
+        }
+    }
+    assert_eq!(peer_verdicts(), admitted, "the snapshot's verdict pass judged peers the same");
+
+    // A peer that has none of it receives one valid chain and admits both batches.
+    let observer = node("elm");
+    let exported = store
+        .export_replication_exchange(FLEET, &observer.replication_inventory().unwrap())
+        .unwrap();
+    observer
+        .receive_replication_exchange("cedar", FLEET, &exported)
+        .unwrap();
+    observer.validate_replication_backlog().unwrap();
+    assert!(observer.claim_by_id(&skipped.id).unwrap().is_some());
+    assert!(observer.claim_by_id(&newer.id).unwrap().is_some());
+}
+
 fn recovery_note(store: &Store, subject: &str) -> crate::claim::ClaimRecord {
     store
         .append_claim(&ClaimInput {

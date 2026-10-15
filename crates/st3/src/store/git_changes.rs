@@ -38,6 +38,14 @@ fn repository_key(key: &str) -> Result<()> {
 }
 
 impl Store {
+    pub fn install_git_change_registry(&self, registry: Arc<crate::changes::service::Registry>) -> Result<()> {
+        self.smalltalk.git_change_registry.set(registry).map_err(|_| anyhow::anyhow!("Git change registry already installed"))
+    }
+
+    pub fn git_change_registry(&self) -> Option<Arc<crate::changes::service::Registry>> {
+        self.smalltalk.git_change_registry.get().cloned()
+    }
+
     /// Call only after Git object/source/parent validation outside the writer. Immutable
     /// object rows and the latest pointer are published in one short transaction.
     pub fn index_git_change(&self, repository: &str, revision: &Revision) -> Result<()> {

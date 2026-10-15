@@ -2,6 +2,8 @@
 //! cooperative scheduling data, not signed gate evidence or permission to move main.
 
 pub mod transport;
+pub mod config;
+pub mod service;
 pub mod discovery;
 pub mod view;
 

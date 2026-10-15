@@ -500,11 +500,13 @@ GET /v1/client/agents SERVER / first_frame     st.roster.rebuild INTERNAL root (
 | `st.roster.admission.hold_ms` | double | Acquire to release |
 | `st.roster.invalidation` | string enum | `cold`, `unknown_kind`, `structural_claim`, `missing_message`, `membership`, `local_frontier`, `queue_deadline`, `coverage_gap`, `safe_delta`, `historical_snapshot` |
 | `st.roster.changed`, `st.roster.covered`, `st.roster.refolded` | integer | Changed agents, resulting subject coverage (card count for a complete roster), and cards refolded |
-| `st.roster.phase.<phase>.wall_ms`, `st.roster.phase.<phase>.cpu_ms` | double | Wall and calling-thread CPU time; `<phase>` is `membership`, `status_fold`, `card_presentation`, `queue_selection`, or `serialization` |
+| `st.roster.phase.<phase>.wall_ms`, `st.roster.phase.<phase>.cpu_ms` | double | Wall and calling-thread CPU time; `<phase>` is `membership`, `status_fold`, `card_presentation`, `subagent_leases`, `queue_selection`, or `serialization` |
 
 Phases are synchronous sections measured on the thread that runs them, so `cpu_ms` is
 that section's own thread CPU rather than a share of an outer task. Durations keep
 sub-millisecond precision as doubles. Repeated phases within one read accumulate.
+`subagent_leases` measures the live lease query inside `card_presentation`; it is a
+component of that enclosing phase, not an additional duration to sum with it.
 Worker queue and reader acquisition totals survive a WS probe and its admitted retry.
 The first publication includes its preparatory warm worker's measurements, moved into
 the cold root without creating another span. Those sections can precede root start.
@@ -817,27 +819,22 @@ and root completion on serving or guard drop.
 
 ```text
 exchange(peer) → st.replication.round (detached root, one per exchange call)
-heal(peer)     → st.replication.heal  (detached root, one per heal call)
 ```
 
-Both roots use the OpenTelemetry API's `start_with_context` with an empty
+The root uses the OpenTelemetry API's `start_with_context` with an empty
 parent context. smallclaims depends on the OTel API only; st3 owns providers.
-A heal does not inherit the round, and neither inherits an ambient daemon or
-worker span. `span.label` is the bounded operation `round` or `heal`.
+The round does not inherit an ambient daemon or worker span. `span.label` is
+the bounded operation `round`.
 Span fields use the `st.replication.*` prefix. The round records `peer`,
-`outcome=moved|in_sync|failed|cancelled`, integer `moved_envelopes`, and boolean
-`heal_due`. `moved` follows the exchange's existing progress result,
+`outcome=moved|in_sync|failed|cancelled` and integer `moved_envelopes`.
+`moved` follows the exchange's existing progress result,
 including checkpoint adoption; it need not imply a nonzero envelope count.
 Envelope counts sum locally stored pulls and successful pushes whose peer
 inventory changed; push counts are sent batch sizes, not remote receipt counts.
-The heal records `peer`, integer `questions`, and
-`outcome=repaired|unchanged|failed|cancelled`. A heal is repaired when its graph matches
-after refetch, push, or replay; a matching graph without these changes is
-unchanged, and an unresolved, exhausted, or errored heal is failed.
 Failed operations set status `ERROR`
-without exporting raw error prose. There are no per-POST or per-question
-spans and no in-process sampling.
-Dropping an unfinished round or heal, including a dialer aborted after target
+without exporting raw error prose. There are no per-POST spans and no in-process
+sampling.
+Dropping an unfinished round, including a dialer aborted after target
 removal, finalizes it as `cancelled` with unset status, not `ERROR`. Explicit
 completion and Drop consume the same recording, so counters and durations
 are recorded once; cancellation does not itself increment the error counter.
@@ -848,8 +845,6 @@ are recorded once; cancellation does not itself increment the error counter.
 | `st.replication.round.duration` | Histogram | `s` | `peer`, `outcome=moved|in_sync|failed|cancelled` |
 | `st.replication.batch.size` | Histogram | `{envelope}` | `peer`, `direction=pull|push` |
 | `st.replication.errors` | Counter | `{error}` | `peer`, `reason=down|overloaded|auth_failed|refused|removed|timeout|invalid|other` |
-| `st.replication.heals` | Counter | `{heal}` | `peer`, `outcome=repaired|unchanged|failed|cancelled` |
-| `st.replication.heal.duration` | Histogram | `s` | `peer`, `outcome=repaired|unchanged|failed|cancelled` |
 
 Durations cover the whole call, including failed and cancelled calls, and use the seconds
 buckets above. Pull batch sizes are locally stored envelopes; push sizes are
@@ -867,8 +862,7 @@ reqwest failures to `down`, and JSON decoding, API-version mismatch, and
 inflate failures to `invalid`. The legacy dialer's signature/fleet/member
 authentication classification maps to `auth_failed`; unclassified errors map
 to `other`, while recognized legacy failure-kind strings retain their mappings.
-A signed HTTP refusal does not alone imply `refused`. A terminal unresolved or exhausted heal with
-no classified cause uses `other`. Reasons never include error text.
+A signed HTTP refusal does not alone imply `refused`. Reasons never include error text.
 
 Trace and metric enabled gates are independent: metrics record without a
 trace exporter, and traces record without a meter provider. Disabled paths
@@ -878,7 +872,7 @@ label shared between its span and metrics; only metrics require a monotonic
 start time. Batch/outcome/reason labels use static strings, and point
 recording shares the peer label without copying its bytes.
 Telemetry handles bind to the first provider in the process; production initializes once per process.
-Enabled paths reuse existing exchange, receipt, and heal data rather than
+Enabled paths reuse existing exchange and receipt data rather than
 querying the daemon for telemetry. `ReplicationReceipt` has no timing fields;
 cumulative daemon `ReplicationTimings` are not fetched or turned into per-round
 timings. No new IPC or derived timing math is added.

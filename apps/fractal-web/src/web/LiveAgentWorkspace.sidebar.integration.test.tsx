@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { Agent, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@smalltalk/st3-client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import * as Option from 'effect/Option'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
@@ -127,5 +128,50 @@ describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
     await act(async () => registry.set(agents, observed({ value: [] })))
     expect(roster().querySelectorAll('[data-testid="taste-agent-row"]')).toHaveLength(0)
     expect(sidebar().textContent).not.toContain('Waiting for the agent roster.')
+  })
+})
+
+describe('shipped live sidebar machine query', () => {
+  it('applies typed hosts to the real roster and preserves substring text and stripped highlights', async () => {
+    const candidates: readonly Agent[] = [
+      { ...agent, id: 'agent/compiler', name: 'Compiler Alpha', host_id: Option.some('host/synthetic-138/1') },
+      { ...agent, id: 'agent/sidebar', name: 'Sidebar Beta', host_id: Option.some('host/SYNTHETIC-138/2') },
+      // Text looks like a matching host but must not satisfy a machine facet.
+      { ...agent, id: 'agent/decoy', name: 'Compiler synthetic-138/1 decoy', host_id: Option.some('host/laptop24') },
+    ]
+    registry.set(agents, observed({ value: candidates }))
+    await mount(1440)
+    const input = sidebar().querySelector<HTMLInputElement>('input')!
+    expect(input.getAttribute('aria-description')).toMatch(/machine:.*host:/)
+    const search = async (value: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+    }
+    const names = () => [...roster().querySelectorAll('[data-testid="taste-agent-row"]')].map(row => row.textContent)
+    expect(names()).toHaveLength(3)
+    for (const [query, expected] of [
+      ['machine:synthetic-138/1', ['Compiler Alpha']],
+      ['machine:synthetic-138/1,synthetic-138/2', ['Compiler Alpha', 'Sidebar Beta']],
+      ['HOST:SYNTHETIC-138', ['Compiler Alpha', 'Sidebar Beta']],
+      ['machine:synthetic-138 host:synthetic-138/1', ['Compiler Alpha']],
+      ['machine:synthetic-138/1 host:synthetic-138/2', []],
+      ['machine:synthetic-138/9', []],
+      ['machine: host:,,', ['Compiler Alpha', 'Sidebar Beta', 'Compiler synthetic-138/1 decoy']],
+      ['Alpha machine:SYNTHETIC-138', ['Compiler Alpha']],
+      ['cmp machine:synthetic-138', []],
+      ['synthetic-138/1', ['Compiler Alpha', 'Compiler synthetic-138/1 decoy']],
+      ['machine:host/synthetic-138/1', []],
+    ] as const) {
+      await search(query)
+      expect(names()).toHaveLength(expected.length)
+      expected.forEach(name => expect(roster().textContent).toContain(name))
+    }
+    await search('machine:synthetic-138/1')
+    expect(roster().querySelectorAll('mark')).toHaveLength(0)
+    await search('Alpha machine:synthetic-138/1')
+    expect([...roster().querySelectorAll('mark')].map(mark => mark.textContent).join('')).toContain('Alpha')
+    expect([...roster().querySelectorAll('mark')].some(mark => mark.textContent?.includes('machine:'))).toBe(false)
   })
 })
