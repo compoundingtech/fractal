@@ -6434,9 +6434,24 @@ mod tests {
     }
 
     #[test]
+    fn a_lowercase_r_types_into_the_box_while_the_link_is_down() {
+        // Nathan, 2026-10-14: with the link stale he could not type a lowercase r (the key was
+        // taken to mean reconnect); R worked. Letters are letters, link or no link.
+        let mut ui = glass();
+        ui.world.link = Link::Offline("No member reachable · reconnecting · Ctrl+R retry now".into());
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".into())),
+            Open::Tab,
+        );
+        typed(&mut ui, "rare");
+        let draft = ui.conversation_state.drafts.get("agent/example/atlas/builder");
+        assert_eq!(draft.map(String::as_str), Some("rare"));
+    }
+
+    #[test]
     fn the_connection_word_is_clickable_and_says_what_is_known() {
         let mut ui = glass();
-        ui.world.link = Link::Offline("Last connected at 10:02 · reconnecting · r retry now".into());
+        ui.world.link = Link::Offline("Last connected at 10:02 · reconnecting · Ctrl+R retry now".into());
         screen(&ui);
         let rect = {
             let info = ui.frame.borrow();
