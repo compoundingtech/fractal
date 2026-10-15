@@ -32,6 +32,7 @@ const source = vi.hoisted(() => ({
   transcriptTurns: [] as (readonly TranscriptTurn[])[],
   scrollToBottomKeys: [] as (string | undefined)[],
   composerProps: [] as React.ComponentProps<typeof Kit.EmbraceComposer>[],
+  agentControls: undefined as { readonly control: () => Promise<never>; readonly interrupt: (agent: string) => Promise<{ readonly _tag: 'Sent' } | { readonly _tag: 'Refused'; readonly detail: string }> } | undefined,
 }))
 
 vi.mock('../data/react.tsx', async () => {
@@ -41,7 +42,7 @@ vi.mock('../data/react.tsx', async () => {
   return ({
   useConversation: () => source.feed,
   useConversationSync: () => source.sync,
-  useDataSource: () => ({ agents, conversationInterest: undefined }),
+  useDataSource: () => ({ agents, conversationInterest: undefined, agentControls: source.agentControls }),
   useFeedInterest: () => {},
   useNow: () => source.now,
   useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', terminalInput: 'ungranted' }),
@@ -104,6 +105,7 @@ beforeEach(() => {
   source.transcriptTurns = []
   source.scrollToBottomKeys = []
   source.composerProps = []
+  source.agentControls = undefined
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   // jsdom has no layout observers; the kit instantiates one while attaching scroll.
   // Test-environment sizing (react-aria renders every row) needs no measured entries.
@@ -669,5 +671,35 @@ describe('ConversationPane composition activation', () => {
     await mount()
     expect(container.querySelector('[data-testid="agent-message"]')).not.toBeNull()
     expect(container.querySelector('[data-testid="user-message"]')).toBeNull()
+  })
+
+  it('stops the running turn from the composer through the agent interrupt, and shows a refusal beside Stop', async () => {
+    let answer: (result: { readonly _tag: 'Sent' } | { readonly _tag: 'Refused'; readonly detail: string }) => void = () => {}
+    const interrupt = vi.fn((_agent: string) => new Promise<{ readonly _tag: 'Sent' } | { readonly _tag: 'Refused'; readonly detail: string }>(resolve => { answer = resolve }))
+    source.agentControls = { control: () => Promise.reject(new Error('not used')), interrupt }
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, { _tag: 'Status', id: 'run', status: 'running', at: at(2) }], hasOlder: false, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    await mount()
+    const stop = () => container.querySelector<HTMLButtonElement>('[data-testid="run-stop"]')
+    expect(stop()?.getAttribute('aria-label')).toBe('Stop run')
+    expect(stop()?.getAttribute('aria-keyshortcuts')).toBe('Escape')
+    await act(async () => { stop()!.click() })
+    expect(interrupt).toHaveBeenCalledExactlyOnceWith('agent/selected')
+    expect(stop()?.getAttribute('aria-label')).toBe('Stopping run')
+    expect(stop()?.disabled).toBe(true)
+    await act(async () => { answer({ _tag: 'Refused', detail: 'That agent has no terminal to stop its turn through.' }) })
+    expect(stop()?.getAttribute('aria-label')).toBe('Stop run')
+    expect(container.querySelector('[data-testid="composer-footer"] [role="status"]')?.textContent).toBe('That agent has no terminal to stop its turn through.')
+    // The run ends: Stop and the refusal leave with it.
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, { _tag: 'Status', id: 'run', status: 'cancelled', at: at(3) }], hasOlder: false, observation: { empty: false } } }
+    await mount()
+    expect(stop()).toBeNull()
+    expect(container.querySelector('[data-testid="composer-footer"] [role="status"]')).toBeNull()
+  })
+
+  it('offers no Stop when the connection cannot interrupt agents', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, { _tag: 'Status', id: 'run', status: 'running', at: at(2) }], hasOlder: false, observation: { empty: false } } }
+    await mount()
+    expect(container.querySelector('[data-testid="run-stop"]')).toBeNull()
   })
 })
