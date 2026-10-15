@@ -1267,6 +1267,59 @@ mod tests {
     }
 
     #[test]
+    fn empty_peer_wakes_preserve_needed_projection_and_racing_admission() {
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        let source = Store::open_memory("source").unwrap();
+        let target = Store::open_memory("target").unwrap();
+        declare_message(&source);
+        assert!(target.project_replication_backlog().unwrap());
+        let exchange = super::super::tests::exchange_from(&source, &ReplicationInventory::default());
+        let arrivals = std::cell::Cell::new(0);
+        assert!(target.project_replication_backlog_before_clear(|| {
+            arrivals.set(arrivals.get() + 1);
+            target.receive_replication_exchange("source", FLEET, &exchange).unwrap();
+            let admission = target.validate_replication_backlog().unwrap();
+            assert_eq!((admission.invalid, admission.unknown), (0, 0));
+        }).unwrap());
+        assert_eq!(arrivals.get(), 1);
+        assert!(target.replication_projection_deferred(), "an empty wake must not clear a racing admission's generation");
+        let admitted = target.index().unwrap();
+        assert!(target.project_replication_backlog().unwrap());
+        assert!(!target.replication_projection_deferred());
+        assert_eq!(target.message("message/keyed").unwrap().unwrap().content, "keyed lookup");
+        for missing_health in [false, true] {
+            {
+                let mut connection = target.connection.write();
+                let transaction = connection.transaction().unwrap();
+                transaction.execute("DELETE FROM desired WHERE subject='message/keyed'", []).unwrap();
+                if missing_health {
+                    transaction.execute("DELETE FROM projection_health WHERE aggregate='graph'", []).unwrap();
+                } else {
+                    transaction.execute(
+                        "UPDATE projection_health SET status='stale',last_good_store_index=NULL WHERE aggregate='graph'", [],
+                    ).unwrap();
+                }
+                transaction.commit().unwrap();
+            }
+            assert_eq!(target.index().unwrap(), admitted, "the peer wake admits no additional source");
+            assert!(target.project_replication_backlog().unwrap());
+            assert_eq!(target.message("message/keyed").unwrap().unwrap().content, "keyed lookup",
+                "missing or stale health must not skip needed canonical projection");
+            let health: (String, u64) = target.readers.get().query_row(
+                "SELECT status,last_good_store_index FROM projection_health WHERE aggregate='graph'", [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            assert_eq!(health, ("healthy".into(), admitted));
+            assert!(!target.replication_projection_deferred());
+        }
+        for _ in 0..3 {
+            assert!(target.project_replication_backlog().unwrap());
+            assert_eq!(target.index().unwrap(), admitted);
+            assert_eq!(target.message("message/keyed").unwrap().unwrap().content, "keyed lookup");
+        }
+    }
+
+    #[test]
     fn cancellation_apply_with_many_claimants_has_one_selector_commit_allowance() {
         let store = Store::open_memory("node").unwrap();
         let count = BACKFILL_SUBJECTS * 3 + 3;
