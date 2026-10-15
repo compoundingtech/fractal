@@ -1157,9 +1157,16 @@ impl Ui {
             // A command typed as it begins ("new mission") is first. Among what can be opened,
             // agents come first, then missions, whatever a mission's title starts with
             // (Nathan, 2026-10-06); within a section, what begins as typed comes first.
+            // Now, Usage and the Fleet list are commands too: "fleet" opens the list before a
+            // mission whose id has fleet in it.
             scored.sort_by_key(|(choice, score)| {
                 let named = choice.label.to_lowercase().starts_with(&typed);
-                let command = named && choice.section > 3;
+                let command = named
+                    && (choice.section > 3
+                        || matches!(
+                            choice.action,
+                            Action::Home | Action::Usage | Action::Open(Pane::List(_))
+                        ));
                 (!command, RANK[choice.section], !named, -score)
             });
         }
@@ -7501,6 +7508,23 @@ mod tests {
         assert_eq!(first(&mut ui, "new terminal"), Action::NewTerminal);
         assert_eq!(first(&mut ui, "close glass"), Action::CloseGlass);
         assert_eq!(first(&mut ui, "shell"), Action::NewTerminal);
+    }
+
+    /// The section digits are gone, so Ctrl+K reaches what they did: Usage over the space, and
+    /// the Fleet list in a tab.
+    #[test]
+    fn ctrl_k_opens_usage_and_the_fleet_list() {
+        let mut ui = glass();
+        ui.open_palette(None, Open::Here);
+        typed(&mut ui, "usage");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.usage_open(), "{}", screen(&ui));
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!ui.home_open());
+        ui.open_palette(None, Open::Here);
+        typed(&mut ui, "fleet");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(ui.focused_pane(), Some(Pane::List(3)), "{}", screen(&ui));
     }
 
     #[test]

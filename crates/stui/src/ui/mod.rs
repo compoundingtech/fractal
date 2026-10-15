@@ -879,6 +879,9 @@ impl Ui {
                 self.selected[index] = position;
             }
         }
+        // The selection followed its items; the person did not move, so a later look at the
+        // focus (st delivering the glasses again after a reconnect) must not close their box.
+        self.focus_seen = self.focus();
     }
 
     /// The conversations to keep live, the focused one first, then every agent pane on screen,
@@ -7163,6 +7166,71 @@ mod tests {
         }
         ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(!ui.editing, "the answer is sent and the box closes");
+    }
+
+    /// Answered asks leave and a new one arrives, each by `set_world`; then st delivers the
+    /// glasses again, as it does after a reconnect. The box the person is typing in stays open:
+    /// the selection followed the data, and the focus never moved.
+    #[test]
+    fn a_reconnect_keeps_the_answer_box_open_after_earlier_asks_left() {
+        let asks = |id: &str| Attention {
+            conversations: vec![],
+            id: id.into(),
+            tier: Tier::Stopped,
+            title: "Confirm on the remote member".into(),
+            waiting: Some("Asker on cedar".into()),
+            age: "1m".into(),
+            mission: None,
+            agent: Some("agent/example/asker".into()),
+            kind: AttentionKind::Request {
+                from: "Asker".into(),
+                from_id: "agent/example/asker".into(),
+                question: "Confirm it.".into(),
+                structured: None,
+            },
+            actions: vec!["work.done".into()],
+            related: Vec::new(),
+            raised_by: None,
+            blocked: None,
+        };
+        let live = |items: Vec<Attention>| {
+            let mut world = demo::world();
+            world.link = Link::Live;
+            world.attention = Load::Ready(items);
+            world
+        };
+        let mut ui = Ui::new(live(vec![]));
+        ui.live = true;
+        let typed = |ui: &mut Ui, text: &str| {
+            for letter in text.chars() {
+                ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+            }
+        };
+        for id in ["attention/one", "attention/two"] {
+            ui.set_world(live(vec![asks(id)]));
+            typed(&mut ui, "cdone");
+            ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            for effect in std::mem::take(&mut ui.effects) {
+                ui.note_acted(&effect);
+            }
+            ui.set_world(live(vec![]));
+        }
+        ui.set_world(live(vec![asks("attention/three")]));
+        typed(&mut ui, "cConfirmed");
+        assert!(ui.editing, "c opens the answer box");
+        ui.show_focused();
+        assert!(ui.editing, "the glasses arriving again leave the box open");
+        typed(&mut ui, " on the remote member");
+        assert!(ui.chat.is_none() && ui.confirm.is_none(), "every letter went into the box");
+        ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            ui.effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Attention { id, reason: Some(text), .. }
+                    if id == "attention/three" && text == "Confirmed on the remote member"
+            )),
+            "the whole answer is sent"
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ use st3::{api::AppState, model::PersonAskRequest, store::Store};
 use st3_client::{Client, PairingBegin};
 use std::{
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
@@ -391,6 +391,20 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
     http_server.abort();
 }
 
+/// Every file under `root`, or none when it does not exist.
+fn files_under(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .flat_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() { files_under(&path) } else { vec![path] }
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member() {
     let member = tempfile::tempdir().unwrap();
@@ -462,9 +476,15 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
         "offline keys must queue no mutation"
     );
     assert!(!device.path().join("absent.sock").exists());
+    // stui keeps this device's spaces and preferences under state/st3/stui; nothing else.
+    let kept = device.path().join("state/st3/stui");
+    let others = files_under(&device.path().join("state"))
+        .into_iter()
+        .filter(|path| !path.starts_with(&kept))
+        .collect::<Vec<_>>();
     assert!(
-        !device.path().join("state").exists(),
-        "the device must create no daemon or replica"
+        others.is_empty(),
+        "the device must create no daemon or replica: {others:?}"
     );
     drop(tui);
     let mut tui = Tui::start(device.path());

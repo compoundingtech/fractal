@@ -2665,7 +2665,7 @@
     {
       "action": "simplify or expand tool detail",
       "tests": [
-        "crates/stui/src/ui/mod.rs::shift_o_simplifies_every_conversation_and_back"
+        "crates/stui/src/ui/mod.rs::ctrl_p_simplifies_every_conversation_and_back"
       ],
       "verification": "local UI state; no daemon mutation, restart fence not applicable"
     },
@@ -2763,6 +2763,13 @@
       "tests": [
         "crates/stui/src/ui/glass.rs::what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that",
         "crates/stui/src/ui/glass.rs::glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g"
+      ],
+      "verification": "local palette/reducer; resulting daemon effects are listed separately"
+    },
+    {
+      "action": "Usage",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::ctrl_k_opens_usage_and_the_fleet_list"
       ],
       "verification": "local palette/reducer; resulting daemon effects are listed separately"
     },

@@ -1969,9 +1969,11 @@ pub fn run(context: Context) -> Result<()> {
     Ok(())
 }
 
+/// Saves once st has sent Now, the window every layout follows; missions arrive only while a
+/// mission list or card is on screen, so they cannot be what makes a reading worth keeping.
 fn save_cache(path: Option<&std::path::Path>, person: &str, model: &Model) {
     if let Some(path) = path
-        && model.missions.snapshot.is_some()
+        && model.now.snapshot.is_some()
     {
         let _ = crate::cache::save(path, person, model);
     }
