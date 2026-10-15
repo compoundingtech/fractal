@@ -584,15 +584,16 @@ check when its real command is known. Write `scripts/evidence-verify --policy-fr
 ### Running the checks locally (`scripts/st-test`)
 
 `scripts/st-test` runs each required check that has a local command (today `genie-freshness` and
-`typescript-client`; `--list` prints them) once, through `evidence-wrap`, on the tree the pull request will be
-tested as, and the host's signer records the exit code and output digest. GitHub tests the merge of the branch into
-its base, so when the branch does not hold the base's tip the script computes the merge tree (`git merge-tree`) and
-makes a merge commit with that tree; a merge that conflicts stops it. The command always runs in a fresh throwaway
-worktree of that commit, so untracked or ignored files in your checkout cannot change the result. A failing run is
+`typescript-client`; `--list` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
+records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
+request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
+many commits behind the base the branch is, and the merge queue still tests the integrated tree. The command always runs in a fresh
+throwaway worktree of that commit, so untracked or ignored files in your checkout cannot change the result. A failing run is
 recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base. It prints one
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
 (`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or
 `EVIDENCE_PUSH_TOKEN`); whether that identity may create `refs/notes/evidence/*` is a repository rule not yet confirmed for agent seats.
+
 `scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not).
 
 A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
