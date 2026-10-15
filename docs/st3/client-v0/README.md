@@ -501,8 +501,11 @@ An agent's `usage` summary selects the newest response rollup in each incarnatio
 run/step/host slot. Selected rollups take precedence over legacy cumulative or response records
 for that incarnation, for both tokens and cost. Known `cost_microusd` values are summed once and
 exposed as USD in `usage.cost`; `reported_cost_microusd` is already included, not added again.
-The `aggregation` value is
-`rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas`.
+Clients accept both `cumulative-per-incarnation-else-response-deltas` and
+`rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas` for `aggregation`.
+The daemon still emits the old literal in this client-first rollout. Only after dual-literal
+clients are deployed will a separate PR switch daemon emission to the new literal; acceptance
+of the old literal will be removed later, after old daemons are retired.
 Any contributing tokens without a price, or selected costs in different currencies, leaves the
 combined cost/currency unknown, including legacy cumulative and response records. A newer priced
 rollup replaces an unpriced one in the same slot. This summary is not period spend, native session

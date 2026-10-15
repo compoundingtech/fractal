@@ -520,7 +520,7 @@ impl UsageFold {
             return None;
         }
         let mut summary = UsageSummary {
-            aggregation: "rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas".into(),
+            aggregation: "cumulative-per-incarnation-else-response-deltas".into(),
             context: self.context.clone().map(|(_, value)| value),
             ..UsageSummary::default()
         };
