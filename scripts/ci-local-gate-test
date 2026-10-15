@@ -224,6 +224,25 @@ class SlotRun(unittest.TestCase):
         self.assertTrue(gate.has_stage_slot(str(self.shim)))
 
 
+class Homes(unittest.TestCase):
+    def test_the_cargo_home_and_cache_survive_the_run_and_are_not_the_isolated_home(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as work:
+            env = {k: v for k, v in os.environ.items() if k not in ('CARGO_HOME', 'XDG_CACHE_HOME')}
+            env['HOME'] = home
+            old = dict(os.environ)
+            os.environ.clear()
+            os.environ.update(env)
+            try:
+                prepared = gate.prepare(work)
+            finally:
+                os.environ.clear()
+                os.environ.update(old)
+            self.assertEqual(prepared['CARGO_HOME'], str(Path(home) / '.cargo'))
+            self.assertTrue(prepared['CI_CACHE_DIR'].startswith(str(Path(home) / '.cache')))
+            self.assertFalse(prepared['CARGO_HOME'].startswith(work))
+            self.assertTrue(prepared['HOME'].startswith(work))  # the tests' HOME is the isolated one
+
+
 class Prepared(unittest.TestCase):
     def test_the_environment_is_the_ci_jobs_isolated_home_and_runner_temp(self):
         with tempfile.TemporaryDirectory() as work:

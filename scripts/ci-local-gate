@@ -120,6 +120,13 @@ def merge_commit(base, env):
     return git('commit-tree', tree, '-p', base, '-p', 'HEAD', '-m', 'ci-local-gate: effective merge source')
 
 
+def cargo_home():
+    """A cargo home that outlives the run. CI's per-job cargo home is thrown away with its runner; here a temporary one would
+    make every stage download and recompile every registry dependency (the drill's first test partition spent most of its 40
+    minutes on that), because cargo's fingerprints include the registry path."""
+    return os.environ.get('CARGO_HOME') or str(Path(os.environ['HOME']) / '.cargo')
+
+
 def prepare(work):
     """The environment the CI jobs prepare: RUNNER_TEMP, an isolated HOME and XDG state, the cache directory."""
     temp = Path(work) / 'runner-temp'
@@ -129,7 +136,7 @@ def prepare(work):
     return {'RUNNER_TEMP': str(temp), 'GITHUB_STEP_SUMMARY': str(temp / 'summary.md'),
             'HOME': str(home), 'XDG_CONFIG_HOME': str(home / '.config'), 'XDG_CACHE_HOME': str(home / '.cache'),
             'XDG_STATE_HOME': str(home / '.local/state'),
-            'CARGO_HOME': os.environ.get('CARGO_HOME') or str(temp / 'cargo-home'), 'CI_CACHE_DIR': str(temp / 'st-ci-cache')}
+            'CARGO_HOME': cargo_home(), 'CI_CACHE_DIR': str(Path(os.environ.get('XDG_CACHE_HOME') or Path(os.environ['HOME']) / '.cache') / 'ci-local-gate/st-ci-cache')}
 
 
 def shared_environment(env):
