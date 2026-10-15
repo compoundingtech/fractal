@@ -28,6 +28,9 @@ assert.equal(agentWord('compacting'), 'compacting');
 assert.equal(agentWord('needs-you'), 'alert');
 assert.equal(agentState({ state: 'waiting', harness_state: 'starting' }), 'starting');
 assert.equal(agentState({ state: 'stopped' }), 'stopped');
+assert.equal(agentState({ state: 'retired', fault: 'old failure', delivery: { state: 'stale' } }), 'retired');
+assert.equal(agentWord('retired'), 'retired');
+assert.deepEqual(agentSections(agentRows([agent('example/retired', { state: 'retired' })], [], 'example-linux', now)).map(section => section.title), ['retired']);
 assert.equal(agentState({ state: 'failed' }), 'fault');
 
 // Grouped and sorted like stui: waiting on you, broken, working, idle, stopped, and sessions st
