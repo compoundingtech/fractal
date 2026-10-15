@@ -170,6 +170,13 @@ class StTest(unittest.TestCase):
         self.assertIn('does not merge cleanly', str(code))
         self.assertEqual(self.statements(), [])
 
+    def test_a_base_that_looks_like_a_git_option_is_refused(self):
+        self.commit('b.txt', 'two')
+        for bad in ('--upload-pack=x', '-x', 'a b', ''):
+            with self.assertRaises(st_test.Failure):
+                st_test.main([f'--base={bad}', '--check', 'demo'])
+        self.assertEqual(self.statements(), [])
+
     def test_uncommitted_tracked_changes_and_unknown_checks_are_refused(self):
         self.commit('b.txt', 'two')
         (self.work / 'b.txt').write_text('edited, not committed')

@@ -593,7 +593,8 @@ recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from t
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
 (`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or
 `EVIDENCE_PUSH_TOKEN`); whether that identity may create `refs/notes/evidence/*` is a repository rule not yet confirmed for agent seats.
-It changes no policy: a check skips only where `enforce` is true.
+It runs `nix develop` and `pnpm install` from the tree under test, on the signing host as its user: code in that tree runs
+there with the key within reach (cooperative trust, see Host keys). It changes no policy: a check skips only where `enforce` is true.
 
 ### When the gate says skip
 
