@@ -76,7 +76,7 @@ export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef:
   // A non-modal complementary panel: opening it never inerts or hides the workspace, so the click
   // commits the panel in the same frame instead of restyling the whole app.
   return <div {...stylex.props(styles.actions)}>
-    <Aria.Button aria-label="Resources" aria-expanded={resourcesOpen} aria-controls={resourcesOpen ? panelId : undefined} onHoverStart={prefetch} onFocus={prefetch} onPressStart={prefetch} onPress={() => onOpenChange(!resourcesOpen)} isDisabled={disabledReason !== undefined} aria-describedby={disabledReason === undefined ? undefined : reasonId} {...stylex.props(styles.button)}><CompositionIcon name="folder" />Resources</Aria.Button>
+    <Aria.Button aria-label="Resources" aria-expanded={resourcesOpen} aria-controls={resourcesOpen ? panelId : undefined} onHoverStart={prefetch} onFocus={prefetch} onPressStart={prefetch} onPress={() => onOpenChange(!resourcesOpen)} isDisabled={disabledReason !== undefined} aria-describedby={disabledReason === undefined ? undefined : reasonId} {...stylex.props(styles.button, styles.resourcesButton)}><CompositionIcon name="folder" /><span {...stylex.props(styles.resourcesLabel)}>Resources</span></Aria.Button>
     {resourcesOpen ? <SidePanel ref={shellCommit} id={panelId} aria-label="Agent resources" onClose={() => onOpenChange(false)}>
       <header {...stylex.props(styles.heading)}><strong>Resources</strong><Aria.Button aria-label="Close resources" onPress={() => onOpenChange(false)} {...stylex.props(styles.button)}>Close resources</Aria.Button></header>
       <ResourceContents agentRef={agentRef} resources={resources} opening={opening} cache={cache} />
@@ -147,6 +147,8 @@ const ReadNotice = ({ feed, label }: { readonly feed: Exclude<Feed<unknown>, { r
 const styles = stylex.create({
   actions: { display: 'flex', alignItems: 'center', gap: s.md },
   button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` }, ':disabled': { opacity: 0.5, cursor: 'default' } },
+  resourcesButton: { justifyContent: 'center', width: { default: 28, '@media (min-width: 640px)': 'auto' }, paddingInline: { default: 0, '@media (min-width: 640px)': s.md } },
+  resourcesLabel: { display: { default: 'none', '@media (min-width: 640px)': 'inline' } },
   reason: { fontSize: t.denseSize, color: c.fgMuted },
   contents: { flex: '1 1 0', minHeight: 0, padding: s.lg, overflowY: 'auto' },
   heading: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: s.lg, borderBottom: `1px solid ${c.border}` },
