@@ -7,6 +7,8 @@
     "typecheck": "tsc --noEmit",
     "dev": "vite --config vite.config.ts --configLoader runner",
     "build": "vite build --config vite.config.ts --configLoader runner",
+    "storybook": "storybook dev -p 53706 --host 127.0.0.1 --no-open --disable-telemetry",
+    "build-storybook": "storybook build --disable-telemetry",
     "start": "node server/main.mts"
   },
   "dependencies": {
@@ -24,6 +26,11 @@
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",
+    "@storybook/react": "10.6.1",
+    "@storybook/react-vite": "10.6.1",
+    "@storybook/addon-a11y": "10.6.1",
+    "@storybook/addon-docs": "10.6.1",
+    "storybook": "10.6.1",
     "@types/node": "24.10.0",
     "typescript": "6.0.3",
     "vitest": "4.1.9",
