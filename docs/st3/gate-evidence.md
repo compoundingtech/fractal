@@ -278,6 +278,128 @@ hostile workflow author. These limits are why full tier requires a platform-boun
 queue/manual source and an accepted workflow pin. Native receipts remain separate
 work; this does not certify the behavior of all target code or runtime identity.
 
+## Evidence observe workflow
+
+`.github/workflows/evidence-observe.yml` starts from a finished merge-group run of
+`Workspace CI` (or a manual replay from `main`) on runners labelled `evidence-ci`. It never runs
+for a pull request or a fork. `scripts/ci-evidence-observe` asks the protected observer
+(`$EVIDENCE_OBSERVER`, the operator's JSON argument vector; default
+`st sekrets -- st3 evidence observe-ci`) to record the run, imports the returned pack into a
+persistent scratch repository, verifies every full-trust record with `scripts/evidence-verify`
+against the key list in `main`, creates `refs/notes/evidence/<record>` and pushes it. It runs no
+check, never replaces an existing ref, and publishes degraded records labelled as unsigned and
+unverified. A full record that does not verify fails the job and creates no ref. A cancelled
+run has no `linux-gate` job to record (the observer exits 2): the workflow skips cancelled
+runs, and a replay of one reports "nothing to attest" instead of failing. The observer's answer
+is about 20 MB (the base64 object pack), so the script streams it to a file. The same code
+serves a degraded profile (no key) and a full one; the operator's profile decides.
+
+The same script runs outside GitHub Actions, for a timer on an operator host:
+
+```
+python3 scripts/ci-evidence-observe --poll --publish --checkout CHECKOUT_OF_MAIN \
+  --keys-from origin/main --state-dir /var/lib/evidence-observe
+python3 scripts/ci-evidence-observe --run RUN_ID --publish --checkout CHECKOUT_OF_MAIN   # one run
+```
+
+`--poll` lists the last `--limit` (20) completed merge-group `Workspace CI` runs, skips cancelled
+or skipped ones and runs already done, observes the rest and records each in
+`STATE_DIR/observed.jsonl`; a run that fails three times is marked `gave_up` and never retried
+(loop protection). `--run` takes the run id alone (the attempt is read from GitHub). Environment:
+`EVIDENCE_OBSERVER` (observer argument vector as JSON), `GH_TOKEN` or the operator's own `gh` login
+for GitHub reads and the push, and the observer's own `HOME` for its private configuration. State
+(`scratch.git`, `observed.jsonl`) lives in `--state-dir` (default `~/.local/state/evidence-observe`).
+
+The controller never records a check that the evidence gate skipped. A gate job that decides to skip ends
+with a step named `evidence skip taken` and still concludes success; if the controller recorded the check
+anyway, one real run would keep refreshing its own skips. It therefore reads the run's jobs, and any record
+whose check has an `evidence-gate-<check>` job whose `evidence skip taken` step ran, or whose own job ran the
+step `evidence covered by a trusted note` (a second, independent signal), is neither imported nor
+published (the summary names it). If the jobs cannot be read nothing is recorded. It also refuses any run
+that is not a run of `Workspace CI`, so it can never act on its own workflow's runs.
+
+The server rejects a shallow push, and the pack carries the source commit without its history, so
+the script first fetches the source's missing parents from the repository. Run
+`python3 scripts/ci-evidence-observe-test` for the cases (signature verified, verifier refusal,
+wrong run, malformed pack, push with a missing parent, replay).
+
+## Recording a local run: evidence-wrap and evidence-sign
+
+`scripts/evidence-wrap --check NAME -- COMMAND...` runs one check once, from a clean checkout, on
+the developer's machine, and asks the signer to record it. It measures the commit, the command,
+its exit code, the sha256 of its exact output, and an environment fingerprint: the sha256 of
+`flake.lock`, of the dev shell derivation path, of the wrapper's own bytes, the system and the
+attempt. A failing command is recorded too. It refuses a dirty checkout and a run that changes the
+tree. Take the script from `main`, not from the change under test.
+
+`scripts/evidence-sign` runs where the key is (root-installed, hash-pinned, behind a sekrets grant
+that allows only that command; configuration in `$HOME/.config/st/evidence-sign.json`). It reads
+the commit, tree and `flake.lock` from the caller's checkout, never from the request, uses its own
+clock and its own digest as producer, accepts exactly the documented request keys, and signs a
+`tests` observation with `runner: "wrapper"`. It cannot check that the command really ran; that is
+the cooperative boundary (agents with the key's account can lie) and belongs in the known defects.
+
+`scripts/testdata/evidence/wrapper-note/` is a golden note made with a throwaway key
+(`python3 scripts/evidence-wrap-test --write-fixture DIR` regenerates one). The verifier's tests
+read it too. A note applies only to the tree it names, so it helps CI only when the pushed commit
+has the tree CI will test.
+
+## A CI job that signs its own result
+
+The machine that ran a check can sign the result itself, with no call to GitHub. The key is the
+`EVIDENCE_SIGNING_KEY` secret of the `evidence-signing` environment (forks never receive it).
+`scripts/ci-evidence-signing` holds the steps that handle it, and all of them are tested without
+GitHub: `guard` allows only merge-queue refs, `main`, manual runs on `main` and same-repository
+pull requests; `configure` writes the signer configuration and key as mode 0600 in a 0700
+directory and masks every key line; `once CHECK` refuses a second signature for a check in one job;
+`cleanup` overwrites and removes the key, and runs even when earlier steps failed. The wrapper and
+signer scripts must come from the base commit of the change, never from the tree under test.
+Accepted gap: code under test in a job that holds the key can read it.
+
+An aggregate job records what it knows: `scripts/ci-evidence-signing aggregate FILE` builds, from
+the `needs` context, the needed jobs, the result each reported and the gate job's own result, and
+`scripts/evidence-wrap --aggregate FILE` signs that. It does not claim the stages' commands,
+outputs, test inventories, timings or toolchains, because it did not run them; those belong in
+notes signed by the stage jobs. The signer accepts extra named string inputs next to the required
+environment fingerprint, so a check's note can carry more over time; the repository policy decides
+which inputs a check must carry.
+
+### Stage notes and publishing
+
+Each `linux-gate` stage job (the test shards, clippy, fleet-compat and the mail canaries) signs its
+own result in fail-soft steps after its logs are retained, so signing cannot change the stage's
+outcome. `ci-evidence-signing stage-facts` reads what `scripts/ci-linux` wrote: the exit status and
+seconds (`STAGE.time`) and the digest of the exact log (`STAGE.log`); a missing or unreadable timing
+file is recorded as a failure, never as success. `evidence-wrap --aggregate FILE --out DIR` signs
+those facts (and records `workspace_clean` rather than refusing a workspace the tests dirtied) and
+writes the note as a pack for upload. A stage job's checkout is shallow and the server refuses a push
+from one, so the aggregate note job collects the packs and `scripts/evidence-publish` publishes them:
+it accepts a note only if its signature verifies against `.st/evidence-keys` from the base commit for
+the principal it claims, it is a full-tier single-note commit about this commit and tree, its check
+is one of the allowed stage names, and the commit is its only parent. It never replaces a ref and
+accepts at most 40 notes in one run; failures and refusals appear in the job summary by record id.
+
+### What reaches the signing environment
+
+Only the merge queue and `main` reach the `evidence-signing` environment: every signing job's
+`environment:` is the expression `merge_group` or push to `main` ? `evidence-signing` : empty, and the
+aggregate note job does not run for pull requests at all. A pull request, including one from this
+repository, runs the same jobs without the environment, gets no key, and the guard step refuses it again
+in code. **The environment must not gain required reviewers or a wait timer:** eleven required check jobs
+carry it in the merge queue, so a protection rule that waits would block every required check. A
+deployment-branch policy comes only after this conditional is on main (a policy that excludes the queue
+refs would otherwise fail those jobs at start). Signing jobs also refuse to sign when tracked files
+differ from the commit (`git status --porcelain --untracked-files=no`): the code under test ran in that
+checkout, and the note names `HEAD`'s tree. Untracked build output is recorded (`untracked_files`) and
+does not stop the note. `git status` can be told to ignore a tracked file (`--assume-unchanged`,
+`--skip-worktree`), so the index flags are read too (`git ls-files -v`: every tracked file must be tagged
+`H`). Untracked and ignored files are not refused, by design, because build output lives there; the note
+therefore says "tested" about a checkout whose tracked files equal the tree it names, plus whatever
+untracked or ignored files the job had. The signer finds `git` and `ssh-keygen` only in its own path: the
+standard system directories, or the `path` in its configuration (`EVIDENCE_TOOL_PATH` when
+`ci-evidence-signing configure` writes it), which is how the Nix sandbox, where they live in
+`/nix/store`, supplies them without trusting the caller's PATH.
+
 ## Fresh CI re-attestation
 
 The protected CI adapter accepts repeatable `--re-attest RECORD_ID` selectors
