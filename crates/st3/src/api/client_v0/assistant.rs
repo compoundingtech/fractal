@@ -647,6 +647,24 @@ mod tests {
             AxumPath(id),Json(policy())).await.unwrap_err().status,StatusCode::FORBIDDEN);
     }
     #[tokio::test]
+    async fn assistant_policy_update_uses_renewed_expiry_not_original_expiry() {
+        let root=tempfile::tempdir().unwrap(); let state=state(root.path()); let paired=paired(&state).await;
+        let id=paired["grant"]["id"].as_str().unwrap().to_owned();
+        let granted=latest(&state,&subject(&id).unwrap(),GRANTED).unwrap().unwrap();
+        let mut expired=fields(&granted).unwrap().clone(); expired["expires_at_unix_ms"]=json!(1);
+        let original=append(&state,granted.subject.clone(),GRANTED,ISSUER,expired,Some(&granted)).unwrap();
+        let mut renewed=fields(&original).unwrap().clone();
+        renewed["expires_at_unix_ms"]=json!(client_now_ms()+86_400_000);
+        renewed["policy_revision"]=json!(2);
+        append(&state,granted.subject.clone(),POLICY,ISSUER,renewed,Some(&original)).unwrap();
+        let policy=serde_json::from_value::<AssistantGrantPolicy>(json!({
+            "api_version":CLIENT_API_VERSION,"scopes":SCOPES,"expires_in_seconds":86400,
+            "disclosure_consent":true,"consent_evidence":"recorded owner consent","minimal_read_mode":"approval-once"})).unwrap();
+        let Json(changed)=update_policy(State(state),Extension(ClientSession::local(Some(ISSUER)).unwrap()),
+            AxumPath(id),Json(policy)).await.unwrap();
+        assert_eq!(changed["policy_revision"],3);
+    }
+    #[tokio::test]
     async fn assistant_missing_or_changed_owner_configuration_fails_closed() {
         let root=tempfile::tempdir().unwrap(); let mut state=state(root.path());
         state.owning_person=None;
