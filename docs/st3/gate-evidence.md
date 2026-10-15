@@ -665,8 +665,14 @@ the provider components). The one difference from CI is that nextest builds in p
 another job built, so no GitHub artifact is needed. A test checks every command it runs against the generated workflow, so the
 two cannot drift apart. Every stage runs even after a failure; with `--external genie-freshness=EXIT --external
 typescript-client=EXIT` and `--facts FILE` it writes the facts the CI aggregate job records (the command the policy pins, every
-member's result), for `scripts/evidence-wrap --aggregate`. `isolation-vm` needs `/dev/kvm`. This change does not sign anything and
-has not been run end to end on a build host; the drill and the `st-test` wiring come next.
+member's result), for `scripts/evidence-wrap --aggregate`. `isolation-vm` needs `/dev/kvm`. Run it only on a build host (hetz2), never on the production host: it starts the full Rust
+test partitions, clippy and VM tests, and it relies on the host's cargo shim and `build-admission` (it puts the shim in front of the
+dev shell's cargo when `~/.local/bin/cargo` exists, because the dev shell's own cargo would bypass it; run one stage at a time under
+`build-admission run heavy`). The facts it writes say `event_name: local`, where CI records `pull_request` or `merge_group`: the
+policy does not require that input, and a policy that did would reject these notes, which is the safe direction. **Until the drill
+has run every stage end to end, a note made from this runner must not be treated as covering a CI job, and no policy may pin it.**
+Drill so far on a build host: `upgrade-impact` 13 s, `linux-test-build` 693 s; the rest are unproven. This change does not sign
+anything; the `st-test` wiring comes next.
 
 ### When the gate says skip
 
