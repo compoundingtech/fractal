@@ -31,6 +31,7 @@ fn accepts_person(argument: &clap::Arg) -> bool {
 // small semantic supplement next to the generated syntax, not in an operator wrapper.
 fn implicit_person(path: &str) -> bool {
     path == "st setup"
+        || path == "st ui"
         || path == "st note"
         || path.starts_with("st note ")
         || (path.starts_with("st changes ")
@@ -138,6 +139,7 @@ mod tests {
             "st note set",
             "st note clear",
             "st setup",
+            "st ui",
             "st changes sync",
         ] {
             assert_eq!(commands[path]["can_carry_person"], true, "{path}");
