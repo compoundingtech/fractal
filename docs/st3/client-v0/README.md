@@ -1844,17 +1844,27 @@ that roster's own cut in its `snapshot` (`store_index`, `created_at`) and when i
 (`published_at`). That cut can be older than the request, by about a second plus one fold.
 
 An ordinary first page answers immediately from the latest publication, including `st agents ls`
-and `st agents tree`. Legacy `fresh=true` is accepted but has no effect for agents: it names no
-caller-specific read-after-write fence. It does not request a refresh or wait for publication.
+and `st agents tree`, which no longer send `fresh=true`. Existing callers may still pass
+`fresh=true`: its legacy behavior is unchanged. It requests a refresh and waits up to two
+seconds for a publication at or after the request cut, returns the retained publication
+promptly after a failed latest attempt with no newer attempt in flight, and uses the existing
+unchanged-card proof. Rust keeps `agents_list_fresh`; current-work `fresh=true` is unchanged.
 
-A caller that needs read-after-write passes `min_cut=N`, using the `ClaimRecord.store_index`
-returned by its write on this same host. This is a host-local store index, not a fleet-wide
-sequence: a cut returned by host A must not be used as a fence on host B. The daemon requests a
-targeted refresh and waits at most two seconds for a publication whose `snapshot.store_index`
-is at least `min_cut`. If none is available by the deadline, it returns a retryable HTTP 503
-with `details.reason: "agent-roster-cut-not-ready"`, rather than silently serving an older
-publication. The existing `fresh-wait` timing stage measures this explicit cut wait.
-Current-work `fresh=true` behavior is unchanged.
+A caller that needs a strict read-after-write fence passes `min_cut=N`, using the
+`ClaimRecord.store_index` returned by its write on this same host. This is a host-local
+acceptance index, not a replicated sequence: a cut minted on host A must not fence host B.
+The daemon waits at most two seconds for a publication whose served `snapshot.store_index`
+is at least `min_cut`, rechecking the final snapshot after the wait. If that cut is unavailable,
+it returns retryable HTTP 503 with `details.reason: "agent-roster-cut-not-ready"`; failure of a
+refresh never permits an older publication to satisfy this barrier. When both `fresh` and
+`min_cut` are supplied, `min_cut` wins: one named barrier and one two-second timer.
+
+An older daemon ignores `min_cut` and returns its newest publication, without a new server
+error. The caller must compare the returned `snapshot.store_index` on the same host with its
+requested cut. Rust's additive `agents_list_after` does that comparison and reports the same
+cut-not-ready message/error as a barrier timeout if the publication is older. There is no
+in-repo CLI mutation-following roster read; existing mutation commands' point-detail reads
+stay unchanged.
 
 Without an explicit cut, a read returns a retryable 503 (the stream sends `resync`) only before
 a usable roster of the requested mode has been published, or after a full projection reset

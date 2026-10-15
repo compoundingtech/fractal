@@ -15,18 +15,18 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Ordinary agents lists, including st agents ls and st agents tree, return the latest publication without waiting for a refresh. Legacy agents fresh=true remains accepted as a no-op because it names no caller-specific read-after-write fence. Clients needing that fence pass min_cut using the ClaimRecord.store_index from their write on the same host; a cut from host A is not a fence on host B. The daemon requests a targeted refresh and waits at most two seconds for a publication at or after min_cut, then returns a retryable HTTP 503 with details.reason agent-roster-cut-not-ready rather than older rows. Current-work fresh behavior is unchanged. The existing roster fresh-wait timing stage measures explicit cut waits."
+    "detail": "Ordinary st agents ls and st agents tree stop sending fresh=true and return the newest publication. Existing fresh=true requests, the agents_list_fresh SDK method, failed-attempt and unchanged-card handling, and latency classification are preserved. Additive min_cut uses the same host-local acceptance index returned by a write, waits at most two seconds and returns retryable agent-roster-cut-not-ready unless the final served publication reaches it. min_cut wins over fresh with one timer and is rejected with a continuation cursor. Older daemons ignore min_cut and return their newest publication; callers compare the served index on the minting host, and Rust agents_list_after rejects an unmet cut. Current-work freshness is unchanged."
   },
   "downtime": {
     "status": "none",
     "detail": "No startup migration or expected service interruption. Reads still require an initial usable roster publication."
   },
   "manual": {
-    "status": "changed",
-    "detail": "Callers relying on agents fresh=true for read-after-write must instead pass min_cut from the write receipt on the same host and handle the retryable cut-not-ready error. Ordinary listing callers need no operator action or configuration change."
+    "status": "none",
+    "detail": "No operator action or configuration change. Callers opting into min_cut use a same-host write receipt and check the served cut; existing freshness callers retain their behavior."
   },
   "recovery": {
     "status": "none",
-    "detail": "No persistent state changes or new rollback restrictions. Rolling back restores the previous agents fresh=true publication-wait behavior and removes the explicit min_cut fence."
+    "detail": "No persistent state changes or new rollback restrictions. Older daemons ignore min_cut and return their newest publication; named-cut clients must compare its host-local snapshot index rather than claim read-after-write."
   }
 }

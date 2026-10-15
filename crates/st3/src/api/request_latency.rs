@@ -79,8 +79,9 @@ impl WorkAction {
 
 const AGENTS: &str = "/v1/client/agents";
 
-/// What an agents roster read asks for. Only a first page naming its mutation cut waits
-/// for that publication; ordinary and legacy fresh reads answer from a publication at once.
+/// What an agents roster read asks for. A fresh first page waits, by design, for the refresher
+/// to publish a roster at or after its own cut; min_cut names a fixed host-local cut.
+/// Other first pages answer from a publication at once.
 /// Each keeps its own sample so a latency target can count the designed wait separately
 /// without dropping it from the route total.
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -100,7 +101,8 @@ impl AgentsRead {
             match name {
                 // A continuation answers from its first page's publication and never waits.
                 "cursor" => return Some(Self::Continuation),
-                "min_cut" => fresh = value.parse::<u64>().is_ok(),
+                "fresh" => fresh |= value == "true",
+                "min_cut" => fresh |= value.parse::<u64>().is_ok(),
                 _ => {}
             }
         }
@@ -634,12 +636,14 @@ mod tests {
 
     #[test]
     fn a_fresh_agents_read_has_its_own_target_and_counts_toward_no_other() {
-        assert!(is_fresh_agents_read(&Method::GET, AGENTS, Some("limit=5&min_cut=42")));
-        assert!(!is_fresh_agents_read(&Method::GET, AGENTS, Some("fresh=true")));
+        assert!(is_fresh_agents_read(&Method::GET, AGENTS, Some("limit=5&fresh=true")));
+        assert!(is_fresh_agents_read(&Method::GET, AGENTS, Some("min_cut=42&fresh=false")));
+        assert!(is_fresh_agents_read(&Method::GET, AGENTS, Some("fresh=false&min_cut=42")));
+        assert!(!is_fresh_agents_read(&Method::GET, AGENTS, Some("fresh=false")));
         assert!(!is_fresh_agents_read(&Method::GET, AGENTS, None));
-        assert!(!is_fresh_agents_read(&Method::GET, AGENTS, Some("min_cut=42&cursor=page")));
-        assert!(!is_fresh_agents_read(&Method::POST, AGENTS, Some("min_cut=42")));
-        assert!(!is_fresh_agents_read(&Method::GET, "/v1/client/work", Some("min_cut=42")));
+        assert!(!is_fresh_agents_read(&Method::GET, AGENTS, Some("fresh=true&cursor=page")));
+        assert!(!is_fresh_agents_read(&Method::POST, AGENTS, Some("fresh=true")));
+        assert!(!is_fresh_agents_read(&Method::GET, "/v1/client/work", Some("fresh=true")));
         let targets = crate::slo::targets();
         let named = |timed: &Timed| timed.target.map(|index| targets.latency[index].name.as_str());
         let first = Timed::resolve("GET /v1/client/agents", false, Wait::No);
@@ -722,7 +726,7 @@ mod tests {
         for (query, duration) in [
             (None, 4),
             (Some("limit=50"), 6),
-            (Some("limit=50&min_cut=42"), 700),
+            (Some("limit=50&fresh=true"), 700),
             (Some("fresh=false"), 5),
             (Some("fresh=true&cursor=page%2Fsecret"), 3),
         ] {

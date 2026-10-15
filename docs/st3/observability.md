@@ -247,10 +247,10 @@ GET /v1/client/agents SERVER / first_frame     st.roster.rebuild INTERNAL root (
 | Attribute | Type | Vocabulary / meaning |
 | --- | --- | --- |
 | `st.roster.path` | string enum | `published_complete`, `published_head`, `exact_warm`, `exact_cold`, `filtered_full`, `not_ready`; any status-filtered read is `filtered_full` |
-| `st.roster.fresh_requested` | boolean | Whether the HTTP agents query explicitly supplied `min_cut`; legacy `fresh=true` alone reports `false`. WebSocket reads and background rebuild roots report `false` because they have no caller-specific cut fence |
-| `st.roster.requested_cut` | integer | Store index of the read's snapshot |
+| `st.roster.fresh_requested` | boolean | Whether the HTTP agents query asks for legacy `fresh=true` or a named `min_cut`, including exact reads, published first pages, continuations and `not_ready`; WebSocket reads and background rebuild roots report `false` because they have no freshness query |
+| `st.roster.requested_cut` | integer | Named `min_cut`, if supplied; otherwise store index of the read's snapshot |
+| `st.roster.publication_wait_ms` | double | Milliseconds spent in the explicit `min_cut` publication barrier |
 | `st.roster.publication_cut` | integer | Store index of the publication served; absent for `not_ready` |
-| `st.roster.publication_wait_ms` | double | Actual milliseconds spent waiting for a publication that satisfies an explicit `min_cut` |
 | `st.roster.worker_queue_ms` | double | Cumulative submission-to-start time of the read's blocking workers, excluding reader acquisition and execution |
 | `st.roster.reader_acquire_ms` | double | Cumulative SQLite reader acquisition, connection opening, `BEGIN`, and first index read |
 | `st.roster.admission.id` | integer | Process-local sequence number of this admission acquisition |
