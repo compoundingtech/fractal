@@ -388,3 +388,49 @@ fn admission_keeps_a_record_repaired_before_it() {
         ("repaired", Some("claim-hash-mismatch"))
     );
 }
+
+/// Blob presence is read under the writer, not prepared: a claim whose blob is missing when its
+/// envelope is prepared is admitted when the blob is stored before the loan, and refused when it
+/// is not.
+#[test]
+fn a_blob_stored_after_preparation_admits_the_claim_that_names_it() {
+    for stored_late in [true, false] {
+        let source = node("birch");
+        let target = node("cedar");
+        let mut exchange = populated(&source, &target, 1);
+        let mut carried = Vec::new();
+        exchange.envelopes[0] = forged(&exchange.envelopes[0], |payload| {
+            carried = std::mem::take(&mut payload.blobs).into_values().collect();
+        });
+        assert_eq!(carried.len(), 1, "the note named one blob");
+        target
+            .receive_replication_exchange("birch", FLEET, &exchange)
+            .unwrap();
+        let outcome = admit_with_a_change_before_the_loan(&target, || {
+            if stored_late {
+                target.put_blob(&carried[0]).unwrap();
+            }
+        });
+        let state: String = target
+            .readers
+            .get()
+            .query_row(
+                "SELECT state FROM replica_records WHERE writer='birch' AND position=0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if stored_late {
+            assert_eq!((state.as_str(), outcome.valid), ("valid", 1), "{outcome:?}");
+        } else {
+            assert_eq!(state, "invalid", "{outcome:?}");
+            assert!(
+                target
+                    .replica_records(true)
+                    .unwrap()
+                    .iter()
+                    .any(|record| record.error_code.as_deref() == Some("missing-replicated-blob"))
+            );
+        }
+    }
+}
