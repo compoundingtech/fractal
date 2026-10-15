@@ -472,7 +472,7 @@ mission "review-repair" state="ready" {
                 fields.insert("owner".into(), json!(format!("step-run/history/{answered}/{index}")));
                 fields.insert(
                     "reviewer".into(),
-                    json!(if answered { OLD } else { "person/unrelated" }),
+                    json!(if answered { OLD } else { "person/intruder" }),
                 );
                 let historical = store.append_claim(&ClaimInput {
                     subject: format!("gate-operation/history/{answered}/{index}"),

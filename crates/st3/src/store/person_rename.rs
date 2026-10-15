@@ -355,7 +355,7 @@ mission "unrelated" state="ready" {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("rename.sqlite3");
         let store = std::sync::Arc::new(Store::open(&path, "alder").unwrap());
-        for person in ["person/robin", "person/sage"] { know(&store, person); }
+        for person in ["person/robin", "person/blair"] { know(&store, person); }
         let intent = crate::graph::parse_internal_intent(
             r#"version 2
 mission "routing" state="ready" {
@@ -370,7 +370,7 @@ mission "routing" state="ready" {
             inputs: BTreeMap::new(), idempotency_key: "concurrent-run".into(),
         }).unwrap();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let handles = ["person/robin", "person/sage"].map(|person| {
+        let handles = ["person/robin", "person/blair"].map(|person| {
             let store = std::sync::Arc::clone(&store);
             let barrier = std::sync::Arc::clone(&barrier);
             std::thread::spawn(move || {
@@ -592,7 +592,7 @@ mission "approvals" state="ready" revisions="human-only" revision-reviewer="pers
         }
         let source = Store::open_memory("source").unwrap();
         know(&source, "person/robin");
-        know(&source, "person/sage");
+        know(&source, "person/blair");
         let intent = crate::graph::parse_internal_intent(
             r#"version 2
 mission "replicated-repair" state="ready" {
@@ -625,7 +625,7 @@ mission "replicated-repair" state="ready" {
         receive(&source, &alder, false);
         receive(&source, &birch, false);
         let first = repair_input("person/robin", "replicated-robin");
-        let second = repair_input("person/sage", "replicated-sage");
+        let second = repair_input("person/blair", "replicated-blair");
         let first_report = alder.rename_person(&first).unwrap();
         let second_report = birch.rename_person(&second).unwrap();
         assert_eq!(first_report.reassigned_steps, vec![work.subject.clone()]);

@@ -28560,7 +28560,7 @@ version 2
         );
 
         let index_before_refusals = store.index().unwrap();
-        for actor in ["agent/test.operator", "person/unrelated"] {
+        for actor in ["agent/test.operator", "person/intruder"] {
             let (status, error) = json_request(app.clone(), "/v1/persons/rename", json!({
                 "old_person": "person/alex",
                 "new_person": "person/robin",
