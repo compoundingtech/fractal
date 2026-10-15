@@ -5,7 +5,7 @@ edition = "2024"
 description = "Smalltalk terminal UI library"
 license = "MIT"
 # The workspace's build identity stamp, shared with st2 and st-drivers (see src/version.rs).
-build = "../../build.rs"
+build = "../st-drivers/build.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

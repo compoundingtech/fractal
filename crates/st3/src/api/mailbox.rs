@@ -583,7 +583,7 @@ fn own_post_reactor(state: &AppState, fence: &Fence) -> tokio::sync::mpsc::Sende
         while let Some(subject) = pending.recv().await {
             let store = state.store.clone();
             let binding = fence.clone();
-            let result = tokio::task::spawn_blocking(move || {
+            let result = store.connection.write_workers().spawn_blocking(move || {
                 store.close_mailbox_own_post_wake(&binding, &subject)
             }).await;
             match result {
@@ -635,7 +635,7 @@ async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDe
         } => {},
     }
     if native {
-        let _ = crate::api::read_deadline::spawn_blocking(move || {
+        let _ = state.store.connection.write_workers().spawn_blocking(move || {
             authority::loss_if_current(&state, &fence, &peer)
         }).await;
     }
@@ -728,6 +728,7 @@ impl StreamControl {
 struct FixtureDirtyGate {
     allowed: std::sync::atomic::AtomicBool,
     notifications: std::sync::atomic::AtomicUsize,
+    replay_proofs: std::sync::atomic::AtomicUsize,
 }
 
 async fn stream_with_timers_inner<F, S, H>(
@@ -754,7 +755,7 @@ async fn stream_with_timers_inner<F, S, H>(
     let mut replay_nonce = Fence::new(&fence.subject, &fence.incarnation, "replay").token;
     let mut replay_challenge_sent = false;
     let mut replay_supported = false;
-    let mut replay_proven = false;
+    let mut replay_proven: Option<authority::ReplayProofInputs> = None;
     let mut recovered = std::collections::BTreeSet::new();
     let mut policy_rechecks = std::collections::BTreeSet::new();
     let mut order = MailboxOrder::new();
@@ -768,10 +769,16 @@ async fn stream_with_timers_inner<F, S, H>(
         #[cfg(not(test))]
         let process_dirty = true;
         if dirty && process_dirty {
-            // A later close notification may record another loss after this connection's
-            // first proof. Durable wakes (and the bounded safety heartbeat) let its current
-            // consumed nonce repair that episode too, without reoffering native work.
-            replay_proven = false;
+            // Retain consumed replay across ordinary wakes. A new unresolved loss
+            // or changed authority input requires a fresh proof of the same nonce.
+            if let (Some(proof), Some(peer)) = (replay_proven.take(), peer.as_ref()) {
+                let checked_state = state.clone();
+                let binding = fence.clone();
+                let peer = peer.clone();
+                replay_proven = crate::api::read_deadline::spawn_blocking(move || {
+                    proof.is_current(&checked_state, &binding, &peer).then_some(proof)
+                }).await.ok().flatten();
+            }
             let admission_store = state.store.clone();
             let store = state.store.clone();
             let binding = fence.clone();
@@ -786,7 +793,7 @@ async fn stream_with_timers_inner<F, S, H>(
             let repaired = if let Some(peer) = peer.clone() {
                 let repair_state = state.clone();
                 let repair_fence = fence.clone();
-                match tokio::task::spawn_blocking(move || {
+                match state.store.connection.write_workers().spawn_blocking(move || {
                     if repair_state.store.check_mailbox(&repair_fence).is_ok() { return false; }
                     let _ = authority::loss_if_current(&repair_state, &repair_fence, &peer);
                     matches!(authority::with_authority(&repair_state, &repair_fence, &peer, |owner, validate| {
@@ -820,7 +827,7 @@ async fn stream_with_timers_inner<F, S, H>(
                         previous_mailbox.clear();
                         replay_nonce = Fence::new(&fence.subject, &fence.incarnation, "replay").token;
                         replay_challenge_sent = false;
-                        replay_proven = false;
+                        replay_proven = None;
                     }
                     recovered = admitted;
                     policy_rechecks = policies;
@@ -941,14 +948,27 @@ async fn stream_with_timers_inner<F, S, H>(
                             let checked_state = state.clone();
                             let binding = fence.clone();
                             let raw = report.to_string();
-                            matches!(crate::api::read_deadline::spawn_blocking(move || {
+                            matches!(state.store.connection.write_workers().spawn_blocking(move || {
                                 authority::admit_report(&checked_state, &binding, &peer, &raw)
                             }).await, Ok(Ok(())))
                         } else { true };
                         // Native refusal discards all report-driven effects, including
                         // capability negotiation and rollout ACKs. Typed presence failure
                         // remains separate for an otherwise authenticated control report.
-                        if !authenticated { continue; }
+                        if !authenticated {
+                            replay_proven = None;
+                            continue;
+                        }
+                        // Admission is never bypassed by retained replay. Recheck
+                        // inputs here too: custody may change between dirty passes.
+                        if let (Some(proof), Some(peer)) = (replay_proven.take(), peer.as_ref()) {
+                            let checked_state = state.clone();
+                            let binding = fence.clone();
+                            let peer = peer.clone();
+                            replay_proven = crate::api::read_deadline::spawn_blocking(move || {
+                                proof.is_current(&checked_state, &binding, &peer).then_some(proof)
+                            }).await.ok().flatten();
+                        }
                         let recorded = record_admitted_report(&fence, &report);
                         let value = serde_json::from_str::<Value>(&report).unwrap_or(Value::Null);
                         replay_supported |= peer.is_some() && value["mailbox_replay_ack"] == true;
@@ -956,17 +976,21 @@ async fn stream_with_timers_inner<F, S, H>(
                             if send(&mut socket, &Frame::Replay { nonce: replay_nonce.clone() }).await.is_err() { return; }
                             replay_challenge_sent = true;
                         }
-                        if recorded && !replay_proven && replay_challenge_sent
+                        if recorded && replay_proven.is_none() && replay_challenge_sent
                             && value["mailbox_replay_nonce"].as_str() == Some(&replay_nonce)
                             && value["ready"] == true
                             && let Some(peer) = peer.clone()
                         {
+                            #[cfg(test)]
+                            if let Some(gate) = &control.dirty_gate {
+                                gate.replay_proofs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            }
                             let repair_state = state.clone();
                             let binding = fence.clone();
                             let raw = report.to_string();
-                            replay_proven = matches!(crate::api::read_deadline::spawn_blocking(move || {
+                            replay_proven = state.store.connection.write_workers().spawn_blocking(move || {
                                 authority::repair_proven(&repair_state, &binding, &peer, &raw)
-                            }).await, Ok(Ok(())));
+                            }).await.ok().and_then(Result::ok);
                         }
                         if let Ok(value) = serde_json::from_str::<Value>(&report)
                             && fence.component == "delivery"
@@ -977,6 +1001,8 @@ async fn stream_with_timers_inner<F, S, H>(
                             let _ = crate::rollout::phase(&state.store, &fence.subject, &operation, "drain-ack", None, &[]);
                             signal_changed(&state);
                         }
+                    } else {
+                        replay_proven = None;
                     }
                 },
                 Some(Ok(WsMessage::Pong(_))) => {},
@@ -1098,6 +1124,11 @@ mod tests {
     use super::*;
     use crate::client::{Client, Endpoint};
     use tokio_tungstenite::tungstenite::Message;
+
+    #[cfg(all(feature = "test-support", target_os = "linux"))]
+    mod replay_native_tests {
+        include!("mailbox/replay_native_tests.rs");
+    }
 
     // These snapshot/receipt controls model an already-admitted channel with a synthetic
     // identity. Their explicit test-only routes do not claim production peer authentication;
@@ -1224,20 +1255,29 @@ mod tests {
         }
     }
 
+    /// Backdate a send past the recovery window of the recipient's current boot. The
+    /// window is measured from the boot floor, so age from it (or from now, before any
+    /// boot): a slow runner between boot and this call must not make the mail recent.
     fn age_sent(store: &Store, database: &Path, subject: &str) {
         let claim = store
             .latest_claim(subject, Some("message.sent"))
             .unwrap()
             .unwrap();
+        let recipient = claim.body.get("fields").unwrap_or(&claim.body)["to"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let anchor = store
+            .native_mail_boot_floor(&recipient)
+            .unwrap()
+            .map_or(client_now_ms(), |(since, _)| since.min(client_now_ms()));
         let connection = rusqlite::Connection::open(database).unwrap();
         crate::store::configure_projection_writer(&connection).unwrap();
         connection
             .execute(
                 "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                 rusqlite::params![
-                    (client_now_ms()
-                        - u128::from(super::super::mail_backlog::THRESHOLD_MS)
-                        - 1_000)
+                    (anchor - u128::from(super::super::mail_backlog::THRESHOLD_MS) - 1_000)
                         .to_string(),
                     claim.id
                 ],
@@ -2732,6 +2772,7 @@ mod tests {
         let dirty_gate = Arc::new(FixtureDirtyGate {
             allowed: std::sync::atomic::AtomicBool::new(true),
             notifications: std::sync::atomic::AtomicUsize::new(0),
+            replay_proofs: std::sync::atomic::AtomicUsize::new(0),
         });
         let fixture_gate = dirty_gate.clone();
         let app = Router::new()
@@ -3037,12 +3078,13 @@ mod tests {
         source.bind_fleet(FLEET).unwrap();
         crate::mailbox::tests::ready(&source, "session-1");
         let request = || ReplicationReceiveRequest {
+            carrier: Default::default(),
             peer: "source".into(),
             fleet_id: FLEET.into(),
             exchange: source
                 .export_replication_exchange(FLEET, &state.store.replication_inventory().unwrap())
                 .unwrap(),
-            // The native replication worker supplies this; it enables the worker's heal path.
+            // The native replication worker supplies this for its own dials.
             round_trip_ms: Some(1),
         };
         // Establish the remote incarnation before binding the live stream.
@@ -3917,3 +3959,6 @@ mod profile;
 
 #[cfg(test)]
 mod update_cost_tests;
+
+#[cfg(test)]
+mod replay_proof_tests;

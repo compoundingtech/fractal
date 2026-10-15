@@ -10,11 +10,9 @@ pub use smallclaims::claim::{
 #[cfg(test)]
 pub use smallclaims::replication::{ReplicaRange, ReplicationBatch, ReplicationResponse};
 pub use smallclaims::replication::{
-    ClaimRange, ClaimRangeDigest, ClaimSubjectDigest, HealClaim, InventoryCheckpoint,
-    ReplicaRecordView, ReplicationExchange, ReplicationExportRequest, ReplicationExportResponse,
-    ReplicationFirstSync, ReplicationHealAnswer, ReplicationHealAnswerRequest,
-    ReplicationHealNextRequest, ReplicationHealQuery, ReplicationHealReport,
-    ReplicationHealRequest, ReplicationHealStep, ReplicationInventory, ReplicationInventoryBucket,
+    InventoryCheckpoint, ReplicaRecordView, ReplicationExchange, ReplicationExportRequest,
+    ReplicationExportResponse, ReplicationFirstSync, ReplicationInventory,
+    ReplicationInventoryBucket,
     ReplicationPeerFailureRequest, ReplicationPeerStatus, ReplicationPeerSync, ReplicationReceipt,
     ReplicationReceiveRequest, ReplicationReceiveResponse, ReplicationRepairRequest,
     ReplicationStatus, ReplicationTimings, UnhealthyProjection,
@@ -36,6 +34,10 @@ pub fn refuse_person_recipient(recipient: &str) -> Result<(), St3Error> {
         return Err(St3Error::new(PERSON_HAS_NO_INBOX_CODE, PERSON_HAS_NO_INBOX));
     }
     Ok(())
+}
+
+fn is_zero_u128(value: &u128) -> bool {
+    *value == 0
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -1627,7 +1629,19 @@ pub struct ClientSyncNotice {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ClientExchangeTransport {
+    pub at: String,
+    pub carrier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_route: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClientSyncPeer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_successful_exchange: Option<ClientExchangeTransport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failed_exchange: Option<ClientExchangeTransport>,
     pub host_id: String,
     pub peer_only_envelopes: u64,
     pub local_only_envelopes: u64,
@@ -2076,6 +2090,50 @@ pub struct MessageView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_origin: Option<String>,
     pub created_index: u64,
+}
+
+/// A definitive first-send refusal. Transport loss remains MessageSendUnconfirmed.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "variant")]
+pub enum MessageSendRefusal {
+    Retired {
+        recipient: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        successor: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transfer: Option<String>,
+    },
+    LifecycleUnavailable {
+        recipient: String,
+        reason: LifecycleUnavailableReason,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LifecycleUnavailableReason {
+    Unavailable,
+    Conflict,
+}
+
+impl MessageSendRefusal {
+    pub fn into_error(self) -> St3Error {
+        let (code, variant, recipient) = match &self {
+            Self::Retired { recipient, .. } => ("recipient-retired", "Retired", recipient),
+            Self::LifecycleUnavailable { recipient, .. } => {
+                ("lifecycle-unavailable", "LifecycleUnavailable", recipient)
+            }
+        };
+        St3Error::new(
+            code,
+            format!("{variant}: recipient `{recipient}` refuses this first send"),
+        )
+        .with_detail("applied", "none")
+        .with_detail(
+            "refusal",
+            serde_json::to_value(&self).expect("refusal serializes"),
+        )
+    }
 }
 
 impl MessageView {
@@ -2531,6 +2589,12 @@ pub struct StepRunView {
     pub carried_claimant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_started_at_unix_ms: Option<u128>,
+    /// While a declared wait has stopped the execution clock: when the wait ends on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_paused_until_unix_ms: Option<u128>,
+    /// What this attempt has spent in declared waits; a wait has a budget per attempt.
+    #[serde(default, skip_serializing_if = "is_zero_u128")]
+    pub execution_waited_ms: u128,
     #[serde(default)]
     pub execution_elapsed_ms: u128,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2728,6 +2792,10 @@ pub struct WorkRequest {
     pub reason: Option<String>,
     #[serde(default)]
     pub evidence: Vec<String>,
+    /// `work wait`: how long the execution clock stays stopped at most. Absent for every other
+    /// action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
     pub idempotency_key: String,
 }
 

@@ -353,3 +353,72 @@ zero headroom at the base. Reusable schema/lifetime authority, multi-consumer
 retention, native/canonical mutation closure, physical-schema/work-at-scale,
 unsafe cleanup/quarantine, hold/CPU and production opt-in remain open. No new
 factory, worker, proof capability, admission policy or source activation.
+
+## Two-consumer production journal controls (fixture only)
+
+The next two controls register distinct fixture operators over the same source
+and existing namespace-keyed output/coverage tables. They drive the production
+`Installer::prune_journal` directly through existing managed background writer
+transactions. The wrapper performs no minimum/cutoff calculation or journal
+deletion of its own. It does not invoke the single-consumer image-prune helper:
+all 32 immutable images stay retained, within the existing 256-image cap.
+
+One control installs both prefix roots, advances A to 32 and B to 16, and checks
+that only the first 16 journal references disappear. A second prune must remove
+zero until B consumes the remaining original references. This second call is
+necessary to discriminate a fast-root cutoff when each call is capped at 16.
+B's current-source status and getter explicitly refuse at revision 16; after B
+reaches 32, both namespaces match native-derived ID/subject/kind/digest output.
+
+The other control uses an actual active follower catchup job at revision zero
+without a published root. That job must pin every reference even while A is
+current. Only an explicit committed cancel releases the job's pin. Cancellation
+must leave the other's separately ready root intact. A captured stale follower
+page refuses publication without changing its job/root/coverage/output rows or
+the source journal counters. The stopped follower remains unavailable; it is
+not automatically restarted or repaired. Cancellation of a separately published
+follower root is outside this control.
+
+These two names are UNRUN at source authoring. They claim only journal retention
+for this fixed two-consumer registry, not image reclamation across two consumers,
+crash and reopen with two consumers, multiconsumer rollback/refused-COMMIT, or a
+whole-prune accounting tuple/nextest override. Those are deferred and unverified.
+Existing single-consumer crash and work receipts do not qualify them. No new
+nextest setting, production table/trigger/library/Runtime/factory/worker or
+authority/lifetime proof is added, and all earlier controls and ceilings remain
+unchanged. Metadata growth remains adverse and the original strict page has
+zero statement headroom; any current-main failure must retain its actual tuple.
+
+## Two-consumer journal outer rollback (fixture only)
+
+One appended control calls the production `Installer::prune_journal` inside an
+existing managed background writer transaction, with two distinct installed
+prefix roots at A=32 and B=16. The library alone selects the cutoff and deletes
+journal references; the single-consumer image-prune helper is not called.
+An owned within-transaction witness must contain the byte-identical original
+references 17..32 and their independently summed row/byte counters, while both
+consumers' complete root/job/coverage/output states stay unchanged. A no-op
+prune cannot satisfy the changed-rowset and changed-counter assertions.
+
+Separate checked WAL readers must see the original committed state while that
+transaction is open. After explicit successful rollback and an idle-writer
+assertion, the physical writer loan ends before fresh readers compare all
+source/native/image/journal/counter state and both complete consumer states.
+The owned changed witness survives rollback. Payload width validation is a
+post-copy oracle bound, not production pre-copy eligibility. There are no
+sleeps, timing assertions, callbacks or hook replacements.
+
+A predetermined committing arm then removes 16 references; a second prune must
+remove zero while B is still at 16. B consumes the original retained references
+to reach 32 and matches native-derived ID/subject/kind/digest output with A;
+only then may the final 16 references be pruned. All 32 images remain unchanged.
+Any transaction/check/rollback error fails the control without a fallback.
+
+The new name is UNRUN at source authoring. This covers successful outer rollback
+only after hosted qualification. Two-consumer refused COMMIT, crash/reopen,
+image reclamation, whole-prune accounting and unsafe-cleanup containment remain
+unverified, alongside source authority/lifetime and production adoption. All
+previous controls, helpers, strict/growth/crash bodies, limits and nextest
+settings remain unchanged. The original strict page has zero statement
+headroom and eight characterized growth pages remain over 128; no old work or
+crash receipt qualifies this new two-consumer path.

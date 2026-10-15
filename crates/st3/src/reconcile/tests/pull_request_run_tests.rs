@@ -286,6 +286,7 @@ fn supersession_revokes_a_claimed_worker_and_runs_final_cleanup() {
         .unwrap();
     store.set_step_state(&step.subject, "ready", None).unwrap();
     let work = |key: &str| WorkRequest {
+        wait_ms: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some("worker-incarnation".into()),
         summary: None,
@@ -298,7 +299,8 @@ fn supersession_revokes_a_claimed_worker_and_runs_final_cleanup() {
         .unwrap();
     observe(&store, &"b".repeat(40), "open");
     let r = reconciler(&store);
-    r.evaluate_active_mission_run(&store.mission_run(&run.id).unwrap().unwrap())
+    let (view, mission) = store.mission_run_for_evaluation(&run.id).unwrap();
+    r.evaluate_active_mission_run(&view, mission)
         .unwrap();
     let cancelled = store.mission_run(&run.id).unwrap().unwrap();
     assert_eq!(cancelled.phase, "final-cancelled");

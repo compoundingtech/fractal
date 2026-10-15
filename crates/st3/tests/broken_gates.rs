@@ -1166,3 +1166,190 @@ mission "orchid/inputs" state="ready" {
     let (_, view) = check(&["--input", "release=1.5.0"]);
     assert_eq!(view["gates"][0]["answer"], "not-yet", "{view:#}");
 }
+
+
+#[test]
+fn until_scripts_wait_for_round_outputs_in_preflight_and_still_run_each_round() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let file = root.path().join("until.kdl");
+    std::fs::write(&file, r#"version 2
+mission "orchid/round-output" state="ready" {
+  goal "Check a result only after a round produces it."
+  completion { when "all-steps-exhausted" }
+  gate "mission script" { exec "printf checked > mission-checked"; host "orchid"; workspace "."; }
+  loop "improve" {
+    max-rounds 2
+    until {
+      gate "round result" {
+        exec "printf '%s\\n' \"$ST_LOOP_ROUND\" >> until-evaluated; test -s result.json || exit 2; test \"$ST_LOOP_ROUND\" -ge 2"
+        host "orchid"
+        workspace "."
+      }
+    }
+    round {
+      completion { when "all-steps-exhausted" }
+      step "produce" {
+        assigned-to "person/avery"
+        goal "Write result.json for this round."
+        gate "round step script" { exec "printf checked > round-checked"; host "orchid"; workspace "."; }
+      }
+    }
+  }
+}
+"#).unwrap();
+    let file = file.to_str().unwrap();
+    let workspace = root.path().to_str().unwrap();
+
+    // This used to run until-evaluated before any round and reject the absent result with exit 2.
+    let dry = daemon.run_cli(&[
+        "apply",
+        file,
+        "--as",
+        PUBLISHER,
+        "--workspace",
+        workspace,
+        "--dry-run",
+        "--check",
+    ]);
+    assert!(dry.status.success(), "{dry:?}");
+    assert!(
+        String::from_utf8_lossy(&dry.stderr).contains("not checked, they run after each round")
+    );
+    assert!(!root.path().join("until-evaluated").exists());
+    assert!(!root.path().join("result.json").exists());
+    assert!(root.path().join("mission-checked").exists());
+    assert!(root.path().join("round-checked").exists());
+    assert!(
+        !daemon
+            .command(&["missions", "ls", "--all"])
+            .to_string()
+            .contains("orchid/round-output")
+    );
+
+    let checked = daemon.command(&["missions", "check", file, "--workspace", workspace]);
+    let gates = checked["gates"].as_array().unwrap();
+    // Normalization also lists the generated round mission; assert the relevant gates by name.
+    for name in ["mission script", "round step script", "round result"] {
+        assert!(gates.iter().any(|gate| gate["gate"] == name), "{checked:#}");
+    }
+    assert_eq!(
+        gates
+            .iter()
+            .filter(|gate| gate["gate"] == "round result")
+            .count(),
+        1,
+        "{checked:#}"
+    );
+    for gate in gates {
+        if gate["gate"] == "round result" {
+            assert_eq!(gate["answer"], "unchecked", "{gate:#}");
+            assert_eq!(gate["reason"], "not checked, they run after each round");
+            assert!(gate["exit_code"].is_null(), "{gate:#}");
+        } else {
+            assert_eq!(gate["answer"], "pass", "{gate:#}");
+        }
+    }
+    let human = daemon.run_cli_format(
+        &["missions", "check", file, "--workspace", workspace],
+        false,
+    );
+    assert!(human.status.success(), "{human:?}");
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("not checked, they run after each round")
+    );
+
+    // Real publication uses the same scope and displays the deferred reason, too.
+    let published = daemon.run_cli(&["apply", file, "--as", PUBLISHER, "--workspace", workspace]);
+    assert!(published.status.success(), "{published:?}");
+    assert!(
+        String::from_utf8_lossy(&published.stderr)
+            .contains("not checked, they run after each round")
+    );
+    assert!(!root.path().join("until-evaluated").exists());
+    assert!(!root.path().join("result.json").exists());
+
+    for args in [
+        vec!["apply", "--help"],
+        vec!["missions", "publish", "--help"],
+        vec!["missions", "check", "--help"],
+    ] {
+        let help = daemon.run_cli_format(&args, false);
+        assert!(help.status.success(), "{help:?}");
+        let text = String::from_utf8_lossy(&help.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("after each round"), "{text}");
+    }
+
+    let run_id = "mission-run/orchid/round-output-test";
+    daemon.command(&[
+        "missions",
+        "start",
+        "mission/orchid/round-output",
+        "--id",
+        run_id,
+        "--workspace",
+        workspace,
+        "--as",
+        PUBLISHER,
+    ]);
+    for round in 1..=2 {
+        let mut step = String::new();
+        wait_for("the round's producer step", || {
+            let work = daemon.command(&["work", "ls", "--as", "person/avery"]);
+            let found = work["value"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["state"] == "ready");
+            if let Some(item) = found {
+                step = item["id"].as_str().unwrap().to_owned();
+            }
+            !step.is_empty()
+        });
+        if round == 1 {
+            assert!(!root.path().join("until-evaluated").exists());
+        } else {
+            let evaluated = std::fs::read_to_string(root.path().join("until-evaluated")).unwrap();
+            assert!(!evaluated.is_empty());
+            assert!(evaluated.lines().all(|value| value == "1"), "{evaluated}");
+        }
+        std::fs::write(
+            root.path().join("result.json"),
+            format!("{{\"round\":{round}}}"),
+        )
+        .unwrap();
+        daemon.command(&[
+            "work",
+            "done",
+            &step,
+            "--as",
+            "person/avery",
+            "--summary",
+            "Produced result.json",
+        ]);
+    }
+    wait_for("the loop to finish after its second boundary", || {
+        daemon.command(&["missions", "show", run_id])["status"] == "completed"
+    });
+    // Verify both boundaries in order without imposing exactly-once execution on runtime.
+    let evaluated = std::fs::read_to_string(root.path().join("until-evaluated")).unwrap();
+    let rounds = evaluated.lines().collect::<Vec<_>>();
+    assert_eq!(rounds.first(), Some(&"1"), "{evaluated}");
+    let second = rounds.iter().position(|value| *value == "2").unwrap();
+    assert!(
+        rounds[..second].iter().all(|value| *value == "1"),
+        "{evaluated}"
+    );
+    assert!(
+        rounds[second..].iter().all(|value| *value == "2"),
+        "{evaluated}"
+    );
+    let run = daemon.command(&["missions", "show", run_id]);
+    assert_eq!(run["loops"][0]["round"], 2, "{run:#}");
+}
