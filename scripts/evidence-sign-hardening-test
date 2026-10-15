@@ -79,10 +79,10 @@ print('passed: a tool file that is not root-owned is refused even when its direc
 signer.TOOLS['PATH'] = '/usr/bin:/bin'
 hostile = {'LD_LIBRARY_PATH': '/evil', 'LD_PRELOAD': '/evil.so', 'SSH_AUTH_SOCK': '/agent', 'GIT_DIR': '/evil', 'GIT_CONFIG_COUNT': '1',
            'GIT_SSH_COMMAND': 'evil', 'PYTHONUNBUFFERED': '1', 'PERL5OPT': '-Mevil', 'HTTPS_PROXY': 'http://evil', 'PATH': '/evil/bin',
-           'LC_ALL': 'evil', 'HOME': '/home/x', 'TMPDIR': '/var/tmp/x', 'FOO': 'bar'}
+           'LC_ALL': 'evil', 'HOME': '/srv/example-home', 'TMPDIR': '/var/tmp/x', 'FOO': 'bar'}
 child = signer.child_environment(environ=hostile)
 assert set(child) == {'HOME', 'TMPDIR', 'PATH', 'LC_ALL', 'GIT_NO_REPLACE_OBJECTS', 'GIT_TERMINAL_PROMPT', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL'}, sorted(child)
-assert child['PATH'] == '/usr/bin:/bin' and child['LC_ALL'] == 'C' and child['HOME'] == '/home/x' and child['TMPDIR'] == '/var/tmp/x'
+assert child['PATH'] == '/usr/bin:/bin' and child['LC_ALL'] == 'C' and child['HOME'] == '/srv/example-home' and child['TMPDIR'] == '/var/tmp/x'
 assert child['GIT_CONFIG_GLOBAL'] == '/dev/null' and child['GIT_CONFIG_NOSYSTEM'] == '1'
 extra = signer.child_environment({'GIT_AUTHOR_NAME': 'Evidence signer'}, environ=hostile)
 assert extra['GIT_AUTHOR_NAME'] == 'Evidence signer', 'settings the signer supplies itself are kept'
