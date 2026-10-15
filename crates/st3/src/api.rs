@@ -18383,7 +18383,7 @@ mission "expiring-work" state="ready" {
             }).unwrap()
         };
         append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
-        let now = now_ms();
+        let now = client_now_ms();
         let expired = now - crate::store::CLAUDE_PROMPT_ANSWER_WAIT_MS - 1_000;
         append("harness.observed", json!({
             "state":"working", "driver":"claude", "incarnation_id":"one",
