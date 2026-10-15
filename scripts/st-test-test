@@ -117,6 +117,18 @@ class StTest(unittest.TestCase):
         self.assertIn('demo', out)
         self.assertIn('covered by wrapper', out)
         self.assertIn('this branch', out)
+        self.assertIn('clean worktree', out)
+
+    def test_untracked_and_ignored_files_in_the_checkout_cannot_change_the_result(self):
+        self.commit('b.txt', 'two')
+        (self.work / 'stray.txt').write_text('untracked')
+        (self.work / '.gitignore').write_text('ignored.txt\n')
+        git(self.work, 'add', '.gitignore')
+        git(self.work, 'commit', '-q', '-m', 'ignore')
+        (self.work / 'ignored.txt').write_text('ignored')
+        code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', 'test ! -e stray.txt && test ! -e ignored.txt'])
+        self.assertEqual(code, 0, err + out)
+        self.assertEqual(len(self.statements()), 1)
 
     def test_after_the_base_moved_the_merge_tree_is_what_is_signed(self):
         self.commit('b.txt', 'feature work')

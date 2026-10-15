@@ -10,13 +10,16 @@ the output it measured under this host's key (scripts/evidence-keygen). A failin
 asks the verifier, from the accepted base, whether the tree is now covered, and prints one line per check.
 
 The tree: GitHub tests the merge of a pull request into its base, not the branch. When the branch already holds
-the base's tip that is the branch itself and the command runs in this checkout. Otherwise the merge tree is
-computed (`git merge-tree`), a merge commit with that tree is made, and the command runs in a throwaway worktree of
-it, so "merge main, then push" signs the tree that will be tested. A merge that conflicts stops here.
+the base's tip that is the branch itself; otherwise the merge tree is computed (`git merge-tree`) and a merge commit
+with that tree is made, so "merge main, then push" signs the tree that will be tested. A merge that conflicts stops
+here. The command always runs in a fresh throwaway worktree of that commit, never in this checkout, so untracked or
+ignored files here cannot change the result; nothing is linked in (the dev shells create their own helper links).
 
 evidence-wrap, evidence-sign and evidence-verify come from the accepted base, not from the change under test.
 Commands that call cargo reach the build admission shim on PATH like any other cargo; nothing here knows about
-admission. With --push the signed notes are pushed to REMOTE after they verify.
+admission. With --push the signed notes are pushed to REMOTE after they verify, with the identity git uses for REMOTE
+(or EVIDENCE_PUSH_TOKEN if set); whether that identity may create refs/notes/evidence/* is a repository rule that
+has not been confirmed for agent seats.
 
 Exit 0 when every selected check passed and was signed, 1 otherwise.
 """
@@ -57,23 +60,25 @@ def text(done):
     return done.stdout.decode().strip()
 
 
-def merge_target(base, scratch):
-    """(directory to run in, commit, cleanup). The branch itself when it holds the base's tip, else its merge."""
+def target_worktree(base, scratch):
+    """(directory, commit): a clean throwaway worktree of what the pull request will be tested as.
+
+    The branch itself when it holds the base's tip, else a merge commit made from the merge tree. Always a fresh
+    worktree, never this checkout, so untracked or ignored files here cannot change the result, and no helper
+    directory is linked in: the dev shells make their own."""
     if git('merge-base', '--is-ancestor', base, 'HEAD', check=False).returncode == 0:
-        return Path(text(git('rev-parse', '--show-toplevel'))), text(git('rev-parse', 'HEAD')), None
-    merged = git('merge-tree', '--write-tree', '--no-messages', base, 'HEAD', check=False)
-    if merged.returncode != 0:
-        raise Failure(f'HEAD does not merge cleanly into {base}; merge it first and run again')
-    tree = text(merged).splitlines()[0]
-    identity = {'GIT_AUTHOR_NAME': 'st-test', 'GIT_AUTHOR_EMAIL': 'st-test@example.invalid',
-                'GIT_COMMITTER_NAME': 'st-test', 'GIT_COMMITTER_EMAIL': 'st-test@example.invalid'}
-    commit = text(git('commit-tree', tree, '-p', base, '-p', 'HEAD', '-m', f'st-test: HEAD merged into {base}', env=identity))
-    top = Path(text(git('rev-parse', '--show-toplevel')))
-    directory = Path(scratch) / 'merge'
+        commit = text(git('rev-parse', 'HEAD'))
+    else:
+        merged = git('merge-tree', '--write-tree', '--no-messages', base, 'HEAD', check=False)
+        if merged.returncode != 0:
+            raise Failure(f'HEAD does not merge cleanly into {base}; merge it first and run again')
+        tree = text(merged).splitlines()[0]
+        identity = {'GIT_AUTHOR_NAME': 'st-test', 'GIT_AUTHOR_EMAIL': 'st-test@example.invalid',
+                    'GIT_COMMITTER_NAME': 'st-test', 'GIT_COMMITTER_EMAIL': 'st-test@example.invalid'}
+        commit = text(git('commit-tree', tree, '-p', base, '-p', 'HEAD', '-m', f'st-test: HEAD merged into {base}', env=identity))
+    directory = Path(scratch) / 'tree'
     git('worktree', 'add', '--detach', '-q', str(directory), commit)
-    if (top / 'repos').exists():
-        (directory / 'repos').symlink_to(top / 'repos')  # untracked helper checkouts the dev shells link
-    return directory, commit, top
+    return directory, commit
 
 
 def covered(verifier, directory, tree, check, base, repository):
@@ -133,7 +138,8 @@ def main(argv):
             path.write_bytes(git('show', f'{args.base}:scripts/{name}').stdout)
             path.chmod(0o700)
             tools[name] = str(path)
-        directory, commit, top = merge_target(args.base, scratch)
+        directory, commit = target_worktree(args.base, scratch)
+        merged = text(git('rev-parse', 'HEAD')) != commit
         try:
             tree = text(git('rev-parse', f'{commit}^{{tree}}', cwd=directory))
             repository = args.repository or repository_of(remote or 'origin')
@@ -157,13 +163,12 @@ def main(argv):
                 failed = failed or not ok
                 is_covered, why = covered(tools['evidence-verify'], directory, tree, name, args.base, repository)
                 rows.append((name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why))
-            print(f'\nst-test: tree {tree[:12]} ({"this branch" if top is None else "merge with " + args.base})')
+            print(f'\nst-test: tree {tree[:12]} ({"merge with " + args.base if merged else "this branch"}), in a clean worktree')
             for name, result, seconds, why in rows:
                 print(f'  {name:<20} {result:<12} {seconds:>6}s  {why}')
             return 1 if failed else 0
         finally:
-            if top is not None:
-                git('worktree', 'remove', '--force', str(directory), check=False)
+            git('worktree', 'remove', '--force', str(directory), check=False)
 
 
 if __name__ == '__main__':
