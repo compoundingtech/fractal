@@ -3749,7 +3749,8 @@ pub const REPLICATION_EXCHANGE_ENVELOPE_LIMIT: usize = 512;
 /// per envelope on a populated store; leave room for queued write acknowledgements below 50 ms.
 pub const ADMISSION_CHUNK_ENVELOPES: usize = 8;
 /// Payload bytes admission prepares ahead of its loans. Decoded envelopes wait in memory for the
-/// loan that admits them; one envelope larger than this is prepared alone.
+/// loan that admits them, next to their payloads, so the set can hold about twice this; one
+/// envelope larger than this is prepared alone.
 pub const ADMISSION_PREPARED_BYTES: usize = 16 * 1024 * 1024;
 
 /// Stop a chunk before starting another envelope once its writer work reaches this budget.
@@ -6336,6 +6337,8 @@ impl Store {
                     ready.insert(index, prepared);
                 }
                 #[cfg(test)]
+                PREPARED_AHEAD.with(|sets| sets.borrow_mut().push(ready.len()));
+                #[cfg(test)]
                 BEFORE_ADMISSION_LOAN.with(|hook| {
                     if let Some(mut hook) = hook.borrow_mut().take() {
                         hook();
@@ -8520,6 +8523,8 @@ thread_local! {
     static ADMISSION_MEMBERSHIP_FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     // One-shot deterministic control between preparing authority and acquiring its writer.
     static BEFORE_ADMISSION_LOAN: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+    // How many envelopes were prepared ahead of each admission loan.
+    static PREPARED_AHEAD: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub fn apply_replication_repair_tx(

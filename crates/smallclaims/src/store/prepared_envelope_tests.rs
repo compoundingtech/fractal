@@ -1052,3 +1052,51 @@ fn a_classification_that_reads_the_store_sees_the_store_under_the_writer() {
         }
     }
 }
+
+/// Exchange from `source` until `target` has received every envelope, without admitting any:
+/// large envelopes leave in pages of their own.
+fn receive_everything(source: &Store, target: &Store) {
+    for _ in 0..32 {
+        let exchange = source
+            .export_replication_exchange(FLEET, &target.replication_inventory().unwrap())
+            .unwrap();
+        if exchange.envelopes.is_empty() {
+            return;
+        }
+        target
+            .receive_replication_exchange("birch", FLEET, &exchange)
+            .unwrap();
+    }
+    panic!("the source kept sending envelopes");
+}
+
+/// Preparation ahead of the loans stops at `ADMISSION_PREPARED_BYTES` of payload: three envelopes
+/// of 6 MiB are prepared two at a time, and one of 17 MiB alone. Either way admission stores what
+/// the old function stores.
+#[test]
+fn preparation_stops_at_the_byte_budget_and_prepares_a_larger_envelope_alone() {
+    const MIB: usize = 1024 * 1024;
+    for (sizes, first) in [(vec![6 * MIB; 3], 2), (vec![17 * MIB, MIB], 1)] {
+        let source = node("birch");
+        let prepared = node("cedar");
+        let old = node("larch");
+        for (index, size) in sizes.iter().enumerate() {
+            let hash = source.put_blob(&vec![index as u8; *size]).unwrap();
+            note(
+                &source,
+                &format!("note/large/{index}"),
+                BTreeMap::from([("hash".into(), Value::String(hash))]),
+            );
+        }
+        receive_everything(&source, &prepared);
+        receive_everything(&source, &old);
+        PREPARED_AHEAD.with(|sets| sets.borrow_mut().clear());
+        let outcome = prepared.validate_replication_backlog().unwrap();
+        let sets = PREPARED_AHEAD.with(|sets| sets.borrow().clone());
+        assert_eq!(sets.first(), Some(&first), "prepared ahead of each loan: {sets:?}");
+        assert!(sets.iter().all(|count| *count <= first), "{sets:?}");
+        assert_eq!(outcome.invalid, 0, "{outcome:?}");
+        admit_with_the_old_function(&old);
+        assert_eq!(admitted_rows(&prepared), admitted_rows(&old));
+    }
+}
