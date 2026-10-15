@@ -1,6 +1,7 @@
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import { DialogTrigger, Dialog, Popover } from 'react-aria-components'
+import { compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
 
 import {
   Button,
@@ -20,6 +21,13 @@ import type { ShowRow } from './show.ts'
 import { defaultFilters, type SidebarFilters } from './state.ts'
 import { statuses, type AgentStatus } from './StatusIcon.tsx'
 
+const readLightScheme = () => document.documentElement.dataset.scheme !== 'dark'
+const subscribeScheme = (notify: () => void) => {
+  const observer = new MutationObserver(notify)
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-scheme'] })
+  return () => observer.disconnect()
+}
+
 /** Sidebar search, Show, visibility, status and view-only ordering controls. */
 export const SidebarToolbar = ({
   filters,
@@ -32,6 +40,7 @@ export const SidebarToolbar = ({
   readonly hosts: readonly string[]
   readonly showRows: readonly ShowRow[]
 }) => {
+  const light = React.useSyncExternalStore(subscribeScheme, readLightScheme, () => true)
   const search = React.useRef<HTMLDivElement>(null)
   const shortcut = React.useCallback((node: HTMLDivElement | null) => {
     if (node === null) return
@@ -67,6 +76,7 @@ export const SidebarToolbar = ({
           onQueryChange={(query) => update({ ...filters, query })}
           rows={showRows}
           hosts={hosts}
+          {...(light ? { popoverTheme: compositionLightTheme } : {})}
         />
         <div {...stylex.props(styles.menus)}>
           <DialogTrigger>

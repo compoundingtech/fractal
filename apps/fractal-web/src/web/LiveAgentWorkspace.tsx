@@ -169,7 +169,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   const [search, setSearchText] = React.useState(() => withRememberedMachines({ query: '', remembered: machineMemory.remembered }))
   const setSearch = (value: string) => {
     setSearchText(value)
-    machineMemory.remember(value)
+    machineMemory.remember(value, fleet._tag === 'Observed' ? fleet.value.hosts.map((row) => row.id) : [])
   }
   const [panes, setPanes] = useAtom(workspacePanes(current))
   const query = new URLSearchParams(location.split('?')[1])

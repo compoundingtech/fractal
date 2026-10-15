@@ -551,7 +551,7 @@ export const AgentFolders = React.memo(
           update={(value) => {
             setFilters(value)
             // Fixture registries never write live browser state.
-            if (source.mode !== 'fixtures') machineMemory.remember(value.query)
+            if (source.mode !== 'fixtures') machineMemory.remember(value.query, workspaces.map((workspace) => workspace.host))
           }}
           hosts={[...new Set(workspaces.map((workspace) => workspace.host))].toSorted()}
           showRows={showRows}

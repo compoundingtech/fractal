@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import { createPersistence } from '../../state/persistence.ts'
 import { matchesShow, parseSidebarQuery, printSidebarQuery } from './filter.ts'
-import { machineMemory, selectedShowKeys, showCounts, showMachines, withRememberedMachines, withShowKeys, type ShowRow } from './show.ts'
+import { machineMemory, machinesToRemember, selectedShowKeys, showCounts, showMachines, withRememberedMachines, withShowKeys, type ShowRow } from './show.ts'
 
 const toggle = (query: string, keys: readonly string[]) =>
   printSidebarQuery(withShowKeys({ parsedQuery: parseSidebarQuery(query), keys: new Set(keys) }))
@@ -39,11 +39,27 @@ describe('Show menu model', () => {
   })
 
   it('restores remembered machines over the machine tokens while keeping text and is:asking', () => {
-    expect(withRememberedMachines({ query: '', remembered: ['host-a', 'host-b'] })).toBe('machine:host-a,host-b')
-    expect(withRememberedMachines({ query: 'is:asking compiler machine:host-c', remembered: ['host-a'] })).toBe('is:asking machine:host-a compiler')
-    expect(withRememberedMachines({ query: 'compiler machine:host-a machine:host-b', remembered: ['host-b', 'host-a'] })).toBe('compiler machine:host-a machine:host-b')
+    expect(withRememberedMachines({ query: '', remembered: [['host-a', 'host-b']] })).toBe('machine:host-a,host-b')
+    expect(withRememberedMachines({ query: 'is:asking compiler machine:host-c', remembered: [['host-a']] })).toBe('is:asking machine:host-a compiler')
+    expect(withRememberedMachines({ query: 'compiler machine:host-a,host-b', remembered: [['host-b', 'host-a']] })).toBe('compiler machine:host-a,host-b')
     expect(withRememberedMachines({ query: 'is:asking compiler', remembered: null })).toBe('is:asking compiler')
     expect(withRememberedMachines({ query: 'is:asking compiler machine:host-a', remembered: null })).toBe('is:asking compiler machine:host-a')
+  })
+
+  it('remembers and restores machine token groups without turning AND into OR', () => {
+    const remembered = machinesToRemember('compiler machine:host-a machine:host-b', ['host-a', 'host-b'])
+    expect(remembered).toEqual([['host-a'], ['host-b']])
+    expect(withRememberedMachines({ query: 'is:asking', remembered })).toBe('is:asking machine:host-a machine:host-b')
+    expect(withRememberedMachines({ query: 'machine:host-a,host-b', remembered })).toBe('machine:host-a machine:host-b')
+  })
+
+  it('remembers only complete known hosts, not partial prefixes or partially typed OR groups', () => {
+    const hosts = ['host/HOST-A', 'host-b']
+    expect(machinesToRemember('machine:h', hosts)).toBeNull()
+    expect(machinesToRemember('machine:host-a,h', hosts)).toBeNull()
+    expect(machinesToRemember('machine:unknown', hosts)).toBeNull()
+    expect(machinesToRemember('machine:HOST-A,host-b', hosts)).toEqual([['host-a', 'host-b']])
+    expect(machinesToRemember('compiler is:asking', hosts)).toEqual([])
   })
 
   it('clears a gateway query’s stale machine tokens when machines were explicitly cleared in this browser', () => {
@@ -97,15 +113,16 @@ describe('remembered machines', () => {
     JSON.stringify({ version: 1, entries: { [machineMemory.key]: { version, value, clock: 1, writer: 'other-tab' } } })
 
   it('restores a valid list as a machine token', () => {
-    expect(restore(entry(1, ['host-a', 'host-b']))).toEqual({ machines: ['host-a', 'host-b'], query: 'machine:host-a,host-b', error: undefined })
-    expect(restore(entry(1, []))).toEqual({ machines: [], query: '', error: undefined })
+    expect(restore(entry(2, [['host-a', 'host-b']]))).toEqual({ machines: [['host-a', 'host-b']], query: 'machine:host-a,host-b', error: undefined })
+    expect(restore(entry(2, []))).toEqual({ machines: [], query: '', error: undefined })
     expect(restore(null)).toEqual({ machines: null, query: '', error: undefined })
   })
 
   it.each([
-    ['a value that is not a machine list', entry(1, ['host-a', 'host b', 7])],
-    ['an uppercase value', entry(1, ['HOST-A'])],
-    ['a newer entry version', entry(2, ['host-a'])],
+    ['a value that is not a machine list', entry(2, [['host-a', 'host b', 7]])],
+    ['an uppercase value', entry(2, [['HOST-A']])],
+    ['an empty machine token', entry(2, [[]])],
+    ['a newer entry version', entry(3, [['host-a']])],
     ['a document that is not JSON', '{"version":1,'],
   ])('restores nothing from %s and reports the error', (_, raw) => {
     const restored = restore(raw)

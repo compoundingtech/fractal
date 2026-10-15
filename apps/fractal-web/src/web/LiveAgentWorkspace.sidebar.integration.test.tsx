@@ -199,4 +199,25 @@ describe('shipped live sidebar machine query', () => {
     expect(input().value).toBe('machine:host-b')
     expect(names()).toHaveLength(2)
   })
+
+  it('keeps complete remembered machine groups when a partial prefix is typed before remount', async () => {
+    registry.set(agents, observed({ value: [
+      { ...agent, id: 'agent/a', host_id: Option.some('host/host-a') },
+      { ...agent, id: 'agent/b', host_id: Option.some('host/host-b') },
+    ] }))
+    await mount(1440)
+    const input = () => sidebar().querySelector<HTMLInputElement>('input')!
+    for (const query of ['machine:host-a machine:host-b', 'machine:h']) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input(), query)
+        input().dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      expect(input().value).toBe(query)
+    }
+    await act(async () => root.unmount())
+    root = createRoot(host)
+    await mount(1440)
+    expect(input().value).toBe('machine:host-a machine:host-b')
+    expect(roster().querySelectorAll('[data-testid="taste-agent-row"]')).toHaveLength(0)
+  })
 })

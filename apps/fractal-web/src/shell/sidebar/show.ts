@@ -79,35 +79,41 @@ export const showCounts = ({
   return { asking, machines: counts }
 }
 
-/** Browser-local machine memory: versioned key and entry, validated on read. `null` = nothing chosen in this
- * browser yet, or an unreadable entry; `[]` = machines were explicitly cleared. */
+/** Browser-local machine groups: `null` = no readable choice; `[]` = explicitly cleared.
+ * Version 2 preserves AND between tokens and OR within each token. */
 export const machineMemory = {
-  key: 'sidebar.show.machines@1',
-  version: 1,
-  schema: Schema.NullOr(Schema.Array(Schema.String.check(Schema.isPattern(/^[^\s,A-Z]+$/u)))),
+  key: 'sidebar.show.machines@2',
+  version: 2,
+  schema: Schema.NullOr(Schema.Array(Schema.Array(Schema.String.check(Schema.isPattern(/^[^\s,A-Z]+$/u))).check(Schema.isMinLength(1)))),
   defaultValue: null,
 }
 const rememberedMachines = persistedAtom(machineMemory)
-/** Remembered machines replace the query's machine tokens as one OR-ed token (none when cleared); text and
- * is:asking stay. No memory, or memory naming the machines the query already selects, leaves the query as typed. */
+const sameMachineGroups = (left: SidebarQuery['machines'], right: SidebarQuery['machines']): boolean =>
+  left.length === right.length && left.every((group, index) => sameMachines(group, right[index]!))
+/** Replace only machine tokens, preserving the remembered AND/OR structure. */
 export const withRememberedMachines = ({
   query,
   remembered,
 }: {
   readonly query: string
-  readonly remembered: readonly string[] | null
+  readonly remembered: SidebarQuery['machines'] | null
 }): string => {
   const parsedQuery = parseSidebarQuery(query)
-  if (remembered === null || sameMachines(remembered, selectedMachines(parsedQuery))) return query
-  return printSidebarQuery({ ...parsedQuery, machines: remembered.length === 0 ? [] : [remembered] })
+  if (remembered === null || sameMachineGroups(remembered, parsedQuery.machines)) return query
+  return printSidebarQuery({ ...parsedQuery, machines: remembered })
 }
-/** The query stays the only live machine state; memory mirrors its machine tokens on every query change. */
+/** Partial or unknown typed hosts still filter live, but never overwrite the last complete choice. */
+export const machinesToRemember = (query: string, hosts: readonly string[]): SidebarQuery['machines'] | null => {
+  const machines = parseSidebarQuery(query).machines
+  const known = new Set(hosts.map(sidebarHostValue))
+  return machines.every((group) => group.every((machine) => known.has(machine))) ? machines : null
+}
+/** The query stays the only live machine state; memory mirrors complete machine tokens. */
 export const useMachineMemory = () => {
   const [remembered, setRemembered] = useAtom(rememberedMachines)
-  const remember = (query: string) => {
-    const next = selectedMachines(parseSidebarQuery(query))
-    if (remembered === null || next.length !== remembered.length || next.some((machine, index) => machine !== remembered[index]))
-      setRemembered(next)
+  const remember = (query: string, hosts: readonly string[]) => {
+    const next = machinesToRemember(query, hosts)
+    if (next !== null && (remembered === null || !sameMachineGroups(next, remembered))) setRemembered(next)
   }
   return { remembered, remember }
 }

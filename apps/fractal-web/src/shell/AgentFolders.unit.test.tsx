@@ -210,14 +210,14 @@ describe('AgentFolders remembered machines', () => {
   const live = (gateway: string) => ({ ...fixtureSource({ world: fixtureProjections }), mode: 'live' as const, gateway })
   const settings: SidebarFilters = { ...defaultFilters, query: '', hideRetired: true, sort: 'name' }
   // The live workspace's write path: the shared browser persistence document.
-  const remember = (machines: readonly string[] | null) => {
+  const remember = (machines: readonly (readonly string[])[] | null) => {
     const registry = AtomRegistry.make()
     registry.set(persistedAtom(machineMemory), machines)
     registry.dispose()
   }
 
   it('seeds a new gateway from the remembered machine and keeps its other settings', async () => {
-    remember(['build-host-b'])
+    remember([['build-host-b']])
     const tree = mountTree({ source: live('restore.gateway.invalid'), filters: settings })
     try {
       expect(tree.filters()).toEqual({ ...settings, query: 'machine:build-host-b' })
@@ -236,7 +236,7 @@ describe('AgentFolders remembered machines', () => {
       key: 'wf.ui@1',
       newValue: JSON.stringify({
         version: 1,
-        entries: { [machineMemory.key]: { version: 1, value: ['BUILD HOST B'], clock: Date.now() + 60_000, writer: 'other-tab' } },
+        entries: { [machineMemory.key]: { version: 2, value: [['BUILD HOST B']], clock: Date.now() + 60_000, writer: 'other-tab' } },
       }),
     }))
     const tree = mountTree({ source: live('corrupt.gateway.invalid'), filters: settings })
