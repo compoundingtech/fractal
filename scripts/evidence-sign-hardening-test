@@ -91,6 +91,7 @@ with tempfile.TemporaryDirectory() as directory:
     real_dir.mkdir()
     for name in ('git', 'ssh-keygen'):
         (real_dir / f'{name}-real').write_text('#!/bin/sh\n')
+        (real_dir / f'{name}-real').chmod(0o755)  # shutil.which only finds executable files
         (Path(directory) / name).symlink_to(real_dir / f'{name}-real')
     saved_directory, saved_file = signer.unsafe_directory, signer.unsafe_file
     signer.unsafe_directory = lambda d: None
