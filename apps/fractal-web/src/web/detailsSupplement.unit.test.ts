@@ -1,8 +1,20 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { DetailsResources } from '../../../../packages/fractal-ui/src/assistant-ui/details/DetailsResources.tsx'
 import type { DetailsOverview, TraceSeries, TraceFact } from '@smalltalk/fractal-ui/assistant-ui'
 import { detailsWithSupplement } from './detailsSupplement.ts'
 import type { DetailsSupplement } from '../extensions/contract.ts'
 import { observed, unavailable } from '../data/source.ts'
+
+// Match the existing node-rendering lane: semantic DOM, not compiled CSS.
+vi.mock('@stylexjs/stylex', () => ({
+  create: (styles: unknown) => styles,
+  defineVars: (variables: unknown) => variables,
+  createTheme: () => ({}),
+  keyframes: () => 'test-animation',
+  props: () => ({}),
+}))
 
 const known = <A>(value: A): TraceFact<A> => ({ _tag: 'Known', value, source: 'st', asOfMs: 2_000 })
 const missing = { _tag: 'Unknown', reason: 'no-provider' } as const
@@ -92,4 +104,15 @@ describe('independent Details metric composition', () => {
     expect(result.trace).toBe(native)
     expect(result.overview).toBe(overview)
   })
+})
+
+it('shows the reported traced count in the heading, not the bounded list size or an invented zero', () => {
+  const render = (count: TraceFact<number>) => renderToStaticMarkup(createElement(DetailsResources, {
+    state: 'partial', sections: [{ title: 'Subagents', items: { _tag: 'Known', value: [] } }],
+    trace: { ...trace(), subagents: known([]), subagentCount: count }, now: 2000, empty: 'E3', onOpen: () => {},
+  }))
+  const heading = (html: string) => html.match(/<button[^>]*aria-expanded[^>]*>(.*?)<\/button>/)?.[1]?.replace(/<[^>]+>/g, '')
+  expect(heading(render(known(309)))).toBe('Subagents309')
+  expect(heading(render(known(0)))).toBe('Subagents0')
+  expect(heading(render(missing))).toBe('Subagents')
 })
