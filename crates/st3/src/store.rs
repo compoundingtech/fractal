@@ -14,6 +14,7 @@ mod arrangements_tests;
 mod authored_pull_requests_tests;
 #[cfg(test)]
 mod schedule_active_run_tests;
+pub(crate) mod schedule_standby;
 mod glasses;
 pub(crate) mod mailbox_wakes;
 mod mailbox_changes;
@@ -1878,6 +1879,7 @@ pub type IdempotencyConflict = Vec<(String, String)>;
 /// keeps the caches of its projections and plugs its claim kinds into the graph.
 pub struct Store {
     graph: GraphStore,
+    pub(crate) standby_observations: Mutex<BTreeMap<String, crate::schedule_standby::Heartbeat>>,
     smalltalk: Arc<SmalltalkRuntime>,
 }
 
@@ -3270,7 +3272,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, standby_observations: Default::default() })
     }
 
     /// Open explicitly registered shadow views beside Smalltalk's production admission and
@@ -3285,7 +3287,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, standby_observations: Default::default() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -3297,7 +3299,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &smalltalk);
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, standby_observations: Default::default() })
     }
 
     /// Simulate a different build's registry on this node.
@@ -9794,6 +9796,9 @@ impl Store {
         if let Err(error) = message_subscriptions::validate(&connection, intent, store_index) {
             blockers.push(format!("{}: {}", error.code, error.message));
         }
+        if let Err(error) = schedule_standby::validate_publication(&connection, &self.origin, intent) {
+            blockers.push(format!("{}: {}", error.code, error.message));
+        }
         if let Err(error) = crate::provenance::validate_publication(&connection, intent) {
             blockers.push(format!("{}: {}", error.code, error.message));
         }
@@ -10373,6 +10378,7 @@ impl Store {
                     return cache_local_apply_receipt_tx(transaction,
                         serde_json::from_str(&response).map_err(internal)?,local_receipt,idempotency_key);
                 }
+                schedule_standby::validate_publication(transaction, &self.origin, intent)?;
                 crate::provenance::validate_publication(transaction, intent)?;
                 message_subscriptions::validate(transaction, intent, current_index_tx(transaction).map_err(internal)?)?;
                 let owned_plan = owned.map(|options| owned_sets::plan_tx(transaction, intent, options)).transpose()?;
