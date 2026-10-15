@@ -11472,7 +11472,7 @@ async fn run_harness_questions(
                         snapshot_id: current.snapshot.id,
                         subject_revisions: BTreeMap::from([(
                             question.clone(),
-                            current.value.revision,
+                            current.value.header.revision,
                         )]),
                         runtime_incarnation: Some(current.value.runtime_incarnation),
                         ..ClientFence::default()

@@ -291,7 +291,7 @@ mod tests {
     async fn harness_answer_authority_fences_replays_and_resolution_order() {
         let (_root, mut state, session, _question, request) = fixture();
         state.harness_question_sink = Some(Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false }));
-        invoke(&state, &session, &request).await.unwrap();
+        assert_eq!(invoke(&state, &session, &request).await.unwrap().0["harness_answer"]["status"], "accepted");
         let mut retry = request.clone();
         retry.fence.snapshot_id = "snapshot/operator/999999999/future".into();
         assert_eq!(invoke(&state, &session, &retry).await.unwrap_err().code, "stale-fence");
@@ -409,7 +409,7 @@ mod tests {
     async fn changed_question_parameter_conflicts_with_retained_receipt() {
         let (_root, mut state, session, _question, request) = fixture();
         state.harness_question_sink = Some(Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false }));
-        invoke(&state, &session, &request).await.unwrap();
+        assert_eq!(invoke(&state, &session, &request).await.unwrap().0["harness_answer"]["status"], "accepted");
         let other = state.store.observe_harness_question(&QuestionObservation {
             agent:"agent/ada".into(), session:"tester".into(), native_id:"operator".into(), runtime_incarnation:"tester".into(),
             questions:vec![Question { id:"tester".into(), options:2, multi:false, required:true }],
@@ -430,7 +430,7 @@ mod tests {
         ] {
             let (_root, mut state, session, _question, request) = fixture();
             state.harness_question_sink = Some(Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false }));
-            invoke(&state, &session, &request).await.unwrap();
+            assert_eq!(invoke(&state, &session, &request).await.unwrap().0["harness_answer"]["status"], "accepted");
             let no_scope = ClientSession::for_tests_scoped("person/alex", "person/alex", &[]);
             assert_eq!(invoke(&state, &no_scope, &request).await.unwrap_err().code, "forbidden");
             let agent_credential = ClientSession::for_tests_scoped("agent/ada", "person/alex", &["terminal.control"]);

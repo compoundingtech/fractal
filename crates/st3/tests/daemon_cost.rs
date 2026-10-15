@@ -1960,7 +1960,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
                 })
                 .unwrap();
             store
-                .observe_harness_question(&st3::store::harness_questions::QuestionObservation {
+                .observe_harness_question(&st3::store::QuestionObservation {
                     agent: "agent/ada".into(),
                     session: "tester".into(),
                     native_id: "tester".into(),
