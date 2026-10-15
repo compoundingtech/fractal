@@ -51,26 +51,24 @@ export const recordDiagnosticCapabilities = (client: St3Client, caps: Capabiliti
 const scheduleUpload = (at = Date.now()): void => {
   clearTimeout(timer);
   timer = undefined;
-  if (!sender || !active) return;
+  if (!sender || !active || deniedClients.has(sender)) return;
   const client = sender, currentGeneration = generation;
   timer = setTimeout(() => {
     timer = undefined;
     const current = () => sender === client && generation === currentGeneration && active;
     if (!current()) return;
     if (deniedClients.has(client)) return;
+    const refuse = (error: unknown): never => {
+      if (error instanceof ClientError && (error.status === 401 || error.status === 403)) deniedClients.add(client);
+      throw error;
+    };
     const flush = async (): Promise<number | undefined> => {
-      if (!grantedClients.has(client)) recordDiagnosticCapabilities(client, (await client.discover()).value);
+      if (!grantedClients.has(client)) recordDiagnosticCapabilities(client, (await client.discover().catch(refuse)).value);
       if (!current() || grantedClients.get(client) !== true) return;
-      return queue.flush(async batch => {
-        try { return (await client.diagnosticsSubmit(batch)).value; }
-        catch (error) {
-          if (error instanceof ClientError && (error.status === 401 || error.status === 403)) deniedClients.add(client);
-          throw error;
-        }
-      }, current);
+      return queue.flush(async batch => (await client.diagnosticsSubmit(batch).catch(refuse)).value, current);
     };
     void flush().then(next => { if (current() && next !== undefined) scheduleUpload(next); })
-      .catch(() => { if (current()) scheduleUpload(Date.now() + 30_000); });
+      .catch(() => { if (current() && !deniedClients.has(client)) scheduleUpload(Date.now() + 30_000); });
   }, Math.max(0, at - Date.now()));
 };
 

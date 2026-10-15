@@ -93,6 +93,23 @@ fn the_corpus_includes_every_registry_kind() {
     }
 }
 
+#[test]
+fn the_corpus_generates_each_client_diagnostic_input() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in ["client.launch", "client.js-error", "client.native-crash", "client.hang"] {
+        let input = world
+            .claim_of(&corpus()[kind], 0)
+            .unwrap_or_else(|| panic!("generate a native input for {kind}"));
+        assert_eq!(input.kind, kind);
+        assert!(input.subject.starts_with("client/"));
+        for (name, field) in &corpus()[kind].fields {
+            if field.required {
+                assert!(input.fields.contains_key(name), "{kind} requires {name}");
+            }
+        }
+    }
+}
+
 /// Kinds a checkpoint rule may drop. Every other kind is kept on every node.
 const RULE_KINDS: &[&str] = &[
     "harness.observed",
@@ -791,6 +808,10 @@ impl World {
             })
             .collect::<Vec<_>>();
         let spec = *self.rng.pick(&kinds);
+        self.claim_of(spec, index)
+    }
+
+    fn claim_of(&mut self, spec: &st3_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
         let family = self.rng.pick(&spec.subjects).clone();
         let subject = self.subject_of(&family, index)?;
         let mut fields = Map::new();
@@ -823,6 +844,7 @@ impl World {
             "account" => format!("account/example-{small}"),
             "agent" => format!("agent/run-{}/worker-{small}", self.rng.below(2)),
             "attention" => format!("attention/{}", self.fresh("attention")),
+            "client" => format!("client/{}", self.fresh("device")),
             "custom" => format!("custom/convergence/{small}"),
             "daemon" => format!("daemon/{}", self.nodes[index].name),
             "doc" => format!("doc/convergence/{small}"),
