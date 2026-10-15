@@ -22,6 +22,63 @@ const capabilityFixture = require('../../../docs/st3/client-v0/fixtures/capabili
 const cursorGapFixture = require('../../../docs/st3/client-v0/fixtures/cursor-gap-error.json');
 const capabilities = { ...capabilityFixture.value, limits: { ...capabilityFixture.value.limits, max_page_items: 2, max_event_items: 3, max_wait_ms: 10 } };
 
+test('default sockets use headers in Node, Bun and React Native, and bearer protocols only in browsers', async () => {
+    const names = ['WebSocket', 'window', 'navigator', 'importScripts', 'Bun'];
+    const descriptors = names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
+    const opened = [];
+    const set = (name, value) => Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+    try {
+        set('WebSocket', class {
+            constructor(...args) { opened.push(args); }
+            close() {}
+            send() {}
+        });
+        for (const runtime of ['Node', 'Bun', 'ReactNative', 'browser', 'worker']) {
+            set('window', runtime === 'browser' ? { document: {} } : undefined);
+            set('navigator', { product: runtime === 'ReactNative' ? runtime : 'Gecko' });
+            set('Bun', runtime === 'Bun' ? {} : undefined);
+            if (runtime === 'worker') set('importScripts', () => {});
+            else delete globalThis.importScripts;
+            const browser = runtime === 'browser' || runtime === 'worker';
+            const client = new St3Client({ baseUrl: 'https://example.test', credential: () => 'secret' });
+            opened.length = 0;
+            const streams = [
+                await client.terminalStream('terminal/example', { streamCapability: 'attach-proof', onScreen() {} }),
+                await client.conversationStream('example', { onChange() {} }),
+                await client.collectionStream({ onFrame() {} }),
+            ];
+            const protocols = [
+                ['st3.client.terminal.v0', 'st3.cap.attach-proof'],
+                ['st3.client.conversation.v0'],
+                ['st3.client.collections.v0'],
+            ];
+            assert.equal(opened.length, 3, runtime);
+            for (const [index, args] of opened.entries()) {
+                assert.deepEqual(args[1], [...protocols[index], ...(browser ? ['st3.bearer.secret'] : [])], runtime);
+                assert.equal(args.length, browser ? 2 : 3, runtime);
+                if (!browser) assert.equal(args[2].headers.Authorization, 'Bearer secret', runtime);
+            }
+            streams.forEach(stream => stream.close());
+        }
+        set('window', { document: {} });
+        for (const credential of ['has space', 'has,comma', 'has/slash', 'has=padding', 'has\nnewline', 'nonascii-ä']) {
+            const client = new St3Client({ baseUrl: 'https://example.test', credential: () => credential });
+            const count = opened.length;
+            await assert.rejects(client.collectionStream({ onFrame() {} }), /HTTP token characters/);
+            assert.equal(opened.length, count);
+        }
+        const client = new St3Client({ baseUrl: 'https://example.test', credential: () => 'base64_URL-safe-123' });
+        const stream = await client.collectionStream({ onFrame() {} });
+        assert.deepEqual(opened.at(-1)[1], ['st3.client.collections.v0', 'st3.bearer.base64_URL-safe-123']);
+        stream.close();
+    } finally {
+        for (const [name, descriptor] of descriptors) {
+            if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+            else delete globalThis[name];
+        }
+    }
+});
+
 test('notesList reads the typed advisory current notes endpoint', async () => {
     const wire = require('../../../docs/st3/client-v0/fixtures/directive-notes.json');
     const calls = [];
@@ -220,7 +277,7 @@ test('follows terminal screens until the server ends the stream with its error',
     });
     assert.deepEqual(opened, [{
         url: 'wss://example.test/v1/client/terminals/terminal%2Frelease-shell/stream?incarnation=pty-4%3A2026-09-20T11%3A10%3A00Z',
-        protocols: ['st3.client.terminal.v0', 'st3.cap.capability-proof', 'st3.bearer.secret'],
+        protocols: ['st3.client.terminal.v0', 'st3.cap.capability-proof'],
         headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' },
     }]);
     socket.onmessage({ data: JSON.stringify(screenFixture) });
@@ -254,7 +311,7 @@ test('conversation stream opens at a cursor and delivers bounded changes', async
         onChange: change => received.push(change.value),
         socket: (url, protocols, headers) => { opened.push({ url, protocols, headers }); return socket; },
     });
-    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/conversations/example/stream?after=conversation-cursor%2Fowner%2Fexample%2F1.2.3', protocols: ['st3.client.conversation.v0', 'st3.bearer.secret'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
+    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/conversations/example/stream?after=conversation-cursor%2Fowner%2Fexample%2F1.2.3', protocols: ['st3.client.conversation.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
     const change = { kind: 'conversation-changes', session_id: 'session/example', items: [{ id: 'timeline-entry/example', sequence: 4, revision: 1, timestamp: snapshot.created_at, role: 'assistant', type: 'content', final: true, body: { media_type: 'text/plain', text: 'reply' } }], next_cursor: 'conversation-cursor/owner/example/1.3.3' };
     socket.onmessage({ data: JSON.stringify(envelope(change)) });
     assert.deepEqual(received, [change]);
@@ -274,7 +331,7 @@ test('collection stream holds commands until the socket opens and passes frames 
     const ends = [];
     const client = new St3Client({ baseUrl: 'https://example.test/', credential: () => 'secret', fetchImpl: async () => { throw new Error('no HTTP'); } });
     const stream = await client.collectionStream({ onFrame: frame => frames.push(frame), onEnd: error => ends.push(error), onOpen: () => lifecycle.push(['open']), onCommandSent: command => lifecycle.push([command.kind, command.id]), socket: (url, protocols, headers) => { opened.push({ url, protocols, headers }); return socket; } });
-    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/collections/stream', protocols: ['st3.client.collections.v0', 'st3.bearer.secret'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
+    assert.deepEqual(opened, [{ url: 'wss://example.test/v1/client/collections/stream', protocols: ['st3.client.collections.v0'], headers: { Authorization: 'Bearer secret', 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' } }]);
     stream.subscribe('missions', 'missions', 200);
     stream.subscribe('mine', 'attention', 50, { person: 'person/example' });
     assert.deepEqual(socket.sent, []);

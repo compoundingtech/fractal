@@ -97,17 +97,21 @@ export function applyWindow(window: CollectionWindow | undefined, frame: Collect
     return { items, hasMore: frame.has_more, snapshot: frame.snapshot };
 }
 
-function defaultTerminalSocket(url: string, protocols: string[], headers: Record<string, string>): CollectionSocket {
+function defaultTerminalSocket(url: string, protocols: string[], headers: Record<string, string>): TerminalSocket {
     const Socket = WebSocket as unknown as new (url: string, protocols: string[], options?: { headers: Record<string, string> }) => CollectionSocket;
-    if (typeof navigator !== 'undefined' && navigator.product === 'ReactNative') {
-        return new Socket(url, protocols, { headers });
+    // Browser windows and workers cannot supply WebSocket handshake headers.
+    const browser = (typeof window !== 'undefined' && typeof window.document !== 'undefined')
+        || (typeof navigator !== 'undefined' && 'importScripts' in globalThis);
+    if (!browser) return new Socket(url, protocols, { headers });
+    const authorization = headers.Authorization;
+    if (authorization) {
+        const credential = authorization.slice('Bearer '.length);
+        if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(credential)) {
+            throw new TypeError('The browser WebSocket credential must contain only HTTP token characters');
+        }
+        protocols = [...protocols, `st3.bearer.${credential}`];
     }
     return new Socket(url, protocols);
-}
-
-function authenticatedProtocols(protocols: string[], credential: string | undefined): string[] {
-    if (credential) protocols.push(`st3.bearer.${credential}`);
-    return protocols;
 }
 
 export class ClientError extends Error {
@@ -322,7 +326,7 @@ export class St3Client {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), authenticatedProtocols([TERMINAL_SUBPROTOCOL, `st3.cap.${options.streamCapability}`], credential), headers);
+        const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), [TERMINAL_SUBPROTOCOL, `st3.cap.${options.streamCapability}`], headers);
         let ended = false;
         const stop = () => { ended = true; socket.onmessage = null; socket.onclose = null; socket.onerror = null; };
         const end = (error?: Error) => { if (ended) return; stop(); options.onEnd?.(error); };
@@ -350,7 +354,7 @@ export class St3Client {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), authenticatedProtocols([CONVERSATION_SUBPROTOCOL], credential), headers);
+        const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), [CONVERSATION_SUBPROTOCOL], headers);
         let ended = false;
         const end = (error?: Error) => { if (ended) return; ended = true; socket.onmessage = null; socket.onclose = null; socket.onerror = null; options.onEnd?.(error); };
         socket.onmessage = event => {
@@ -376,7 +380,7 @@ export class St3Client {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? (defaultTerminalSocket as unknown as CollectionSocketFactory))(url.toString(), authenticatedProtocols([COLLECTIONS_SUBPROTOCOL], credential), headers);
+        const socket = (options.socket ?? (defaultTerminalSocket as unknown as CollectionSocketFactory))(url.toString(), [COLLECTIONS_SUBPROTOCOL], headers);
         let ended = false, open = false;
         const waiting: Record<string, unknown>[] = [];
         const stop = () => { ended = true; socket.onopen = null; socket.onmessage = null; socket.onclose = null; socket.onerror = null; };

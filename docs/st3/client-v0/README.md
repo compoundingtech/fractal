@@ -285,6 +285,10 @@ echoes only the normal stream protocol, never the credential. An explicit Author
 is selected before parsing the fallback, even if that fallback is empty or duplicated. Invalid
 explicit Authorization never falls back to another credential. Redact the credential protocol
 from reverse-proxy handshake logs.
+The TypeScript default transport uses this fallback only in browser windows and workers,
+validating the credential as an HTTP token before opening the socket. Node, Bun and React Native
+send Authorization headers without offering the bearer subprotocol; custom factories receive
+the normal protocols and headers.
 
 The gateway sends this CSP on bundle responses, including HEAD, SPA fallbacks and errors:
 
@@ -339,6 +343,8 @@ Raw-terminal capabilities remain single-use and their viewer guard detaches them
 
 Each collection socket holds up to 64 subscriptions by default. Set the top-level
 `client_subscription_limit` in `config.toml` to a positive integer to change the limit.
+The default is omitted when writing config, so it does not add an unknown key for older readers;
+an explicit non-default limit is preserved and requires a reader that supports it.
 An additional subscription receives an error with code `subscription-limit`; replacing an
 existing ID does not consume another slot, and unsubscribe frees its slot.
 
