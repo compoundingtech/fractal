@@ -148,8 +148,16 @@ pub(super) struct Plan {
 }
 
 pub(super) fn manual_member(connection: &Connection, member: &Member) -> Result<bool, St3Error> {
+    manual_member_at(connection, member, None)
+}
+
+pub(super) fn manual_member_at(
+    connection: &Connection,
+    member: &Member,
+    at: Option<u64>,
+) -> Result<bool, St3Error> {
     Ok(member.manual_rollout
-        || claim(connection, &member.claim, None)?
+        || claim(connection, &member.claim, at)?
             .and_then(|c| serde_json::from_value::<DesiredSubject>(c.body).ok())
             .is_some_and(|desired| crate::rollout::manual(&desired)))
 }

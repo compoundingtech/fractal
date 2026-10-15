@@ -4541,8 +4541,18 @@ impl Store {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<String>> {
+        self.mission_collection_ids_at(history, offset, limit, now_ms())
+    }
+
+    pub(crate) fn mission_collection_ids_at(
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        at_unix_ms: u128,
+    ) -> Result<Vec<String>> {
         Ok(self
-            .mission_collection_page(history, offset, limit, None)?
+            .mission_collection_page_at(history, offset, limit, None, at_unix_ms)?
             .into_iter()
             .map(|(id, _)| id)
             .collect())
@@ -4555,7 +4565,18 @@ impl Store {
         limit: usize,
         after: Option<&(u128, String)>,
     ) -> Result<Vec<(String, u128)>> {
-        let ended_since = recently_ended_since();
+        self.mission_collection_page_at(history, offset, limit, after, now_ms())
+    }
+
+    pub(crate) fn mission_collection_page_at(
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        after: Option<&(u128, String)>,
+        at_unix_ms: u128,
+    ) -> Result<Vec<(String, u128)>> {
+        let ended_since = at_unix_ms.saturating_sub(RECENTLY_ENDED_MS);
         let connection = self.readers.get();
         let mut statement = connection.prepare(
             "WITH ids AS (
@@ -14869,8 +14890,12 @@ impl Store {
 
     /// Current runs waiting on person steps, human gates or approvals.
     pub fn human_attention_runs(&self) -> Result<BTreeSet<String>> {
+        self.human_attention_runs_at(now_ms())
+    }
+
+    pub(crate) fn human_attention_runs_at(&self, now: u128) -> Result<BTreeSet<String>> {
         let mut items = self.mission_run_attention_items(None)?;
-        items.extend(self.person_attention_items(None, now_ms())?);
+        items.extend(self.person_attention_items(None, now)?);
         Ok(items.into_iter().filter_map(|item| item.mission_run).collect())
     }
 
@@ -15209,8 +15234,25 @@ impl Store {
         desired_lineage_from_tx(&connection, row.claim_id, same_declared_launch)
     }
 
-    pub(crate) fn suspension_lineage_from(&self, token: &str) -> Result<Vec<String>> {
-        desired_lineage_from_tx(&self.readers.get(), token.to_owned(), same_declared_launch)
+    /// Suspension ancestry from `token`, over the claims accepted at or before `at`.
+    pub(crate) fn suspension_lineage_from_at(&self, token: &str, at: Option<u64>) -> Result<Vec<String>> {
+        desired_lineage_from_at_tx(&self.readers.get(), token.to_owned(), same_declared_launch, at)
+    }
+
+    /// The kind of the declaration selected at a client snapshot.
+    pub(crate) fn selected_desired_kind_at(&self, subject: &str, at: Option<u64>) -> Result<Option<String>> {
+        smallclaims::touched::note_read(|| subject.to_owned());
+        let connection = self.readers.get();
+        desired_row_at(&connection, subject, at).map(|row| row.map(|row| row.kind))
+    }
+
+    /// `latest_actual_value` at a client snapshot.
+    pub(crate) fn latest_actual_value_at(&self, subject: &str, at: Option<u64>) -> Result<Option<Value>> {
+        if at.is_none() {
+            return self.latest_actual_value(subject);
+        }
+        smallclaims::touched::note_read(|| subject.to_owned());
+        latest_actual_at(&self.readers.get(), subject, at)
     }
 
     /// Only seats whose durable resume requests name this host need transfer reconciliation.
@@ -18123,6 +18165,9 @@ impl Store {
         subject: &str,
         at_index: u64,
     ) -> Result<Option<crate::model::CurrentHarnessView>> {
+        // The ended harness is read from the seat's own claims, so the evaluation that reads
+        // it must be revisited when one arrives.
+        smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
         Ok(harness_fold_at(&connection, subject, Some(at_index), true, false, true)?
             .filter(|harness| harness.state == "ended"))
@@ -19447,6 +19492,14 @@ fn adopt_declared_mission_revision_tx(
             Some(batch_id),
         )
         .map_err(internal)?;
+        if status == "draining" {
+            transaction
+                .execute(
+                    "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
+                    params![run_id, claim.accepted_at_unix_ms.to_string()],
+                )
+                .map_err(internal)?;
+        }
         return Ok((vec![claim.id], true));
     }
 
@@ -21878,11 +21931,22 @@ fn launch_lineage_from_tx(connection: &Connection, current: String) -> Result<Ve
 
 fn desired_lineage_from_tx(
     connection: &Connection,
-    mut current: String,
+    current: String,
     equivalent: fn(&Value, &Value) -> bool,
 ) -> Result<Vec<String>> {
+    desired_lineage_from_at_tx(connection, current, equivalent, None)
+}
+
+/// `desired_lineage_from_tx` over the claims accepted at or before `at`.
+fn desired_lineage_from_at_tx(
+    connection: &Connection,
+    mut current: String,
+    equivalent: fn(&Value, &Value) -> bool,
+    at: Option<u64>,
+) -> Result<Vec<String>> {
+    let visible = |claim: &ClaimRecord| at.is_none_or(|index| claim.store_index <= index);
     let mut lineage = vec![current.clone()];
-    while let Some(claim) = claim_by_id_tx(connection, &current)? {
+    while let Some(claim) = claim_by_id_tx(connection, &current)?.filter(visible) {
         // A claim that merges concurrent revisions has one predecessor per fork; follow the
         // first one that is still the same launch.
         let mut next = None;
@@ -21890,7 +21954,7 @@ fn desired_lineage_from_tx(
             if lineage.contains(predecessor) {
                 continue;
             }
-            if let Some(previous) = claim_by_id_tx(connection, predecessor)?
+            if let Some(previous) = claim_by_id_tx(connection, predecessor)?.filter(visible)
                 && previous.kind == "intent.desired"
                 && previous.subject == claim.subject
                 && equivalent(&previous.body, &claim.body)
@@ -35686,6 +35750,11 @@ mod tests {
     mod canonical_audit {
         use super::*;
         include!("store/canonical_audit.rs");
+    }
+
+    mod declarative_revision_timestamp_tests {
+        use super::*;
+        include!("store/declarative_revision_timestamp_tests.rs");
     }
 
     mod actual_purity_tests {

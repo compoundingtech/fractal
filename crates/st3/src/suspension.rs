@@ -282,11 +282,17 @@ pub fn current_at(store: &Store, subject: &str, at: Option<u64>) -> Result<Optio
     let Some(request) = requests.last() else {
         return Ok(None);
     };
+    // Only an agent declaration at this snapshot can be suspended; a stopped seat has none,
+    // whatever manual launch is still pending.
+    if store.selected_desired_kind_at(subject, at)?.as_deref() != Some("agent") {
+        return Ok(None);
+    }
     let lineage = store.suspension_lineage_at(subject, at)?;
+    let visible = |index: u64| at.is_none_or(|at| index <= at);
     let mut moved = false;
     if action(request) == Some("resume") && field(request, "host").is_some() {
         for token in &lineage {
-            if store.claim_by_id(token)?.is_some_and(|selected| {
+            if store.claim_by_id(token)?.filter(|claim| visible(claim.store_index)).is_some_and(|selected| {
                 selected.body.get("evidence").and_then(Value::as_array)
                     .is_some_and(|items| items.iter().any(|id| id.as_str() == Some(&request.id)))
             }) { moved = true; break; }
@@ -296,10 +302,10 @@ pub fn current_at(store: &Store, subject: &str, at: Option<u64>) -> Result<Optio
         .is_some_and(|token| lineage.iter().any(|item| item == token));
     if !applies
         && let Some(token) = evidence(request, 0)
-        && let Some((incumbent, _)) = crate::rollout::pending_manual_launch(store, subject)?
+        && let Some((incumbent, _)) = crate::rollout::pending_manual_launch_at(store, subject, at)?
     {
-        let incumbent_lineage = store.suspension_lineage_from(&incumbent)?;
-        let request_lineage = store.suspension_lineage_from(token)?;
+        let incumbent_lineage = store.suspension_lineage_from_at(&incumbent, at)?;
+        let request_lineage = store.suspension_lineage_from_at(token, at)?;
         applies = request_lineage.iter().any(|token| incumbent_lineage.contains(token));
     }
     if !moved && !applies {
