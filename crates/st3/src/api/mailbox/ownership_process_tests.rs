@@ -15,6 +15,9 @@ const ROLE: &str = "ST_TEST_OWNERSHIP_ROLE";
 const SUBJECT: &str = "agent/ownership-real-peer";
 const SESSION: &str = "owned-process-fixture";
 const LIMIT: Duration = Duration::from_secs(60);
+// Deliberately shared discovery inputs. These real peer helpers are NOT Claude plugin loaders;
+// the launch selector's unit controls separately exercise the generated override.
+const PLUGIN_SETTINGS: &str = r#"{"enabledPlugins":{"st-channel@st":true,"st3-channel@st3":true,"st3-channel@st2":true,"st2-channel@st2":true}}"#;
 
 async fn read(stream: &mut UnixStream) -> Value {
     tokio::time::timeout(LIMIT, async {
@@ -47,12 +50,15 @@ fn command(role: &str) -> Command {
         .env_clear()
         .envs(std::env::vars_os().filter(|(key, _)| {
             let key = key.to_string_lossy();
+            let copied_seat = role != "stripped-secondary"
+                && (key.starts_with("ST_DRIVER_")
+                    || matches!(
+                        key.as_ref(),
+                        "ST_AGENT" | "ST_CLAUDE_SESSION" | "ST_CLAUDE_SESSION_SEQ"
+                    ));
             key.starts_with("ST_TEST_OWNERSHIP_")
-                || key.starts_with("ST_DRIVER_")
-                || matches!(
-                    key.as_ref(),
-                    "ST_AGENT" | "ST_CLAUDE_SESSION" | "ST_CLAUDE_SESSION_SEQ" | "HOME" | "PATH"
-                )
+                || matches!(key.as_ref(), "HOME" | "PATH")
+                || copied_seat
         }));
     command.args([
         "--exact",
@@ -75,6 +81,27 @@ fn wait_children(children: Vec<Child>) {
 }
 
 async fn helper(role: &str) {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        home.canonicalize().unwrap()
+    );
+    for path in [".claude/settings.json", ".claude/settings.local.json"] {
+        assert_eq!(
+            fs::read(home.join(path)).unwrap(),
+            PLUGIN_SETTINGS.as_bytes()
+        );
+    }
+    if role == "stripped-secondary" {
+        assert!(std::env::vars_os().all(|(key, _)| {
+            let key = key.to_string_lossy();
+            key.starts_with("ST_TEST_OWNERSHIP_")
+                || !(key.starts_with("ST_")
+                    || key.starts_with("ST3_")
+                    || key.starts_with("CLAUDE_CODE_")
+                    || key.starts_with("CLAUDECODE"))
+        }));
+    }
     let mut control = UnixStream::connect(std::env::var_os("ST_TEST_OWNERSHIP_CONTROL").unwrap())
         .await
         .unwrap();
@@ -120,7 +147,7 @@ async fn helper(role: &str) {
         let roles: &[&str] = if role == "provider" {
             &["primary", "nested"]
         } else {
-            &["secondary", "secondary-title"]
+            &["secondary", "secondary-title", "stripped-secondary"]
         };
         for role in roles {
             children.push(command(role).spawn().unwrap());
@@ -268,6 +295,10 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
     for nested_first in [false, true] {
         for secondary_closes_first in [false, true] {
             let root = tempfile::tempdir().unwrap();
+            fs::create_dir(root.path().join(".claude")).unwrap();
+            for path in [".claude/settings.json", ".claude/settings.local.json"] {
+                fs::write(root.path().join(path), PLUGIN_SETTINGS).unwrap();
+            }
             let mut state = crate::api::tests::state(root.path());
             // Hosted Linux uses the pinned devShell ptyPackage (flake.nix), never a skip.
             state.pty_binary =
@@ -396,7 +427,7 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                 pids.insert(role.clone(), pid);
                 links.insert(role, link);
             }
-            while links.len() < 4 {
+            while links.len() < 5 {
                 let (role, link, pid) = accept(&listener).await;
                 pids.insert(role.clone(), pid);
                 links.insert(role, link);
@@ -474,20 +505,22 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                 .remove(&(state.state_dir.clone(), SUBJECT.into()));
             let requested = Fence::new(SUBJECT, &incarnation, "delivery");
             if nested_first {
-                assert_eq!(
-                    call(
-                        links.get_mut("secondary").unwrap(),
-                        json!({"op":"bind","fence":requested})
-                    )
-                    .await["ok"],
-                    false
-                );
-                assert!(
-                    !authority::primary_bindings()
-                        .lock()
-                        .unwrap()
-                        .contains_key(&(state.state_dir.clone(), SUBJECT.into()))
-                );
+                for role in ["secondary", "stripped-secondary"] {
+                    assert_eq!(
+                        call(
+                            links.get_mut(role).unwrap(),
+                            json!({"op":"bind","fence":requested})
+                        )
+                        .await["ok"],
+                        false
+                    );
+                    assert!(
+                        !authority::primary_bindings()
+                            .lock()
+                            .unwrap()
+                            .contains_key(&(state.state_dir.clone(), SUBJECT.into()))
+                    );
+                }
             }
             let bound = call(
                 links.get_mut("primary").unwrap(),
@@ -529,34 +562,36 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
             assert_eq!(captures.1.pid, wrapper_pid);
             let before = count(&state.store);
             for _ in 0..16 {
-                assert_eq!(
-                    call(
-                        links.get_mut("secondary").unwrap(),
-                        json!({"op":"bind","fence":fence})
-                    )
-                    .await["ok"],
-                    false
-                );
-                assert_eq!(
-                    call(
-                        links.get_mut("secondary").unwrap(),
-                        json!({"op":"open","fence":fence})
-                    )
-                    .await["ok"],
-                    false
-                );
-                // The primary stays actively healthy while the bounded adversarial cohort runs.
-                assert_eq!(
-                    call(links.get_mut("primary").unwrap(), json!({"op":"report"})).await["ok"],
-                    true
-                );
-                state.store.check_mailbox(&fence).unwrap();
-                assert!(crate::api::claude_channel_attached(
-                    &state.store,
-                    SUBJECT,
-                    &incarnation
-                ));
-                assert_eq!(count(&state.store), before);
+                for role in ["secondary", "stripped-secondary"] {
+                    assert_eq!(
+                        call(
+                            links.get_mut(role).unwrap(),
+                            json!({"op":"bind","fence":fence})
+                        )
+                        .await["ok"],
+                        false
+                    );
+                    assert_eq!(
+                        call(
+                            links.get_mut(role).unwrap(),
+                            json!({"op":"open","fence":fence})
+                        )
+                        .await["ok"],
+                        false
+                    );
+                    // The primary stays actively healthy while the bounded adversarial cohort runs.
+                    assert_eq!(
+                        call(links.get_mut("primary").unwrap(), json!({"op":"report"})).await["ok"],
+                        true
+                    );
+                    state.store.check_mailbox(&fence).unwrap();
+                    assert!(crate::api::claude_channel_attached(
+                        &state.store,
+                        SUBJECT,
+                        &incarnation
+                    ));
+                    assert_eq!(count(&state.store), before);
+                }
             }
             assert_eq!(
                 call(
@@ -571,10 +606,12 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                 "a nested wrapper label is not its kernel peer PID"
             );
             for op in ["error", "close"] {
-                assert_eq!(
-                    call(links.get_mut("secondary").unwrap(), json!({"op":op})).await["ok"],
-                    true
-                );
+                for role in ["secondary", "stripped-secondary"] {
+                    assert_eq!(
+                        call(links.get_mut(role).unwrap(), json!({"op":op})).await["ok"],
+                        true
+                    );
+                }
             }
             state.store.check_mailbox(&fence).unwrap();
             state.store.check_mailbox(&title).unwrap();
@@ -743,10 +780,12 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
             let before = count(&state.store);
 
             if secondary_closes_first {
-                assert_eq!(
-                    call(links.get_mut("secondary").unwrap(), json!({"op":"quit"})).await["ok"],
-                    true
-                );
+                for role in ["secondary", "stripped-secondary"] {
+                    assert_eq!(
+                        call(links.get_mut(role).unwrap(), json!({"op":"quit"})).await["ok"],
+                        true
+                    );
+                }
                 assert!(crate::api::claude_channel_attached(
                     &state.store,
                     SUBJECT,
@@ -783,10 +822,12 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                 true
             );
             if !secondary_closes_first {
-                assert_eq!(
-                    call(links.get_mut("secondary").unwrap(), json!({"op":"quit"})).await["ok"],
-                    true
-                );
+                for role in ["secondary", "stripped-secondary"] {
+                    assert_eq!(
+                        call(links.get_mut(role).unwrap(), json!({"op":"quit"})).await["ok"],
+                        true
+                    );
+                }
             }
             assert_eq!(count(&state.store), before);
             assert_eq!(
@@ -803,6 +844,12 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
             );
             assert_eq!(call(&mut provider, json!({"op":"quit"})).await["ok"], true);
             assert_eq!(call(&mut wrapper, json!({"op":"quit"})).await["ok"], true);
+            for path in [".claude/settings.json", ".claude/settings.local.json"] {
+                assert_eq!(
+                    fs::read(root.path().join(path)).unwrap(),
+                    PLUGIN_SETTINGS.as_bytes()
+                );
+            }
             server.abort();
         }
     }

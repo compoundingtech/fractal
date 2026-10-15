@@ -282,7 +282,8 @@ fn select_st3_channel_plugin(mut argv: Vec<String>, packaged: bool) -> Result<Ve
         serde_json::json!({"enabledPlugins": {
             "st-channel@st": packaged,
             "st3-channel@st3": false,
-            "st3-channel@st2": false
+            "st3-channel@st2": false,
+            "st2-channel@st2": false
         }})
         .to_string(),
     ]);
@@ -2239,7 +2240,8 @@ mod tests {
                 "st2-channel@st2": true,
                 "bridge@tools": true
             },
-            "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "observe"}]}]}
+            "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "observe"}]}]},
+            "permissions": {"allow": ["Read(./notes/**)"], "deny": ["Read(./private/**)"]}
         });
         let argv = vec![
             "claude".into(),
@@ -2258,9 +2260,10 @@ mod tests {
             assert_eq!(settings["enabledPlugins"]["st-channel@st"], packaged);
             assert_eq!(settings["enabledPlugins"]["st3-channel@st3"], false);
             assert_eq!(settings["enabledPlugins"]["st3-channel@st2"], false);
-            assert_eq!(settings["enabledPlugins"]["st2-channel@st2"], true);
+            assert_eq!(settings["enabledPlugins"]["st2-channel@st2"], false);
             assert_eq!(settings["enabledPlugins"]["bridge@tools"], true);
             assert_eq!(settings["hooks"], authored["hooks"]);
+            assert_eq!(settings["permissions"], authored["permissions"]);
             assert_eq!(select_st3_channel_plugin(selected.clone(), packaged).unwrap(), selected);
         }
     }
@@ -2273,6 +2276,7 @@ mod tests {
         assert_eq!(settings["enabledPlugins"]["st-channel@st"], true);
         assert_eq!(settings["enabledPlugins"]["st3-channel@st3"], false);
         assert_eq!(settings["enabledPlugins"]["st3-channel@st2"], false);
+        assert_eq!(settings["enabledPlugins"]["st2-channel@st2"], false);
     }
 
     #[test]
