@@ -643,7 +643,7 @@ fn a_denial_cleared_after_validation_is_refused_again_inside_the_writer() {
                     &body,
                     std::slice::from_ref(&denial.id),
                     None,
-                    &native_prompt_answer_key(&denial.id),
+                    &format!("native-prompt-answer:{}", denial.id),
                 )
             })
             .unwrap()

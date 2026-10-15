@@ -1,6 +1,5 @@
 use super::tests::{json_request, state};
 use super::*;
-use tower::ServiceExt as _;
 
 async fn owner_get(app: Router, path: &str, person: &str) -> (StatusCode, Value) {
     let response = app
