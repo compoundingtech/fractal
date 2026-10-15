@@ -75,9 +75,11 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
   const now = useNow()
   const [requestedAt] = React.useState(now)
   const gateway = useGatewaySync()
+  const scopedRoot = native.trace.nativeSessionId._tag === 'Known' ? native.trace.nativeSessionId.value : undefined
   const supplement = useDetailsSupplement({
     agentRef,
-    ...(native.nativeSessionId === undefined ? {} : { nativeSessionId: native.nativeSessionId }),
+    ...(scopedRoot === undefined ? {} : { nativeSessionId: scopedRoot }),
+    canRefresh: native.nativeSessionId !== undefined,
     ...(native.incarnationId === undefined ? {} : { incarnationId: native.incarnationId }),
     ...(native.host === undefined ? {} : { host: native.host }),
     ...(native.harness === undefined ? {} : { harness: native.harness }),
@@ -85,7 +87,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
   const data = detailsWithSupplement({
     trace: native.trace, overview: native.overview, supplement,
     ...(native.harness === undefined ? {} : { harness: native.harness }),
-    ...(native.nativeSessionId === undefined ? {} : { nativeSessionId: native.nativeSessionId }),
+    ...(scopedRoot === undefined ? {} : { nativeSessionId: scopedRoot }),
   })
   const sections = visibleDetailsSections(suppliedSections, data.trace)
   const unreportedSections = suppliedSections.filter(section => section.items._tag === 'Unknown' && !sections.includes(section)).map(section => section.title)
@@ -107,7 +109,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
     {native.harness === 'omp' && <p role="status" data-details-supplement-state={supplement._tag} {...stylex.props(styles.coverage)}>
       {supplement._tag === 'Waiting' ? 'Descendant observations are loading independently of native session facts.'
         : supplement._tag === 'Unavailable' ? `Descendant observations unavailable: ${supplement.detail}`
-          : supplement.freshness === 'stale' ? 'Last observed descendant ledger coverage · 7d as reported. Percentages describe window-global monetary attribution, not root completeness.' : 'Descendant ledger coverage · 7d as reported. Percentages describe window-global monetary attribution, not root completeness; exact cut bounds and observation time are not supplied.'}
+          : supplement.freshness === 'stale' ? `Last good descendant read ${supplement.value.receivedAtMs === undefined ? '(age unreported)' : `${Math.max(0, Math.floor((now - supplement.value.receivedAtMs) / 1000))}s ago`} · retained/stale. ${supplement.error?.detail ?? 'Last successful read retained while revalidating.'} Coverage is window-global monetary attribution, not root completeness.` : 'Descendant ledger coverage · 7d as reported. Percentages describe window-global monetary attribution, not root completeness; exact cut bounds and producer observation time are not supplied.'}
     </p>}
     <DetailsPane overview={data.overview} sections={sections} trace={data.trace} now={now}
       variants={variants} state={native.state} intent={intent} onIntentChange={onIntentChange}

@@ -65,6 +65,16 @@ describe('independent Details metric composition', () => {
       expect(result.trace.subagents).toEqual({ _tag: 'Unknown', reason: 'not-covered' })
     }
   })
+  it('keeps matching stale financial facts visible without reconciling them with native self spend', () => {
+    const native = trace()
+    const value = { ...supplement(), receivedAtMs: 1_500 }
+    const retained = observed({ value, freshness: 'stale' })
+    const result = detailsWithSupplement({ trace: native, overview, supplement: retained, harness: 'omp', nativeSessionId: value.nativeSessionId })
+    expect(result.trace.meters.spend.totalUsd).toBe(value.totalUsd)
+    expect(result.trace.meters.spend.mainUsd).toBe(native.meters.spend.mainUsd)
+    expect(result.trace.meters.context).toBe(native.meters.context)
+    expect(detailsWithSupplement({ trace: native, overview, supplement: retained, harness: 'omp', nativeSessionId: 'different-root' }).trace).toBe(native)
+  })
   it('keeps native facts when a private root is not found or the relay is unavailable', () => {
     const native = trace()
     const result = detailsWithSupplement({ trace: native, overview, supplement: unavailable({ reason: 'failed', detail: 'Root not found in reported cut; hub may lag.' }), harness: 'omp', nativeSessionId: supplement().nativeSessionId })

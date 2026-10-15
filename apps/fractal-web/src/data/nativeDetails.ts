@@ -143,7 +143,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
       since: statusSince === undefined || DateTime.toEpochMillis(statusSince) > now ? undefined : durationText(now - DateTime.toEpochMillis(statusSince)),
       age: 'Incarnation launch age unreported',
     }, sections,
-    trace: { agentId: agentRef, nativeSessionId: root === undefined ? unknown('No unique usage root proven by a current-incarnation native binding.', 'not-attributed') : known(root),
+    trace: { agentId: agentRef, nativeSessionId: attributedRoot === undefined ? unknown('No unique usage root proven by a current-incarnation native binding.', 'not-attributed') : known(attributedRoot),
       meters: { context: { reportedPercent: occupancy._tag === 'Known' ? known(occupancy.usedPercent, occupancy.observedAt) : unknown('Context occupancy not reported for this incarnation fence.'), usedTokens: occupancy._tag === 'Known' ? contextField(occupancy.usedTokens) : unknown('Context tokens not reported.'), windowTokens: occupancy._tag === 'Known' ? contextField(occupancy.windowTokens) : unknown('Context capacity not reported.'), compactions: contextField(context?.compactions), lastCompactionMs: contextField(context?.last_compaction_ms === undefined ? undefined : Duration.toMillis(context.last_compaction_ms)) },
         spend: { usdScope: { _tag: 'IncludingSubagents' }, usdWindow: unknown('Descendant period not reported.'), totalUsdCoverage: { _tag: 'Unavailable', reason: 'not-covered' }, totalUsd: unsupported,
           mainUsdScope: { _tag: 'Self' }, mainUsdWindow: nativeWindow, mainUsdCoverage: nativeCoverage, mainUsd: hasPeriod ? known(cost, period?.until_ms) : unknown('No native period rows attributed to the selected root.', 'not-attributed'),

@@ -88,6 +88,7 @@ describe('fixture-free native Details projection', () => {
     const result = project({ selectedPeriod: { _tag: 'Observed', value: period, freshness: 'stale', error: { reason: 'failed', detail: 'Read failed' } } })
     expect(result.stale).toBe(true)
     expect(result.nativeSessionId).toBeUndefined()
+    expect(result.trace.nativeSessionId).toEqual({ _tag: 'Known', value: 'native/root', source: 'st' })
     expect(result.trace.meters.spend.mainUsd).toMatchObject({ _tag: 'Known', value: 3.5 })
   })
   it('refuses snapshot-dated starts instead of presenting a fresh elapsed time or age', () => {

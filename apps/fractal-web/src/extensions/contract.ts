@@ -67,6 +67,8 @@ export interface ExtensionFixtures {
 export interface DetailsSupplementQuery {
   readonly agentRef: string
   readonly nativeSessionId?: string
+  /** False permits matching retained observations only, never another provider read. */
+  readonly canRefresh?: boolean
   readonly incarnationId?: string
   /** Canonical native host reference used for identity, not a formatted display name. */
   readonly host?: string
@@ -81,6 +83,8 @@ export interface DetailsSupplement {
   readonly subagentsWindow: TraceFact<TraceAccumulationWindow>
   readonly subagentCount: TraceFact<number>
   readonly durations?: readonly DetailsDisplayObservation[]
+  /** Client time of the last successful read, not the producer's observation time. */
+  readonly receivedAtMs?: number
 }
 export type UseDetailsSupplement = (query: DetailsSupplementQuery) => Feed<DetailsSupplement>
 /** Protected host metadata sections are independent of any trace/root binding. */
