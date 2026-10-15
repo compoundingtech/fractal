@@ -1623,6 +1623,12 @@ async fn follow_conversation_since(
                     if matches!(error.code.as_str(), "cursor-gap" | "page-cursor-expired") =>
                 {
                     record_conversation_reopen(&id, &session_id, remote.is_some(), "replay-gap", &error.code, 0);
+                    // An expired page cursor is a native read that refuses, not a cursor to
+                    // replace: opening again meets the same refusal (a newest prefix of hidden
+                    // delivery echoes past the scan budget), so wait before the next attempt.
+                    if error.code == "page-cursor-expired" {
+                        tokio::time::sleep(COLLECTION_REREAD_INTERVAL).await;
+                    }
                     break;
                 }
                 Err(error) if client_error_retryable(error.status, Some(&error.code)) => {
@@ -6144,7 +6150,7 @@ fn canonical_native_slice(
             // Not cursor-gap: that code asks the client to reload the newest page, which meets
             // the same hidden prefix and the same error, so older history would be unreachable.
             return Err(client_page_expired(
-                "the correlated native prefix exceeded the bounded keyset read; restart pagination",
+                "more consecutive delivery echoes than one bounded read examines hide the next native entries; the page cannot continue",
             ));
         }
         let mut next = conversation_blocks::read_slice(
@@ -20359,29 +20365,55 @@ mission "example/zero-run" state="ready" {
         assert!(error.details.get("full_resync").is_none());
     }
 
-    /// A newest prefix of nothing but hidden echoes as long as the budget leaves nothing to show:
-    /// the native read refuses with an expired page cursor, never `cursor-gap` (reloading the
-    /// newest page would meet the same prefix and loop). OPEN falls back to the stored timeline;
-    /// the header's head read and change replay surface the error.
-    #[test]
-    fn timeline_send_identity_budget_without_a_visible_entry_expires_the_native_read() {
-        let root = tempfile::tempdir().unwrap();
-        let home = root.path().join("home");
+    /// One graph send addressed to `owner` for `session_id`, and the native client id its echo
+    /// carries in a Codex transcript of thread `thread`.
+    fn graph_send_and_echo_id(
+        state: &AppState, owner: &str, session_id: &str, thread: &str, subject: &str,
+    ) -> String {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "message.sent".into(), actor: Some("person/alex".into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!("person/alex")), ("to".into(), json!(owner)),
+                ("session_id".into(), json!(session_id)), ("content".into(), json!("send")),
+                ("status".into(), json!("sent")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        st_drivers::codex_app_server::stable_client_user_message_id(owner, thread, subject)
+    }
+
+    /// A Codex transcript line at `second` (seconds from 2099-01-01); an echo carries `client_id`.
+    fn codex_line(text: &str, role: &str, client_id: Option<&str>, second: usize) -> String {
+        let mut payload = json!({
+            "type":"message", "role":role, "id":text,
+            "content":[{"type": if role == "user" { "input_text" } else { "output_text" }, "text":text}],
+        });
+        if let Some(client_id) = client_id {
+            payload["clientId"] = json!(client_id);
+        }
+        format!("{}\n", json!({
+            "type":"response_item",
+            "timestamp":format!("2099-01-01T{:02}:{:02}:{:02}Z", second / 3600, second / 60 % 60, second % 60),
+            "payload":payload,
+        }))
+    }
+
+    /// A managed Codex session whose transcript is `NATIVE_ECHO_SCAN_ITEMS + 8` exact echoes of
+    /// graph sends after one visible answer: nothing visible lies within the scan budget.
+    fn hidden_echo_prefix_fixture(root: &Path) -> (AppState, String) {
+        let home = root.join("home");
         let transcript = home.join(".codex/sessions/2026/09/24/budget.jsonl");
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         let owner = "agent/budget-codex";
         let incarnation = "native-pty:one";
         let provider_incarnation = "provider-one";
         let native_id = "native-budget-codex-test";
-        let state = {
-            let mut state = test_state_named(root.path(), "budget-codex-test");
-            state.native_session_home = Some(home);
-            state
-        };
+        let mut state = test_state_named(root, "budget-codex-test");
+        state.native_session_home = Some(home);
         let session_id = super::managed_session_id(owner, incarnation);
-        let mut text = format!("{}\n{}\n",
-            json!({"type":"session_meta","timestamp":"2026-09-24T12:00:00Z","payload":{"id":native_id,"cwd":root.path(),"source":"test"}}),
-            json!({"type":"response_item","timestamp":"2026-09-24T12:00:01Z","payload":{"type":"message","role":"assistant","id":"answer-old","content":[{"type":"output_text","text":"answer-old"}]}}),
+        let mut text = format!("{}\n{}",
+            json!({"type":"session_meta","timestamp":"2026-09-24T12:00:00Z","payload":{"id":native_id,"cwd":root,"source":"test"}}),
+            codex_line("answer-old", "assistant", None, 0),
         );
         std::fs::write(&transcript, &text).unwrap();
         let directory = state.state_dir.join("drivers")
@@ -20409,36 +20441,32 @@ mission "example/zero-run" state="ready" {
         }
         // The sends follow the runtime observation: only then do they belong to this session.
         for number in 0..NATIVE_ECHO_SCAN_ITEMS + 8 {
-            let subject = format!("message/budget-open-{number}");
-            state.store.append_claim(&ClaimInput {
-                subject: subject.clone(), kind: "message.sent".into(), actor: Some("person/alex".into()),
-                fields: BTreeMap::from([
-                    ("from".into(), json!("person/alex")), ("to".into(), json!(owner)),
-                    ("session_id".into(), json!(session_id)), ("content".into(), json!("send")),
-                    ("status".into(), json!("sent")),
-                ]),
-                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-            }).unwrap();
-            let client_id = st_drivers::codex_app_server::stable_client_user_message_id(owner, native_id, &subject);
-            let second = number + 2;
-            text += &format!("{}\n", json!({
-                "type":"response_item",
-                "timestamp":format!("2026-09-24T13:{:02}:{:02}Z", second / 60 % 60, second % 60),
-                "payload":{"type":"message","role":"user","id":format!("echo-{number}"),"clientId":client_id,
-                    "content":[{"type":"input_text","text":format!("echo-{number}")}]},
-            }));
+            let client_id = graph_send_and_echo_id(
+                &state, owner, &session_id, native_id, &format!("message/budget-open-{number}"),
+            );
+            text += &codex_line(&format!("echo-{number}"), "user", Some(&client_id), number + 1);
         }
         std::fs::write(&transcript, text).unwrap();
+        (state, session_id)
+    }
+
+    fn assert_expired_without_resync(error: ApiError) {
+        assert_eq!(error.status, StatusCode::GONE);
+        assert_eq!(error.code, "page-cursor-expired");
+        assert!(error.details.get("full_resync").is_none());
+    }
+
+    /// A newest prefix of nothing but hidden echoes as long as the budget leaves nothing to show:
+    /// the native read refuses with an expired page cursor, never `cursor-gap` (reloading the
+    /// newest page would meet the same prefix and loop). OPEN falls back to the stored timeline;
+    /// change replay surfaces the error.
+    #[test]
+    fn timeline_send_identity_budget_without_a_visible_entry_expires_the_native_read() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, session_id) = hidden_echo_prefix_fixture(root.path());
         let session = ClientSession::local(Some("person/alex")).unwrap();
-        let expired = |error: ApiError| {
-            assert_eq!(error.status, StatusCode::GONE);
-            assert_eq!(error.code, "page-cursor-expired");
-            assert!(error.details.get("full_resync").is_none());
-        };
         conversation_blocks::source(&state, &session_id).expect("the managed transcript is bound");
-        // OPEN never answers cursor-gap here (its client would reload into the same prefix): it
-        // keeps the established stored-timeline fallback with no native generation, and change
-        // replay from that cursor surfaces the expired page cursor.
+        // OPEN keeps the established stored-timeline fallback, with no native generation.
         let (start, opened) = conversation_open_local(&state, &session, &session_id).unwrap();
         assert!(opened["items"].as_array().unwrap().iter().all(|item|
             !item["id"].as_str().unwrap_or_default().starts_with("timeline-entry/native-")), "{opened:#}");
@@ -20447,15 +20475,141 @@ mission "example/zero-run" state="ready" {
                 .unwrap().source_generation,
             0,
         );
-        expired(conversation_read_now(&state, &session, &session_id, start["next_cursor"].as_str()).unwrap_err());
-        // The header's head read is the same bounded read at the page size.
+        let error = conversation_read_now(&state, &session, &session_id, start["next_cursor"].as_str())
+            .unwrap_err();
+        assert!(!error.message.contains("restart pagination"), "{}", error.message);
+        assert_expired_without_resync(error);
+    }
+
+    /// While the newest entries are all hidden echoes, a change that concerns the conversation
+    /// makes the replay refuse with an expired page cursor and the follower re-OPEN. It must wait
+    /// before that next attempt: a refusal that opening again cannot cure is not retried at once.
+    #[tokio::test]
+    async fn timeline_send_identity_budget_expiry_does_not_reopen_in_a_hot_loop() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, session_id) = hidden_echo_prefix_fixture(root.path());
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let follower = tokio::spawn(follow_conversation(
+            state.clone(), ClientSession::local(Some("person/alex")).unwrap(), "chat".into(), 1,
+            (session_id.clone(), None), sender, Queue::new(Kind::Conversation), (None, None),
+        ));
+        let first = tokio::time::timeout(Duration::from_secs(10), receiver.recv())
+            .await.unwrap().unwrap().2;
+        assert_eq!(first["replace"], true);
+        // A new send to the session concerns the conversation and wakes the replay.
+        graph_send_and_echo_id(
+            &state, "agent/budget-codex", &session_id, "native-budget-codex-test", "message/budget-wakes-replay",
+        );
+        let mut reopened = 0;
+        let deadline = tokio::time::Instant::now() + COLLECTION_REREAD_INTERVAL / 2;
+        while let Ok(Some((_, _, frame))) = tokio::time::timeout_at(deadline, receiver.recv()).await {
+            if frame["replace"] == true {
+                reopened += 1;
+            }
+        }
+        follower.abort();
+        assert_eq!(reopened, 0, "re-OPENed within {:?} of the refused replay", COLLECTION_REREAD_INTERVAL / 2);
+    }
+
+    /// A transcript for the paged-read tests: `visible` answers, then `hidden` graph sends whose
+    /// echoes are NOT yet in the file (a test appends them with [`append_echoes`]).
+    fn page_fixture(
+        root: &Path, name: &str, visible: usize, hidden: usize,
+    ) -> (AppState, String, std::path::PathBuf, crate::external_sessions::ExternalSession, Vec<String>) {
+        let state = test_state_named(root, name);
+        let owner = format!("agent/{name}");
+        let incarnation = format!("{name}-one");
+        let session_id = super::managed_session_id(&owner, &incarnation);
+        state.store.append_claim(&ClaimInput {
+            subject: owner.clone(), kind: "runtime.observed".into(), actor: Some(owner.clone()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")), ("runtime_id".into(), json!(name)),
+                ("incarnation_id".into(), json!(incarnation)), ("terminal".into(), json!(true)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let echo_ids = (0..hidden).map(|number| graph_send_and_echo_id(
+            &state, &owner, &session_id, "paging-test", &format!("message/{name}-{number}"),
+        )).collect();
+        let path = root.join(format!("{name}.jsonl"));
+        std::fs::write(&path, (0..visible)
+            .map(|number| codex_line(&format!("answer-{number}"), "assistant", None, number))
+            .collect::<String>()).unwrap();
+        let source = page_test_source(&path, &session_id);
+        (state, session_id, path, source, echo_ids)
+    }
+
+    fn append_echoes(path: &Path, client_ids: &[String], first_second: usize) {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        for (number, client_id) in client_ids.iter().enumerate() {
+            file.write_all(codex_line(
+                &format!("late-echo-{number}"), "user", Some(client_id), first_second + number,
+            ).as_bytes()).unwrap();
+        }
+    }
+
+    /// The header summarizes the newest entries with its own bounded read. Echoes appended after
+    /// a page cursor was issued leave the continuation itself readable (appends keep a cursor
+    /// valid) but hide the whole head: the continuation is an expired page cursor, not a page
+    /// with a header from nothing.
+    #[test]
+    fn timeline_send_identity_header_read_refuses_a_hidden_head_of_a_valid_continuation() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, session_id, path, source, echo_ids) =
+            page_fixture(root.path(), "send-identity-header", 6, NATIVE_ECHO_SCAN_ITEMS + 8);
         let snapshot = new_client_snapshot(&state);
-        let source = conversation_blocks::source(&state, &session_id).unwrap();
-        let messages = native_session_messages(&state, &snapshot, &session_id).unwrap();
-        expired(canonical_native_slice(
-            &state, &snapshot, &source, &session, &session_id, &messages,
-            crate::external_sessions::TimelineOrder::TimestampSequence, None, CLIENT_MAX_PAGE_ITEMS,
-        ).map(|_| ()).unwrap_err());
+        let mut session = ClientSession::local(Some("person/alex")).unwrap();
+        session.conversation_blocks = true;
+        let first = native_slice_page(
+            &state, &snapshot, &session, &session_id,
+            &ClientListQuery { limit: Some(2), ..Default::default() }, &source,
+        ).unwrap().0;
+        assert_eq!(first["page"]["has_more"], true);
+        let next = ClientListQuery {
+            limit: Some(2), cursor: first["page"]["next_cursor"].as_str().map(str::to_owned),
+            ..Default::default()
+        };
+        // Unchanged, the continuation (and its separate head read) is a normal page.
+        let unchanged = native_slice_page(&state, &snapshot, &session, &session_id, &next, &source)
+            .unwrap().0;
+        assert_eq!(unchanged["items"].as_array().unwrap().len(), 2);
+        append_echoes(&path, &echo_ids, 100);
+        let error = native_slice_page(&state, &snapshot, &session, &session_id, &next, &source)
+            .unwrap_err();
+        assert!(error.message.contains("delivery echoes"), "from the head read: {}", error.message);
+        assert_expired_without_resync(error);
+    }
+
+    /// A cursor carries the transcript generation it was issued at: an in-place rewrite of the
+    /// same file (same basis, new generation) expires the continuation.
+    #[test]
+    fn timeline_send_identity_cursor_generation_must_match_the_native_slice() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, session_id, path, source, _) =
+            page_fixture(root.path(), "send-identity-generation", 6, 0);
+        let snapshot = new_client_snapshot(&state);
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let first = native_slice_page(
+            &state, &snapshot, &session, &session_id,
+            &ClientListQuery { limit: Some(2), ..Default::default() }, &source,
+        ).unwrap().0;
+        let next = ClientListQuery {
+            limit: Some(2), cursor: first["page"]["next_cursor"].as_str().map(str::to_owned),
+            ..Default::default()
+        };
+        native_slice_page(&state, &snapshot, &session, &session_id, &next, &source).unwrap();
+        // Same file and inode, a different last complete record.
+        let mut rewritten = (0..5)
+            .map(|number| codex_line(&format!("answer-{number}"), "assistant", None, number))
+            .collect::<String>();
+        rewritten += &codex_line("rewritten-last", "assistant", None, 5);
+        std::fs::OpenOptions::new().write(true).truncate(true).open(&path).unwrap();
+        std::fs::write(&path, rewritten).unwrap();
+        let error = native_slice_page(&state, &snapshot, &session, &session_id, &next, &source)
+            .unwrap_err();
+        assert_eq!(error.code, "page-cursor-expired");
+        assert!(error.message.contains("replaced while paging"), "{}", error.message);
     }
 
     /// The header's head read must be from the page's own basis and generation: a transcript

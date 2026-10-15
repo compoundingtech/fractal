@@ -783,7 +783,8 @@ and its last visible entry as the boundary, so the next page reads on with a fre
 that many consecutive entries are all suppressed echoes and none is visible, the read answers
 `page-cursor-expired` (HTTP 410, no `full_resync`) on a continuation, on the header's head read
 and on change replay; it is not `cursor-gap`, because reloading the newest page would meet the
-same prefix. OPEN keeps its established stored-timeline fallback in that case. A transcript with
+same prefix. OPEN keeps its established stored-timeline fallback in that case, and a following
+stream waits before it re-opens after such a refusal. A transcript with
 more than 4096 consecutive correlated delivery echoes therefore cannot be paged past by cursor,
 and while its newest 4096 entries are all echoes its native entries cannot be shown; this is an
 accepted, known limit.
