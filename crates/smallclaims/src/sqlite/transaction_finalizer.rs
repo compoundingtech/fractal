@@ -404,6 +404,7 @@ mod tests {
                 }),
                 profile: None,
                 wait: None,
+                holder: crate::windows::holds::Holder::current(),
                 done,
             });
             answers.push(answer);
@@ -442,6 +443,7 @@ mod tests {
                 }),
                 profile: None,
                 wait: None,
+                holder: crate::windows::holds::Holder::current(),
                 done,
             });
             answers.push(answer);
@@ -684,6 +686,7 @@ mod tests {
                 }),
                 profile: None,
                 wait: None,
+                holder: crate::windows::holds::Holder::current(),
                 done,
             });
             answers.push(answer);

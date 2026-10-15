@@ -1,5 +1,5 @@
 //! The claim store: the claim log and its batches, replica envelopes and their admission,
-//! replication between members, documents and blobs, checkpoints and heals.
+//! replication between members, documents and blobs, and checkpoints.
 //!
 //! A runtime built on the graph, such as smalltalk, keeps its projections in the same database
 //! and plugs them in through [`Runtime`]: the store calls it to create its tables, to validate a
@@ -37,6 +37,7 @@ use crate::sqlite::{
 };
 
 mod operation_metadata;
+mod replica_record;
 pub use operation_metadata::OperationMetadata;
 #[cfg(test)]
 mod projection_busy_tests;
@@ -57,11 +58,13 @@ pub use binary_payloads::PayloadConversion;
 pub mod canonical;
 pub mod checkpoint;
 pub mod checkpoint_agreement;
+pub mod checkpoint_staging;
 mod checkpoint_completion;
 pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod document_index;
-pub mod heal;
+mod document_pages;
+pub mod first_sync;
 pub mod principals;
 pub mod projection_digest;
 pub mod runtime;
@@ -468,9 +471,8 @@ CREATE INDEX IF NOT EXISTS claims_subject_kind_index ON claims(subject, kind, st
 CREATE INDEX IF NOT EXISTS claims_subject_kind_accepted_index
 ON claims(subject, kind, length(accepted_at_unix_ms), accepted_at_unix_ms);
 CREATE INDEX IF NOT EXISTS claims_batch_index ON claims(batch_id, store_index);
--- Heal compares claim identities, not bodies. Keep both join keys in a compact index so a
--- range digest does not visit every body-bearing claim page.
-CREATE INDEX IF NOT EXISTS claims_batch_claim_id ON claims(batch_id, id);
+-- Heals once compared claim identities through this index; nothing reads it any more.
+DROP INDEX IF EXISTS claims_batch_claim_id;
 CREATE INDEX IF NOT EXISTS claims_accepted_order_index
 ON claims(length(accepted_at_unix_ms), accepted_at_unix_ms, store_index);
 CREATE INDEX IF NOT EXISTS claims_operation_index
@@ -759,6 +761,8 @@ pub struct Store {
     /// Serializes projection passes while they lend the writer back between chunks.
     pub projection: Mutex<()>,
     pub replication_timers: ReplicationTimers,
+    /// Where the next compact answer starts listing differing ranges.
+    replication_listing_turn: std::sync::atomic::AtomicUsize,
     /// Low bit means deferred; each new deferral advances the generation by two so an
     /// older projection pass cannot clear a newer admission or catch-up deferral.
     replication_projection_state: AtomicU64,
@@ -769,8 +773,6 @@ pub struct Store {
     projection_contention_generation: AtomicU64,
     /// When this process last attempted projection of replicated claims, in Unix milliseconds.
     pub last_replication_projection_unix_ms: AtomicU64,
-    /// The heals this node asks its peers, and when it last replayed its graph for one.
-    pub heal: Mutex<heal::HealState>,
     /// This node's fleet member key. Set, it signs every envelope of this node's writer.
     pub member_key: std::sync::RwLock<Option<Arc<crate::fleet::MemberKey>>>,
     /// The keys this node signs claims with. See `principals`.
@@ -793,8 +795,6 @@ pub struct Store {
     pub trim_chunk_envelopes: AtomicUsize,
     /// Extra time each trimmed row takes. Tests only.
     pub trim_row_cost_micros: AtomicU64,
-    /// The shortest wait between two replays for heals. A runtime's own tests set it to zero.
-    pub heal_replay_backoff_ms: u128,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
 }
@@ -1019,11 +1019,11 @@ impl Store {
             roots_cache: Mutex::new(None),
             projection: Mutex::new(()),
             replication_timers: ReplicationTimers::default(),
+            replication_listing_turn: Default::default(),
             replication_projection_state: AtomicU64::new(0),
             projection_diagnostics: Mutex::new(ProjectionDiagnosticState::default()),
             projection_contention_generation: AtomicU64::new(0),
             last_replication_projection_unix_ms: AtomicU64::new(0),
-            heal: Mutex::default(),
             member_key: std::sync::RwLock::new(None),
             keyring: crate::principal::Keyring::default(),
             principal_minting: Mutex::new(()),
@@ -1036,7 +1036,6 @@ impl Store {
             trim_fault: Mutex::new(None),
             trim_chunk_envelopes: AtomicUsize::new(checkpoint_trim::TRIM_CHUNK_ENVELOPES),
             trim_row_cost_micros: AtomicU64::new(0),
-            heal_replay_backoff_ms: heal::HEAL_REPLAY_BACKOFF_MS,
             runtime,
         })
     }
@@ -1165,11 +1164,9 @@ pub struct PeerSyncProgress {
     /// The last exchange at which both nodes held the same envelopes and every projection was
     /// settled, so the two projections were comparable.
     pub aligned_comparison: Option<AlignedComparison>,
-    /// When the last heal with this peer started, and how long until the next may.
-    pub heal_started_at_unix_ms: Option<u128>,
-    pub heal_backoff_ms: u128,
-    pub heal: Option<ReplicationHealReport>,
     pub worker: Option<crate::replication::ReplicationWorkerStatus>,
+    pub last_successful_exchange: Option<crate::replication::ReplicationExchangeTransport>,
+    pub last_failed_exchange: Option<crate::replication::ReplicationExchangeTransport>,
     /// How many envelopes this node held when it took the last measurement.
     pub measured_inventory_envelopes: u64,
 }
@@ -1181,7 +1178,6 @@ impl PeerSyncProgress {
         self.graph_compared_at_unix_ms = Some(now);
         if equal {
             self.graph_differs_since_unix_ms = None;
-            self.heal_backoff_ms = 0;
         } else {
             self.graph_differs_since_unix_ms.get_or_insert(now);
         }
@@ -1250,7 +1246,6 @@ impl PeerSyncProgress {
             .is_some_and(|(since, compared)| {
                 compared.saturating_sub(since) >= REPLICATION_DIVERGED_AFTER_MS
             });
-        sync.heal = self.heal.clone();
         Some(sync)
     }
 }
@@ -1832,7 +1827,7 @@ pub const FLEET_CLAIM_KINDS: &str = "'fleet.member-admitted','fleet.member-endpo
 pub const REPLICATION_SIGNATURE_LIMIT: usize = 512;
 
 /// One kind of envelope that `st3 doctor` reports: admitted before this node knew better.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetAdmissionResidue {
     pub writer: String,
     /// `admitted-beyond-high-water` or `admitted-unsigned`.
@@ -3848,14 +3843,29 @@ pub fn replication_bucket_start(sequence: u64) -> u64 {
 /// Compare a local inventory with a peer's compact inventory. Returns the local envelopes the
 /// peer provably lacks, bounded per exchange, and the local identities of the ranges both
 /// sides hold with different digests, so the peer can compute the reverse difference. Whole
-/// ranges are listed in order while they fit `listing_limit`. The first differing range is
-/// always listed. If payloadless checkpoint differences prevent it from settling, the sync
-/// worker requests a full inventory rather than repeating this prefix indefinitely.
+/// ranges are listed in order while they fit `listing_limit`, from the first differing range.
 pub fn compact_replication_difference(
     inventory: &CompactReplicationInventory,
     buckets: &[ReplicationInventoryBucket],
     remote: &ReplicationInventory,
     listing_limit: usize,
+) -> (Vec<ReplicaEnvelopeId>, Vec<ReplicaEnvelopeId>) {
+    compact_replication_difference_turn(inventory, buckets, remote, listing_limit, 0)
+}
+
+/// `compact_replication_difference`, listing the differing ranges that hold an envelope with a
+/// payload first and the rest after, each group from the range `turn` picks
+/// (`listing_turn_start`) and on around. The first range listed is always listed whole. Ranges
+/// that differ only by payloadless checkpoint identities never settle, so a listing that always
+/// began at the first differing range could spend every exchange on them and never reach a range
+/// with an envelope to send; live ranges come first, and a listing that moves on each exchange
+/// lists every differing range in turn.
+pub fn compact_replication_difference_turn(
+    inventory: &CompactReplicationInventory,
+    buckets: &[ReplicationInventoryBucket],
+    remote: &ReplicationInventory,
+    listing_limit: usize,
+    turn: usize,
 ) -> (Vec<ReplicaEnvelopeId>, Vec<ReplicaEnvelopeId>) {
     let remote_buckets = remote
         .buckets
@@ -3874,8 +3884,8 @@ pub fn compact_replication_difference(
     }
     let page_limit = replication_page_limit(remote);
     let mut missing = Vec::new();
-    let mut listed = Vec::new();
-    let mut listing_full = false;
+    // Differing ranges with an envelope to send, then those holding only checkpoint identities.
+    let (mut live, mut payloadless) = (Vec::new(), Vec::new());
     for bucket in buckets {
         let key = (bucket.writer.as_str(), bucket.start);
         let local = inventory.range(&bucket.writer, bucket.start);
@@ -3894,12 +3904,10 @@ pub fn compact_replication_difference(
         if theirs.digest == bucket.digest {
             continue;
         }
-        let compact = local;
-        let local = inventory.identities(compact);
-        if !listing_full && (listed.is_empty() || listed.len() + local.len() <= listing_limit) {
-            listed.extend_from_slice(&local);
+        if local.iter().any(|envelope| inventory.has_payload(envelope)) {
+            live.push(bucket);
         } else {
-            listing_full = true;
+            payloadless.push(bucket);
         }
         // Only the peer's complete listing of this range proves which identities it lacks. A
         // range that changed after the peer chose what to list waits for the next exchange.
@@ -3914,9 +3922,9 @@ pub fn compact_replication_difference(
             continue;
         }
         missing.extend(
-            compact
+            local
                 .iter()
-                .zip(local)
+                .zip(inventory.identities(local))
                 .filter(|(envelope, identity)| {
                     inventory.has_payload(envelope) && known.binary_search(&identity).is_err()
                 })
@@ -3924,7 +3932,30 @@ pub fn compact_replication_difference(
                 .take(room),
         );
     }
+    for group in [&mut live, &mut payloadless] {
+        let start = listing_turn_start(turn, group.len());
+        group.rotate_left(start);
+    }
+    let mut listed = Vec::new();
+    for bucket in live.iter().chain(&payloadless) {
+        let range = inventory.range(&bucket.writer, bucket.start);
+        if !listed.is_empty() && listed.len() + range.len() > listing_limit {
+            break;
+        }
+        listed.extend(inventory.identities(range));
+    }
     (missing, listed)
+}
+
+/// The range a listing of `len` differing ranges starts from on answer `turn`: the fractional part
+/// of `turn` times the golden ratio, scaled to `len`. One store counts turns across all its peers,
+/// so a peer answered every `k`th time sees every `k`th turn. Starting at `turn % len` would then
+/// show that peer only the ranges `k` reaches modulo `len`, and with four peers and four ranges
+/// only the first. Golden-ratio steps have no such stride: every peer's answers reach every range,
+/// within twice `len` answers for one peer and within four times for four.
+fn listing_turn_start(turn: usize, len: usize) -> usize {
+    const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
+    (((turn as u64).wrapping_mul(GOLDEN) as u128 * len as u128) >> 64) as usize
 }
 
 /// Count the envelopes only the peer holds and only this node holds, as `(peer_only,
@@ -4435,6 +4466,75 @@ pub fn compact_replication_exchange_waits_for_a_complete_listing() {
     let (missing, listed) = compact_replication_difference(&inventory, &buckets, &listing, limit);
     assert!(missing.is_empty());
     assert_eq!(listed, inventory.public().envelopes);
+}
+
+#[cfg(test)]
+#[test]
+pub fn compact_listing_puts_live_ranges_first_and_reaches_every_payloadless_range_in_turn() {
+    // Four ranges of a retired writer whose payloads a checkpoint dropped, on two different
+    // lineages, and one live range that differs because the peer lacks its newer half.
+    let mut inventory = CompactReplicationInventory::default();
+    for identity in test_envelope_ids("alder-retired", 0..1024, "a") {
+        inventory.push_sorted(identity);
+        inventory.mark_last_payloadless();
+    }
+    for identity in test_envelope_ids("birch", 0..10, "a") {
+        inventory.push_sorted(identity);
+    }
+    inventory.refresh_digest();
+    let buckets = inventory.buckets();
+    let peer = TestReplica(
+        test_envelope_ids("alder-retired", 0..1024, "b")
+            .into_iter()
+            .chain(test_envelope_ids("birch", 0..5, "a"))
+            .collect(),
+    );
+    let remote = peer.summary();
+    let limit = REPLICATION_EXCHANGE_ENVELOPE_LIMIT;
+    let live = test_envelope_ids("birch", 0..10, "a");
+    // One payloadless range fits beside the live one in each listing. The store's turn counter is
+    // shared by its peers, so a peer answered every `stride`th time sees every `stride`th turn.
+    for stride in 1..=4 {
+        for first in 0..stride {
+            let mut reached = BTreeSet::new();
+            for turn in (first..).step_by(stride).take(12) {
+                let (_, listed) =
+                    compact_replication_difference_turn(&inventory, &buckets, &remote, limit, turn);
+                assert_eq!(listed[..10], live[..], "the live range leads every listing");
+                assert!(listed.len() <= limit, "{}", listed.len());
+                reached.extend(
+                    listed[10..].iter().map(|identity| replication_bucket_start(identity.sequence)),
+                );
+            }
+            assert_eq!(
+                reached,
+                BTreeSet::from([0, 256, 512, 768]),
+                "a peer seeing every {stride}th turn from {first} reaches every range"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+pub fn every_peer_sharing_the_turn_counter_reaches_every_range() {
+    for peers in 1..=4 {
+        for len in 1..=64 {
+            for peer in 0..peers {
+                let answers = 4 * len;
+                let starts = (peer..)
+                    .step_by(peers)
+                    .take(answers)
+                    .map(|turn| listing_turn_start(turn, len))
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(
+                    starts.len(),
+                    len,
+                    "peer {peer} of {peers} reaches every one of {len} ranges in {answers} answers"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5042,13 +5142,6 @@ impl Store {
         Ok(self.committed_index.load(Ordering::Acquire))
     }
 
-    /// A cheap committed point for a mutation caller deciding whether to wake its readers.
-    /// This is an invalidation hint, never a graph-equality or admission certificate. Replay
-    /// may conservatively change the generation even when its final graph bytes agree.
-    pub fn replication_change_point(&self) -> Result<(u64, i64)> {
-        self.read_snapshot(|index| Ok((index, graph_generation(&self.readers.get())?)))
-    }
-
     /// Run `read` with every read this thread makes through the store seeing one SQLite
     /// snapshot, and give it that snapshot's store index. Rows read inside always match the
     /// index, however many commits land meanwhile. A nested call joins the outer snapshot,
@@ -5130,9 +5223,7 @@ impl Store {
                 Some(connection) => Rc::new(connection),
                 None => guard.pinned.take().expect("a request loan holds its connection"),
             }),
-            transaction: Some(crate::windows::Timer::start(
-                crate::windows::StoreWork::ReadTransaction,
-            )),
+            transaction: Some(crate::windows::holds::ReadHold::start()),
         };
         drop(guard);
         let connection = pinned
@@ -5351,52 +5442,7 @@ impl Store {
         after: Option<(&str, u64)>,
         limit: usize,
     ) -> Result<Vec<DocumentVersion>> {
-        let connection = self.readers.get();
-        let query = "SELECT d.name, d.hash, b.size, d.created_index,
-                     d.hash=(SELECT n.hash FROM documents n
-                 WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1)
-                     ,d.binding_claim_id, c.accepted_at_unix_ms, c.actor, c.origin
-                     FROM documents d JOIN blobs b ON b.hash=d.hash
-                     JOIN claims c ON c.id=d.binding_claim_id
-                     WHERE (?1 IS NULL OR d.name=?1)
-                       AND (?2 OR d.hash=(SELECT n.hash FROM documents n
-                 WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1))
-                       AND (?3 IS NULL OR substr(d.name,1,length(?3))=?3)
-                       AND (?4 IS NULL OR d.name>?4 OR (d.name=?4 AND EXISTS (
-                           SELECT 1 FROM documents cursor_document
-                           WHERE cursor_document.name=?4 AND cursor_document.created_index=?5
-                             AND cursor_document.binding_key>d.binding_key)))
-                     ORDER BY d.name, d.binding_key DESC LIMIT ?6";
-        let mut statement = connection.prepare(query)?;
-        let rows = statement.query_map(
-            params![
-                name,
-                history,
-                prefix,
-                after.map(|v| v.0),
-                after.map(|v| v.1),
-                limit
-            ],
-            |row| {
-                Ok(DocumentVersion {
-                    name: row.get(0)?,
-                    hash: row.get(1)?,
-                    size: row.get(2)?,
-                    created_index: row.get(3)?,
-                    latest: row.get::<_, i64>(4)? != 0,
-                    binding_claim_id: row.get(5)?,
-                    created_at_unix_ms: row.get::<_, String>(6)?.parse().map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            6,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?,
-                    owner: row.get::<_, Option<String>>(7)?.or(row.get(8)?),
-                })
-            },
-        )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        document_pages::read(self, name, prefix, history, after, limit)
     }
 
     pub fn claim_by_id(&self, id: &str) -> Result<Option<ClaimRecord>> {
@@ -5637,7 +5683,8 @@ impl Store {
     pub fn replication_snapshot(&self) -> Result<Arc<ReplicationSnapshot>> {
         // A write that lands between sealing and reading would be counted by the projection
         // digests but not by the inventory, and a peer comparing graphs at equal inventories
-        // would heal for nothing. Seal again until the snapshot holds no unsealed batch.
+        // would find a difference that is not there. Seal again until the snapshot holds no
+        // unsealed batch.
         let mut snapshot;
         let mut attempts = 0;
         loop {
@@ -5658,6 +5705,13 @@ impl Store {
     /// writer, and only when there are such batches.
     pub fn seal_local_batches(&self) -> Result<()> {
         self.recover_sealing_frontier()?;
+        self.seal_local_batches_after_frontier()
+    }
+
+    /// Seal the batches written after the sealing frontier, without the once-per-process search
+    /// for batches skipped behind it. That search walks every batch; whoever seals for a
+    /// snapshot runs it, and lowering the frontier then seals what it found.
+    fn seal_local_batches_after_frontier(&self) -> Result<()> {
         // Capture the target once; concurrent writes belong to the next pass.
         let target = max_batch_rowid(&self.readers.get())?;
         while self.seal_local_batch_chunk(target)? {}
@@ -5997,12 +6051,14 @@ impl Store {
         let _timing = time_stage(&self.replication_timers.export);
         let same = !remote.digest.is_empty() && remote.digest == snapshot.inventory.digest;
         if !same && !remote.buckets.is_empty() {
-            // The peer sent range digests, so only differing ranges need identities.
-            let (missing, listed) = compact_replication_difference(
+            // The peer sent range digests, so only differing ranges need identities. Each
+            // answer lists from the next differing range, so every one is listed in turn.
+            let (missing, listed) = compact_replication_difference_turn(
                 &snapshot.inventory,
                 &snapshot.buckets,
                 remote,
                 REPLICATION_EXCHANGE_ENVELOPE_LIMIT,
+                self.replication_listing_turn.fetch_add(1, Ordering::Relaxed),
             );
             return Ok(ReplicationExchange {
                 peer: self.origin.clone(),
@@ -6133,15 +6189,25 @@ impl Store {
         self.receive_replication_exchange_asking(relay, fleet_id, input, false)
     }
 
-    /// Receive an exchange. `asks` says the exchange answers this node's own request, so the
-    /// worker that made it heals with the peer when the receipt says so; an exchange the peer
-    /// started leaves the heal to this node's own requests.
+    /// Receive an exchange. `asks` says the exchange answers this node's own dial, which proves
+    /// the route out to the peer works again.
     pub fn receive_replication_exchange_asking(
         &self,
         relay: &str,
         fleet_id: &str,
         input: &ReplicationExchange,
         asks: bool,
+    ) -> Result<ReplicationReceipt, St3Error> {
+        self.receive_replication_exchange_via(relay, fleet_id, input, asks, Default::default())
+    }
+
+    pub fn receive_replication_exchange_via(
+        &self,
+        relay: &str,
+        fleet_id: &str,
+        input: &ReplicationExchange,
+        asks: bool,
+        carrier: crate::replication::ReplicationCarrier,
     ) -> Result<ReplicationReceipt, St3Error> {
         if input.peer != relay {
             return Err(St3Error::new(
@@ -6191,16 +6257,17 @@ impl Store {
         // prepare/finalize/commit boundary, but lets queued foreground requests go first.
         // Immutable signature verification stays outside the writer. The guard returns before
         // any receipt counters, snapshot work or acknowledgement can observe success.
-        let (received, duplicate, signatures) = {
+        let (received, duplicate, signatures, received_at) = {
             let mut connection = self.connection.write_background();
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(internal)?;
-            let counts = (|transaction: &Transaction<'_>| -> Result<(usize, usize, usize), St3Error> {
+            let counts = (|transaction: &Transaction<'_>| -> Result<(usize, usize, usize, u128), St3Error> {
                 let mut received = 0;
                 let mut duplicate = 0;
                 let mut signatures = 0;
-                let now = now_ms().to_string();
+                let received_at = now_ms();
+                let now = received_at.to_string();
                 for (envelope, verified) in input.envelopes.iter().zip(&envelope_signatures) {
                     // A checkpoint dropped this envelope here. Its tombstone already stands for it.
                     if checkpoint::envelope_tombstoned(
@@ -6283,11 +6350,16 @@ impl Store {
                 if asks {
                     transaction.execute("DELETE FROM replication_refusals WHERE peer=?1", [relay]).map_err(internal)?;
                 }
-                Ok((received, duplicate, signatures))
+                Ok((received, duplicate, signatures, received_at))
             })(&transaction)?;
             transaction.commit().map_err(internal)?;
             counts
         };
+        // Only a response to our own dial is carrier evidence for a locally initiated
+        // exchange. Incoming traffic updates last-seen but cannot relabel an earlier dial.
+        if asks {
+            self.record_replication_exchange_transport(relay, true, received_at, carrier);
+        }
         drop(timing);
         self.replication_timers
             .exchanges
@@ -6366,19 +6438,12 @@ impl Store {
                 .map_err(internal)?;
             }
         }
-        // A first sync ends at its first comparison, and a difference there heals at once.
-        let first_sync_differs = match graph_equal {
-            Some(equal) => self
-                .observe_first_sync(
-                    relay,
-                    equal,
-                    snapshot.inventory.envelopes.len() as u64,
-                    &local_graph,
-                    &remote_graph,
-                )
-                .map_err(internal)?,
-            None => false,
-        };
+        // A first sync ends at the first exchange where both nodes hold the same envelopes and
+        // this node has admitted and projected them all; it settles on claims alone.
+        if graph_equal.is_some() {
+            self.observe_first_sync(relay, snapshot.inventory.envelopes.len() as u64)
+                .map_err(internal)?;
+        }
         let now = now_ms();
         let mut sync = self
             .replication_sync
@@ -6394,7 +6459,6 @@ impl Store {
             progress.graph_compared_at_unix_ms = None;
             progress.graph_differs_since_unix_ms = None;
             progress.aligned_comparison = None;
-            progress.heal = None;
         }
         if graph_equal.is_some() {
             progress.aligned_comparison = Some(AlignedComparison {
@@ -6406,13 +6470,9 @@ impl Store {
                 ),
             });
         }
-        let heal = match graph_equal {
-            Some(equal) => {
-                progress.compare_graphs(equal, now);
-                asks && progress.heal_due(now, first_sync_differs)
-            }
-            None => false,
-        };
+        if let Some(equal) = graph_equal {
+            progress.compare_graphs(equal, now);
+        }
         drop(sync);
         Ok(ReplicationReceipt {
             received,
@@ -6425,7 +6485,6 @@ impl Store {
                 accepts: None,
                 checkpoint: None,
             },
-            heal,
         })
     }
 
@@ -6442,7 +6501,10 @@ impl Store {
 
     pub fn validate_replication_backlog(&self) -> Result<ReplicationAdmission> {
         // Seed and sign local batches first, so local membership claims decide admission.
-        self.replication_snapshot()?;
+        // Admission needs no replication snapshot: building one in a fresh process reads every
+        // envelope, and the daemon runs this before it serves. The first export builds it.
+        self.seal_local_batches_after_frontier()?;
+        self.judge_claims(false)?;
         // Admission lends the writer back between chunks, so two must not run at once and
         // admit the same pending envelopes.
         let _admitting = self
@@ -6679,11 +6741,10 @@ impl Store {
         Ok(report)
     }
 
-    /// Replay the graph from nothing now, as a heal does when two nodes project different graphs
-    /// from the same claims.
+    /// Replay the graph from nothing now, as a restored store does once its claims are back.
     pub fn replay_replication_graph(&self) -> Result<()> {
-        crate::profile::note("projection: full replay for a heal");
-        let _replay = crate::profile::span("projection/heal-replay");
+        crate::profile::note("projection: full replay");
+        let _replay = crate::profile::span("projection/full-replay");
         let mut connection = self.connection.write();
         let _timing = time_stage(&self.replication_timers.projection);
         let transaction = connection.transaction()?;
@@ -7204,30 +7265,23 @@ impl Store {
              FROM replica_records{filter} ORDER BY writer, sequence, envelope_hash, position"
         ))?;
         Ok(statement
-            .query_map([], |row| {
-                Ok(ReplicaRecordView {
-                    record_ref: row.get(0)?,
-                    writer: row.get(1)?,
-                    sequence: row.get(2)?,
-                    envelope_hash: row.get(3)?,
-                    position: row.get(4)?,
-                    state: row.get(5)?,
-                    claim_id: row.get(6)?,
-                    subject: row.get(7)?,
-                    kind: row.get(8)?,
-                    error_code: row.get(9)?,
-                    error_message: row.get(10)?,
-                    replacement_claim_id: row.get(11)?,
-                })
-            })?
+            .query_map([], replica_record::decode)?
             .collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn replica_record(&self, record_ref: &str) -> Result<Option<ReplicaRecordView>> {
-        Ok(self
-            .replica_records(false)?
-            .into_iter()
-            .find(|record| record.record_ref == record_ref))
+    pub fn record_peer_failure_via(
+        &self,
+        peer: &str,
+        status: &str,
+        error: &str,
+        carrier: Option<crate::replication::ReplicationCarrier>,
+    ) -> Result<bool> {
+        let failed_at = now_ms();
+        let changed = self.record_peer_failure(peer, status, error)?;
+        if let Some(carrier) = carrier {
+            self.record_replication_exchange_transport(peer, false, failed_at, carrier);
+        }
+        Ok(changed)
     }
 
     pub fn record_peer_failure(&self, peer: &str, status: &str, error: &str) -> Result<bool> {
@@ -7528,6 +7582,66 @@ impl Store {
             .any(|progress| progress.view(now).is_some_and(|sync| sync.diverged))
     }
 
+    /// Keep two independent observations, using their own exchange time rather than a probe
+    /// or worker phase. Concurrent completion of an older receipt cannot replace newer evidence.
+    pub fn record_replication_exchange_transport(
+        &self,
+        peer: &str,
+        success: bool,
+        at_unix_ms: u128,
+        carrier: crate::replication::ReplicationCarrier,
+    ) {
+        let mut peers = self
+            .replication_sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let progress = peers.entry(peer.to_owned()).or_default();
+        let record = if success {
+            &mut progress.last_successful_exchange
+        } else {
+            &mut progress.last_failed_exchange
+        };
+        if record
+            .as_ref()
+            .is_none_or(|previous| previous.at_unix_ms <= at_unix_ms)
+        {
+            *record = Some(crate::replication::ReplicationExchangeTransport::new(
+                at_unix_ms, carrier,
+            ));
+        }
+    }
+
+    /// Whether this peer's local status is currently visible in a client sync notice.
+    /// This checks one in-memory row, without folding membership or reading the graph.
+    pub fn replication_peer_in_sync_notice(&self, peer: &str) -> bool {
+        self.replication_sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(peer)
+            .and_then(|progress| progress.view(now_ms()))
+            .is_some_and(|sync| sync.catching_up || sync.diverged)
+    }
+
+    pub fn replication_peer_transport(
+        &self,
+        peer: &str,
+    ) -> (
+        Option<crate::replication::ReplicationExchangeTransport>,
+        Option<crate::replication::ReplicationExchangeTransport>,
+    ) {
+        self.replication_sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(peer)
+            .map(|progress| {
+                (
+                    progress.last_successful_exchange.clone(),
+                    progress.last_failed_exchange.clone(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
     /// Update host-local worker status without writing the graph.
     pub fn record_replication_worker(
         &self,
@@ -7671,6 +7785,8 @@ impl Store {
                         let updated_at = row.get::<_, String>(6)?.parse::<u128>().ok();
                         Ok((
                             ReplicationPeerStatus {
+                                last_successful_exchange: None,
+                                last_failed_exchange: None,
                                 worker: None,
                                 peer: peer.clone(),
                                 status: row.get(0)?,
@@ -7698,6 +7814,8 @@ impl Store {
                 .optional()?
                 .unwrap_or((
                     ReplicationPeerStatus {
+                        last_successful_exchange: None,
+                        last_failed_exchange: None,
                         worker: None,
                         peer: peer.clone(),
                         status: "unknown".into(),
@@ -7746,6 +7864,8 @@ impl Store {
                 status.refusal_reason = Some(reason);
                 status.last_error = None;
             }
+            (status.last_successful_exchange, status.last_failed_exchange) =
+                self.replication_peer_transport(peer);
             status.worker = self
                 .replication_sync
                 .lock()

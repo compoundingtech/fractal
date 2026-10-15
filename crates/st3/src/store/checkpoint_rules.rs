@@ -13,6 +13,9 @@ use super::*;
 use smallclaims::store::checkpoint::DAY_MS;
 use smallclaims::store::checkpoint::*;
 
+mod staged;
+pub(crate) use staged::plan_staged;
+
 /// The rule engine's version. It is part of the rules digest, so nodes agree on a checkpoint only
 /// when they run the same rules. Version 5 leaves repaired originals out of the sealed set and
 /// proves on the sealed claims' blobs only. Version 6 applies work extensions to the canonical
@@ -211,10 +214,23 @@ pub(crate) fn witnessed(
     later: &BTreeSet<String>,
     later_claims: usize,
 ) -> bool {
-    let own = fields(claim).map(|fields| fields.keys().cloned().collect::<Vec<_>>());
-    let own = own.unwrap_or_default();
+    witnessed_names(&claim.kind, &field_names(claim), later, later_claims)
+}
+
+/// The names of the fields a claim sets.
+pub(crate) fn field_names(claim: &ClaimRecord) -> Vec<String> {
+    fields(claim).map(|fields| fields.keys().cloned().collect()).unwrap_or_default()
+}
+
+/// `witnessed` for a claim of `kind` that sets the fields `own`.
+pub(crate) fn witnessed_names(
+    kind: &str,
+    own: &[String],
+    later: &BTreeSet<String>,
+    later_claims: usize,
+) -> bool {
     if later_claims > 0
-        && let Some(spec) = st3_schema::registry().claim(&claim.kind)
+        && let Some(spec) = st3_schema::registry().claim(kind)
         && spec.cardinality == st3_schema::Cardinality::StateTransition
         && own.iter().all(|name| spec.fields.contains_key(name))
     {
@@ -225,11 +241,16 @@ pub(crate) fn witnessed(
 
 /// The newest claim of a slot carrying each field name, so every field keeps its last value.
 pub(crate) fn field_carriers(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
+    carriers(&claims.iter().map(|claim| field_names(claim)).collect::<Vec<_>>())
+}
+
+/// `field_carriers` of a slot whose claims set the fields `names`, in order.
+pub(crate) fn carriers(names: &[Vec<String>]) -> BTreeSet<usize> {
     let mut seen = BTreeSet::new();
     let mut keep = BTreeSet::new();
-    for (position, claim) in claims.iter().enumerate().rev() {
-        for name in fields(claim).into_iter().flat_map(|fields| fields.keys()) {
-            if seen.insert(name.clone()) {
+    for (position, names) in names.iter().enumerate().rev() {
+        for name in names {
+            if seen.insert(name.as_str()) {
                 keep.insert(position);
             }
         }
@@ -453,6 +474,178 @@ pub(crate) fn timing_answers(
         .collect()
 }
 
+impl Rule {
+    /// Whether the rule's keep function reads claim bodies, beyond field names and times.
+    pub(crate) fn reads_bodies(self) -> bool {
+        matches!(
+            self,
+            Rule::HarnessObserved | Rule::UsageSeries | Rule::UsageCumulative | Rule::AccountLimits | Rule::LoopState
+        )
+    }
+
+    /// Whether a claim accepted at `accepted_at` is old enough for the rule to drop.
+    pub(crate) fn old_enough(self, accepted_at: u128, cut: u128) -> bool {
+        match self {
+            Rule::NewestAged(min_age) => accepted_at < cut.saturating_sub(min_age),
+            _ => true,
+        }
+    }
+
+    fn tag(self) -> String {
+        match self {
+            Rule::Newest => "newest".into(),
+            Rule::NewestAged(min_age) => format!("newest-aged:{min_age}"),
+            Rule::HarnessObserved => "harness-observed".into(),
+            Rule::LoopState => "loop-state".into(),
+            Rule::Deferral => "deferral".into(),
+            Rule::UsageSeries => "usage-series".into(),
+            Rule::UsageCumulative => "usage-cumulative".into(),
+            Rule::AccountLimits => "account-limits".into(),
+        }
+    }
+
+    fn from_tag(tag: &str) -> Option<Self> {
+        Some(match tag {
+            "newest" => Rule::Newest,
+            "harness-observed" => Rule::HarnessObserved,
+            "loop-state" => Rule::LoopState,
+            "deferral" => Rule::Deferral,
+            "usage-series" => Rule::UsageSeries,
+            "usage-cumulative" => Rule::UsageCumulative,
+            "account-limits" => Rule::AccountLimits,
+            tag => Rule::NewestAged(tag.strip_prefix("newest-aged:")?.parse().ok()?),
+        })
+    }
+}
+
+/// A rule and slot as one staging key, and back.
+pub(crate) fn slot_text(rule: Rule, slot: &[String]) -> String {
+    serde_json::to_string(&(rule.tag(), slot)).expect("text serializes")
+}
+
+pub(crate) fn slot_from_text(text: &str) -> Option<(Rule, Vec<String>)> {
+    let (tag, slot): (String, Vec<String>) = serde_json::from_str(text).ok()?;
+    Some((Rule::from_tag(&tag)?, slot))
+}
+
+/// The claims a slot's rule keeps, by position, before field carriers: `claims` are the slot's
+/// claims in order when the rule reads bodies, and `closed` says whether a deferral's request
+/// is closed.
+pub(crate) fn rule_keep(
+    rule: Rule,
+    len: usize,
+    claims: &[&ClaimRecord],
+    closed: bool,
+    limits_newest: &BTreeMap<(String, String, String, bool), u64>,
+    cut: u128,
+) -> BTreeSet<usize> {
+    let newest = BTreeSet::from([len - 1]);
+    match rule {
+        Rule::Newest | Rule::NewestAged(_) => newest,
+        Rule::HarnessObserved => harness_keep(claims),
+        Rule::UsageSeries => usage_series_keep(claims, cut),
+        Rule::UsageCumulative => usage_cumulative_keep(claims),
+        Rule::AccountLimits => limits_keep(claims, limits_newest),
+        Rule::LoopState => loop_keep(claims),
+        Rule::Deferral if closed => newest,
+        Rule::Deferral => (0..len).collect(),
+    }
+}
+
+/// The positions among one seat's status-history sources, in canonical order, that the
+/// status-history rule keeps.
+pub(crate) fn status_keep_positions(sources: &[&ClaimRecord], cut: u128) -> BTreeSet<usize> {
+    let mut keep = BTreeSet::new();
+    let positions = seat_status::transition_positions(sources);
+    let mut kept_positions = positions.iter().copied().rev()
+        .filter(|position| seat_status::observation_time(sources[*position]) >= cut.saturating_sub(seat_status::WINDOW_MS))
+        .take(seat_status::MAX_TRANSITIONS).collect::<BTreeSet<_>>();
+    // An unstamped boundary row emits only because its preceding effective state differs.
+    // Keeping the row alone can suppress it and expose an older retained transition instead.
+    // Preserve that context separately for each incarnation represented in the bounded read;
+    // the witness may fall outside the seven-day window. The reader still caps its answer.
+    let mut previous = BTreeMap::new();
+    let mut witnessed = BTreeSet::new();
+    for position in positions {
+        let source = sources[position];
+        let source_fields = source.body.get("fields").unwrap_or(&source.body);
+        let Some(incarnation) = source_fields.get("incarnation_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if kept_positions.contains(&position) && witnessed.insert(incarnation)
+            && let Some(predecessor) = previous.get(incarnation)
+        {
+            kept_positions.insert(*predecessor);
+        }
+        previous.insert(incarnation, position);
+    }
+    for position in kept_positions {
+        keep.insert(position);
+        // A restored prompt exposes the most recent underlying harness state. Its source
+        // can be hidden while the prompt is active, but still witnesses this transition.
+        let source = sources[position];
+        if source.kind == "harness.diagnostic" && matches!(field_str(source, "code"), Some("provider-auth-restored" | "provider-update-restored"))
+            && let Some(dependency) = sources[..position].iter().rposition(|claim| {
+                claim.kind == "harness.observed"
+                    && field_str(claim, "incarnation_id") == field_str(source, "incarnation_id")
+                    && fields(claim).and_then(|fields| fields.get("status_transition")).and_then(Value::as_bool) != Some(false)
+            }) { keep.insert(dependency); }
+    }
+    keep
+}
+
+/// Whether a claim is a source of its subject's status history.
+pub(crate) fn status_source(claim: &ClaimRecord) -> bool {
+    matches!(claim.kind.as_str(), "harness.observed" | "runtime.observed" | "harness.diagnostic")
+        && seat_status::history_source(claim)
+}
+
+/// The claim IDs a claim cites as evidence, or pins as a mission run's input. Those claims are
+/// read by their IDs, so they stay.
+pub(crate) fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
+    let body = &claim.body;
+    let evidence = body
+        .get("evidence")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    let inputs = (claim.kind == "mission-run.created")
+        .then(|| body.pointer("/fields/inputs").and_then(Value::as_object))
+        .flatten()
+        .into_iter()
+        .flat_map(|inputs| inputs.values())
+        .filter_map(|input| input.get("claim_id").and_then(Value::as_str));
+    evidence.chain(inputs)
+}
+
+/// Whether claims of `kind` are never dropped, because their validation reads them: a kind that
+/// is not plain append or state transition, or one the registry does not know.
+pub(crate) fn guarded_kind(kind: &str) -> bool {
+    !matches!(
+        st3_schema::registry().claim(kind).map(|spec| spec.cardinality.clone()),
+        Some(st3_schema::Cardinality::Append | st3_schema::Cardinality::StateTransition)
+    )
+}
+
+/// What the staged planner reads of a claim's body.
+pub(crate) fn claim_facts(claim: &ClaimRecord) -> smallclaims::store::checkpoint_staging::CheckpointClaimFacts {
+    smallclaims::store::checkpoint_staging::CheckpointClaimFacts {
+        slot: slot_of(claim).map(|(rule, slot)| slot_text(rule, &slot)),
+        status_source: status_source(claim),
+        fields: field_names(claim),
+        cites: cited_by(claim).map(str::to_owned).collect(),
+        closes: REQUEST_CLOSERS
+            .contains(&claim.kind.as_str())
+            .then(|| field_str(claim, "request").map(str::to_owned))
+            .flatten(),
+        limits: (claim.kind == "harness.limits")
+            .then(|| limits_reading(claim))
+            .flatten()
+            .map(|(group, measured)| (serde_json::to_string(&group).expect("text serializes"), measured)),
+    }
+}
+
 /// Decide what a checkpoint drops from `sealed`. See the module documentation and invariants
 /// D1 to D6 of the design.
 pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
@@ -485,50 +678,14 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
     let mut status_seats: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for index in first.iter().copied() {
         let claim = &claims[index].claim;
-        if matches!(claim.kind.as_str(), "harness.observed" | "runtime.observed" | "harness.diagnostic")
-            && seat_status::history_source(claim)
-        {
+        if status_source(claim) {
             status_seats.entry(&claim.subject).or_default().push(index);
         }
     }
     let mut status_keep = BTreeSet::new();
     for members in status_seats.values() {
         let sources = members.iter().map(|index| &claims[*index].claim).collect::<Vec<_>>();
-        let positions = seat_status::transition_positions(&sources);
-        let mut kept_positions = positions.iter().copied().rev()
-            .filter(|position| seat_status::observation_time(sources[*position]) >= cut.saturating_sub(seat_status::WINDOW_MS))
-            .take(seat_status::MAX_TRANSITIONS).collect::<BTreeSet<_>>();
-        // An unstamped boundary row emits only because its preceding effective state differs.
-        // Keeping the row alone can suppress it and expose an older retained transition instead.
-        // Preserve that context separately for each incarnation represented in the bounded read;
-        // the witness may fall outside the seven-day window. The reader still caps its answer.
-        let mut previous = BTreeMap::new();
-        let mut witnessed = BTreeSet::new();
-        for position in positions {
-            let source = sources[position];
-            let source_fields = source.body.get("fields").unwrap_or(&source.body);
-            let Some(incarnation) = source_fields.get("incarnation_id").and_then(Value::as_str) else {
-                continue;
-            };
-            if kept_positions.contains(&position) && witnessed.insert(incarnation)
-                && let Some(predecessor) = previous.get(incarnation)
-            {
-                kept_positions.insert(*predecessor);
-            }
-            previous.insert(incarnation, position);
-        }
-        for position in kept_positions {
-            status_keep.insert(members[position]);
-            // A restored prompt exposes the most recent underlying harness state. Its source
-            // can be hidden while the prompt is active, but still witnesses this transition.
-            let source = sources[position];
-            if source.kind == "harness.diagnostic" && matches!(field_str(source, "code"), Some("provider-auth-restored" | "provider-update-restored"))
-                && let Some(dependency) = sources[..position].iter().rposition(|claim| {
-                    claim.kind == "harness.observed"
-                        && field_str(claim, "incarnation_id") == field_str(source, "incarnation_id")
-                        && fields(claim).and_then(|fields| fields.get("status_transition")).and_then(Value::as_bool) != Some(false)
-                }) { status_keep.insert(members[dependency]); }
-        }
+        status_keep.extend(status_keep_positions(&sources, cut).into_iter().map(|position| members[position]));
     }
     // The newest measurement of each account group, across every seat, for the limits rule.
     let mut limits_newest = BTreeMap::new();
@@ -554,35 +711,19 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
             .iter()
             .map(|index| &claims[*index].claim)
             .collect::<Vec<_>>();
-        let newest = BTreeSet::from([members.len() - 1]);
-        let keep = match rule {
-            Rule::Newest | Rule::NewestAged(_) => newest,
-            Rule::HarnessObserved => harness_keep(&slot_claims),
-            Rule::UsageSeries => usage_series_keep(&slot_claims, cut),
-            Rule::UsageCumulative => usage_cumulative_keep(&slot_claims),
-            Rule::AccountLimits => limits_keep(&slot_claims, &limits_newest),
-            Rule::LoopState => loop_keep(&slot_claims),
-            Rule::Deferral => {
-                let request = slot.last().cloned().unwrap_or_default();
-                if closed_requests.contains(&(slot[0].clone(), request)) {
-                    newest
-                } else {
-                    (0..members.len()).collect()
-                }
-            }
+        let closed = *rule == Rule::Deferral && {
+            let request = slot.last().cloned().unwrap_or_default();
+            closed_requests.contains(&(slot[0].clone(), request))
         };
-        let mut keep = keep;
+        let mut keep = rule_keep(*rule, members.len(), &slot_claims, closed, &limits_newest, cut);
         if *rule != Rule::LoopState {
             keep.extend(field_carriers(&slot_claims));
         }
         for (position, index) in members.iter().enumerate() {
-            let old_enough = match rule {
-                Rule::NewestAged(min_age) => {
-                    claims[*index].claim.accepted_at_unix_ms < cut.saturating_sub(*min_age)
-                }
-                _ => true,
-            };
-            if !keep.contains(&position) && !status_keep.contains(index) && old_enough {
+            if !keep.contains(&position)
+                && !status_keep.contains(index)
+                && rule.old_enough(claims[*index].claim.accepted_at_unix_ms, cut)
+            {
                 dropped[*index] = true;
             }
         }
@@ -592,22 +733,7 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
     // A claim cited as evidence, or pinned as a mission run's input, is read by its ID.
     let cited = claims
         .iter()
-        .flat_map(|sealed_claim| {
-            let body = &sealed_claim.claim.body;
-            let evidence = body
-                .get("evidence")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str);
-            let inputs = (sealed_claim.claim.kind == "mission-run.created")
-                .then(|| body.pointer("/fields/inputs").and_then(Value::as_object))
-                .flatten()
-                .into_iter()
-                .flat_map(|inputs| inputs.values())
-                .filter_map(|input| input.get("claim_id").and_then(Value::as_str));
-            evidence.chain(inputs)
-        })
+        .flat_map(|sealed_claim| cited_by(&sealed_claim.claim))
         .collect::<BTreeSet<_>>();
     let mut newest_envelope: BTreeMap<&str, u64> = BTreeMap::new();
     for envelope in &sealed.envelopes {
@@ -618,17 +744,11 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
     }
     for (index, sealed_claim) in claims.iter().enumerate() {
         let claim = &sealed_claim.claim;
-        let cardinality = st3_schema::registry()
-            .claim(&claim.kind)
-            .map(|spec| spec.cardinality.clone());
         let guarded = claim
             .actor
             .as_deref()
             .is_some_and(|actor| actor.starts_with("person/"))
-            || !matches!(
-                cardinality,
-                Some(st3_schema::Cardinality::Append | st3_schema::Cardinality::StateTransition)
-            )
+            || guarded_kind(&claim.kind)
             || !sealed_claim.valid
             || sealed_claim.protected
             || occurrences[claim.id.as_str()] > 1

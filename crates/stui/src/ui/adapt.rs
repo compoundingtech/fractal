@@ -130,8 +130,8 @@ fn missions(model: &Model) -> Vec<Mission> {
 pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     let link = if extras.offline.is_some() {
         Link::Offline(match &model.last_connected {
-            Some(at) => format!("Last connected at {at} · reconnecting · r retry now"),
-            None => "No member reachable · reconnecting · r retry now".into(),
+            Some(at) => format!("Last connected at {at} · reconnecting · Ctrl+R retry now"),
+            None => "No member reachable · reconnecting · Ctrl+R retry now".into(),
         })
     } else if extras.live {
         Link::Live
@@ -658,6 +658,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
         .agents()
         .map(|agent| {
             let state = match (agent.state.as_str(), agent.harness_state.as_deref()) {
+                ("retired", _) => AgentState::Retired,
                 _ if agent.fault.is_some() => AgentState::Fault,
                 // A seat whose message path stopped polling or cannot hand off takes no
                 // messages, however ready its harness looks. An `outdated` path still delivers.
@@ -669,6 +670,8 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                     AgentState::Fault
                 }
                 ("failed", _) => AgentState::Fault,
+                // st decides a seat with no session is down, since when; no app re-derives it.
+                ("down", _) => AgentState::Down,
                 // Signed out of its provider (Claude "Not logged in · Run /login"): a login on
                 // its host fixes it, not a restart (Nathan, 2026-10-04).
                 // st's additive detail names the known error outright; the legacy `unauthenticated`
@@ -730,13 +733,23 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                 unmanaged: false,
                 // A running agent with a runtime is worth trying; opening it finds the terminal.
                 terminal: !agent.runtime_ids.is_empty()
-                    && !matches!(agent.state.as_str(), "stopped" | "failed"),
+                    && !matches!(agent.state.as_str(), "stopped" | "failed" | "retired"),
                 parent: agent
                     .under
                     .first()
                     .map(|relation| relation.agent_id.clone()),
                 details: AgentDetails {
-                    progress: work.and_then(|work| step_progress(missions, &work.id)),
+                    progress: work
+                        .and_then(|work| {
+                            let reported = step_progress(missions, &work.id);
+                            match work.holder_down_since.as_deref() {
+                                Some(since) => Some(match reported {
+                                    Some(line) => format!("Held by a seat with no session since {since}. Last reported: {line}"),
+                                    None => format!("Held by a seat with no session since {since}"),
+                                }),
+                                None => reported,
+                            }
+                        }),
                     goal: work.and_then(|work| work.goal.as_deref().map(clean_message_text)),
                     claimed: work.map(|work| format!("{} ago", age(&work.since))),
                     next: agent
@@ -769,6 +782,9 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                         .filter(|effort| !effort.is_empty())
                         .map(str::to_owned),
                     fault: agent.fault.clone().or_else(|| {
+                        agent.down_since.as_deref().filter(|_| agent.state == "down")
+                            .map(|since| format!("No running session since {since}"))
+                    }).or_else(|| {
                         agent.delivery.as_ref()
                             .filter(|delivery| delivery.state == "stale")
                             .and_then(|delivery| delivery.reason.clone())
@@ -2026,6 +2042,36 @@ mod tests {
         assert_eq!(agents(&model, &[])[0].state, AgentState::Fault);
         model.agents = window(vec![resource("waiting", "indeterminate", Some("human"))]);
         assert_eq!(agents(&model, &[])[0].state, AgentState::Starting);
+    }
+
+    #[test]
+    fn a_down_seat_reads_down_with_its_time_and_marks_the_step_it_holds() {
+        let mut model = Model::default();
+        model.agents = window(vec![serde_json::json!({
+            "id": "agent/example/gone", "kind": "agent", "revision": "r1",
+            "updated_at": "2026-10-12T12:29:00Z", "name": "example/gone",
+            "state": "down", "down_since": "2026-10-12T12:31:00.000Z",
+            "reachability": "reachable", "harness_state": "indeterminate",
+            "observation": "stale", "runtime_ids": [], "under": [],
+            "current_work": [{
+                "id": "step-run/one/build", "mission_id": "mission/example",
+                "mission_run_id": "mission-run/example", "path": "build",
+                "state": "claimed", "since": "2026-10-12T12:00:00.000Z",
+                "holder_down_since": "2026-10-12T12:31:00.000Z"
+            }],
+        })]);
+        let seat = &agents(&model, &[])[0];
+        // Neither "starting" (the stale guess for a waiting seat) nor an idle one.
+        assert_eq!(seat.state, AgentState::Down);
+        assert_eq!(
+            seat.details.fault.as_deref(),
+            Some("No running session since 2026-10-12T12:31:00.000Z")
+        );
+        assert_eq!(
+            seat.details.progress.as_deref(),
+            Some("Held by a seat with no session since 2026-10-12T12:31:00.000Z")
+        );
+        assert_eq!(super::super::screens::agent_word(seat.state), "down");
     }
 
     #[test]

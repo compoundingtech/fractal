@@ -57,7 +57,7 @@ impl Fence {
                 {
                     return Err(error);
                 }
-                Err(_) => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+                Err(_) => tokio::time::sleep(crate::client::driver_retry_pause()).await,
             }
         }
     }
@@ -181,7 +181,7 @@ impl Subscription {
                     return;
                 }
                 // Transport loss changes no delivery state. The next connection replays the graph.
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(crate::client::driver_retry_pause()).await;
             }
         });
         Self {

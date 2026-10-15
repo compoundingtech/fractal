@@ -1752,9 +1752,23 @@ fn allocator_reclamation_follows_checkpoint_plan_view_and_proof_errors_once() {
     assert_eq!(after.1 - before.1, u64::from(cfg!(all(target_os = "linux", target_env = "gnu"))));
 
     let sealed = store.checkpoint_sealed_set(cut).unwrap();
+    let before = allocator_reclaim_stats_for_test();
+    let staged = store.checkpoint_staged_set(cut, None, &scratch.path().join("plan")).unwrap();
+    let staged_path = staged.path.clone();
+    let captured = store.checkpoint_plan_view_from_staged(cut, staged, scratch.path()).unwrap();
+    assert!(!staged_path.exists(), "successful proof removes its dry-run staging file");
+    assert_eq!(serde_json::to_value(&captured).unwrap(), serde_json::to_value(&view).unwrap());
+    assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1,
+        "the separately scheduled captured plan retains its outer reclamation boundary");
     let plan = plan_drops(&sealed);
     let blocked = scratch.path().join("not-a-directory");
     std::fs::write(&blocked, b"occupied").unwrap();
+    let before = allocator_reclaim_stats_for_test();
+    let staged = store.checkpoint_staged_set(cut, None, &scratch.path().join("plan")).unwrap();
+    let staged_path = staged.path.clone();
+    assert!(store.checkpoint_plan_view_from_staged(cut, staged, &blocked).is_err());
+    assert!(!staged_path.exists(), "failed proof removes its dry-run staging file");
+    assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1);
     let before = allocator_reclaim_stats_for_test();
     assert!(store.prove_checkpoint_plan(&sealed, &plan, &blocked).is_err());
     assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1,
@@ -1766,6 +1780,35 @@ fn allocator_reclamation_follows_checkpoint_plan_view_and_proof_errors_once() {
     assert!(prove_on_copy(&invalid, &sealed, &plan).is_err());
     assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1,
         "failed direct proof also finishes once");
+}
+
+#[test]
+fn staged_plan_finishes_without_borrowing_a_held_live_writer() {
+    let store = Store::open_memory("alder").unwrap();
+    write_history(&store);
+    let scratch = tempfile::tempdir().unwrap();
+    let cut = now_ms() + 1_000;
+    let staged = store.checkpoint_staged_set(cut, None, &scratch.path().join("plan")).unwrap();
+    let staged_path = staged.path.clone();
+    let writer = store.connection.write();
+    std::thread::scope(|scope| {
+        let (done, result) = std::sync::mpsc::channel();
+        let working = &store;
+        let scratch = scratch.path();
+        let proof = scope.spawn(move || {
+            // Test builds normally compare to the full in-memory capture as well.
+            // Exercise only the production staged phase while the live writer is held.
+            let view = smallclaims::store::checkpoint_staging::without_reference_plan(||
+                working.checkpoint_plan_view_from_staged(cut, staged, scratch));
+            let _ = done.send(view);
+        });
+        let completed = result.recv_timeout(std::time::Duration::from_secs(5));
+        drop(writer); // Always free a wrongly borrowed writer before joining/asserting.
+        proof.join().unwrap();
+        let view = completed.expect("staged planning/proof borrowed the live writer").unwrap();
+        assert!(view.proof.passed);
+    });
+    assert!(!staged_path.exists());
 }
 
 #[test]
@@ -1837,12 +1880,21 @@ fn a_trimmed_node_seals_and_digests_like_an_untrimmed_one() {
     let [after_trim, without_trim] =
         [&trimmed, &untrimmed].map(|store| store.checkpoint_sealed_set(second).unwrap());
     assert_eq!(sealed_digest(&after_trim), sealed_digest(&without_trim));
-    // A seal reads only the identities, and they give the same digest as the whole set.
+    // A seal reads only the identities, and they give the same digest as the whole set at
+    // every page size, though the trimmed node's identities alternate between its envelopes
+    // and its tombstones.
     for (store, set) in [(&trimmed, &after_trim), (&untrimmed, &without_trim)] {
         assert_eq!(
             store.checkpoint_sealed_identities(second, None).unwrap(),
             SealedIdentities::of(set)
         );
+        for page in [1, 2, 3, 5] {
+            assert_eq!(
+                store.checkpoint_sealed_identities_paged(second, None, page).unwrap(),
+                SealedIdentities::of(set),
+                "identities differ at page {page}"
+            );
+        }
     }
     assert_eq!(after_trim.envelope_tombstones.len(), plan.envelopes.len());
     assert!(after_trim.claims.len() < without_trim.claims.len());
@@ -1850,6 +1902,55 @@ fn a_trimmed_node_seals_and_digests_like_an_untrimmed_one() {
     assert!(after_trim.claims.is_empty(), "{:?}", after_trim.claims);
     assert_eq!(after_trim.drop_digest, plan.drop_digest);
     assert_eq!(without_trim.drop_digest, plan.drop_digest);
+}
+
+/// While a trim records its tombstones, a dropped envelope is both a row and a tombstone. A seal
+/// counts its identity once, at every page size.
+#[test]
+fn a_seal_counts_an_envelope_once_while_its_tombstone_is_recording() {
+    let store = Store::open_memory("alder").unwrap();
+    write_history(&store);
+    let first = now_ms() + 1_000;
+    let before = store.checkpoint_sealed_identities(first, None).unwrap();
+    let plan = plan_drops(&store.checkpoint_sealed_set(first).unwrap());
+    assert!(!plan.envelopes.is_empty());
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        record_checkpoint_tombstones_tx(&transaction, &checkpoint_name(first), &plan.envelopes, &plan.claims)
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    for page in [1, 2, 3, 64] {
+        assert_eq!(store.checkpoint_sealed_identities_paged(first, None, page).unwrap(), before, "page {page}");
+    }
+}
+
+/// Each identity page seeks the identity key and reads it in order: no table scan and no sort,
+/// so a page costs its rows, wherever it starts.
+#[test]
+fn seal_identity_pages_seek_the_identity_key() {
+    let store = Store::open_memory("alder").unwrap();
+    let connection = store.readers.get();
+    for (sql, parameters) in [
+        (SEALED_IDENTITY_ENVELOPES_SQL, 6),
+        (SEALED_IDENTITY_TOMBSTONES_SQL, 5),
+    ] {
+        let mut values: Vec<rusqlite::types::Value> =
+            vec![0_i64.into(), "alder".to_owned().into(), 1_i64.into(), "hash".to_owned().into()];
+        values.extend(std::iter::repeat_n(rusqlite::types::Value::from(64_i64), parameters - 4));
+        let plan: Vec<String> = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(rusqlite::params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let outer = &plan[0];
+        assert!(outer.starts_with("SEARCH") && outer.contains("INDEX"), "{plan:?}");
+        assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{plan:?}");
+        assert!(!plan.iter().any(|line| line.starts_with("SCAN")), "{plan:?}");
+    }
 }
 
 /// Nearly every claim cites the claim before it on its subject. A walk from a runtime's
@@ -2206,6 +2307,7 @@ fn a_write_queued_during_sealing_runs_before_the_backlog_finishes() {
             }),
             profile: None,
             wait: None,
+            holder: smallclaims::windows::holds::Holder::current(),
             enqueued: std::time::Instant::now(),
             done: done.clone(),
         },

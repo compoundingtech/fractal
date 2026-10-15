@@ -15,7 +15,7 @@ export const linuxRunnerProfile = `namespace-profile-linux-x86-64;job.priority=$
 const releaseJobPriority = "${{ github.event_name == 'pull_request' && 2 || 1 }}"
 export const releaseLinuxRunnerProfile = `namespace-profile-linux-x86-64;job.priority=${releaseJobPriority}`
 export const releaseMacosRunnerProfile = `namespace-profile-macos-arm64;job.priority=${releaseJobPriority}`
-export const releaseLinuxRunner = ['ci1-priority'] as const
+export const releaseLinuxRunner = "${{ fromJSON(needs['pick-runner'].outputs.ci1 || '[\"ci1-priority\"]') }}"
 export const macosRunnerProfile = 'namespace-profile-macos-arm64'
 export const linuxRunner = [`${linuxRunnerProfile};github.run-id=\${{ github.run_id }}`] as const
 /**
@@ -38,11 +38,11 @@ export const performanceRunner = [
 export const macosRunner = [`${macosRunnerProfile};github.run-id=\${{ github.run_id }}`] as const
 export const linuxActionlintConfig = {
   ...defaultActionlintConfig,
-  selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner, 'ci1-priority'],
+  selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner, 'ci1-priority', 'ci2', 'ci2-merge', 'ci2-priority'],
 } as const
 
-/** Merge groups use the owned priority runner without status/API admission.
- * Trusted PRs may use idle general runners or the explicit ci-priority lane.
+/** Merge groups use the shared owned priority role; the scheduler chooses the host.
+ * Trusted PRs may use distinct idle general workers in group3 or the ci-priority lane.
  * Fork PR code never reaches a self-hosted runner. CI1_RUNNERS controls PR picking only.
  */
 export const pickRunnerJobId = 'pick-runner'
@@ -52,7 +52,7 @@ const ci1MinIdle = 1
 
 export const pickRunnerJob = {
   name: pickRunnerJobId,
-  if: "vars.CI1_RUNNERS == 'on'",
+  if: "github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on'",
   // GitHub-hosted, so the choice never waits for either pool it chooses between.
   'runs-on': 'ubuntu-latest',
   'timeout-minutes': 3,
@@ -75,69 +75,24 @@ export const pickRunnerJob = {
         PR_LABELS: '${{ toJSON(github.event.pull_request.labels.*.name) }}',
         OWNER: '${{ github.repository_owner }}',
         NEED: `\${{ vars.CI1_MIN_IDLE || '${ci1MinIdle}' }}`,
+        MERGE_OVERFLOW: '${{ vars.CI_MERGE_OVERFLOW }}',
+        MERGE_NEED: "${{ vars.CI_MERGE_MIN_IDLE || '3' }}",
+        RUN_ID: '${{ github.run_id }}',
       },
-      run: `primary_label=
-namespace() {
-  echo "$1: Namespace"
-  printf 'Unpicked runners: **Namespace** (%s)\\n' "$1" >> "$GITHUB_STEP_SUMMARY"
-  exit 0
-}
-primary() {
-  primary_label=$1
-  printf 'ci1=["%s"]\\n' "$primary_label" >> "$GITHUB_OUTPUT"
-  printf 'Primary runner: **ci1** (%s)\\n' "$primary_label" >> "$GITHUB_STEP_SUMMARY"
-}
-if [ "$EVENT" = pull_request ] && [ "$HEAD_REPOSITORY" != "$REPOSITORY" ]; then
-  namespace "a pull request from a fork never runs on ci1"
-fi
-if [ "$EVENT" = pull_request ] && jq -e 'index("ci-priority") != null' <<< "$PR_LABELS" >/dev/null 2>&1; then
-  primary ci1-priority
-  echo "priority PR: reserved ci1-priority capacity"
-  printf 'Runner: **ci1** (ci1-priority, ahead of ordinary PRs)\\n' >> "$GITHUB_STEP_SUMMARY"
-fi
-if [ "$EVENT" = merge_group ]; then
-  primary ci1-priority
-  echo "merge queue: reserved ci1-priority, never Namespace"
-  exit 0
-fi
-[ -n "$GH_TOKEN" ] || namespace "no runner status token"
-[[ "$NEED" =~ ^[1-9][0-9]*$ ]] || namespace "invalid minimum idle runner count"
-if ! runners=$(timeout 20s gh api --paginate --slurp "orgs/$OWNER/actions/runners?per_page=100" 2>&1); then
-  echo "::warning::could not list ci1's runners: $runners"
-  namespace "the runner list is unavailable"
-fi
-if ! idle=$(jq -e '[.[].runners[] | select(.status == "online" and .busy == false and any(.labels[]; .name == "ci1"))] | length' <<< "$runners"); then
-  namespace "the runner list is invalid"
-fi
-if [ -z "$primary_label" ]; then
-  if [ "$idle" -ge "$NEED" ]; then
-    primary ci1
-  else
-    printf 'Primary runner: **Namespace** (%s general runners idle, %s needed)\\n' "$idle" "$NEED" >> "$GITHUB_STEP_SUMMARY"
-  fi
-fi
-# A primary on ci1 or ci1-merge may take a general worker. Account for that worker
-# before offering separate slots to the second shard and canaries. A priority
-# primary has its own reserved label; general workers temporarily lent to priority
-# work no longer carry ci1 and therefore were excluded from the idle count above.
-available=$idle
-case "$primary_label" in ci1|ci1-merge) available=$((available - 1));; esac
-echo "$idle general runners idle; primary minimum $NEED; extra slots $available"
-for output in ci1_secondary ci1_mail; do
-  if [ "$available" -gt 0 ]; then
-    printf '%s=["ci1"]\\n' "$output" >> "$GITHUB_OUTPUT"
-    printf '%s runner: **ci1** (idle general slot)\\n' "$output" >> "$GITHUB_STEP_SUMMARY"
-    available=$((available - 1))
-  else
-    printf '%s runner: **Namespace** (no idle general slot)\\n' "$output" >> "$GITHUB_STEP_SUMMARY"
-  fi
-done`,
+      run: `python3 - <<'CI_PICK_RUNNER'\n${readFileSync(new URL('../../scripts/ci-pick-runner', import.meta.url), 'utf8')}CI_PICK_RUNNER\n`,
     },
   ],
 } as const
 
-// Every required merge job uses the owned priority lane; no Namespace overflow.
-const mergeCi1Labels = `github.event_name == 'merge_group' && '["ci1-priority"]'`
+/** Releases share the pool choice, without the ordinary PR opt-in variable. */
+export const priorityRunnerJob = {
+  ...pickRunnerJob,
+  if: "github.event_name != 'pull_request'",
+  steps: pickRunnerJob.steps.map(step => ({ ...step, env: { ...step.env, MODE: 'priority' } })),
+} as const
+
+// Every required merge job follows one pool decision, including explicit overflow.
+const mergeCi1Labels = `github.event_name == 'merge_group' && (needs.${pickRunnerJobId}.outputs.ci1 || '["ci1-priority"]')`
 const pickedOr = (namespaceLabels: string, output = 'ci1') =>
   `\${{ fromJSON(${mergeCi1Labels} || (github.event_name != 'merge_group' && needs.${pickRunnerJobId}.outputs.${output}) || ${namespaceLabels}) }}`
 
@@ -166,6 +121,10 @@ export const mailStageRunsOn = pickedOr(
   namespaceLabels(linuxStageRunner),
   'ci1_mail',
 )
+
+// Extra merge partitions use either host's merge role; an overflowed group stays
+// wholly on its selected Namespace profile rather than mixing source cohorts.
+export const extraMergeTestRunsOn = `\${{ fromJSON(needs.${pickRunnerJobId}.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.${pickRunnerJobId}.outputs.ci1 || '["ci1-merge"]') }}`
 
 /** `runs-on` for a Linux profile job: picked ci1, else the shared Namespace queue class. */
 export const linuxRunsOn = pickedOr(
@@ -276,8 +235,8 @@ for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
 done`,
   },
   nixDevelopStep({ name: 'Build selected test targets first (no debug info)', command: ['bash', 'scripts/ci-nextest', 'run', '--no-run'] }),
-  // The integration target already built st2 with the workspace's unified features. Running it
-  // directly avoids a separate cargo run build before those features are unified.
+  // The integration targets already built the driver library's matching hook installer.
+  // Run it directly without the legacy runner CLI or a separate cargo run build.
   nixDevelopStep({ name: 'Install matching rendered hooks', command: ['bash', 'scripts/ci-install-built-hooks'] }),
 ]
 
@@ -320,6 +279,136 @@ export const testArchiveConsumerSetup = [
 /** Everything a job that runs the workspace tests needs. */
 export const workspacePreparationSteps = [...commonSetupSteps, ...testBuildSteps]
 
+/**
+ * The stage jobs of `linux-gate` sign their own result. Every step is fail-soft and runs after the
+ * stage's logs are retained, so signing can never change a stage's outcome. The signer scripts come
+ * from the BASE commit of the change, never the tree under test. The note is written as a pack and
+ * uploaded; the aggregate note job (shallow checkouts cannot push) publishes it.
+ */
+export const evidenceStageNames = [
+  'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4',
+  'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries',
+] as const
+const evidenceHelper = '"$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"'
+/**
+ * Only the merge queue, main and pull requests from this repository reach the `evidence-signing`
+ * environment (and so the key); a fork's pull request and any other event get an empty expression and run
+ * without an environment, exactly as before. A same-repository author controls the workflow file its own
+ * pull request runs, so its code can read the key (known defect 20). The
+ * environment's own deployment-branch policy comes after this conditional exists.
+ */
+export const evidenceEnvironment =
+  "${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}"
+export const evidenceStageJob = (name: string) =>
+  (evidenceStageNames as readonly string[]).includes(name) ? { environment: evidenceEnvironment } : {}
+
+/**
+ * Jobs that are not `scripts/ci-linux` stages but are required checks too (genie-freshness,
+ * typescript-client, isolation-vm). They sign from the outcomes of their own steps; a step that did
+ * not run (for example because the job was covered by a trusted note) makes no note.
+ */
+export const evidenceStepNames = ['genie-freshness', 'typescript-client', 'isolation-vm'] as const
+export const evidenceStepJob = () => ({ environment: evidenceEnvironment })
+
+// The evidence gate(s) that can cover a job's work. A job that took such a skip must not sign a note for a run in
+// which it did not run its work: the signing helper refuses when this is 'true' (and so makes no note), whatever the
+// job's log or step outcomes say. Every gate named here must be in that job's `needs`.
+export const gateSkipExpression = (name: string): string => {
+  const gates = name === 'mail-redelivery-canaries'
+    ? ['linux-gate', 'mail-redelivery-canaries']
+    : (evidenceStepNames as readonly string[]).includes(name) ? [name] : ['linux-gate']
+  return '${{ ' + gates.map((gate) => `needs.evidence-gate-${gate}.outputs.skip == 'true'`).join(' || ') + ' }}'
+}
+
+const signingCore = (
+  name: string,
+  facts: { helper: 'stage-facts' | 'step-facts'; env: Record<string, string>; toolchain: boolean },
+): unknown[] => {
+  const soft = { if: 'always()', 'continue-on-error': true } as const
+  // Without a toolchain override the wrapper asks nix for the dev shell derivation; jobs without a
+  // stage shell fingerprint what they ran on instead.
+  const toolchain = facts.toolchain
+    ? ` \\
+  --toolchain-sha256 "$(printf '%s|%s|%s|%s|%s|%s' "$RUNNER_OS" "$RUNNER_ARCH" "\${ImageVersion:-}" "$(nix --version 2>/dev/null)" "$(node --version 2>/dev/null)" "$(pnpm --version 2>/dev/null)" | sha256sum | cut -d' ' -f1)"`
+    : ''
+  return [
+    {
+      ...soft,
+      name: 'Take the evidence signer from the base commit',
+      id: 'evidence-base',
+      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
+    },
+    {
+      ...soft,
+      name: 'May this job use the signing key?',
+      id: 'evidence-guard',
+      if: "${{ always() && steps.evidence-base.outcome == 'success' }}",
+      env: {
+        PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+        PR_BASE_SHA: '${{ github.event.pull_request.base.sha }}',
+        PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+        PR_USER: '${{ github.event.pull_request.user.login }}',
+      },
+      run: `python3 ${evidenceHelper} guard`,
+    },
+    {
+      ...soft,
+      name: 'Write the signer configuration and key',
+      id: 'evidence-configure',
+      if: "${{ always() && steps.evidence-guard.outcome == 'success' }}",
+      env: { EVIDENCE_SIGNING_KEY: '${{ secrets.EVIDENCE_SIGNING_KEY }}' },
+      run: `set -o pipefail
+python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
+    },
+    {
+      ...soft,
+      name: `Sign this ${facts.helper === 'stage-facts' ? 'stage' : 'job'} result`,
+      if: "${{ always() && steps.evidence-configure.outcome == 'success' }}",
+      env: {
+        ...facts.env,
+        GATE_SKIP: gateSkipExpression(name),
+        PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}',
+      },
+      run: `helper=${evidenceHelper}
+python3 "$helper" once ${facts.helper === 'stage-facts' ? '"$STAGE_JOB"' : '"$STEP_CHECK"'}
+python3 "$helper" ${facts.helper} "$RUNNER_TEMP/job-facts.json"
+home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check ${facts.helper === 'stage-facts' ? '"$STAGE_JOB"' : '"$STEP_CHECK"'} \\
+  --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \\
+  --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \\
+  --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \\
+  --out "$RUNNER_TEMP/evidence-notes"${toolchain}`,
+    },
+    { ...soft, name: 'Remove the key', run: `python3 ${evidenceHelper} cleanup` },
+    {
+      ...soft,
+      name: 'Retain the signed note',
+      uses: 'actions/upload-artifact@v4',
+      with: { name: `evidence-note-${name}`, path: '${{ runner.temp }}/evidence-notes/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
+    },
+  ]
+}
+
+export const evidenceStageSteps = (name: string, stage: string): unknown[] =>
+  (evidenceStageNames as readonly string[]).includes(name)
+    ? signingCore(name, { helper: 'stage-facts', env: { STAGE: stage, STAGE_JOB: name }, toolchain: false })
+    : []
+
+/** Signing steps for a job made of steps: `command` names what they stand for, `steps` maps step ids to outcomes. */
+export const evidenceStepSteps = (name: string, command: string[], stepIds: string[]): unknown[] =>
+  signingCore(name, {
+    helper: 'step-facts',
+    env: {
+      STEP_CHECK: name,
+      STEP_COMMAND: JSON.stringify(command),
+      STEP_OUTCOMES: '{' + stepIds.map((id) => `"${id}":"\${{ steps.${id}.outcome }}"`).join(',') + '}',
+    },
+    toolchain: true,
+  })
+
 // One Linux stage: its own runner and caches, the common setup, then scripts/ci-linux (or the
 // command given), with steps before and after it.
 export const linuxStageJob = ({
@@ -352,6 +441,7 @@ export const linuxStageJob = ({
   name,
   ...(condition ? { if: condition } : {}),
   'runs-on': runsOn,
+  ...evidenceStageJob(name),
   'timeout-minutes': 120,
   defaults: { run: { shell: 'bash' } },
   env: { ...buildEnv, ...env, CI_CACHE_DEV_SHELL: 'default' },
@@ -381,6 +471,7 @@ export const linuxStageJob = ({
         'if-no-files-found': 'ignore',
       },
     },
+    ...evidenceStageSteps(name, stage),
   ],
 })
 
@@ -421,7 +512,10 @@ export const fractalWebJobs = {
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 1,
     permissions: { contents: 'read' },
-    outputs: { relevant: '${{ steps.detect.outputs.relevant }}' },
+    outputs: {
+      relevant: '${{ steps.detect.outputs.relevant }}',
+      'kit-inputs': '${{ steps.detect.outputs.kit-inputs }}',
+    },
     steps: [
       {
         name: 'Detect web-relevant changes',
@@ -429,8 +523,8 @@ export const fractalWebJobs = {
         env: {
           EVENT: '${{ github.event_name }}',
           REMOTE: '${{ github.server_url }}/${{ github.repository }}.git',
-          BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}',
-          HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}',
+          BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
+          HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
         },
         run: embeddedPython('ci-fractal-web-changes'),
       },
@@ -450,7 +544,12 @@ export const fractalWebJobs = {
       { name: 'Restore the pnpm store', id: 'pnpm-store', uses: 'actions/cache/restore@v4', with: fractalWebStoreCache },
       {
         ...nixDevelopStep({ name: 'Run the fractal-web lanes and dependency license check', flake: '.#web', command: ['bash', 'scripts/ci-fractal-web'] }),
-        env: pnpmStoreEnv,
+        env: {
+          ...pnpmStoreEnv,
+          KIT_INPUTS: '${{ needs.fractal-web-changes.outputs.kit-inputs }}',
+          BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
+          HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
+        },
       },
     ],
   },
