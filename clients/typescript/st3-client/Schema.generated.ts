@@ -1016,11 +1016,24 @@ export const ReplicatedNotice = /*#__PURE__*/ (() => Schema.Struct({
 export type ReplicatedNotice = typeof ReplicatedNotice.Type
 export type ReplicatedNoticeEncoded = typeof ReplicatedNotice.Encoded
 
+/** Host-local evidence for a locally initiated exchange or attempt; absent after restart. Success and failure records are independent. Incoming receipt updates last-seen but preserves the original outbound record and timestamp; an inbound-only peer has no record. Probes never rewrite these records. */
+export const ExchangeTransport = /*#__PURE__*/ (() => Schema.Struct({
+  "at": Timestamp,
+  /** tailscale, fabric, loopback or unknown; future values remain readable. For failure, the attempted carrier. */
+  "carrier": Schema.String.annotate({ description: "tailscale, fabric, loopback or unknown; future values remain readable. For failure, the attempted carrier." }),
+  /** unknown for Fabric until per-dial evidence exists; absent for other carriers. */
+  "fabric_route": optionalKey(Schema.String).annotate({ description: "unknown for Fabric until per-dial evidence exists; absent for other carriers." })
+}).annotate({ identifier: "ExchangeTransport", description: "Host-local evidence for a locally initiated exchange or attempt; absent after restart. Success and failure records are independent. Incoming receipt updates last-seen but preserves the original outbound record and timestamp; an inbound-only peer has no record. Probes never rewrite these records." }))()
+export type ExchangeTransport = typeof ExchangeTransport.Type
+export type ExchangeTransportEncoded = typeof ExchangeTransport.Encoded
+
 export const SyncPeer = /*#__PURE__*/ (() => Schema.Struct({
   "diverged_since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
   "estimated_catch_up_seconds": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationSecondsRange), wholeUnits(1000))), NULL_NONE),
   "host_id": Id,
   "last_exchange_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  "last_failed_exchange": optionalKey(ExchangeTransport),
+  "last_successful_exchange": optionalKey(ExchangeTransport),
   "local_only_envelopes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "peer_only_envelopes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "SyncPeer" }))()

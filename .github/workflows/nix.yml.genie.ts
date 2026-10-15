@@ -1,4 +1,4 @@
-import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
+import { readyPRJobs } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow, installNixStep } from '../../repos/effect-utils/genie/external.ts'
 import { readOnlyBinaryCaches } from './workspace-ci.ts'
 
@@ -17,11 +17,8 @@ export default githubWorkflow(readyPRJobs({
       ]
     },
     "schedule": [{ "cron": "17 1 * * *" }],
-    "workflow_dispatch": {},
-    "pull_request": {
-      types: readyPullRequestTypes,
-      "paths": [".github/workflows/nix.yml*", ".github/messaging-compat-baseline.json", "scripts/ci-nix-release*", "flake.nix", "flake.lock", "nix/**"]
-    }
+    // Optional Nix verification stays off PRs while the release owner repairs it.
+    "workflow_dispatch": {}
   },
   "permissions": { "contents": "read" },
   "concurrency": {
