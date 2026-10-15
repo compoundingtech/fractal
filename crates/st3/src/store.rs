@@ -611,9 +611,13 @@ WHERE kind IN ('work.claimed', 'work.progress');
 CREATE INDEX IF NOT EXISTS claims_subagent_appeared_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.appeared';
-CREATE INDEX IF NOT EXISTS claims_subagent_renewed_index
-ON claims(subject, json_extract(body, '$.fields.subagent_id'))
+-- Include the numeric lease so MAX for one live pair seeks its final index entry instead
+-- of folding all its renewals. A new name upgrades existing stores at schema initialization.
+CREATE INDEX IF NOT EXISTS claims_subagent_renewed_max_lease_index
+ON claims(subject, json_extract(body, '$.fields.subagent_id'),
+          CAST(json_extract(body, '$.fields.lease_expires_at_unix_ms') AS INTEGER))
 WHERE kind='subagent.renewed';
+DROP INDEX IF EXISTS claims_subagent_renewed_index;
 CREATE INDEX IF NOT EXISTS claims_subagent_ended_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.ended';
@@ -4530,8 +4534,18 @@ impl Store {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<String>> {
+        self.mission_collection_ids_at(history, offset, limit, now_ms())
+    }
+
+    pub(crate) fn mission_collection_ids_at(
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        at_unix_ms: u128,
+    ) -> Result<Vec<String>> {
         Ok(self
-            .mission_collection_page(history, offset, limit, None)?
+            .mission_collection_page_at(history, offset, limit, None, at_unix_ms)?
             .into_iter()
             .map(|(id, _)| id)
             .collect())
@@ -4544,7 +4558,18 @@ impl Store {
         limit: usize,
         after: Option<&(u128, String)>,
     ) -> Result<Vec<(String, u128)>> {
-        let ended_since = recently_ended_since();
+        self.mission_collection_page_at(history, offset, limit, after, now_ms())
+    }
+
+    pub(crate) fn mission_collection_page_at(
+        &self,
+        history: bool,
+        offset: usize,
+        limit: usize,
+        after: Option<&(u128, String)>,
+        at_unix_ms: u128,
+    ) -> Result<Vec<(String, u128)>> {
+        let ended_since = at_unix_ms.saturating_sub(RECENTLY_ENDED_MS);
         let connection = self.readers.get();
         let mut statement = connection.prepare(
             "WITH ids AS (
@@ -14858,8 +14883,12 @@ impl Store {
 
     /// Current runs waiting on person steps, human gates or approvals.
     pub fn human_attention_runs(&self) -> Result<BTreeSet<String>> {
+        self.human_attention_runs_at(now_ms())
+    }
+
+    pub(crate) fn human_attention_runs_at(&self, now: u128) -> Result<BTreeSet<String>> {
         let mut items = self.mission_run_attention_items(None)?;
-        items.extend(self.person_attention_items(None, now_ms())?);
+        items.extend(self.person_attention_items(None, now)?);
         Ok(items.into_iter().filter_map(|item| item.mission_run).collect())
     }
 
@@ -19446,6 +19475,14 @@ fn adopt_declared_mission_revision_tx(
             Some(batch_id),
         )
         .map_err(internal)?;
+        if status == "draining" {
+            transaction
+                .execute(
+                    "UPDATE mission_runs SET updated_at_unix_ms=?2 WHERE id=?1",
+                    params![run_id, claim.accepted_at_unix_ms.to_string()],
+                )
+                .map_err(internal)?;
+        }
         return Ok((vec![claim.id], true));
     }
 
@@ -35662,6 +35699,11 @@ mod tests {
     mod canonical_audit {
         use super::*;
         include!("store/canonical_audit.rs");
+    }
+
+    mod declarative_revision_timestamp_tests {
+        use super::*;
+        include!("store/declarative_revision_timestamp_tests.rs");
     }
 
     mod actual_purity_tests {
