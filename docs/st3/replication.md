@@ -124,6 +124,17 @@ batches skipped behind the sealing frontier. Both read every envelope or batch, 
 two-million-envelope store, and the daemon listens only after admission. The first export or
 replication activation after the daemon serves runs them on a read connection.
 
+Admission prepares each envelope before it takes the writer: it decodes the payload, checks
+the envelope, batch, blob and claim hashes, encodes each claim and, for a runtime that
+classifies without the store (st3's does), classifies its kinds and fields. The writer is held
+only for the checks that read stored state and the writes: the envelope row is still there and
+not dropped by a checkpoint, membership and signatures still admit it, earlier record states
+(a `repaired` record stays repaired), tombstones and blobs. The envelope hash names its bytes,
+so a preparation always describes the row's content; an envelope deleted and received again
+after it was prepared is left `pending` and prepared again by a later pass, never re-prepared
+under the writer. This is a partial move of admission's cost, not a bound on its hold: the
+stored-state reads and writes still grow with the envelope's claims and bytes.
+
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each
 envelope hash commits its original payload and chain metadata. Thus members holding the same
