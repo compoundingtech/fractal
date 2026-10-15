@@ -378,6 +378,46 @@ async fn startup_summary_stays_pending_between_roster_and_summary_publication() 
     state.store.stop_attention_list_refresher();
 }
 
+/// A real read failure before the first successful summary must not be mistaken for the
+/// expected initial roster dependency. Use the real read-budget cancellation path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn startup_summary_read_failure_preserves_native_fallback() {
+    use crate::store::summary_list::PublishedSummary;
+    use smallclaims::read_budget::{self, ReadBudget};
+
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "summary-startup-error");
+    custom(&state, "custom/garden/review/v1/ada", "person/ada");
+    let _roster = state.store.start_agent_roster_refresher().unwrap();
+    state.store.start_attention_list_refresher().unwrap();
+    crate::api::refresh_attention_list(&state.store).unwrap();
+    let ada = ClientSession::local(Some("person/ada")).unwrap();
+    assert_eq!(summary_window(&state, &ada).await.unwrap_err().code, "summary-not-ready");
+    assert!(!summary::refresh_published(&state, 60_000, false).unwrap());
+    assert!(state.store.summary_selection_waiting(), "the initial roster wait is pending");
+    crate::api::refresh_agent_roster(&state.store, false).unwrap();
+
+    let changed = read_budget::with(
+        Some(ReadBudget::new("/summary-startup-control", Duration::ZERO)),
+        || summary::refresh_published(&state, 60_000, false).unwrap(),
+    );
+    assert!(changed, "a real cancelled read must resolve the selection to fallback");
+    assert!(state.store.summary_shared_starting(), "no shared counts have succeeded");
+    assert!(state.store.summary_shared().is_none());
+    assert!(matches!(
+        state.store.published_summary(Some("person/ada")),
+        PublishedSummary::Unserved
+    ));
+    assert!(!state.store.summary_selection_waiting());
+    let (snapshot, items, _) = summary_window(&state, &ada).await.unwrap();
+    assert!(snapshot.published_at.is_none(), "a genuine failure permits native reads");
+    assert_eq!(items[0]["needs_you"], 1);
+    assert!(summary::refresh_published(&state, 60_000, false).unwrap());
+    let (snapshot, _, _) = summary_window(&state, &ada).await.unwrap();
+    assert!(snapshot.published_at.is_some(), "a later success repairs fallback");
+    state.store.stop_attention_list_refresher();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn odd_and_surplus_summary_selections_never_stop_the_others() {
     let root = tempfile::tempdir().unwrap();
