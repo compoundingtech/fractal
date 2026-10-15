@@ -764,6 +764,7 @@ async fn dispatch(
     }
     actions! {
         "agent.create" => agent_create, "agent.queue-move" => agent_queue_move,
+        "agent.restart" => agent_restart,
         "agent.resume" => agent_resume, "agent.start" => agent_start,
         "agent.retire" => agent_retire, "agent.stop" => agent_stop, "agent.suspend" => agent_suspend,
         "custom.reply" => custom_reply, "prompt.respond" => prompt_respond,
@@ -1541,6 +1542,53 @@ async fn revision_decisions_survive_stale_previews_and_restarts() {
             );
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_requests_capture_native_context_and_survive_stale_fences_and_restarts() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    daemon.claim(
+        WORKER,
+        "harness.session-file",
+        json!({
+            "harness": "claude",
+            "session_id": "coverage-restart-native",
+            "agent": WORKER,
+            "incarnation_id": "4242:fixture",
+            "status": "active",
+            "resume_available": true,
+        }),
+    );
+    let revision = daemon.store().selected_desired_token(WORKER).unwrap().unwrap();
+    let mut fence = daemon.fence(PERSON).await;
+    fence.runtime_incarnation = Some("4242:fixture".into());
+    fence.runtime_desired_revision = Some(revision.clone());
+    let accepted = daemon
+        .exercise(
+            PERSON,
+            "agent.restart",
+            json!({"agent": WORKER, "fresh_context": false}),
+            fence,
+        )
+        .await;
+    assert_eq!(accepted["affected_ids"], json!([WORKER]));
+    let request = daemon
+        .store()
+        .latest_claim(WORKER, Some("runtime.action.requested"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.body["fields"]["action"], "restart");
+    assert_eq!(request.body["fields"]["incarnation_id"], "4242:fixture");
+    assert_eq!(
+        request.body["fields"]["native_session_id"],
+        "coverage-restart-native",
+    );
+    assert_eq!(request.body["fields"]["fresh_context"], false);
+    assert_eq!(request.body["evidence"], json!([revision]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
