@@ -301,6 +301,18 @@ fn collection_ignores(collection: &str, kind: &str) -> bool {
         return !kind.starts_with("arrangement.")
             && !matches!(kind, "custom.client.pairing-completed" | "custom.client.pairing-revoked");
     }
+    // Mission cards read run/step/gate state, definitions and person attention, never
+    // harness telemetry. Attention additionally reads harness login state and diagnostics,
+    // but not transcripts, token totals, todos or session-file metadata.
+    if collection == "missions" && matches!(kind,
+        "harness.observed" | "harness.diagnostic" | "harness.timeline" | "harness.usage"
+            | "harness.todo.observed" | "harness.session-file") {
+        return true;
+    }
+    if collection == "attention" && matches!(kind,
+        "harness.timeline" | "harness.usage" | "harness.todo.observed" | "harness.session-file") {
+        return true;
+    }
     matches!(kind, "daemon.diagnostic" | "transport.observed" | "workspace.observed")
         || (kind == "harness.usage" && collection != "agents")
 }
@@ -738,30 +750,34 @@ async fn collection_items_with_windows(
                     None => client_snapshot_at(&state, index),
                 };
                 let at = snapshot.created_at.clone();
+                // Share one bounded fleet projection across subscriber window sizes.
+                // Uncached reads retain the same bounded cut as the shared projection.
+                let projection_limit = if matches!(collection.as_str(), "missions" | "attention") {
+                    CLIENT_MAX_PAGE_ITEMS
+                } else {
+                    limit
+                };
                 let compute = || {
+                    let mut valid_until = None;
                     let mut items = match collection.as_str() {
                         "summary" => {
                             if let Some(rows) = &published_rows {
-                                return Ok((rows.clone(), false));
+                                return Ok((rows.clone(), false, None));
                             }
                             return Ok((summary::native(&state, &current, &request, &snapshot,
-                                now, windows.as_deref(), commits)?, false));
+                                now, windows.as_deref(), commits)?, false, None));
                         }
                         "missions" if published_missions.is_some() => {
                             let publication = published_missions.as_ref().expect("published missions");
-                            return super::published_lists::mission_window(&publication.rows, limit);
+                            return super::published_lists::mission_window(&publication.rows, limit)
+                                .map(|(items, has_more)| (items, has_more, None));
                         }
                         "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals" => {
-                            return inventory::items(&state, &current, &request, &snapshot);
+                            return inventory::items(&state, &current, &request, &snapshot)
+                                .map(|(items, has_more)| (items, has_more, None));
                         }
                         "missions" => {
-                            let mut ids =
-                                store.mission_collection_ids(false, 0, limit.saturating_add(1))?;
-                            let mut has_more = ids.len() > limit;
-                            ids.truncate(limit);
-                            let mut items = mission_list_cards_at(&store, &ids, now)?;
-                            has_more |= bound_mission_cards(&mut items)?;
-                            return Ok((items, has_more));
+                            return mission_collection_projection_at(&store, projection_limit, now);
                         }
                         "glasses" | "arrangements" if published_rows.is_some() => {
                             published_rows.clone().expect("published rows")
@@ -782,7 +798,13 @@ async fn collection_items_with_windows(
                         }
                         "attention" => match &published_rows {
                             Some(rows) => rows.clone(),
-                            None => client_attention_resources_at(&store, person.as_deref(), false, now)?,
+                            None => {
+                                let (items, until) = crate::performance::task("attention_collection/resources", || {
+                                    client_attention_resources_fenced_at(&store, person.as_deref(), now)
+                                })?;
+                                valid_until = until;
+                                items
+                            }
                         },
                         "agents" => {
                             // Published cards already exist; a cold unfiltered window folds
@@ -792,7 +814,8 @@ async fn collection_items_with_windows(
                                 Some(cards) => cards.iter().take(keep).cloned().collect(),
                                 None if status.is_none() => {
                                     folded.set(true);
-                                    return client_agent_window_cards(&store, index, limit);
+                                    return client_agent_window_cards(&store, index, limit)
+                                        .map(|(items, has_more)| (items, has_more, None));
                                 }
                                 None => {
                                     folded.set(true);
@@ -802,9 +825,10 @@ async fn collection_items_with_windows(
                         }
                         "work" if published_work.is_some() => {
                             let publication = published_work.as_ref().expect("published work");
-                            return Ok(super::published_lists::work_window(
+                            let (items, has_more) = super::published_lists::work_window(
                                 &publication.rows, actor.as_deref(), limit,
-                            ));
+                            );
+                            return Ok((items, has_more, None));
                         }
                         "work" => client_work_resources(
                             &store,
@@ -819,14 +843,14 @@ async fn collection_items_with_windows(
                     // Agent status/availability depends on live local delivery presence; overlay and
                     // filter it on every read, after reusing the immutable graph-derived rows.
                     if collection == "agents" {
-                        return Ok((items, false));
+                        return Ok((items, false, None));
                     }
                     if let Some(status) = &status {
                         items.retain(|item| item["state"].as_str() == Some(status.as_str()));
                     }
-                    let has_more = items.len() > limit;
-                    items.truncate(limit);
-                    Ok((items, has_more))
+                    let has_more = items.len() > projection_limit;
+                    items.truncate(projection_limit);
+                    Ok((items, has_more, valid_until))
                 };
                 let (mut items, mut has_more) = match windows.as_ref().filter(|_| published.is_none()) {
                     Some(windows) => windows.read(
@@ -841,8 +865,15 @@ async fn collection_items_with_windows(
                         },
                         compute,
                     )?,
-                    None => compute()?,
+                    None => {
+                        let (items, has_more, _) = compute()?;
+                        (items, has_more)
+                    }
                 };
+                if matches!(collection.as_str(), "missions" | "attention") {
+                    has_more |= items.len() > limit;
+                    items.truncate(limit);
+                }
                 if collection == "agents" {
                     // The window's shared rows are in hand; each reader's live overlay runs
                     // beside the others instead of behind them.
@@ -3117,6 +3148,24 @@ pub(super) fn mission_resources(
     })
 }
 
+fn mission_collection_projection_at(
+    store: &Store,
+    limit: usize,
+    at_unix_ms: u128,
+) -> anyhow::Result<(Vec<Value>, bool, Option<u128>)> {
+    let mut ids = store.mission_collection_ids_at(false, 0, limit.saturating_add(1), at_unix_ms)?;
+    let mut has_more = ids.len() > limit;
+    // The lookahead also determines has_more, so its membership deadline belongs to
+    // this window even though its card is not rendered.
+    let valid_until = store.mission_collection_valid_until(&ids, at_unix_ms)?;
+    ids.truncate(limit);
+    let mut items = crate::performance::task("mission_collection/cards", || {
+        mission_list_cards_at(store, &ids, at_unix_ms)
+    })?;
+    has_more |= bound_mission_cards(&mut items)?;
+    Ok((items, has_more, valid_until))
+}
+
 /// Collection cards keep only three run headers, regardless of a mission's history size.
 /// Full run and step detail stays on the detail endpoint.
 fn mission_list_cards(store: &Store, ids: &[String]) -> anyhow::Result<Vec<Value>> {
@@ -3128,7 +3177,8 @@ fn mission_list_cards_at(
     ids: &[String],
     at_unix_ms: u128,
 ) -> anyhow::Result<Vec<Value>> {
-    mission_list_cards_with(store, ids, at_unix_ms, &store.human_attention_runs()?)
+    let attention = crate::performance::task("mission_collection/attention_runs", || store.human_attention_runs_at(at_unix_ms))?;
+    mission_list_cards_with(store, ids, at_unix_ms, &attention)
 }
 
 /// [`mission_list_cards_at`] with the runs that wait on a person already read, as the published
@@ -3139,13 +3189,13 @@ pub(super) fn mission_list_cards_with(
     at_unix_ms: u128,
     attention: &BTreeSet<String>,
 ) -> anyhow::Result<Vec<Value>> {
-    let definitions = store
-        .mission_definitions_for_ids(ids)?
+    let definitions = crate::performance::task("mission_collection/definitions", || store
+        .mission_definitions_for_ids(ids))?
         .into_iter()
         .map(|d| (d.mission.subject.clone(), d))
         .collect::<BTreeMap<_, _>>();
     ids.iter().map(|id| {
-        let overview = store.mission_overview(id, 3)?;
+        let overview = crate::performance::task("mission_collection/overview", || store.mission_overview(id, 3))?;
         let newest = overview["newest"].as_array().expect("overview previews");
         let latest = newest.first();
         let definition = definitions.get(id);
@@ -3165,7 +3215,7 @@ pub(super) fn mission_list_cards_with(
             .map(|(_,count)| count.as_u64().unwrap_or(0)).sum::<u64>();
         let details = newest.iter().rev().map(|run| {
             let run_id=run["id"].as_str().expect("run header id");
-            let (total,done,steps)=store.mission_step_preview_at(run_id, at_unix_ms)?;
+            let (total,done,steps)=crate::performance::task("mission_collection/steps", || store.mission_step_preview_at(run_id, at_unix_ms))?;
             let terminal=matches!(run["status"].as_str(),Some("completed"|"failed"|"cancelled"));
             let scheduler_fault=store.reconcile_fault(run_id, crate::reconcile::FIRST_READINESS_FAULT_SCOPE)?;
             let must_act=if terminal {"nobody"} else if attention.contains(run_id) {"you"}

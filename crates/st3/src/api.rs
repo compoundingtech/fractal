@@ -784,6 +784,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/mailbox", get(mailbox::subscribe))
         .route("/v1/harness-events", post(harness_events::publish))
         .route("/v1/harness-prompts/state", get(harness_events::prompt_state))
+        .route("/v1/harness-prompts/answer", get(harness_events::prompt_answer))
         .route("/v1/mailbox/bind", post(mailbox::bind))
         .route("/v1/mailbox/attachment", get(mailbox::attachment))
         .route("/v1/mailbox/receipts", post(mailbox::receipt))
@@ -1663,6 +1664,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "idempotency-conflict"
         | "idempotency-key-expired"
         | "issuer-required"
+        | "suspend-authored-session-selection"
         | "arrangement-exists"
         | "arrangement-folder-exists"
         | "arrangement-retired"
@@ -2869,7 +2871,10 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
 /// without a claim, so this is read per request rather than cached with the agents.
 fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
     let mut running = BTreeMap::<String, Vec<Value>>::new();
-    for subagent in store.running_subagents(client_now_ms() as u64)? {
+    let subagents = crate::otel::roster_phase("subagent_leases", || {
+        store.running_subagents(client_now_ms() as u64)
+    })?;
+    for subagent in subagents {
         running
             .entry(subagent.agent.clone())
             .or_default()
@@ -3796,7 +3801,27 @@ pub(crate) fn client_attention_resources_at(
     _history: bool,
     at_unix_ms: u128,
 ) -> anyhow::Result<Vec<Value>> {
-    let current = store.attention_snapshot(person, at_unix_ms)?;
+    let current = crate::performance::task("attention_collection/snapshot", || {
+        store.attention_snapshot(person, at_unix_ms)
+    })?;
+    client_attention_resources_from_items(store, current)
+}
+
+fn client_attention_resources_fenced_at(
+    store: &Store,
+    person: Option<&str>,
+    at_unix_ms: u128,
+) -> anyhow::Result<(Vec<Value>, Option<u128>)> {
+    let (current, valid_until) = crate::performance::task("attention_collection/snapshot", || {
+        store.attention_collection_snapshot(person, at_unix_ms)
+    })?;
+    Ok((client_attention_resources_from_items(store, current)?, valid_until))
+}
+
+fn client_attention_resources_from_items(
+    store: &Store,
+    current: Vec<crate::model::AttentionItemView>,
+) -> anyhow::Result<Vec<Value>> {
     let mut resources = Vec::new();
     for item in current {
         let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
@@ -11450,7 +11475,7 @@ async fn restart_agent(
     {
         return Err(ApiError::bad(St3Error::new(
             "restart-suspended",
-            "the seat is suspended; resume it with `st agents resume`",
+            "the seat is suspended; resume it with `st agents resume`. If resume refuses an authored session selection, use `st agents stop` then `st agents start`; this ends the suspension and launches the declaration without preserving the suspended session",
         )));
     }
     let status = state
@@ -11772,6 +11797,15 @@ pub(crate) fn request_suspend(
             ))
         })?;
     check_suspension_fence(fence.as_ref(), Some(incarnation), &token)?;
+    if let Some(selector) = crate::native_resume::authored_session_selection(&member) {
+        return Err(ApiError::bad(
+            St3Error::new(
+                "suspend-authored-session-selection",
+                format!("the seat declares its own session selection ({selector}); native resume would refuse it, so suspend leaves the seat running"),
+            )
+            .with_detail("selector", selector),
+        ));
+    }
     let blocking = crate::suspension::blockers(&state.store, &subject, incarnation)
         .map_err(ApiError::internal)?;
     if !blocking.is_empty() {
