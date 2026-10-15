@@ -1034,11 +1034,12 @@ fn ts_type(value: &Value) -> Result<String> {
         return Ok(constant.to_string());
     }
     if let Some(items) = value.get("enum").and_then(Value::as_array) {
-        return Ok(items
-            .iter()
-            .map(Value::to_string)
-            .collect::<Vec<_>>()
-            .join(" | "));
+        let cases = items.iter().map(Value::to_string).collect::<Vec<_>>();
+        // One case per line from the same size as the schema cases, so two additions merge.
+        if cases.len() >= rich::ONE_PER_LINE_FROM {
+            return Ok(format!("\n  {}\n", cases.join("\n  | ")));
+        }
+        return Ok(cases.join(" | "));
     }
     for union in ["oneOf", "anyOf"] {
         if let Some(items) = value.get(union).and_then(Value::as_array) {
