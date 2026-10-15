@@ -45,11 +45,18 @@ export const HumanTime = React.memo(function HumanTime({ at, kind = 'relative', 
   const ref = React.useRef<HTMLTimeElement>(null)
   const tooltipEnabled = tooltip && exactText !== undefined
   const tip = useHoverTooltip(tooltipEnabled)
+  // While the tooltip is mounted the anchor names it as its description; the text equals
+  // aria-description, which aria-describedby supersedes, so the description is announced once.
+  const tooltipId = React.useId()
+  const describedBy = tooltipEnabled && tip.state.isOpen ? tooltipId : undefined
+  // RAC's Tooltip forwards `id` through its DOM-prop filter but leaves it out of TooltipProps.
+  const tooltipDom: { readonly id: string } = { id: tooltipId }
   const time = <time
       ref={ref}
       dateTime={exact === undefined ? undefined : kind === 'day' ? formatDayValue(at, zone) : new Date(at).toISOString()}
       aria-label={aria['aria-label'] === undefined ? undefined : `${aria['aria-label']} ${visibleLabel}`}
       aria-description={exactText}
+      aria-describedby={describedBy}
       data-testid={aria['data-testid']}
       data-human-time={kind}
       {...tip.hoverProps}
@@ -59,7 +66,7 @@ export const HumanTime = React.memo(function HumanTime({ at, kind = 'relative', 
   return <ThemePortal>
     {time}
     {tip.state.isOpen && <TooltipTriggerStateContext.Provider value={tip.state}>
-      <Tooltip triggerRef={ref} placement="top" offset={geometryNumbers.tooltipOffset} {...stylex.props(tooltipStyles.tooltip, styles.tooltip)}>{exactText}</Tooltip>
+      <Tooltip {...tooltipDom} triggerRef={ref} placement="top" offset={geometryNumbers.tooltipOffset} {...stylex.props(tooltipStyles.tooltip, styles.tooltip)}>{exactText}</Tooltip>
     </TooltipTriggerStateContext.Provider>}
   </ThemePortal>
 })

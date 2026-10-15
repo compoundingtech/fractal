@@ -7,6 +7,7 @@ import { civilDate } from './human-time'
 import { baselineTheme } from '../assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from '../assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as text, spaceVars as s, typeVars as t } from '../assistant-ui/composition-tokens.stylex'
+import { tooltipFor } from '../story-play'
 
 const now = Date.parse('2026-10-12T16:00:00Z')
 const zone = { locale: 'en-GB', timeZone: 'America/New_York' }
@@ -59,10 +60,12 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
     await expect(time).toHaveTextContent(label!)
     await expect(time).toHaveAttribute('datetime', dateTime!)
     await expect(time).toHaveAttribute('aria-description', description!)
+    // The tooltip becomes the description only while mounted; either way it is announced once.
+    await expect(time).not.toHaveAttribute('aria-describedby')
+    await expect(time).toHaveAccessibleDescription(description!)
     await userEvent.hover(time)
-    const tooltip = await canvas.findByRole('tooltip')
-    await expect(tooltip).toHaveTextContent(description!)
-    await waitFor(() => expect(getComputedStyle(tooltip).visibility).toBe('visible'))
+    const tooltip = await tooltipFor(time, description!)
+    await expect(time).toHaveAccessibleDescription(description!)
     const colors = getComputedStyle(canvas.getByTestId('tooltip-colors'))
     await expect(getComputedStyle(tooltip).backgroundColor).toBe(colors.backgroundColor)
     await expect(getComputedStyle(tooltip).color).toBe(colors.color)
@@ -70,6 +73,7 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
     await expect(getComputedStyle(tooltip).maxWidth).toBe('320px')
     await userEvent.unhover(time)
     await waitFor(() => expect(canvas.queryByRole('tooltip')).toBeNull())
+    await expect(time).not.toHaveAttribute('aria-describedby')
   }
   await expect(canvas.getByTestId('relative')).toHaveAccessibleName('Updated 3m ago')
   const unreported = canvas.getByTestId('unreported')
@@ -78,10 +82,11 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(unreported).not.toHaveAttribute('aria-description')
   await userEvent.hover(unreported)
   await expect(canvas.queryByRole('tooltip')).toBeNull()
+  await expect(unreported).not.toHaveAttribute('aria-describedby')
   await userEvent.unhover(unreported)
   // Leave a tooltip visible for comparison screenshots.
   await userEvent.hover(canvas.getByTestId('relative'))
-  await expect(await canvas.findByRole('tooltip')).toHaveTextContent(exact)
+  await tooltipFor(canvas.getByTestId('relative'), exact)
 }
 export const AllStates: Story = { play: assertStates }
 export const Light440: Story = { args: { scheme: 'light', width: 440 }, play: assertStates }
