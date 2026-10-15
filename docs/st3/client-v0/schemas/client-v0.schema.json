@@ -1722,11 +1722,24 @@
         "peers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/SyncPeer" } }
       }
     },
+    "ExchangeTransport": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Host-local evidence for a locally initiated exchange or attempt; absent after restart. Success and failure records are independent. Incoming receipt updates last-seen but preserves the original outbound record and timestamp; an inbound-only peer has no record. Probes never rewrite these records.",
+      "required": ["at", "carrier"],
+      "properties": {
+        "at": { "$ref": "#/$defs/Timestamp" },
+        "carrier": { "type": "string", "description": "tailscale, fabric, loopback or unknown; future values remain readable. For failure, the attempted carrier." },
+        "fabric_route": { "type": "string", "description": "unknown for Fabric until per-dial evidence exists; absent for other carriers." }
+      }
+    },
     "SyncPeer": {
       "type": "object",
       "additionalProperties": false,
       "required": ["host_id", "peer_only_envelopes", "local_only_envelopes"],
       "properties": {
+        "last_successful_exchange": { "$ref": "#/$defs/ExchangeTransport" },
+        "last_failed_exchange": { "$ref": "#/$defs/ExchangeTransport" },
         "host_id": { "$ref": "#/$defs/Id" },
         "peer_only_envelopes": { "type": "integer", "minimum": 0 },
         "local_only_envelopes": { "type": "integer", "minimum": 0 },
@@ -1763,6 +1776,10 @@
         "is_error": {"type": "boolean"}, "label": {"type": "string"}, "message": {"type": "string"},
         "stop_reason": {"type": "string"}, "error_id": {"type": "integer"},
         "api": {"type": "string"}, "provider": {"type": "string"}, "model": {"type": "string"},
+        "native": {
+          "type": "object", "additionalProperties": {},
+          "description": "Exact native assistant stopReason, errorMessage, errorStatus, errorId and retryRecovery diagnostics, including arbitrary structured/null and future values."
+        },
         "retry": {
           "type": "object", "additionalProperties": false,
           "properties": {
