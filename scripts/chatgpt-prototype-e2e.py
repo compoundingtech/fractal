@@ -104,6 +104,16 @@ def release_mutation_gate():
 def count_person_answers(subject):
     with sqlite3.connect(STATE/'store.sqlite') as db:
         return db.execute("SELECT count(*) FROM claims WHERE kind='work.person-done' AND subject=?", (subject,)).fetchone()[0]
+def replace_expired_grant():
+    global paired, adapter
+    # Expired grants cannot be renewed: obtain fresh owner consent and reconnect.
+    paired=pair(info)
+    policy(paired['grant']['id'])
+    credential.write_text(paired['credential'])
+    adapter.terminate();adapter.wait(timeout=10)
+    adapter=start(adapter_args+['--listen','127.0.0.1:'+str(port)],'adapter.log')
+    ready(listening,adapter)
+
 try:
     fixture=start([str(BIN/'examples/chatgpt_fixture'),str(STATE)],'fixture.log')
     ready(lambda:(STATE/'fixture.json').exists() and (STATE/'st3.sock').exists() and (STATE/'st3-client.sock').exists(),fixture)
@@ -238,7 +248,7 @@ try:
         release_mutation_gate()
         denied,error=future.result()
     record('expiry between proposal approval and execution',error and count_person_answers(info['expiry_ask_id'])==0,denied)
-    policy(paired['grant']['id'])
+    replace_expired_grant()
     stdio=subprocess.Popen(adapter_args+['--transport','stdio'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=open(STATE/'stdio.log','wb'),env=ENV,text=True,bufsize=1)
     PROCESSES.append(stdio)
     def stdio_rpc(request):
@@ -255,7 +265,7 @@ try:
     time.sleep(1.2)
     denied,error=mcp(endpoint,'st_agents_list')
     record('expired grant denied',error,denied)
-    policy(paired['grant']['id'])
+    replace_expired_grant()
     before=count_messages()
     revoked_send=dict(message_args,action_id='action/revoke-held-send',idempotency_key='revoke-held-send-key',fence={'snapshot_id':local('/v1/client/attention')['snapshot']['id']})
     arm_mutation_gate()
