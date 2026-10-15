@@ -2134,7 +2134,15 @@
       "tests": [
         "crates/st3/tests/tiles_root.rs::a_tile_acts_through_its_endpoint_only_as_its_own_agent"
       ],
-      "verification": "root-only proofs on a real Linux host with disposable system users (ST_TILES_ROOT_TEST=1 tiles_root); not run in CI, which has no root"
+      "verification": "root-only proofs on a real Linux host with launcher-allocated user IDs (ST_TILES_ROOT_TEST=1 tiles_root); not run in CI, which has no root"
+    },
+    {
+      "command": "st tiles remove",
+      "description": "End a tile, remove its state and directories, and give its user ID back. Run as root. Its registry entry stays; a later launch starts it afresh with a new user ID",
+      "tests": [
+        "crates/st3/tests/tiles_root.rs::the_launcher_allocates_each_tiles_user_id_and_gives_it_back"
+      ],
+      "verification": "root-only proofs on a real Linux host with launcher-allocated user IDs (ST_TILES_ROOT_TEST=1 tiles_root); not run in CI, which has no root"
     },
     {
       "command": "st tiles run",
@@ -2144,7 +2152,7 @@
         "crates/st3/tests/tiles_root.rs::sibling_tiles_cannot_reach_each_other_or_the_host",
         "crates/st3/tests/tiles_root.rs::only_root_starts_a_tile_and_only_inside_its_unit"
       ],
-      "verification": "root-only proofs on a real Linux host with disposable system users (ST_TILES_ROOT_TEST=1 tiles_root); not run in CI, which has no root"
+      "verification": "root-only proofs on a real Linux host with launcher-allocated user IDs (ST_TILES_ROOT_TEST=1 tiles_root); not run in CI, which has no root"
     },
     {
       "command": "st tiles stop",
@@ -2152,7 +2160,7 @@
       "tests": [
         "crates/st3/tests/tiles_root.rs::a_tile_ends_completely_however_its_launch_ends"
       ],
-      "verification": "root-only proofs on a real Linux host with disposable system users (ST_TILES_ROOT_TEST=1 tiles_root); not run in CI, which has no root"
+      "verification": "root-only proofs on a real Linux host with launcher-allocated user IDs (ST_TILES_ROOT_TEST=1 tiles_root); not run in CI, which has no root"
     },
     {
       "command": "st trace show",
