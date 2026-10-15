@@ -217,6 +217,9 @@ const outputMediaLanguages: Readonly<Record<string, string>> = {
   'application/yaml': 'yaml', 'text/yaml': 'yaml', 'application/x-yaml': 'yaml',
 }
 export const workLogOutputLanguage = (call: WorkLogCall): string => call.outputLanguage ?? (call.kind === 'run' ? 'bash' : '')
+/** The readable text a call's result renders to; empty, image-only or absent results have none.
+ * Rows, the default detail and the preview use this one rule to decide whether output exists. */
+export const renderedToolOutput = (call: WorkLogCall): string | undefined => call.detail || toolOutput(call.output) || undefined
 /** Never let a newer caller projection fold an older committed message snapshot. */
 export function committedWorkLogs(items: readonly ConversationItem[], projections: readonly WorkLogProjection[]): ReadonlyMap<number, WorkLogProjection> {
   const positions = new Map(items.map((item, index) => [item.id, index]))

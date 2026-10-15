@@ -6,13 +6,13 @@ import { agentFolders, commandSections, leadingRows, recentLimit, recordVisit, s
 
 // Names, folders and hosts as observed in the live roster on 2026-10-12.
 const live = [
-  ['agent/fleet-coordinator', 'Fleet coordinator', 'dev5'],
-  ['agent/fleet-storage', 'Fleet storage steward', 'dev3'],
-  ['agent/global-complexity', 'Global complexity orchestrator', 'dev3'],
-  ['agent/agent-attention', 'Agent attention', 'dev3'],
-  ['agent/buck2-lead', 'Buck2 migration lead', 'dev3'],
-  ['agent/graph-steward', 'Graph-as-code steward', 'dev5'],
-  ['agent/janitor', 'Janitor', 'dev3'],
+  ['agent/fleet-coordinator', 'Fleet coordinator', 'desk3'],
+  ['agent/fleet-storage', 'Fleet storage steward', 'desk1'],
+  ['agent/global-complexity', 'Global complexity orchestrator', 'desk1'],
+  ['agent/agent-attention', 'Agent attention', 'desk1'],
+  ['agent/buck2-lead', 'Buck2 migration lead', 'desk1'],
+  ['agent/graph-steward', 'Graph-as-code steward', 'desk3'],
+  ['agent/janitor', 'Janitor', 'desk1'],
 ] as const
 const agents: readonly Agent[] = live.map(([ref, name, host]) => ({ ...searchAgents[0]!, ref, name, host, mission: undefined }))
 const tree: readonly SidebarNode[] = [
@@ -72,12 +72,12 @@ describe('switch results over live names', () => {
     expect(sections({ query: 'fleet', recents: ['agent/fleet-storage'] })[0]!.rows.map(row => row.title)).toEqual(['Fleet storage steward', 'Fleet coordinator', 'Janitor'])
   })
   it('opens a mission through the agent last visited for it and disables missions without an agent', () => {
-    const working = agents.map(agent => agent.ref === 'agent/janitor' || agent.ref === 'agent/fleet-storage' ? { ...agent, mission: 'mission/dotfiles/disk' } : agent)
-    const missions = [{ id: 'mission/dotfiles/disk', title: 'Disk steward sweep', state: 'active' }, { id: 'mission/idle', title: 'Disk archive', state: { raw: 'ready' } }]
+    const working = agents.map(agent => agent.ref === 'agent/janitor' || agent.ref === 'agent/fleet-storage' ? { ...agent, mission: 'mission/ops/disk' } : agent)
+    const missions = [{ id: 'mission/ops/disk', title: 'Disk steward sweep', state: 'active' }, { id: 'mission/idle', title: 'Disk archive', state: { raw: 'ready' } }]
     const result = sections({ agents: working, missions, query: 'disk', recents: ['agent/janitor'] })
     expect(result.map(section => section.id)).toEqual(['missions'])
     expect(result[0]!.rows.map(row => [row.title, row.target, row.disabledReason !== undefined])).toEqual([
-      ['Disk steward sweep', { _tag: 'Mission', id: 'mission/dotfiles/disk', agentRef: 'agent/janitor' }, false],
+      ['Disk steward sweep', { _tag: 'Mission', id: 'mission/ops/disk', agentRef: 'agent/janitor' }, false],
       ['Disk archive', { _tag: 'Mission', id: 'mission/idle', agentRef: undefined }, true],
     ])
     expect(result[0]!.rows[0]!.context[0]!.text).toBe('mission · Janitor +1')

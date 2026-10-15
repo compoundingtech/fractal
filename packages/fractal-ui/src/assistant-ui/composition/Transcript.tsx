@@ -6,7 +6,7 @@ import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/mo
 import { EmbraceScrollViewport } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
 import { WorkLogV1 } from '../taste/WorkLogV1'
-import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
+import { errorReason, formatWorkDuration, readableCommand, renderedToolOutput, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
 import { SyncLine } from '../st3-views/SyncLine'
 import { syncLine } from '../st3-views/sync-line'
 import type { SyncStatus } from '../st3-views/sync-status'
@@ -104,9 +104,11 @@ export function AgentMessage({ item, senderLine }: { readonly item: (TextItem & 
 }
 /** The row disclosure is the sole route to the full raw input/output. */
 export function ToolDetailPreview({ call, onOpen }: { readonly call: WorkLogCall; readonly onOpen?: (call: WorkLogCall) => void }) {
-  const output = call.detail ?? (call.output === undefined ? call.status === 'running' ? 'No output received yet.' : 'No output recorded.' : typeof call.output === 'string' ? call.output : JSON.stringify(call.output, null, 2))
+  const rendered = renderedToolOutput(call)
+  const output = rendered ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')
   const command = readableCommand(call)
-  const showOutput = (call.detail ?? '') !== '' || call.output !== undefined || call.rawInput === undefined
+  // An input-bearing call without readable output shows its input only, never an empty output block.
+  const showOutput = rendered !== undefined || call.rawInput === undefined
   return <div data-testid="tool-detail-preview" {...stylex.props(styles.preview)}>
     {call.status === 'error' && call.detail !== undefined && <p data-testid="tool-error-reason" {...stylex.props(styles.errorReason)}>{errorReason(call.detail)}</p>}
     {call.rawInput !== undefined && <pre data-testid="tool-raw-input" {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}>{call.rawInput}</code></pre>}

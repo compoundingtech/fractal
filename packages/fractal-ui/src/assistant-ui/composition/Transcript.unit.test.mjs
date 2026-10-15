@@ -67,3 +67,34 @@ test('successful output is never automatically previewed and human titles are no
   assert.match(markup, /data-tool-kind="run"/)
   assert.match(markup, /Checking visible rows/)
 })
+
+const settled = { kind: 'read', title: 'read', argsSummary: 'src/rows.ts', status: 'success', startedAt: '2026-01-15T12:00:00Z', endedAt: '2026-01-15T12:00:01Z' }
+const workLog = async calls => {
+  const { WorkLogV1 } = await server.ssrLoadModule('/src/assistant-ui/taste/WorkLogV1.tsx')
+  return renderToStaticMarkup(React.createElement(WorkLogV1, { turn: { calls, foldable: false, running: false, failed: false, interrupted: false } }))
+}
+
+test('a settled silent row carries no absent-output placeholder', async () => {
+  const markup = await workLog([{ ...settled, id: 'call/silent' }])
+  assert.doesNotMatch(markup, /No output/)
+})
+
+test('row expandability follows rendered text, not raw empty or image-only results', async () => {
+  const image = [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }]
+  const silent = await workLog([{ ...settled, id: 'call/empty', input: {}, output: [] }, { ...settled, id: 'call/image', input: {}, output: image }])
+  assert.doesNotMatch(silent, /data-row-disclosure|Show raw input and output/)
+  // Control: the same row with readable text output is expandable.
+  const readable = await workLog([{ ...settled, id: 'call/text', input: {}, output: [{ type: 'text', text: 'Observed read result.' }] }])
+  assert.match(readable, /data-row-disclosure="closed"/)
+})
+
+test('an input-bearing call with empty output shows its input without an empty output block', async () => {
+  const { ToolDetailPreview } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
+  const preview = call => renderToStaticMarkup(React.createElement(ToolDetailPreview, { call: { ...settled, id: 'call/read', ...call } }))
+  const markup = preview({ rawInput: '{"path":"src/rows.ts"}', output: '' })
+  assert.equal(markup.match(/<pre/g)?.length, 1)
+  assert.match(markup, /data-testid="tool-raw-input"/)
+  assert.doesNotMatch(markup, /No output recorded/)
+  // Control: readable output still renders beside the input.
+  assert.equal(preview({ rawInput: '{"path":"src/rows.ts"}', output: 'Observed read result.' }).match(/<pre/g)?.length, 2)
+})

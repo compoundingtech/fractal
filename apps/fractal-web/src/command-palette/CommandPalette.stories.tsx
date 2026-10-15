@@ -13,17 +13,17 @@ import { commandSections, switchSections, type PaletteCommand, type PaletteMode,
 
 // Live roster names, folders and hosts from 2026-10-12, repeated with numbered copies to reach a realistic size.
 const names = [
-  ['Fleet coordinator', 'Fleet / manager', 'dev5'], ['Fleet storage steward', 'Fleet / manager', 'dev3'], ['Janitor', 'Fleet / Runtime & hosts', 'dev3'],
-  ['Global complexity orchestrator', 'Agent system / Agent control', 'dev3'], ['Agent attention', 'Agent system / Agent control', 'dev3'],
-  ['Buck2 migration lead', 'Engineering loop / buck2', 'dev3'], ['Graph-as-code steward', 'Compounding / Smalltalk', 'dev5'],
-  ['Notion IaC Alchemy prototype', 'Knowledge / Context', 'dev3'], ['Berlin home owner', 'Life / Home', 'dev3'], ['Eggisried home owner', 'Life / Home', 'dev3'],
-  ['UI design', 'Design', 'dev5'], ['Investigating cross-host agent sessions with exceptionally long mission and workspace names', 'Research / Long-running missions', 'dev4'],
+  ['Fleet coordinator', 'Fleet / manager', 'desk3'], ['Fleet storage steward', 'Fleet / manager', 'desk1'], ['Janitor', 'Fleet / Runtime & hosts', 'desk1'],
+  ['Global complexity orchestrator', 'Agent system / Agent control', 'desk1'], ['Agent attention', 'Agent system / Agent control', 'desk1'],
+  ['Buck2 migration lead', 'Engineering loop / buck2', 'desk1'], ['Graph-as-code steward', 'Compounding / Smalltalk', 'desk3'],
+  ['Notion IaC Alchemy prototype', 'Knowledge / Context', 'desk1'], ['Berlin home owner', 'Life / Home', 'desk1'], ['Eggisried home owner', 'Life / Home', 'desk1'],
+  ['UI design', 'Design', 'desk3'], ['Investigating cross-host agent sessions with exceptionally long mission and workspace names', 'Research / Long-running missions', 'desk2'],
 ] as const
 const agents: readonly Agent[] = Array.from({ length: 6 }, (_, copy) => names.map(([name, , host], index) => ({
-  ...searchAgents[0]!, ref: `agent/${index}-${copy}`, name: copy === 0 ? name : `${name} ${copy + 1}`, host, connected: host !== 'dev4', status: copy % 2 === 0 ? 'working' : 'idle', mission: index === 0 ? 'mission/dotfiles/fleet' : undefined,
+  ...searchAgents[0]!, ref: `agent/${index}-${copy}`, name: copy === 0 ? name : `${name} ${copy + 1}`, host, connected: host !== 'desk2', status: copy % 2 === 0 ? 'working' : 'idle', mission: index === 0 ? 'mission/ops/fleet' : undefined,
 }))).flat()
 const folders = new Map(agents.map((agent, index) => [agent.ref, names[index % names.length]![1]]))
-const missions = [{ id: 'mission/dotfiles/fleet', title: 'Fleet health sweep', state: 'active' }, { id: 'mission/dotfiles/ui-design/palette-build', title: 'Palette build', state: { raw: 'ready' } }]
+const missions = [{ id: 'mission/ops/fleet', title: 'Fleet health sweep', state: 'active' }, { id: 'mission/ops/ui-design/palette-build', title: 'Palette build', state: { raw: 'ready' } }]
 const commands: readonly PaletteCommand[] = [
   { id: 'attention.open', title: 'Open pending questions', detail: '3 agents ask a question', category: 'Navigate', keywords: ['needs you', 'inbox'] },
   { id: 'terminal.toggle', title: 'Open terminal', detail: 'Fleet coordinator', category: 'View' },

@@ -29,7 +29,8 @@ const server = await createServer({
     }) },
   }],
   optimizeDeps: { entries: ['index.html'], include: ['react', 'react-dom/client', 'react/jsx-runtime'] },
-  server: { ...loaded.config.server, host: '127.0.0.1', port: 0, strictPort: false, hmr: false, fs: { allow: [scratch, app, `${app}/../..`, '/home/schickling/.megarepo'] } },
+  // Workspaces whose package store lives outside the repo list it in WF_PROOF_FS_ALLOW (colon-separated).
+  server: { ...loaded.config.server, host: '127.0.0.1', port: 0, strictPort: false, hmr: false, fs: { allow: [scratch, app, `${app}/../..`, ...(process.env.WF_PROOF_FS_ALLOW?.split(':').filter(Boolean) ?? [])] } },
 })
 const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {})
 const entry = (bounded, version) => `import * as React from 'react'

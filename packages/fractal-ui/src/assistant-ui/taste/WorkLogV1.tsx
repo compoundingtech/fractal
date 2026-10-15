@@ -6,7 +6,7 @@ import { Icon } from '../composition/Icons'
 import { ErrorOverlay } from '../composition/ErrorOverlay'
 import { HighlightedSource } from '../composition/Markdown'
 import type { WorkLogCall, WorkLogTurn } from './work-log'
-import { errorReason, failedCommandSource, formatWorkDuration, readableCommand, workLogOutputLanguage } from './work-log'
+import { errorReason, failedCommandSource, formatWorkDuration, readableCommand, renderedToolOutput, workLogOutputLanguage } from './work-log'
 import { workKindPresentation, workServicePresentation } from './work-row-presentation'
 
 export type WorkLogCallDetailRenderer = (call: WorkLogCall) => React.ReactNode
@@ -51,7 +51,8 @@ const TimelineCall = React.memo(function TimelineCall({ call }: { call: WorkLogC
   const [open, setOpen] = React.useState(false)
   const renderDetail = React.useContext(CallDetailRenderer)
   const { interactive } = React.useContext(CallPresentation)
-  const hasOutput = call.detail !== undefined && call.detail.length > 0 || call.output !== undefined && call.output !== ''
+  // Expandability follows rendered text: empty and image-only native results have nothing to read.
+  const hasOutput = renderedToolOutput(call) !== undefined
   // Input-only rows still open an intent summary and the explicit raw disclosure.
   const canInspect = hasOutput || call.rawInput !== undefined || renderDetail !== undefined && (call.input !== undefined || call.command !== undefined)
   const displayed = canInspect && open
@@ -64,12 +65,12 @@ const TimelineCall = React.memo(function TimelineCall({ call }: { call: WorkLogC
   const start = Date.parse(call.startedAt), end = Date.parse(call.endedAt ?? '')
   const duration = Number.isFinite(start) && Number.isFinite(end) && end >= start ? formatWorkDuration(end - start) || '<1s' : undefined
   const state = call.skipped ? 'Skipped' : call.status === 'running' ? 'Running' : call.status === 'error' ? 'Failed' : call.status === 'interrupted' ? 'Interrupted' : 'OK'
-  const row = <><span data-tool-kind={service === undefined ? call.kind === 'unknown' ? 'system' : call.kind : 'service'} data-kind-icon={service === undefined ? presentation.icon : 'gear'}><Icon name={service === undefined ? presentation.icon : 'gear'} size={16} /></span><span {...stylex.props(styles.callLabel)}>{call.intent === undefined ? <span data-tool-title>{secondary}</span> : <><span data-tool-title data-tool-intent>{call.intent}</span><span data-tool-secondary {...stylex.props(styles.secondary)}>{' · '}{secondary}</span></>}</span>{canInspect && interactive && <span data-row-disclosure={displayed ? 'open' : 'closed'} {...stylex.props(styles.disclosure)}><Icon name={displayed ? 'chevron-down' : 'chevron-right'} size={12} /></span>}<span data-tool-state {...stylex.props(styles.callState)}>{call.status === 'running' && <Icon name="spinner" spinning size={12} />}{call.status === 'error' && !call.skipped && <span data-tool-error-mark {...stylex.props(styles.errorMark)}><Icon name="x" size={12} /></span>}{service === undefined ? state : <>{service.state}<span data-service-readiness={service.readiness} data-service-tone={service.warning ? 'warning' : 'neutral'} {...stylex.props(styles.serviceChip, service.warning && styles.serviceWarning)}>{service.readiness}</span></>}{!hasOutput && call.status !== 'running' && !call.skipped ? ' · No output' : ''}{duration === undefined ? '' : ` · ${duration}`}</span></>
+  const row = <><span data-tool-kind={service === undefined ? call.kind === 'unknown' ? 'system' : call.kind : 'service'} data-kind-icon={service === undefined ? presentation.icon : 'gear'}><Icon name={service === undefined ? presentation.icon : 'gear'} size={16} /></span><span {...stylex.props(styles.callLabel)}>{call.intent === undefined ? <span data-tool-title>{secondary}</span> : <><span data-tool-title data-tool-intent>{call.intent}</span><span data-tool-secondary {...stylex.props(styles.secondary)}>{' · '}{secondary}</span></>}</span>{canInspect && interactive && <span data-row-disclosure={displayed ? 'open' : 'closed'} {...stylex.props(styles.disclosure)}><Icon name={displayed ? 'chevron-down' : 'chevron-right'} size={12} /></span>}<span data-tool-state {...stylex.props(styles.callState)}>{call.status === 'running' && <Icon name="spinner" spinning size={12} />}{call.status === 'error' && !call.skipped && <span data-tool-error-mark {...stylex.props(styles.errorMark)}><Icon name="x" size={12} /></span>}{service === undefined ? state : <>{service.state}<span data-service-readiness={service.readiness} data-service-tone={service.warning ? 'warning' : 'neutral'} {...stylex.props(styles.serviceChip, service.warning && styles.serviceWarning)}>{service.readiness}</span></>}{duration === undefined ? '' : ` · ${duration}`}</span></>
   return <div data-item-id={call.id} data-tool-status={call.status}>{canInspect && interactive ? <TooltipTrigger delay={150}><Button aria-description="Show raw input and output" aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(styles.call, open && styles.expanded)}>{row}</Button><Tooltip {...stylex.props(styles.hover)}><div>{label}</div></Tooltip></TooltipTrigger> : <div {...stylex.props(styles.call, styles.staticCall)}>{row}</div>}{displayed && (renderDetail === undefined ? <DefaultCallDetail call={call} /> : renderDetail(call))}</div>
 })
 /** The row disclosure is the sole route to exact input and full output. */
 function DefaultCallDetail({ call }: { readonly call: WorkLogCall }) {
-  const output = call.detail !== undefined && call.detail !== '' ? call.detail : call.output === undefined || call.output === '' ? undefined : typeof call.output === 'string' ? call.output : JSON.stringify(call.output, null, 2)
+  const output = renderedToolOutput(call)
   return <>
     <p>{call.summary ?? call.title} · {call.status}</p>
     {call.status === 'error' && call.detail !== undefined && <p>{errorReason(call.detail)}</p>}

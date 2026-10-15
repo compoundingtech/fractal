@@ -104,7 +104,7 @@ async function expectNoOutputWithControl(element: HTMLElement) {
 const longCommand = 'pnpm --filter ./packages/rows exec vitest run src/rows.test.ts --reporter=verbose --coverage --coverage.include=src/rows.ts --testNamePattern "selection survives the projection change across visible and hidden rows"'
 const commandRowItems = ([['short', 'pnpm test rows'], ['long', longCommand]] as const).map(([key, command]): ConversationItem => ({ _tag: 'ToolCall', id: `rows/${key}`, callId: `rows/${key}`, name: 'run', input: { command }, status: 'success', result: { content: '✓ selection retained', mediaType: 'text/x-shellscript', isError: false, at: '2026-01-15T12:00:04Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' }))
 const commandRowData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'rows', items: commandRowItems, work: workLogTurnFromItems(commandRowItems, { kindFor: () => 'run', running: false, failed: false, interrupted: false, durationMs: 4000, startedAt: at, completeHistory: true }) }] }
-/** A long command keeps its row to one line: ellipsis in place, full text in the title. */
+/** A long command keeps its row to one line: ellipsis in place, full label in a React Aria tooltip (no native title). */
 export const LongCommandRow: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={commandRowData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await userEvent.click(await canvas.findByRole('button', { name: /Worked for 4s/ }))
@@ -122,9 +122,16 @@ export const LongCommandRow: Story = { render: args => <main {...stylex.props(st
   const assertTokenHeights = async () => {
     for (const height of heights()) await expect(height).toBe(toolRow)
   }
-  const label = rows[1]!.querySelector<HTMLElement>('span[title]')!
-  await expect(label).toHaveAttribute('title', `run ${longCommand}`)
-  await waitFor(() => expect(label.querySelector('[data-syntax-token]')).not.toBeNull())
+  // The semantic label container owns the one-line ellipsis; the row carries no native title.
+  const label = rows[1]!.querySelector<HTMLElement>('[data-tool-title]')!.parentElement!
+  await expect(label).toHaveTextContent(longCommand)
+  await expect(rows[1]!.querySelector('[title]')).toBeNull()
+  await expect(label.querySelector('[data-syntax-token]')).toBeNull()
+  const page = within(canvasElement.ownerDocument.body)
+  await userEvent.hover(rows[1]!)
+  await expect(await page.findByRole('tooltip')).toHaveTextContent(`Run command · ${longCommand}`)
+  await userEvent.unhover(rows[1]!)
+  await waitFor(() => expect(page.queryByRole('tooltip')).toBeNull())
   await nextFrame()
   await assertTokenHeights()
   await expect(label.scrollWidth).toBeGreaterThan(label.clientWidth)
