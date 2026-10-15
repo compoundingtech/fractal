@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "none",
-    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites; no client contract change."
+    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites; the card's field names and types are unchanged."
   },
   "rules": {
     "status": "none",
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Behavior change on the status contract only: down_since is later than before for a seat that reported after its launch. The field and its type are unchanged."
+    "detail": "No client or member change is required. The meaning of down_since changes from when the seat began waiting to when it last reported after its launch, so it reads later than before for a seat that reported after launching; clients that print it as a time need no change."
   },
   "downtime": {
     "status": "none",
