@@ -10030,14 +10030,6 @@ async fn run_devices(
                         max_response_bytes: Some(max_response_bytes),
                     }).await?
                 }
-                AssistantGrantCommand::ReadTrust { grant, issuer, key_id, attestor_public_key, shim_public_key, default_response_bytes, max_response_bytes } => {
-                    client.assistant_grant_read_trust(&grant, &AssistantReadTrustRequest {
-                        api_version: CLIENT_V0_API_VERSION.into(), issuer, key_id,
-                        attestor_public_key, shim_public_key,
-                        default_response_bytes: Some(default_response_bytes),
-                        max_response_bytes: Some(max_response_bytes),
-                    }).await?
-                }
             };
             print_client_value(&response, json_output)
         }

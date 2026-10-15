@@ -11333,7 +11333,7 @@ impl Store {
         let _gate = assistant_write_gate::pause(&authorization.grant_subject)?;
         let admission = |transaction: &Connection| assistant_write::authorize(transaction, &self.origin, authorization);
         append_claim_with_commit_context(&self.graph, input, None, None, None, None,
-            ClaimCommitContext { admission: Some(&admission), signature: None })
+            ClaimCommitContext { admission: Some(&admission), ..Default::default() })
     }
 
     #[cfg(test)]
