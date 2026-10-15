@@ -518,7 +518,10 @@ url = "http://127.0.0.1:{proxies[1 - i]}"
             )
             wrapper.chmod(0o755)
         # The nodes are independent until both serve; neither startup waits behind the other.
-        await asyncio.gather(*(node.start() for node in nodes))
+        # Let both starts settle before raising, so cleanup never races a start still spawning.
+        for outcome in await asyncio.gather(*(node.start() for node in nodes), return_exceptions=True):
+            if isinstance(outcome, BaseException):
+                raise outcome
         legacy_env = ""
         if case == "old-channel":
             legacy = target.binary.with_name("legacy-st3")
