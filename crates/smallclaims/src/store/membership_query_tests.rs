@@ -269,6 +269,7 @@ fn sealed_fleet_cache_reuses_the_query_and_invalidates_every_fold_input() {
         "UPDATE claims SET id='renamed'",
         "UPDATE batches SET replica_sequence=4",
         "UPDATE batches SET origin='cedar'",
+        "UPDATE batches SET origin='birch', replica_sequence=3",
         "UPDATE replica_envelopes SET batch_id=NULL",
         "UPDATE replica_envelopes SET batch_id='anchor'",
         "UPDATE replica_envelopes SET envelope_hash='changed'",
@@ -323,4 +324,35 @@ fn sealed_fleet_cache_never_includes_the_local_signer_fallback() {
     let sealed = sealed_fleet_view_tx(&connection, &mut cache).unwrap();
     assert_eq!(sealed.current("birch")[0].state, "current");
     assert_eq!(sealed_fleet_view_tx(&connection, &mut cache).unwrap(), sealed);
+}
+
+#[test]
+fn sealed_fleet_cache_tracks_batch_signers_after_envelope_identity_changes() {
+    let connection = fixture();
+    connection.execute_batch(&fleet_generation_schema()).unwrap();
+    let anchor = admitted("anchor", "birch", "anchor-key", "anchor", "birch", 3);
+    insert_claim(&connection, &anchor);
+    envelope(&connection, &anchor, "sealed", &["anchor-key"]);
+    connection.execute(
+        "UPDATE replica_envelopes SET writer='other-writer', sequence=99", [],
+    ).unwrap();
+    let mut cache = None;
+    assert_eq!(
+        sealed_fleet_view_tx(&connection, &mut cache).unwrap().current("birch").len(), 1,
+    );
+    for sql in [
+        "DELETE FROM replica_envelope_signatures",
+        "INSERT INTO replica_envelope_signatures VALUES('birch',3,'sealed','anchor-key')",
+        "UPDATE replica_envelope_signatures SET member_key='other-key'",
+        "UPDATE replica_envelope_signatures SET member_key='anchor-key'",
+    ] {
+        let before = fleet_generation(&connection).unwrap();
+        connection.execute_batch(sql).unwrap();
+        assert!(fleet_generation(&connection).unwrap() > before, "{sql}");
+        assert_eq!(
+            sealed_fleet_view_tx(&connection, &mut cache).unwrap(),
+            crate::fleet::FleetView::from_membership(&fleet_membership_tx(&connection).unwrap()),
+            "{sql}",
+        );
+    }
 }
