@@ -55,6 +55,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case notFound, forbidden, unsupportedCapability, validationFailed, idempotencyConflict
     case attentionMigrated
     case issuerRequired
+    case suspendAuthoredSessionSelection
     case arrangementExists
     case arrangementFolderExists, arrangementRetired, arrangementLimit, arrangementFolderDeleted
     case arrangementCycle, arrangementBodyTooLarge, arrangementOwnerForbidden
@@ -76,6 +77,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "unsupported-capability": .unsupportedCapability; case "validation-failed": .validationFailed
         case "idempotency-conflict": .idempotencyConflict; case "stale-fence": .staleFence
         case "issuer-required": .issuerRequired
+        case "suspend-authored-session-selection": .suspendAuthoredSessionSelection
         case "arrangement-exists": .arrangementExists
         case "arrangement-folder-exists": .arrangementFolderExists
         case "arrangement-retired": .arrangementRetired; case "arrangement-limit": .arrangementLimit
@@ -105,6 +107,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .unsupportedCapability: "unsupported-capability"; case .validationFailed: "validation-failed"
         case .idempotencyConflict: "idempotency-conflict"; case .staleFence: "stale-fence"
         case .issuerRequired: "issuer-required"
+        case .suspendAuthoredSessionSelection: "suspend-authored-session-selection"
         case .arrangementExists: "arrangement-exists"
         case .arrangementFolderExists: "arrangement-folder-exists"
         case .arrangementRetired: "arrangement-retired"; case .arrangementLimit: "arrangement-limit"
