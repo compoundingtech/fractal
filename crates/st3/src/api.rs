@@ -6415,10 +6415,22 @@ async fn client_messages_sql_page_with_envelope(
             }
             let through = through.unwrap_or(reader.store.client_messages_page_cut(index)?);
             let snapshot = if continuing { snapshot } else { client_snapshot_at(&reader, through) };
-            let rows = reader.store.client_messages_page(
+            let mut rows = reader.store.client_messages_page(
                 person.as_deref(), actor.as_deref(), history, through, after.as_ref(), limit,
             )?;
-            Ok((cut_epoch, Some((snapshot, through, rows))))
+            let selected_more = rows.len() > limit;
+            rows.truncate(limit);
+            // Delivery enrichment reads the store too: keep it on the blocking
+            // worker and inside the same read snapshot as selector/body folding.
+            let resources = rows.into_iter().map(|(message, metadata, current)| {
+                let key = (
+                    metadata["sent_at"].as_str().unwrap_or("0").parse::<u128>()?,
+                    message.subject.clone(),
+                );
+                let resource = client_message_resource(&reader.store, message, &metadata, current, now)?;
+                Ok((key, resource))
+            }).collect::<anyhow::Result<Vec<_>>>()?;
+            Ok((cut_epoch, Some((snapshot, through, selected_more, resources))))
         })
     }).await?;
     // Retire every affected receipt for this store, not just the cursor that
@@ -6429,21 +6441,14 @@ async fn client_messages_sql_page_with_envelope(
             !cut.store.ptr_eq(&store) || cut.cut_epoch >= cut_epoch
         });
     }
-    let Some((snapshot, through, mut rows)) = read else {
+    let Some((snapshot, through, selected_more, resources)) = read else {
         return Err(client_page_expired("the message page cut was invalidated; restart pagination"));
     };
-    let selected_more = rows.len() > limit;
-    rows.truncate(limit);
-    let mut keys = Vec::with_capacity(rows.len());
-    let mut item_sizes = Vec::with_capacity(rows.len());
-    let mut items = Vec::with_capacity(rows.len());
-    for (message, metadata, current) in rows {
-        keys.push((
-            metadata["sent_at"].as_str().unwrap_or("0").parse::<u128>().map_err(ApiError::internal)?,
-            message.subject.clone(),
-        ));
-        let resource = client_message_resource(&state.store, message, &metadata, current, now)
-            .map_err(ApiError::internal)?;
+    let mut keys = Vec::with_capacity(resources.len());
+    let mut item_sizes = Vec::with_capacity(resources.len());
+    let mut items = Vec::with_capacity(resources.len());
+    for (key, resource) in resources {
+        keys.push(key);
         item_sizes.push(client_encoded_size(&resource)?);
         items.push(resource);
     }

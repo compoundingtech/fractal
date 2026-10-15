@@ -3,7 +3,7 @@
   "summary": "Seek bounded message pages through body-free temporal selectors",
   "replay": {
     "status": "none",
-    "detail": "Opening an older database installs selector source capture and durable progress without building the first full cut. After both APIs begin serving, the background worker backfills local message selector headers from current message projections and retained canonical claims in short, resumable chunks. Starting a backfill invalidates existing page cuts. No authoritative claim replay or body-copy inventory is introduced; ordinary pages fold only selected message bodies."
+    "detail": "Opening an older database installs selector source capture and durable progress without building the first full cut. After both APIs begin serving, the background worker backfills local message selector headers from current message projections and retained canonical claims in short, resumable chunks. Starting a backfill invalidates existing page cuts. No authoritative claim replay or body-copy inventory is introduced; ordinary pages fold only selected message bodies. Page serialization and delivery enrichment run together on a blocking worker inside the selector/body read snapshot, rather than reading the store on the async executor."
   },
   "schema": {
     "status": "changed",
