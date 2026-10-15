@@ -589,7 +589,10 @@ line, `host/NAME namespaces="git" ssh-ed25519 ...`. Adding that line to `.st/evi
 like any other: the file is read from the accepted base (main), so a change cannot vouch for its own key, and
 removing a line stops every record that key signed from counting. The principal's first part, `host`, is the
 trust level; a check's policy admits it for the `wrapper` kind only (the per-kind `trust_levels` override above),
-never for `observed`. No root, no `sekrets` grant and no pinned program is needed.
+never for `observed`. No root, no `sekrets` grant and no pinned program is needed. The root-owned hardening of `scripts/evidence-sign` (tool
+directories closed to the account) does not apply to a user-owned key, because the account is the one that runs code under test.
+The script itself refuses symlinks, other owners and loose modes, creates files under `umask 077`, derives the printed line
+from the private key, and refuses to run as root or with a `HOME` that is not the account's.
 
 What this does not give, stated so nobody assumes it: anything that runs as the same user can read the key and
 sign a result it never ran, and a signer that is not isolated from the code under test is only as honest as that
