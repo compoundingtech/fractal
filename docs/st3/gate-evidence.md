@@ -581,6 +581,18 @@ checked. Only `observed` (the central observer's record) is listed today; `wrapp
 check when its real command is known. Write `scripts/evidence-verify --policy-from BASE
 --repository OWNER/NAME` to apply it by hand.
 
+### Running the checks locally (`scripts/st-test`)
+
+`scripts/st-test` runs each required check that has a local command (today `genie-freshness` and
+`typescript-client`; `--list` prints them) once, through `evidence-wrap`, on the tree the pull request will be
+tested as, and the host's signer records the exit code and output digest. GitHub tests the merge of the branch into
+its base, so when the branch does not hold the base's tip the script computes the merge tree (`git merge-tree`) and
+runs in a throwaway worktree of a merge commit with that tree; a merge that conflicts stops it. A failing run is
+recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base. It prints one
+line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
+(`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify.
+It changes no policy: a check skips only where `enforce` is true.
+
 ### When the gate says skip
 
 `scripts/ci-evidence-gate` takes the verifier from the accepted base and asks it, with the policy,
