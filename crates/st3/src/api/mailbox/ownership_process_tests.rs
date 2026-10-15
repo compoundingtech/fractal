@@ -5,6 +5,7 @@ use super::*;
 use crate::api::{router, serve_unix_bound_with_ready};
 use crate::client::{Client, Endpoint};
 use futures_util::{SinkExt as _, StreamExt as _};
+use std::path::PathBuf;
 use std::process::{Child, Command};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
