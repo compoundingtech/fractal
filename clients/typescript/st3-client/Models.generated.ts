@@ -557,7 +557,7 @@ export type CollectionCommand = ({
   until_ms?: number;
 } | {
   actor?: string | null;
-  collection: "missions" | "attention" | "agents" | "work" | "glasses" | "summary";
+  collection: "missions" | "attention" | "agents" | "notes" | "work" | "glasses" | "summary";
   id: string;
   kind: "subscribe";
   limit?: number;
@@ -635,7 +635,7 @@ export type CollectionFrame = ({
   retryable?: boolean;
 });
 
-export type CollectionName = "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "summary" | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
+export type CollectionName = "missions" | "attention" | "agents" | "notes" | "work" | "glasses" | "arrangements" | "summary" | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
 
 export type ConnectedClient = ResourceHeader & {
   actor: string;
@@ -796,7 +796,7 @@ export type Envelope = {
   api_version: "st3.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog);
+  value: ((DirectiveNotes | SubjectNotes) | SubjectNoteResult | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog);
 };
 
 export type ErrorCode = ("recipient-retired" | "lifecycle-unavailable" | "retirement-upgrade-required" | "attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "suspend-authored-session-selection" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "internal" | string);
@@ -1247,6 +1247,19 @@ export type MissionWake = {
 
 export type MustAct = ("you" | "agent" | "system" | "blocked" | "nobody" | string);
 
+export type Note = ResourceHeader & {
+  audience: NoteAudience;
+  author: string;
+  created_at: Timestamp;
+  expires_at?: (Timestamp | null);
+  kind: "note";
+  session?: string | null;
+  target: string;
+  text: string;
+};
+
+export type NoteAudience = ("self" | "agent" | string);
+
 export type ObservationAccepted = {
   accepted: true;
 };
@@ -1390,7 +1403,7 @@ export type PairingBegin = {
   device_name: string;
   full_control?: boolean;
   person_id: string;
-  scopes?: Array<"read.projections" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;
+  scopes?: Array<"read.projections" | "read.glasses" | "control.glasses" | "control.notes" | "terminal.read" | "control.attention" | "control.launches">;
 };
 
 export type PairingChallenge = {
@@ -1522,7 +1535,7 @@ export type RequestSubject = {
   url?: string;
 };
 
-export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet);
+export type Resource = (Note | ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet);
 
 export type ResourceHeader = {
   id: Id;
@@ -1674,6 +1687,43 @@ export type SubjectDefinition = {
   kdl: string;
   kind: "subject-definition";
   subject: string;
+};
+
+export type SubjectNote = {
+  audience: NoteAudience;
+  author: string;
+  created_at: Timestamp;
+  expires_at?: (Timestamp | null);
+  id: string;
+  revision: string;
+  session?: string | null;
+  target: string;
+  text: string;
+  updated_at: Timestamp;
+};
+
+export type SubjectNoteCreate = {
+  audience?: NoteAudience;
+  expires_at?: (Timestamp | null);
+  session?: string | null;
+  target: string;
+  text: string;
+};
+
+export type SubjectNoteResult = {
+  id: string;
+  note: (SubjectNote | null);
+};
+
+export type SubjectNoteUpdate = {
+  audience?: NoteAudience;
+  expires_at?: (Timestamp | null);
+  session?: string | null;
+  text?: string | null;
+};
+
+export type SubjectNotes = {
+  notes: Array<SubjectNote>;
 };
 
 export type Subscription = ResourceHeader & {

@@ -32,6 +32,7 @@ Storage digest: `1dcbc0927e291e822470da735e497deec0a5ad4f1cd6cb7e00679a0e44fab09
 | `message` | `message/ID` | yes | A Small Talk message. |
 | `mission` | `mission/ID` | no | An immutable mission revision lineage. |
 | `mission-run` | `mission-run/ID` | no | A mission execution. |
+| `note` | `note/AUTHOR_FAMILY/AUTHOR_ID/UUIDv7` | yes | A short person- or agent-authored note about one subject; context, never authority. |
 | `observer` | `observer/RUN/LOCAL_ID` | no | A mission-run resource observer. |
 | `owned-set` | `owned-set/NAME` | no | A graph-owned set of declarations with source ordering and omission retirement. |
 | `person` | `person/IDENTITY` | no | A human actor. |
@@ -128,6 +129,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `mission.produced` | `mission`, `step-run` | `capability-holder` | `append` | `durable` | `attempt:integer`, `mission:subject-reference`, `name:string`, `revision:string`, `step_definition:string` | `produces` |
 | `mission.provenance` | `mission` | `system-only` | `once` | `durable` | `mission!:subject-reference(mission)`, `provenance!:object`, `revision!:string` | `provenance` |
 | `mission.published` | `mission` | `authorized-requester` | `append` | `durable` | `body:object`, `revision:string`, `state:string` | `mission` |
+| `note.set` | `note` | `subject-encoded-author` | `state-transition` | `durable` | `audience!:string`, `expires_at:string`, `session:string`, `target!:subject-reference(agent|mission|mission-run|step-run)`, `text!:string or null` |  |
 | `observer.observed` | `observer` | `system-only` | `append` | `durable` | `attempt:string`, `changed:boolean`, `changed_fields:array`, `cursor:string`, `locator:string`, `next_check_unix_ms:string`, `observation:subject-reference`, `provider:string`, `resource:subject-reference`, `revision:string`, `status:string` | `observer` |
 | `observer.refresh-requested` | `observer` | `system-only` | `append` | `durable` | `attempt!:string`, `revision!:string` | `refresh` |
 | `observer.state` | `observer` | `system-only` | `state-transition` | `durable` | `attempt:string`, `error_code:string`, `next_check_unix_ms:string`, `reason:string`, `revision:string`, `state!:string` | `observer` |
@@ -229,6 +231,12 @@ All members must upgrade before publishing accountable roots. Older members reta
 Notes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.
 
 Publication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.
+
+## Authored subject notes
+
+`note.set` records short context on `note/AUTHOR_FAMILY/AUTHOR_ID/UUIDv7`. The author is an immutable `person/NAME` or `agent/PATH` encoded in the subject, followed by a lowercase UUIDv7. `subject-encoded-author` requires every local and replicated claim actor to equal that author. Required `target` references an agent, mission, mission-run or step-run; required `text` is null to archive, or nonblank text of at most 1024 UTF-8 bytes. Required `audience` is an open string vocabulary with known values `self` and `agent`, not a closed enum. New local writes always store `agent`; API inputs have no audience field. Optional `session` is a nonblank incarnation id only on an agent target; optional `expires_at` is a valid RFC 3339 UTC timestamp. The canonical latest claim supplies the revision and update time; the first claim supplies creation time. Archived, expired and ended-session revisions remain historical but are omitted from current views.
+
+Every current note, including historical self and unfamiliar audience values, is readable by persons with target access, its author and its resolved agents. Every current target note is agent context; audience is not a privacy boundary. Local admission checks target access and agent assignment restrictions; replicated admission enforces the stateless author and field rules. Notes live in the separate notes collection, never in agent or mission rows. Publication requires `features.subject_notes=1` on every active member's latest own-origin `daemon.started`, using the directive-note publication barrier. Notes and daemon-origin digests inform only: they do not assign work, approve gates, wake agents or grant authority.
 
 ## Harness todo snapshots
 

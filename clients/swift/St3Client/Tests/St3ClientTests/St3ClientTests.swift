@@ -21,6 +21,47 @@ final class St3ClientTests: XCTestCase {
         XCTAssertTrue(empty.notes.isEmpty)
     }
 
+    func testSubjectNotesKeepIdentitySessionAndOpenAudience() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/subject-notes.json"))
+        let result = try JSONDecoder().decode(Envelope<SubjectNotes>.self, from: data)
+        let note = try XCTUnwrap(result.value.notes.first)
+        XCTAssertEqual(note.id, "note/person/ada/019a0000-0000-7000-8000-000000000001")
+        XCTAssertEqual(note.target, "agent/example/reviewer")
+        XCTAssertEqual(note.author, "person/ada")
+        XCTAssertEqual(note.audience, .selfOnly)
+        XCTAssertEqual(note.session, "incarnation/example")
+        XCTAssertEqual(note.createdAt, "2026-10-14T09:00:00Z")
+        XCTAssertEqual(note.updatedAt, "2026-10-14T09:01:00Z")
+        XCTAssertEqual(note.expiresAt, "2026-10-15T09:00:00Z")
+        let future = result.value.notes[1].audience
+        XCTAssertEqual(future, .other("mission-crew"))
+        XCTAssertEqual(future.label, "mission-crew")
+        XCTAssertEqual(try JSONDecoder().decode(NoteAudience.self, from: JSONEncoder().encode(future)), future)
+        var row = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(note)) as? [String: Any])
+        row["kind"] = "note"
+        let resource = try JSONDecoder().decode(Resource.self, from: JSONSerialization.data(withJSONObject: row))
+        guard case .note(let typed) = resource else { return XCTFail("expected typed note resource") }
+        XCTAssertEqual(typed.target, note.target)
+        XCTAssertEqual(resource.id, note.id)
+    }
+
+    func testSubjectNoteArchivePatchDistinguishesOmittedAndNullFields() throws {
+        let wire = Data(#"{"text":null,"session":null}"#.utf8)
+        let patch = try JSONDecoder().decode(SubjectNoteUpdate.self, from: wire)
+        XCTAssertEqual(patch.text, .clear)
+        XCTAssertEqual(patch.session, .clear)
+        XCTAssertNil(patch.expiresAt)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(patch)) as? NSDictionary,
+            try JSONSerialization.jsonObject(with: wire) as? NSDictionary)
+        let archive = try JSONDecoder().decode(SubjectNoteResult.self, from: Data(#"{"id":"note/person/ada/019a0000-0000-7000-8000-000000000001","note":null}"#.utf8))
+        XCTAssertNil(archive.note)
+        XCTAssertEqual(archive.id, "note/person/ada/019a0000-0000-7000-8000-000000000001")
+        let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(archive)) as? [String: Any])
+        XCTAssertTrue(encoded["note"] is NSNull)
+    }
+
     func testCreationActionFixtures() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }

@@ -39,6 +39,28 @@ test('directive notes decode metadata and expiry without becoming gate evidence'
     assert.throws(() => decode(invalid));
 });
 
+test('subject notes use rich open audiences and nullable archive patches', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = require('../../../docs/st3/client-v0/fixtures/subject-notes.json').value;
+    const decoded = Rich.decodeUnknownSync(Rich.SubjectNotes)(wire);
+    assert.equal(decoded.notes[0].audience, 'self');
+    assert.deepEqual(decoded.notes[1].audience, { _tag: 'Unknown', raw: 'mission-crew' });
+    const encoded = Schema.encodeSync(Rich.SubjectNotes)(decoded);
+    assert.equal(encoded.notes[1].audience, 'mission-crew');
+    assert.equal(encoded.notes[0].session, 'incarnation/example');
+    assert.equal(encoded.notes[0].created_at, '2026-10-14T09:00:00.000Z');
+    assert.deepEqual(Schema.encodeSync(Rich.SubjectNotes)(Rich.decodeUnknownSync(Rich.SubjectNotes)({ notes: [] })), { notes: [] });
+    const patch = { text: null, session: null };
+    assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteUpdate)(Rich.decodeUnknownSync(Rich.SubjectNoteUpdate, 'strict')(patch)), patch);
+    assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteUpdate)(Rich.decodeUnknownSync(Rich.SubjectNoteUpdate, 'strict')({})), {});
+    const archived = { id: wire.notes[0].id, note: null };
+    assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteResult)(Rich.decodeUnknownSync(Rich.SubjectNoteResult, 'strict')(archived)), archived);
+    const row = { ...wire.notes[0], kind: 'note' };
+    const resource = Rich.decodeUnknownSync(Rich.Resource)(row);
+    assert.equal(resource.kind, 'note');
+    assert.equal(Schema.encodeSync(Rich.Resource)(resource).target, row.target);
+});
+
 test('person-ask mission rows retain actor references through the generated decoder', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');

@@ -13,6 +13,7 @@ import type { SyncStatus } from './assistant-ui/st3-views/sync-status'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
+import { greenFindings } from './assistant-ui/composition/no-green-assertion'
 
 const now = Date.parse('2026-01-15T12:01:00Z')
 const at = '2026-01-15T12:00:00Z'
@@ -817,30 +818,6 @@ const tokenAnswer = 'Quoted shell and diff tokens stay neutral.\n\n```bash\nprin
 const tokenItems: readonly ConversationItem[] = cases.settled.turns[0]!.items.map(item => item._tag === 'ToolCall' && item.name === 'run' ? { ...item, input: { command: 'printf \'%s\\n\' "retained rows"' }, result: { content: 'printf \'%s\\n\' "retained rows"\n+inserted line', mediaType: 'text/x-diff', isError: false, at } } : item._tag === 'Text' && item.role === 'assistant' ? { ...item, id: 'tokens/answer', text: tokenAnswer } : item)
 const tokenData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ ...cases.settled.turns[0]!, id: 'tokens', items: tokenItems, work: workLogTurnFromItems([cases.settled.turns[0]!.prompt!, ...tokenItems], { kindFor: name => name === 'run' ? 'run' : 'read', running: false, failed: false, interrupted: false, durationMs: 24000, startedAt: at, completeHistory: true }) }] }
 const noGreenData: readonly (readonly [string, TranscriptStoryData])[] = [['tokens', tokenData], ['semantic', semanticData], ...(Object.keys(cases) as State[]).map(state => [state, cases[state]] as const)]
-// Green is hue 90-170° with HSL saturation above 25%; any colour function the parser cannot read fails too.
-function greenFindings(root: Element): string[] {
-  const findings: string[] = []
-  const properties = ['color', 'background-color', 'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color', 'caret-color', 'fill', 'stroke', 'box-shadow', 'background-image']
-  for (const element of [root, ...root.querySelectorAll('*')]) for (const pseudo of [null, '::before', '::after']) {
-    const style = getComputedStyle(element, pseudo)
-    for (const property of properties) {
-      const value = style.getPropertyValue(property)
-      if (/\b(?:oklch|oklab|lab|lch|hsla?|hwb)\(/.test(value)) { findings.push(`${property} unparsed ${value}`); continue }
-      for (const match of value.matchAll(/rgba?\(([^)]*)\)|color\(srgb ([^)]*)\)/g)) {
-        const parts = (match[1] ?? match[2]!).split(/[\s,/]+/).filter(Boolean).map(Number)
-        const scale = match[1] === undefined ? 1 : 255
-        const [red, green, blue] = parts.slice(0, 3).map(part => part / scale) as [number, number, number]
-        if ((parts[3] ?? 1) === 0) continue
-        const max = Math.max(red, green, blue), min = Math.min(red, green, blue), lightness = (max + min) / 2
-        if (max === min) continue
-        const saturation = (max - min) / (1 - Math.abs(2 * lightness - 1))
-        const hue = (max === red ? ((green - blue) / (max - min) + 6) % 6 : max === green ? (blue - red) / (max - min) + 2 : (red - green) / (max - min) + 4) * 60
-        if (hue >= 90 && hue <= 170 && saturation > 0.25) findings.push(`${element.tagName.toLowerCase()}${pseudo ?? ''}[${element.getAttribute('data-syntax-token') ?? element.getAttribute('data-testid') ?? ''}] ${property} ${match[0]}`)
-      }
-    }
-  }
-  return findings
-}
 function NoGreenStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   return <main data-scheme={scheme} {...stylex.props(styles.all, ...baselineTheme, scheme === 'light' && lightTheme)}>{noGreenData.map(([name, data]) => <section key={name} data-no-green-state={name}><h2>{name}</h2><div {...stylex.props(styles.cell)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} onRetrySend={() => {}} /></div></section>)}</main>
 }

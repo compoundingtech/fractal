@@ -80,6 +80,53 @@ pub fn stored_tags(from: &str, requested: &[String]) -> Vec<String> {
     tags
 }
 
+/// Notes are a live view, not a snapshot of the notes present when mail was queued.
+/// Keep one digest per recipient so multiple revisions cannot repeat the same live block.
+pub fn refresh_notes(store: &crate::store::Store, messages: &mut Vec<MessageView>) -> anyhow::Result<()> {
+    let mut newest = std::collections::BTreeMap::<String, (u64, String)>::new();
+    for message in messages.iter().filter(|message| is_notes_digest(message)) {
+        let candidate = (message.created_index, message.subject.clone());
+        newest.entry(message.to.clone()).and_modify(|current| {
+            if candidate > *current { *current = candidate.clone(); }
+        }).or_insert(candidate);
+    }
+    let mut rendered = std::collections::BTreeMap::new();
+    for recipient in newest.keys() {
+        rendered.insert(recipient.clone(), crate::notes_digest::render(
+            &crate::notes_digest::current_notes(store, recipient)?)?);
+    }
+    messages.retain_mut(|message| {
+        if !is_notes_digest(message) { return true; }
+        let Some(Some(content)) = rendered.get(&message.to) else { return false; };
+        if newest.get(&message.to).is_none_or(|(_, subject)| subject != &message.subject) {
+            return false;
+        }
+        message.content.clone_from(content);
+        true
+    });
+    Ok(())
+}
+
+/// Apply a server-resolved current block to a legacy client's held paging batch.
+pub fn refresh_notes_rendered(messages: &mut Vec<MessageView>, recipient: &str, content: Option<&str>) {
+    let newest = messages.iter().filter(|message| message.to == recipient && is_notes_digest(message))
+        .max_by_key(|message| (message.created_index, &message.subject))
+        .map(|message| message.subject.clone());
+    messages.retain_mut(|message| {
+        if message.to != recipient || !is_notes_digest(message) { return true; }
+        let Some(content) = content else { return false; };
+        if newest.as_deref() != Some(&message.subject) { return false; }
+        message.content.clear();
+        message.content.push_str(content);
+        true
+    });
+}
+
+pub fn is_notes_digest(message: &MessageView) -> bool {
+    message.from == "daemon/runtime"
+        && message.tags.iter().any(|tag| tag == crate::notes_digest::TAG)
+}
+
 /// The mail a seat's delivery offers now. A held message that has not been offered stays back
 /// until a message that wakes the seat is offered, then goes with it; one already offered stays.
 pub fn release(messages: &mut Vec<MessageView>) {
@@ -179,6 +226,35 @@ mod tests {
 
     fn tags(values: &[&str]) -> Vec<String> {
         values.iter().map(|tag| (*tag).to_owned()).collect()
+    }
+
+    #[test]
+    fn paged_notes_refresh_keeps_only_current_latest_digest() {
+        let old = message("message/example-old", "daemon/runtime", "sent",
+            &[SILENT_TAG, crate::notes_digest::TAG]);
+        let mut new = old.clone();
+        new.subject = "message/example-new".into();
+        new.created_index = 1;
+        let mut batch = vec![old, new];
+        refresh_notes_rendered(&mut batch, "agent/example/reader", Some("Current block"));
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].subject, "message/example-new");
+        assert_eq!(batch[0].content, "Current block");
+        refresh_notes_rendered(&mut batch, "agent/example/reader", None);
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn notes_digest_with_no_current_notes_is_dropped() {
+        let store = crate::store::Store::open_memory("example").unwrap();
+        let digest = message("message/example-notes", "daemon/runtime", "sent",
+            &[SILENT_TAG, crate::notes_digest::TAG]);
+        let wake = message("message/example-wake", "agent/example/writer", "sent", &[]);
+        let mut batch = vec![digest, wake];
+        refresh_notes(&store, &mut batch).unwrap();
+        release(&mut batch);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].subject, "message/example-wake");
     }
 
     #[test]

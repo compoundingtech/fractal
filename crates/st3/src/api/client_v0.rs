@@ -29,6 +29,7 @@ fn subscription_first_frame(
         "missions" => "missions",
         "attention" => "attention",
         "agents" => "agents",
+        "notes" => "notes",
         "work" => "work",
         "glasses" => "glasses",
         "arrangements" => "arrangements",
@@ -267,7 +268,7 @@ fn publication_rereads<'a>(
 /// Whether a collection's rows change as time passes without a claim: attention grace periods,
 /// mission and work-queue leases, and the summary counts made of them.
 fn collection_follows_clock(collection: &str) -> bool {
-    matches!(collection, "attention" | "missions" | "agents" | "summary")
+    matches!(collection, "attention" | "missions" | "agents" | "summary" | "notes")
 }
 
 /// Claims that no collection window shows: rereading for them only costs.
@@ -275,6 +276,10 @@ fn collection_ignores(collection: &str, kind: &str) -> bool {
     // Summary overlays include transport reachability and agent activity as well as
     // graph membership. Its tiny public row is compared after each current read.
     if collection == "summary" {
+        return false;
+    }
+    // Session notes become non-current when runtime authority loses reachability.
+    if collection == "notes" && kind == "transport.observed" {
         return false;
     }
     if collection == "summary-missions"
@@ -444,12 +449,15 @@ async fn collection_items_with_windows(
 ) -> Result<(ClientSnapshot, Vec<Value>, bool), ApiError> {
     if !matches!(
         request.collection.as_str(),
-        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "summary"
+        "missions" | "attention" | "agents" | "notes" | "work" | "glasses" | "arrangements" | "summary"
             | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
     ) {
         return Err(validation("unknown collection subscription"));
     }
     inventory::validate(request)?;
+    if request.collection == "notes" && (request.person.is_some() || request.actor.is_some()) {
+        return Err(validation("notes select the authenticated reader"));
+    }
     if request.collection == "summary"
         && (request.actor.is_some() || request.status.is_some() || request.subject.is_some())
     {
@@ -760,6 +768,16 @@ async fn collection_items_with_windows(
                 let compute = || {
                     let mut valid_until = None;
                     let mut items = match collection.as_str() {
+                        "notes" => {
+                            let notes = store.list_subject_notes(None, None, &current.authority_actor)?;
+                            let has_more = notes.len() > limit;
+                            let items = notes.into_iter().take(limit).map(|note| {
+                                let mut value = serde_json::to_value(note)?;
+                                value["kind"] = json!("note");
+                                Ok(value)
+                            }).collect::<anyhow::Result<Vec<_>>>()?;
+                            return Ok((items, has_more));
+                        }
                         "summary" => {
                             if let Some(rows) = &published_rows {
                                 return Ok((rows.clone(), false, None));
@@ -947,6 +965,7 @@ fn collection_window_label(collection: &str) -> &'static str {
         "missions" => "stream collection/missions",
         "attention" => "stream collection/attention",
         "agents" => "stream collection/agents",
+        "notes" => "stream collection/notes",
         "work" => "stream collection/work",
         "glasses" => "stream collection/glasses",
         "arrangements" => "stream collection/arrangements",
@@ -2598,6 +2617,7 @@ const ALL_SCOPES: &[&str] = &[
     "control.glasses",
     "read.arrangements",
     "control.arrangements",
+    "control.notes",
     "terminal.read",
     "terminal.control",
     "control.attention",
@@ -2614,6 +2634,7 @@ const LIMITED_PAIRING_SCOPES: &[&str] = &[
     "control.glasses",
     "read.arrangements",
     "control.arrangements",
+    "control.notes",
     "terminal.read",
     "control.attention",
     "control.launches",
@@ -12458,6 +12479,87 @@ mod published_attention_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notes_collection_tracks_expiry_runtime_and_recipient_changes() {
+        assert!(collection_follows_clock("notes"));
+        for kind in ["note.set", "runtime.observed", "transport.observed", "agent.declared", "mission.declared", "work.claimed", "work.released"] {
+            assert!(!collection_ignores("notes", kind), "notes must refresh for {kind}");
+        }
+    }
+
+    #[tokio::test]
+    async fn notes_collection_uses_authority_reader_and_removes_ended_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "notes-test");
+        let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+        state.store.bind_fleet(fleet).unwrap();
+        state.store.pin_fleet_anchor(key.public()).unwrap();
+        state.store.set_member_key(Some(key.clone())).unwrap();
+        state.store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
+        let append = |subject: &str, kind: &str, fields: Value| {
+            state.store.append_claim(&crate::model::ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: None,
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        append("daemon/notes-test", "daemon.started", json!({"status":"running","features":{"subject_notes":1}}));
+        let target = "agent/example/reader";
+        append(target, "runtime.observed", json!({"status":"running","runtime_id":"reader","host":"notes-test","terminal":true,"incarnation_id":"first"}));
+        let historical = "note/person/ada/019a0000-0000-7000-8000-000000000001";
+        let shared = "note/person/ada/019a0000-0000-7000-8000-000000000002";
+        let future = "note/agent/example/reader/019a0000-0000-7000-8000-000000000003";
+        for (id, author, audience, session) in [
+            (historical, "person/ada", "self", None),
+            (future, target, "future-level", Some("first")),
+        ] {
+            let mut fields = std::collections::BTreeMap::from([
+                ("target".into(), json!(target)), ("text".into(), json!("Historical context")),
+                ("audience".into(), json!(audience)),
+            ]);
+            if let Some(session) = session { fields.insert("session".into(), json!(session)); }
+            state.store.append_claim(&crate::model::ClaimInput {
+                subject: id.into(), kind: st3_schema::subject_notes::KIND.into(), actor: Some(author.into()),
+                fields,
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        state.store.set_subject_note(shared, "person/ada", target, Some("Session context"), Some("first"), None).unwrap();
+        state.store.set_subject_note("note/person/ada/019a0000-0000-7000-8000-000000000004",
+            "person/ada", target, Some("Expired reminder"), None, Some("2000-01-01T00:00:00Z")).unwrap();
+        let request: CollectionSubscribe = serde_json::from_value(json!({"kind":"subscribe","id":"notes","collection":"notes","limit":200})).unwrap();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        for (reader, expected) in [("person/ada", 3), ("person/other", 3), (target, 3), ("agent/example/unrelated", 0)] {
+            let mut session = ClientSession::for_tests(reader, reader, "unix");
+            session.scopes.insert("read.projections".into());
+            let (_, rows, has_more) = collection_items(&state, &session, &request, semaphore.clone().acquire_owned().await.unwrap()).await.unwrap();
+            assert_eq!(rows.len(), expected, "{reader}");
+            assert!(!has_more);
+            assert!(rows.iter().all(|row| row["kind"] == "note"));
+            if expected != 0 {
+                for audience in ["self", "agent", "future-level"] {
+                    assert!(rows.iter().any(|row| row["audience"] == audience), "{reader}: {audience}");
+                }
+            }
+        }
+        state.store.set_subject_note(historical, "person/ada", target, None, None, None).unwrap();
+        let mut owner = ClientSession::for_tests("person/ada", "person/ada", "unix");
+        owner.scopes.insert("read.projections".into());
+        let (_, rows, _) = collection_items(&state, &owner, &request, semaphore.clone().acquire_owned().await.unwrap()).await.unwrap();
+        assert_eq!(rows.len(), 2, "archived and expired notes leave the current window");
+        assert!(rows.iter().any(|row| row["id"] == shared));
+        assert!(rows.iter().any(|row| row["id"] == future));
+        append(target, "runtime.observed", json!({"status":"exited","runtime_id":"reader","host":"notes-test","terminal":true,"incarnation_id":"first"}));
+        let mut session = ClientSession::for_tests(target, target, "unix");
+        session.scopes.insert("read.projections".into());
+        let (_, rows, _) = collection_items(&state, &session, &request, semaphore.clone().acquire_owned().await.unwrap()).await.unwrap();
+        assert!(rows.is_empty(), "retained incarnation cannot keep an ended session note current");
+        let mut filtered = request;
+        filtered.actor = Some("person/ada".into());
+        assert!(collection_items(&state, &session, &filtered, semaphore.acquire_owned().await.unwrap()).await.is_err());
+    }
 
     #[tokio::test]
     async fn request_latency_keeps_scope_and_routes_with_a_memory_only_cost_snapshot() {

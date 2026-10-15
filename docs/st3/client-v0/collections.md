@@ -18,7 +18,7 @@ Send one JSON command per subscription:
 {"kind":"subscribe","id":"missions-tab","collection":"missions","limit":50}
 ```
 
-Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `work`, `glasses`, and `arrangements`,
+Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `notes`, `work`, `glasses`, and `arrangements`,
 plus `terminal` and `conversation` (below). The optional `actor` filter applies to work,
 `person` to attention, and `status` to agents. For `arrangements`, `person: "person/NAME"`
 is required: agents explicitly select a fleet person's collection, never an inferred
@@ -44,6 +44,18 @@ subject starts empty. Individual resource byte bounds still apply. Omitting
 Arrangement snapshots and changes carry full typed arrangement resources. Folder or
 placement changes are full resource upserts; retirement sends the arrangement ID in
 `removes`. Glass privacy and its person-only selection are unchanged.
+
+The `notes` window carries independent `note` resources with the shared
+`SubjectNote` fields. It selects the authenticated authority actor, not a free
+`person` or `actor` filter. Every current note is visible to persons with target
+access, its author and the agents its target currently resolves to, regardless of
+stored audience (including historical `self` and unfamiliar values). Clients
+derive note counts and previews from this window; agent and mission rows have no
+note fields.
+Clock ticks remove expired notes, and runtime and assignment changes refresh
+currency and recipient access. A session note requires the target's authoritative
+runtime to be running in that incarnation. Archives and ended sessions remove
+rows through the same collection changes protocol.
 A window contains 1–200 current items. History remains on the
 corresponding paged HTTP reads. Send `{"kind":"unsubscribe","id":"missions-tab"}`
 to remove a subscription. IDs are chosen by the client and unique on the socket.

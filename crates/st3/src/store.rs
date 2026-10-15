@@ -5,6 +5,7 @@ pub mod custom;
 pub mod declarations;
 pub mod retirements;
 pub mod directive_notes;
+pub mod subject_notes;
 pub(crate) mod observer_subscription_detail;
 mod glass_heads;
 mod arrangements;
@@ -4356,6 +4357,7 @@ impl Store {
         resources::rebuild(&transaction)?;
         glass_heads::rebuild(&transaction)?;
         directive_notes::rebuild(&transaction)?;
+        subject_notes::rebuild(&transaction)?;
         arrangements::rebuild(&transaction)?;
         transaction.commit()?;
         Ok(())
@@ -22523,6 +22525,7 @@ fn append_admitted_claim_tx(
     st3_schema::glasses::validate_owner(subject, actor).map_err(anyhow::Error::new)?;
     st3_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     st3_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
+    st3_schema::subject_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     if kind == "owned-set.revised" {
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
@@ -22543,6 +22546,9 @@ fn append_admitted_claim_tx(
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
     if kind == st3_schema::directive_notes::KIND {
         directive_notes::validate_publication(transaction, origin).map_err(anyhow::Error::new)?;
+    }
+    if kind == st3_schema::subject_notes::KIND {
+        subject_notes::validate_publication(transaction, origin).map_err(anyhow::Error::new)?;
     }
     validate_claim_cardinality(
         transaction,
@@ -22576,6 +22582,9 @@ fn append_admitted_claim_tx(
     }
     if kind == st3_schema::directive_notes::KIND {
         directive_notes::flush(transaction)?;
+    }
+    if kind == st3_schema::subject_notes::KIND {
+        subject_notes::flush(transaction)?;
     }
     if kind == "message.sent" {
         agent_messages::flush(transaction)?;
@@ -29045,6 +29054,8 @@ fn classify_replicated_claim_with_registry(
         .map_err(|e| St3Error::new(e.code, e.message))?;
     st3_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
+    st3_schema::subject_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
+        .map_err(|e| St3Error::new(e.code, e.message))?;
     if claim.subject.starts_with("glass/")
         && (!fields.contains_key("base_revision") || !fields.contains_key("replaced_revision"))
     {
@@ -30709,6 +30720,8 @@ fn replay_graph_from_nothing_with_progress_tx(
     glass_heads::rebuild(transaction).map_err(internal)?;
     stage("full-replay/directive-notes");
     directive_notes::rebuild(transaction).map_err(internal)?;
+    stage("full-replay/subject-notes");
+    subject_notes::rebuild(transaction).map_err(internal)?;
     stage("full-replay/custom");
     custom::rebuild(transaction).map_err(internal)?;
     stage("full-replay/arrangements");
@@ -60521,6 +60534,8 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), St3Error> {
         .map_err(|e| St3Error::new(e.code, e.message))?;
     st3_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
+    st3_schema::subject_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
+        .map_err(|e| St3Error::new(e.code, e.message))?;
     claim_operation(input)?;
     Ok(())
 }
@@ -60671,6 +60686,7 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("resource_observations", &[]),
     ("glass_heads", &[]),
     ("person_directive_notes", &[]),
+    ("subject_notes", &[]),
     ("custom_registrations", &[]),
     ("custom_sources", &[]),
     ("custom_dependencies", &[]),

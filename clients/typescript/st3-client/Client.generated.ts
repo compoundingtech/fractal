@@ -2,7 +2,7 @@
 import { API_VERSION } from './Models.generated.ts';
 import type {
     ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, MessageBody, EnvelopeOf,
-    ResourcesFilter, ResourcesPage, DirectiveNotes,
+    ResourcesFilter, ResourcesPage, DirectiveNotes, SubjectNotes, SubjectNoteResult, SubjectNoteCreate, SubjectNoteUpdate,
     Arrangement, ArrangementId, ArrangementPage,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
@@ -418,6 +418,8 @@ export class St3Client {
     listGlasses(options: PageOptions = {}): Promise<EnvelopeOf<Page>> { return this.get(`/v1/client/glasses${query(options)}`); }
     getGlass(id: string): Promise<EnvelopeOf<Glass>> { return this.get(`/v1/client/glasses/${encodeURIComponent(id.split('/').pop()!)}`); }
     putGlass(id: string, request: GlassPut, idempotencyKey: string): Promise<EnvelopeOf<Glass>> { return this.request('PUT', `/v1/client/glasses/${encodeURIComponent(id.split('/').pop()!)}`, request, idempotencyKey); }
+    subjectNotesCreate(note: SubjectNoteCreate): Promise<EnvelopeOf<SubjectNoteResult>> { return this.request('POST', '/v1/subject-notes', note); }
+    subjectNotesUpdate(id: string, note: SubjectNoteUpdate): Promise<EnvelopeOf<SubjectNoteResult>> { return this.request('PUT', `/v1/subject-notes/${encodeURIComponent(id)}`, note); }
     deleteGlass(id: string, request: GlassDelete, idempotencyKey: string): Promise<EnvelopeOf<Glass>> { return this.request('DELETE', `/v1/client/glasses/${encodeURIComponent(id.split('/').pop()!)}`, request, idempotencyKey); }
     /** Exact server-side filters; refuses older servers that ignore them. */
     async terminalsListFiltered(options: TerminalListOptions = {}): Promise<EnvelopeOf<Page>> {
@@ -431,6 +433,8 @@ export class St3Client {
     }
 
     async notesList(): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes'); }
+    async subjectNotesList(target?: string): Promise<EnvelopeOf<SubjectNotes>> { return this.get('/v1/client/subject-notes' + query({ target })); }
+    async subjectNotesMine(author: string): Promise<EnvelopeOf<SubjectNotes>> { return this.get('/v1/client/subject-notes' + query({ author })); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options)); }
     async customSubjectsGet(id: string): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`); }
     async hostRepositories(id: string): Promise<EnvelopeOf<HostRepositories>> { return this.get(`/v1/client/hosts/${encodeURIComponent(routedId(id))}/repositories`); }

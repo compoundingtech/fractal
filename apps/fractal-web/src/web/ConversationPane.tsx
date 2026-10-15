@@ -10,6 +10,7 @@ import { createConversationTranscript, openableImageUrl, transcriptObservedAt, t
 import { composerSendBinding, type SendRefusal } from './composerSend.ts'
 import { spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
+import { AgentNotes } from './AgentNotes.tsx'
 import { DOCUMENT_REF } from '../documents/document-port.ts'
 import { documentReferences } from '../documents/DocumentLink.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
@@ -56,10 +57,9 @@ export const ConversationPane = ({
   React.useLayoutEffect(() => {
     const node = boundary.current
     if (node === null) return
-    // Only the small composer is inert. Locking the entire transcript would restyle every
-    // row in the switch frame. The boundary hides covered content from assistive technology.
-    const composer = node.querySelector('textarea')?.closest('form')
-    if (composer !== null && composer !== undefined) composer.inert = !visible
+    // Only composers are inert. Locking the entire transcript would restyle every
+    // row in the switch frame. Include quick-note input as well as message input.
+    for (const composer of node.querySelectorAll('form')) composer.inert = !visible
     const focused = node.ownerDocument.activeElement
     if (!visible && focused instanceof HTMLElement && node.contains(focused)) focused.blur()
   }, [visible, state._tag])
@@ -123,6 +123,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     onOpenDocument(href)
   }
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: state._tag === 'Observed' && state.isRunning }}>
+    <AgentNotes agentRef={agentRef} />
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
     <Transcript

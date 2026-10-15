@@ -733,7 +733,7 @@ pub fn run(context: Context) -> Result<()> {
                             Inventory::Usage(hours) if hours == ui.usage_hours => model.usage = Some(model::inventory_usage(collection.items)),
                             Inventory::Usage(_) => {},
                         },
-                        Window::Glasses | Window::Summary | Window::Arrangements => {}
+                        Window::Glasses | Window::Summary | Window::Arrangements | Window::Notes => {}
                     }
                     extras.live = true;
                     extras.offline = None;

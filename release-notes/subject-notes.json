@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Attach non-waking agent context to subjects without an audience choice",
+  "replay": {
+    "status": "changed",
+    "detail": "Durable note.set claims project canonical subject notes with target and author indexes. Archives, expiry and authoritative session scope remove notes from current reads without removing history. Replay and checkpoints rebuild the projection."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds the client-writable note subject family and SubjectEncodedAuthor policy, bounded nullable text, target references, open audience, optional session and UTC expiry. Generated clients and the notes collection expose the shared note model. Agent and mission collection rows have no note fields."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Only the encoded author writes a note. Every current note, including historical self or unfamiliar audience values, is readable by persons with target access, its author and current resolved agents. New writes always store agent; API inputs have no audience field. Local API admission restricts agent authors to themselves or assigned mission/step runs. Daemon-origin digests include every current target note and never assign work or grant authority."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Publication requires anchored fleet membership and every active member advertising features.subject_notes=1; fence legacy writers before enabling notes. Adds authenticated subject-notes routes, control.notes paired-client delegation and a reactive notes collection."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "The empty projection is installed without a data-dependent startup migration or service interruption."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Upgrade active members and fence legacy peers. Use st --instance NAME note add TARGET TEXT for agent context, --session current to narrow to a running agent incarnation, or --expires-at UTC. There is no --for option. Read with note ls and archive with note archive ID. Existing person directive-note commands are unchanged. Clients derive previews and counts from the notes window."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Archive or replace an authored note through the authenticated API. Claim history is authoritative and the existing replay path rebuilds subject notes. Digest text is refreshed before silent release so stale context is never released."
+  }
+}

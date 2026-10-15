@@ -12,6 +12,7 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("resource_observations", &[]),
     ("glass_heads", &[]),
     ("person_directive_notes", &[]),
+    ("subject_notes", &[]),
     ("custom_registrations", &[]),
     ("custom_sources", &[]),
     ("custom_dependencies", &[]),
@@ -95,6 +96,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_glass_head_dirty",
         "local_directive_note_pending",
         "local_directive_note_dirty",
+        "local_subject_note_pending",
+        "local_subject_note_dirty",
         "local_custom_dirty",
         "graph_generation",
         "fleet_generation",
@@ -215,7 +218,7 @@ pub(super) fn shared_rows(store: &Store) -> BTreeMap<String, Vec<String>> {
                     if (*table == "blobs" && name == "bytes")
                         || (*table == "documents" && name == "binding_key")
                         || (*table == "glass_heads" && matches!(name.as_str(), "created_key" | "head_key"))
-                        || (*table == "person_directive_notes" && name == "head_key")
+                        || (matches!(*table, "person_directive_notes" | "subject_notes") && name == "head_key")
                         || (matches!(*table, "arrangements" | "arrangement_registers")
                             && name == "winner")
                     {
