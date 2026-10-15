@@ -514,7 +514,8 @@ pub fn doctor_lines(report: &Value) -> Vec<(String, &'static str, String)> {
 }
 
 /// `st doctor`'s line for open projection divergences: met while there are no more open than the
-/// target allows, which is none.
+/// target allows, which is none. A miss is `info` like every other target's: the fault itself goes
+/// to the fleet's fault agent, and while a peer still differs the replication check fails.
 pub fn divergence_line(open: u64) -> (String, &'static str, String) {
     let max_open = targets().divergence.max_open;
     (
