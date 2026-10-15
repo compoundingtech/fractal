@@ -539,6 +539,8 @@ fn lent_ack_waits_for_guard_observer_and_next_loan_requires_actual_return() {
 #[test]
 fn observer_panic_after_commit_does_not_turn_durable_output_into_rollback_or_ack() {
     const CHILD: &str = "SMALLCLAIMS_U0_OBSERVER_PANIC_CHILD";
+    const WITNESS_PATH: &str = "SMALLCLAIMS_U0_OBSERVER_PANIC_WITNESS_PATH";
+    const WITNESS_NONCE: &str = "SMALLCLAIMS_U0_OBSERVER_PANIC_WITNESS_NONCE";
     if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {
         // Bound the ENTIRE child, including WriterConnection::drop/join, using reactive
         // pidfd readiness. No detached test thread can leave this test job stuck forever.
@@ -550,9 +552,20 @@ fn observer_panic_after_commit_does_not_turn_durable_output_into_rollback_or_ack
                 let _ = self.0.wait();
             }
         }
+        // Fresh parent-owned directory and nonce: exit 0 from an unmatched --exact filter
+        // cannot satisfy this witness. Keep the directory alive until child kill/reap.
+        let witness_directory = tempfile::tempdir().unwrap();
+        let witness = witness_directory.path().join("completed");
+        let nonce = format!("observer-panic-native-teardown:{}", uuid::Uuid::now_v7());
+        assert!(!witness.exists());
+        // Includes child startup, SQLite setup, native thread spawn and join. This is a
+        // failure bound, not a performance claim; load-induced flakes must remain adverse.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let mut child = ChildGuard(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "sqlite::publication_contract::tests::observer_panic_after_commit_does_not_turn_durable_output_into_rollback_or_ack", "--nocapture"])
             .env(CHILD, "1")
+            .env(WITNESS_PATH, &witness)
+            .env(WITNESS_NONCE, &nonce)
             .spawn().unwrap());
         // SAFETY: pidfd_open addresses the owned, unreaped child; a successful descriptor
         // is newly owned here and closed by OwnedFd. The child contains only native threads.
@@ -568,7 +581,6 @@ fn observer_panic_after_commit_does_not_turn_durable_output_into_rollback_or_ack
             events: libc::POLLIN,
             revents: 0,
         };
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let exited = loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
@@ -597,6 +609,13 @@ fn observer_panic_after_commit_does_not_turn_durable_output_into_rollback_or_ack
             "observer panic fixture exceeded 15s including native teardown; child killed/reaped"
         );
         assert!(status.success(), "observer panic fixture failed: {status}");
+        let completed = std::fs::read(&witness)
+            .expect("child exited successfully without completing the selected native fixture");
+        assert_eq!(
+            completed,
+            nonce.as_bytes(),
+            "child completion witness mismatch"
+        );
         return;
     }
     let fixture = Fixture::new();
@@ -614,6 +633,17 @@ fn observer_panic_after_commit_does_not_turn_durable_output_into_rollback_or_ack
     // returned.recv sees channel disconnection and write_queue exits. The parent deadline
     // discriminates that expected termination from a hang; this control remains UNRUN.
     drop(fixture); // Include the writer thread's join inside the supervised child lifetime.
+    // Write only AFTER this exact branch's assertions and native teardown. No other test
+    // or a zero-test selection can mint the parent's fresh completion witness.
+    use std::io::Write as _;
+    let path = std::env::var_os(WITNESS_PATH).expect("child witness path missing");
+    let nonce = std::env::var(WITNESS_NONCE).expect("child witness nonce missing");
+    let mut completed = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .unwrap();
+    completed.write_all(nonce.as_bytes()).unwrap();
     // Caller saw no successful return. Recovery must inspect authoritative committed state;
     // no generic Result-to-rollback or idempotent reapply protocol is invented here.
 }
