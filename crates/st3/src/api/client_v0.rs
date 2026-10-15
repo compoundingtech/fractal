@@ -20372,9 +20372,12 @@ mission "example/zero-run" state="ready" {
         let source = page_test_source(&path, &session_id);
         let snapshot = new_client_snapshot(&state);
         let session = ClientSession::local(Some("person/alex")).unwrap();
+        let managed = super::super::managed_session_owner_at(
+            &state.store, snapshot.store_index, &session_id,
+        ).unwrap();
         let (newest, _, suppressed) = native_slice_page_at_generation(
             &state, &snapshot, &session, &session_id,
-            &ClientListQuery { limit: Some(200), ..Default::default() }, &source,
+            &ClientListQuery { limit: Some(200), ..Default::default() }, &source, managed.as_ref(),
         ).unwrap();
         let newest = newest.0;
         assert!(!newest["page"]["has_more"].as_bool().unwrap());
