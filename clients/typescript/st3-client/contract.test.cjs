@@ -55,9 +55,10 @@ test('default sockets use headers in Node, Bun and React Native, and bearer prot
             ];
             assert.equal(opened.length, 3, runtime);
             for (const [index, args] of opened.entries()) {
-                assert.deepEqual(args[1], [...protocols[index], ...(browser ? ['st3.bearer.secret'] : [])], runtime);
-                assert.equal(args.length, browser ? 2 : 3, runtime);
-                if (!browser) assert.equal(args[2].headers.Authorization, 'Bearer secret', runtime);
+                const nativeOptions = !browser && runtime !== 'ReactNative';
+                assert.deepEqual(nativeOptions ? args[1].protocols : args[1], [...protocols[index], ...(browser ? ['st3.bearer.secret'] : [])], runtime);
+                assert.equal(args.length, runtime === 'ReactNative' ? 3 : 2, runtime);
+                if (!browser) assert.equal((nativeOptions ? args[1] : args[2]).headers.Authorization, 'Bearer secret', runtime);
             }
             streams.forEach(stream => stream.close());
         }

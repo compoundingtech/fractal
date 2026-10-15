@@ -98,11 +98,14 @@ export function applyWindow(window: CollectionWindow | undefined, frame: Collect
 }
 
 function defaultTerminalSocket(url: string, protocols: string[], headers: Record<string, string>): TerminalSocket {
-    const Socket = WebSocket as unknown as new (url: string, protocols: string[], options?: { headers: Record<string, string> }) => CollectionSocket;
+    const Socket = WebSocket as unknown as new (url: string, protocols: string[] | { protocols: string[]; headers: Record<string, string> }, options?: { headers: Record<string, string> }) => CollectionSocket;
     // Browser windows and workers cannot supply WebSocket handshake headers.
     const browser = (typeof window !== 'undefined' && typeof window.document !== 'undefined')
         || (typeof navigator !== 'undefined' && 'importScripts' in globalThis);
-    if (!browser) return new Socket(url, protocols, { headers });
+    if (typeof navigator !== 'undefined' && navigator.product === 'ReactNative') {
+        return new Socket(url, protocols, { headers });
+    }
+    if (!browser) return new Socket(url, { protocols, headers });
     const authorization = headers.Authorization;
     if (authorization) {
         const credential = authorization.slice('Bearer '.length);

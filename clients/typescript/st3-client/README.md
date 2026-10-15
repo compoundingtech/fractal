@@ -9,7 +9,7 @@ The generated source uses erasable TypeScript syntax, and the package type check
 `erasableSyntaxOnly` and `exactOptionalPropertyTypes` for both the raw client and rich schemas.
 The raw client also type checks with `verbatimModuleSyntax`.
 
-The client uses standard `fetch`, so callers can supply a fetch implementation and a credential callback. Call `discover()` before rendering capability-dependent controls. List and event limits are checked against the server's advertised bounds. Submit fenced actions with the generated typed methods, then use `followOperation(operation_id)` for accepted actions. `terminalStream` opens the screen stream a `terminal.attach` capability allows and calls `onScreen` with each changed screen. Browser windows and workers use the two-argument WebSocket constructor and offer an additional `st3.bearer.<credential>` subprotocol, never a bearer in the URL. Credentials must contain only HTTP token characters; the paired URL-safe base64 bearer satisfies this requirement. The server selects only the normal stream subprotocol. Non-browser runtimes, including Node, Bun and React Native, receive Authorization headers as the constructor's third argument without a bearer subprotocol. Custom `socket` factories receive the normal protocols and headers, and are responsible for their runtime's authentication transport.
+The client uses standard `fetch`, so callers can supply a fetch implementation and a credential callback. Call `discover()` before rendering capability-dependent controls. List and event limits are checked against the server's advertised bounds. Submit fenced actions with the generated typed methods, then use `followOperation(operation_id)` for accepted actions. `terminalStream` opens the screen stream a `terminal.attach` capability allows and calls `onScreen` with each changed screen. Browser windows and workers use the two-argument WebSocket constructor and offer an additional `st3.bearer.<credential>` subprotocol, never a bearer in the URL. Credentials must contain only HTTP token characters; the paired URL-safe base64 bearer satisfies this requirement. The server selects only the normal stream subprotocol. Node and Bun receive `{ protocols, headers }` as the constructor's second argument. React Native receives the protocol array and third-argument headers. Native transports do not offer a bearer subprotocol. Custom `socket` factories receive the normal protocols and headers, and are responsible for their runtime's authentication transport.
 
 ## Browser credentials
 
@@ -121,3 +121,8 @@ pnpm --filter @smalltalk/st3-client run test:schema
 pnpm --filter @smalltalk/st3-client run typecheck:schema
 ```
 The browser integration check requires a local Chromium executable (defaults to `chromium`) and the same TypeScript installation as the contract checks. It exercises real IndexedDB persistence across navigation, gateway isolation, overwrite/deletion, credential callbacks, and native browser WebSocket handshakes for all three streams.
+
+`pnpm --filter @smalltalk/st3-client run test:socket` requires Node and Bun on PATH.
+It starts a loopback WebSocket server and checks actual Authorization headers and offered
+protocols for terminal, conversation and collection streams from both runtimes, without
+replacing their WebSocket constructors.
