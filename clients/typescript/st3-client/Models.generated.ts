@@ -823,7 +823,7 @@ export type Envelope = {
   value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog);
 };
 
-export type ErrorCode = ("recipient-retired" | "lifecycle-unavailable" | "retirement-upgrade-required" | "attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "internal" | string);
+export type ErrorCode = ("recipient-retired" | "lifecycle-unavailable" | "retirement-upgrade-required" | "attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "suspend-authored-session-selection" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "internal" | string);
 
 export type ErrorEnvelope = {
   api_version: "st3.client.v0";
@@ -847,6 +847,12 @@ export type EventPage = {
   kind: "event-page";
   oldest_cursor: Cursor;
   resume_cursor: Cursor;
+};
+
+export type ExchangeTransport = {
+  at: Timestamp;
+  carrier: string;
+  fabric_route?: string;
 };
 
 export type Fence = {
@@ -1176,6 +1182,7 @@ export type Mission = ResourceHeader & {
   runs: Array<MissionRunId>;
   runs_truncated?: boolean;
   state: MissionState;
+  system?: boolean;
   title: string;
   total_runs?: number;
   usage?: (UsageSummary | null);
@@ -1238,6 +1245,7 @@ export type MissionStep = {
   constraints?: Array<string>;
   goals?: Array<string>;
   id: Id;
+  keep_open?: boolean;
   last_progress?: string | null;
   loop_max_rounds?: number | null;
   loop_reason?: string | null;
@@ -1749,6 +1757,8 @@ export type SyncPeer = {
   estimated_catch_up_seconds?: number | null;
   host_id: Id;
   last_exchange_at?: (Timestamp | null);
+  last_failed_exchange?: ExchangeTransport;
+  last_successful_exchange?: ExchangeTransport;
   local_only_envelopes: number;
   peer_only_envelopes: number;
 };
@@ -2051,6 +2061,9 @@ export type TimelineViewAssistantError = {
   label: string;
   message: string;
   model?: string;
+  native?: {
+  [key: string]: unknown;
+};
   presentation: "full" | "compact-recovered" | "none";
   provider?: string;
   retry?: {

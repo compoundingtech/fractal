@@ -86,6 +86,7 @@ pub enum ErrorCode {
     ValidationFailed,
     IdempotencyConflict,
     IssuerRequired,
+    SuspendAuthoredSessionSelection,
     StaleFence,
     CursorGap,
     PageCursorExpired,
@@ -233,7 +234,19 @@ impl SyncNotice {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ExchangeTransport {
+    pub at: String,
+    pub carrier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_route: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SyncPeer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_successful_exchange: Option<ExchangeTransport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failed_exchange: Option<ExchangeTransport>,
     pub host_id: String,
     /// Envelopes the peer holds that this host lacks.
     pub peer_only_envelopes: u64,
@@ -941,6 +954,9 @@ pub struct Mission {
     pub title: String,
     pub state: String,
     pub mission_revision: String,
+    /// st's own plumbing or a standing observer; false from older daemons.
+    #[serde(default)]
+    pub system: bool,
     #[serde(default)]
     pub runs: Vec<String>,
     #[serde(default)]
@@ -1009,6 +1025,9 @@ pub struct MissionStep {
     pub claimant: Option<String>,
     #[serde(default)]
     pub agentless: bool,
+    /// st's own step that holds its run open; false from older daemons.
+    #[serde(default)]
+    pub keep_open: bool,
     pub since: String,
     #[serde(default)]
     pub last_progress: Option<String>,

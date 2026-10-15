@@ -278,9 +278,9 @@ async fn run(program: &Path, arguments: &[&str]) -> Result<String> {
 }
 
 /// Fabric builds older than 0.2.41 have no `--json` and no error codes: they print the
-/// address or path alone and say a refusal only in words on stderr. This is the single place
-/// st still reads those words, and it turns them into the same [`FabricError`] a current
-/// build prints, so nothing downstream matches text.
+/// address, path, NodeID or tab-separated peer rows alone and say a refusal only in words on
+/// stderr. This is the single place st still reads that text, and it turns a refusal into the
+/// same [`FabricError`] a current build prints, so nothing downstream matches text.
 ///
 /// Remove this module, and `Ok(None)` from [`run_json`], once no fleet member runs Fabric
 /// older than 0.2.41. A member updates Fabric with `fabric update`, which is how a fleet
@@ -296,6 +296,19 @@ mod legacy {
         ),
         ("node is not in fabric allow-list", "peer_not_in_allow_list"),
     ];
+
+    /// `fabric peers` rows: a NodeID, the local name (possibly empty), and the peer's grants.
+    pub(super) fn parse_peers(printed: &str) -> Vec<(String, String)> {
+        printed
+            .lines()
+            .filter_map(|line| {
+                let mut columns = line.split('\t');
+                let node = columns.next()?.trim();
+                let name = columns.next().unwrap_or_default().trim();
+                (!node.is_empty()).then(|| (node.to_owned(), name.to_owned()))
+            })
+            .collect()
+    }
 
     /// The code the old words stand for, for a refusal said only in prose.
     pub(super) fn refusal_code(text: &str) -> Option<&'static str> {
@@ -327,19 +340,6 @@ mod legacy {
 /// The addresses `tailscale ip` reports.
 pub async fn tailscale_addresses(tailscale: &Path) -> Result<Vec<IpAddr>> {
     Ok(parse_tailscale_ips(&run(tailscale, &["ip"]).await?))
-}
-
-/// `fabric peers` rows: a NodeID, the local name (possibly empty), and the peer's grants.
-fn parse_fabric_peers(printed: &str) -> Vec<(String, String)> {
-    printed
-        .lines()
-        .filter_map(|line| {
-            let mut columns = line.split('\t');
-            let node = columns.next()?.trim();
-            let name = columns.next().unwrap_or_default().trim();
-            (!node.is_empty()).then(|| (node.to_owned(), name.to_owned()))
-        })
-        .collect()
 }
 
 /// The default Fabric protocol for a fleet, so a throwaway fleet never collides with another.
@@ -382,7 +382,10 @@ impl Fabric {
 
     /// This machine's Fabric NodeID.
     pub async fn id(&self) -> Result<String> {
-        let id = run(&self.program, &["id"]).await?.trim().to_owned();
+        let id = match run_json(&self.program, &["id"]).await? {
+            Some(value) => value["id"].as_str().unwrap_or_default().to_owned(),
+            None => run(&self.program, &["id"]).await?.trim().to_owned(),
+        };
         anyhow::ensure!(!id.is_empty(), "fabric id printed nothing");
         Ok(id)
     }
@@ -423,7 +426,22 @@ impl Fabric {
 
     /// The trusted peers in Fabric's `peers.toml`, as NodeID and local name.
     pub async fn peers(&self) -> Result<Vec<(String, String)>> {
-        Ok(parse_fabric_peers(&run(&self.program, &["peers"]).await?))
+        let Some(value) = run_json(&self.program, &["peers"]).await? else {
+            return Ok(legacy::parse_peers(&run(&self.program, &["peers"]).await?));
+        };
+        let peers = value["peers"]
+            .as_array()
+            .context("fabric peers printed no peers")?;
+        Ok(peers
+            .iter()
+            .filter_map(|peer| {
+                let node = peer["node"].as_str().filter(|node| !node.is_empty())?;
+                Some((
+                    node.to_owned(),
+                    peer["name"].as_str().unwrap_or_default().to_owned(),
+                ))
+            })
+            .collect())
     }
 
     /// Whether the peer's Fabric refuses this machine for `protocol`, asked with a fresh
@@ -511,6 +529,36 @@ pub enum Route {
     Http(String),
     /// A Fabric peer and protocol; the worker dials a local tunnel for it.
     Fabric { node: String, protocol: String },
+}
+
+impl Route {
+    /// Classify the actual dial route, including config overrides. A Fabric tunnel's
+    /// ephemeral loopback URL must never be classified as a loopback carrier.
+    pub fn carrier(&self) -> crate::replication::ReplicationCarrier {
+        use crate::replication::ReplicationCarrier;
+        match self {
+            Self::Fabric { .. } => ReplicationCarrier::Fabric,
+            Self::Http(url) => {
+                let host = reqwest::Url::parse(url).ok().and_then(|url| {
+                    url.host_str()
+                        .map(|host| host.trim_matches(['[', ']']).to_owned())
+                });
+                match host.as_deref() {
+                    Some(host) if host.eq_ignore_ascii_case("localhost") => {
+                        ReplicationCarrier::Loopback
+                    }
+                    Some(host) => match host.parse::<IpAddr>() {
+                        Ok(address) if address.is_loopback() => ReplicationCarrier::Loopback,
+                        Ok(address) if is_tailnet_address(&address) => {
+                            ReplicationCarrier::Tailscale
+                        }
+                        _ => ReplicationCarrier::Unknown,
+                    },
+                    None => ReplicationCarrier::Unknown,
+                }
+            }
+        }
+    }
 }
 
 /// A lasting peer route. HTTP stays on loopback or the encrypted tailnet; Fabric names
@@ -615,6 +663,32 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
+    fn carrier_comes_from_the_dial_route_including_overrides() {
+        use crate::replication::ReplicationCarrier;
+        for (route, carrier) in [
+            ("http://127.0.0.1:4000", ReplicationCarrier::Loopback),
+            ("http://[::1]:4000", ReplicationCarrier::Loopback),
+            ("http://localhost:4000", ReplicationCarrier::Loopback),
+            ("http://100.101.102.103:4000", ReplicationCarrier::Tailscale),
+            (
+                "http://[fd7a:115c:a1e0::1]:4000",
+                ReplicationCarrier::Tailscale,
+            ),
+            ("fabric://birch/st3-peer-v1", ReplicationCarrier::Fabric),
+        ] {
+            assert_eq!(parse_route(route).unwrap().carrier(), carrier, "{route}");
+        }
+        assert_eq!(
+            Route::Http("http://example.invalid:4000".into()).carrier(),
+            ReplicationCarrier::Unknown
+        );
+        assert_eq!(
+            Route::Http("malformed".into()).carrier(),
+            ReplicationCarrier::Unknown
+        );
+    }
+
+    #[test]
     fn tailnet_ranges_are_exact() {
         for inside in ["100.64.0.1", "100.127.255.254", "fd7a:115c:a1e0::1"] {
             assert!(is_tailnet_address(&inside.parse().unwrap()), "{inside}");
@@ -690,7 +764,7 @@ mod tests {
         let fabric = Fabric::new(shim(
             root.path(),
             &format!(
-                "echo \"$@\" >> {log}\ncase \"$1\" in id) echo node-a;; dial) echo '{{\"address\":\"127.0.0.1:45678\"}}';; *) ;; esac",
+                "echo \"$@\" >> {log}\ncase \"$1\" in id) echo '{{\"id\":\"node-a\"}}';; dial) echo '{{\"address\":\"127.0.0.1:45678\"}}';; *) ;; esac",
                 log = log.display()
             ),
         ));
@@ -707,7 +781,7 @@ mod tests {
         let calls = std::fs::read_to_string(&log).unwrap();
         assert_eq!(
             calls,
-            "id\ndial node-b st3/fleet/x --tcp 127.0.0.1:0 --json\n\
+            "id --json\ndial node-b st3/fleet/x --tcp 127.0.0.1:0 --json\n\
              expose st3/fleet/x --tcp 127.0.0.1:31313\nunexpose st3/fleet/x\n"
         );
 
@@ -825,6 +899,40 @@ mod tests {
                 "case \" $* \" in *' --json '*) echo \"error: unexpected argument '--json'\" >&2; exit 2;; esac\n{dial}"
             ),
         ))
+    }
+
+    #[tokio::test]
+    async fn an_older_fabric_without_json_still_names_itself_and_lists_its_peers() {
+        let root = tempfile::tempdir().unwrap();
+        let fabric = old_build(
+            root.path(),
+            "case \"$1\" in id) echo node-a;; \
+             peers) printf 'node-b\\tBox\\techo,st3/pty/x\\nnode-c\\t\\techo\\n';; esac",
+        );
+        assert_eq!(fabric.id().await.unwrap(), "node-a");
+        assert_eq!(
+            fabric.peers().await.unwrap(),
+            vec![
+                ("node-b".to_owned(), "Box".to_owned()),
+                ("node-c".to_owned(), String::new()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn id_and_peers_report_fabric_failures_by_code() {
+        let root = tempfile::tempdir().unwrap();
+        let down = fails_with(root.path(), "daemon_not_running", "fault", 69);
+        for error in [
+            down.id().await.unwrap_err(),
+            down.peers().await.unwrap_err(),
+        ] {
+            let fault = error.downcast_ref::<FabricError>().unwrap();
+            assert_eq!(fault.code, "daemon_not_running");
+        }
+        let root = tempfile::tempdir().unwrap();
+        let empty = Fabric::new(shim(root.path(), "echo '{\"id\":\"\"}'"));
+        assert!(empty.id().await.is_err());
     }
 
     #[tokio::test]
@@ -958,7 +1066,7 @@ mod tests {
             root.path(),
             &format!(
                 "echo \"$@\" >> {log}\ncase \"$1\" in \
-                 peers) printf 'node-b\\tBox\\techo,st3/pty/x\\nnode-c\\t\\techo\\n';; \
+                 peers) echo '{{\"peers\":[{{\"node\":\"node-b\",\"name\":\"Box\",\"allow\":[\"echo\",\"st3/pty/x\"]}},{{\"node\":\"node-c\",\"name\":null,\"allow\":[\"echo\"]}}]}}';; \
                  dial) echo '{{\"socket\":\"/run/fabric/dials/node-b.sock\"}}';; *) ;; esac",
                 log = log.display()
             ),
@@ -986,7 +1094,7 @@ mod tests {
         assert_eq!(
             calls,
             "expose st3/pty/x --socket /run/st/terminals.sock\n\
-             expose st3/pty/x --exec -- /bin/st terminals serve-fabric\npeers\n\
+             expose st3/pty/x --exec -- /bin/st terminals serve-fabric\npeers --json\n\
              dial node-b st3/pty/x --json\n"
         );
 

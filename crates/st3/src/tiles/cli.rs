@@ -31,6 +31,20 @@ enum TilesCommand {
     },
     /// End every process in a tile. Run as root.
     Stop { name: String },
+    /// Make a tile's directories, including the endpoint directory its supervisor serves,
+    /// without starting it. Run as root, for example at boot.
+    Prepare {
+        #[arg(long, default_value = DEFAULT_REGISTRY)]
+        registry: PathBuf,
+        name: String,
+    },
+    /// End a tile, remove its state and directories, and give its user ID back. Run as root.
+    /// Its registry entry stays; a later launch starts it afresh with a new user ID.
+    Remove {
+        #[arg(long, default_value = DEFAULT_REGISTRY)]
+        registry: PathBuf,
+        name: String,
+    },
     /// Build the tile and run the command in it. The tile's unit runs this as root.
     #[command(hide = true)]
     Enter {
@@ -56,6 +70,10 @@ pub fn run(args: TilesArgs) -> Result<i32> {
                 command,
             } => launch::run(&registry, &name, pty, &command),
             TilesCommand::Stop { name } => launch::stop(&name).map(|()| 0),
+            TilesCommand::Prepare { registry, name } => {
+                launch::prepare(&registry, &name).map(|()| 0)
+            }
+            TilesCommand::Remove { registry, name } => launch::remove(&registry, &name).map(|()| 0),
             TilesCommand::Enter {
                 registry,
                 name,
