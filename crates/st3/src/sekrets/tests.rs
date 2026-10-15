@@ -1218,8 +1218,8 @@ fn a_nodes_st_makes_api_requests_with_a_token_it_never_holds() {
 }
 
 /// A second gateway over `fixture`'s store whose configuration names `people`, and whose tile
-/// registry is `registry`. Its socket.
-fn tile_gateway(fixture: &Fixture, people: &str, registry: &str) -> PathBuf {
+/// registry has one tile, atlas, whose launcher-allocated user ID is `tile_uid`. Its socket.
+fn tile_gateway(fixture: &Fixture, people: &str, tile_uid: u32) -> PathBuf {
     let socket = fixture.root.join(format!(
         "run/tiles-{}.sock",
         std::time::SystemTime::now()
@@ -1235,7 +1235,10 @@ fn tile_gateway(fixture: &Fixture, people: &str, registry: &str) -> PathBuf {
         checkouts = fixture.checkouts,
     ))
     .unwrap();
-    let registry = crate::tiles::registry::Registry::parse(registry).unwrap();
+    let registry = crate::tiles::registry::Registry::parse(&tile_registry(tile_uid))
+        .unwrap()
+        .with_uids(&format!("atlas = {tile_uid}\n"))
+        .unwrap();
     let gateway = Arc::new(
         Gateway::new(
             config,
@@ -1253,9 +1256,11 @@ fn tile_gateway(fixture: &Fixture, people: &str, registry: &str) -> PathBuf {
 
 const TILE_AGENT: &str = "agent/fleet/fixture-web/atlas";
 
+/// A registry with one tile, whose launcher-allocated user ID is `uid`.
 fn tile_registry(uid: u32) -> String {
     format!(
-        "[tiles.atlas]\nuid = {uid}\ngid = {uid}\nagent = \"{TILE_AGENT}\"\nperson = \"person/ada\"\n"
+        "uids = {{ first = {uid}, last = {uid} }}\n\
+         [tiles.atlas]\nagent = \"{TILE_AGENT}\"\nperson = \"person/ada\"\n"
     )
 }
 
@@ -1280,7 +1285,7 @@ fn a_tile_is_its_agent_by_the_kernels_word_alone() {
         })
         .unwrap();
     // This process's Unix user is now the tile's, and no person's.
-    let socket = tile_gateway(&fixture, "", &tile_registry(fixture.uid));
+    let socket = tile_gateway(&fixture, "", fixture.uid);
     let set = |cgroup: String| *fixture.kernel.cgroup.lock().unwrap() = cgroup;
 
     set(crate::tiles::registry::tools_cgroup("atlas"));
@@ -1365,7 +1370,7 @@ fn a_unix_user_that_is_both_a_person_and_a_tile_is_refused() {
     let socket = tile_gateway(
         &fixture,
         &format!("\"{}\" = \"person/ada\"\n", fixture.uid),
-        &tile_registry(fixture.uid),
+        fixture.uid,
     );
     *fixture.kernel.cgroup.lock().unwrap() = crate::tiles::registry::tools_cgroup("atlas");
     let refused = Connection::open(&socket).err().expect("refused");
@@ -1377,7 +1382,7 @@ fn a_unix_user_that_is_both_a_person_and_a_tile_is_refused() {
     let socket = tile_gateway(
         &fixture,
         &format!("\"{}\" = \"person/ada\"\n", fixture.uid),
-        &tile_registry(fixture.uid + 1),
+        fixture.uid + 1,
     );
     fixture.as_person();
     assert_eq!(
@@ -1408,7 +1413,7 @@ fn a_tiles_directory_is_never_bound_into_a_command() {
         })
         .unwrap();
     fixture.tool("where", "pwd");
-    let socket = tile_gateway(&fixture, "", &tile_registry(fixture.uid));
+    let socket = tile_gateway(&fixture, "", fixture.uid);
     *fixture.kernel.cgroup.lock().unwrap() = crate::tiles::registry::tools_cgroup("atlas");
     // Even a directory under the checkout roots, which a seat's call would bind.
     let cwd = fixture.checkout("tile-work");

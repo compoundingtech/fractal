@@ -2012,8 +2012,11 @@ command = ["evidence-sign"]
 
     fn program_tile_registry() -> Registry {
         Registry::parse(
-            "[tiles.atlas]\nuid=1001\ngid=1001\nagent=\"agent/example/atlas\"\nperson=\"person/ada\"\n",
+            "uids = { first = 1001, last = 1001 }\n\
+             [tiles.atlas]\nagent=\"agent/example/atlas\"\nperson=\"person/ada\"\n",
         )
+        .unwrap()
+        .with_uids("atlas = 1001\n")
         .unwrap()
     }
 
