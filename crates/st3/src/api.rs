@@ -1764,6 +1764,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "projection-detail-invalid-source"
         | "cursor-gap"
         | "page-cursor-expired"
+        | "response-too-large"
         | "rate-limited"
         | "runtime-not-local"
         | "runtime-authority-indeterminate"
