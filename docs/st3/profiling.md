@@ -660,6 +660,21 @@ malformed operation metadata, an operation conflict, and `incremental-error:CODE
 incremental chunks produce no fallback log. The target is the admitted index observed at entry;
 a full replay can also include claims admitted since that observation.
 
+The daemon reserves both Unix socket addresses right after acquiring its startup lock, before
+opening SQLite, but does not listen on them. A socket that is bound and not listening makes the
+kernel refuse every connection at once, so clients and `st doctor` keep seeing "daemon starting"
+with the current phase, and nothing queues behind an uninitialized router. The daemon starts
+listening only when migrations, admission, canonical projection catch-up and application
+initialization have finished. A per-address advisory lock (`<socket>.reservation.lock`) is held
+from reservation through serving, so a second daemon neither unlinks a reserved address nor a
+live listener; the lock is released when the process exits.
+
+Reserving early moves the path preparation (live-listener probe, stale-file removal, bind,
+permissions and discovery link) off the ready-to-listen interval. It does not preserve an exited
+process's established streams or remove the stop-to-bind refusal window. Zero-refusal restarts
+require a service-manager-owned socket that survives the writer handoff, with the replacement
+accepting only after SQLite is ready.
+
 ### Startup phase durations
 
 Every successful daemon start emits one structured stderr line when both listeners are ready:
@@ -676,7 +691,8 @@ The phase keys partition that interval: `configuration_ms`, `install_hooks_ms`,
 instance-lock setup; hooks include profiler initialization and the file-descriptor limit.
 Opening the store includes signing-key setup. Settlement and projection share one interval;
 the runtime prelude includes the startup claim, notification state, and PTY directory.
-Binding ends at the second listener's readiness callback. The summary adds no per-request
+`bind_ms` adds the early socket reservation to the interval that ends at the second listener's
+readiness callback. The summary adds no per-request
 instrumentation and is not repeated for projection chunks or readiness progress updates.
 
 ## Reproduce a mailbox-wake comparison

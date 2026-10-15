@@ -425,7 +425,7 @@ fn native_follow_resynchronizes_a_real_window_gap_without_any_claim_change() {
             }
             let (_, resolved) = resolve_conversation(&fixture.state, &fixture.session_id).unwrap();
             let source = conversation_blocks::source(&fixture.state, &fixture.session_id, resolved.managed.as_ref()).unwrap();
-            let (authoritative, _, native) = conversation_first_page_at_generation(
+            let (authoritative, _, native, _) = conversation_first_page_at_generation(
                 &fixture.state,
                 &new_client_snapshot(&fixture.state),
                 &session,
@@ -548,7 +548,7 @@ fn native_pages_exclude_stored_availability_notices_and_truncation_entries() {
     );
     let (_, resolved) = resolve_conversation(&fixture.state, &fixture.session_id).unwrap();
     let source = conversation_blocks::source(&fixture.state, &fixture.session_id, resolved.managed.as_ref()).unwrap();
-    let (after, _, native) = conversation_first_page_at_generation(
+    let (after, _, native, _) = conversation_first_page_at_generation(
         &fixture.state,
         &new_client_snapshot(&fixture.state),
         &session,
