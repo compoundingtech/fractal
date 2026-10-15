@@ -1961,6 +1961,9 @@ pub struct AttentionResolveRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AttentionWithdrawRequest {
+    /// The original work.person-asked claim for an informational update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode: Option<String>,
     pub reason: String,
     pub actor: String,
     pub idempotency_key: String,

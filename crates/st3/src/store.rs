@@ -136,6 +136,8 @@ pub use runtime_starts::{RuntimeStartAdmission, RuntimeStartOperation, RuntimeSt
 mod roster_admission;
 pub(crate) use roster_admission::AdmissionGuard;
 mod adhoc_work;
+#[cfg(test)]
+pub(crate) mod alert_action_controls;
 mod attention_snapshot;
 pub(crate) use attention_snapshot::{
     CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
@@ -13343,18 +13345,7 @@ impl Store {
     ) -> Result<Option<(DesiredSubject, Option<String>)>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        connection
-            .query_row(
-                "SELECT desired.subject, desired.kind, desired.body, desired.member,
-                        desired.owner_run, desired.owner_generation, desired.owner_step,
-                        claims.actor
-                 FROM desired LEFT JOIN claims ON claims.id = desired.claim_id
-                 WHERE desired.subject = ?1",
-                [subject],
-                |row| Ok((desired_from_row(row)?, row.get::<_, Option<String>>(7)?)),
-            )
-            .optional()
-            .map_err(Into::into)
+        desired_subject_with_writer_at(&connection, subject)
     }
 
     /// Among `subjects`, each declaration whose member this build cannot read, with the reason.
@@ -18111,48 +18102,7 @@ impl Store {
     /// Prefer a bound account person, then follow declaration authors and mission requesters.
     /// Missing or cyclic ownership remains unknown; it never selects a global operator.
     pub(crate) fn agent_person(&self, agent: &str) -> Result<Option<String>> {
-        let mut actor = agent.to_owned();
-        let mut seen = BTreeSet::new();
-        for _ in 0..16 {
-            if actor.starts_with("person/") {
-                return Ok(Some(actor));
-            }
-            if !seen.insert(actor.clone()) {
-                return Ok(None);
-            }
-            let Some((desired, writer)) = self.desired_subject_with_writer(&actor)? else {
-                return Ok(None);
-            };
-            if actor == agent {
-                let owner = match crate::accounts::harness_binding(&desired.desired)
-                    .map(|binding| binding.binding)
-                {
-                    Some(crate::accounts::Binding::Pool(person)) => Some(person),
-                    Some(crate::accounts::Binding::Account(account)) => self
-                        .desired_subject_with_writer(&format!("account/{account}"))?
-                        .and_then(|(account, _)| {
-                            crate::accounts::parse_account(&account.subject, &account.desired)
-                        })
-                        .and_then(|account| account.owner),
-                    None => None,
-                };
-                if let Some(owner) = owner.filter(|owner| owner.starts_with("person/")) {
-                    return Ok(Some(owner));
-                }
-            }
-            let requester = desired
-                .owner_run
-                .as_deref()
-                .map(|run| self.mission_run(run))
-                .transpose()?
-                .flatten()
-                .map(|run| run.requester);
-            let Some(next) = requester.or(writer) else {
-                return Ok(None);
-            };
-            actor = next;
-        }
-        Ok(None)
+        agent_person_at(&self.readers.get(), agent)
     }
 
     pub fn current_harness(
@@ -22531,6 +22481,9 @@ fn append_admitted_claim_tx(
         || fields.contains_key("delegation")
         || fields.contains_key("acted_for")
         || (kind == "work.person-done" && actor.is_some_and(|actor| actor.starts_with("agent/")))
+        || (kind == "harness.diagnostic"
+            && fields.get("code") == Some(&json!("native-prompt-answered"))
+            && actor.is_some_and(|actor| actor.starts_with("agent/")))
     {
         let evidence = serde_json::from_value::<Vec<String>>(
             body.get("evidence").cloned().unwrap_or_else(|| json!([])),
@@ -24385,6 +24338,85 @@ fn intent_leaves_at(
         .map(|(id, _)| id)
         .filter(|id| !referenced.contains(id))
         .collect())
+}
+
+fn desired_subject_with_writer_at(
+    connection: &Connection,
+    subject: &str,
+) -> Result<Option<(DesiredSubject, Option<String>)>> {
+    smallclaims::touched::note_read(|| subject.to_owned());
+    connection
+        .query_row(
+            "SELECT desired.subject, desired.kind, desired.body, desired.member,
+                        desired.owner_run, desired.owner_generation, desired.owner_step,
+                        claims.actor
+                 FROM desired LEFT JOIN claims ON claims.id = desired.claim_id
+                 WHERE desired.subject = ?1",
+            [subject],
+            |row| Ok((desired_from_row(row)?, row.get::<_, Option<String>>(7)?)),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+/// The same ownership walk on the caller's pinned read or writer transaction.
+fn agent_person_at(connection: &Connection, agent: &str) -> Result<Option<String>> {
+    let mut actor = agent.to_owned();
+    let mut seen = BTreeSet::new();
+    for _ in 0..16 {
+        if actor.starts_with("person/") {
+            return Ok(Some(actor));
+        }
+        if !seen.insert(actor.clone()) {
+            return Ok(None);
+        }
+        let Some((desired, writer)) = desired_subject_with_writer_at(connection, &actor)? else {
+            return Ok(None);
+        };
+        if actor == agent {
+            let owner = match crate::accounts::harness_binding(&desired.desired)
+                .map(|binding| binding.binding)
+            {
+                Some(crate::accounts::Binding::Pool(person)) => Some(person),
+                Some(crate::accounts::Binding::Account(account)) => {
+                    desired_subject_with_writer_at(connection, &format!("account/{account}"))?
+                        .and_then(|(account, _)| {
+                            crate::accounts::parse_account(&account.subject, &account.desired)
+                        })
+                        .and_then(|account| account.owner)
+                }
+                None => None,
+            };
+            if let Some(owner) = owner.filter(|owner| owner.starts_with("person/")) {
+                return Ok(Some(owner));
+            }
+        }
+        let requester = desired
+            .owner_run
+            .as_deref()
+            .map(|run| {
+                smallclaims::touched::note_read(|| {
+                    format!(
+                        "mission-run/{}",
+                        run.strip_prefix("mission-run/").unwrap_or(run)
+                    )
+                });
+                connection
+                    .query_row(
+                        "SELECT requester FROM mission_runs WHERE id=?1",
+                        [run.strip_prefix("mission-run/").unwrap_or(run)],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+            })
+            .transpose()?
+            .flatten();
+        let Some(next) = requester.or(writer) else {
+            return Ok(None);
+        };
+        actor = next;
+    }
+    Ok(None)
 }
 
 fn desired_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DesiredSubject> {
@@ -57369,6 +57401,7 @@ mission "typecase" state="ready" {
             .withdraw_attention(
                 "attention/other-fault",
                 &AttentionWithdrawRequest {
+                    episode: None,
                     reason: "cleared".into(),
                     actor: "agent/node.requester".into(),
                     idempotency_key: "other-fault-withdrawn".into(),

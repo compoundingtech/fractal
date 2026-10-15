@@ -386,12 +386,23 @@ export const PersonStepParameters = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonStepParameters = typeof PersonStepParameters.Type
 export type PersonStepParametersEncoded = typeof PersonStepParameters.Encoded
 
-/** A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers (allow or deny). */
+export const DelegationProof = /*#__PURE__*/ (() => Schema.Struct({
+  "episode": Schema.String,
+  "message": Schema.String,
+  "person": Schema.String,
+  "policy": Schema.String,
+  "quote": Schema.String
+}).annotate({ identifier: "DelegationProof" }))()
+export type DelegationProof = typeof DelegationProof.Type
+export type DelegationProofEncoded = typeof DelegationProof.Encoded
+
+/** A native prompt answer; an authenticated agent may only dismiss an auto-denial under an exact current close-item delegation proof. Parameters never select the actor. */
 export const PromptRespondParameters = /*#__PURE__*/ (() => Schema.Struct({
-  "answer": Schema.Literals(["allow","deny"]),
+  "answer": Schema.Literals(["allow","deny","dismiss"]),
+  "delegation": Schema.optionalKey(DelegationProof),
   "episode": Schema.String,
   "target_id": Id
-}).annotate({ identifier: "PromptRespondParameters", description: "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers (allow or deny)." }))()
+}).annotate({ identifier: "PromptRespondParameters", description: "A native prompt answer; an authenticated agent may only dismiss an auto-denial under an exact current close-item delegation proof. Parameters never select the actor." }))()
 export type PromptRespondParameters = typeof PromptRespondParameters.Type
 export type PromptRespondParametersEncoded = typeof PromptRespondParameters.Encoded
 

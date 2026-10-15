@@ -20,11 +20,12 @@ default policy, and old policy references cannot authorize new actions after rep
 | Action | Permitted operation |
 | --- | --- |
 | `answer-ask` | Complete a person-assigned ask using their prior answer, keeping its named answer ID and text. |
-| `close-item` | Read an informational update or archive a message the person explicitly said to close. |
+| `close-item` | Read an informational update, archive a message, or dismiss an auto-denied harness call the person explicitly said to close. It cannot allow a call or its kind. |
 | `record-go-stop` | Approve or reject an approve-mode human gate for the exact episode and revision the person decided on. |
 
 An unanswered ask cannot be dismissed as an informational update. Attention is derived from
-its source: `st alerts resolve --for ... --outcome resolved` closes only an informational update. Other attention
+its source: `st alerts resolve --for ... --outcome resolved` reads an informational update. With
+`--outcome dismissed`, the same proof flags can close an exact auto-denial episode. Other attention
 requires answering or remedying its source. Authored person steps, feedback changes, launch
 approvals, mission revision approvals, and other operations are outside this initial list.
 Existing free-mode actions remain recorded as the agent itself.
@@ -64,3 +65,19 @@ The CLI uses `/v1/work/delegation`, `/v1/work/done`, `/v1/reviews/...`, and the 
 endpoint. These accept an optional `delegation` object with `person`, `policy`, `message`,
 `quote`, and `episode`. Paired client-v0 actions retain their existing session authority
 rules; the `person_answers` projection includes delegated answers for those clients to read.
+
+For an auto-denial, name the alert's `attention/...` ID and the original
+`harness.diagnostic` claim as `--episode`. The instruction must have been sent by the
+represented person to the agent recording it. The action leaves the call denied and records
+the agent, represented person, current policy, instruction and exact episode. Its source
+answer and the notification to the seat commit together. A live permission prompt, approving
+once, and allowing a kind are outside this grant; they are refused rather than inferred from
+`close-item`. `prompt.respond` carries the same optional proof in client-v0; its actor is the
+authenticated session authority, never a parameter supplied by the client.
+
+An agent can withdraw an informational update it sent without acting for the recipient:
+`st alerts withdraw STEP_RUN --as AGENT --reason REASON --idempotency-key KEY`. To use the
+attention card ID instead, also supply the update's original `work.person-asked` claim as
+`--episode`. This cancels that update source, preserves its history and leaves unrelated
+claimed work alone. It cannot withdraw another sender's update or use this route to cancel
+a question; an explicit ask keeps `st work cancel-ask` semantics.

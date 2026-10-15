@@ -746,6 +746,14 @@ export type DecisionResponse = ({
   value: Array<string>;
 });
 
+export type DelegationProof = {
+  episode: string;
+  message: string;
+  person: string;
+  policy: string;
+  quote: string;
+};
+
 export type Device = ResourceHeader & {
   expires_at: Timestamp;
   kind: "device";
@@ -1481,7 +1489,8 @@ export type ProjectionEvent = Omit<{
 }, 'type' | 'body'> & ({ type: "timeline.delta"; body: TimelineDelta });
 
 export type PromptRespondParameters = {
-  answer: "allow" | "deny";
+  answer: "allow" | "deny" | "dismiss";
+  delegation?: DelegationProof;
   episode: string;
   target_id: Id;
 };

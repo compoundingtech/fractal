@@ -726,10 +726,16 @@ public struct GlassCollectionFrame: Codable, Sendable {
 public struct StatusHistory: Codable, Sendable { public let kind, seat, retainedFrom: String; public let items: [StatusTransition]; public let complete: Bool; enum CodingKeys: String, CodingKey { case kind, seat, items, retainedFrom = "retained_from", complete } }
 public struct StatusTransition: Codable, Sendable { public let seat, runtimeIncarnation, observedAt: String; public let state: String?; public let reset: Bool; enum CodingKeys: String, CodingKey { case seat, runtimeIncarnation = "runtime_incarnation", state, observedAt = "observed_at", reset } }
 
+public struct DelegationProof: Codable, Sendable {
+    public var person, policy, message, quote, episode: String
+    public init(person: String, policy: String, message: String, quote: String, episode: String) { self.person = person; self.policy = policy; self.message = message; self.quote = quote; self.episode = episode }
+}
+
 public struct PromptRespondParameters: Codable, Sendable {
     public var targetID, episode, answer: String
-    public init(targetID: String, episode: String, answer: String) { self.targetID = targetID; self.episode = episode; self.answer = answer }
-    enum CodingKeys: String, CodingKey { case targetID = "target_id", episode, answer }
+    public var delegation: DelegationProof?
+    public init(targetID: String, episode: String, answer: String, delegation: DelegationProof? = nil) { self.targetID = targetID; self.episode = episode; self.answer = answer; self.delegation = delegation }
+    enum CodingKeys: String, CodingKey { case targetID = "target_id", episode, answer, delegation }
 }
 
 public struct CustomReplyParameters: Codable, Sendable {
