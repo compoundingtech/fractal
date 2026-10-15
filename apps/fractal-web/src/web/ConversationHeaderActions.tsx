@@ -13,15 +13,27 @@ import { unavailable, waiting, type Feed } from '../data/source.ts'
 import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
 import { resourceState, resourceTitle, type ResourcePage } from '../resources/agent/model.ts'
 import { systemEventsPreference } from './conversationPreferences.ts'
+import type { OpenOperation, UxTelemetry } from '../telemetry/ux.ts'
 
 const unsupportedResources = Atom.make<Feed<ResourcePage>>(unavailable({ reason: 'unsupported', detail: '' }))
 const unopenedResources = Atom.make<Feed<ResourcePage>>(waiting)
 
 /** Native conversation controls, retained from the former ConversationDetail header portal. */
-export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: string }) => {
+export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef: string; readonly ux?: UxTelemetry }) => {
   const source = useDataSource()
   const [showSystemEvents, setShowSystemEvents] = useAtom(systemEventsPreference)
   const [resourcesOpen, setResourcesOpen] = React.useState(false)
+  const [opening, setOpening] = React.useState<OpenOperation>()
+  const onOpenChange = (open: boolean) => {
+    if (open) setOpening(ux?.beginOpen({ surface: 'resources' }))
+    else { opening?.cancel(); setOpening(undefined) }
+    setResourcesOpen(open)
+  }
+  const shellCommit = React.useCallback((node: HTMLElement | null) => {
+    if (node === null || opening === undefined) return
+    opening.phase('shell')
+    return () => opening.cancel()
+  }, [opening])
   // Keep portaled sheets under the owning workspace's semantic theme variables.
   const portalContainer = React.useRef<HTMLDivElement>(null)
   // A closed inspector has no read demand. Otherwise each switch starts discovery plus a
@@ -34,13 +46,13 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
       : resources.reason === 'unsupported' ? 'This connection does not support agent resources.' : undefined
     : undefined
   return <div ref={portalContainer} {...stylex.props(styles.actions)}>
-    <Aria.DialogTrigger isOpen={resourcesOpen} onOpenChange={setResourcesOpen}>
+    <Aria.DialogTrigger isOpen={resourcesOpen} onOpenChange={onOpenChange}>
       <Aria.Button aria-label="Resources" aria-expanded={resourcesOpen} isDisabled={disabledReason !== undefined} aria-describedby={disabledReason === undefined ? undefined : reasonId} {...stylex.props(styles.button)}><CompositionIcon name="folder" />Resources</Aria.Button>
       <Aria.ModalOverlay isDismissable UNSTABLE_portalContainer={portalContainer.current ?? undefined} {...stylex.props(styles.overlay)}>
         <Aria.Modal {...stylex.props(styles.modal)}>
-          <Aria.Dialog aria-label="Agent resources" {...stylex.props(styles.dialog)}>
-            <header {...stylex.props(styles.heading)}><strong>Resources</strong><Aria.Button aria-label="Close resources" onPress={() => setResourcesOpen(false)} {...stylex.props(styles.button)}>Close resources</Aria.Button></header>
-            <ResourceContents agentRef={agentRef} resources={resources} />
+          <Aria.Dialog ref={shellCommit} aria-label="Agent resources" {...stylex.props(styles.dialog)}>
+            <header {...stylex.props(styles.heading)}><strong>Resources</strong><Aria.Button aria-label="Close resources" onPress={() => onOpenChange(false)} {...stylex.props(styles.button)}>Close resources</Aria.Button></header>
+            <ResourceContents agentRef={agentRef} resources={resources} opening={opening} />
           </Aria.Dialog>
         </Aria.Modal>
       </Aria.ModalOverlay>
@@ -57,13 +69,19 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
   </div>
 }
 
-const ResourceContents = ({ agentRef, resources }: {
+const ResourceContents = ({ agentRef, resources, opening }: {
   readonly agentRef: string
   readonly resources: Feed<ResourcePage>
+  readonly opening?: OpenOperation
 }) => {
   const source = useDataSource()
   const queue = useAtomValue(source.subjectReads.agentQueue.feed(agentRef))
   const now = useNow()
+  React.useLayoutEffect(() => {
+    if (resources._tag !== 'Waiting') opening?.phase('data', { 'wf.ux.cache': 'cold' })
+    if (queue._tag !== 'Waiting') opening?.phase('queue')
+    if (resources._tag !== 'Waiting' && queue._tag !== 'Waiting') return opening?.contentCommitted()
+  }, [opening, resources._tag, queue._tag])
   return <div {...stylex.props(styles.contents)}>
     <section aria-label="Todos">
       <h2 {...stylex.props(styles.sectionTitle)}>Todos</h2>
