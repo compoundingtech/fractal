@@ -330,6 +330,14 @@ fn claude_observe(
         answer_permission_from_st(env, &identity, &paths.agent_dir, &raw);
         return 0;
     }
+    if event == "Stop" {
+        report_denials(env, &identity, &paths.agent_dir, &raw);
+        return 0;
+    }
+    if event == "PreToolUse" {
+        allow_approved_call(env, &identity, &paths.agent_dir, &raw);
+        return 0;
+    }
     if !session_start {
         return 0;
     }
@@ -339,20 +347,19 @@ fn claude_observe(
     }
 }
 
-/// How long a permission hook waits for a person's answer from a client. Claude shows its own
-/// dialog meanwhile, and an answer there wins at once, so the wait only bounds the hook.
-const PROMPT_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long a permission hook waits for a person's answer from a client: exactly as long as st
+/// offers one, so an answer given from a client is never recorded after its hook has gone. Claude
+/// shows its own dialog meanwhile, and an answer there wins at once, so the wait only bounds the hook.
+const PROMPT_ANSWER_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(crate::store::CLAUDE_PROMPT_ANSWER_WAIT_MS as u64);
 const PROMPT_ANSWER_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Let a person answer a Claude permission prompt from a client. The hook waits while Claude
 /// shows its dialog; if the person answers in st first, the hook returns that decision, which
 /// closes the dialog (measured on Claude Code 2.1.296, for the seat's own prompts and its
-/// subagents'). A question prompt is answered in the terminal only.
+/// subagents', and for `AskUserQuestion`, whose answer carries the person's choices).
 fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str) {
     let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
-    if payload.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion") {
-        return;
-    }
     // This hook's own prompt, as the seat's open prompts name it: it is answered only once the
     // seat shows it, by an answer to exactly the observation that shows it, never one to an
     // earlier or a parallel prompt (see `st_drivers::claude_prompts`).
@@ -407,10 +414,153 @@ fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path
         PROMPT_ANSWER_WAIT,
         PROMPT_ANSWER_POLL,
     );
-    if let Some(output) = answer.as_deref().and_then(permission_decision) {
+    if let Some(output) = answer
+        .as_deref()
+        .and_then(|answer| permission_decision(answer, &payload))
+    {
         println!("{output}");
     }
 }
+
+/// This seat's daemon client, and the seat's subject, for a hook that talks to st.
+fn hook_client(
+    env: &dyn HookEnv,
+    identity: &str,
+) -> Option<(tokio::runtime::Runtime, crate::client::Client, String)> {
+    let endpoint = match env.var("ST3_ENDPOINT") {
+        Some(endpoint) => crate::client::Endpoint::parse(endpoint),
+        None => crate::client::Endpoint::Unix(crate::config::Config::load_unvalidated(None).ok()?.socket),
+    };
+    let subject = env
+        .var("ST3_SUBJECT")
+        .or_else(|| env.var("ST_AGENT"))
+        .unwrap_or_else(|| format!("agent/{identity}"));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    Some((runtime, crate::client::Client::new(endpoint), subject))
+}
+
+/// Raise each call Claude's auto mode classifier denied since the last turn as an alert for the
+/// seat's person (see `st_drivers::claude_denials`): its tool, the classifier's reason, and the
+/// call's id in the seat's conversation, never its input. Fails open: a turn's end is never held.
+fn report_denials(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str) {
+    let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+    let (Some(session), Some(transcript)) = (
+        payload.get("session_id").and_then(Value::as_str),
+        payload.get("transcript_path").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    // Only the session's own transcript, as Claude names it.
+    let transcript = Path::new(transcript);
+    if !transcript.is_absolute()
+        || transcript.extension().is_none_or(|extension| extension != "jsonl")
+        || transcript.file_stem().is_none_or(|stem| stem != session)
+    {
+        return;
+    }
+    let denials = match st_drivers::claude_denials::new_denials(agent_dir, session, transcript) {
+        Ok(denials) if !denials.is_empty() => denials,
+        Ok(_) => return,
+        Err(error) => {
+            eprintln!("st: Claude's denied calls were not read: {error:#}");
+            return;
+        }
+    };
+    let Some((runtime, client, subject)) = hook_client(env, identity) else {
+        return;
+    };
+    for denial in denials {
+        let claim = crate::model::ClaimInput {
+            subject: subject.clone(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(subject.clone()),
+            fields: BTreeMap::from([
+                ("severity".into(), Value::String("warning".into())),
+                ("status".into(), Value::String(denial.tool.clone())),
+                ("code".into(), Value::String(PERMISSION_DENIED_CODE.into())),
+                ("reason".into(), Value::String(denial.reason.clone())),
+                ("driver".into(), Value::String("claude".into())),
+                ("session_id".into(), Value::String(session.into())),
+                (
+                    "matched_line".into(),
+                    Value::String(serde_json::json!({"call_id": denial.call_id}).to_string()),
+                ),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("claude-permission-denied:{subject}:{}", denial.call_id)),
+        };
+        let posted = runtime.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.post::<_, crate::model::ClaimRecord>("/v1/claims", &claim),
+            )
+            .await
+        });
+        match posted {
+            Ok(Ok(record)) => {
+                if let Err(error) =
+                    st_drivers::claude_denials::raised(agent_dir, &denial.call_id, &record.id)
+                {
+                    eprintln!("st: a denied call's alert was not remembered: {error:#}");
+                }
+            }
+            Ok(Err(error)) => eprintln!("st: a denied call was not raised: {error:#}"),
+            Err(_) => eprintln!("st: a denied call was not raised: the st daemon did not answer"),
+        }
+    }
+}
+
+/// Let a call through that Claude's classifier denied and the seat's person then allowed: once
+/// for that exact call, or for its kind on this seat. Claude takes a `PreToolUse` decision of
+/// `allow` before its classifier runs. St is asked only while a denial waits on an answer.
+fn allow_approved_call(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str) {
+    let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+    let Some(tool) = payload.get("tool_name").and_then(Value::as_str) else {
+        return;
+    };
+    let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
+    let mut client = None;
+    let approved = st_drivers::claude_denials::approved(agent_dir, tool, &input, |claim| {
+        if client.is_none() {
+            client = Some(hook_client(env, identity)?);
+        }
+        let (runtime, client, subject) = client.as_ref()?;
+        let path = format!(
+            "/v1/harness-prompts/answer?agent={}&episode={}",
+            urlencoding::encode(subject),
+            urlencoding::encode(claim)
+        );
+        runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    client.get::<crate::store::PromptAnswer>(&path),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+            })
+            .and_then(|answer| answer.answer)
+    });
+    match approved {
+        Ok(true) => println!(
+            "{}",
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "The seat's person allowed this from st after auto mode denied it."}})
+        ),
+        Ok(false) => {}
+        Err(error) => eprintln!("st: an allowed call was not checked: {error:#}"),
+    }
+}
+
+/// The diagnostic code of a call Claude's auto mode classifier denied.
+pub(crate) const PERMISSION_DENIED_CODE: &str = "permission-denied";
 
 /// Poll `state` until the prompt is answered (its answer), gone, or `wait` runs out (none).
 fn wait_for_prompt_answer(
@@ -432,11 +582,63 @@ fn wait_for_prompt_answer(
     }
 }
 
-/// Claude's `PermissionRequest` hook output for a person's answer.
-fn permission_decision(answer: &str) -> Option<String> {
+/// A question's answers as Claude takes them, from the positions the person chose: each question's
+/// text to its chosen labels, several joined with a comma for a multi-select. The questions and
+/// labels come from the call this hook holds, so only positions ever leave the seat's host.
+/// `None` when a position names no question or option of this call, or a question of the call
+/// has no answer: Claude is never handed a partial answer, and the dialog stays.
+fn question_labels(
+    input: &Value,
+    choices: &serde_json::Map<String, Value>,
+) -> Option<serde_json::Map<String, Value>> {
+    let questions = input.get("questions")?.as_array()?;
+    if choices.len() != questions.len() {
+        return None;
+    }
+    let mut answers = serde_json::Map::new();
+    for (position, options) in choices {
+        let question = questions.get(position.parse::<usize>().ok()?)?;
+        let labels = options
+            .as_array()?
+            .iter()
+            .map(|option| {
+                let option = usize::try_from(option.as_u64()?).ok()?;
+                question.get("options")?.as_array()?.get(option)?.get("label")?.as_str()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        answers.insert(question.get("question")?.as_str()?.to_owned(), labels.join(", ").into());
+    }
+    Some(answers)
+}
+
+/// Claude's `PermissionRequest` hook output for a person's answer to the prompt `payload` opened.
+/// A question's answer is its choices, which Claude takes as the tool's `answers` beside the
+/// questions it asked; a question refused is declined.
+///
+/// A plan is refused through the hook, and Claude keeps planning with that as feedback; it is
+/// approved with the dialog's own keys, since a hook's allow does not approve a plan (measured on
+/// Claude Code 2.1.296), so an approval prints nothing here.
+fn permission_decision(answer: &str, payload: &Value) -> Option<String> {
+    let tool = payload.get("tool_name").and_then(Value::as_str);
+    let question = tool == Some("AskUserQuestion");
     let decision = match answer {
-        "allow" => serde_json::json!({"behavior": "allow"}),
+        "deny" if tool == Some("ExitPlanMode") => serde_json::json!({
+            "behavior": "deny",
+            "message": "The person did not approve this plan from st. Keep planning, and ask them what to change if it is not clear."}),
+        _ if tool == Some("ExitPlanMode") => return None,
+        "deny" if question => serde_json::json!({
+            "behavior": "deny", "message": "The person declined to answer this from st."}),
         "deny" => serde_json::json!({"behavior": "deny", "message": "The person denied this from st."}),
+        "allow" if !question => serde_json::json!({"behavior": "allow"}),
+        choices if question => {
+            let Ok(Value::Object(choices)) = serde_json::from_str::<Value>(choices) else {
+                return None;
+            };
+            let mut input = payload.get("tool_input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let answers = question_labels(&input, &choices)?;
+            input.as_object_mut()?.insert("answers".into(), Value::Object(answers));
+            serde_json::json!({"behavior": "allow", "updatedInput": input})
+        }
         _ => return None,
     };
     Some(
@@ -852,14 +1054,64 @@ mod tests {
             ),
             None
         );
-        let allow: Value = serde_json::from_str(&super::permission_decision("allow").unwrap())
-            .unwrap();
+        let bash = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "make"}});
+        let allow: Value =
+            serde_json::from_str(&super::permission_decision("allow", &bash).unwrap()).unwrap();
         assert_eq!(allow["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
         assert_eq!(allow["hookSpecificOutput"]["decision"]["behavior"], "allow");
         let deny: Value =
-            serde_json::from_str(&super::permission_decision("deny").unwrap()).unwrap();
+            serde_json::from_str(&super::permission_decision("deny", &bash).unwrap()).unwrap();
         assert_eq!(deny["hookSpecificOutput"]["decision"]["behavior"], "deny");
-        assert!(super::permission_decision("maybe").is_none());
+        assert!(super::permission_decision("maybe", &bash).is_none());
+        assert!(super::permission_decision(r#"{"Which?":"Red"}"#, &bash).is_none());
+    }
+
+    /// A question's answer is its choices: Claude takes them as the tool's `answers`, beside the
+    /// questions it asked, and shows them as the person's (measured on Claude Code 2.1.296 with a
+    /// single-select and a multi-select question in one call).
+    #[test]
+    fn a_questions_answer_returns_its_choices_as_the_tools_answers() {
+        let asked = serde_json::json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": [
+            {"question": "Which color?", "header": "Color", "multiSelect": false,
+             "options": [{"label": "Red", "description": "Red"}, {"label": "Blue", "description": "Blue"}]},
+            {"question": "Which pets?", "header": "Pets", "multiSelect": true,
+             "options": [{"label": "Cat", "description": "Cat"}, {"label": "Dog", "description": "Dog"}]},
+        ]}});
+        let answered: Value = serde_json::from_str(
+            &super::permission_decision(r#"{"0":[1],"1":[0,1]}"#, &asked)
+                .unwrap(),
+        )
+        .unwrap();
+        let decision = &answered["hookSpecificOutput"]["decision"];
+        assert_eq!(decision["behavior"], "allow");
+        assert_eq!(decision["updatedInput"]["questions"], asked["tool_input"]["questions"]);
+        assert_eq!(
+            decision["updatedInput"]["answers"],
+            serde_json::json!({"Which color?": "Blue", "Which pets?": "Cat, Dog"})
+        );
+        let declined: Value =
+            serde_json::from_str(&super::permission_decision("deny", &asked).unwrap()).unwrap();
+        assert_eq!(declined["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        // A question is never answered with a bare allow, nor with positions it does not have.
+        assert!(super::permission_decision("allow", &asked).is_none());
+        assert!(super::permission_decision(r#"{"0":[5]}"#, &asked).is_none());
+        assert!(super::permission_decision(r#"{"2":[0]}"#, &asked).is_none());
+        // Every question of the call is answered, or none is: never a partial answer.
+        assert!(super::permission_decision(r#"{"0":[1]}"#, &asked).is_none());
+    }
+
+    /// A plan is refused through the hook, which Claude reads as feedback and keeps planning; an
+    /// approval prints nothing, because the reconciler presses the dialog's own keys (a hook's
+    /// allow does not approve a plan on Claude Code 2.1.296).
+    #[test]
+    fn a_plan_is_refused_through_the_hook_and_approved_with_its_keys() {
+        let plan = serde_json::json!({"tool_name": "ExitPlanMode",
+            "tool_input": {"plan": "1. Create hello.txt"}});
+        let refused: Value =
+            serde_json::from_str(&super::permission_decision("deny", &plan).unwrap()).unwrap();
+        assert_eq!(refused["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        assert!(super::permission_decision("approve", &plan).is_none());
+        assert!(super::permission_decision("allow", &plan).is_none());
     }
 
     #[test]
