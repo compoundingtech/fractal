@@ -5167,7 +5167,7 @@ mod tests {
         ctrl(&mut ui, 'a');
         assert_eq!(ui.popover.as_deref(), Some("actions:agent/example/atlas/builder"));
         let shown = screen(&ui);
-        for action in ["Restart", "Suspend", "Retire", "Copy id", "ACTIONS · ESC CLOSES"] {
+        for action in ["Restart", "Suspend", "Stop", "Copy id", "ACTIONS · ESC CLOSES"] {
             assert!(shown.contains(action), "{action}: {shown}");
         }
         // Restart asks first; Esc would keep it, y restarts.
@@ -5189,6 +5189,14 @@ mod tests {
         press(&mut ui, KeyCode::Char('x'), KeyModifiers::NONE);
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(ui.effects.is_empty());
+    }
+
+    #[test]
+    fn a_retired_identity_has_no_start_resume_or_runtime_actions() {
+        let agent = Agent { state: AgentState::Retired, terminal: false, ..glass().world.agents.items()[0].clone() };
+        let keys = screens::agent_actions(&agent).iter().map(|action| action.key).collect::<String>();
+        for key in ['s','u','r','x','p','t'] { assert!(!keys.contains(key), "{keys}"); }
+        assert_eq!(screens::agent_word(agent.state), "retired");
     }
 
     #[test]
@@ -6344,9 +6352,24 @@ mod tests {
     }
 
     #[test]
+    fn a_lowercase_r_types_into_the_box_while_the_link_is_down() {
+        // Nathan, 2026-10-14: with the link stale he could not type a lowercase r (the key was
+        // taken to mean reconnect); R worked. Letters are letters, link or no link.
+        let mut ui = glass();
+        ui.world.link = Link::Offline("No member reachable · reconnecting · Ctrl+R retry now".into());
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".into())),
+            Open::Tab,
+        );
+        typed(&mut ui, "rare");
+        let draft = ui.conversation_state.drafts.get("agent/example/atlas/builder");
+        assert_eq!(draft.map(String::as_str), Some("rare"));
+    }
+
+    #[test]
     fn the_connection_word_is_clickable_and_says_what_is_known() {
         let mut ui = glass();
-        ui.world.link = Link::Offline("Last connected at 10:02 · reconnecting · r retry now".into());
+        ui.world.link = Link::Offline("Last connected at 10:02 · reconnecting · Ctrl+R retry now".into());
         screen(&ui);
         let rect = {
             let info = ui.frame.borrow();
