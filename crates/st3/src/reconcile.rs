@@ -8389,6 +8389,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Keep the earliest pending wake for this item. Repeated passes can request `now + delay`;
     /// those requests must not each create a timer or postpone the already pending wake.
     fn arm_restart(&self, subject: &str, until: u128) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // Keep the incremental clock dependency, but do not register an unspawned timer:
+            // it would suppress a later request made inside a runtime.
+            smallclaims::touched::note_due(until);
+            return;
+        };
         let mut armed = self
             .delayed_restarts
             .lock()
@@ -8402,9 +8408,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         smallclaims::touched::note_due(until);
         armed.insert(subject.into(), until);
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
         let notify = self.notify.clone();
         let delayed = self.delayed_restarts.clone();
         let subject = subject.to_owned();
@@ -18751,6 +18754,31 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         assert_eq!(restart_wake_kind("stage/faults"), "stage/faults");
         assert_eq!(restart_wake_kind("runtime-snapshot"), "runtime-snapshot");
         assert_eq!(restart_wake_kind("agent/example/seat"), "member");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_requested_without_a_runtime_does_not_suppress_a_later_timer() {
+        let notify = Arc::new(Notify::new());
+        let reconciler = Arc::new(Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        ));
+        let origin = now_ms();
+        let outside = reconciler.clone();
+        std::thread::spawn(move || {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            outside.arm_restart("stage/schedule-sync", origin + 1_000);
+        })
+        .join()
+        .unwrap();
+        assert!(reconciler.delayed_restarts.lock().unwrap().is_empty());
+        reconciler.arm_restart("stage/schedule-sync", origin + 5_000);
+        tokio::time::timeout(Duration::from_secs(6), notify.notified())
+            .await
+            .expect("the runtime request must spawn its timer after a runtime-free request");
+        assert!(reconciler.delayed_restarts.lock().unwrap().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
