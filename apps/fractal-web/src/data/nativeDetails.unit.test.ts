@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { createProjections } from './projections.ts'
 import { observed, unavailable, type Feed } from './source.ts'
 import { nativeDetailsRoot, nativeDetailsTiming, projectNativeDetails } from './nativeDetails.ts'
-import { projectNativeDeclarations } from './nativeDeclarations.ts'
+import { projectNativeDeclarations, type NativeDeclarations } from './nativeDeclarations.ts'
 import { sidebarRow } from '../web/sidebarRow.ts'
 
 const row = Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Real seat', state: 'running', reachability: 'local', runtime_ids: [], revision: '1', updated_at: '1970-01-01T00:00:05Z', incarnation_id: 'inc/current', current_session_id: 'session/current', driver: 'omp', workspace: '/private/checkout', checkout: { repository: '/private/repo', branch: 'private-branch', base: 'main' },
@@ -15,7 +15,7 @@ const usageRow = { agent: row.id, native_session_id: 'native/root', model: 'firs
 const period = Native.decodeUnknownSync(Native.UsagePeriod)({ since_ms: 1000, until_ms: 5000, rows: [usageRow, { ...usageRow, model: 'second-model', account: 'second-account', total_tokens: 63, cost_microusd: 2300000 }, { ...usageRow, agent: 'agent/other', cost_microusd: 99000000 }] })
 const session = Native.decodeUnknownSync(Native.Session)({ id: 'session/current', kind: 'session', owner_id: row.id, runtime_incarnation: 'inc/current', started_at: '1970-01-01T00:00:01Z', ended_at: '1970-01-01T00:00:03Z', updated_at: '1970-01-01T00:00:03Z', revision: '1', state: 'completed', timeline_cursor: 'cursor/0' })
 const missing = unavailable({ reason: 'unsupported', detail: 'Not reported' })
-const project = ({ selected = row, selectedPeriod = observed({ value: period }), selectedSession = session, selectedQueue, needsMe }: { readonly selected?: Native.Agent; readonly selectedPeriod?: Feed<Native.UsagePeriod>; readonly selectedSession?: Native.Session; readonly selectedQueue?: Feed<Native.AgentQueue>; readonly needsMe?: boolean } = {}) => projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: createProjections().fleetFromAgents([selected]).agents[0] }), period: selectedPeriod, session: observed({ value: selectedSession }), declarations: missing, missions: observed({ value: [] }), queue: selectedQueue, needsMe, now: 10000, onRetry: () => undefined })
+const project = ({ selected = row, selectedPeriod = observed({ value: period }), selectedSession = session, sessionFeed, selectedQueue, selectedDeclarations = missing, needsMe }: { readonly selected?: Native.Agent; readonly selectedPeriod?: Feed<Native.UsagePeriod>; readonly selectedSession?: Native.Session; readonly sessionFeed?: Feed<Native.Session>; readonly selectedQueue?: Feed<Native.AgentQueue>; readonly selectedDeclarations?: Feed<NativeDeclarations>; readonly needsMe?: boolean } = {}) => projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: createProjections().fleetFromAgents([selected]).agents[0] }), period: selectedPeriod, session: sessionFeed ?? observed({ value: selectedSession }), declarations: selectedDeclarations, missions: observed({ value: [] }), queue: selectedQueue, needsMe, now: 10000, onRetry: () => undefined })
 
 describe('fixture-free native Details projection', () => {
   it('sums attributed main cost across models/accounts with exact bounds, independently of cumulative tokens', () => {
@@ -105,11 +105,23 @@ describe('fixture-free native Details projection', () => {
     expect(result.trace.nativeSessionId).toEqual({ _tag: 'Known', value: 'native/root', source: 'st' })
     expect(result.trace.meters.spend.mainUsd).toMatchObject({ _tag: 'Known', value: 3.5 })
   })
-  it('refuses snapshot-dated starts instead of presenting a fresh elapsed time or age', () => {
-    expect(nativeDetailsTiming({ row, session: { ...session, started_at: session.updated_at }, now: 10000 })).toEqual({})
-    expect(nativeDetailsTiming({ row, session: { ...session, started_at: DateTime.makeUnsafe(10000), ended_at: Option.none(), state: 'running' }, now: 10000 })).toEqual({})
-    expect(nativeDetailsTiming({ row, session, now: 10000 })).toEqual({ elapsedMs: 2000, sessionAgeMs: 9000 })
-    expect(project({ selectedSession: { ...session, started_at: session.updated_at } }).overview.durations?.map(item => item.value)).toEqual(['Unreported', 'Unreported'])
+  it('refuses producer snapshot-dated starts even seven seconds later, with the actual reason only on unknown values', () => {
+    const snapshotCreatedAt = DateTime.makeUnsafe(3000)
+    const snapshotSession = { ...session, started_at: snapshotCreatedAt, updated_at: DateTime.makeUnsafe(5000), ended_at: Option.none(), state: 'running' as const }
+    expect(nativeDetailsTiming({ row, session: snapshotSession, snapshotCreatedAt, now: 10000 })).toEqual({ detail: 'Session start matches the producer snapshot time; elapsed time and age are unreported.' })
+    expect(nativeDetailsTiming({ row, session: { ...session, started_at: session.updated_at }, now: 10000 })).toEqual({ detail: 'Session start matches its update time; elapsed time and age are unreported.' })
+    const rejected = project({ sessionFeed: observed({ value: snapshotSession, snapshotCreatedAt }) })
+    expect(rejected.overview.durations?.map(item => item.value)).toEqual(['Unreported', 'Unreported'])
+    expect(rejected.overview.durations?.every(item => item.detail?.includes('producer snapshot time'))).toBe(true)
+    expect(rejected.nativeSessionId).toBe('native/root')
+    expect(rejected.trace.meters.spend.mainUsd).toMatchObject({ _tag: 'Known', value: 3.5 })
+    const valid = project({ sessionFeed: observed({ value: session, snapshotCreatedAt }) })
+    expect(valid.overview.durations?.map(item => item.value)).toEqual(['2s', '9s'])
+    expect(valid.overview.durations?.every(item => item.detail === undefined)).toBe(true)
+    // Client receipt/display time is not snapshot provenance: an actual start now is valid zero.
+    expect(nativeDetailsTiming({ row, session: { ...snapshotSession, started_at: DateTime.makeUnsafe(10000) }, snapshotCreatedAt, now: 10000 })).toEqual({ elapsedMs: 0, sessionAgeMs: 0 })
+    const guarded = project({ sessionFeed: unavailable({ reason: 'failed', detail: 'Session start changed between observations; elapsed time and age are unreported.' }) })
+    expect(guarded.overview.durations?.every(item => item.detail === 'Session start changed between observations; elapsed time and age are unreported.')).toBe(true)
   })
   it('uses the identical occupancy calculation as sidebar, not cumulative totals', () => {
     const agent = createProjections().fleetFromAgents([row]).agents[0]!

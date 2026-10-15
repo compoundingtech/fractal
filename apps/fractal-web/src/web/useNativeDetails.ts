@@ -3,8 +3,8 @@ import { DateTime, Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
 import { useAgent, useAgentRow, useDataSource, useNow, useSubjectList } from '../data/react.tsx'
-import { projectNativeDetails, type NativeDetailsObservation } from '../data/nativeDetails.ts'
-import { unavailable, type Feed } from '../data/source.ts'
+import { nativeSessionStartReason, projectNativeDetails, type NativeDetailsObservation } from '../data/nativeDetails.ts'
+import { unavailable, type DataSource, type Feed } from '../data/source.ts'
 import type * as Native from '@smalltalk/st3-client/schema'
 import type { NativeDeclarations } from '../data/nativeDeclarations.ts'
 import { sidebarAttention } from './sidebarAttention.ts'
@@ -12,20 +12,42 @@ import { sidebarAttention } from './sidebarAttention.ts'
 export type { NativeDetailsObservation } from '../data/nativeDetails.ts'
 const notReported = Atom.make(unavailable({ reason: 'unsupported', detail: 'The selected native fact is not reported.' }))
 
-/** A session start is immutable within its native incarnation; a forward drift is not a fresh age. */
-export const guardedSessionTiming = (input: Atom.Atom<Feed<Native.Session>>): Atom.Atom<Feed<Native.Session>> => {
-  let earliest: { readonly id: string; readonly incarnation?: string; readonly start: number } | undefined
+interface SessionStartGuard {
+  readonly earliest: number
+  readonly rejectedReason?: string
+}
+// Source ownership outlives a Details mount, but never retains a discarded source.
+const sessionStartGuards = new WeakMap<DataSource, Map<string, Map<string, Map<string | undefined, SessionStartGuard>>>>()
+
+/** Immutable earliest/rejected starts are fenced by source, selected agent, session and incarnation. */
+export const guardedSessionTiming = ({ input, source, agentRef }: { readonly input: Atom.Atom<Feed<Native.Session>>; readonly source: DataSource; readonly agentRef: string }): Atom.Atom<Feed<Native.Session>> => {
+  let agents = sessionStartGuards.get(source)
+  if (agents === undefined) { agents = new Map(); sessionStartGuards.set(source, agents) }
+  let sessions = agents.get(agentRef)
+  if (sessions === undefined) { sessions = new Map(); agents.set(agentRef, sessions) }
+  const guards = sessions
   return Atom.make(get => {
     const feed = get(input)
-    if (feed._tag !== 'Observed') return feed
+    if (feed._tag !== 'Observed' || feed.error?.reason === 'ungranted') return feed
     const session = feed.value
+    if (session.owner_id !== agentRef) return feed
     const start = DateTime.toEpochMillis(session.started_at)
     const incarnation = Option.getOrUndefined(session.runtime_incarnation)
-    if (earliest === undefined || earliest.id !== session.id || earliest.incarnation !== incarnation || start < earliest.start)
-      earliest = { id: session.id, incarnation, start }
-    return start > earliest.start
-      ? unavailable({ reason: 'failed', detail: 'Session start changed between observations; elapsed time and age are unreported.' })
-      : feed
+    let incarnations = guards.get(session.id)
+    if (incarnations === undefined) { incarnations = new Map(); guards.set(session.id, incarnations) }
+    let guard = incarnations.get(incarnation)
+    const reason = nativeSessionStartReason({ session, snapshotCreatedAt: feed.snapshotCreatedAt })
+    if (guard === undefined || start < guard.earliest) {
+      guard = { earliest: start, ...(reason === undefined ? {} : { rejectedReason: reason }) }
+      incarnations.set(incarnation, guard)
+    } else if (start === guard.earliest && reason !== undefined && guard.rejectedReason === undefined) {
+      guard = { ...guard, rejectedReason: reason }
+      incarnations.set(incarnation, guard)
+    }
+    const detail = start > guard.earliest
+      ? 'Session start changed between observations; elapsed time and age are unreported.'
+      : guard.rejectedReason
+    return detail === undefined ? feed : unavailable({ reason: 'failed', detail })
   })
 }
 
@@ -39,7 +61,7 @@ export const useNativeDetails = ({ agentRef }: { readonly agentRef: string }): N
   const selected = row._tag === 'Observed' ? row.value : undefined
   const sessionRef = selected === undefined ? undefined : Option.getOrUndefined(selected.current_session_id)
   const sessionAtom: Atom.Atom<Feed<Native.Session>> = sessionRef === undefined ? notReported : source.subjectReads.session.feed(sessionRef)
-  const timingSessionAtom = React.useMemo(() => guardedSessionTiming(sessionAtom), [sessionAtom])
+  const timingSessionAtom = React.useMemo(() => guardedSessionTiming({ input: sessionAtom, source, agentRef }), [sessionAtom, source, agentRef])
   const session = useAtomValue(timingSessionAtom)
   const periodAtom: Atom.Atom<Feed<Native.UsagePeriod>> = source.nativeDetails?.usagePeriod ?? notReported
   const period = useAtomValue(periodAtom)

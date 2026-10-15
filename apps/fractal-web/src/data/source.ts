@@ -27,6 +27,7 @@ import type {
   ConversationSearch,
 } from '@smalltalk/st3-client/schema'
 import type { ErrorEnvelope } from '@smalltalk/st3-client'
+import type { Timestamp } from '@smalltalk/st3-client/schema'
 import type { MessageSendInput } from '@st3/sdk/effect'
 import type { ConnectionState } from '@st3/sdk/effect'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
@@ -56,6 +57,8 @@ export type Feed<A> =
       readonly _tag: 'Observed'
       readonly value: A
       readonly freshness: 'live' | 'stale'
+      /** Producer snapshot time, not the client's receipt or display clock. */
+      readonly snapshotCreatedAt?: Timestamp
       /** Explicitly bounded published evidence; absence makes no completeness claim. */
       readonly coverage?: { readonly _tag: 'Partial' }
       /** A newer transcript read failed; these are still the last trusted rows, not a repair. */
@@ -311,13 +314,16 @@ export interface DataSource {
 export const observed = <A>({
   value,
   freshness = 'live',
+  snapshotCreatedAt,
 }: {
   readonly value: A
   readonly freshness?: 'live' | 'stale'
+  readonly snapshotCreatedAt?: Timestamp
 }): Feed<A> => ({
   _tag: 'Observed',
   value,
   freshness,
+  ...(snapshotCreatedAt === undefined ? {} : { snapshotCreatedAt }),
 })
 /** The feed before the first observation arrives. */
 export const waiting: Feed<never> = { _tag: 'Waiting' }

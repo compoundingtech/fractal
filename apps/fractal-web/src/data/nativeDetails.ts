@@ -50,13 +50,23 @@ export const nativeDetailsRoot = ({ row, period }: { readonly row: Native.Agent;
   return bindings.size === 1 && root !== undefined && period.rows.some(item => item.agent === row.id && item.native_session_id === root) ? root : undefined
 }
 
-export const nativeDetailsTiming = ({ row, session, now }: { readonly row: Native.Agent; readonly session: Native.Session | undefined; readonly now: number }): { readonly elapsedMs?: number; readonly sessionAgeMs?: number } => {
+/** Snapshot-dated replica starts are not evidence of a real session start. */
+export const nativeSessionStartReason = ({ session, snapshotCreatedAt }: { readonly session: Native.Session; readonly snapshotCreatedAt?: Native.Timestamp }): string | undefined => {
+  const start = DateTime.toEpochMillis(session.started_at)
+  if (snapshotCreatedAt !== undefined && start === DateTime.toEpochMillis(snapshotCreatedAt))
+    return 'Session start matches the producer snapshot time; elapsed time and age are unreported.'
+  if (start === DateTime.toEpochMillis(session.updated_at))
+    return 'Session start matches its update time; elapsed time and age are unreported.'
+  return undefined
+}
+
+export const nativeDetailsTiming = ({ row, session, snapshotCreatedAt, now }: { readonly row: Native.Agent; readonly session: Native.Session | undefined; readonly snapshotCreatedAt?: Native.Timestamp; readonly now: number }): { readonly elapsedMs?: number; readonly sessionAgeMs?: number; readonly detail?: string } => {
   const incarnation = Option.getOrUndefined(row.incarnation_id)
   if (session === undefined || incarnation === undefined || session.id !== Option.getOrUndefined(row.current_session_id) ||
     session.owner_id !== row.id || Option.getOrUndefined(session.runtime_incarnation) !== incarnation) return {}
   const start = DateTime.toEpochMillis(session.started_at)
-  // Replica fallbacks date the session from the current snapshot, not its start.
-  if (start === DateTime.toEpochMillis(session.updated_at) || start === now) return {}
+  const detail = nativeSessionStartReason({ session, snapshotCreatedAt })
+  if (detail !== undefined) return { detail }
   const ended = Option.getOrUndefined(session.ended_at)
   const end = ended === undefined ? now : DateTime.toEpochMillis(ended)
   if (start > now || end < start || end > now) return {}
@@ -116,7 +126,8 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   // API period groups expose latest native ID, not their incarnation or binding history.
   const nativeCoverage: TraceCoverage = { _tag: 'Unavailable', reason: rows.some(item => item.unpriced_tokens > 0) ? 'not-covered' : 'not-attributed' }
   const unsupported = unknown<number>('Native source does not report descendant-inclusive spend.')
-  const timing = row === undefined ? {} : nativeDetailsTiming({ row, session, now })
+  const timing = row === undefined ? {} : nativeDetailsTiming({ row, session, snapshotCreatedAt: sessionFeed._tag === 'Observed' ? sessionFeed.snapshotCreatedAt : undefined, now })
+  const timingDetail = timing.detail ?? (sessionFeed._tag === 'Unavailable' ? sessionFeed.detail : undefined)
   const syncStatus = rowSyncStatus(rowFeed)
   const statusSince = row === undefined ? undefined : Option.getOrUndefined(row.since)
   const model = contextValid && context?.model !== undefined && context.model.trim().length > 0 && context.model !== '.unknown' ? context.model : undefined
@@ -151,8 +162,8 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   return {
     overview: { title: row?.name, status: projected?.status, machine: projected?.host, harness: projected?.harness, model, mission,
       durations: [
-        { label: 'Managed-session elapsed (from session start to end or now; wall time, not active)', value: timing.elapsedMs === undefined ? 'Unreported' : durationText(timing.elapsedMs) },
-        { label: 'Current-incarnation session age (from managed session start; native launch not reported)', value: timing.sessionAgeMs === undefined ? 'Unreported' : durationText(timing.sessionAgeMs) },
+        { label: 'Managed-session elapsed (from session start to end or now; wall time, not active)', value: timing.elapsedMs === undefined ? 'Unreported' : durationText(timing.elapsedMs), ...(timing.elapsedMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },
+        { label: 'Current-incarnation session age (from managed session start; native launch not reported)', value: timing.sessionAgeMs === undefined ? 'Unreported' : durationText(timing.sessionAgeMs), ...(timing.sessionAgeMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },
       ],
       since: statusSince === undefined || DateTime.toEpochMillis(statusSince) > now ? undefined : durationText(now - DateTime.toEpochMillis(statusSince)),
       age: 'Incarnation launch age unreported',

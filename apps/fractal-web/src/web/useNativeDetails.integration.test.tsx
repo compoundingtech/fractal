@@ -4,6 +4,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { St3Client } from '@smalltalk/st3-client'
 import * as Native from '@smalltalk/st3-client/schema'
+import { DateTime } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { describe, expect, it, vi } from 'vitest'
@@ -16,25 +17,98 @@ import recording from '../data/subjectReadPort.gateway.fixtures.json' with { typ
 import { guardedSessionTiming, useNativeDetails, type NativeDetailsObservation } from './useNativeDetails.ts'
 
 const nativeRow = (incarnation: string) => Native.decodeUnknownSync(Native.Agent)({ id: 'agent/example', kind: 'agent', name: 'Native title', revision: '1', updated_at: '1970-01-01T00:00:05Z', driver: 'claude', state: 'running', reachability: 'local', runtime_ids: [], incarnation_id: incarnation, current_session_id: `session/${incarnation}`, subagents: [], usage: { aggregation: 'cumulative-per-incarnation-else-response-deltas', incarnation_count: 1, input_tokens: 1, output_tokens: 1, cached_tokens: 0, total_tokens: 99999999, context: { used_percent: 42, observed_at_unix_ms: 4000 } } })
+const emptySource = (): DataSource => fixtureSource({ world: { now: 10000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
 
 describe('native Details mounted hook with real getter adapters', () => {
-  it('keeps a forward-moving session start unknown across stable subsequent polls, and resets only on corrected start or incarnation', () => {
-    const session = (start: number, incarnation = 'first') => Native.decodeUnknownSync(Native.Session)({ id: 'session/example', kind: 'session', owner_id: 'agent/example', runtime_incarnation: incarnation, revision: '1', started_at: new Date(start).toISOString(), updated_at: '1970-01-01T00:00:09Z', state: 'running', timeline_cursor: 'cursor/0' })
+  it('retains earliest and rejected start memory across new guard atoms, scoped to source/agent/session/incarnation', () => {
+    const session = (start: number, incarnation = 'first', id = 'session/example', owner = 'agent/example') => Native.decodeUnknownSync(Native.Session)({ id, kind: 'session', owner_id: owner, runtime_incarnation: incarnation, revision: '1', started_at: new Date(start).toISOString(), updated_at: '1970-01-01T00:00:09Z', state: 'running', timeline_cursor: 'cursor/0' })
+    const source = emptySource()
     const input = Atom.make<Feed<Native.Session>>(observed({ value: session(1000) }))
-    const guarded = guardedSessionTiming(input)
     const registry = AtomRegistry.make()
-    const release = registry.mount(guarded)
+    const mount = (owner = source, agentRef = 'agent/example') => {
+      const atom = guardedSessionTiming({ input, source: owner, agentRef })
+      return { atom, release: registry.mount(atom) }
+    }
+    let mounted = mount()
     try {
-      expect(registry.get(guarded)._tag).toBe('Observed')
+      expect(registry.get(mounted.atom)._tag).toBe('Observed')
       registry.set(input, observed({ value: session(2000) }))
-      expect(registry.get(guarded)._tag).toBe('Unavailable')
-      registry.set(input, observed({ value: session(2000) }))
-      expect(registry.get(guarded)._tag).toBe('Unavailable')
+      expect(registry.get(mounted.atom)).toMatchObject({ _tag: 'Unavailable', detail: 'Session start changed between observations; elapsed time and age are unreported.' })
+      mounted.release()
+      mounted = mount()
+      expect(registry.get(mounted.atom)._tag).toBe('Unavailable')
+      const separate = mount(emptySource())
+      expect(registry.get(separate.atom)._tag).toBe('Observed')
+      separate.release()
       registry.set(input, observed({ value: session(500) }))
-      expect(registry.get(guarded)._tag).toBe('Observed')
-      registry.set(input, observed({ value: session(3000, 'second') }))
-      expect(registry.get(guarded)._tag).toBe('Observed')
-    } finally { release(); registry.dispose() }
+      expect(registry.get(mounted.atom)._tag).toBe('Observed')
+      registry.set(input, observed({ value: session(3000, 'second'), snapshotCreatedAt: DateTime.makeUnsafe(3000) }))
+      expect(registry.get(mounted.atom)).toMatchObject({ _tag: 'Unavailable', detail: expect.stringContaining('producer snapshot time') })
+      mounted.release()
+      mounted = mount()
+      // A later producer snapshot does not rehabilitate the same previously rejected start.
+      registry.set(input, observed({ value: session(3000, 'second'), snapshotCreatedAt: DateTime.makeUnsafe(5000) }))
+      expect(registry.get(mounted.atom)._tag).toBe('Unavailable')
+      registry.set(input, observed({ value: session(2500, 'second'), snapshotCreatedAt: DateTime.makeUnsafe(5000) }))
+      expect(registry.get(mounted.atom)._tag).toBe('Observed')
+      registry.set(input, observed({ value: session(3000, 'third'), snapshotCreatedAt: DateTime.makeUnsafe(5000) }))
+      expect(registry.get(mounted.atom)._tag).toBe('Observed')
+      registry.set(input, observed({ value: session(4000, 'third', 'session/unrelated'), snapshotCreatedAt: DateTime.makeUnsafe(5000) }))
+      expect(registry.get(mounted.atom)._tag).toBe('Observed')
+      const otherAgent = mount(source, 'agent/other')
+      registry.set(input, observed({ value: session(4000, 'third', 'session/example', 'agent/other'), snapshotCreatedAt: DateTime.makeUnsafe(5000) }))
+      expect(registry.get(otherAgent.atom)._tag).toBe('Observed')
+      otherAgent.release()
+    } finally { mounted.release(); registry.dispose() }
+  })
+  it('never renders fresh seven-second durations from the real producer snapshot, including Details remount and earlier correction', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    const registry = AtomRegistry.make()
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    let startedAt = '1970-01-01T00:00:03Z'
+    let snapshotAt = '1970-01-01T00:00:03Z'
+    let sessionReads = 0
+    const options = { baseUrl: 'http://gateway.invalid', fetchImpl: async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/capabilities')) return Response.json(recording.capabilities)
+      if (url.pathname.includes('/agent-queues/')) return Response.json({ ...recording.cases.agent.payload, value: { kind: 'agent-queue', agent_id: 'agent/example', current_work_ids: [], next_work_id: null, move_count: 0, moves: [], runs: [] } })
+      if (!url.pathname.includes('/sessions/')) throw new TypeError('Unexpected native request')
+      sessionReads++
+      return Response.json({ ...recording.cases.agent.payload, snapshot: { ...recording.cases.agent.payload.snapshot, created_at: snapshotAt },
+        value: { id: 'session/first', kind: 'session', owner_id: 'agent/example', runtime_incarnation: 'first', revision: '1', started_at: startedAt, updated_at: '1970-01-01T00:00:05Z', state: 'running', timeline_cursor: 'cursor/0' } })
+    } }
+    const agents = Atom.make<Feed<readonly Native.Agent[]>>(observed({ value: [nativeRow('first')] }))
+    const source: DataSource = { ...emptySource(), agents, subjectReads: gatewaySubjectReads({ options, registry }) }
+    let last: NativeDetailsObservation | undefined
+    const Pane = () => { last = useNativeDetails({ agentRef: 'agent/example' }); return <div>{last.overview.durations?.map(item => <div key={item.label}>{item.value}<span>{item.detail}</span></div>)}</div> }
+    try {
+      await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><Pane /></DataSourceProvider>))
+      await act(async () => { await vi.waitFor(() => expect(last?.overview.durations?.[0]?.detail).toContain('producer snapshot time')) })
+      expect(last?.overview.durations?.map(item => item.value)).toEqual(['Unreported', 'Unreported'])
+      expect(host.textContent).not.toContain('7s')
+      expect(last?.incarnationId).toBe('first')
+      expect(last?.trace.meters.spend.tokens).toMatchObject({ _tag: 'Known', value: 99999999 })
+      await act(async () => root.render(<DataSourceProvider source={source} registry={registry}>{null}</DataSourceProvider>))
+      // A new response's snapshot is no longer equal, but the original rejection must survive.
+      snapshotAt = '1970-01-01T00:00:08Z'
+      await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><Pane /></DataSourceProvider>))
+      await act(async () => { await vi.waitFor(() => expect(sessionReads).toBe(2)) })
+      expect(last?.overview.durations?.map(item => item.value)).toEqual(['Unreported', 'Unreported'])
+      expect(host.textContent).toContain('producer snapshot time')
+      expect(host.textContent).not.toContain('7s')
+      startedAt = '1970-01-01T00:00:01Z'
+      await act(async () => registry.refresh(source.subjectReads.session.feed('session/first')))
+      await act(async () => { await vi.waitFor(() => expect(last?.overview.durations?.map(item => item.value)).toEqual(['9s', '9s'])) })
+      expect(last?.overview.durations?.every(item => item.detail === undefined)).toBe(true)
+      expect(host.textContent).not.toContain('snapshot time')
+    } finally {
+      await act(async () => root.unmount())
+      registry.dispose()
+      host.remove()
+      vi.unstubAllGlobals()
+    }
   })
   it('mounts selected facts only, fences restarts, and removes its getter demand when hidden', async () => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
