@@ -730,6 +730,20 @@ describe('ConversationPane composition activation', () => {
     await act(async () => { answers[1]!({ _tag: 'Refused', detail: 'Late answer for the first run.' }) })
     expect(refusal()).toBeNull()
     expect(stop()?.getAttribute('aria-label')).toBe('Stop run')
+    // Overlap: run A's Stop is still pending when run B starts; B's Stop is refused, then A's answer lands. B's reason stays.
+    const thirdRun = [prompt('p3'), { _tag: 'Status', id: 'run-3', status: 'running', at: at(7) }] as const satisfies readonly ConversationItem[]
+    const thirdEnded = [prompt('p3'), { _tag: 'Status', id: 'run-3', status: 'completed', at: at(8) }] as const satisfies readonly ConversationItem[]
+    const fourthRun = [...thirdEnded, prompt('p4'), { _tag: 'Status', id: 'run-4', status: 'running', at: at(9) }] as const satisfies readonly ConversationItem[]
+    await show(thirdRun)
+    await act(async () => { stop()!.click() })
+    await show(thirdEnded)
+    await show(fourthRun)
+    await act(async () => { stop()!.click() })
+    await act(async () => { answers[3]!({ _tag: 'Refused', detail: 'Run B refused.' }) })
+    expect(refusal()?.textContent).toBe('Run B refused.')
+    await act(async () => { answers[2]!({ _tag: 'Refused', detail: 'Late answer for run A.' }) })
+    expect(refusal()?.textContent).toBe('Run B refused.')
+    expect(interrupt).toHaveBeenCalledTimes(4)
   })
 
   it('offers no Stop when the connection cannot interrupt agents', async () => {

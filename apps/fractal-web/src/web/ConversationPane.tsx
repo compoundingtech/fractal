@@ -120,10 +120,14 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   const runId = state._tag === 'Observed' && state.isRunning ? state.turns.findLast(turn => turn.work.running)?.id ?? '' : undefined
   const [stopRefusal, setStopRefusal] = React.useState<{ readonly runId: string; readonly detail: string }>()
   if (stopRefusal !== undefined && stopRefusal.runId !== runId) setStopRefusal(undefined)
+  // The run on screen when an interrupt answer lands; a closure would hold the run of the press.
+  const currentRun = React.useRef(runId)
+  React.useLayoutEffect(() => { currentRun.current = runId }, [runId])
   const onCancel = React.useMemo(() => agentControls === undefined ? undefined : async () => {
     setStopRefusal(undefined)
     const result = await agentControls.interrupt(agentRef)
-    if (result._tag === 'Refused' && runId !== undefined) setStopRefusal({ runId, detail: result.detail })
+    // An answer for an older run must not touch the current run's refusal.
+    if (result._tag === 'Refused' && runId !== undefined && currentRun.current === runId) setStopRefusal({ runId, detail: result.detail })
   }, [agentControls, agentRef, runId])
   const retryConversation = source.retryConversation
   const renderInlineReference = React.useMemo(() => onOpenDocument === undefined ? undefined : documentReferences(onOpenDocument), [onOpenDocument])
