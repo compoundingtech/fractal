@@ -1000,7 +1000,7 @@ def prove_pending_ask_restart(node, seats, name, evidence):
     """No person input or model handoff is allowed from interruption to the live picker."""
     assert node.harness == "omp"
     ask = {"toolName": "ask", "toolCallId": "canary-pending-ask",
-           "args": {"questions": [{"question": "Which restart policy?",
+           "input": {"questions": [{"question": "Which restart policy?",
                                   "options": [{"label": "Keep"}, {"label": "Replace"}]}]}}
     (node.root / "ws/pending-ask.json").write_text(json.dumps(ask))
     before = until(lambda: next((row for row in receipts(node, "a")
