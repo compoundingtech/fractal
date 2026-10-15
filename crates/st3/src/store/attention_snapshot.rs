@@ -1942,7 +1942,7 @@ impl Store {
                         "in_reply_to":null, "tags":[format!("st3-denial:{episode}")]}, "evidence":[recorded.id]}),
                     std::slice::from_ref(&recorded.id), None, &message_key).map_err(claim_append_error)?;
                 Ok(Some(recorded))
-            }).map_err(internal)?;
+            }).map_err(|error| St3Error::new("internal", error))?;
         }
         let recorded = self.append_claim(&ClaimInput {
             subject: seat.to_owned(),
