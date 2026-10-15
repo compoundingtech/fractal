@@ -1814,6 +1814,8 @@ mod tests {
     #[test]
     fn a_peer_with_newer_records_is_behind_and_a_diverged_one_is_not() {
         let peer = |host: &str, missing: u64, diverged: bool| st3_client::SyncPeer {
+            last_successful_exchange: None,
+            last_failed_exchange: None,
             host_id: host.into(),
             peer_only_envelopes: missing,
             local_only_envelopes: 0,
