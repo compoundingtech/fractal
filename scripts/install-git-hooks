@@ -33,6 +33,11 @@ cat > "$hook.tmp" <<'STUB'
 # st-evidence-prepush: written by scripts/install-git-hooks
 # Never blocks a push. Runs the base branch's copy of scripts/evidence-prepush, never the pushed tree's.
 remote=${1:-origin}
+# git exports GIT_DIR and friends to a hook: note where we are, drop them all, and let git find the repository from the working
+# directory again, so nothing started below can reach the caller's repository through them (st2#3014).
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+for variable in $(compgen -e | grep '^GIT_' || true); do unset "$variable"; done
+cd "$top" || exit 0
 git rev-parse -q --verify "refs/remotes/$remote/main" >/dev/null 2>&1 || exit 0
 work=$(mktemp -d 2>/dev/null) || exit 0
 trap 'rm -rf "$work"' EXIT

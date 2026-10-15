@@ -1,0 +1,11 @@
+# Source me: `. scripts/git-env-clean`.
+#
+# git exports GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and more to hooks and aliases. A script that then runs `git -C other ...`
+# or makes a fresh temporary repository still acts on the CALLER's repository, because GIT_DIR wins over -C and over the
+# working directory (st2#3014: the pre-push evidence hook ran the repository's fixture tests that way and they committed on the
+# caller's branches, rewrote its identity and pushed). Drop every GIT_* variable; git finds its repository again from the
+# working directory.
+for _git_variable in $(compgen -e | grep '^GIT_' || true); do
+  unset "$_git_variable"
+done
+unset _git_variable
