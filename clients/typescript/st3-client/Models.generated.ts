@@ -3,6 +3,9 @@
 
 export const API_VERSION = 'st3.client.v0' as const;
 
+/** Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043). */
+export const SIDEBAR_ARRANGEMENT_UUID = "00000000-0000-7000-8000-000000000001" as const;
+
 export type ActionCommon = {
   api_version: "st3.client.v0";
   fence: Fence;
@@ -1052,7 +1055,7 @@ export type Envelope = {
   value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog);
 };
 
-export type ErrorCode = ("attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "response-budget-exceeded" | "content-not-text" | "internal" | string);
+export type ErrorCode = ("recipient-retired" | "lifecycle-unavailable" | "retirement-upgrade-required" | "attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "suspend-authored-session-selection" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "response-budget-exceeded" | "content-not-text" | "internal" | string);
 
 export type ErrorEnvelope = {
   api_version: "st3.client.v0";

@@ -130,3 +130,6 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("assistant.conversation-content", "/v1/client/assistant/conversation-content"),
     ("assistant.terminal-content", "/v1/client/assistant/terminal-content"),
 ];
+/// Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043).
+#[rustfmt::skip]
+pub const SIDEBAR_ARRANGEMENT_UUID: &str = "00000000-0000-7000-8000-000000000001";

@@ -1,6 +1,12 @@
 {
   "contract": "st3.client.v0",
   "schema": "./client-v0.schema.json",
+  "constants": {
+    "sidebar_arrangement_uuid": {
+      "value": "00000000-0000-7000-8000-000000000001",
+      "about": "Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043)."
+    }
+  },
   "transport": {
     "local": "unix",
     "remote": "fabric-loopback",
