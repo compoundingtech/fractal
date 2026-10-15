@@ -22,6 +22,8 @@ mod mailbox_lease;
 mod message_send_tests;
 #[cfg(test)]
 mod message_thread_legacy_rank_dependency_tests;
+#[cfg(test)]
+mod actual_state_sorter_tests;
 pub mod owned_sets;
 #[cfg(test)]
 mod owned_sets_tests;
@@ -135,8 +137,9 @@ pub(crate) use roster_admission::AdmissionGuard;
 mod adhoc_work;
 mod attention_snapshot;
 pub(crate) use attention_snapshot::{
-    NativePromptState, native_prompt_gone_key, plan_approval, screen_prompt_delivered_key,
-    screen_prompt_gone_key, screen_prompt_undelivered_key,
+    CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
+    plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
+    screen_prompt_undelivered_key,
 };
 pub(crate) mod attention_list;
 pub(crate) mod owner_lists;
@@ -609,9 +612,13 @@ WHERE kind IN ('work.claimed', 'work.progress');
 CREATE INDEX IF NOT EXISTS claims_subagent_appeared_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.appeared';
-CREATE INDEX IF NOT EXISTS claims_subagent_renewed_index
-ON claims(subject, json_extract(body, '$.fields.subagent_id'))
+-- Include the numeric lease so MAX for one live pair seeks its final index entry instead
+-- of folding all its renewals. A new name upgrades existing stores at schema initialization.
+CREATE INDEX IF NOT EXISTS claims_subagent_renewed_max_lease_index
+ON claims(subject, json_extract(body, '$.fields.subagent_id'),
+          CAST(json_extract(body, '$.fields.lease_expires_at_unix_ms') AS INTEGER))
 WHERE kind='subagent.renewed';
+DROP INDEX IF EXISTS claims_subagent_renewed_index;
 CREATE INDEX IF NOT EXISTS claims_subagent_ended_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.ended';
@@ -15089,7 +15096,7 @@ impl Store {
         let mut items = self.mission_run_attention_items(person)?;
         items.extend(self.person_attention_items(person, as_of)?);
         items.extend(self.harness_login_attention_items(person)?);
-        items.extend(self.harness_prompt_attention_items(person)?);
+        items.extend(self.harness_prompt_attention_items(person, as_of)?);
         items.extend(self.custom_attention_items(person)?);
         // A person who published a broken gate is the one to correct it.
         items.extend(
@@ -23338,8 +23345,11 @@ fn latest_actual_at(
     // Folded in canonical order, so two nodes holding the same claims agree however they
     // received them. `NOT LIKE` also leaves out harness kinds in any letter case, as it always
     // has; the ranges let SQLite seek past the subject's harness reports.
+    // Only the integer identity and canonical keys enter SQLite's sorter. Keep its cursor
+    // open while fetching each body on this same connection: even an unpinned caller then
+    // reads both statements from one SQLite read cut, without retaining history bodies.
     let mut statement = connection.prepare_cached(&format!(
-        "SELECT claims.kind, claims.body
+        "SELECT claims.store_index
          FROM claims INDEXED BY claims_subject_kind_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
@@ -23347,35 +23357,40 @@ fn latest_actual_at(
            AND claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
          ORDER BY {CANONICAL_ORDER}"
     ))?;
-    let rows = statement
-        .query_map(params![subject, at_index], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    fold_latest_actual(rows)
+    let mut rows = statement.query(params![subject, at_index])?;
+    let mut bodies = connection
+        .prepare_cached("SELECT kind, body FROM claims WHERE store_index=?1")?;
+    fold_latest_parsed_values(std::iter::from_fn(|| {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => return None,
+            Err(error) => return Some(Err(error.into())),
+        };
+        Some((|| {
+            let index: u64 = row.get(0)?;
+            let (kind, body): (String, String) =
+                bodies.query_row([index], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok((kind, serde_json::from_str::<Value>(&body)?))
+        })())
+    }))
 }
 
-/// A subject's actual state from its actual-state claims, `(kind, body)` in canonical order.
-fn fold_latest_actual(
-    rows: impl IntoIterator<Item = (String, String)>,
-) -> Result<Option<Value>> {
-    let rows = rows
-        .into_iter()
-        .map(|(kind, body)| Ok((kind, serde_json::from_str::<Value>(&body)?)))
-        .collect::<Result<Vec<_>>>()?;
-    fold_latest_values(rows)
-}
-
-/// [`fold_latest_actual`] of claims already parsed, `(kind, body)` in canonical order. It takes
+/// A subject's actual state from already parsed claims in canonical order. It takes
 /// the bodies, so each field moves into the folded state instead of being copied.
 fn fold_latest_values(rows: impl IntoIterator<Item = (String, Value)>) -> Result<Option<Value>> {
-    let mut rows = rows.into_iter().peekable();
-    if rows.peek().is_none() {
-        return Ok(None);
-    }
+    fold_latest_parsed_values(rows.into_iter().map(Ok))
+}
+
+/// Fold one body at a time, propagating SQL/JSON errors without caching a partial answer.
+fn fold_latest_parsed_values(
+    rows: impl IntoIterator<Item = Result<(String, Value)>>,
+) -> Result<Option<Value>> {
     let mut merged = serde_json::Map::new();
     let registry = st3_schema::registry();
-    for (kind, value) in rows {
+    let mut any = false;
+    for row in rows {
+        let (kind, value) = row?;
+        any = true;
         let source = match value {
             Value::Object(mut body) => match body.remove("fields") {
                 Some(fields) => fields,
@@ -23405,7 +23420,7 @@ fn fold_latest_values(rows: impl IntoIterator<Item = (String, Value)>) -> Result
             }
         }
     }
-    Ok(Some(Value::Object(merged)))
+    Ok(any.then_some(Value::Object(merged)))
 }
 
 /// `columns` of subject `?1`'s claims of one `kind` at or before store index `?2`, newest first
@@ -57178,6 +57193,93 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         );
     }
 
+    /// A Claude prompt is answered from a client only while its permission hook still waits: one
+    /// that has waited longer is answered in the terminal, so no answer is recorded that nothing
+    /// would deliver. The hook still waiting on it is told it is gone, and exits.
+    #[test]
+    fn a_claude_prompt_older_than_its_hook_is_answered_in_the_terminal() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "late-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        let prompt = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .find(|item| item.kind == "harness-prompt")
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
+        let now = now_ms() as u64;
+        let window = CLAUDE_PROMPT_ANSWER_WAIT_MS as u64;
+        let asked = |observed_at: u64, transition: u64| {
+            append(
+                "harness.observed",
+                json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                    "blocked_on":"human", "ask":"permission", "reason":"Read",
+                    "observed_at_ms": observed_at,
+                    "ownership_sequence":1, "transition_sequence":transition}),
+            )
+        };
+        // Within the hook's wait, the prompt is answered here.
+        asked(now - window + 60_000, 3);
+        assert_eq!(prompt().unwrap().answers, vec!["allow".to_owned(), "deny".to_owned()]);
+        // The next prompt opened before the hook's wait: still an alert, answered in the terminal,
+        // and so is each restatement of it, which keeps when it opened.
+        append(
+            "harness.observed",
+            json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":null, "ask":null, "ownership_sequence":1, "transition_sequence":4}),
+        );
+        asked(now - window - 1_000, 5);
+        let late = asked(now, 5);
+        let shown = prompt().expect("a late prompt is still an alert");
+        assert!(shown.answers.is_empty(), "{:?}", shown.answers);
+        assert!(shown.detail.contains("waited longer than st can answer it"), "{}", shown.detail);
+        assert_eq!(
+            shown.requested_at_unix_ms,
+            u128::from(now - window - 1_000),
+            "it has waited since it opened, not since its latest restatement"
+        );
+        assert_eq!(
+            store
+                .answer_native_prompt(seat, &late.id, "allow", "person/avery")
+                .unwrap_err()
+                .code,
+            "stale-fence"
+        );
+        assert_eq!(store.native_prompt_state(seat, 1, 5).unwrap(), NativePromptState::Gone);
+    }
+
     /// A driver writes each prompt as its own transition, so a later prompt for the same tool is
     /// another prompt: an answer to it never reaches the earlier prompt's waiter. A restatement
     /// of the same transition, or a credential edge, is still the same prompt.
@@ -57450,6 +57552,108 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
             NativePromptState::Answered {
                 answer: "deny".into()
             }
+        );
+    }
+
+    /// A call Claude's auto mode classifier denied waits on the seat's person: an alert until they
+    /// answer it, and the answer (allow once, allow its kind, or dismiss) is what the seat's
+    /// `PreToolUse` hook reads; the seat is told, so it runs the call again or leaves it.
+    #[test]
+    fn a_classifier_denial_is_an_alert_whose_answer_the_seat_hears() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "denial-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value, key: Option<&str>| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: key.map(str::to_owned),
+                })
+                .unwrap()
+        };
+        let denied = |call: &str| {
+            append(
+                "harness.diagnostic",
+                json!({"severity":"warning", "status":"Bash", "code":"permission-denied",
+                    "reason":"Irreversible Local Destruction", "driver":"claude",
+                    "session_id":"session-1", "matched_line": json!({"call_id": call}).to_string()}),
+                Some(&format!("claude-permission-denied:{seat}:{call}")),
+            )
+        };
+        let alerts = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .filter(|item| item.kind == "harness-prompt")
+                .collect::<Vec<_>>()
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}), None);
+        let first = denied("toolu_1");
+        let shown = alerts();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].episode, first.id);
+        assert_eq!(shown[0].answers, vec!["approve-once", "approve-kind", "dismiss"]);
+        assert!(shown[0].title.ends_with("needs you to allow a Bash call"));
+        assert!(shown[0].detail.contains("(Irreversible Local Destruction)"), "{}", shown[0].detail);
+        assert_eq!(
+            store.answer_native_prompt(seat, &first.id, "allow", "person/avery").unwrap_err().code,
+            "invalid-answer"
+        );
+        assert_eq!(
+            store.answer_native_prompt(seat, &first.id, "approve-once", "person/other").unwrap_err().code,
+            "forbidden"
+        );
+        assert_eq!(store.prompt_answer(&first.id).unwrap().answer, None);
+        store.answer_native_prompt(seat, &first.id, "approve-once", "person/avery").unwrap();
+        assert_eq!(store.prompt_answer(&first.id).unwrap().answer.as_deref(), Some("approve-once"));
+        assert!(alerts().is_empty(), "an answered denial is no longer an alert");
+        // The seat hears it, from st, and runs the call again.
+        let told = store
+            .claims_for(&format!(
+                "message/{}",
+                &hex::encode(sha2::Sha256::digest(format!("st3-denial-answer:{}", first.id).as_bytes()))[..16]
+            ), Some("message.sent"))
+            .unwrap();
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].body["fields"]["to"], seat);
+        assert!(told[0].body["fields"]["content"].as_str().unwrap().contains("Run that same call again"));
+        assert_eq!(
+            store.answer_native_prompt(seat, &first.id, "dismiss", "person/avery").unwrap_err().code,
+            "stale-fence",
+            "an answer is final"
+        );
+        // A denial from before the seat restarted waits on nobody.
+        let old = denied("toolu_2");
+        assert_eq!(alerts().len(), 1);
+        append("runtime.observed", json!({"status":"exited", "incarnation_id":"one"}), None);
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"two"}), None);
+        assert!(alerts().is_empty());
+        assert_eq!(
+            store.answer_native_prompt(seat, &old.id, "approve-kind", "person/avery").unwrap_err().code,
+            "stale-fence"
         );
     }
 
