@@ -378,10 +378,18 @@ impl Seat {
             &intent, &preview.subject_tokens, key, Some("person/operator"), policy,
         ).unwrap();
     }
+    /// One pass. A planned restart of a ready seat first sends "Prepare for restart" and waits
+    /// for its handoff; the fixture seat never answers, so the deadline is zero and the pass
+    /// after the prepare goes ahead (see `prepare_pass`).
     fn plain_step(&self) {
         Reconciler::new(
             self.store.clone(), self.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
-        ).reconcile_once().unwrap();
+        ).with_restart_prepare_deadline(std::time::Duration::ZERO).reconcile_once().unwrap();
+    }
+    /// The pass that sends the prepare message and holds the stop.
+    fn prepare_pass(&self) {
+        self.plain_step();
+        assert!(self.runtime.stops.lock().is_empty(), "the stop waits for the prepare pass");
     }
 }
 
@@ -418,6 +426,7 @@ fn acceptance_2888_idle_launch_change_restarts_without_waiting_for_deadline() {
     let expected = seat.desired().member.unwrap();
     seat.plain_step();
     assert!(seat.store.restart_cutover(SUBJECT).unwrap());
+    seat.prepare_pass();
     seat.plain_step();
     assert_eq!(*seat.runtime.stops.lock(), ["original-1"]);
     seat.plain_step();
@@ -436,6 +445,7 @@ fn acceptance_2888_explicit_restart_now_restarts_a_working_seat() {
     seat.publish_plain("second", None, "acceptance-restart-now");
     let expected = seat.desired().member.unwrap();
     assert!(rollout::deferred_restart(&seat.store, SUBJECT).unwrap().is_none());
+    seat.prepare_pass();
     seat.plain_step();
     assert_eq!(*seat.runtime.stops.lock(), ["original-1"]);
     for _ in 0..5 {
@@ -492,6 +502,7 @@ fn apply_restart_defers_work_and_asks_then_restarts_at_idle_across_reopen() {
     seat.plain_step();
     assert!(seat.runtime.stops.lock().is_empty());
     assert_eq!(rollout::status(&seat.store, SUBJECT).unwrap().unwrap()["phase"], "stopping");
+    seat.prepare_pass();
     seat.plain_step();
     assert_eq!(*seat.runtime.stops.lock(), ["original-1"]);
     seat.plain_step();
@@ -703,6 +714,7 @@ fn apply_restart_waits_for_live_independent_asks_before_and_after_publication() 
         assert!(!seat.store.restart_person_work_pending(SUBJECT).unwrap());
         seat.plain_step();
         assert!(seat.store.restart_cutover(SUBJECT).unwrap());
+        seat.prepare_pass();
         seat.plain_step();
         assert_eq!(*seat.runtime.stops.lock(), ["original-1"]);
     }
@@ -998,6 +1010,7 @@ fn apply_restart_blocked_leased_work_is_not_a_safe_point() {
 fn apply_restart_now_interrupts_work_immediately() {
     let seat = Seat::new_with_owned_publication(false);
     seat.publish_plain("second", None, "plain-now");
+    seat.prepare_pass();
     seat.plain_step();
     assert_eq!(*seat.runtime.stops.lock(), ["original-1"]);
 }
@@ -1024,6 +1037,7 @@ fn apply_restart_deadline_keeps_change_held_until_explicit_restart_now() {
     seat.busy(true);
     seat.publish_plain("third", None, "plain-release-now");
     assert!(rollout::deferred_restart(&seat.store, SUBJECT).unwrap().is_none());
+    seat.prepare_pass();
     seat.plain_step();
     assert_eq!(*seat.runtime.stops.lock(), ["original-1"]);
 }
