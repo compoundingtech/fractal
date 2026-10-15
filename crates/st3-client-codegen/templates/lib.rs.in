@@ -1259,10 +1259,11 @@ impl Client {
     }
     /// Read a roster publication covering a mutation's host-local `store_index`.
     /// Use the same host that accepted the mutation; ordinary reads do not wait for a cut.
+    /// This starts a page sequence. Continue with `agents_list` or `agents_list_for_status`
+    /// and the returned cursor, without a cut.
     pub async fn agents_list_after(
         &self,
         status: Option<&str>,
-        cursor: Option<&str>,
         limit: Option<usize>,
         history: bool,
         min_cut: u64,
@@ -1270,7 +1271,7 @@ impl Client {
         let min_cut = min_cut.to_string();
         let filters = [("min_cut", min_cut.as_str()), ("status", status.unwrap_or_default())];
         let filter_count = if status.is_some() { 2 } else { 1 };
-        self.list_internal_with_filters("agents", cursor, limit, history, &filters[..filter_count])
+        self.list_internal_with_filters("agents", None, limit, history, &filters[..filter_count])
             .await
     }
     /// The current work list's first page as of this request: the daemon waits briefly for a
@@ -3036,7 +3037,7 @@ mod tests {
                 .replace("resource-page", "page");
             let directory = tempfile::tempdir().unwrap();
             let socket = directory.path().join("agents.sock");
-            let server = scripted_server(&socket, vec![(0, 200, page); 4]);
+            let server = scripted_server(&socket, vec![(0, 200, page); 5]);
             let client = Client::unix(&socket);
             client.agents_list(None, None, false).await.unwrap();
             client
@@ -3044,11 +3045,15 @@ mod tests {
                 .await
                 .unwrap();
             client
-                .agents_list_after(None, None, None, false, 0)
+                .agents_list_after(None, None, false, 0)
                 .await
                 .unwrap();
             client
-                .agents_list_after(Some("needs attention"), Some("page&next"), Some(5), true, u64::MAX)
+                .agents_list_after(Some("needs attention"), Some(5), true, u64::MAX)
+                .await
+                .unwrap();
+            client
+                .agents_list_for_status("needs attention", Some("page&next"), Some(5), true)
                 .await
                 .unwrap();
             assert_eq!(
@@ -3057,7 +3062,8 @@ mod tests {
                     "GET /v1/client/agents HTTP/1.1",
                     "GET /v1/client/agents?limit=5&status=running HTTP/1.1",
                     "GET /v1/client/agents?min_cut=0 HTTP/1.1",
-                    "GET /v1/client/agents?cursor=page%26next&limit=5&history=true&min_cut=18446744073709551615&status=needs%20attention HTTP/1.1",
+                    "GET /v1/client/agents?limit=5&history=true&min_cut=18446744073709551615&status=needs%20attention HTTP/1.1",
+                    "GET /v1/client/agents?cursor=page%26next&limit=5&history=true&status=needs%20attention HTTP/1.1",
                 ]
             );
         });
