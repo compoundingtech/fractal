@@ -306,7 +306,8 @@ Substantive activity uses the existing last-activity evidence categories: `work.
 `harness.timeline` entries of type `message`, `content`, `tool_call`, or `tool_result`.
 Renewals, heartbeats and usage do not reset the idle clock. Latest `work.claimed` acceptance
 time (creation time if absent) starts that clock for a newly acquired lease. When an agent
-holds several steps/incarnations its newest activity wins. Owner-local timeline observations
+holds several steps, its newest claim selects the timeline incarnation (ties use descending
+incarnation); its newest substantive evidence wins. Owner-local timeline observations
 are deliberately excluded: replicas must measure the same replicated evidence. Consequently,
 unreplicated native activity is not visible to this signal; it measures replicated inactivity,
 not proof that the native process is stopped.
@@ -329,8 +330,8 @@ The SDK-owned blocking metric reader performs one reader-pool statement at most 
 60 seconds, shared by every gauge callback; it never takes the writer or enters a Tokio
 worker. It walks only `step_runs_open_index`, joins owners by primary key, and performs
 one indexed latest-claim seek per open step plus four indexed latest-activity seeks per
-distinct `(holder, incarnation)`. Thus the hard probe cap is `W + 4H`, where `W` is current
-open projected work and `H <= W` is distinct held agent/incarnation pairs, independent of
+distinct holder. Thus the hard probe cap is `W + 4H`, where `W` is current
+open projected work and `H <= W` is distinct held agents, independent of
 completed history. Snapshot memory is O(W + H); export callback output is constant size.
 Failed refreshes omit samples rather than export stale values or fabricated zeros.
 `flow_metrics_cost_is_independent_of_completed_history` records elapsed time and SQLite VM

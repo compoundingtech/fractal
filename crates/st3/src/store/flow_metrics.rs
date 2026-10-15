@@ -14,7 +14,7 @@ pub(crate) struct FlowSnapshot {
     pub idle_with_work: u64,
 }
 
-// One statement; four latest-entry index seeks per distinct (holder, incarnation).
+// One statement; four latest-entry index seeks per distinct holder.
 // MATERIALIZED prevents the two consumers from repeating the open-step traversal.
 const SNAPSHOT_SQL: &str = r#"
 WITH work AS MATERIALIZED (
@@ -35,11 +35,15 @@ WITH work AS MATERIALIZED (
    AND root.status NOT IN ('completed','failed','cancelled') AND root.phase!='terminal'
    AND g.status NOT IN ('completed','failed','cancelled','superseded')
 ), holders AS MATERIALIZED (
- SELECT lease_owner AS agent, lease_incarnation AS incarnation, MAX(claimed_at) AS since
- FROM work WHERE lease_owner LIKE 'agent/%'
-   AND status IN ('claimed','working','verifying','blocked')
-   AND (expires IS NULL OR expires>?1)
- GROUP BY lease_owner, lease_incarnation
+ SELECT agent, incarnation, since FROM (
+  SELECT lease_owner AS agent, lease_incarnation AS incarnation, claimed_at AS since,
+         ROW_NUMBER() OVER (
+          PARTITION BY lease_owner ORDER BY claimed_at DESC, lease_incarnation DESC
+         ) AS position
+  FROM work WHERE lease_owner LIKE 'agent/%'
+    AND status IN ('claimed','working','verifying','blocked')
+    AND (expires IS NULL OR expires>?1)
+ ) WHERE position=1
 )
 SELECT 0, status, assignee, lease_owner, expires, updated, NULL FROM work
 UNION ALL
