@@ -71,6 +71,7 @@ fn shared(
                 .collect::<Vec<_>>()}),
             ],
             false,
+            deadline,
         ))
     };
     // Mission active membership cannot depend on which agent owns a ready queue: a step that
