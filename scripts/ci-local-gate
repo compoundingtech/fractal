@@ -22,12 +22,17 @@ typescript-client are run by scripts/st-test): with them, --facts writes the sam
 records, for `scripts/evidence-wrap --aggregate`: the command is the aggregate's, the output names every member's
 result. Without every member present no facts are written, because a note that leaves one out would claim more than
 was tested. Exit 0 only if every stage passed.
+
+Trust: the facts and the --external exit codes are written by whoever runs this script. Run by hand from a checkout, that is the tree
+under test itself; a signed note must come only from the copy of this script taken from the accepted base, with the external members run by
+the signer's own caller (scripts/st-test, once it is wired to call this; not yet). Nothing here signs.
 """
 import argparse
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -89,12 +94,19 @@ STAGE_LIMIT_EXIT = 124  # the shim stops a stage after the host's limit (2400 s 
 
 
 def has_stage_slot(shim_dir):
-    """True when the shim at shim_dir has the stage form (st3-network #383). An older shim hands `--stage-slot` to the real
-    cargo, which fails: every building stage would report a false red. Reading the file costs no ticket."""
+    """True when the shim at shim_dir really has the stage form (st3-network #383). An older shim hands `--stage-slot` to the real
+    cargo, which fails: every building stage would report a false red. The shim must be a regular file of this user that nobody
+    else can write, and it must answer `cargo --stage-slot` (no label) the way the stage form does: usage on stderr and exit 2
+    (the host's own smoke test). That asks for no ticket and runs no build."""
+    path = Path(shim_dir) / 'cargo'
     try:
-        return b'--stage-slot' in (Path(shim_dir) / 'cargo').read_bytes()[:2_000_000]
-    except OSError:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+            return False
+        answer = subprocess.run([str(path), '--stage-slot'], capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
         return False
+    return answer.returncode == 2 and 'stage-slot' in answer.stderr
 
 
 def slot_command(name, shim_dir, base, step=0):
@@ -128,10 +140,16 @@ def merge_commit(base, env):
 
 
 def cargo_home():
-    """A cargo home that outlives the run. CI's per-job cargo home is thrown away with its runner; here a temporary one would
-    make every stage download and recompile every registry dependency (the drill's first test partition spent most of its 40
-    minutes on that), because cargo's fingerprints include the registry path."""
-    return os.environ.get('CARGO_HOME') or str(Path(os.environ['HOME']) / '.cargo')
+    """A cargo home that outlives the run but is NOT the user's own ~/.cargo (credentials, config, installed tools).
+
+    CI's per-job cargo home is thrown away with its runner; a temporary one here made every stage download and recompile every
+    registry dependency (cargo's fingerprints include the registry path). It is a dedicated directory under the real cache
+    directory, shared by the stages of every tree this script runs: downloads are verified against Cargo.lock's checksums, and a
+    tree's own build scripts run as this user anyway (cooperative trust, docs/st3/gate-evidence.md)."""
+    if os.environ.get('CARGO_HOME'):
+        return os.environ['CARGO_HOME']
+    cache = os.environ.get('XDG_CACHE_HOME') or str(Path(os.environ['HOME']) / '.cache')
+    return str(Path(cache) / 'ci-local-gate/cargo-home')
 
 
 def prepare(work):

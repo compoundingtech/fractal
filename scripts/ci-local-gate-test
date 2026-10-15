@@ -199,7 +199,9 @@ class SlotRun(unittest.TestCase):
     def fake_cargo(self, *codes, stage_form=True):
         marker = '# the stage form: cargo --stage-slot LABEL -- COMMAND\n' if stage_form else ''
         script = self.shim / 'cargo'
-        script.write_text('#!/usr/bin/env bash\n' + marker + f'printf "%s\\n" "$*" >> {self.log}\n'
+        smoke = ('[ "$1" = --stage-slot ] && [ $# -eq 1 ] && { echo "usage: cargo --stage-slot LABEL -- COMMAND (stage-slot)" >&2; exit 2; }\n'
+                 if stage_form else '[ "$1" = --stage-slot ] && [ $# -eq 1 ] && { echo "error: unknown option" >&2; exit 1; }\n')
+        script.write_text('#!/usr/bin/env bash\n' + marker + smoke + f'printf "%s\\n" "$*" >> {self.log}\n'
                           f'n=$(wc -l < {self.log}); codes=({" ".join(str(c) for c in codes)}); exit "${{codes[$((n - 1))]:-0}}"\n')
         script.chmod(0o755)
 
@@ -236,6 +238,20 @@ class SlotRun(unittest.TestCase):
         self.assertFalse(gate.has_stage_slot(str(Path(self.tmp.name) / 'nowhere')))
         self.fake_cargo(0)
         self.assertTrue(gate.has_stage_slot(str(self.shim)))
+        # A script that merely MENTIONS the flag is not enough; it must answer the way the stage form does.
+        (self.shim / 'cargo').write_text('#!/usr/bin/env bash\n# supports --stage-slot someday\nexit 0\n')
+        (self.shim / 'cargo').chmod(0o755)
+        self.assertFalse(gate.has_stage_slot(str(self.shim)))
+        # Not a regular file of ours, or writable by others: refused without being run.
+        self.fake_cargo(0)
+        (self.shim / 'cargo').chmod(0o777)
+        self.assertFalse(gate.has_stage_slot(str(self.shim)))
+        (self.shim / 'cargo').chmod(0o755)
+        (self.shim / 'real-cargo').write_text((self.shim / 'cargo').read_text())
+        (self.shim / 'real-cargo').chmod(0o755)
+        (self.shim / 'cargo').unlink()
+        (self.shim / 'cargo').symlink_to(self.shim / 'real-cargo')
+        self.assertFalse(gate.has_stage_slot(str(self.shim)))
 
 
 class Homes(unittest.TestCase):
@@ -251,11 +267,30 @@ class Homes(unittest.TestCase):
             finally:
                 os.environ.clear()
                 os.environ.update(old)
-            self.assertEqual(prepared['CARGO_HOME'], str(Path(home) / '.cargo'))
+            self.assertEqual(prepared['CARGO_HOME'], str(Path(home) / '.cache/ci-local-gate/cargo-home'))  # not the user's own ~/.cargo
             self.assertTrue(prepared['CI_CACHE_DIR'].startswith(str(Path(home) / '.cache')))
             self.assertFalse(prepared['CARGO_HOME'].startswith(work))
             self.assertTrue(prepared['HOME'].startswith(work))  # the tests' HOME is the isolated one
             self.assertEqual(prepared['CI'], 'true')  # so the dev shell does not install the pre-push hook into the shared repository
+
+
+class Failing(unittest.TestCase):
+    def test_a_failing_step_fails_its_stage_whatever_the_later_steps_do_and_the_facts_say_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            facts = Path(tmp) / 'facts.json'
+            ran = Path(tmp) / 'ran'
+            table = {name: [(['sh', '-c', f'echo {name}-0 >> {ran}'], {}), (['sh', '-c', f'echo {name}-1 >> {ran}; exit 0'], {})]
+                     for name in gate.stages('BASE')}
+            table['linux-clippy'] = [(['sh', '-c', f'echo clippy-0 >> {ran}; exit 1'], {}), (['sh', '-c', f'echo clippy-1 >> {ran}; exit 0'], {})]
+            code = gate.main(['--external', 'genie-freshness=0', '--external', 'typescript-client=0', '--facts', str(facts)],
+                             table=table, setup=lambda work: {'RUNNER_TEMP': work})
+            self.assertEqual(code, 1)
+            lines = ran.read_text().split()
+            self.assertIn('clippy-0', lines)
+            self.assertNotIn('clippy-1', lines)  # a failing step stops its stage
+            document = json.loads(facts.read_text())
+            self.assertEqual((document['exit_code'], document['output']['gate'], document['output']['needs']['linux-clippy']), (1, 'failure', 'failure'))
+            self.assertEqual(document['output']['needs']['linux-fleet-compat'], 'success')  # the other stages still ran
 
 
 class Prepared(unittest.TestCase):
