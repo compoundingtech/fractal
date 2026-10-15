@@ -77,9 +77,9 @@ pub(super) fn source(
             )));
         }
         if let Some(incarnation) = incarnation
-            && let Some(managed) = managed_transcript(state, owner, incarnation)?
+            && let Some(transcript) = managed_transcript(state, owner, incarnation)?
         {
-            return managed
+            return transcript
                 .transcript
                 .map_err(|missing| transcript_unavailable(&missing.reason));
         }

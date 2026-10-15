@@ -6603,13 +6603,13 @@ fn timeline_first_page(
     // below is shown with one entry that says why, never silently in its place.
     let mut transcript_notice_entry = None;
     if let Some(incarnation) = incarnation
-        && let Some(managed) = managed_transcript(state, owner, incarnation)?
+        && let Some(transcript) = managed_transcript(state, owner, incarnation)?
     {
         let read = if let Some(error) = native_read_error.as_ref() {
             Err(format!("the transcript could not be read: {}", error.message))
         } else {
             let _span = crate::profile::span("timeline/native-read");
-            match managed.transcript.as_ref() {
+            match transcript.transcript.as_ref() {
                 Ok(external) => match if external.driver != crate::external_sessions::ExternalDriver::OpenCode {
                     native_slice_page(state, snapshot, session, &session_id, query, external)
                 } else {
@@ -6626,7 +6626,7 @@ fn timeline_first_page(
         match read {
             Ok(page) => return Ok(page),
             Err(reason) => {
-                transcript_notice_entry = Some(transcript_notice(&session_id, &managed, &reason));
+                transcript_notice_entry = Some(transcript_notice(&session_id, &transcript, &reason));
             }
         }
     }
