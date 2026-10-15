@@ -1707,6 +1707,7 @@ mod retry_tests {
         for away in [Duration::from_secs(120), Duration::from_secs(4 * 3600)] {
             tokio::time::advance(away).await;
             let backend = Local(Arc::new(plain_memory("retry-fixture").unwrap()));
+            let mut early_spent = BTreeSet::new();
             let wait = wait_peer_retry(
                 &backend,
                 crate::store::now_ms(),
@@ -1721,7 +1722,7 @@ mod retry_tests {
                 None,
                 &http,
                 None,
-                &mut BTreeSet::new(),
+                &mut early_spent,
             );
             tokio::pin!(wait);
             assert!(futures_util::poll!(&mut wait).is_pending());
@@ -1747,6 +1748,7 @@ mod retry_tests {
         }
         tokio::time::advance(Duration::from_millis(1)).await;
         let backend = Local(Arc::new(plain_memory("retry-fixture").unwrap()));
+        let mut early_spent = BTreeSet::new();
         let wait = wait_peer_retry(
             &backend,
             crate::store::now_ms(),
@@ -1761,7 +1763,7 @@ mod retry_tests {
             None,
             &http,
             None,
-            &mut BTreeSet::new(),
+            &mut early_spent,
         );
         tokio::pin!(wait);
         assert!(futures_util::poll!(&mut wait).is_pending());
@@ -2108,6 +2110,7 @@ mod retry_tests {
         let mut activity = fleet.activity_changed.subscribe();
         let mut connectivity = fleet.connectivity_changed.subscribe();
         let backend = Local(Arc::new(plain_memory("retry-fixture").unwrap()));
+        let mut early_spent = BTreeSet::new();
         let wait = wait_peer_retry(
             &backend,
             crate::store::now_ms(),
@@ -2122,7 +2125,7 @@ mod retry_tests {
             None,
             &http,
             None,
-            &mut BTreeSet::new(),
+            &mut early_spent,
         );
         tokio::pin!(wait);
         // Retain the routes sender while waiting.
@@ -2751,6 +2754,7 @@ async fn an_always_failing_http_peer_cannot_refresh_its_own_probe_window() {
     assert!(!error.is::<PeerOverloaded>());
     {
         let started = tokio::time::Instant::now();
+        let mut early_spent = BTreeSet::new();
         let wait = wait_peer_retry(
             &local,
             crate::store::now_ms(),
@@ -2765,7 +2769,7 @@ async fn an_always_failing_http_peer_cannot_refresh_its_own_probe_window() {
             Some(&previous),
             &http,
             None,
-            &mut BTreeSet::new(),
+            &mut early_spent,
         );
         tokio::pin!(wait);
         let mut completed = false;
@@ -2795,6 +2799,7 @@ async fn an_always_failing_http_peer_cannot_refresh_its_own_probe_window() {
     let started = tokio::time::Instant::now();
     let delay = retry_delay(Duration::from_secs(3600), &fleet, "cedar");
     assert_eq!(delay, Duration::from_secs(3600));
+    let mut early_spent = BTreeSet::new();
     let wait = wait_peer_retry(
         &local,
         crate::store::now_ms(),
@@ -2809,7 +2814,7 @@ async fn an_always_failing_http_peer_cannot_refresh_its_own_probe_window() {
         Some(&previous),
         &http,
         None,
-        &mut BTreeSet::new(),
+        &mut early_spent,
     );
     tokio::pin!(wait);
     for _ in 0..2 {
@@ -3037,7 +3042,7 @@ mod early_recovery {
         connectivity: watch::Receiver<u64>,
         http: reqwest::Client,
         auth: FleetAuth,
-        local: Local,
+        local: Local<Store>,
         query: ReplicationExchange,
         peer: PeerConfig,
         /// The route's last successful exchange, just before the outage.
