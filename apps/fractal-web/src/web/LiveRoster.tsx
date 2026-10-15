@@ -15,15 +15,14 @@ export interface HiddenRoster {
 
 /**
  * Rows count once: a typed identity groups its field failures; an id-less row reports exactly one
- * identity (`id`) or whole-row (`$`) failure. Shown rows only carry omitted-leaf evidence, so they
- * are excluded unless every row failed and the shown roster is the retained last-good one.
+ * identity (`id`) or whole-row (`$`) failure. Degraded leaves never count as hidden agents.
  */
 export const hiddenRoster = ({ decode, shown }: {
   readonly decode: RosterDecode
   readonly shown: ReadonlySet<string>
 }): HiddenRoster => {
   const failures = decode.undecodable.filter((entry) =>
-    decode.decodeStale || entry.id === undefined || !shown.has(entry.id))
+    entry._tag === 'Rejected' && (decode.decodeStale || entry.id === undefined || !shown.has(entry.id)))
   const ids = new Set<string>()
   let anonymous = 0
   for (const entry of failures) {

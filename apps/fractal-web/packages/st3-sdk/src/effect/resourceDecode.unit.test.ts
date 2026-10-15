@@ -4,7 +4,7 @@ import { Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import oldLiteral from './agentSnapshot.oldLiteral.json'
-import { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, decodedUsageEquivalence, openAgent } from './resourceDecode.ts'
+import { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, normalizeDecodePath, decodedUsageEquivalence, openAgent } from './resourceDecode.ts'
 import { makeWindowIngest, type ProcessedWindow } from './windowIngest.ts'
 import { frame } from './windowIngest.fixture.ts'
 
@@ -30,7 +30,7 @@ describe('row-wise resource decoding', () => {
       decode: { unrecognized: [{ path: 'usage.aggregation', value: { _tag: 'Unrecognized', raw: 'future-aggregation-v2' } }] },
     })
     expect(result.undecodable).toEqual([{
-      _tag: 'Undecodable', id: agent.id, path: 'usage.aggregation',
+      _tag: 'Degraded', id: agent.id, path: 'usage.aggregation',
       reason: 'Unrecognized leaf value',
     }])
     if (result.value?.kind !== 'agent') throw new Error('Expected retained agent')
@@ -43,13 +43,13 @@ describe('row-wise resource decoding', () => {
     expect(result.items).toHaveLength(1)
     expect(result.items[0]?.id).toBe(agent.id)
     expect(result.undecodable).toContainEqual({
-      _tag: 'Undecodable', id: 'not-a-resource-id', path: 'id',
+      _tag: 'Rejected', id: 'not-a-resource-id', path: 'id',
       reason: 'Value does not satisfy the resource field schema',
     })
     const missing = decodeResourceRow({ ...agent, id: 42 })
     expect(missing.value).toBeUndefined()
     expect(missing.undecodable).toContainEqual({
-      _tag: 'Undecodable', path: 'id', reason: 'Value does not satisfy the resource field schema',
+      _tag: 'Rejected', path: 'id', reason: 'Value does not satisfy the resource field schema',
     })
   })
 
@@ -68,7 +68,7 @@ describe('row-wise resource decoding', () => {
     })
     expect(result.value).toMatchObject({ observation: { _tag: 'Unrecognized', raw: 'future-observation' } })
     expect(result.undecodable).toContainEqual({
-      _tag: 'Undecodable', id: agent.id, path: 'observation',
+      _tag: 'Degraded', id: agent.id, path: 'observation',
       reason: 'Unrecognized leaf value',
     })
   })
@@ -77,14 +77,14 @@ describe('row-wise resource decoding', () => {
     const result = decodeResourceRow({ ...agent, runtime_ids: ['broken-runtime-id'] })
     expect(result.value).toBeUndefined()
     expect(result.undecodable).toContainEqual({
-      _tag: 'Undecodable', id: agent.id, path: 'runtime_ids.0',
+      _tag: 'Rejected', id: agent.id, path: 'runtime_ids.*',
       reason: 'Value does not satisfy the resource field schema',
     })
   })
 
   it('keeps identity discriminators and wrong primitive leaf types closed', () => {
     expect(decodeResourceRow({ ...agent, kind: 'future-agent' })).toMatchObject({
-      undecodable: [{ _tag: 'Undecodable', path: 'kind' }],
+      undecodable: [{ _tag: 'Rejected', path: 'kind' }],
     })
     const malformed = decodeResourceRow({ ...agent, usage: { ...agent.usage, aggregation: 42 } })
     expect(malformed.value).toBeUndefined()
@@ -119,7 +119,7 @@ describe('row-wise resource decoding', () => {
     send([{ ...agent, id: 'broken-id' }])
     expect(windows[1]?.items).toBe(windows[0]?.items)
     expect(windows[1]?.decodeStale).toBe(true)
-    expect(windows[1]?.undecodable[0]).toMatchObject({ _tag: 'Undecodable', path: 'id' })
+    expect(windows[1]?.undecodable[0]).toMatchObject({ _tag: 'Rejected', path: 'id' })
     send([agent])
     expect(windows[2]?.decodeStale).toBe(false)
     expect(windows[2]?.undecodable).toEqual([])
@@ -151,24 +151,133 @@ describe('row-wise resource decoding', () => {
     expect(windows[1]?.decodeStale).toBe(true)
     expect(windows[1]?.undecodable).not.toHaveLength(0)
     expect(windows[1]?.rawItems).toEqual([broken])
+    ingest.accept({
+      kind: 'changes', id: good.id, collection: good.collection,
+      upserts: [], removes: [], order: [], has_more: false, snapshot: good.snapshot,
+    })
+    while (tasks.length > 0) tasks.shift()!()
+    expect(windows.at(-1)?.decodeStale).toBe(true)
+    expect(windows.at(-1)?.rawItems).toEqual([broken])
+    expect(windows.at(-1)?.undecodable).toEqual(windows[1]?.undecodable)
+    ingest.accept({
+      kind: 'changes', id: good.id, collection: good.collection,
+      upserts: [agent] as ResourceWire[], removes: [], order: [agent.id],
+      has_more: false, snapshot: good.snapshot,
+    })
+    while (tasks.length > 0) tasks.shift()!()
+    expect(windows.at(-1)?.decodeStale).toBe(true)
+    expect(windows.at(-1)?.rawItems).toEqual([agent, broken])
+    expect(windows.at(-1)?.undecodable).toEqual(windows[1]?.undecodable)
     send([agent, broken])
-    expect(windows[2]?.items).toHaveLength(1)
-    expect(windows[2]?.decodeStale).toBe(false)
-    expect(windows[2]?.undecodable).not.toHaveLength(0)
+    expect(windows.at(-1)?.items).toHaveLength(1)
+    expect(windows.at(-1)?.decodeStale).toBe(false)
+    expect(windows.at(-1)?.undecodable).not.toHaveLength(0)
+    send([agent])
+    expect(windows.at(-1)?.decodeStale).toBe(false)
+    expect(windows.at(-1)?.undecodable).toEqual([])
   })
 
-  it('counts each resource/path and emits the first-path signal once per SDK session', () => {
+  it('clears an unjoinable but identifiable failure only when that row is repaired', () => {
+    const tasks: (() => void)[] = []
+    const windows: ProcessedWindow<unknown>[] = []
+    const ingest = makeWindowIngest({
+      decode: (raw) => decodeResourceRow(raw).value,
+      decodeDetailed: decodeResourceRow,
+      publish: (window) => windows.push(window),
+      now: () => 0,
+      schedule: (work) => { tasks.push(work); return () => {} },
+    })
+    const good = frame([agent] as ResourceWire[])
+    if (good.kind !== 'snapshot') throw new TypeError('Expected snapshot')
+    ingest.accept({ ...good, items: [{ ...agent, runtime_ids: ['broken-id'] }] as ResourceWire[], order: [] })
+    while (tasks.length > 0) tasks.shift()!()
+    expect(windows.at(-1)?.decodeStale).toBe(true)
+    const delta = {
+      kind: 'changes' as const, id: good.id, collection: good.collection,
+      upserts: [], removes: [], order: [], has_more: false, snapshot: good.snapshot,
+    }
+    ingest.accept(delta)
+    while (tasks.length > 0) tasks.shift()!()
+    expect(windows.at(-1)?.decodeStale).toBe(true)
+    expect(windows.at(-1)?.undecodable).toEqual(windows[0]?.undecodable)
+    ingest.accept({ ...delta, upserts: [agent] as ResourceWire[], order: [agent.id] })
+    while (tasks.length > 0) tasks.shift()!()
+    expect(windows.at(-1)?.decodeStale).toBe(false)
+    expect(windows.at(-1)?.undecodable).toEqual([])
+    expect(windows.at(-1)?.items).toHaveLength(1)
+  })
+
+  it('counts rejected and degraded diagnostics in one stream per normalized resource/path', () => {
     const observed: unknown[] = []
-    const report = makeDecodeDiagnostics((resource, path, count, first) => observed.push({ resource, path, count, first }))
-    const diagnostic = { _tag: 'Undecodable', path: 'usage.aggregation', reason: 'bad leaf' } as const
-    report('agents', [diagnostic, diagnostic])
+    const report = makeDecodeDiagnostics((resource, path, count, first, counters, tag) =>
+      observed.push({ resource, path, count, first, ...counters, tag }))
+    const diagnostic = { _tag: 'Degraded', path: 'usage.aggregation', reason: 'bad leaf' } as const
+    report('agents', [diagnostic, { ...diagnostic, _tag: 'Rejected' }])
     report('sessions', [diagnostic])
     report('agents', [{ ...diagnostic, path: 'id' }])
     expect(observed).toEqual([
-      { resource: 'agents', path: 'usage.aggregation', count: 1, first: true },
-      { resource: 'agents', path: 'usage.aggregation', count: 2, first: false },
-      { resource: 'sessions', path: 'usage.aggregation', count: 1, first: true },
-      { resource: 'agents', path: 'id', count: 1, first: true },
+      { resource: 'agents', path: 'usage.aggregation', count: 1, first: true, rejectedCount: 0, degradedCount: 1, tag: 'Degraded' },
+      { resource: 'agents', path: 'usage.aggregation', count: 2, first: false, rejectedCount: 1, degradedCount: 1, tag: 'Rejected' },
+      { resource: 'sessions', path: 'usage.aggregation', count: 1, first: true, rejectedCount: 0, degradedCount: 1, tag: 'Degraded' },
+      { resource: 'agents', path: 'id', count: 1, first: true, rejectedCount: 0, degradedCount: 1, tag: 'Degraded' },
     ])
+  })
+
+  it('normalizes 1000 array indices to one schema path and first-path signal', () => {
+    const paths = new Set<string>()
+    const firstPaths: string[] = []
+    let lastCount = 0
+    const report = makeDecodeDiagnostics((_resource, path, count, first) => {
+      paths.add(path)
+      if (first) firstPaths.push(path)
+      lastCount = count
+    })
+    for (let index = 0; index < 1000; index++)
+      report('agents', [{ _tag: 'Rejected', path: `runtime_ids.${index}`, reason: 'bad field' }])
+    expect([...paths]).toEqual(['runtime_ids.*'])
+    expect(firstPaths).toEqual(['runtime_ids.*'])
+    expect(lastCount).toBe(1000)
+    expect(normalizeDecodePath('usage.secret-row-id')).toBe('$')
+    expect(normalizeDecodePath('receipt.private-row-id')).toBe('receipt.*')
+    expect(normalizeDecodePath('receipt.another-row-id')).toBe('receipt.*')
+    expect(normalizeDecodePath('runtime_ids.*')).toBe('runtime_ids.*')
+  })
+
+  it('normalizes structural diagnostics from a 1000-element malformed array', () => {
+    const result = decodeResourceRow({ ...agent, runtime_ids: Array.from({ length: 1000 }, () => 'broken-id') })
+    expect(result.value).toBeUndefined()
+    expect(result.undecodable.length).toBeGreaterThan(0)
+    expect([...new Set(result.undecodable.map(({ path }) => path))]).toEqual(['runtime_ids.*'])
+  })
+
+  it('does not persist a usable degraded row once it leaves server order', () => {
+    const tasks: (() => void)[] = []
+    const windows: ProcessedWindow<unknown>[] = []
+    const ingest = makeWindowIngest({
+      decode: (raw) => decodeResourceRow(raw).value,
+      decodeDetailed: decodeResourceRow,
+      publish: (window) => windows.push(window),
+      now: () => 0,
+      schedule: (work) => { tasks.push(work); return () => {} },
+    })
+    const good = frame([agent] as ResourceWire[])
+    if (good.kind !== 'snapshot') throw new TypeError('Expected snapshot')
+    // Deliberately inject a future wire case beyond the generated TypeScript contract.
+    const futureRows: unknown = [{ ...agent, observation: 'future-observation' }]
+    ingest.accept({
+      ...good,
+      items: futureRows as ResourceWire[],
+    })
+    while (tasks.length > 0) tasks.shift()!()
+    expect(windows.at(-1)?.undecodable[0]?._tag).toBe('Degraded')
+    ingest.accept({
+      kind: 'changes', id: good.id, collection: good.collection,
+      upserts: [], removes: [], order: [], has_more: false, snapshot: good.snapshot,
+    })
+    while (tasks.length > 0) tasks.shift()!()
+    expect(windows.at(-1)?.items).toEqual([])
+    expect(windows.at(-1)?.rawItems).toEqual([])
+    expect(windows.at(-1)?.undecodable).toEqual([])
+    expect(windows.at(-1)?.decodeStale).toBe(false)
   })
 })

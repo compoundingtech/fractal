@@ -3,11 +3,18 @@ import { Schema, SchemaAST, SchemaTransformation } from 'effect'
 import type { Brand, DateTime, Duration, Option } from 'effect'
 import type { Issue } from 'effect/SchemaIssue'
 
-export interface Undecodable {
-  readonly _tag: 'Undecodable'
+/** Rejected rows have no usable value; degraded rows retain an open, unrecognized leaf. */
+export interface ResourceDecodeDiagnostic {
+  readonly _tag: 'Rejected' | 'Degraded'
   readonly id?: string
   readonly path: string
   readonly reason: string
+}
+/** Compatibility name for the single tagged diagnostic stream. */
+export type Undecodable = ResourceDecodeDiagnostic
+export interface DecodeDiagnosticCounts {
+  readonly rejectedCount: number
+  readonly degradedCount: number
 }
 export interface Unrecognized {
   readonly _tag: 'Unrecognized'
@@ -120,6 +127,47 @@ const decodeResource = decodeUnknownSync(Resource)
 export const decodedUsageEquivalence: (left: DecodedUsageSummary, right: DecodedUsageSummary) => boolean =
   Schema.toEquivalence(UsageSchema)
 
+type PathNode = Map<string, PathNode>
+const schemaPaths: PathNode = new Map()
+const collectPaths = (ast: SchemaAST.AST, node: PathNode, ancestors: ReadonlySet<SchemaAST.AST>): void => {
+  if (ancestors.has(ast)) return
+  const next = new Set(ancestors).add(ast)
+  const child = (key: string): PathNode => {
+    const existing = node.get(key)
+    if (existing !== undefined) return existing
+    const created: PathNode = new Map()
+    node.set(key, created)
+    return created
+  }
+  if (ast._tag === 'Objects') {
+    for (const property of ast.propertySignatures)
+      collectPaths(property.type, child(String(property.name)), next)
+    for (const index of ast.indexSignatures) collectPaths(index.type, child('*'), next)
+  } else if (ast._tag === 'Arrays') {
+    for (const type of [...ast.elements, ...ast.rest]) collectPaths(type, child('*'), next)
+  } else if (ast._tag === 'Union') {
+    for (const type of ast.types) collectPaths(type, node, next)
+  } else if (ast._tag === 'Declaration') {
+    for (const type of ast.typeParameters) collectPaths(type, node, next)
+  }
+}
+collectPaths(SchemaAST.toEncoded(Resource.ast), schemaPaths, new Set())
+
+/** Only schema-owned names leave the SDK. Array indices and record keys become `*`. */
+export const normalizeDecodePath = (path: string): string => {
+  if (path === '$') return path
+  let node = schemaPaths
+  const normalized: string[] = []
+  for (const segment of path.split('.')) {
+    const key = node.has(segment) ? segment : '*'
+    const child = node.get(key)
+    if (child === undefined) return '$'
+    normalized.push(key)
+    node = child
+  }
+  return normalized.length === 0 ? '$' : normalized.join('.')
+}
+
 const unknownLeaves = (value: unknown, path: string, found: UnrecognizedLeaf[]): void => {
   if (object(value)) {
     if (value._tag === 'Unrecognized') {
@@ -145,8 +193,8 @@ export const openAgent = (agent: Agent): DecodedAgent => {
 /** Identity and structure are closed; future agent leaf cases remain in their own row. */
 export const decodeResourceRow = (raw: unknown): ResourceDecodeResult => {
   const id = object(raw) && typeof raw.id === 'string' ? raw.id : undefined
-  const diagnostic = (path: string, reason: string): Undecodable => ({
-    _tag: 'Undecodable', ...(id === undefined ? {} : { id }), path, reason,
+  const diagnostic = (path: string, reason: string, tag: ResourceDecodeDiagnostic['_tag'] = 'Rejected'): Undecodable => ({
+    _tag: tag, ...(id === undefined ? {} : { id }), path: normalizeDecodePath(path), reason,
   })
   try {
     if (!object(raw) || raw.kind !== 'agent') {
@@ -164,7 +212,7 @@ export const decodeResourceRow = (raw: unknown): ResourceDecodeResult => {
     unknownLeaves(value, '', unrecognized)
     return {
       value: unrecognized.length > 0 && value.kind === 'agent' ? { ...value, decode: { unrecognized } } : value,
-      undecodable: unrecognized.map((leaf) => diagnostic(leaf.path, 'Unrecognized leaf value')),
+      undecodable: unrecognized.map((leaf) => diagnostic(leaf.path, 'Unrecognized leaf value', 'Degraded')),
     }
   } catch (error) {
     const failures: Undecodable[] = []
@@ -208,15 +256,30 @@ export const decodeResourceRows = (rows: readonly unknown[]): {
   return { items, undecodable }
 }
 
-/** One SDK session owns these counters and first-seen paths. No row contents are emitted. */
-export const makeDecodeDiagnostics = (event: (resource: string, path: string, count: number, first: boolean) => void) => {
-  const counts = new Map<string, number>()
+/** One SDK session owns bounded counters and first-seen schema paths. No row contents are emitted.
+ * Overflow shares the root bucket rather than retaining arbitrary additional paths.
+ */
+export const makeDecodeDiagnostics = (
+  event: (resource: string, path: string, count: number, first: boolean,
+    counters: DecodeDiagnosticCounts, tag: ResourceDecodeDiagnostic['_tag']) => void,
+) => {
+  const counts = new Map<string, DecodeDiagnosticCounts>()
+  const paths = new Set<string>()
   return (resource: string, diagnostics: readonly Undecodable[]): void => {
     for (const diagnostic of diagnostics) {
-      const key = `${resource}:${diagnostic.path}`
-      const count = (counts.get(key) ?? 0) + 1
-      counts.set(key, count)
-      event(resource, diagnostic.path, count, count === 1)
+      let path = normalizeDecodePath(diagnostic.path)
+      if (!paths.has(path)) {
+        if (paths.size >= 128) path = '$'
+        else paths.add(path)
+      }
+      const key = `${resource}:${path}`
+      const previous = counts.get(key)
+      const counters = {
+        rejectedCount: (previous?.rejectedCount ?? 0) + (diagnostic._tag === 'Rejected' ? 1 : 0),
+        degradedCount: (previous?.degradedCount ?? 0) + (diagnostic._tag === 'Degraded' ? 1 : 0),
+      }
+      counts.set(key, counters)
+      event(resource, path, counters.rejectedCount + counters.degradedCount, previous === undefined, counters, diagnostic._tag)
     }
   }
 }

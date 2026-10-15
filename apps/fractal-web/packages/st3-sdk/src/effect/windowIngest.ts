@@ -66,6 +66,8 @@ export const makeWindowIngest = <A>({
 }) => {
   type Entry = { readonly raw: Resource; readonly value: A | undefined; readonly undecodable: readonly Undecodable[] }
   let rows: Map<string, Entry> | undefined
+  // Rows without a usable identity cannot be repaired by an unrelated keyed delta.
+  let unidentified: Entry[] = []
   let previous: ProcessedWindow<A> | undefined
   let frames: WindowFrame[] = []
   let offset = 0
@@ -85,7 +87,7 @@ export const makeWindowIngest = <A>({
       onRejected(raw)
     }
     return { raw, value, undecodable: result?.undecodable ?? (value === undefined
-      ? [{ _tag: 'Undecodable', ...(typeof raw?.id === 'string' ? { id: raw.id } : {}), path: '$', reason: 'Resource row did not decode' }]
+      ? [{ _tag: 'Rejected', ...(typeof raw?.id === 'string' ? { id: raw.id } : {}), path: '$', reason: 'Resource row did not decode' }]
       : []) }
   }
 
@@ -93,7 +95,7 @@ export const makeWindowIngest = <A>({
     if (frame.kind === 'changes' && rows === undefined) return
     const next = frame.kind === 'snapshot' ? new Map<string, Entry>() : rows!
     const orderedIds = new Set(frame.order)
-    const unorderedFailures: Entry[] = []
+    const nextUnidentified = frame.kind === 'snapshot' ? [] : [...unidentified]
     if (frame.kind === 'changes') {
       for (const id of frame.removes) {
         next.delete(id)
@@ -106,7 +108,9 @@ export const makeWindowIngest = <A>({
       const entry = retained !== undefined && sameWireValue(retained.raw, raw)
         ? retained : decodeRow(raw)
       if (typeof id === 'string') next.set(id, entry)
-      if (!orderedIds.has(id) && entry.undecodable.length > 0) unorderedFailures.push(entry)
+      else if (entry.value === undefined && entry.undecodable.length > 0
+        && !nextUnidentified.some((existing) => sameWireValue(existing.raw, raw)))
+        nextUnidentified.push(entry)
       yield
     }
     const items: A[] = []
@@ -121,18 +125,27 @@ export const makeWindowIngest = <A>({
       }
       yield
     }
-    // Malformed identity cannot be joined to server order, but must not disappear as an
-    // apparently empty/healthy window. Preserve its wire row and typed failure notice.
+    // Keep unresolved malformed rows for the window lifetime. Identifiable rows are
+    // replaced/removed through next; identity-less rows require a replacement snapshot.
+    const unorderedFailures = [...nextUnidentified]
+    for (const [id, entry] of next) {
+      if (!orderedIds.has(id) && entry.value === undefined && entry.undecodable.length > 0) {
+        unorderedFailures.push(entry)
+        yield
+      }
+    }
     for (const entry of unorderedFailures) {
       rawItems.push(entry.raw)
       undecodable.push(...entry.undecodable)
     }
     rows = next
+    unidentified = nextUnidentified
     for (const id of rejected.keys()) {
       if (!next.has(id) || !orderedIds.has(id)) rejected.delete(id)
     }
-    const decodeStale = rawItems.length > 0 && items.length === 0 && undecodable.length > 0
-    const currentItems = decodeStale && previous !== undefined ? previous.items : items
+    const decodeStale = (rawItems.length > 0 && items.length === 0 && undecodable.length > 0)
+      || (frame.kind === 'changes' && previous?.decodeStale === true && unorderedFailures.length > 0)
+    const currentItems = decodeStale && items.length === 0 && previous !== undefined ? previous.items : items
     const retainedItems =
       previous !== undefined &&
       previous.items.length === currentItems.length &&
@@ -185,6 +198,7 @@ export const makeWindowIngest = <A>({
       frames = []
       offset = 0
       rows = undefined
+      unidentified = []
       // Keep the last good compatibility view across transport resubscription.
     },
   }

@@ -238,6 +238,8 @@ export const liveSource = ({
           case 'ResourceDecode':
             // Cumulative per session, resource and path; never row contents.
             setDebug(`Wf.resourceDecode.${event.resource}.${event.path}`, event.count)
+            setDebug(`Wf.resourceDecode.${event.resource}.${event.path}.Rejected`, event.rejectedCount)
+            setDebug(`Wf.resourceDecode.${event.resource}.${event.path}.Degraded`, event.degradedCount)
             break
         }
         options.onDiagnostics?.(event)
@@ -294,6 +296,7 @@ export const liveSource = ({
     explicitInterest = false,
     onVisibilityChange,
     observedFreshness,
+    prepareObservation,
     telemetryKind = 'window',
   }: {
     readonly resolve: (get: Atom.AtomContext) => Effect.Effect<TSpec, AttachFailure>
@@ -305,6 +308,8 @@ export const liveSource = ({
     readonly initialRead?: (st3: St3['Service']) => Effect.Effect<{ readonly value: A; readonly hasMore: boolean }, AttachFailure>
     /** Freshness of a decoded frame; a frame retaining last-good rows is stale, not live. */
     readonly observedFreshness?: (value: A) => 'live' | 'stale'
+    /** Applied only after the observation's authority/ordering guard accepts it. */
+    readonly prepareObservation?: (value: A, previous: Feed<A>) => A
     readonly keepAlive?: boolean
     readonly onCommit?: (value: A) => void
     readonly explicitInterest?: boolean
@@ -418,6 +423,7 @@ export const liveSource = ({
             initialReadFiber = runtime.runFork(initialRead(st3).pipe(
               Effect.tap(({ value, hasMore }) => Effect.sync(() => {
                 if (!active || readRejection !== undefined || terminalFailure || latest._tag !== 'Waiting') return
+                value = prepareObservation?.(value, latest) ?? value
                 // HTTP is last-published evidence, not proof that the live subscription is ready.
                 latest = {
                   ...observed({ value, freshness: 'stale' }),
@@ -483,8 +489,9 @@ export const liveSource = ({
                 if (event._tag === 'Observed') {
                   initialReadDeadlineFiber?.interruptUnsafe()
                   initialReadDeadlineFiber = undefined
-                  latest = observed({ value: event.value, freshness: observedFreshness?.(event.value) ?? 'live' })
-                  syncLatest = observeFeedSync(syncLatest, event.value, Date.now())
+                  const value = prepareObservation?.(event.value, latest) ?? event.value
+                  latest = observed({ value, freshness: observedFreshness?.(value) ?? 'live' })
+                  syncLatest = observeFeedSync(syncLatest, value, Date.now())
                 } else if (event._tag === 'Failed') {
                   const failure = syncStatusFromFailure(event.error)
                   syncLatest = transitionFeedSync(syncLatest, failure, Date.now())
@@ -654,12 +661,12 @@ export const liveSource = ({
   }
 
   const rosterDecode = Atom.keepAlive(Atom.make<RosterDecode>(decodedRoster))
-  /** Rows the SDK retained as last-good because every row of the latest frame failed to decode. */
-  const decodeStaleRosters = new WeakSet<readonly DecodedAgent[]>()
+  /** Decode metadata belongs to an observation and is published only with its accepted rows. */
+  const rosterEvidence = new WeakMap<readonly DecodedAgent[], RosterDecode>()
   const sameUndecodable = (left: readonly Undecodable[], right: readonly Undecodable[]) =>
     left.length === right.length && left.every((entry, index) => {
       const other = right[index]!
-      return entry.id === other.id && entry.path === other.path && entry.reason === other.reason
+      return entry._tag === other._tag && entry.id === other.id && entry.path === other.path && entry.reason === other.reason
     })
   const recordRosterDecode = (next: RosterDecode) => {
     const current = registry.get(rosterDecode)
@@ -670,19 +677,27 @@ export const liveSource = ({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'agents', limit: 100 }),
     initialRead: (st3) => st3.readAgents.pipe(
       Effect.map(({ value, hasMore, undecodable, decodeStale }) => {
-        recordRosterDecode({ undecodable, decodeStale })
-        return { value, hasMore }
+        const rows = [...value]
+        rosterEvidence.set(rows, { undecodable, decodeStale })
+        return { value: rows, hasMore }
       }),
     ),
-    observedFreshness: (value) => decodeStaleRosters.has(value) ? 'stale' : 'live',
+    prepareObservation: (value, previous) => {
+      const evidence = rosterEvidence.get(value) ?? decodedRoster
+      if (!evidence.decodeStale || value.length > 0 || previous._tag !== 'Observed') return value
+      const retained = [...previous.value]
+      rosterEvidence.set(retained, evidence)
+      return retained
+    },
+    onCommit: (value) => recordRosterDecode(rosterEvidence.get(value) ?? decodedRoster),
+    observedFreshness: (value) => rosterEvidence.get(value)?.decodeStale ? 'stale' : 'live',
     follow: ({ st3, spec }) =>
       st3.followWindow(spec).pipe(
         Stream.map((event) => {
           if (event._tag !== 'Observed') return event
           const { items, undecodable, decodeStale } = event.value
           const value = items.filter((row): row is DecodedAgent => row.kind === 'agent')
-          if (decodeStale) decodeStaleRosters.add(value)
-          recordRosterDecode({ undecodable, decodeStale })
+          rosterEvidence.set(value, { undecodable, decodeStale })
           return { _tag: 'Observed' as const, value }
         }),
       ),

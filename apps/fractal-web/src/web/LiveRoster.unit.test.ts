@@ -5,8 +5,8 @@ vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 import { hiddenRoster, rosterDecodeNotice } from './LiveRoster.tsx'
 
-const failure = (fields: Omit<Undecodable, '_tag'>): Undecodable => ({ _tag: 'Undecodable', ...fields })
-const omittedLeaf = failure({ id: 'agent/kept', path: 'usage.aggregation', reason: 'Unrecognized leaf value; dependent data omitted' })
+const failure = (fields: Omit<Undecodable, '_tag'>): Undecodable => ({ _tag: 'Rejected', ...fields })
+const omittedLeaf: Undecodable = { _tag: 'Degraded', id: 'agent/kept', path: 'usage.aggregation', reason: 'Unrecognized leaf value' }
 const brokenFields = [
   failure({ id: 'agent/broken', path: 'runtime_ids', reason: 'Expected array' }),
   failure({ id: 'agent/broken', path: 'updated_at', reason: 'Expected timestamp' }),
@@ -27,8 +27,8 @@ test('an all-bad frame counts every failed row, including ids still shown from t
     decode: { undecodable: [omittedLeaf, ...brokenFields, brokenIdentity], decodeStale: true },
     shown: new Set(['agent/kept', 'agent/broken']),
   })
-  expect(hidden.count).toBe(3)
-  expect(hidden.failures).toHaveLength(4)
+  expect(hidden.count).toBe(2)
+  expect(hidden.failures).toHaveLength(3)
 })
 
 test('a fully decoded roster has no notice', () => {

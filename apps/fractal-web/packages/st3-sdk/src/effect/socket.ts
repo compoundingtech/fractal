@@ -69,6 +69,9 @@ export type St3Diagnostic =
       readonly resource: string
       readonly path: string
       readonly count: number
+      readonly tag: 'Rejected' | 'Degraded'
+      readonly rejectedCount: number
+      readonly degradedCount: number
     }
 
 /** One subscription on the socket, keyed by its registration id. */

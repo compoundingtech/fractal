@@ -10,9 +10,10 @@
  * (`freshness.ts`), folded only from transport events the SDK really observes.
  * Resource rows decode independently. Agent literal/enum leaves are open tagged values,
  * preserving their raw case in-place and in SDK decode metadata. Structurally bad rows become
- * Undecodable notices. All-bad windows retain last-good items with decodeStale.
- * ResourceDecode diagnostics count failures per resource/path; each distinct path produces
- * one trace event per SDK session. No row contents or decoder errors go to the console.
+ * Rejected notices; retained open leaves emit Degraded notices in the same stream.
+ * All-bad windows retain last-good items with decodeStale. Unjoinable failures persist
+ * until replacement or identifiable repair. Diagnostics count each tag per normalized
+ * schema path, with bounded first-path trace events and no row contents or decoder errors.
  *
  * `messageSend` uses the generated HTTP action client and decodes its acknowledgement; it does
  * not retry ambiguous delivery. Daemon refusals retain the complete error envelope and HTTP
@@ -76,7 +77,7 @@ import {
 import { type ConnectionState, type St3Diagnostic, makeChannel } from './socket.ts'
 import { makeWindowIngest, type ProcessedWindow } from './windowIngest.ts'
 import { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, type DecodedAgent, type DecodedResource, type Undecodable } from './resourceDecode.ts'
-export { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, decodedUsageEquivalence, openAgent, type Open, type DecodedAgent, type DecodedUsageSummary, type DecodedResource, type Undecodable, type Unrecognized, type UnrecognizedLeaf } from './resourceDecode.ts'
+export { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, normalizeDecodePath, decodedUsageEquivalence, openAgent, type Open, type DecodedAgent, type DecodedUsageSummary, type DecodedResource, type ResourceDecodeDiagnostic, type DecodeDiagnosticCounts, type Undecodable, type Unrecognized, type UnrecognizedLeaf } from './resourceDecode.ts'
 import type { SyncStatus } from './sync-status.ts'
 import { syncStatusFromFreshness, syncStatusFromFailure } from './sync-projection.ts'
 import { browserSocket, type TraceContext, traceContextOf, traceQuerySocket } from './trace.ts'
@@ -879,8 +880,9 @@ const make = (options: St3Options) =>
       )
 
     const decodeTracer = yield* Effect.tracer
-    const reportDecode = makeDecodeDiagnostics((resource, path, count, first) => {
-      options.onDiagnostics?.({ _tag: 'ResourceDecode', resource, path, count })
+    const reportDecode = makeDecodeDiagnostics((resource, path, count, first, counters, tag) => {
+      const attributes = { resource, path, tag, count, ...counters }
+      options.onDiagnostics?.({ _tag: 'ResourceDecode', ...attributes })
       if (first) {
         const at = BigInt(Date.now()) * 1_000_000n
         const parent = options.parentSpan?.()
@@ -889,7 +891,8 @@ const make = (options: St3Options) =>
           annotations: Context.empty(), links: [], startTime: at,
           kind: 'client', root: parent === undefined, sampled: true,
         })
-        span.event('st3.resource.decode_failure', at, { resource, path })
+        for (const [key, value] of Object.entries(attributes)) span.attribute(key, value)
+        span.event('st3.resource.decode_failure', at, attributes)
         span.end(at, Exit.void)
       }
     })
