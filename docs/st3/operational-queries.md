@@ -41,6 +41,12 @@ History cursors and page order are local to the serving daemon, like raw claim-h
 they are not shared state folds. Reason selection uses canonical claim order, including recovery
 from an earlier transition, so replicated arrival order cannot choose a different reason.
 
+Native lease polling uses `GET /v1/work?actor=...&view=renewal`: only the actor's
+currently held claimed/working steps, with owner and lease validity applied. This view
+does not populate execution timing, queue, wake, summaries or agent hierarchy. The
+default work list remains fully enriched. Performance tasks distinguish `work/renewal`
+from `work/human-list`; these labels are fixed, never actor-derived.
+
 ```sh
 st doctor
 st doctor --performance

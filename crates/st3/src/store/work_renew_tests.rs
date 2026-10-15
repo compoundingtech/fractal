@@ -74,6 +74,55 @@ fn claimed_step(history: usize) -> Renewal {
     }
 }
 
+#[test]
+fn renewal_poll_reads_only_held_claims_without_folding_timing() {
+    let renewal = claimed_step(2);
+    let actor = "agent/node.worker";
+    STEP_TIMING_FOLD_CALLS.with(|calls| calls.set(0));
+    let held = renewal.store.work_for_renewal(actor).unwrap();
+    assert_eq!(STEP_TIMING_FOLD_CALLS.with(std::cell::Cell::get), 0);
+    assert_eq!(held.len(), 1);
+    let step = &held[0];
+    assert_eq!(step.subject, renewal.subject);
+    assert_eq!(step.claimant.as_deref(), Some(actor));
+    assert_eq!(step.claim_incarnation.as_deref(), Some("current"));
+    assert!(matches!(step.status.as_str(), "claimed" | "working"));
+    assert!(step.progress_summary.is_none());
+    assert!(step.wake.is_none());
+    assert!(step.execution_started_at_unix_ms.is_none());
+    assert!(renewal.store.work_for_renewal("agent/node.other").unwrap().is_empty());
+    let full = renewal.store.work(Some(actor), false).unwrap();
+    assert!(STEP_TIMING_FOLD_CALLS.with(std::cell::Cell::get) > 0);
+    assert!(full[0].progress_summary.is_some(), "the full list keeps its enrichment");
+}
+
+#[test]
+fn renewal_poll_excludes_expired_or_ended_claims() {
+    let renewal = claimed_step(0);
+    let actor = "agent/node.worker";
+    {
+        let connection = renewal.store.connection.write();
+        connection.execute(
+            "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
+            [&renewal.subject],
+        ).unwrap();
+    }
+    assert!(renewal.store.work_for_renewal(actor).unwrap().is_empty());
+    {
+        let connection = renewal.store.connection.write();
+        connection.execute(
+            "UPDATE step_runs SET lease_expires_at_unix_ms=?2 WHERE subject=?1",
+            params![renewal.subject, (now_ms() + 60_000).to_string()],
+        ).unwrap();
+        connection.execute(
+            "UPDATE mission_runs SET status='cancelled',phase='terminal' WHERE id=(
+                SELECT run_id FROM step_runs WHERE subject=?1)",
+            [&renewal.subject],
+        ).unwrap();
+    }
+    assert!(renewal.store.work_for_renewal(actor).unwrap().is_empty());
+}
+
 fn writer_work(key: &str) -> smallclaims::sqlite::work::SqliteWork {
     WORK_ACTION_WRITER_WORK
         .lock()

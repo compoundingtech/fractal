@@ -24064,7 +24064,7 @@ fn work_incarnation_key(incarnation: Option<&str>) -> String {
 
 async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Result<()> {
     let work: Vec<StepRunView> = client
-        .get(&format!("/v1/work?actor={}", urlencoding::encode(subject)))
+        .get(&format!("/v1/work?actor={}&view=renewal", urlencoding::encode(subject)))
         .await?;
     // Most resident seats hold no work. Only a held claim needs the status reduction
     // that proves its harness incarnation is still live before renewing the lease.
