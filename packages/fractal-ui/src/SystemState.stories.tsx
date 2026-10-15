@@ -27,7 +27,7 @@ const rows: readonly Row[] = [
   agent('nix-infra', 'dev4', 'idle', 240),
   agent('pr-review', 'dev4', 'waiting', 18),
 ]
-const countdown = 'Reconnecting in 2s · attempt 1'
+const countdown = 'Next try in 2s · attempt 1'
 
 /**
  * The workspace as the app composes its system states: one amber band under the thread header owns the gateway
@@ -116,7 +116,7 @@ export const Live: Story = { args: { connection: 'live' }, play: async ({ canvas
 export const ConnectionBannerRecovers: Story = { play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await userEvent.click(canvas.getByRole('button', { name: 'Reconnect' }))
-  await expect(canvasElement.querySelector('[data-connection-state="reconnecting"]')).toHaveTextContent('Reconnecting in 2s')
+  await expect(canvasElement.querySelector('[data-connection-state="reconnecting"]')).toHaveTextContent(`Reconnecting·${countdown}`)
   await userEvent.click(canvas.getByRole('button', { name: 'Retry: Terminal session ended' }))
   const drawer = canvas.getByRole('region', { name: 'Terminal drawer' })
   await expect(drawer.querySelector('[data-system-state="loading"]')).toHaveTextContent('Loading terminal')

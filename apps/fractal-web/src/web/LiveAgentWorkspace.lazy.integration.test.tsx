@@ -152,7 +152,8 @@ describe('gateway connection banner', () => {
     const band = bands[0]
     expect(band?.getAttribute('data-connection-state')).toBe('reconnecting')
     expect(band?.closest('section[aria-label="Agent workspace"]')).not.toBeNull()
-    expect(band?.textContent).toContain('Reconnecting in 3s · attempt 2')
+    expect(band?.textContent).toContain('Next try in 3s · attempt 2')
+    expect(band?.textContent).not.toContain('Reconnecting in')
     expect(band?.textContent).not.toContain('Private diagnostic')
     expect(container.querySelector('footer')?.querySelector('[data-connection-state]')).toBeNull()
     const buttons = band?.querySelectorAll('button') ?? []

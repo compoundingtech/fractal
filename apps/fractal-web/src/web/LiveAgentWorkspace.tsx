@@ -338,9 +338,14 @@ const GatewayConnectionStatus = () => {
   })
   const status = observation.status
   const reconnecting = status._tag === 'Stale' && status.reason._tag === 'Reconnecting'
+  // The band's title already says "Reconnecting"; its detail is the next try, after syncLine's grace delay.
+  const text = line === undefined ? undefined
+    : status._tag === 'Stale' && status.reason._tag === 'Reconnecting'
+      ? `Next try in ${Math.ceil(Math.max(0, status.reason.nextAt - now) / 1000)}s · attempt ${status.reason.attempt}`
+      : line.text
   return <ConnectionStatus
     state={network._tag === 'Offline' ? 'offline' : reconnecting ? 'reconnecting' : status._tag === 'Stale' ? 'stale' : status._tag === 'Failed' ? 'failed' : 'live'}
-    {...(line === undefined ? {} : { text: line.text })}
+    {...(text === undefined ? {} : { text })}
     {...((reconnecting || network._tag === 'Offline') && source.reconnect !== undefined ? { onReconnect: source.reconnect } : {})}
   />
 }

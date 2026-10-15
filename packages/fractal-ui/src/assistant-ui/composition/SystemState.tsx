@@ -38,7 +38,7 @@ export function SystemNotice({ kind, title, detail, scope = 'pane', connection =
 
 export interface ConnectionStatusProps {
   readonly state: ConnectionState
-  /** The host's decoded line while reconnecting, e.g. "Reconnecting in 2s · attempt 5". */
+  /** The detail while reconnecting, after the "Reconnecting" title: the next try, e.g. "Next try in 2s · attempt 5". */
   readonly text?: string
   readonly onReconnect?: () => void
 }
