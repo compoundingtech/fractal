@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::os::fd::AsRawFd as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -21,7 +23,7 @@ use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 use tokio::sync::{Notify, watch};
 use tower::ServiceExt as _;
 
@@ -6867,7 +6869,7 @@ pub async fn serve_unix_bound(
     serve_unix_bound_with_ready(socket, state_socket, app, || {}).await
 }
 
-/// Readiness is published only once the local API is bound and discoverable.
+/// Readiness is published only once the initialized local API can accept requests.
 pub async fn serve_unix_bound_with_ready(
     socket: &Path,
     state_socket: &Path,
@@ -6907,15 +6909,59 @@ async fn serve_unix_with_ancestor_ready(
     ancestor: fn(u32) -> Option<String>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    // Only st3-fixture initializes this process-local state. Disable host ancestry while
-    // retaining native-driver identification, which mailbox subscriptions require.
-    #[cfg(feature = "test-support")]
-    let bind_ancestry = bind_harness && crate::test_support::login_shell().is_none();
-    #[cfg(not(feature = "test-support"))]
-    let bind_ancestry = bind_harness;
+    let reserved = reserve_unix_socket(socket, state_socket).await?;
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bind_harness, ancestor, ready).await
+}
+
+/// An address reservation, not a listener. Connect attempts remain refused until
+/// the initialized application calls `serve_reserved_unix_with_ready`.
+pub struct ReservedUnixSocket {
+    socket: tokio::net::UnixSocket,
+    // The existing connect probe protects a listening predecessor. This lock also
+    // protects a new daemon's bound-but-not-listening address during startup.
+    reservation: File,
+}
+
+pub fn unix_reservation_path(socket: &Path) -> std::path::PathBuf {
+    // Discovery aliases and parent aliases must refer to the same reservation.
+    let socket = fs::canonicalize(socket).unwrap_or_else(|_| {
+        socket
+            .parent()
+            .and_then(|parent| fs::canonicalize(parent).ok())
+            .zip(socket.file_name())
+            .map(|(parent, name)| parent.join(name))
+            .unwrap_or_else(|| socket.to_path_buf())
+    });
+    let mut path = socket.as_os_str().to_owned();
+    path.push(".reservation.lock");
+    path.into()
+}
+
+/// Bind the address and publish discovery without listening or queueing clients.
+/// Retain the per-address reservation for the entire serving lifetime; never
+/// unlink its lock file while another process could hold its inode.
+pub async fn reserve_unix_socket(
+    socket: &Path,
+    state_socket: Option<&Path>,
+) -> anyhow::Result<ReservedUnixSocket> {
     crate::config::validate_unix_socket_path(socket, "--socket or --client-gateway-socket")?;
     if let Some(parent) = socket.parent() {
         fs::create_dir_all(parent)?;
+    }
+    let reservation = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(unix_reservation_path(socket))?;
+    if unsafe { libc::flock(reservation.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        anyhow::bail!(
+            "refusing to replace reserved Unix socket at {}: {}",
+            socket.display(),
+            std::io::Error::last_os_error()
+        );
     }
     // A second daemon must never detach an active listener by unlinking its pathname.
     if tokio::net::UnixStream::connect(socket).await.is_ok() {
@@ -6929,11 +6975,47 @@ async fn serve_unix_with_ancestor_ready(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let listener = UnixListener::bind(socket)?;
+    let listener = tokio::net::UnixSocket::new_stream()?;
+    listener.bind(socket)?;
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
     if let Some(state_socket) = state_socket {
         publish_state_socket(socket, state_socket)?;
     }
+    Ok(ReservedUnixSocket {
+        socket: listener,
+        reservation,
+    })
+}
+
+/// Only a fully initialized router may turn the reservation into a listener.
+pub async fn serve_reserved_unix_with_ready(
+    reserved: ReservedUnixSocket,
+    app: Router,
+    bind_harness: bool,
+    ready: impl FnOnce(),
+) -> anyhow::Result<()> {
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bind_harness, harness_ancestor, ready)
+        .await
+}
+
+async fn serve_reserved_unix_with_ancestor_ready(
+    reserved: ReservedUnixSocket,
+    app: Router,
+    bind_harness: bool,
+    ancestor: fn(u32) -> Option<String>,
+    ready: impl FnOnce(),
+) -> anyhow::Result<()> {
+    let ReservedUnixSocket {
+        socket,
+        reservation: _reservation,
+    } = reserved;
+    let listener = socket.listen(1024)?;
+    // Only st3-fixture initializes this process-local state. Disable host ancestry while
+    // retaining native-driver identification, which mailbox subscriptions require.
+    #[cfg(feature = "test-support")]
+    let bind_ancestry = bind_harness && crate::test_support::login_shell().is_none();
+    #[cfg(not(feature = "test-support"))]
+    let bind_ancestry = bind_harness;
     ready();
     let mut accept_failures = AcceptFailures::default();
     loop {
@@ -7086,6 +7168,88 @@ mod gateway_listener_tests {
         );
         assert!(tokio::net::UnixStream::connect(&socket).await.is_ok());
         drop(listener);
+    }
+
+    #[tokio::test]
+    async fn reserved_addresses_refuse_connections_until_initialized_serving() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("api.sock");
+        let discovery = root.path().join("state/run/st3.sock");
+        let reserved = super::reserve_unix_socket(&socket, Some(&discovery))
+            .await
+            .unwrap();
+        assert!(socket.exists());
+        for path in [&socket, &discovery] {
+            let error = tokio::net::UnixStream::connect(path).await.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+        }
+
+        let (ready, serving) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(super::serve_reserved_unix_with_ready(
+            reserved,
+            axum::Router::new().fallback(|| async { "initialized" }),
+            false,
+            move || ready.send(()).unwrap(),
+        ));
+        serving.await.unwrap();
+        let error = super::reserve_unix_socket(&socket, None)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to replace reserved Unix socket"),
+            "{error}"
+        );
+        let mut stream = tokio::net::UnixStream::connect(&discovery).await.unwrap();
+        stream
+            .write_all(b"GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_string(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.ends_with("initialized"), "{response}");
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn a_starting_socket_reservation_cannot_be_unlinked_even_through_discovery() {
+        use std::os::unix::fs::MetadataExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("api.sock");
+        let discovery = root.path().join("state/run/st3.sock");
+        let reserved = super::reserve_unix_socket(&socket, Some(&discovery))
+            .await
+            .unwrap();
+        let inode = std::fs::metadata(&socket).unwrap().ino();
+        for path in [&socket, &discovery] {
+            let error = super::reserve_unix_socket(path, None).await.err().unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("refusing to replace reserved Unix socket"),
+                "{error}"
+            );
+            assert_eq!(std::fs::metadata(path).unwrap().ino(), inode);
+        }
+        drop(reserved);
+        // A released/crashed reservation is not a permanent latch.
+        let next = super::reserve_unix_socket(&socket, Some(&discovery))
+            .await
+            .unwrap();
+        assert!(tokio::net::UnixStream::connect(&socket).await.is_err());
+        drop(next);
     }
 }
 
