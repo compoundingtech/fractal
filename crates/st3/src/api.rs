@@ -1664,6 +1664,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "idempotency-conflict"
         | "idempotency-key-expired"
         | "issuer-required"
+        | "suspend-authored-session-selection"
         | "arrangement-exists"
         | "arrangement-folder-exists"
         | "arrangement-retired"
@@ -2870,7 +2871,10 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
 /// without a claim, so this is read per request rather than cached with the agents.
 fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
     let mut running = BTreeMap::<String, Vec<Value>>::new();
-    for subagent in store.running_subagents(client_now_ms() as u64)? {
+    let subagents = crate::otel::roster_phase("subagent_leases", || {
+        store.running_subagents(client_now_ms() as u64)
+    })?;
+    for subagent in subagents {
         running
             .entry(subagent.agent.clone())
             .or_default()
@@ -11451,7 +11455,7 @@ async fn restart_agent(
     {
         return Err(ApiError::bad(St3Error::new(
             "restart-suspended",
-            "the seat is suspended; resume it with `st agents resume`",
+            "the seat is suspended; resume it with `st agents resume`. If resume refuses an authored session selection, use `st agents stop` then `st agents start`; this ends the suspension and launches the declaration without preserving the suspended session",
         )));
     }
     let status = state
@@ -11773,6 +11777,15 @@ pub(crate) fn request_suspend(
             ))
         })?;
     check_suspension_fence(fence.as_ref(), Some(incarnation), &token)?;
+    if let Some(selector) = crate::native_resume::authored_session_selection(&member) {
+        return Err(ApiError::bad(
+            St3Error::new(
+                "suspend-authored-session-selection",
+                format!("the seat declares its own session selection ({selector}); native resume would refuse it, so suspend leaves the seat running"),
+            )
+            .with_detail("selector", selector),
+        ));
+    }
     let blocking = crate::suspension::blockers(&state.store, &subject, incarnation)
         .map_err(ApiError::internal)?;
     if !blocking.is_empty() {
