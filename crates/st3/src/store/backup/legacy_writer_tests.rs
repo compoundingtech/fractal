@@ -128,7 +128,7 @@ impl LegacyWriter<'_> {
                     health.map_or(admitted == 0, |(status, through)| status == "healthy" && through >= admitted),
                     "backup requires a healthy, fully projected graph; retry after replication catches up"
                 );
-                let mut header = self.backup_header()?;
+                let mut header = self.snapshot_backup_header()?;
                 if !owned.is_empty() {
                     header.version = crate::backup::VERSION_WITH_BODIES;
                 }
