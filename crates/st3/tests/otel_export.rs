@@ -1986,14 +1986,18 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     assert_upgrade_link(&projection, &receive);
     assert_eq!(string_attribute(&projection, "st.replication.peer"), Some("otel-source"));
     assert!(int_attribute(&projection, "st.replication.moved_envelopes").is_some_and(|count| count > 0), "{projection}");
+    // Receive has no read budget: its mutation-dispatch polls must retain the route origin
+    // for both queue waits and loan holds, including nested blocking store work.
     daemon.await_export(&root.path().join("capture/metrics.ndjson"), |request| {
-        metric_points(request, "st.db.writer.hold").into_iter().any(|point| {
-            string_attribute(point, "st.db.writer.origin")
-                == Some("POST /v1/internal/replication/receive")
-                && point["count"].as_u64().or_else(|| {
-                    point["count"].as_str().and_then(|value| value.parse::<u64>().ok())
-                }).is_some_and(|count| count > 0)
-                && point["sum"].as_f64().is_some_and(|seconds| seconds > 0.)
+        ["st.db.writer.hold", "st.db.writer.queue.duration"].into_iter().all(|metric| {
+            metric_points(request, metric).into_iter().any(|point| {
+                string_attribute(point, "st.db.writer.origin")
+                    == Some("POST /v1/internal/replication/receive")
+                    && point["count"].as_u64().or_else(|| {
+                        point["count"].as_str().and_then(|value| value.parse::<u64>().ok())
+                    }).is_some_and(|count| count > 0)
+                    && point["sum"].as_f64().is_some_and(|seconds| seconds > 0.)
+            })
         })
     });
     for (body, traceparent, trace) in [

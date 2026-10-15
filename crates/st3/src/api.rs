@@ -1186,8 +1186,8 @@ async fn response_envelope_unbounded(
             let first_poll = Arc::new(std::sync::OnceLock::<Instant>::new());
             let first_work = first_poll.clone();
             let server_trace = otel.clone();
-            let writer_wait = server_trace.as_ref().map(|_| {
-                Arc::new(smallclaims::sqlite::telemetry::WriterWait::default())
+            let writer_wait = (server_trace.is_some() || crate::otel::metrics_enabled()).then(|| {
+                Arc::new(smallclaims::sqlite::telemetry::WriterWait::with_origin(origin))
             });
             let polled_writer_wait = writer_wait.clone();
             let remote = served_remote.clone();
