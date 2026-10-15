@@ -11,6 +11,9 @@ import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import * as Aria from 'react-aria-components'
+import { VisuallyHidden } from 'react-aria-components'
+// Deep import: the assistant-ui barrel would pull the transcript graph into the eager shell.
+import { Icon as CompositionIcon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
@@ -27,6 +30,9 @@ import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
 import { useGatewaySync } from '../data/react.tsx'
 import { matchesSidebarHost, parseSidebarQuery } from '../shell/sidebar/filter.ts'
+import { PaletteHost, usePaletteRecents, type PaletteHandle } from '../command-palette/LiveCommandPalette.tsx'
+import type { PaletteCommand, PaletteTarget } from '../command-palette/model.ts'
+import type { SidebarNode } from '../folders/sidebarContract.ts'
 
 // A static import would evaluate the kit Transcript/Markdown/refractor before the shell paints.
 // Demand and speculative prefetch share one in-flight request; rejection releases it for retry.
@@ -91,11 +97,14 @@ class ConversationPaneCodeBoundary extends React.Component<React.ComponentProps<
 
 // The kit diff viewer imports Markdown; keep it outside the shell's eager graph too.
 const ChangesInspector = React.lazy(() => import('./ChangesInspector.tsx').then(module => ({ default: module.ChangesInspector })))
+const ToolInspector = React.lazy(() => import('./ToolInspector.tsx').then(module => ({ default: module.LiveToolInspector })))
 // The terminal grid, fonts and native key encoder load only when a terminal pane opens.
 const TerminalDetail = React.lazy(() => import('../terminal/TerminalDetail.tsx').then((module) => ({ default: module.TerminalDetail })))
 const MissionsPane = React.lazy(() => import('../missions/MissionsPane.tsx').then((module) => ({ default: module.MissionsPane })))
 const DocumentPane = React.lazy(() => import('../documents/DocumentPane.tsx').then((module) => ({ default: module.DocumentPane })))
 
+// This shell renders a flat roster: no agent belongs to a sidebar folder, so palette rows carry no folder field.
+const flatRosterFolders: readonly SidebarNode[] = []
 const sidebarRatio = persistedAtom({ key: 'round2.sidebarRatio', schema: Schema.Number, defaultValue: 256 / 1440 })
 const panelRatio = persistedAtom({ key: 'round2.panelRatio', schema: Schema.Number, defaultValue: 380 / 1440 })
 const sidebarClosed = persistedAtom({ key: 'round2.sidebarClosed', schema: Schema.Boolean, defaultValue: false })
@@ -217,6 +226,61 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   const panelSize = dragPanel ?? Math.min(maxPanel, Math.max(240, Math.round(panelFraction * viewport)))
   const maxSidebar = Math.max(208, Math.min(440, viewport - 640))
   const agentName = agent?.name ?? current.split('/').at(-1) ?? 'Conversation'
+  const platform = navigator.platform.includes('Mac') ? 'mac' as const : 'other' as const
+  // Native ask=question is actionable even without an attention card; unknown attention never requests action.
+  const needsYou = React.useMemo(() => {
+    const agentRefs = new Set(agents.map(row => row.ref))
+    const refs = new Set(subjects.filter(subject => subject.icon === 'conversation' && subject.attention === true && agentRefs.has(subject.ref)).map(subject => subject.ref))
+    for (const row of agents) if (row.ask._tag === 'Known' && row.ask.value === 'question') refs.add(row.ref)
+    return refs
+  }, [agents, subjects])
+  const [palettePortal, setPalettePortal] = React.useState<HTMLDivElement | null>(null)
+  const [paletteNotice, setPaletteNotice] = React.useState('')
+  const paletteHandle = React.useRef<PaletteHandle>(null)
+  const paletteButtonRef = React.useRef<HTMLButtonElement>(null)
+  // This shell has no modal sidebar drawer competing with the palette for focus.
+  const beforePaletteOpen = React.useCallback(() => false, [])
+  const dataSource = useDataSource()
+  const paletteRecents = usePaletteRecents(dataSource.gateway ?? dataSource.mode, current)
+  const paletteShortcut = platform === 'mac' ? '⌘K' : 'Ctrl K'
+  const terminalOpen = selectedPane.startsWith('terminal/')
+  const toggleTerminal = () => { if (terminalOpen) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }
+  const paletteCommands = React.useMemo((): readonly PaletteCommand[] => {
+    const noAgent = current === '' ? 'Select an agent first.' : undefined
+    return [
+      { id: 'terminal.toggle', title: terminalOpen ? 'Close terminal' : 'Open terminal', detail: agentName, category: 'View', ...(!terminalOpen && terminalRef === undefined ? { disabledReason: noAgent ?? terminalDisabledReason ?? 'This agent has no observed terminal.' } : {}) },
+      { id: 'details.toggle', title: diffOpen ? 'Hide agent details' : 'Show agent details', detail: agentName, category: 'View', keywords: ['inspector', 'changes'], ...(noAgent === undefined ? {} : { disabledReason: noAgent }) },
+      { id: 'sidebar.toggle', title: 'Toggle sidebar', detail: 'Agent roster', category: 'View' },
+      { id: 'theme.toggle', title: scheme === 'dark' ? 'Use light theme' : 'Use dark theme', detail: 'This device', category: 'View', keywords: ['appearance', 'scheme'] },
+      { id: 'link.copy', title: 'Copy link to this agent', detail: agentName, category: 'Share', keywords: ['url', 'share'], ...(noAgent === undefined ? {} : { disabledReason: noAgent }) },
+    ]
+  }, [current, terminalOpen, terminalRef, terminalDisabledReason, agentName, diffOpen, scheme])
+  const runPaletteTarget = (target: PaletteTarget) => {
+    if (target._tag === 'Agent') select(target.ref)
+    else if (target._tag === 'Mission') { if (target.agentRef !== undefined) select(target.agentRef) }
+    else if (target.id === 'terminal.toggle') toggleTerminal()
+    else if (target.id === 'details.toggle') setDiffOpen(value => !value)
+    else if (target.id === 'sidebar.toggle') setCollapsed(!collapsed)
+    else if (target.id === 'theme.toggle') setScheme(scheme === 'dark' ? 'light' : 'dark')
+    else {
+      const link = window.location.href
+      navigator.clipboard.writeText(link).then(() => setPaletteNotice('Link copied.'), () => setPaletteNotice(`Clipboard unavailable. Link: ${link}`))
+    }
+  }
+  // The palette host is memoized; a stable callback keeps workspace renders from re-rendering an open palette.
+  const latestPaletteTarget = React.useRef(runPaletteTarget)
+  latestPaletteTarget.current = runPaletteTarget
+  const selectPaletteTarget = React.useCallback((target: PaletteTarget) => latestPaletteTarget.current(target), [])
+  const paletteInventoryNote = fleet._tag === 'Waiting' ? 'Waiting for the agent roster.'
+    : fleet._tag === 'Unavailable' ? 'The agent roster is unavailable.'
+      : fleet.coverage?._tag === 'Partial' ? 'Showing a partial roster.'
+        : stale ? 'Showing the last observed roster while reconnecting.' : undefined
+  const paletteButton = <span {...stylex.props(styles.paletteTrigger)}>
+    <Aria.Button ref={paletteButtonRef} aria-label="Switch agent" render={props => <button {...props} aria-keyshortcuts={platform === 'mac' ? 'Meta+K' : 'Control+K'} />} onPress={() => paletteHandle.current?.open(paletteButtonRef.current)} {...stylex.props(styles.textButton, styles.paletteButton)}>
+      <CompositionIcon name="search" /><span {...stylex.props(styles.paletteLabel)}>Switch</span>
+    </Aria.Button>
+    <kbd aria-hidden="true" {...stylex.props(styles.paletteLabel, styles.kbd)}>{paletteShortcut}</kbd>
+  </span>
   // The panes are portalled from outside the shell providers: those values change on every
   // switch, and React then scans every fiber below a memoized pane for consumers, which costs
   // O(retained turns) per click. No pane reads these shell contexts.
@@ -274,7 +338,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
               </aside>
               <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
               <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-                <ThreadHeader terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} /></>} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} status={headerRow?.status} statusLabel={headerRow?.statusLabel} statusSince={headerRow?.statusSince} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} now={now} panelOpen={diffOpen} drawerOpen={selectedPane.includes('terminal/')} onTogglePanel={() => setDiffOpen((value) => !value)} onToggleDrawer={() => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }} />
+                <ThreadHeader terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={<div {...stylex.props(styles.headerActions)}>{paletteButton}{current === '' ? null : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} /></>}</div>} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} status={headerRow?.status} statusLabel={headerRow?.statusLabel} statusSince={headerRow?.statusSince} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} now={now} panelOpen={diffOpen} drawerOpen={selectedPane.includes('terminal/')} onTogglePanel={() => setDiffOpen((value) => !value)} onToggleDrawer={toggleTerminal} />
                 {visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
                     <Aria.Button aria-pressed={selectedPane === 'thread'} onPress={() => navigate(current)} {...stylex.props(styles.textButton)}>
@@ -303,15 +367,14 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
               {openedTool !== undefined && current !== '' ? (
                 <>
                   <ResizableSplit id="live-tool-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Tool detail panel width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setOpenedTool(undefined)} onReset={() => setPanelFraction(380 / viewport)} />
-                  <aside aria-label="Tool detail" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}>
-                    <header {...stylex.props(styles.toolDetailHeader)}>
-                      <strong {...stylex.props(styles.toolDetailTitle)}>{openedTool.title}{openedTool.argsSummary === undefined ? '' : ` ${openedTool.argsSummary}`}</strong>
-                      <Aria.Button aria-label="Close tool detail" onPress={() => setOpenedTool(undefined)} {...stylex.props(styles.iconButton)}>×</Aria.Button>
-                    </header>
-                    <pre {...stylex.props(styles.toolDetailOutput)}>{openedTool.detail ?? (openedTool.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
-                  </aside>
+                  <React.Suspense fallback={<aside aria-label="Tool detail" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}><p role="status" {...stylex.props(styles.notice)}>Loading tool inspector…</p></aside>}>
+                    <ToolInspector agentRef={current} call={openedTool} width={panelSize} onClose={() => setOpenedTool(undefined)} />
+                  </React.Suspense>
                 </>
               ) : null}
+              <div ref={setPalettePortal} {...stylex.props(styles.portal)} />
+              <PaletteHost ref={paletteHandle} onOpen={beforePaletteOpen} fallbackFocus={paletteButtonRef} agents={agents} tree={flatRosterFolders} needsYou={needsYou} current={current} stale={stale} inventoryNote={paletteInventoryNote} recents={paletteRecents} commands={paletteCommands} onSelect={selectPaletteTarget} portalContainer={palettePortal} shortcut={paletteShortcut} />
+              <VisuallyHidden><p role="status">{paletteNotice}</p></VisuallyHidden>
             </div>
           </ThreadHeaderSlotContext.Provider>
         </MonitorDetailProvider>
@@ -428,6 +491,14 @@ const styles = stylex.create({
   brand: { height: g.band, paddingInline: s.lg, display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
   iconButton: { width: 28, height: 28, display: 'inline-flex', justifyContent: 'center', alignItems: 'center', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer' },
   textButton: { padding: '4px 8px', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer', fontSize: t.metaSize },
+  paletteTrigger: { display: 'inline-flex', alignItems: 'center', gap: s.xs },
+  paletteButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: s.sm, width: { default: 28, '@media (min-width: 640px)': 'auto' }, paddingInline: { default: 0, '@media (min-width: 640px)': s.md }, whiteSpace: 'nowrap', ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outline: `2px solid ${c.primary}`, outlineOffset: 1 } },
+  // Narrow headers keep the search icon only; the button keeps its name and the palette stays reachable by touch.
+  paletteLabel: { display: { default: 'none', '@media (min-width: 640px)': 'inline-flex' }, alignItems: 'center', gap: s.sm },
+  kbd: { fontFamily: t.fontSans, fontSize: t.denseSize, color: c.fgMuted, borderWidth: 1, borderStyle: 'solid', borderColor: c.borderStrong, borderRadius: 4, paddingInline: s.xs },
+  portal: { display: 'contents' },
+  // The kit's action slot is a block; keep Switch on the same row as the conversation actions.
+  headerActions: { display: 'flex', alignItems: 'center', gap: { default: s.xs, '@media (min-width: 640px)': s.md } },
   // Message fill plus a hairline: raised equals the sidebar surface in light mode.
   search: { marginInline: s.md, padding: `calc(${s.md} - ${g.hairline})`, borderRadius: 8, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border, backgroundColor: c.message, flexShrink: 0 },
   searchInput: { width: '100%', minWidth: 0, borderWidth: 0, outline: 'none', backgroundColor: 'transparent', color: c.fg, fontSize: t.metaSize },
@@ -455,7 +526,4 @@ const styles = stylex.create({
   notice: { padding: s.lg, fontSize: t.metaSize, color: c.fgMuted },
   empty: { position: 'relative', zIndex: 2, margin: 'auto', padding: s.section, color: c.fgMuted },
   changesPanel: { display: 'flex', flexDirection: 'column', flexShrink: 0, minWidth: 0, minHeight: 0, overflowY: 'auto', borderLeftWidth: 1, borderLeftStyle: 'solid', borderLeftColor: c.border },
-  toolDetailHeader: { height: 40, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },
-  toolDetailTitle: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize },
-  toolDetailOutput: { margin: 0, padding: s.lg, minHeight: 0, overflowY: 'auto', fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: c.fgMuted },
 })

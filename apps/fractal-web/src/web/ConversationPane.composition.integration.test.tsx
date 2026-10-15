@@ -27,7 +27,10 @@ vi.mock('@stylexjs/stylex', () => ({
   defineVars: (variables: unknown) => variables,
   createTheme: () => ({}),
   keyframes: () => 'test-animation',
-  props: () => ({}),
+  props: (...styles: readonly unknown[]) => ({
+    'data-test-color': styles.flat(Infinity).flatMap(style =>
+      typeof style === 'object' && style !== null && 'color' in style && typeof style.color === 'string' ? [style.color] : []).at(-1),
+  }),
 }))
 
 const source = vi.hoisted(() => ({
@@ -105,6 +108,7 @@ let root: Root | undefined
 const container = document.createElement('div')
 
 beforeEach(() => {
+  opened.length = 0
   source.now = 1000
   source.runtimeItems = []
   source.transcriptTurns = []
@@ -422,6 +426,21 @@ describe('ConversationPane composition activation', () => {
     }
   })
 
+  it('opens the existing read-only inspector from a typed wait row with its original call', async () => {
+    const wait: ConversationItem = { _tag: 'ToolCall', id: 'wait/example', callId: 'call/wait', name: 'wait', input: { jobs: ['bg/example'] }, status: 'success', callSeen: true, at: at(1), result: { content: 'Arrived', isError: false, at: at(2), metadata: { jobs: [{ jobId: 'bg/example' }] } } }
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [wait], hasOlder: false, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    const before = opened.length
+    await mount()
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-work-log-summary]')!.click())
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-tool-status][data-item-id="wait/example"] > button')!.click())
+    const inspect = container.querySelector<HTMLButtonElement>('button[aria-label="Open inspector for wait"]')
+    expect(inspect).not.toBeNull()
+    await act(async () => inspect!.click())
+    expect(opened).toHaveLength(before + 1)
+    expect(opened.at(-1)).toMatchObject({ id: wait.id, callId: wait.callId, toolName: 'wait', kind: 'wait', input: wait.input })
+  })
+
   it('reproduces the reference transcript for a scenario native page', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: true, observation: { empty: false } } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
@@ -462,16 +481,16 @@ describe('ConversationPane composition activation', () => {
     const fold = container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')
     expect(fold?.textContent).toContain('Worked for 7s')
     await act(async () => { fold!.click() })
-    const raw = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')
+    const raw = container.querySelector<HTMLButtonElement>('[data-tool-status="success"] > button')
     await act(async () => { raw!.click() })
     const open = await act(async () => {
-      const button = container.querySelector<HTMLButtonElement>('button[aria-label="Open Reading information tool detail"]')
+      const button = container.querySelector<HTMLButtonElement>('button[aria-label="Open Reading tool detail"]')
       button?.click()
       return button
     })
     expect(open).not.toBeNull()
     expect(opened).toHaveLength(1)
-    expect(opened[0]).toMatchObject({ id: 'read', kind: 'read', title: 'Reading information', argsSummary: undefined })
+    expect(opened[0]).toMatchObject({ id: 'read', kind: 'read', title: 'Reading', argsSummary: 'src/rows.ts' })
   })
 
   it('shows native text-block tool output on the expanded row instead of No output', async () => {
@@ -487,16 +506,14 @@ describe('ConversationPane composition activation', () => {
     await act(async () => { fold!.click() })
     const log = container.querySelector('[data-testid="work-log"]')!
     expect(log.querySelector('[data-tool-status="success"]')?.textContent).not.toContain('No output')
-    const preview = log.querySelector('[data-testid="tool-detail-preview"]')!
-    expect(preview.textContent).not.toContain(output)
-    expect(preview.querySelector('pre')).toBeNull()
-    const raw = [...preview.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')
+    expect(log.querySelector('[data-testid="tool-detail-preview"]')).toBeNull()
+    const raw = log.querySelector<HTMLButtonElement>('[data-tool-status="success"] > button')
     expect(raw?.getAttribute('aria-expanded')).toBe('false')
     await act(async () => { raw!.click() })
     expect(log.querySelector('[data-testid="tool-detail-preview"]')?.textContent).toContain('export const rows = []')
   })
 
-  it('keeps failed command diagnostics behind the banner raw disclosure', async () => {
+  it('keeps routine failures muted and reserves the diagnostic banner for a run-ending failure', async () => {
     const diagnostic = '/tmp/example/ready-step-test.fixture\nTraceback (most recent call last):\n  File "/tmp/example/check.py", line 4\nAssertionError: expected ready state'
     source.feed = { _tag: 'Observed', freshness: 'live', value: {
       items: [scenario[0]!, { _tag: 'ToolCall', id: 'failed-run', callId: 'failed-call', name: 'run',
@@ -505,6 +522,18 @@ describe('ConversationPane composition activation', () => {
       hasOlder: false, observation: { empty: false },
     } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    await mount()
+    expect(container.querySelector('[data-error-overlay]')).toBeNull()
+    const fold = container.querySelector<HTMLButtonElement>('[data-work-log-summary]')!
+    expect(fold.getAttribute('data-test-color')).toBe('#818181')
+    await act(async () => { fold.click() })
+    const row = container.querySelector<HTMLElement>('[data-tool-status="error"]')!
+    expect(row.querySelector('button')?.getAttribute('data-test-color')).toBe('#818181')
+    expect(row.querySelector('[data-tool-error-mark] svg')?.getAttribute('width')).toBe('12')
+    // Failing control: an authoritative failed run retains its readable banner and raw diagnostics.
+    source.feed = { ...source.feed, value: { ...source.feed.value, items: [
+      ...source.feed.value.items, { _tag: 'Status', id: 'run-ended', status: 'failed', at: at(4) },
+    ] } }
     await mount()
     const banner = container.querySelector<HTMLElement>('[data-error-overlay]')!
     expect(banner.textContent).toContain('Command did not complete')
@@ -531,14 +560,17 @@ describe('ConversationPane composition activation', () => {
     } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
     await mount()
-    expect(container.querySelector('[data-error-overlay]')?.textContent).toContain(reason)
+    expect(container.querySelector('[data-error-overlay]')).toBeNull()
     const fold = container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')!
+    expect(fold.getAttribute('data-test-color')).toBe('#818181')
     await act(async () => { fold.click() })
     const row = container.querySelector<HTMLElement>('[data-tool-status="error"]')!
+    expect(row.querySelector('button')?.getAttribute('data-test-color')).toBe('#818181')
+    expect(row.querySelector('[data-tool-error-mark] svg')?.getAttribute('width')).toBe('12')
     const open = row.querySelector<HTMLButtonElement>('button')
     if (open !== null) await act(async () => { open.click() })
     expect(row.querySelector('[data-testid="tool-error-reason"]')?.textContent).toBe(reason)
-    expect(row.querySelector('pre')).toBeNull()
+    expect([...row.querySelectorAll('pre')].map(pre => pre.textContent).join('\n')).toContain(diagnostic)
   })
 
   it('shows a subprocess script only as unescaped code in the raw disclosure', async () => {
@@ -551,12 +583,19 @@ describe('ConversationPane composition activation', () => {
     } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
     await mount()
-    const banner = container.querySelector<HTMLElement>('[data-error-overlay]')!
-    expect(banner.textContent).toContain('Command timed out after 30s')
-    expect(banner.textContent).not.toContain('set -eu')
-    const raw = [...banner.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')!
+    expect(container.querySelector('[data-error-overlay]')).toBeNull()
+    const fold = container.querySelector<HTMLButtonElement>('[data-work-log-summary]')!
+    expect(fold.getAttribute('data-test-color')).toBe('#818181')
+    await act(async () => { fold.click() })
+    const row = container.querySelector<HTMLElement>('[data-tool-status="error"]')!
+    const raw = row.querySelector<HTMLButtonElement>('button')!
+    expect(raw.getAttribute('data-test-color')).toBe('#818181')
+    expect(row.querySelector('[data-tool-error-mark] svg')?.getAttribute('width')).toBe('12')
+    expect(row.querySelector('[data-testid="tool-detail-preview"]')).toBeNull()
+    expect(row.textContent).not.toContain("echo 'ready'")
     await act(async () => { raw.click() })
-    expect(banner.querySelector('[data-testid="error-overlay-command"] code')?.textContent).toBe("set -eu\necho 'ready'\n")
+    expect(row.querySelector('[data-testid="tool-error-reason"]')?.textContent).toBe('Command timed out after 30s')
+    expect(row.querySelector('[data-testid="tool-command"] code')?.textContent).toBe("set -eu\necho 'ready'\n")
   })
 
   it.each([
@@ -578,10 +617,6 @@ describe('ConversationPane composition activation', () => {
     if (open !== null) await act(async () => { open.click() })
     const preview = container.querySelector<HTMLElement>('[data-testid="tool-detail-preview"]')!
     expect(preview.querySelector('[data-testid="tool-error-reason"]')?.textContent).toBe(reason)
-    expect(preview.querySelector('[data-testid="tool-raw-input"]')).toBeNull()
-    expect(preview.querySelector('[data-testid="tool-command"]')).toBeNull()
-    const raw = [...preview.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')!
-    await act(async () => { raw.click() })
     expect(preview.querySelector('[data-testid="tool-command"] code')?.textContent).toBe(command)
     expect(preview.querySelector('[data-testid="tool-raw-input"] code')?.textContent).toBe(JSON.stringify(input, null, 2))
   })

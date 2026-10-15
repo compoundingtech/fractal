@@ -12,6 +12,8 @@ import { ConversationItem, type RunStatus, type SendState } from '../conversatio
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import { sendFailureDetail } from './composerSend.ts'
+import { toolKindFor } from '../conversation/toolClassification.ts'
+export { toolKindFor } from '../conversation/toolClassification.ts'
 
 /** Unknown protocol events are hidden by default; explicit inspection uses payload-free notices. */
 type KitConversationItem = NonNullable<ConversationRuntimeOptions['messages']>[number]
@@ -52,23 +54,22 @@ const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly r
 
 const isOmittedItem = (item: ConversationItem): boolean => item._tag === 'UnknownEvent'
 
-/** The host owns work-log classification: how a tool reads, runs or edits. */
-const toolKindFor = (name: string): WorkKind => {
-  const tool = name.toLowerCase()
-  if (/(?:^|[/_.-])(?:bash|sh|shell|exec|execute|run|command|eval|task|infra)(?:$|[/_.-])/.test(tool)) return 'run'
-  return /(?:edit|write|patch|apply)/.test(tool) ? 'edit' : 'read'
-}
 
-/** Human intent belongs in the header; raw paths and commands remain on the source tool item. */
-const toolSummary = (item: Extract<KitConversationItem, { _tag: 'ToolCall' }>): string => {
+/** Human intent belongs in the row title; absence keeps the verb/argument fallback explicit. */
+const toolIntent = (item: Extract<KitConversationItem, { _tag: 'ToolCall' }>): string | undefined => {
   const input = typeof item.input === 'object' && item.input !== null ? item.input : {}
   for (const key of ['i', 'title', 'description']) {
     const value = key in input ? Reflect.get(input, key) : undefined
-    if (typeof value === 'string' && value.trim().length > 0 && !/(?:[a-z]+:\/\/|\/[\w.-]+\/)/i.test(value))
+    if (typeof value === 'string' && value.trim().length > 0)
       return value.trim().replace(/\s+/g, ' ').slice(0, 100)
   }
-  return toolKindFor(item.name) === 'run' ? 'Running a command'
-    : toolKindFor(item.name) === 'edit' ? 'Updating a file' : 'Reading information'
+  return undefined
+}
+const toolSummary = (item: Extract<KitConversationItem, { _tag: 'ToolCall' }>, intent: string | undefined): string => {
+  if (item.skipped) return 'Skipped'
+  if (intent !== undefined) return intent
+  const kind = toolKindFor(item)
+  return { read: 'Reading', search: 'Searching', run: 'Running', change: 'Changing', subagent: 'Delegating', web: 'Browsing', decision: 'Deciding', todo: 'Planning', wait: 'Waiting', message: 'Message sent', schedule: 'Scheduling', 'terminal-input': 'Terminal input', skill: 'Using skill', eval: 'Evaluating', unknown: item.name }[kind]
 }
 
 const activeRunStatuses: Record<RunStatus, boolean> = { queued: true, running: true, waiting: true, completed: false, failed: false, cancelled: false }
@@ -137,10 +138,10 @@ export const prepareTranscriptTurns = (
       if (caption !== undefined) senderCaptions[item.id] = caption
     }
     const work = workLogTurnFromItems(prompt === undefined ? turnItems : [prompt, ...turnItems], {
-      kindFor: toolKindFor,
+      kindFor: (name, call) => toolKindFor(call ?? name),
       ...workFactsFor(first.at ?? '', turnItems),
       ...(first.at === undefined ? {} : { startedAt: first.at }),
-      ...(turns.length === 0 && !options.firstTurnComplete ? { completeHistory: false } : {}),
+      completeHistory: turns.length > 0 || options.firstTurnComplete,
     })
     const tools = new Map(turnItems.flatMap(item => item._tag === 'ToolCall' ? [[item.id, item] as const] : []))
     turns.push({
@@ -149,7 +150,10 @@ export const prepareTranscriptTurns = (
       items: turnItems,
       work: { ...work, calls: work.calls.map(call => {
         const item = tools.get(call.id)
-        return { ...call, title: item === undefined ? 'Working' : toolSummary(item), summary: item === undefined ? 'Working' : toolSummary(item), argsSummary: undefined }
+        if (item === undefined) return call
+        const intent = toolIntent(item)
+        const summary = toolSummary(item, intent)
+        return { ...call, title: summary, summary, ...(intent === undefined ? {} : { intent }) }
       }) },
       ...(Object.keys(senderCaptions).length === 0 ? {} : { senderCaptions }),
     })

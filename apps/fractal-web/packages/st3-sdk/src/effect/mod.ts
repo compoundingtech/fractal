@@ -66,6 +66,8 @@ import type * as Tracer from 'effect/Tracer'
 
 import { makeAdmission } from './admission.ts'
 import { takeEarlyCollections } from './early.ts'
+import { sourceBlocks } from './conversationBlocks.ts'
+export { SourceBlock, sourceBlocks } from './conversationBlocks.ts'
 import { makeFirstFrames, type FirstFrameAttempt, type FirstFrameOutcome } from './firstFrame.ts'
 import {
   type FollowFreshness,
@@ -429,7 +431,12 @@ export const decodeConversationChunk = (
     : {}),
   entries: frame.items.flatMap<TimelineEntry | UnrecognizedEntry>((raw) => {
     try {
-      return [decodeEntry(raw)]
+      const entry = decodeEntry(raw)
+      const blocks = raw !== null && typeof raw === 'object' && 'body' in raw ? sourceBlocks(raw.body) : undefined
+      // The generated v0 schema strips future block fields. Restore only decoded native facts,
+      // never the raw body: ids, roles, timestamps and fallback content remain schema-checked.
+      if (blocks !== undefined) Object.assign(entry.body, { blocks })
+      return [entry]
     } catch {
       return unrecognized(raw) ?? []
     }

@@ -3,7 +3,7 @@ import tailwindcss from '@tailwindcss/vite'
 import stylex from '@stylexjs/unplugin'
 
 const config: StorybookConfig = {
-  stories: ['../src/**/*.stories.tsx'],
+  stories: ['../src/**/*.stories.tsx', '../../../apps/fractal-web/src/web/SemanticTools.stories.tsx', '../../../apps/fractal-web/src/web/TypedToolResult.stories.tsx', '../../../apps/fractal-web/src/web/RecordedTaskResult.stories.tsx', '../../../apps/fractal-web/src/web/WaitInspector.stories.tsx', '../../../apps/fractal-web/src/web/RecordedMessageSend.stories.tsx', '../../../apps/fractal-web/src/command-palette/CommandPalette.stories.tsx'],
   staticDirs: ['./fixtures'],
   framework: '@storybook/react-vite',
   addons: ['@storybook/addon-docs', '@storybook/addon-a11y'],

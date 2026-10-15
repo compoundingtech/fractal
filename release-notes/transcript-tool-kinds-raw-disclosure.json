@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Transcript tool rows preserve read, search, run, change, subagent, web, decision and todo kinds with scoped targets. Runs show their readable command's first nonempty line before cwd; cwd-only targets use their last two path segments. Orphan results have an unknown kind and an Invocation not loaded title, without inferred targets. Successful output no longer opens automatically; each row has one inline raw input/output disclosure and retains its inspector entry. Human titles are plain text, not shell syntax.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "No wire change. WorkKind uses change instead of edit and adds search, subagent, web, decision, todo and unknown (unobserved invocation). WorkLogV1 removes automatic previewCallDetail; output is opened deliberately through the row." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

@@ -200,12 +200,8 @@ export const HostToolReveal: Story = { args: { state: 'two' }, play: async ({ ca
   await userEvent.click(file)
   await expect(file).toHaveAttribute('aria-expanded', 'false')
   await userEvent.click(canvas.getByRole('button', { name: /^Read sample\/rows\.ts\b/ }))
-  // Tool rows disclose a semantic preview first; host actions live behind raw input/output.
-  await expect(canvas.queryByRole('button', { name: 'Open Read sample/rows.ts tool detail' })).toBeNull()
-  const raw = canvas.getByRole('button', { name: 'Show raw input/output' })
-  await expect(raw).toHaveAttribute('aria-expanded', 'false')
-  await userEvent.click(raw)
-  await expect(raw).toHaveAttribute('aria-expanded', 'true')
+  // Expanding the row is the single route: the host action sits beside the raw input/output.
+  await expect(canvas.queryByRole('button', { name: 'Show raw input/output' })).toBeNull()
   await userEvent.click(canvas.getByRole('button', { name: 'Open Read sample/rows.ts tool detail' }))
   await settle()
   await expect(file).toHaveAttribute('aria-expanded', 'true')

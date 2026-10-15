@@ -7,6 +7,15 @@
 // context/agent-ecosystem/03-coding-agents/08-clients/02-webfractal/02-conversation/spec.md#items.
 
 import { Schema } from 'effect'
+import { SourceBlock } from '@st3/sdk/effect'
+
+/** Native facts are retained for semantic app adapters and the explicit inspector. */
+const sourceFacts = {
+  blocks: Schema.optional(Schema.Array(SourceBlock)),
+  view: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  header: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  assistantMetadata: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+}
 
 /** Participant roles displayed by the normalized conversation renderer. */
 export const Role = Schema.Literals(['user', 'assistant', 'system'])
@@ -38,6 +47,9 @@ export type ToolCallStatus = typeof ToolCallStatus.Type
 /** Tool output joined to its invocation, including media type and completion time. */
 export const ToolResult = Schema.Struct({
   content: Schema.Unknown,
+  blocks: Schema.optional(Schema.Array(SourceBlock)),
+  metadata: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  view: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
   mediaType: Schema.optional(Schema.String),
   isError: Schema.Boolean,
   at: Schema.String,
@@ -81,6 +93,7 @@ export type SendState = typeof SendState.Type
 export const ConversationItem = Schema.TaggedUnion({
   /** Prose from a participant. `streaming` = the entry is not final yet (revisions replace it). */
   Text: {
+    ...sourceFacts,
     id: Schema.String,
     role: Role,
     text: Schema.String,
@@ -93,6 +106,7 @@ export const ConversationItem = Schema.TaggedUnion({
   },
   /** A Small Talk message envelope joined into the conversation (st `message` entry). */
   Message: {
+    ...sourceFacts,
     id: Schema.String,
     messageId: Schema.String,
     from: Schema.optional(Schema.String),
@@ -104,6 +118,7 @@ export const ConversationItem = Schema.TaggedUnion({
   },
   /** Model reasoning. No st wire source yet (open Q2); ingest `Thinking` and proposed D08 feed it. */
   Reasoning: {
+    ...sourceFacts,
     id: Schema.String,
     text: Schema.String,
     durationMs: Schema.optional(Schema.Finite),
@@ -113,12 +128,14 @@ export const ConversationItem = Schema.TaggedUnion({
   },
   /** A tool invocation with its joined result (CAG.CLI.WEB.CNV-R04). `callSeen: false` = orphan result. */
   ToolCall: {
+    ...sourceFacts,
     id: Schema.String,
     callId: Schema.String,
     name: Schema.String,
     server: Schema.optional(Schema.String),
     input: Schema.Unknown,
     status: ToolCallStatus,
+    skipped: Schema.optional(Schema.Boolean),
     result: Schema.optional(ToolResult),
     callSeen: Schema.Boolean,
     at: Schema.String,
@@ -126,6 +143,7 @@ export const ConversationItem = Schema.TaggedUnion({
   },
   /** Run lifecycle heartbeat; the renderer folds these into the tail state. */
   Status: {
+    ...sourceFacts,
     id: Schema.String,
     status: RunStatus,
     detail: Schema.optional(Schema.String),
@@ -133,6 +151,7 @@ export const ConversationItem = Schema.TaggedUnion({
   },
   /** Token/cost accounting; rendered as footer metadata on the preceding assistant turn. */
   Usage: {
+    ...sourceFacts,
     id: Schema.String,
     semantics: Schema.Literals(['context_occupancy', 'session_cumulative', 'response']),
     model: Schema.optional(Schema.String),
@@ -146,6 +165,7 @@ export const ConversationItem = Schema.TaggedUnion({
   },
   /** Compact one-line notice: error, redaction, truncation, cleaned event, unknown entry type. */
   Notice: {
+    ...sourceFacts,
     id: Schema.String,
     kind: NoticeKind,
     text: Schema.String,
@@ -156,6 +176,7 @@ export const ConversationItem = Schema.TaggedUnion({
   },
   /** Known structured harness events, never displayed as a raw JSON transcript. */
   Event: {
+    ...sourceFacts,
     id: Schema.String,
     kind: Schema.Literals(['resource-observed', 'harness-message', 'subagent-result']),
     title: Schema.String,
@@ -166,6 +187,7 @@ export const ConversationItem = Schema.TaggedUnion({
   },
   /** Forward-compatible compact row with explicit type and an inspectable structured payload. */
   UnknownEvent: {
+    ...sourceFacts,
     id: Schema.String,
     eventType: Schema.String,
     data: Schema.Unknown,

@@ -3,6 +3,7 @@ import { convertConversationItem } from '../../../../packages/fractal-ui/src/ass
 import type { SyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
 import { mapConversationFeed, openableImageUrl, prepareTranscriptTurns, transcriptSendFailureReason, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
+import { toolKindFor } from './conversationTranscript.ts'
 
 const at = (seconds: number) => `2026-10-08T12:00:${String(seconds).padStart(2, '0').slice(-2)}.000Z`
 const sender = { kind: 'human', label: 'Reader' } as const
@@ -52,12 +53,12 @@ describe('kit transcript turn mapping', () => {
     expect(turns[0]!.senderCaptions).toEqual({ process: 'Example Agent', 'agent-message': 'Agent' })
     expect(turns[0]!.items[0]).toMatchObject({ text: 'proc://example is mentioned in prose' })
   })
-  it('uses one-line human tool summaries without exposing raw input in the header', () => {
+  it('keeps human tool summaries separate from the scoped command target', () => {
     const turns = transcriptTurnsForItems([
       prompt('p', 'Run the check.', 0),
       { _tag: 'ToolCall', id: 'eval', callId: 'eval', name: 'functions.eval', input: { title: 'Checking generated output', command: 'echo /srv/example/private\npwd' }, status: 'running', callSeen: true, at: at(1) },
     ], { firstTurnComplete: true })
-    expect(turns[0]!.work.calls[0]).toMatchObject({ kind: 'run', title: 'Checking generated output', argsSummary: undefined })
+    expect(turns[0]!.work.calls[0]).toMatchObject({ kind: 'eval', title: 'Checking generated output', argsSummary: 'echo /srv/example/private' })
     expect(turns[0]!.items[0]).toMatchObject({ input: { command: 'echo /srv/example/private\npwd' } })
   })
   it('hides unfamiliar events after answers by default while allowing explicit event inspection', () => {
@@ -224,8 +225,8 @@ describe('kit transcript turn mapping', () => {
   it('keeps a truncated page’s first turn expanded', () => {
     const turns = transcriptTurnsForItems(scenario, { firstTurnComplete: false })
     expect(turns[0]!.work.foldable).toBe(false)
-    // Later turns carry the kit default: foldable unless stated otherwise.
-    expect(turns[1]!.work.foldable).toBeUndefined()
+    // Later turns have a complete loaded boundary, so their fold counts are authoritative.
+    expect(turns[1]!.work.foldable).toBe(true)
   })
 
   it('renders every kept item through the kit converter unchanged', () => {
@@ -321,4 +322,22 @@ describe('image handoff', () => {
       expect(openableImageUrl(src)).toBeUndefined()
     }
   })
+})
+
+it('preserves all semantic tool kinds and their scoped targets', async () => {
+  for (const [name, kind] of [['read', 'read'], ['grep', 'search'], ['bash', 'run'], ['edit', 'change'], ['task', 'subagent'], ['web_search', 'web'], ['ask_question', 'decision'], ['todo', 'todo']]) expect(toolKindFor(name!)).toBe(kind)
+  const turns = prepareTranscriptTurns(scenario, { firstTurnComplete: true })
+  expect(turns[0]?.work.calls[0]?.argsSummary).toBe('src/rows.ts')
+})
+
+it('keeps run commands ahead of cwd and labels orphan results without inventing read intent', () => {
+  const inputs = [
+    { _tag: 'ToolCall', id: 'run/source', callId: 'run/source', name: 'run', input: { i: 'Open draft review', cwd: '/workspace/sample/packages/rows', command: 'gh pr create --draft\nprintf done' }, status: 'running', callSeen: true, at: at(1) },
+    { _tag: 'ToolCall', id: 'run/cwd', callId: 'run/cwd', name: 'run', input: { cwd: '/workspace/sample/packages/rows' }, status: 'running', callSeen: true, at: at(2) },
+    { _tag: 'ToolCall', id: 'orphan/result', callId: 'orphan/result', name: 'tool result', input: undefined, status: 'success', callSeen: false, at: at(3), result: { content: 'Captured result', isError: false, at: at(3) } },
+  ] as const
+  const calls = prepareTranscriptTurns(inputs, { firstTurnComplete: false })[0]!.work.calls
+  expect(calls[0]?.argsSummary).toBe('gh pr create --draft')
+  expect(calls[1]?.argsSummary).toBe('packages/rows')
+  expect(calls[2]).toMatchObject({ kind: 'unknown', title: 'tool result', argsSummary: undefined })
 })

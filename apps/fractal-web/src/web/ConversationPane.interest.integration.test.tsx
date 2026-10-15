@@ -380,12 +380,15 @@ describe('ConversationPane conversation demand', () => {
     const workspace = container.querySelector('section[aria-label="Agent workspace"]')!
     expect(workspace.querySelector('[data-testid="transcript-turn"]')).not.toBeNull()
     expect(container.querySelector('aside[aria-label="Tool detail"]')).toBeNull()
-    const raw = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')!
+    const summary = container.querySelector<HTMLButtonElement>('button[data-work-log-summary]')!
+    if (summary.getAttribute('aria-expanded') === 'false') flushSync(() => summary.click())
+    const raw = container.querySelector<HTMLButtonElement>('[data-tool-status="success"] > button')!
     expect(raw).toBeDefined()
     flushSync(() => raw.click())
-    const button = container.querySelector('button[aria-label="Open Reading information tool detail"]') as HTMLButtonElement
+    const button = container.querySelector('button[aria-label="Open Reading tool detail"]') as HTMLButtonElement
     expect(button).not.toBeNull()
     flushSync(() => button.click())
+    await until(() => container.querySelector('aside[aria-label="Tool detail"]')?.textContent?.includes('export const rows = []') === true)
     const panel = container.querySelector('aside[aria-label="Tool detail"]')!
     expect(panel.textContent).toContain('export const rows = []')
     expect(panel.parentElement).toBe(workspace.parentElement)
