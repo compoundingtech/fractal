@@ -97,14 +97,22 @@ jobs:
               if not token or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", repo):
                   return None, "no repository queue reader"
               deadline = time.monotonic() + 40
-              def get(path):
+              def request(path):
                   left = deadline - time.monotonic()
                   if left <= 0:
                       raise TimeoutError("queue snapshot deadline")
-                  result = subprocess.run(["gh", "api", f"repos/{repo}/{path}"],
+                  result = subprocess.run(["gh", "api", path],
                       env={**env, "GH_TOKEN": token}, check=True, capture_output=True,
                       text=True, timeout=min(8, left))
                   return json.loads(result.stdout)
+              def get(path):
+                  # GITHUB_TOKEN's 1000/h repository quota is shared with unrelated jobs.
+                  # Recheck before EVERY charged call; do not use an initial stale balance
+                  # for all 26 calls. This is advisory, not an atomic quota reservation.
+                  quota = request("rate_limit")["resources"]["core"]["remaining"]
+                  if type(quota) is not int or quota < 300:
+                      raise ValueError("repository API reserve below 300 requests")
+                  return request(f"repos/{repo}/{path}")
               def rows(data, field):
                   items = data[field]
                   total = data["total_count"]
@@ -225,7 +233,12 @@ jobs:
                         f'{len(candidates("ci1"))} general idle, {len(candidates("ci1-priority"))} priority idle')
               print(census)
               print(census, file=summary)
-              waits, queue_note = queue_waits(env) if env.get("MODE") != "priority" else (None, "release role unchanged")
+              # No queue read can improve a decision with no usable general/priority
+              # admission slot. Preserve tokens for jobs doing actual work.
+              observe_queue = (env.get("MODE") != "priority" and
+                               (len(candidates("ci1-priority")) >= 3 if event == "merge_group"
+                                else bool(candidates("ci1"))))
+              waits, queue_note = queue_waits(env) if observe_queue else (None, "idle-role decision sufficient; queue API not queried")
               print(queue_note)
               print(queue_note, file=summary)
               if event == "merge_group" and env.get("MERGE_OVERFLOW", "on") != "off":

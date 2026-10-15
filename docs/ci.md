@@ -599,11 +599,20 @@ and merge-only roles never become ordinary PR fallback slots.
 
 The advisory read is bounded to 24 live runs, 100 jobs per run, 40 seconds total
 and eight seconds per request, using only the job's repository token with
-`actions:read`. Incomplete counts, changed run/attempt/head, invalid data, API
+`actions:read`. Each charged advisory request first checks the token's free
+`rate_limit` endpoint and refuses the snapshot below a reserve of 300 requests;
+a missing or malformed balance is UNKNOWN too. Idle-role decisions that cannot
+benefit from queue data skip it entirely, as do priority release pickers.
+The reserve is a non-atomic safety margin shared with concurrent repository
+jobs, not an exclusive quota reservation. At the observed 07:30–08:30Z rate,
+33 Workspace runs/hour is a conservative picker upper bound (draft/skipped
+pickers included): 33 × 26 = 858 extra core requests/hour worst case out of
+1,000; merge groups alone were 7 × 26 = 182. That is why the guard, early exit
+and bounded reads are necessary rather than treating 26 calls as cheap. Incomplete counts, changed run/attempt/head, invalid data, API
 failure or a larger live inventory makes the advisory view UNKNOWN and logs
 that limitation; it never holds jobs. The existing idle-role policy then
 applies. No polling loop, dispatch, rerun, label write or admission lock occurs.
-Queue age is not an assigned start wait. A complete runner view is required to
+Concurrent pickers can see the same snapshot and overshoot a pool; this is advisory admission, not an atomic reservation. Use CI_MERGE_OVERFLOW=off to restore owned-only merges. Queue age is not an assigned start wait. A complete runner view is required to
 infer saturation; an unavailable org reader still retains the owned role.
 
 Overflow build/test jobs use the established 8x16 shape; isolation-vm alone

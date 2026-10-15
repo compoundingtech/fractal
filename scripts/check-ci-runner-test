@@ -359,7 +359,8 @@ def queue_fixture(env=None, change=None, failure=None):
         assert 0 < kw['timeout'] <= 8
         if failure: raise failure
         path=argv[-1]
-        data=({'total_count':1,'workflow_runs':[run_row]} if 'status=queued' in path else
+        data=({'resources':{'core':{'remaining':900}}} if path=='rate_limit' else
+              {'total_count':1,'workflow_runs':[run_row]} if 'status=queued' in path else
               {'total_count':0,'workflow_runs':[]} if 'status=in_progress' in path else
               {'total_count':1,'jobs':[dict(job_row)]})
         if change:data=change(path,data)
@@ -368,7 +369,7 @@ def queue_fixture(env=None, change=None, failure=None):
         result=read_queues({'REPOSITORY':'example/project','GH_REPO_TOKEN':'repo-reader','GH_TOKEN':'org-reader',**(env or {})})
     return result,calls
 result,calls=queue_fixture()
-assert result[0]['owned']>=719 and result[0]['namespace']==0 and len(calls)==3
+assert result[0]['owned']>=719 and result[0]['namespace']==0 and len(calls)==6
 for error in (subprocess.TimeoutExpired('gh',1),OSError('unavailable'),ValueError('invalid')):
     assert queue_fixture(failure=error)[0][0] is None
 for change in (
@@ -396,7 +397,8 @@ def actual_admission(owned_age, namespace_age, event):
         now=datetime.now(timezone.utc)
         def io(argv,**kw):
             path=argv[-1]
-            if path.startswith('orgs/'):
+            if path=='rate_limit':data={'resources':{'core':{'remaining':900}}}
+            elif path.startswith('orgs/'):
                 workers=[runner('ci1-priority') for _ in range(3)]+[runner('ci1')]
                 data=[{'total_count':4,'runners':workers}]
             elif 'status=queued' in path:data={'total_count':1,'workflow_runs':[run_row]}
@@ -413,3 +415,13 @@ assert actual_admission(0,1200,'merge_group')=={'ci1':['ci1-priority']}
 assert actual_admission(1200,0,'pull_request')=={}
 assert actual_admission(0,1200,'pull_request')=={'ci1':['ci1']}
 print('passed: actual picker reverses merge/PR placement when measured queue direction flips, keeping reserved roles')
+
+for quota in (299,0,None,True):
+    result,calls=queue_fixture(change=lambda path,d: {'resources':{'core':{'remaining':quota}}} if path=='rate_limit' else d)
+    assert result[0] is None and calls==['rate_limit'], 'low or invalid repo quota never spends queue requests'
+seen_quota=[900,299]
+def falling_quota(path,data):
+    return {'resources':{'core':{'remaining':seen_quota.pop(0)}}} if path=='rate_limit' else data
+result,calls=queue_fixture(change=falling_quota)
+assert result[0] is None and len(calls)==3 and calls[-1]=='rate_limit', 'quota must be rechecked during the snapshot'
+print('passed: reserve 300 repository requests; low/invalid/falling quota stops advisory reads without retry')
