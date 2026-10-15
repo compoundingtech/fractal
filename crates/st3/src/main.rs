@@ -291,6 +291,8 @@ enum Command {
     },
     /// Run any CLI with credentials no seat can read, through the sekrets gateway.
     Sekrets(st3::sekrets::cli::SekretsArgs),
+    /// Run an agent's tools in its tile: its own Unix user, namespaces and cgroup. Root only.
+    Tiles(st3::tiles::cli::TilesArgs),
     /// Discover native harness sessions and move one under durable st ownership.
     Import {
         #[command(subcommand)]
@@ -371,8 +373,8 @@ enum FleetCommand {
     },
     /// Show this node, the fleet's members, and open invites.
     Status,
-    /// Wait for this node's first sync to end, then check that it projects the same graph as
-    /// the peer it synced from. Fails when the graphs differ after a heal.
+    /// Wait for this node's first sync to end: until it holds the same claims as the peer it
+    /// synced from and has admitted them all.
     Wait {
         /// How long to wait, like 90s or 30m.
         #[arg(long, default_value = "30m")]
@@ -920,6 +922,13 @@ async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool
                     waiting
                 ),
             };
+            // Holding the fleet's envelopes is not enough when this node admitted some the fleet
+            // fenced: its claims then differ from every other member's.
+            let residue: Vec<smallclaims::store::FleetAdmissionResidue> =
+                client.get("/v1/internal/fleet/admission-residue").await?;
+            if let Some(fenced) = render_fenced_admissions(&residue) {
+                anyhow::bail!("{}\nbut {fenced}", render_first_sync(&first, now_ms()));
+            }
             if json_output {
                 let mut value = serde_json::to_value(&first)?;
                 value["caught_up"] = serde_json::to_value(&caught_up)?;
@@ -3236,12 +3245,21 @@ st restarts a seat for an account or model change, a declaration change, or an o
 request; every session that starts after a restart is given the handoff and the live state of the \
 seat's work as its first message. Write what the graph does not hold: what you were in the middle of, \
 the branches and pull requests you own, what you wait on, what to do next, and anything running \
-that you started. Same-session resume (claude --resume, codex resume) stays preferred where it works.")]
+that you started. Same-session resume (claude --resume, codex resume) stays preferred where it works.\n\n\
+Before a planned restart st sends the seat a \"Prepare for restart\" message with a deadline. Writing the \
+handoff acknowledges it; `ready` acknowledges a handoff that is already current. The restart goes ahead \
+at the acknowledgement or the deadline, whichever comes first.")]
 enum HandoffCommand {
     /// Replace this seat's handoff with FILE, or with standard input when FILE is `-` or absent.
     Write {
         file: Option<PathBuf>,
         /// The seat whose handoff to write; only that seat may write it.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
+    },
+    /// Say this seat's handoff is current, so a restart that is waiting for it can go ahead.
+    Ready {
+        /// The seat that is ready; a readiness claim counts only when it names that seat as its actor.
         #[arg(long = "as", value_parser = parse_actor_subject)]
         actor: Option<String>,
     },
@@ -3408,6 +3426,8 @@ enum AgentsCommand {
     /// A host without a systemd user manager ends only the harness's process tree and process
     /// groups; docs/st3/priority.md says what else keeps running there.
     Stop(AgentStopArgs),
+    /// Permanently retire an agent identity; later starts and first sends are refused.
+    Retire(AgentRetireArgs),
     /// Restart a top-level or mission seat, preserving its declaration; wait for a new incarnation.
     Restart(AgentRestartArgs),
     /// Acknowledge an interrupted seed attempt and its warning; never gate launch or rearm seed.
@@ -3950,6 +3970,18 @@ struct AgentNewArgs {
 }
 
 #[derive(Args)]
+struct AgentRetireArgs {
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
+    subject: String,
+    #[arg(long = "as", value_parser = parse_publication_actor)]
+    actor: String,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    reason: String,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    idempotency_key: String,
+}
+
+#[derive(Args)]
 struct AgentStopArgs {
     /// Exact seat subject or its identity without the `agent/` prefix.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: true })))]
@@ -4020,6 +4052,10 @@ struct AgentRestartArgs {
     /// How long to wait for a new running incarnation.
     #[arg(long, default_value = "10m")]
     timeout: String,
+    /// Restart at once. By default a seat that is up and ready is first asked for its handoff and
+    /// restarted at its acknowledgement or after two minutes; use this for a seat that cannot answer.
+    #[arg(long)]
+    now: bool,
 }
 
 #[derive(Subcommand)]
@@ -5335,6 +5371,17 @@ fn cli_main() -> ExitCode {
         Err(error) => exit_usage_error(error),
     };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    // Root runs tiles. Entering one makes namespaces, which needs this process single-threaded,
+    // so it runs before any runtime or thread starts.
+    if let Command::Tiles(args) = cli.command {
+        return match st3::tiles::cli::run(args) {
+            Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+            Err(error) => {
+                eprintln!("st tiles: {error:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if let Command::Ui(options) = cli.command {
         return run_terminal_ui(options, cli.endpoint.as_deref());
     }
@@ -5810,6 +5857,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Skill(_) => unreachable!(),
         Command::Evidence(_) => unreachable!(),
         Command::Sekrets(_) => unreachable!(),
+        Command::Tiles(_) => unreachable!(),
         Command::Admission { .. } => unreachable!(),
         Command::ReplicationWorker(_) => unreachable!(),
         Command::Now(args) => run_now(&endpoint, config.person.as_deref(), args, cli.json).await,
@@ -6083,6 +6131,7 @@ fn guard_mutating_cli_actor(
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             AgentsCommand::Start(args) => Some(args.actor.as_str()),
             AgentsCommand::Stop(args) => Some(args.actor.as_str()),
+            AgentsCommand::Retire(args) => Some(args.actor.as_str()),
             AgentsCommand::Restart(args) => Some(args.actor.as_str()),
             AgentsCommand::Rollout(args) => Some(args.actor.as_str()),
             AgentsCommand::Suspend(args) => Some(args.actor.as_str()),
@@ -6677,6 +6726,15 @@ fn daemon_start_version(machine_version: &str) -> Result<&str> {
 }
 
 async fn run_up(args: UpArgs) -> Result<()> {
+    let started_at = Instant::now();
+    let mut phase_finished_at = started_at;
+    let mut phase_elapsed_ms = || {
+        let now = Instant::now();
+        let elapsed_ms = now.duration_since(phase_finished_at).as_secs_f64() * 1_000.0;
+        phase_finished_at = now;
+        elapsed_ms
+    };
+    let mut startup_phases = st3::startup::PhaseDurations::default();
     let args_config = args.config.clone();
     let private_state = args.state_dir.is_some();
     let private_socket = args.socket.is_some();
@@ -6750,6 +6808,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     validate_unix_socket_path(&config.client_gateway_socket, "--client-gateway-socket")?;
     fs::create_dir_all(&config.state_dir)?;
     let startup = Arc::new(st3::startup::Startup::begin(&config.socket)?);
+    startup_phases.configuration_ms = phase_elapsed_ms();
     startup.phase("install-hooks");
     startup_telemetry.phase("install-hooks");
     st3::hooks::ensure_installed(&st3::hooks::root(&config.state_dir)).context(
@@ -6757,6 +6816,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     )?;
     st3::profile::init_from_env();
     raise_open_file_limit();
+    startup_phases.install_hooks_ms = phase_elapsed_ms();
     startup.phase("open-store");
     startup_telemetry.phase("open-store");
     let store = Arc::new(startup_telemetry.task("startup open-store", || {
@@ -6776,19 +6836,23 @@ async fn run_up(args: UpArgs) -> Result<()> {
         )?))?;
     }
     store.use_key_directory(&keys)?;
+    startup_phases.open_store_ms = phase_elapsed_ms();
     startup.phase("judge-claims");
     startup_telemetry.phase("judge-claims");
     startup_telemetry.task("startup judge-claims", || store.judge_claims(true))?;
+    startup_phases.judge_claims_ms = phase_elapsed_ms();
     startup.phase("validate-replication-backlog");
     startup_telemetry.phase("validate-replication-backlog");
     let admission = startup_telemetry.task("startup validate-replication-backlog", || {
         store.validate_replication_backlog()
     })?;
+    startup_phases.validate_replication_backlog_ms = phase_elapsed_ms();
     startup.phase("apply-replication-repairs");
     startup_telemetry.phase("apply-replication-repairs");
     startup_telemetry.task("startup apply-replication-repairs", || {
         store.apply_replication_repairs()
     })?;
+    startup_phases.apply_replication_repairs_ms = phase_elapsed_ms();
     startup.phase("settle-runs");
     startup_telemetry.phase("settle-runs");
     for run in startup_telemetry.task("startup settle-runs", || {
@@ -6818,6 +6882,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     if admission.invalid != 0 {
         eprintln!("st: replication has {} invalid records", admission.invalid);
     }
+    startup_phases.settlement_projection_ms = phase_elapsed_ms();
     startup.phase("initialize-runtime");
     startup_telemetry.phase("initialize-runtime");
     store.append_claim(&ClaimInput {
@@ -6859,7 +6924,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         .pty_root
         .clone()
         .unwrap_or_else(|| config.state_dir.join("pty"));
+    startup_phases.runtime_prelude_ms = phase_elapsed_ms();
     let login_environment = st3::environment::snapshot_at_startup()?;
+    startup_phases.login_environment_ms = phase_elapsed_ms();
     let isolation_environment = login_environment.clone();
     tokio::task::spawn_blocking(move || st_runtime::initialize_isolation(&isolation_environment))
         .await
@@ -6868,7 +6935,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         Some(pty_binary) => pty_binary,
         None => st_runtime::resolve_executable("pty", &login_environment)?,
     };
+    startup_phases.isolation_pty_ms = phase_elapsed_ms();
     let recorder = install_recorder(&config, &login_environment);
+    startup_phases.recorder_ms = phase_elapsed_ms();
     if let Some(person) = &config.person {
         let _ = st3::sekrets::daemon::PERSON.set(person.clone());
     }
@@ -6897,7 +6966,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
     };
+    // Tiles this daemon's user supervises reach it only through their restricted endpoint.
+    #[cfg(target_os = "linux")]
+    st3::api::spawn_tile_endpoints(state.clone());
     st3::gate_check::set_endpoint(config.socket.display().to_string());
+    startup_phases.app_state_ms = phase_elapsed_ms();
     let reconciler = Arc::new(Reconciler::native(
         store.clone(),
         &config.state_dir,
@@ -6911,6 +6984,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     )?.with_access_mode(config.active_access_mode()).with_seat_priority(config.active_seat_priority()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute)?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
+    startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
     startup_telemetry.phase("start-services");
     tokio::spawn(reconciler.clone().supervise());
@@ -7020,6 +7094,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     st3::api::start_attention_list(&state);
     // Nor does a missions window fold the missions it shows.
     st3::api::start_published_lists(&state);
+    startup_phases.background_tasks_ms = phase_elapsed_ms();
+    let bind_started_at = phase_finished_at;
     startup.phase("bind-listeners");
     startup_telemetry.phase("bind-listeners");
     // Fabric forwards each terminal tunnel to this socket once `st terminals expose-fabric` names
@@ -7083,6 +7159,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
             });
             spawn_publication_evidence(store.clone());
             startup_telemetry.serving();
+            let ready_at = Instant::now();
+            startup_phases.log_ready(
+                ready_at.duration_since(bind_started_at).as_secs_f64() * 1_000.0,
+                ready_at.duration_since(started_at).as_secs_f64() * 1_000.0,
+            );
             startup.serving();
             eprintln!("st: local API listening at {}", config.socket.display());
             eprintln!(
@@ -12171,8 +12252,8 @@ async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) 
 }
 
 /// Wait for this node's first sync to end, printing progress when `progress` is set. It ends at
-/// the first exchange at which this node holds the same envelopes as a peer. With matching
-/// registries the graphs must also match, at once or after a heal. Returns None on timeout.
+/// the first exchange at which this node holds the same envelopes as a peer and has admitted
+/// them all. Returns None on timeout.
 async fn wait_for_first_sync(
     client: &Client,
     timeout: Duration,
@@ -12335,7 +12416,7 @@ fn render_caught_up(caught_up: &CaughtUp, now: u128) -> String {
     line
 }
 
-/// Print how a first sync ended, and fail when its graphs still differ.
+/// Print how a first sync ended, and fail when an earlier build recorded it as failed.
 fn report_first_sync(first: &st3::model::ReplicationFirstSync, json_output: bool) -> Result<()> {
     if json_output {
         print_value(first, true)?;
@@ -12344,12 +12425,28 @@ fn report_first_sync(first: &st3::model::ReplicationFirstSync, json_output: bool
     }
     anyhow::ensure!(
         first.state == "verified",
-        "{}\nThis node's views can be wrong. st replication status shows both graphs and the last \
-         heal; report it with st diagnostic.",
+        "{}\nst replication status shows this node's sync with each peer; report it with st \
+         diagnostic.",
         render_first_sync(first, now_ms())
     );
     println!("{}", render_first_sync(first, now_ms()));
     Ok(())
+}
+
+/// Envelopes this node admitted beyond a writer's high water, which the fleet fenced, or None.
+fn render_fenced_admissions(residue: &[smallclaims::store::FleetAdmissionResidue]) -> Option<String> {
+    let fenced = residue
+        .iter()
+        .filter(|item| item.reason == "admitted-beyond-high-water")
+        .map(|item| format!("{} from {}", envelope_count(item.envelopes), item.writer))
+        .collect::<Vec<_>>();
+    (!fenced.is_empty()).then(|| {
+        format!(
+            "this node admitted {} beyond the writer's high water, which the fleet fenced, so its \
+             claims differ from the fleet's; st doctor reports them",
+            fenced.join(", ")
+        )
+    })
 }
 
 /// This node's first sync in one line.
@@ -12359,80 +12456,24 @@ fn render_first_sync(first: &st3::model::ReplicationFirstSync, now: u128) -> Str
         .ended_at_unix_ms
         .map(|at| relative_time(at, now))
         .unwrap_or_default();
-    let digests = format!(
-        "this node {}, {peer} {}",
-        short_digest(first.graph_digest.as_deref().unwrap_or("unknown")),
-        short_digest(first.peer_graph_digest.as_deref().unwrap_or("unknown"))
-    );
     match first.state.as_str() {
         "verified" if first.authority_digest.is_some() => format!(
-            "first sync verified {when}: this node then held the same {} as {peer}; log digest {}; projection comparison waits for matching builds",
+            "first sync verified {when}: this node then held the same {} as {peer}; log digest {}",
             envelope_count(first.envelopes.unwrap_or(0)),
             short_digest(first.authority_digest.as_deref().unwrap_or("unknown")),
         ),
         "verified" => format!(
-            "first sync verified {when}: this node then held the same {} as {peer} and projected the same graph ({}){}",
+            "first sync verified {when}: this node then held the same {} as {peer}",
             envelope_count(first.envelopes.unwrap_or(0)),
-            short_digest(first.graph_digest.as_deref().unwrap_or("unknown")),
-            if first.healed { ", after a heal" } else { "" }
         ),
         "failed" => format!(
-            "first sync failed {when}: this node holds the same {} as {peer} but projects a different graph ({digests}), and a heal did not fix it: {}",
-            envelope_count(first.envelopes.unwrap_or(0)),
+            "first sync failed {when} on an earlier build: {}; it ends at the next exchange where this node holds the same claims as {peer}",
             first.message.as_deref().unwrap_or("no reason recorded")
         ),
         _ => format!(
             "first sync from {peer} since {}",
             relative_time(first.started_at_unix_ms, now)
         ),
-    }
-}
-
-/// The last heal with one peer in one line.
-fn render_heal(peer: &str, report: &st3::model::ReplicationHealReport, now: u128) -> String {
-    let mut moved = Vec::new();
-    if report.refetched != 0 {
-        moved.push(format!(
-            "admitted {} claims {peer} projects",
-            report.refetched
-        ));
-    }
-    if report.pushed != 0 {
-        moved.push(format!(
-            "{peer} admitted {} claims this node projects",
-            report.pushed
-        ));
-    }
-    if report.replayed {
-        moved.push("replayed this graph from nothing".into());
-    }
-    if report.peer_replayed {
-        moved.push(format!("{peer} replayed its graph from nothing"));
-    }
-    let moved = if moved.is_empty() {
-        String::new()
-    } else {
-        format!(": {}", moved.join(", "))
-    };
-    let narrowed = if report.ranges != 0 {
-        format!(
-            " ({} ranges and {} subjects differed)",
-            report.ranges, report.subjects
-        )
-    } else {
-        String::new()
-    };
-    if report.healed {
-        format!(
-            "healed {}{moved}{narrowed}; the graphs agree",
-            relative_time(report.at_unix_ms, now)
-        )
-    } else {
-        format!(
-            "heal {}{moved}{narrowed} left the graphs different: {}",
-            relative_time(report.at_unix_ms, now),
-            report.unresolved.as_deref().unwrap_or("no reason recorded")
-        )
     }
 }
 
@@ -12542,9 +12583,6 @@ fn render_replication_peers(
                 }
             );
         }
-        if let Some(report) = &sync.heal {
-            let _ = writeln!(output, "  {}", render_heal(&peer.peer, report, now));
-        }
         let compared = sync
             .graph_compared_at_unix_ms
             .map(|at| relative_time(at, now))
@@ -12576,7 +12614,7 @@ fn render_replication_peers(
             if sync.diverged {
                 let _ = writeln!(
                     output,
-                    "  exchanges cannot fix this; the nodes heal by comparing the claims each projects, and views on one node are wrong until then"
+                    "  exchanges cannot fix this; one node projects the same claims wrongly, and its views are wrong until that is fixed"
                 );
             } else {
                 let _ = writeln!(
@@ -13543,6 +13581,30 @@ async fn run_handoff(
                 Ok(())
             }
         }
+        HandoffCommand::Ready { actor } => {
+            let agent = configured_actor(actor.as_deref(), configured_person, "handoff ready")?;
+            document(&agent)?;
+            let claim: ClaimRecord = client
+                .post(
+                    "/v1/claims",
+                    &ClaimInput {
+                        subject: st3::handoff::ready_subject(&agent),
+                        kind: st3::handoff::READY_KIND.into(),
+                        actor: Some(agent.clone()),
+                        fields: std::collections::BTreeMap::from([("agent".into(), agent.clone().into())]),
+                        evidence: vec![],
+                        expected_subject: None,
+                        idempotency_key: Some(format!("restart-ready:{agent}:{}", uuid::Uuid::now_v7())),
+                    },
+                )
+                .await?;
+            if json_output {
+                print_value(&claim, true)
+            } else {
+                println!("{agent} is ready to restart");
+                Ok(())
+            }
+        }
         HandoffCommand::Show { agent } => {
             let agent = configured_actor(agent.as_deref(), configured_person, "handoff show")?;
             let name = document(&agent)?;
@@ -14159,20 +14221,71 @@ async fn run_agents(
                 if let Some(handoff) = &agent.handoff {
                     println!("{subject}: {} → {}", handoff.phase, handoff.destination);
                     if !handoff.pending_sources.is_empty() {
-                        println!("Waiting for source stop: {}", handoff.pending_sources.join(", "));
+                        println!(
+                            "Waiting for source stop: {}",
+                            handoff.pending_sources.join(", ")
+                        );
                     }
                     if !handoff.overridden_sources.is_empty() {
-                        println!("Source-offline override recorded: {}", handoff.overridden_sources.join(", "));
+                        println!(
+                            "Source-offline override recorded: {}",
+                            handoff.overridden_sources.join(", ")
+                        );
                     }
                 } else {
                     let state = cli_help::agent_state(
-                        &agent.state, agent.harness_state.as_deref(),
-                        agent.fault.as_deref(), &agent.reachability,
+                        &agent.state,
+                        agent.harness_state.as_deref(),
+                        agent.fault.as_deref(),
+                        &agent.reachability,
                     );
-                    print!("{}", cli_help::agent_next_steps(&subject, &args.actor, &state));
+                    print!(
+                        "{}",
+                        cli_help::agent_next_steps(&subject, &args.actor, &state)
+                    );
                 }
             }
             Ok(())
+        }
+        AgentsCommand::Retire(args) => {
+            let subject = if args.subject.starts_with("agent/") {
+                args.subject.clone()
+            } else {
+                format!("agent/{}", args.subject)
+            };
+            let client = generated_client(endpoint, Some(&args.actor))?;
+            let status = status_for(&cli_client(endpoint), &subject).await?;
+            let token = status
+                .subjects
+                .first()
+                .and_then(|subject| subject.desired_token.clone())
+                .context("agent has no selected declaration")?;
+            let snapshot = client.capabilities().await?.snapshot.id;
+            let action_id = format!(
+                "action/retire-{}",
+                hex::encode(Sha256::digest(args.idempotency_key.as_bytes()))
+            );
+            let result = client
+                .agent_retire(
+                    action_id,
+                    args.idempotency_key,
+                    ClientFence {
+                        snapshot_id: snapshot,
+                        runtime_desired_revision: Some(token),
+                        ..ClientFence::default()
+                    },
+                    st3_client::AgentRetireParameters {
+                        agent: subject.clone(),
+                        reason: args.reason,
+                    },
+                )
+                .await?;
+            if json_output {
+                print_value(&result, true)
+            } else {
+                println!("Retired {subject}");
+                Ok(())
+            }
         }
         AgentsCommand::Suspend(args) => {
             let subject = format!("agent/{}", args.subject);
@@ -14261,6 +14374,7 @@ async fn run_agents(
                         "subject": subject,
                         "actor": args.actor,
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
+                        "now": args.now,
                     }),
                 )
                 .await?;
@@ -15078,6 +15192,7 @@ async fn run_agent_inspection(
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
         | AgentsCommand::Start(_)
         | AgentsCommand::Stop(_)
+        | AgentsCommand::Retire(_)
         | AgentsCommand::Rollout(_)
         | AgentsCommand::Restart(_)
         | AgentsCommand::AcknowledgeSeed(_)
@@ -27448,6 +27563,23 @@ mod tests {
     }
 
     #[test]
+    fn fleet_wait_refuses_only_on_admissions_the_fleet_fenced() {
+        let residue = |reason: &str| smallclaims::store::FleetAdmissionResidue {
+            writer: "willow".into(),
+            reason: reason.into(),
+            envelopes: 2,
+        };
+        assert_eq!(render_fenced_admissions(&[]), None);
+        assert_eq!(render_fenced_admissions(&[residue("admitted-unsigned")]), None);
+        let refused = render_fenced_admissions(&[
+            residue("admitted-unsigned"),
+            residue("admitted-beyond-high-water"),
+        ])
+        .unwrap();
+        assert!(refused.contains("admitted 2 envelopes from willow beyond the writer's high water"), "{refused}");
+    }
+
+    #[test]
     fn mixed_build_status_reports_log_verification_and_waiting_projections() {
         let first = st3::model::ReplicationFirstSync {
             state: "verified".into(),
@@ -27458,7 +27590,7 @@ mod tests {
         };
         let rendered = render_first_sync(&first, 0);
         assert!(rendered.contains("log digest log-digest"));
-        assert!(rendered.contains("projection comparison waits"));
+        assert!(!rendered.contains("projection comparison waits"));
         let mut peer = peer_status("alder", Some("log-digest"));
         peer.graph_digest = Some("another-graph".into());
         peer.projection_comparison_waiting = true;
@@ -29355,7 +29487,7 @@ mod tests {
              \x20 last seen 2s ago\n\
              \x20 diverged: the same envelopes project different graphs since 3m ago \
              (compared 1s ago; this node 111111111111, Laptop 222222222222)\n\
-             \x20 exchanges cannot fix this; the nodes heal by comparing the claims each projects, and views on one node are wrong until then\n\
+             \x20 exchanges cannot fix this; one node projects the same claims wrongly, and its views are wrong until that is fixed\n\
              peer\tFresh\tup\t\n\
              \x20 last seen 2s ago\n\
              \x20 difference not measured yet\n"

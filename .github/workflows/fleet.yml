@@ -296,6 +296,251 @@ jobs:
           CACHE_REASON: Retains Git source objects only; builds nothing and has no signing key.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-linux-gate:
+    name: evidence-gate-linux-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: linux-gate
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-typescript-client:
+    name: evidence-gate-typescript-client
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: typescript-client
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-isolation-vm:
+    name: evidence-gate-isolation-vm
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: isolation-vm
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-genie-freshness:
+    name: evidence-gate-genie-freshness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: genie-freshness
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-mail-redelivery-canaries:
+    name: evidence-gate-mail-redelivery-canaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: mail-redelivery-canaries
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   upgrade-impact:
     name: upgrade-impact
     runs-on: ubuntu-latest
@@ -348,7 +593,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner"],"typescript-client":["pick-runner","genie-freshness"],"linux-test-build":["pick-runner"],"linux-tests":["pick-runner","linux-test-build"],"linux-tests-shard-2":["pick-runner","linux-test-build"],"linux-tests-shard-3":["pick-runner","linux-test-build"],"linux-tests-shard-4":["pick-runner","linux-test-build"],"linux-clippy":["pick-runner"],"linux-fleet-compat":["pick-runner"],"mail-redelivery-canaries":["pick-runner","linux-test-build"],"linux-gate":["pick-runner","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries"],"perf-cost":[],"isolation-vm":["pick-runner","linux-test-build"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner"],"typescript-client":["pick-runner","genie-freshness"],"linux-test-build":["pick-runner"],"linux-tests":["pick-runner","linux-test-build"],"linux-tests-shard-2":["pick-runner","linux-test-build"],"linux-tests-shard-3":["pick-runner","linux-test-build"],"linux-tests-shard-4":["pick-runner","linux-test-build"],"linux-clippy":["pick-runner"],"linux-fleet-compat":["pick-runner"],"mail-redelivery-canaries":["pick-runner","linux-test-build"],"linux-gate":["pick-runner","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries","genie-freshness","typescript-client","isolation-vm"],"perf-cost":[],"isolation-vm":["pick-runner","linux-test-build"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -520,6 +765,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -562,14 +808,70 @@ jobs:
       - name: Use the cached Nix outputs
         if: env.CI_LOCAL_CACHES != '1'
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
-      - name: Check frozen workspace dependency license coverage
-        run: python3 scripts/ci-fractal-web-licenses-test && python3 scripts/ci-fractal-web-licenses --check-lockfile
-      - name: Check runner selection and generated files
+      - name: Check license coverage, runner selection and generated files
         shell: bash
-        run: "nix develop '.#genie' -c bash -c 'python3 scripts/ci-ready-pr-test && python3 scripts/ci-draft-admission-test && python3 scripts/ci-workflow-concurrency-test && python3 scripts/check-ci-runner-test && python3 scripts/ci-namespace-usage-test && python3 scripts/ci-mail-redelivery-canaries-test && python3 scripts/ci-test-partitions-test && python3 scripts/ci-test-archive-test && python3 scripts/ci-evidence-source-test && python3 scripts/check-ci-test-paths && python3 scripts/ci-queue-watch-test && python3 scripts/check-main-ci-test && python3 scripts/ci-perf-cache-test && python3 scripts/ci-perf-slot-test && python3 scripts/ci-perf-scope-test && python3 scripts/ci-cache-audit-test && python3 scripts/ci-fractal-web-test && genie --check'"
+        run: "nix develop '.#genie' -c bash scripts/ci-genie-freshness"
+        id: freshness
       - name: Save Nix outputs
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: bash scripts/ci-nix-cache save
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this job result
+        env:
+          STEP_CHECK: genie-freshness
+          STEP_COMMAND: '["bash","scripts/ci-genie-freshness"]'
+          STEP_OUTCOMES: '{"freshness":"${{ steps.freshness.outcome }}"}'
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STEP_CHECK"
+          python3 "$helper" step-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STEP_CHECK" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes" \
+            --toolchain-sha256 "$(printf '%s|%s|%s|%s|%s|%s' "$RUNNER_OS" "$RUNNER_ARCH" "${ImageVersion:-}" "$(nix --version 2>/dev/null)" "$(node --version 2>/dev/null)" "$(pnpm --version 2>/dev/null)" | sha256sum | cut -d' ' -f1)"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-genie-freshness
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -582,6 +884,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.genie-freshness.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     defaults:
       run:
         shell: bash
@@ -606,13 +909,72 @@ jobs:
           path: "${{ runner.temp }}/pnpm-store"
           key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}"
       - name: Install the frozen workspace
+        id: install
         env:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
         run: |
           corepack enable
           pnpm install --frozen-lockfile
       - name: Check the client, shared views and iOS consumers
+        id: client
         run: bash scripts/ci-typescript-client
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this job result
+        env:
+          STEP_CHECK: typescript-client
+          STEP_COMMAND: '["bash","scripts/ci-typescript-client"]'
+          STEP_OUTCOMES: '{"install":"${{ steps.install.outcome }}","client":"${{ steps.client.outcome }}"}'
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STEP_CHECK"
+          python3 "$helper" step-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STEP_CHECK" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes" \
+            --toolchain-sha256 "$(printf '%s|%s|%s|%s|%s|%s' "$RUNNER_OS" "$RUNNER_ARCH" "${ImageVersion:-}" "$(nix --version 2>/dev/null)" "$(node --version 2>/dev/null)" "$(pnpm --version 2>/dev/null)" | sha256sum | cut -d' ' -f1)"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-typescript-client
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -768,6 +1130,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -876,6 +1239,61 @@ jobs:
             target/messaging-faults/
             target/boot-canaries/
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: tests
+          STAGE_JOB: linux-tests
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-linux-tests
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -887,6 +1305,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_secondary) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -992,6 +1411,61 @@ jobs:
             target/messaging-faults/
             target/boot-canaries/
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: tests
+          STAGE_JOB: linux-tests-shard-2
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-linux-tests-shard-2
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1003,6 +1477,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1108,6 +1583,61 @@ jobs:
             target/messaging-faults/
             target/boot-canaries/
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: tests
+          STAGE_JOB: linux-tests-shard-3
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-linux-tests-shard-3
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1119,6 +1649,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1224,6 +1755,61 @@ jobs:
             target/messaging-faults/
             target/boot-canaries/
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: tests
+          STAGE_JOB: linux-tests-shard-4
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-linux-tests-shard-4
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1235,6 +1821,7 @@ jobs:
     needs: [pick-runner]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1359,6 +1946,61 @@ jobs:
             ${{ runner.temp }}/ci-logs/
 
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: clippy
+          STAGE_JOB: linux-clippy
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-linux-clippy
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1370,6 +2012,7 @@ jobs:
     needs: [pick-runner]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1493,6 +2136,61 @@ jobs:
             ${{ runner.temp }}/ci-logs/
 
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: fleet-compat
+          STAGE_JOB: linux-fleet-compat
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-linux-fleet-compat
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1502,6 +2200,7 @@ jobs:
   mail-redelivery-canaries:
     name: mail-redelivery-canaries
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_mail) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1647,6 +2346,61 @@ jobs:
             target/messaging-faults/
             target/boot-canaries/
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: mail-redelivery-canaries
+          STAGE_JOB: mail-redelivery-canaries
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-mail-redelivery-canaries
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1697,6 +2451,104 @@ jobs:
         shell: bash
         env:
           CACHE_REASON: Collects completed checks and builds nothing.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  evidence-note-linux-gate:
+    name: evidence-note-linux-gate
+    needs:
+      - linux-gate
+      - linux-test-build
+      - upgrade-impact
+      - linux-tests
+      - linux-tests-shard-2
+      - linux-tests-shard-3
+      - linux-tests-shard-4
+      - linux-clippy
+      - linux-fleet-compat
+      - mail-redelivery-canaries
+      - genie-freshness
+      - typescript-client
+      - isolation-vm
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))) }}
+    runs-on: ubuntu-latest
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    permissions:
+      contents: write
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      EVIDENCE_PUSH_TOKEN: ${{ github.token }}
+      PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+      NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - name: Check out the tested commit
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Take the signer scripts from the base commit
+        id: base
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - name: May this job use the signing key?
+        id: guard
+        continue-on-error: true
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - name: Write the signer configuration and key
+        id: configure
+        if: ${{ steps.guard.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - name: Sign the linux-gate note
+        id: sign
+        if: ${{ steps.configure.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once linux-gate
+          python3 "$helper" aggregate "$RUNNER_TEMP/gate-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check linux-gate \
+            --aggregate "$RUNNER_TEMP/gate-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/gate"
+      - name: Collect the stage notes
+        if: ${{ steps.sign.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: evidence-note-*
+          path: "${{ runner.temp }}/evidence-notes/stages"
+          merge-multiple: true
+      - name: Publish the notes that verify
+        if: ${{ steps.sign.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
+          python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
+            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries,genie-freshness,typescript-client,isolation-vm" --remote origin
+      - name: Remove the key
+        if: always()
+        continue-on-error: true
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Signs the aggregate gate result from workflow context; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   perf-cost:
     name: perf-cost
@@ -1864,6 +2716,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["namespace-profile-linux-x86-64;job.priority={1};github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 60
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     defaults:
       run:
         shell: bash
@@ -1948,6 +2801,7 @@ jobs:
         shell: bash
         run: nix develop -c bash scripts/ci-install-built-hooks
       - name: Probe KVM
+        id: kvm
         run: |
           if [ ! -e /dev/kvm ]; then
             echo "::error::/dev/kvm is missing: this runner profile offers no nested virtualization"
@@ -1965,13 +2819,15 @@ jobs:
           EOF
           printf 'KVM: \x60%s\x60, CPU virtualization flag %s, VM creation succeeded\n\n| Phase | Elapsed |\n| --- | --- |\n' "$(ls -l /dev/kvm)" "$(grep -m1 -oE 'vmx|svm' /proc/cpuinfo || echo none)" >> "$GITHUB_STEP_SUMMARY"
       - name: Build the NixOS VM test driver
+        id: driver
         run: |
           start=$SECONDS
           nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackages.x86_64-linux.transport-isolation-vm.driver
           printf '| VM driver build | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
       - name: Run all three systemd-scope tests in the VM
+        id: vmtest
         env:
-          ST_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/st2.tar.zst"
+          ST_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
           ST_ISOLATION_WORKSPACE: ${{ github.workspace }}
           ST_ISOLATION_TIMINGS: "${{ runner.temp }}/vm-timings.json"
           ST_ISOLATION_BUILD_WORKSPACE: ${{ env.CI_TEST_BUILD_WORKSPACE }}
@@ -1982,11 +2838,13 @@ jobs:
           jq -r '"| VM boot | \(.boot_seconds)s |\n| systemd-scope tests in VM (extract and run) | \(.test_seconds)s |"' "$ST_ISOLATION_TIMINGS" >> "$GITHUB_STEP_SUMMARY"
           printf '| VM test driver total | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
       - name: Build the sekrets VM test driver
+        id: sekrets-driver
         run: |
           start=$SECONDS
           nix build --print-build-logs --out-link "$RUNNER_TEMP/sekrets-vm-driver" .#legacyPackages.x86_64-linux.sekrets-vm.driver
           printf '| sekrets VM driver build | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
       - name: Run the sekrets gateway test in the VM
+        id: sekrets-test
         env:
           ST_SEKRETS_BINARY: ${{ env.CI_SEKRETS_BINARY }}
         run: |
@@ -1997,6 +2855,63 @@ jobs:
       - name: Save Nix outputs
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: bash scripts/ci-nix-cache save
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this job result
+        env:
+          STEP_CHECK: isolation-vm
+          STEP_COMMAND: '["isolation-vm","nixos-test-driver","transport-isolation-vm","sekrets-vm"]'
+          STEP_OUTCOMES: '{"kvm":"${{ steps.kvm.outcome }}","driver":"${{ steps.driver.outcome }}","vmtest":"${{ steps.vmtest.outcome }}","sekrets-driver":"${{ steps.sekrets-driver.outcome }}","sekrets-test":"${{ steps.sekrets-test.outcome }}"}'
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STEP_CHECK"
+          python3 "$helper" step-facts "$RUNNER_TEMP/job-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STEP_CHECK" \
+            --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+            --out "$RUNNER_TEMP/evidence-notes" \
+            --toolchain-sha256 "$(printf '%s|%s|%s|%s|%s|%s' "$RUNNER_OS" "$RUNNER_ARCH" "${ImageVersion:-}" "$(nix --version 2>/dev/null)" "$(node --version 2>/dev/null)" "$(pnpm --version 2>/dev/null)" | sha256sum | cut -d' ' -f1)"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-isolation-vm
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -2011,14 +2926,15 @@ jobs:
       contents: read
     outputs:
       relevant: ${{ steps.detect.outputs.relevant }}
+      kit-inputs: ${{ steps.detect.outputs.kit-inputs }}
     steps:
       - name: Detect web-relevant changes
         id: detect
         env:
           EVENT: ${{ github.event_name }}
           REMOTE: "${{ github.server_url }}/${{ github.repository }}.git"
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: |
           python3 - <<'PY'
           #!/usr/bin/env python3
@@ -2063,6 +2979,7 @@ jobs:
               "flake.lock",
               "pnpm-install-contract.json*",
               ".npmrc",
+              "flake.nix",
               "tsconfig*.json*",
               ".buckroot*",
               ".buckconfig*",
@@ -2079,6 +2996,22 @@ jobs:
               ".github/workflows/cache-audit.ts",
               ".github/repo-settings.json*",
           )
+          # Keep workspace dependency coverage in sync with the guarded package graph in ci-fractal-web-test.
+          KIT_PATTERNS = (
+              "packages/fractal-ui/**",
+              "clients/typescript/st3-scenarios/**",
+              "clients/typescript/st3-client/**",
+              "package.json*",
+              "pnpm-workspace.yaml*",
+              "pnpm-lock.yaml",
+              "pnpm-install-contract.json*",
+              ".npmrc",
+              "flake.nix",
+              "flake.lock",
+              "scripts/ci-fractal-web*",
+              ".github/workflows/fleet.yml*",
+              ".github/workflows/workspace-ci.ts",
+          )
           SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -2090,10 +3023,15 @@ jobs:
 
 
           MATCHERS = tuple(pattern_regex(pattern) for pattern in PATTERNS)
+          KIT_MATCHERS = tuple(pattern_regex(pattern) for pattern in KIT_PATTERNS)
+
+
+          def kit_paths(paths):
+              return [path for path in paths if any(matcher.match(path) for matcher in KIT_MATCHERS)]
 
 
           def relevant_paths(paths):
-              return [path for path in paths if any(matcher.match(path) for matcher in MATCHERS)]
+              return [path for path in paths if any(matcher.match(path) for matcher in (*MATCHERS, *KIT_MATCHERS))]
 
 
           def git(directory, *args):
@@ -2119,19 +3057,22 @@ jobs:
               event = os.environ.get("EVENT", "")
               summary = []
               if event == "workflow_dispatch":
-                  relevant, summary = True, ["Manual run: web execution is forced."]
-              elif event in ("pull_request", "merge_group"):
+                  relevant, kit_inputs, summary = True, True, ["Manual run: web execution and kit plays are forced."]
+              elif event in ("pull_request", "merge_group", "push"):
                   paths = changed_paths(os.environ["REMOTE"], event, os.environ.get("BASE_SHA", ""), os.environ.get("HEAD_SHA", ""))
                   matched = relevant_paths(paths)
                   relevant = bool(matched)
+                  kit_inputs = bool(kit_paths(paths))
                   summary = [f"{len(paths)} changed path(s), {len(matched)} web-relevant."] + [f"- `{path}`" for path in matched[:50]]
               else:
                   raise ValueError(f"unsupported event {event!r}")
               with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                   output.write(f"relevant={'true' if relevant else 'false'}\n")
+                  output.write(f"kit-inputs={'true' if kit_inputs else 'false'}\n")
               with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as step_summary:
                   step_summary.write("\n".join([f"fractal-web execution: **{'required' if relevant else 'not required'}**", *summary]) + "\n")
               print(f"relevant={'true' if relevant else 'false'}")
+              print(f"kit-inputs={'true' if kit_inputs else 'false'}")
               return 0
 
 
@@ -2189,6 +3130,9 @@ jobs:
         run: "nix develop '.#web' -c bash scripts/ci-fractal-web"
         env:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
+          KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
       - name: Report job cache coverage
         if: always()
         shell: bash

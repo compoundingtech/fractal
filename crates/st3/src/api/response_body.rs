@@ -171,7 +171,7 @@ impl Context {
             }),
             Err(error) => json!({"code": "response-read-failed", "message": error.to_string()}),
         };
-        let envelope = if self.client_request {
+        let mut envelope = if self.client_request {
             client_error_envelope(status, &raw, &self.request_id)
         } else {
             json!({
@@ -183,6 +183,11 @@ impl Context {
                 "details": raw.get("details").cloned().unwrap_or_else(|| json!({})),
             })
         };
+        if !self.client_request
+            && let Some(applied) = raw.get("applied")
+        {
+            envelope["applied"] = applied.clone();
+        }
         let bytes = serde_json::to_vec(&envelope).unwrap_or_else(|_| b"{}".to_vec());
         Encoded {
             len: bytes.len(),

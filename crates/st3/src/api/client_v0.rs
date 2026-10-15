@@ -348,6 +348,18 @@ fn collection_ignores(collection: &str, kind: &str) -> bool {
         return !kind.starts_with("arrangement.")
             && !matches!(kind, "custom.client.pairing-completed" | "custom.client.pairing-revoked");
     }
+    // Mission cards read run/step/gate state, definitions and person attention, never
+    // harness telemetry. Attention additionally reads harness login state and diagnostics,
+    // but not transcripts, token totals, todos or session-file metadata.
+    if collection == "missions" && matches!(kind,
+        "harness.observed" | "harness.diagnostic" | "harness.timeline" | "harness.usage"
+            | "harness.todo.observed" | "harness.session-file") {
+        return true;
+    }
+    if collection == "attention" && matches!(kind,
+        "harness.timeline" | "harness.usage" | "harness.todo.observed" | "harness.session-file") {
+        return true;
+    }
     matches!(kind, "daemon.diagnostic" | "transport.observed" | "workspace.observed")
         || (kind == "harness.usage" && collection != "agents")
 }
@@ -841,30 +853,34 @@ async fn collection_items_with_windows(
                     None => client_snapshot_at(&state, index),
                 };
                 let at = snapshot.created_at.clone();
+                // Share one bounded fleet projection across subscriber window sizes.
+                // Uncached reads retain the same bounded cut as the shared projection.
+                let projection_limit = if matches!(collection.as_str(), "missions" | "attention") {
+                    CLIENT_MAX_PAGE_ITEMS
+                } else {
+                    limit
+                };
                 let compute = || {
+                    let mut valid_until = None;
                     let mut items = match collection.as_str() {
                         "summary" => {
                             if let Some(rows) = &published_rows {
-                                return Ok((rows.clone(), false));
+                                return Ok((rows.clone(), false, None));
                             }
                             return Ok((summary::native(&state, &current, &request, &snapshot,
-                                now, windows.as_deref(), commits)?, false));
+                                now, windows.as_deref(), commits)?, false, None));
                         }
                         "missions" if published_missions.is_some() => {
                             let publication = published_missions.as_ref().expect("published missions");
-                            return super::published_lists::mission_window(&publication.rows, limit);
+                            return super::published_lists::mission_window(&publication.rows, limit)
+                                .map(|(items, has_more)| (items, has_more, None));
                         }
                         "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals" => {
-                            return inventory::items(&state, &current, &request, &snapshot);
+                            return inventory::items(&state, &current, &request, &snapshot)
+                                .map(|(items, has_more)| (items, has_more, None));
                         }
                         "missions" => {
-                            let mut ids =
-                                store.mission_collection_ids(false, 0, limit.saturating_add(1))?;
-                            let mut has_more = ids.len() > limit;
-                            ids.truncate(limit);
-                            let mut items = mission_list_cards_at(&store, &ids, now)?;
-                            has_more |= bound_mission_cards(&mut items)?;
-                            return Ok((items, has_more));
+                            return mission_collection_projection_at(&store, projection_limit, now);
                         }
                         "glasses" | "arrangements" if published_rows.is_some() => {
                             published_rows.clone().expect("published rows")
@@ -885,7 +901,13 @@ async fn collection_items_with_windows(
                         }
                         "attention" => match &published_rows {
                             Some(rows) => rows.clone(),
-                            None => client_attention_resources_at(&store, person.as_deref(), false, now)?,
+                            None => {
+                                let (items, until) = crate::performance::task("attention_collection/resources", || {
+                                    client_attention_resources_fenced_at(&store, person.as_deref(), now)
+                                })?;
+                                valid_until = until;
+                                items
+                            }
                         },
                         "agents" => {
                             // Published cards already exist; a cold unfiltered window folds
@@ -895,7 +917,8 @@ async fn collection_items_with_windows(
                                 Some(cards) => cards.iter().take(keep).cloned().collect(),
                                 None if status.is_none() => {
                                     folded.set(true);
-                                    return client_agent_window_cards(&store, index, limit);
+                                    return client_agent_window_cards(&store, index, limit)
+                                        .map(|(items, has_more)| (items, has_more, None));
                                 }
                                 None => {
                                     folded.set(true);
@@ -905,9 +928,10 @@ async fn collection_items_with_windows(
                         }
                         "work" if published_work.is_some() => {
                             let publication = published_work.as_ref().expect("published work");
-                            return Ok(super::published_lists::work_window(
+                            let (items, has_more) = super::published_lists::work_window(
                                 &publication.rows, actor.as_deref(), limit,
-                            ));
+                            );
+                            return Ok((items, has_more, None));
                         }
                         "work" => client_work_resources(
                             &store,
@@ -922,14 +946,14 @@ async fn collection_items_with_windows(
                     // Agent status/availability depends on live local delivery presence; overlay and
                     // filter it on every read, after reusing the immutable graph-derived rows.
                     if collection == "agents" {
-                        return Ok((items, false));
+                        return Ok((items, false, None));
                     }
                     if let Some(status) = &status {
                         items.retain(|item| item["state"].as_str() == Some(status.as_str()));
                     }
-                    let has_more = items.len() > limit;
-                    items.truncate(limit);
-                    Ok((items, has_more))
+                    let has_more = items.len() > projection_limit;
+                    items.truncate(projection_limit);
+                    Ok((items, has_more, valid_until))
                 };
                 let (mut items, mut has_more) = match windows.as_ref().filter(|_| published.is_none()) {
                     Some(windows) => windows.read(
@@ -944,8 +968,15 @@ async fn collection_items_with_windows(
                         },
                         compute,
                     )?,
-                    None => compute()?,
+                    None => {
+                        let (items, has_more, _) = compute()?;
+                        (items, has_more)
+                    }
                 };
+                if matches!(collection.as_str(), "missions" | "attention") {
+                    has_more |= items.len() > limit;
+                    items.truncate(limit);
+                }
                 if collection == "agents" {
                     // The window's shared rows are in hand; each reader's live overlay runs
                     // beside the others instead of behind them.
@@ -2779,6 +2810,7 @@ const ACTIONS: &[&str] = &[
     "work.publish-mission",
     "agent.create",
     "agent.stop",
+    "agent.retire",
     "agent.start",
     "agent.suspend",
     "agent.resume",
@@ -2833,6 +2865,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "work.retry",
     "agent.create",
     "agent.stop",
+    "agent.retire",
     "agent.start",
     "agent.suspend",
     "agent.resume",
@@ -3282,6 +3315,24 @@ pub(super) fn mission_resources(
     })
 }
 
+fn mission_collection_projection_at(
+    store: &Store,
+    limit: usize,
+    at_unix_ms: u128,
+) -> anyhow::Result<(Vec<Value>, bool, Option<u128>)> {
+    let mut ids = store.mission_collection_ids_at(false, 0, limit.saturating_add(1), at_unix_ms)?;
+    let mut has_more = ids.len() > limit;
+    // The lookahead also determines has_more, so its membership deadline belongs to
+    // this window even though its card is not rendered.
+    let valid_until = store.mission_collection_valid_until(&ids, at_unix_ms)?;
+    ids.truncate(limit);
+    let mut items = crate::performance::task("mission_collection/cards", || {
+        mission_list_cards_at(store, &ids, at_unix_ms)
+    })?;
+    has_more |= bound_mission_cards(&mut items)?;
+    Ok((items, has_more, valid_until))
+}
+
 /// Collection cards keep only three run headers, regardless of a mission's history size.
 /// Full run and step detail stays on the detail endpoint.
 fn mission_list_cards(store: &Store, ids: &[String]) -> anyhow::Result<Vec<Value>> {
@@ -3293,7 +3344,8 @@ fn mission_list_cards_at(
     ids: &[String],
     at_unix_ms: u128,
 ) -> anyhow::Result<Vec<Value>> {
-    mission_list_cards_with(store, ids, at_unix_ms, &store.human_attention_runs()?)
+    let attention = crate::performance::task("mission_collection/attention_runs", || store.human_attention_runs_at(at_unix_ms))?;
+    mission_list_cards_with(store, ids, at_unix_ms, &attention)
 }
 
 /// [`mission_list_cards_at`] with the runs that wait on a person already read, as the published
@@ -3304,13 +3356,13 @@ pub(super) fn mission_list_cards_with(
     at_unix_ms: u128,
     attention: &BTreeSet<String>,
 ) -> anyhow::Result<Vec<Value>> {
-    let definitions = store
-        .mission_definitions_for_ids(ids)?
+    let definitions = crate::performance::task("mission_collection/definitions", || store
+        .mission_definitions_for_ids(ids))?
         .into_iter()
         .map(|d| (d.mission.subject.clone(), d))
         .collect::<BTreeMap<_, _>>();
     ids.iter().map(|id| {
-        let overview = store.mission_overview(id, 3)?;
+        let overview = crate::performance::task("mission_collection/overview", || store.mission_overview(id, 3))?;
         let newest = overview["newest"].as_array().expect("overview previews");
         let latest = newest.first();
         let definition = definitions.get(id);
@@ -3330,7 +3382,7 @@ pub(super) fn mission_list_cards_with(
             .map(|(_,count)| count.as_u64().unwrap_or(0)).sum::<u64>();
         let details = newest.iter().rev().map(|run| {
             let run_id=run["id"].as_str().expect("run header id");
-            let (total,done,steps)=store.mission_step_preview_at(run_id, at_unix_ms)?;
+            let (total,done,steps)=crate::performance::task("mission_collection/steps", || store.mission_step_preview_at(run_id, at_unix_ms))?;
             let terminal=matches!(run["status"].as_str(),Some("completed"|"failed"|"cancelled"));
             let scheduler_fault=store.reconcile_fault(run_id, crate::reconcile::FIRST_READINESS_FAULT_SCOPE)?;
             let must_act=if terminal {"nobody"} else if attention.contains(run_id) {"you"}
@@ -4313,7 +4365,16 @@ fn machine_summary_resources(
     snapshot: &ClientSnapshot,
     session: &ClientSession,
 ) -> anyhow::Result<Vec<Value>> {
-    machine_resources_with_work(state, false, snapshot, session, false)
+    Ok(machine_summary_resources_and_hosts(state, snapshot, session)?.0)
+}
+
+/// The summary's machines and the host each current runtime runs on, by runtime subject.
+fn machine_summary_resources_and_hosts(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+) -> anyhow::Result<(Vec<Value>, BTreeMap<String, String>)> {
+    machine_resources_and_hosts(state, false, snapshot, session, false)
 }
 
 fn machine_resources_with_work(
@@ -4323,6 +4384,16 @@ fn machine_resources_with_work(
     session: &ClientSession,
     include_work: bool,
 ) -> anyhow::Result<Vec<Value>> {
+    Ok(machine_resources_and_hosts(state, history, snapshot, session, include_work)?.0)
+}
+
+fn machine_resources_and_hosts(
+    state: &AppState,
+    history: bool,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    include_work: bool,
+) -> anyhow::Result<(Vec<Value>, BTreeMap<String, String>)> {
     let runtimes = runtime_resources(state, history, snapshot, session)?;
     let mut host_runtime_ids = BTreeMap::<String, BTreeSet<String>>::new();
     let mut host_running_runtimes = BTreeMap::<String, usize>::new();
@@ -4610,7 +4681,7 @@ fn machine_resources_with_work(
         machines.push(machine);
     }
     machines.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
-    Ok(machines)
+    Ok((machines, runtime_owner_hosts))
 }
 
 /// How long page reads serve the daemon's last diagnostic report before one of them asks for a
@@ -10110,7 +10181,12 @@ pub(super) struct ActionRequest {
 fn action_scope(action: &str) -> Option<&'static str> {
     if matches!(
         action,
-        "agent.create" | "agent.stop" | "agent.start" | "agent.suspend" | "agent.resume"
+        "agent.create"
+            | "agent.stop"
+            | "agent.retire"
+            | "agent.start"
+            | "agent.suspend"
+            | "agent.resume"
     ) {
         return Some("control.runtimes");
     }
@@ -11517,6 +11593,31 @@ async fn dispatch_action(
             )])
         }
         "terminal.detach" => Ok(vec![detach_terminal_attachment(state, session, request)?]),
+        "agent.retire" => {
+            require_creation_actor(session)?;
+            let parameters = serde_json::from_value::<st3_client::AgentRetireParameters>(p.clone())
+                .map_err(|error| validation(error.to_string()))?;
+            let agent = client_detail_id("agent", &parameters.agent);
+            let token = request
+                .fence
+                .runtime_desired_revision
+                .as_deref()
+                .ok_or_else(|| validation("agent.retire needs fence.runtime_desired_revision"))?;
+            state
+                .store
+                .retire_agent(
+                    &agent,
+                    authority_actor,
+                    &parameters.reason,
+                    token,
+                    request.fence.runtime_incarnation.as_deref(),
+                    &request.idempotency_key,
+                    &state.configured_peers,
+                )
+                .map_err(ApiError::bad)?;
+            signal_changed(state);
+            Ok(vec![agent])
+        }
         action @ ("agent.stop" | "agent.start") => {
             require_creation_actor(session)?;
             let agent = client_detail_id("agent", &parameter_string(p, "agent")?);
@@ -22685,7 +22786,7 @@ mission "example/zero-run" state="ready" {
     fn a_declared_seat_with_no_session_past_its_launch_window_is_down_since_it_began_waiting() {
         let started = 1_790_000_000_000_u64;
         let mut card = sessionless_card(Value::Null);
-        overlay_down(&mut card, Some(started), "missing", started + LAUNCH_WINDOW_MS + 1);
+        overlay_down(&mut card, Some(started), None, None, started + LAUNCH_WINDOW_MS + 1);
         assert_eq!(card["state"], "down");
         assert_eq!(card["down_since"], client_timestamp(u128::from(started)));
         assert_eq!(card["silent_since"], Value::Null, "a dead holder's activity is not shown as activity");
@@ -22697,12 +22798,12 @@ mission "example/zero-run" state="ready" {
     fn a_seat_inside_its_launch_window_is_still_starting() {
         let started = 1_790_000_000_000_u64;
         let mut card = sessionless_card(Value::Null);
-        overlay_down(&mut card, Some(started), "missing", started + LAUNCH_WINDOW_MS);
+        overlay_down(&mut card, Some(started), None, None, started + LAUNCH_WINDOW_MS);
         assert_eq!(card["state"], "desired");
         assert!(card.get("down_since").is_none());
         assert!(card["current_work"][0].get("holder_down_since").is_none());
         let mut unknown = sessionless_card(Value::Null);
-        overlay_down(&mut unknown, None, "missing", started + 10 * LAUNCH_WINDOW_MS);
+        overlay_down(&mut unknown, None, None, None, started + 10 * LAUNCH_WINDOW_MS);
         assert_eq!(unknown["state"], "desired", "no start time, no claim of how long");
     }
 
@@ -22711,14 +22812,44 @@ mission "example/zero-run" state="ready" {
         let started = 1_790_000_000_000_u64;
         for reported in ["ready", "idle", "working"] {
             let mut card = sessionless_card(json!(reported));
-            overlay_down(&mut card, Some(started), "current", started + 100 * LAUNCH_WINDOW_MS);
+            overlay_down(&mut card, Some(started), Some(5_000), Some(reported), started + 100 * LAUNCH_WINDOW_MS);
             assert_eq!(card["state"], "running", "{reported}");
             assert!(card.get("down_since").is_none());
         }
-        // A report that has gone stale proves nothing: the seat is down, not running.
+    }
+
+    #[test]
+    fn a_seat_that_reports_at_its_idle_heartbeat_is_never_called_down() {
+        // Two seats of the second audit (2026-10-14) had a driver and pty daemon a day old, a
+        // runtime row stuck pending and an idle report every five minutes: older than the 90 s
+        // freshness window nearly all the time, never older than a heartbeat.
+        let started = 1_790_000_000_000_u64;
+        for age in [91_000, 150_000, 299_000, 301_000, HEARTBEAT_MS] {
+            let mut card = sessionless_card(json!("indeterminate"));
+            overlay_down(&mut card, Some(started), Some(age), Some("idle"), started + 100 * LAUNCH_WINDOW_MS);
+            assert_eq!(card["state"], "waiting", "{age}");
+            assert!(card.get("down_since").is_none(), "{age}");
+            assert!(card["current_work"][0].get("holder_down_since").is_none(), "{age}");
+        }
+    }
+
+    #[test]
+    fn a_report_older_than_a_heartbeat_proves_nothing_and_an_ended_harness_is_no_session() {
+        let started = 1_790_000_000_000_u64;
         let mut stale = sessionless_card(json!("indeterminate"));
-        overlay_down(&mut stale, Some(started), "stale", started + 100 * LAUNCH_WINDOW_MS);
+        overlay_down(&mut stale, Some(started), Some(HEARTBEAT_MS + 1), Some("idle"), started + 100 * LAUNCH_WINDOW_MS);
         assert_eq!(stale["state"], "down");
+        // The launch report of a replacement incarnation is not a session: `agents restart` waits
+        // for `running`, not for the first line the driver writes.
+        let mut launching = sessionless_card(json!("starting"));
+        overlay_down(&mut launching, Some(started), Some(1_000), Some("starting"), started + 1_000);
+        assert_eq!(launching["state"], "desired");
+        let mut launched_long_ago = sessionless_card(json!("starting"));
+        overlay_down(&mut launched_long_ago, Some(started), Some(1_000), Some("starting"), started + 100 * LAUNCH_WINDOW_MS);
+        assert_eq!(launched_long_ago["state"], "down");
+        let mut ended = sessionless_card(json!("ended"));
+        overlay_down(&mut ended, Some(started), Some(1_000), Some("ended"), started + 100 * LAUNCH_WINDOW_MS);
+        assert_eq!(ended["state"], "down");
     }
 
     #[test]
@@ -22727,7 +22858,7 @@ mission "example/zero-run" state="ready" {
         for state in ["running", "waiting", "stopped", "failed", "suspended"] {
             let mut card = sessionless_card(Value::Null);
             card["state"] = json!(state);
-            overlay_down(&mut card, Some(started), "missing", started + 100 * LAUNCH_WINDOW_MS);
+            overlay_down(&mut card, Some(started), None, None, started + 100 * LAUNCH_WINDOW_MS);
             assert_eq!(card["state"], state);
         }
     }
@@ -22764,6 +22895,50 @@ mission "example/zero-run" state="ready" {
         let birch = cards.iter().find(|item| item["id"] == "agent/birch").unwrap();
         assert_eq!(birch["harness_state"], "indeterminate");
         assert_eq!(birch["state"], "waiting");
+    }
+
+    #[test]
+    fn a_seat_two_hosts_both_claim_says_st_cannot_tell_which_host_runs_it() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "status-rival-runtime");
+        let rival_root = tempfile::tempdir().unwrap();
+        let rival = test_state_named(rival_root.path(), "status-rival");
+        let subject = "agent/cedar";
+        let append = |store: &Store, kind: &str, fields: Value| {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        let runtime = json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"});
+        append(&state.store, "runtime.observed", runtime.clone());
+        append(&rival.store, "runtime.observed", runtime);
+        append(&state.store, "harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        state.store.import_replication("status-rival", &rival.store.export_replication(0).unwrap()).unwrap();
+        let index = state.store.index().unwrap();
+        let mut cards = client_agent_resources(&state.store, false, "", index).unwrap();
+        for card in &mut cards {
+            let mut harness = state.store.observed_harness_at(subject, index).unwrap().unwrap();
+            harness.observed_at_unix_ms = client_now_ms() - 3_600_000;
+            card["_status_source"] = json!(harness);
+        }
+        overlay_agent_resources(&state.store, &mut cards, "").unwrap();
+        let card = cards.iter().find(|item| item["id"] == subject).unwrap();
+        assert_eq!(card["state"], "waiting");
+        assert_eq!(card["reachability"], "indeterminate");
+        assert_eq!(card["reason"], crate::api::AUTHORITY_INDETERMINATE_REASON);
+        // A seat that one host alone claims has no such reason.
+        let alone_root = tempfile::tempdir().unwrap();
+        let alone = test_state_named(alone_root.path(), "status-single-runtime");
+        append(&alone.store, "runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
+        append(&alone.store, "harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        let index = alone.store.index().unwrap();
+        let mut cards = client_agent_resources(&alone.store, false, "", index).unwrap();
+        overlay_agent_resources(&alone.store, &mut cards, "").unwrap();
+        let card = cards.iter().find(|item| item["id"] == subject).unwrap();
+        assert_eq!(card["reachability"], "reachable");
+        assert!(card["reason"].is_null());
     }
 
     #[test]

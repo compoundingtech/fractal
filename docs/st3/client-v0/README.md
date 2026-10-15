@@ -1947,12 +1947,12 @@ projection time of its cut.
 
 Before the missions list's first publication, and while its refresher fails three folds in a
 row or after it stops, missions windows fold on read and follow commits as before, until a fold
-publishes again. When projections are replaced without a claim (a replay, trim or heal), they
+publishes again. When projections are replaced without a claim (a replay or trim), they
 keep the newest rows, under their own cut, until the list's fold from nothing publishes.
 
 The work list is never folded on read while its refresher runs. Until it has a current
 publication (at startup, after its refresher withdrew it on three failed folds in a row, and
-after a replay, trim or heal until its fold from nothing publishes), a work window receives one
+after a replay or trim until its fold from nothing publishes), a work window receives one
 retryable `resync`, then waits for the list's next publication; neither commits, the reread
 interval nor a repeat of that answer sends it anything more. A paired session's clock still
 rechecks its grant meanwhile, and an expired or revoked grant ends the window. If the work
@@ -1962,7 +1962,7 @@ list's refresher stops for good, a work window receives one `error` frame and en
 `GET /v1/client/work` (the current list, not `history=true`) answers the same way. A first
 page is a slice of the newest publication, under that publication's snapshot. A continuation
 is a slice of the same publication, even after a newer one, a withdrawal or the refresher's end
-(new first pages then refuse), until its cursor expires or a replay, trim or heal replaced the
+(new first pages then refuse), until its cursor expires or a replay or trim replaced the
 projections behind it (`page-cursor-expired`). Asking for the same first page again reuses its
 cursor and its original expiry: a cursor close to expiring can still expire before its next page
 is read, and the client restarts from a first page. The daemon keeps at most 32 cached first pages,
@@ -1979,7 +1979,7 @@ comes, it answers HTTP 503, retryable, with `details.reason: "work-list-not-fres
 asks again on a not-ready or not-fresh answer within `--daemon-wait`, measured once across every
 attempt. A client that does not retry, such as the TypeScript and Swift `workList` or a feed's
 model, gets that retryable 503 until the work list's first fold after the daemon starts, and again
-after each replay, trim or heal and each withdrawal until the next publication. HTTP pages of `/v1/client/missions` are unchanged.
+after each replay or trim and each withdrawal until the next publication. HTTP pages of `/v1/client/missions` are unchanged.
 
 A daemon started with `ST3_PUBLISHED_LISTS=off` folds each window and page on read instead.
 
@@ -2174,3 +2174,6 @@ matching, even when the expected incarnation is also missing. A summary is not r
 
 The optional claim field changes the registry digest. Older members keep new-field submissions
 as waiting records until upgrade; see [rolling upgrades](../replication.md#rolling-upgrades-and-waiting-claims).
+
+
+`agent.retire` permanently retires the identity at its declaring host. It requires `{ "agent": "agent/example/worker", "reason": "Work finished" }`, a selected desired claim ID in `fence.runtime_desired_revision`, and a stable idempotency key. Optional `runtime_incarnation` fences a selected process. Rust provides `agent_retire`; Swift and TypeScript provide `agentRetire`. See [terminal retirement](../agent-retirement.md) for the coordinated registry rollout and locally known retirement rule. Fresh sends to a known retired agent return 409 `recipient-retired` with `applied: "none"` and a typed `details.refusal.variant: "Retired"`. Exact accepted retries return their receipt; a lost reply remains unconfirmed. `lifecycle-unavailable` concerns incomplete/conflicting local evidence, never an offline owner alone.

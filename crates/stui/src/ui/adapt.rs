@@ -130,8 +130,8 @@ fn missions(model: &Model) -> Vec<Mission> {
 pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     let link = if extras.offline.is_some() {
         Link::Offline(match &model.last_connected {
-            Some(at) => format!("Last connected at {at} · reconnecting · r retry now"),
-            None => "No member reachable · reconnecting · r retry now".into(),
+            Some(at) => format!("Last connected at {at} · reconnecting · Ctrl+R retry now"),
+            None => "No member reachable · reconnecting · Ctrl+R retry now".into(),
         })
     } else if extras.live {
         Link::Live
@@ -658,6 +658,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
         .agents()
         .map(|agent| {
             let state = match (agent.state.as_str(), agent.harness_state.as_deref()) {
+                ("retired", _) => AgentState::Retired,
                 _ if agent.fault.is_some() => AgentState::Fault,
                 // A seat whose message path stopped polling or cannot hand off takes no
                 // messages, however ready its harness looks. An `outdated` path still delivers.
@@ -732,7 +733,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                 unmanaged: false,
                 // A running agent with a runtime is worth trying; opening it finds the terminal.
                 terminal: !agent.runtime_ids.is_empty()
-                    && !matches!(agent.state.as_str(), "stopped" | "failed"),
+                    && !matches!(agent.state.as_str(), "stopped" | "failed" | "retired"),
                 parent: agent
                     .under
                     .first()

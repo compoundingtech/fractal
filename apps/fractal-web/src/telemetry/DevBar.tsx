@@ -11,6 +11,7 @@ import { counters } from './measurement/index.ts'
 import { acquireMeasurementEngine } from './meters.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { transportSnapshot } from './transport.ts'
+import { Changelog } from '../changelog/Changelog.tsx'
 
 const preferences = AtomRegistry.make()
 let defaultPreference = import.meta.env?.DEV ?? false
@@ -132,6 +133,13 @@ const TransportStatus = () => {
   )
 }
 
+const readDarkScheme = (): boolean => document.documentElement.dataset.scheme === 'dark'
+const subscribeScheme = (notify: () => void): (() => void) => {
+  const observer = new MutationObserver(notify)
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-scheme'] })
+  return () => observer.disconnect()
+}
+
 /** Compact status row with a counter snapshot in the expanded panel. */
 const DevBarContent = ({
   defaultVisible = import.meta.env?.DEV ?? false,
@@ -140,6 +148,7 @@ const DevBarContent = ({
 }) => {
   defaultPreference = defaultVisible
   const shown = useAtomValue(visibility) ?? defaultVisible
+  const dark = React.useSyncExternalStore(subscribeScheme, readDarkScheme, () => false)
   const [hovered, setHovered] = React.useState(false)
   const [pinned, setPinned] = React.useState(false)
   const [snapshot, setSnapshot] = React.useState<Readonly<Record<string, number>>>(() => counters.snapshot())
@@ -161,6 +170,7 @@ const DevBarContent = ({
       {...stylex.props(styles.root, !shown && styles.hidden)}
       aria-label="Developer transport and performance"
       data-testid="wf-devbar"
+      data-changelog-anchor=""
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
@@ -191,6 +201,7 @@ const DevBarContent = ({
         <span {...stylex.props(styles.version)} title={buildIdentity.displayVersion ?? buildIdentity.machineVersion}>
           {buildIdentity.displayVersion ?? buildIdentity.machineVersion}
         </span>
+        <Changelog dark={dark} />
         {buildIdentity.dirty && <span {...stylex.props(styles.transport)}>dirty</span>}
         <TransportStatus />
       </div>
