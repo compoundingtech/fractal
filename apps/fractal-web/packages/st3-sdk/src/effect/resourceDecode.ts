@@ -1,4 +1,4 @@
-import { Agent, Resource, UsageSummary, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { Agent, CollectionName, Resource, UsageSummary, decodeUnknownSync } from '@smalltalk/st3-client/schema'
 import { Schema, SchemaAST, SchemaTransformation } from 'effect'
 import type { Brand, DateTime, Duration, Option } from 'effect'
 import type { Issue } from 'effect/SchemaIssue'
@@ -161,7 +161,7 @@ export const normalizeDecodePath = (path: string): string => {
   for (const segment of path.split('.')) {
     const key = node.has(segment) ? segment : '*'
     const child = node.get(key)
-    if (child === undefined) return '$'
+    if (child === undefined) return [...normalized, '*'].join('.')
     normalized.push(key)
     node = child
   }
@@ -256,22 +256,19 @@ export const decodeResourceRows = (rows: readonly unknown[]): {
   return { items, undecodable }
 }
 
-/** One SDK session owns bounded counters and first-seen schema paths. No row contents are emitted.
- * Overflow shares the root bucket rather than retaining arbitrary additional paths.
+/** One SDK session owns counters over the finite schema-trie path domain and collection enum.
+ * Unknown segments collapse to one wildcard at their nearest schema parent.
  */
 export const makeDecodeDiagnostics = (
   event: (resource: string, path: string, count: number, first: boolean,
     counters: DecodeDiagnosticCounts, tag: ResourceDecodeDiagnostic['_tag']) => void,
 ) => {
+  const isCollection = Schema.is(CollectionName)
   const counts = new Map<string, DecodeDiagnosticCounts>()
-  const paths = new Set<string>()
   return (resource: string, diagnostics: readonly Undecodable[]): void => {
+    resource = isCollection(resource) ? resource : '$'
     for (const diagnostic of diagnostics) {
-      let path = normalizeDecodePath(diagnostic.path)
-      if (!paths.has(path)) {
-        if (paths.size >= 128) path = '$'
-        else paths.add(path)
-      }
+      const path = normalizeDecodePath(diagnostic.path)
       const key = `${resource}:${path}`
       const previous = counts.get(key)
       const counters = {

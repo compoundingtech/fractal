@@ -1,6 +1,6 @@
 import type { Resource as ResourceWire } from '@smalltalk/st3-client'
-import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import { Option } from 'effect'
+import { Agent, Resource, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { Option, SchemaAST } from 'effect'
 import { describe, expect, it } from 'vitest'
 
 import oldLiteral from './agentSnapshot.oldLiteral.json'
@@ -237,10 +237,65 @@ describe('row-wise resource decoding', () => {
     expect([...paths]).toEqual(['runtime_ids.*'])
     expect(firstPaths).toEqual(['runtime_ids.*'])
     expect(lastCount).toBe(1000)
-    expect(normalizeDecodePath('usage.secret-row-id')).toBe('$')
+    expect(normalizeDecodePath('usage.secret-row-id')).toBe('usage.*')
     expect(normalizeDecodePath('receipt.private-row-id')).toBe('receipt.*')
     expect(normalizeDecodePath('receipt.another-row-id')).toBe('receipt.*')
     expect(normalizeDecodePath('runtime_ids.*')).toBe('runtime_ids.*')
+  })
+
+  it('keeps separate counters and first-path signals for more than 128 valid schema paths', () => {
+    const paths = new Set<string>()
+    const visit = (ast: SchemaAST.AST, path: string, ancestors: ReadonlySet<SchemaAST.AST>): void => {
+      if (ancestors.has(ast)) return
+      const next = new Set(ancestors).add(ast)
+      const child = (type: SchemaAST.AST, name: string) => {
+        const nested = path ? `${path}.${name}` : name
+        paths.add(nested)
+        visit(type, nested, next)
+      }
+      if (ast._tag === 'Objects') {
+        for (const property of ast.propertySignatures) child(property.type, String(property.name))
+        for (const index of ast.indexSignatures) child(index.type, '*')
+      } else if (ast._tag === 'Arrays') {
+        for (const type of [...ast.elements, ...ast.rest]) child(type, '*')
+      } else if (ast._tag === 'Union') {
+        for (const type of ast.types) visit(type, path, next)
+      } else if (ast._tag === 'Declaration') {
+        for (const type of ast.typeParameters) visit(type, path, next)
+      }
+    }
+    visit(SchemaAST.toEncoded(Resource.ast), '', new Set())
+    expect(paths.size).toBeGreaterThan(128)
+    const counters = new Map<string, number>()
+    const firstPaths: string[] = []
+    const report = makeDecodeDiagnostics((resource, path, count, first) => {
+      counters.set(`${resource}:${path}`, count)
+      if (first) firstPaths.push(`${resource}:${path}`)
+    })
+    for (const resource of ['agents', 'sessions']) {
+      for (const path of paths) {
+        expect(normalizeDecodePath(path)).toBe(path)
+        const diagnostic = { _tag: 'Rejected', path, reason: 'synthetic failure' } as const
+        report(resource, [diagnostic, diagnostic])
+      }
+    }
+    expect(counters.size).toBe(paths.size * 2)
+    expect(firstPaths).toHaveLength(paths.size * 2)
+    expect(new Set(firstPaths).size).toBe(paths.size * 2)
+    expect([...counters.values()].every(count => count === 2)).toBe(true)
+  })
+
+  it('bounds unknown paths per schema parent and unknown resources to one bucket', () => {
+    const keys = new Set<string>()
+    let lastCount = 0
+    const report = makeDecodeDiagnostics((resource, path, count) => {
+      keys.add(`${resource}:${path}`)
+      lastCount = count
+    })
+    for (let index = 0; index < 1000; index++)
+      report(`future-${index}`, [{ _tag: 'Rejected', path: `usage.future-${index}.nested`, reason: 'synthetic failure' }])
+    expect([...keys]).toEqual(['$:usage.*'])
+    expect(lastCount).toBe(1000)
   })
 
   it('normalizes structural diagnostics from a 1000-element malformed array', () => {
