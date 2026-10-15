@@ -825,6 +825,12 @@ export type EventPage = {
   resume_cursor: Cursor;
 };
 
+export type ExchangeTransport = {
+  at: Timestamp;
+  carrier: string;
+  fabric_route?: string;
+};
+
 export type Fence = {
   attempt?: number;
   mission_generation?: RunGenerationId;
@@ -1727,6 +1733,8 @@ export type SyncPeer = {
   estimated_catch_up_seconds?: number | null;
   host_id: Id;
   last_exchange_at?: (Timestamp | null);
+  last_failed_exchange?: ExchangeTransport;
+  last_successful_exchange?: ExchangeTransport;
   local_only_envelopes: number;
   peer_only_envelopes: number;
 };
