@@ -1,3 +1,7 @@
+// 20x the sparse history. The bound below is 1,000 VM steps over the sparse run, which a lookup
+// that walks 1,900 extra observations per seat exceeds many times over.
+const POPULATED_HISTORY: usize = 2_000;
+
 #[test]
 fn mailbox_fence_cost_is_bounded_with_sparse_observation_history() {
     fn measure(
@@ -86,9 +90,9 @@ fn mailbox_fence_cost_is_bounded_with_sparse_observation_history() {
         (1, Some("current"), "ended"),
     ] {
         let small = measure(100, seats, incarnation, state);
-        let populated = measure(20_000, seats, incarnation, state);
+        let populated = measure(POPULATED_HISTORY, seats, incarnation, state);
         eprintln!(
-            "mailbox incarnation checks (runtime/state lookup VM steps, full admission elapsed): {seats} seats, {incarnation:?}, {state}, 100 sparse reports per seat: {small:?}; 20,000 per seat: {populated:?}"
+            "mailbox incarnation checks (runtime/state lookup VM steps, full admission elapsed): {seats} seats, {incarnation:?}, {state}, 100 sparse reports per seat: {small:?}; {POPULATED_HISTORY} per seat: {populated:?}"
         );
         assert!(small.0 > 0);
         assert!(
