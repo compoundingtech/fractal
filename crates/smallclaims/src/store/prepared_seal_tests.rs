@@ -3,7 +3,8 @@
 //! or by it) through sealing and through a frozen copy of the sealing functions as they were
 //! before preparation (main at 5bf3105b9), and compare every stored row. Then they change the
 //! store between preparation and the writer: a blob stored or dropped, a claim signature that
-//! arrives, the member key, the fleet id or the keyring replaced, a batch sealed by another pass.
+//! arrives, the member key, the fleet id or the keyring replaced, a batch sealed by another pass,
+//! a claim deleted, an own envelope's signature removed.
 use super::runtime::Plain;
 use super::*;
 use crate::fleet::{MemberKey, envelope_signature_message, verify_signature};
@@ -387,7 +388,14 @@ fn a_member_key_fleet_id_or_keyring_changed_after_preparation_is_signed_again() 
         let second = Arc::new(MemberKey::generate().unwrap().0);
         let replacement = second.clone();
         before_the_loan(move |store| match change {
-            "member key" => store.load_member_key(Some(replacement)).unwrap(),
+            // Only the member key: `load_member_key` would also replace the node key and move
+            // the keyring's generation, which masks the member-key compare.
+            "member key" => {
+                *store
+                    .member_key
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(replacement);
+            }
             "fleet id" => {
                 store
                     .connection
@@ -440,6 +448,81 @@ fn a_batch_sealed_by_another_pass_after_preparation_is_not_sealed_again() {
         store.seeded_batch_rowid.load(Ordering::Acquire),
         max_batch_rowid(&reader).unwrap()
     );
+}
+
+#[test]
+fn a_claim_deleted_after_preparation_is_not_sealed() {
+    let store = node("hazel");
+    keyed(&store);
+    let dropped = note(&store, "note/deleted-before-the-loan", BTreeMap::new());
+    note(&store, "note/kept", BTreeMap::new());
+    let id = dropped.id.clone();
+    before_the_loan(move |store| {
+        store
+            .connection
+            .write()
+            .execute("DELETE FROM claims WHERE id=?1", [&id])
+            .unwrap();
+    });
+    assert_eq!(seal(&store), 1);
+    let reader = store.readers.get();
+    let payloads = payloads(&reader);
+    // The batch keeps its header and is sealed without the claim, as the old sealing seals it.
+    assert_eq!(
+        payloads.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["", "note/kept"]
+    );
+    let records: usize = reader
+        .query_row(
+            "SELECT COUNT(*) FROM replica_records WHERE claim_id=?1",
+            [&dropped.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(records, 0);
+}
+
+#[test]
+fn an_own_envelope_found_unsigned_under_the_writer_is_prepared_again() {
+    let store = node("ivy");
+    let key = keyed(&store);
+    let first = note(&store, "note/sealed-before", BTreeMap::new());
+    note(&store, "note/sealed-now", BTreeMap::new());
+    // Seal and sign the first batch without moving the frontier, so it lies inside the chunk.
+    let first_rowid: i64 = store
+        .readers
+        .get()
+        .query_row(
+            "SELECT rowid FROM batches WHERE id=?1",
+            [&first.batch_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        seed_replica_envelopes_range_tx(&transaction, &store.origin, None, Some(first_rowid))
+            .unwrap();
+        assert_eq!(store.sign_own_envelopes_tx(&transaction, None).unwrap(), 1);
+        transaction.commit().unwrap();
+    }
+    assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 0);
+    // Preparation sees the first envelope signed and signs only the one it seals. Its signature
+    // is gone by the loan, so the writer finds an unsigned envelope it holds no signature for.
+    let batch_id = first.batch_id.clone();
+    before_the_loan(move |store| {
+        store
+            .connection
+            .write()
+            .execute(
+                "DELETE FROM replica_envelope_signatures WHERE envelope_hash=(
+                     SELECT envelope_hash FROM replica_envelopes WHERE batch_id=?1)",
+                [&batch_id],
+            )
+            .unwrap();
+    });
+    assert_eq!(seal(&store), 1);
+    assert_eq!(envelopes_signed_by(&store.readers.get(), &key, FLEET), 2);
 }
 
 #[test]

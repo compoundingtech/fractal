@@ -5646,7 +5646,9 @@ impl Store {
             }
         }
         // Something the chunk was prepared from changed. Dropping the transaction writes nothing;
-        // the next pass prepares again, off the writer.
+        // the next pass prepares again, off the writer. Retries are bounded by input churn, not by
+        // a count: each one follows a commit (or a key change) that changed what this finite
+        // chunk reads, and a quiet store seals on the next pass.
         #[cfg(test)]
         SEALS_PREPARED_AGAIN.with(|count| count.set(count.get() + 1));
         Ok(true)
