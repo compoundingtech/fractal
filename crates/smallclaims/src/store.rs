@@ -37,12 +37,15 @@ use crate::sqlite::{
 };
 
 mod operation_metadata;
+pub mod prepared_envelope;
 mod replica_record;
 pub use operation_metadata::OperationMetadata;
 #[cfg(test)]
 mod projection_busy_tests;
 #[cfg(test)]
 mod receive_writer_tests;
+#[cfg(test)]
+mod prepared_envelope_tests;
 #[cfg(test)]
 mod membership_query_tests;
 #[cfg(test)]
@@ -788,8 +791,9 @@ pub struct Store {
     /// Admission took in claims whose verdicts the next projection pass judges.
     pub verdicts_due: AtomicBool,
     pub origin: String,
-    /// The database file, or the shared-memory URI of an in-memory store. A checkpoint proof
-    /// opens its own connection here to copy the store.
+    /// SQLite's resolved database filename, or the shared-memory URI of an in-memory store.
+    /// Readers, checkpoint copies and sidecars must use the opened target, not a caller alias.
+    /// This does not protect against concurrent replacement of that target or its parents.
     pub path: PathBuf,
     pub shared_memory: bool,
     /// Where the next trim stops, as a crash would, and how many envelopes it deletes per
@@ -849,6 +853,7 @@ impl Store {
         }
         let mut connection = Connection::open(path)
             .with_context(|| format!("open st database {}", path.display()))?;
+        let path = crate::sqlite::opened_database_path(&connection, path)?;
         let has_meta: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
             [],
@@ -882,12 +887,12 @@ impl Store {
             runtime.open_projections(&transaction, false)?;
             transaction.commit()?;
         }
-        let readers = ReadPool::new(path, false)?;
+        let readers = ReadPool::new(&path, false)?;
         Self::from_connection(
             connection,
             readers,
             origin,
-            path.to_path_buf(),
+            path,
             false,
             runtime,
         )
@@ -974,6 +979,11 @@ impl Store {
         shared_memory: bool,
         runtime: Arc<dyn Runtime>,
     ) -> Result<Self> {
+        let path = crate::sqlite::opened_database_path(&connection, &path)?;
+        anyhow::ensure!(
+            readers.path == path && readers.shared_memory == shared_memory,
+            "st database writer and read pool must use the same opened database path and mode"
+        );
         // Batch rowids are the sealing frontier. Checkpoint adoption can remove the highest
         // rows, so SQLite's default rowid allocator cannot be used: it reuses those keys and
         // leaves new local batches behind the frontier. Persist the allocation high water.
@@ -1151,6 +1161,7 @@ pub const ALIGNED_COMPARISON_FRESH_MS: u128 = 5 * 60 * 1000;
 pub struct AlignedComparison {
     pub at_unix_ms: u128,
     pub schema_digest: String,
+    pub projection_versions: BTreeMap<String, u64>,
     pub differing_tables: Vec<String>,
 }
 
@@ -1552,7 +1563,8 @@ pub struct ReplicationAdmission {
     pub held: usize,
     pub changed: bool,
     /// Time spent decoding envelopes, checking their hashes and claim schemas, and looking up
-    /// their stored signatures.
+    /// their stored signatures. Most of it is spent preparing envelopes before admission takes
+    /// the writer; the writer's own holds are recorded by `windows::holds`.
     pub verify: std::time::Duration,
 }
 
@@ -2418,16 +2430,24 @@ fn fleet_generation(connection: &Connection) -> Result<i64> {
 // Payload bytes are immutable at this exact hash except the lossless TEXT-to-BLOB
 // conversion. Recheck the retained header and checkpoint exclusion without decoding or
 // copying a potentially large payload on the writer. Ordinary validation still hashes it.
-fn admission_envelope_present(connection: &Connection, envelope: &ReplicaEnvelope) -> Result<bool> {
+/// The row `envelope` names, unless a checkpoint has dropped it or it is gone.
+fn admission_envelope_row(
+    connection: &Connection,
+    envelope: &ReplicaEnvelope,
+) -> Result<Option<prepared_envelope::EnvelopeRow>> {
     Ok(connection.prepare_cached(
-        "SELECT EXISTS(SELECT 1 FROM replica_envelopes
+        "SELECT rowid, received_at_unix_ms FROM replica_envelopes
          WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3
            AND previous_hash IS ?4 AND accepted_at_unix_ms=?5
            AND NOT EXISTS(SELECT 1 FROM checkpoint_envelopes
-                          WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3))"
+                          WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)"
     )?.query_row(params![envelope.writer, envelope.sequence, envelope.hash,
                         envelope.previous_hash, envelope.accepted_at_unix_ms.to_string()],
-                 |row| row.get(0))?)
+                 |row| Ok(prepared_envelope::EnvelopeRow {
+                     rowid: row.get(0)?,
+                     received_at_unix_ms: row.get(1)?,
+                 }))
+       .optional()?)
 }
 
 pub fn fleet_membership_tx(connection: &Connection) -> Result<crate::fleet::Membership> {
@@ -3590,6 +3610,11 @@ pub const REPLICATION_EXCHANGE_ENVELOPE_LIMIT: usize = 512;
 /// Maximum envelopes admitted per writer transaction. Admission can take several milliseconds
 /// per envelope on a populated store; leave room for queued write acknowledgements below 50 ms.
 pub const ADMISSION_CHUNK_ENVELOPES: usize = 8;
+/// Payload bytes admission prepares ahead of its loans: a budget on payload, not a bound on
+/// resident memory. Decoded envelopes wait for the loan that admits them next to their payloads,
+/// so the set holds roughly twice this plus its structures, and one envelope larger than this is
+/// prepared alone.
+pub const ADMISSION_PREPARED_BYTES: usize = 16 * 1024 * 1024;
 
 /// Stop a chunk before starting another envelope once its writer work reaches this budget.
 /// An envelope and the commit are indivisible; this does not preempt either one.
@@ -4698,293 +4723,17 @@ pub fn ensure_claim_blobs(transaction: &Connection, claim: &ClaimRecord) -> Resu
     Ok(())
 }
 
+/// Admit one envelope in a single pass: prepare it, then admit it. Admission proper prepares
+/// before it takes the writer; see `prepared_envelope`.
 pub fn validate_and_admit_envelope_tx(
     transaction: &Connection,
     envelope: &ReplicaEnvelope,
     runtime: &dyn Runtime,
     outcome: &mut ReplicationAdmission,
 ) -> Result<(), St3Error> {
-    let started = std::time::Instant::now();
-    let payload_bytes = envelope.payload.bytes().map_err(|error| {
-        St3Error::new(
-            "invalid-envelope-payload",
-            format!("the envelope payload is not valid base64: {error}"),
-        )
-    })?;
-    let expected_hash = replica_envelope_hash(
-        &envelope.writer,
-        envelope.sequence,
-        envelope.previous_hash.as_deref(),
-        envelope.accepted_at_unix_ms,
-        payload_bytes,
-    );
-    if expected_hash != envelope.hash {
-        return Err(St3Error::new(
-            "envelope-hash-mismatch",
-            "the envelope hash does not match its payload",
-        ));
-    }
-    let payload: ReplicaEnvelopePayload =
-        ciborium::from_reader(payload_bytes).map_err(|error| {
-            St3Error::new(
-                "invalid-envelope-payload",
-                format!("the envelope payload is not valid CBOR: {error}"),
-            )
-        })?;
-    let batch = &payload.batch;
-    if batch.origin != envelope.writer
-        || batch.replica_sequence != envelope.sequence
-        || batch.previous_hash != envelope.previous_hash
-        || batch.accepted_at_unix_ms != envelope.accepted_at_unix_ms
-    {
-        return Err(St3Error::new(
-            "envelope-batch-mismatch",
-            "the envelope and its batch identify different writes",
-        ));
-    }
-    verify_replica_batch_header(batch)?;
-    outcome.verify += started.elapsed();
-    let now = now_ms().to_string();
-    let mut degraded = false;
-    for (offset, (hash, bytes)) in payload.blobs.iter().enumerate() {
-        let position = batch.claims.len() as u64 + offset as u64;
-        let record_ref = replica_record_ref(
-            &envelope.writer,
-            envelope.sequence,
-            &envelope.hash,
-            position,
-        );
-        let valid = hex::encode(Sha256::digest(bytes)) == *hash;
-        let previous_state = transaction
-            .prepare_cached("SELECT state FROM replica_records WHERE record_ref=?1")
-            .map_err(internal)?
-            .query_row([&record_ref], |row| row.get::<_, String>(0))
-            .optional()
-            .map_err(internal)?;
-        if valid {
-            transaction
-                .prepare_cached(
-                    "INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)",
-                )
-                .map_err(internal)?
-                .execute(params![hash, bytes, bytes.len() as u64])
-                .map_err(internal)?;
-            transaction
-                .prepare_cached(
-                    "INSERT INTO replica_records(
-                         record_ref, writer, sequence, envelope_hash, position, raw, state,
-                         subject_hint, kind_hint, updated_at_unix_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, 'blob', ?8)
-                     ON CONFLICT(record_ref) DO UPDATE SET state=CASE WHEN state='repaired' THEN state ELSE 'valid' END,
-                        subject_hint=excluded.subject_hint,
-                            kind_hint='blob',
-                            error_code=CASE WHEN state='repaired' THEN error_code ELSE NULL END,
-                            error_message=CASE WHEN state='repaired' THEN error_message ELSE NULL END,
-                        updated_at_unix_ms=excluded.updated_at_unix_ms",
-                )
-                .map_err(internal)?
-                .execute(params![
-                        record_ref,
-                        envelope.writer,
-                        envelope.sequence,
-                        envelope.hash,
-                        position,
-                        bytes,
-                        format!("blob/{hash}"),
-                        now_ms().to_string(),
-                    ])
-                .map_err(internal)?;
-            outcome.valid += 1;
-            outcome.changed |= previous_state.as_deref() != Some("valid");
-        } else {
-            degraded = true;
-            transaction
-                .prepare_cached(
-                    "INSERT INTO replica_records(
-                         record_ref, writer, sequence, envelope_hash, position, raw, state,
-                         subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'invalid', ?7, 'blob',
-                               'blob-hash-mismatch', ?8, ?9)
-                     ON CONFLICT(record_ref) DO UPDATE SET state=CASE WHEN state='repaired' THEN state ELSE 'invalid' END,
-                        subject_hint=excluded.subject_hint, kind_hint='blob', error_code=excluded.error_code,
-                        error_message=excluded.error_message, updated_at_unix_ms=excluded.updated_at_unix_ms",
-                )
-                .map_err(internal)?
-                .execute(params![
-                        record_ref,
-                        envelope.writer,
-                        envelope.sequence,
-                        envelope.hash,
-                        position,
-                        bytes,
-                        format!("blob/{hash}"),
-                        format!("replicated blob `{hash}` failed verification"),
-                        now_ms().to_string(),
-                    ])
-                .map_err(internal)?;
-            outcome.invalid += 1;
-        }
-    }
-    let batch_rowid = transaction
-        .query_row(
-            "SELECT rowid FROM batches WHERE id=?1",
-            [&batch.id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .map_err(internal)?
-        .map_or_else(|| next_batch_rowid(transaction).map_err(internal), Ok)?;
-    transaction
-        .prepare_cached(
-            "INSERT OR IGNORE INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms, rowid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )
-        .map_err(internal)?
-        .execute(params![
-                batch.id,
-                batch.origin,
-                batch.replica_sequence,
-                batch.previous_hash,
-                batch.hash,
-                batch.accepted_at_unix_ms.to_string(),
-                batch_rowid,
-            ])
-        .map_err(internal)?;
-    for (position, claim) in batch.claims.iter().enumerate() {
-        let position = position as u64;
-        let record_ref = replica_record_ref(
-            &envelope.writer,
-            envelope.sequence,
-            &envelope.hash,
-            position,
-        );
-        let mut raw = Vec::new();
-        ciborium::into_writer(claim, &mut raw).map_err(internal)?;
-        let previous_state = transaction
-            .prepare_cached("SELECT state FROM replica_records WHERE record_ref=?1")
-            .map_err(internal)?
-            .query_row([&record_ref], |row| row.get::<_, String>(0))
-            .optional()
-            .map_err(internal)?;
-        let started = std::time::Instant::now();
-        let classification = validate_replicated_claim(transaction, batch, claim, runtime);
-        outcome.verify += started.elapsed();
-        match classification {
-            Ok(ReplicatedClaimAdmission::Valid) => {
-                // A checkpoint dropped this claim here, and another envelope carries it again.
-                // A node that still held it would ignore the copy as already stored.
-                let inserted = if checkpoint::claim_tombstoned(transaction, &claim.id)
-                    .map_err(internal)?
-                {
-                    0
-                } else {
-                    transaction
-                    .prepare_cached(
-                        "INSERT OR IGNORE INTO claims(id, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    )
-                    .map_err(internal)?
-                    .execute(params![
-                        claim.id,
-                        claim.batch_id,
-                        claim.subject,
-                        claim.kind,
-                        claim.origin,
-                        claim.actor,
-                        canonical_json_text(&claim.body).map_err(internal)?,
-                        serde_json::to_string(&claim.predecessors).map_err(internal)?,
-                        claim.accepted_at_unix_ms.to_string(),
-                    ])
-                    .map_err(internal)?
-                };
-                if let Some(signature) = payload.claim_signatures.get(&claim.id) {
-                    principals::store_claim_signature_tx(transaction, &claim.id, signature)
-                        .map_err(internal)?;
-                }
-                transaction
-                    .prepare_cached(
-                        "INSERT INTO replica_records(
-                             record_ref, writer, sequence, envelope_hash, position, raw, state,
-                             claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, ?8, ?9, NULL, NULL, ?10)
-                         ON CONFLICT(record_ref) DO UPDATE SET state=CASE WHEN state='repaired' THEN state ELSE 'valid' END,
-                            claim_id=excluded.claim_id,
-                            subject_hint=excluded.subject_hint, kind_hint=excluded.kind_hint,
-                            error_code=CASE WHEN state='repaired' THEN error_code ELSE NULL END,
-                            error_message=CASE WHEN state='repaired' THEN error_message ELSE NULL END,
-                            updated_at_unix_ms=excluded.updated_at_unix_ms",
-                    )
-                    .map_err(internal)?
-                    .execute(params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, now])
-                    .map_err(internal)?;
-                outcome.valid += 1;
-                outcome.changed |= inserted != 0 || previous_state.as_deref() != Some("valid");
-            }
-            Ok(
-                classification @ (ReplicatedClaimAdmission::UnknownKind
-                | ReplicatedClaimAdmission::UnknownField),
-            ) => {
-                let (error_code, error_message) = match classification {
-                    ReplicatedClaimAdmission::UnknownKind => (
-                        "unknown-claim-kind",
-                        "this st build does not know the claim kind",
-                    ),
-                    ReplicatedClaimAdmission::UnknownField => (
-                        "unknown-claim-field",
-                        "this st build does not know every field on the claim kind",
-                    ),
-                    ReplicatedClaimAdmission::Valid => unreachable!(),
-                };
-                transaction
-                    .prepare_cached(
-                        "INSERT INTO replica_records(
-                             record_ref, writer, sequence, envelope_hash, position, raw, state,
-                             claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'unknown', ?7, ?8, ?9, ?10, ?11, ?12)
-                         ON CONFLICT(record_ref) DO UPDATE SET state=CASE WHEN state='repaired' THEN state ELSE 'unknown' END,
-                            error_code=CASE WHEN state='repaired' THEN error_code ELSE excluded.error_code END,
-                            error_message=CASE WHEN state='repaired' THEN error_message ELSE excluded.error_message END,
-                            updated_at_unix_ms=excluded.updated_at_unix_ms",
-                    )
-                    .map_err(internal)?
-                    .execute(params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, error_code, error_message, now])
-                    .map_err(internal)?;
-                outcome.unknown += 1;
-            }
-            Err(error) => {
-                degraded = true;
-                transaction
-                    .prepare_cached(
-                        "INSERT INTO replica_records(
-                             record_ref, writer, sequence, envelope_hash, position, raw, state,
-                             claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'invalid', ?7, ?8, ?9, ?10, ?11, ?12)
-                         ON CONFLICT(record_ref) DO UPDATE SET state=CASE WHEN state='repaired' THEN state ELSE 'invalid' END,
-                            error_code=excluded.error_code, error_message=excluded.error_message,
-                            updated_at_unix_ms=excluded.updated_at_unix_ms",
-                    )
-                    .map_err(internal)?
-                    .execute(params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, error.code, error.message, now])
-                    .map_err(internal)?;
-                outcome.invalid += 1;
-            }
-        }
-    }
-    transaction
-        .prepare_cached(
-            "UPDATE replica_envelopes SET receipt_state=?4, validation_error=NULL, batch_id=?5
-             WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
-        )
-        .map_err(internal)?
-        .execute(params![
-            envelope.writer,
-            envelope.sequence,
-            envelope.hash,
-            if degraded { "degraded" } else { "validated" },
-            batch.id,
-        ])
-        .map_err(internal)?;
-    Ok(())
+    let prepared = prepared_envelope::prepare_envelope(envelope, runtime, None);
+    outcome.verify += prepared.verify;
+    prepared_envelope::admit_prepared_envelope_tx(transaction, prepared, outcome)
 }
 
 impl Store {
@@ -5870,6 +5619,8 @@ impl Store {
             peer: self.origin.clone(),
             fleet_id: fleet_id.to_owned(),
             schema_digest: self.runtime.schema_digest(),
+            projection_registry_digest: Some(self.runtime.projection_registry_digest()),
+            projection_versions: self.runtime.projection_versions(),
             authority_digest: snapshot.authority_digest.clone(),
             graph_digest: snapshot.legacy_graph_digest.clone(),
             projection_digests: snapshot.projection_digests.clone(),
@@ -5931,6 +5682,8 @@ impl Store {
                 peer: self.origin.clone(),
                 fleet_id: fleet_id.to_owned(),
                 schema_digest: self.runtime.schema_digest(),
+                projection_registry_digest: Some(self.runtime.projection_registry_digest()),
+                projection_versions: self.runtime.projection_versions(),
                 authority_digest: snapshot.authority_digest.clone(),
                 graph_digest: snapshot.legacy_graph_digest.clone(),
                 projection_digests: snapshot.projection_digests.clone(),
@@ -5973,6 +5726,8 @@ impl Store {
             peer: self.origin.clone(),
             fleet_id: fleet_id.to_owned(),
             schema_digest: self.runtime.schema_digest(),
+            projection_registry_digest: Some(self.runtime.projection_registry_digest()),
+            projection_versions: self.runtime.projection_versions(),
             authority_digest: snapshot.authority_digest.clone(),
             graph_digest: snapshot.legacy_graph_digest.clone(),
             projection_digests: snapshot.projection_digests.clone(),
@@ -6210,6 +5965,16 @@ impl Store {
                 ).map_err(internal)?;
                 transaction.execute(
                     "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    params![format!("peer_projection_versions:{relay}"),
+                        serde_json::to_string(&input.projection_versions).map_err(internal)?],
+                ).map_err(internal)?;
+                transaction.execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    params![format!("peer_projection_registry:{relay}"),
+                        input.projection_registry_digest.as_ref().unwrap_or(&input.schema_digest)],
+                ).map_err(internal)?;
+                transaction.execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
                     params![format!("peer_projection_inventory:{relay}"), input.inventory.digest],
                 ).map_err(internal)?;
                 // A response to our own dial proves the outbound grants now permit it.
@@ -6246,6 +6011,8 @@ impl Store {
         // Each graph projects the envelopes its node holds, so the digests are comparable only
         // while both nodes hold the same ones, and only once this node has projected them all:
         // nothing new arrived that still waits for admission, and no projection is deferred.
+        let incompatible_versions = projection_digest::incompatible_versions(
+            &self.runtime.projection_versions(), &input.projection_versions);
         let (local_graph, remote_graph) = if input.projection_digests.is_empty() {
             (
                 snapshot.legacy_graph_digest.clone(),
@@ -6253,13 +6020,16 @@ impl Store {
             )
         } else {
             (
-                snapshot.graph_digest.clone(),
-                projection_digest::root(&input.projection_digests),
+                projection_digest::root(&projection_digest::comparable(
+                    &snapshot.projection_digests, &incompatible_versions)),
+                projection_digest::root(&projection_digest::comparable(
+                    &input.projection_digests, &incompatible_versions)),
             )
         };
         // Registries from different builds may legitimately produce different projections.
         // Their complete wire logs remain comparable through the authority digest.
-        let same_registry = input.schema_digest == self.runtime.schema_digest();
+        let same_registry = input.projection_registry_digest.as_ref()
+            .unwrap_or(&input.schema_digest) == &self.runtime.projection_registry_digest();
         let waiting: bool = self
             .readers
             .get()
@@ -6330,10 +6100,12 @@ impl Store {
         if graph_equal.is_some() {
             progress.aligned_comparison = Some(AlignedComparison {
                 at_unix_ms: now,
-                schema_digest: input.schema_digest.clone(),
+                schema_digest: input.projection_registry_digest.as_ref()
+                    .unwrap_or(&input.schema_digest).clone(),
+                projection_versions: input.projection_versions.clone(),
                 differing_tables: projection_digest::differing(
-                    &snapshot.projection_digests,
-                    &input.projection_digests,
+                    &projection_digest::comparable(&snapshot.projection_digests, &incompatible_versions),
+                    &projection_digest::comparable(&input.projection_digests, &incompatible_versions),
                 ),
             });
         }
@@ -6396,16 +6168,25 @@ impl Store {
             let mut statement = connection.prepare(&admission_retry_query(retry_hash_mismatches))?;
             let envelopes = statement
                 .query_map([], |row| {
-                    Ok(ReplicaEnvelope {
-                        writer: row.get(0)?,
-                        sequence: row.get(1)?,
-                        hash: row.get(2)?,
-                        previous_hash: row.get(3)?,
-                        accepted_at_unix_ms: row.get::<_, String>(4)?.parse().unwrap_or_default(),
-                        payload: row.get(5)?,
-                        member_key: None,
-                        signature: None,
-                    })
+                    Ok((
+                        ReplicaEnvelope {
+                            writer: row.get(0)?,
+                            sequence: row.get(1)?,
+                            hash: row.get(2)?,
+                            previous_hash: row.get(3)?,
+                            accepted_at_unix_ms: row
+                                .get::<_, String>(4)?
+                                .parse()
+                                .unwrap_or_default(),
+                            payload: row.get(5)?,
+                            member_key: None,
+                            signature: None,
+                        },
+                        prepared_envelope::EnvelopeRow {
+                            rowid: row.get(6)?,
+                            received_at_unix_ms: row.get(7)?,
+                        },
+                    ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             (retry_hash_mismatches, envelopes)
@@ -6425,10 +6206,37 @@ impl Store {
             // Each envelope is admitted in its own savepoint, so an invalid one is rolled back
             // and recorded alone. Refresh authority off the writer whenever its generation moved.
             let mut next = 0;
+            // Each chunk's envelopes are decoded, hashed and encoded before the loan that admits
+            // them. One the loan does not reach waits here for the next.
+            let mut ready = BTreeMap::<usize, prepared_envelope::PreparedEnvelope>::new();
             while next < pending.len() {
                 if membership.is_none() {
                     membership = Some(self.prepare_admission_membership()?);
                 }
+                // Prepared envelopes hold their decoded payloads until their loan, so the set is
+                // bounded by payload bytes as well as count. One envelope above the budget is
+                // prepared alone, as admission always decoded one at a time.
+                let mut prepared_bytes = ready.values().map(|prepared| prepared.bytes).sum::<usize>();
+                let ahead = (next + ADMISSION_CHUNK_ENVELOPES).min(pending.len());
+                for (index, (envelope, row)) in pending.iter().enumerate().take(ahead).skip(next) {
+                    if ready.contains_key(&index) {
+                        continue;
+                    }
+                    let bytes = envelope.payload.bytes().map_or(0, <[u8]>::len);
+                    if prepared_bytes > 0 && prepared_bytes + bytes > ADMISSION_PREPARED_BYTES {
+                        break;
+                    }
+                    let prepared = prepared_envelope::prepare_envelope(
+                        envelope,
+                        &*self.runtime,
+                        Some(row.clone()),
+                    );
+                    prepared_bytes += prepared.bytes;
+                    outcome.verify += prepared.verify;
+                    ready.insert(index, prepared);
+                }
+                #[cfg(test)]
+                PREPARED_AHEAD.with(|sets| sets.borrow_mut().push(ready.len()));
                 #[cfg(test)]
                 BEFORE_ADMISSION_LOAN.with(|hook| {
                     if let Some(mut hook) = hook.borrow_mut().take() {
@@ -6454,11 +6262,22 @@ impl Store {
                     if next != first && started.elapsed() >= ADMISSION_WRITER_BUDGET {
                         break;
                     }
-                    let envelope = &pending[next];
+                    let (envelope, _) = &pending[next];
+                    // The byte budget can stop preparation short of the chunk.
+                    let Some(prepared) = ready.remove(&next) else {
+                        break;
+                    };
                     next += 1;
                     // A checkpoint/repair may have removed the captured source while this
                     // background loan waited. Never restore records from that stale payload.
-                    if !admission_envelope_present(&pass, envelope)? {
+                    let Some(row) = admission_envelope_row(&pass, envelope)? else {
+                        continue;
+                    };
+                    // The row is seen to have changed since it was prepared (deleted and received
+                    // again). Its bytes are the same, since the hash names them, but leave it
+                    // pending: the receipt that changed it runs its own admission pass after this
+                    // one, which prepares it again off the writer.
+                    if prepared.row.as_ref() != Some(&row) {
                         continue;
                     }
                     let started = std::time::Instant::now();
@@ -6466,16 +6285,12 @@ impl Store {
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {
                         hold_replica_envelope(&pass, envelope, reason)?;
-                        held.push(envelope.clone());
+                        held.push((envelope.clone(), row));
                         continue;
                     }
                     let mut savepoint = pass.savepoint()?;
-                    let result = validate_and_admit_envelope_tx(
-                        &savepoint,
-                        envelope,
-                        &*self.runtime,
-                        &mut outcome,
-                    );
+                    let result =
+                        prepared_envelope::admit_prepared_envelope_tx(&savepoint, prepared, &mut outcome);
                     match result {
                         Ok(()) => {
                             savepoint
@@ -7618,6 +7433,7 @@ impl Store {
     ) -> Result<ReplicationStatus> {
         let snapshot = self.sealed_replication_snapshot()?;
         let connection = self.readers.get();
+        let registry_digest = self.runtime.projection_registry_digest();
         // Projection caches include committed local batches before their envelopes are sealed.
         // Equal sealed inventories cannot diagnose those pending writes as peer divergence.
         let unsealed_local: bool = connection.query_row(
@@ -7633,7 +7449,6 @@ impl Store {
             )?)
         };
         let waiting_claims = count("unknown")?;
-        let registry_digest = self.runtime.schema_digest();
         let projection_deferred = self.replication_projection_deferred();
         let now = now_ms();
         let sync = self.replication_peer_sync_held(
@@ -7663,9 +7478,12 @@ impl Store {
                                 last_error: row.get(2)?,
                                 refusal_reason: None,
                                 schema_digest: row.get(3)?,
+                                projection_registry_digest: None,
+                                projection_versions: Default::default(),
                                 authority_digest: row.get(4)?,
                                 graph_digest: row.get(5)?,
                                 projection_digests: BTreeMap::new(),
+                                incompatible_projection_tables: Vec::new(),
                                 differing_tables: Vec::new(),
                                 projection_comparison_waiting: false,
                                 projection_comparison_waiting_reason: None,
@@ -7690,9 +7508,12 @@ impl Store {
                         last_error: None,
                         refusal_reason: None,
                         schema_digest: None,
+                        projection_registry_digest: None,
+                        projection_versions: Default::default(),
                         authority_digest: None,
                         graph_digest: None,
                         projection_digests: BTreeMap::new(),
+                        incompatible_projection_tables: Vec::new(),
                         differing_tables: Vec::new(),
                         projection_comparison_waiting: false,
                         projection_comparison_waiting_reason: None,
@@ -7760,6 +7581,19 @@ impl Store {
                 .map(|value| serde_json::from_str(&value))
                 .transpose()?
                 .unwrap_or_default();
+            let encoded_versions: Option<String> = connection.query_row(
+                "SELECT value FROM meta WHERE key=?1", [format!("peer_projection_versions:{peer}")],
+                |row| row.get(0)).optional()?;
+            status.projection_versions = encoded_versions.map(|value| serde_json::from_str(&value))
+                .transpose()?.unwrap_or_default();
+            status.projection_registry_digest = connection.query_row(
+                "SELECT value FROM meta WHERE key=?1", [format!("peer_projection_registry:{peer}")],
+                |row| row.get(0)).optional()?;
+            let incompatible = projection_digest::incompatible_versions(
+                &self.runtime.projection_versions(), &status.projection_versions);
+            status.incompatible_projection_tables = incompatible.iter().cloned().collect();
+            let same_registry = status.projection_registry_digest.as_ref()
+                .or(status.schema_digest.as_ref()) == Some(&self.runtime.projection_registry_digest());
             let mut inventory_aligned = status.projection_digests.is_empty();
             if !status.projection_digests.is_empty() {
                 status.graph_digest = Some(projection_digest::root(&status.projection_digests));
@@ -7774,12 +7608,12 @@ impl Store {
                     peer_inventory.as_deref() == Some(snapshot.inventory.digest.as_str());
                 let live_settled = !projection_deferred
                     && !unsealed_local
-                    && status.schema_digest.as_deref() == Some(registry_digest.as_str())
+                    && same_registry
                     && waiting_claims == 0;
                 if inventory_aligned && live_settled {
                     status.differing_tables = projection_digest::differing(
-                        &snapshot.projection_digests,
-                        &status.projection_digests,
+                        &projection_digest::comparable(&snapshot.projection_digests, &incompatible),
+                        &projection_digest::comparable(&status.projection_digests, &incompatible),
                     );
                 }
             }
@@ -7793,7 +7627,8 @@ impl Store {
                 None
             } else {
                 self.peer_aligned_comparison(peer, now)
-                    .filter(|held| held.schema_digest == registry_digest)
+                    .filter(|held| held.schema_digest == registry_digest
+                        && held.projection_versions == status.projection_versions)
             };
             let held = aligned_before
                 .clone()
@@ -7809,8 +7644,8 @@ impl Store {
             } else if !status.projection_digests.is_empty() && status.schema_digest.is_none() {
                 Some("the peer has not reported its projection registry".into())
             } else if let Some(digest) = status
-                .schema_digest
-                .as_deref()
+                .projection_registry_digest.as_ref().or(status.schema_digest.as_ref())
+                .map(String::as_str)
                 .filter(|digest| *digest != registry_digest)
             {
                 Some(format!(
@@ -7856,6 +7691,7 @@ impl Store {
                 status.projection_compared_at_unix_ms = compared.map(|(_, at)| at);
             }
             status.projection_comparison_waiting_reason = reason;
+
             peers.push(status);
         }
         Ok(ReplicationStatus {
@@ -8032,7 +7868,8 @@ pub fn admission_retry_query(retry_hash_mismatches: bool) -> String {
              {hash_mismatches}
          )
          SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
-                envelopes.previous_hash, envelopes.accepted_at_unix_ms, envelopes.payload
+                envelopes.previous_hash, envelopes.accepted_at_unix_ms, envelopes.payload,
+                envelopes.rowid, envelopes.received_at_unix_ms
          FROM retry_ids CROSS JOIN replica_envelopes AS envelopes
            ON envelopes.writer=retry_ids.writer AND envelopes.sequence=retry_ids.sequence
           AND envelopes.envelope_hash=retry_ids.envelope_hash
@@ -8610,6 +8447,8 @@ thread_local! {
     static ADMISSION_MEMBERSHIP_FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     // One-shot deterministic control between preparing authority and acquiring its writer.
     static BEFORE_ADMISSION_LOAN: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+    // How many envelopes were prepared ahead of each admission loan.
+    static PREPARED_AHEAD: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
     // One-shot change to the store between preparing a sealing chunk and taking its writer.
     static SEAL_BEFORE_LOAN: std::cell::RefCell<Option<SealHook>> = const { std::cell::RefCell::new(None) };
     /// Sealing chunks this thread prepared again because their store changed before the loan.
