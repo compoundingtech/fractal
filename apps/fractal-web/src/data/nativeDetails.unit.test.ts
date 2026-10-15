@@ -123,6 +123,15 @@ describe('fixture-free native Details projection', () => {
     const guarded = project({ sessionFeed: unavailable({ reason: 'failed', detail: 'Session start changed between observations; elapsed time and age are unreported.' }) })
     expect(guarded.overview.durations?.every(item => item.detail === 'Session start changed between observations; elapsed time and age are unreported.')).toBe(true)
   })
+  it('marks only actively waiting declarations and queue as pending, never static missing producers', () => {
+    const waiting = project({ selectedDeclarations: { _tag: 'Waiting' }, selectedQueue: { _tag: 'Waiting' } })
+    expect(waiting.sections.find(section => section.title === 'Declared bindings')?.pending).toBe(true)
+    expect(waiting.sections.find(section => section.title === 'Missions / queue')?.pending).toBe(true)
+    const absent = project()
+    expect(absent.sections.find(section => section.title === 'Declared bindings')?.pending).toBe(false)
+    expect(absent.sections.find(section => section.title === 'Missions / queue')?.pending).not.toBe(true)
+    expect(absent.sections.find(section => section.title === 'History')?.pending).not.toBe(true)
+  })
   it('uses the identical occupancy calculation as sidebar, not cumulative totals', () => {
     const agent = createProjections().fleetFromAgents([row]).agents[0]!
     const occupancy = sidebarRow({ agent, now: 10000, stale: false }).context

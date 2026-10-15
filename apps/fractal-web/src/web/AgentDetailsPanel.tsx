@@ -31,7 +31,7 @@ export interface AgentDetailsPanelProps {
 
 /** q44 hides absent resource bodies; an observed zero descendant count is still evidence. */
 export const visibleDetailsSections = (sections: readonly DetailsSection[], trace: TraceSeries): readonly DetailsSection[] =>
-  sections.filter(section => section.items._tag === 'Known' && (section.items.value.length > 0 || section.title === 'Subagents') ||
+  sections.filter(section => section.pending === true || section.items._tag === 'Known' && (section.items.value.length > 0 || section.title === 'Subagents') ||
     section.title === 'Subagents' && (trace.subagents._tag === 'Known' || trace.subagentCount._tag === 'Known'))
 
 /** The real kit tab-group owns Details' status/action slot; hidden tabs release reader demand. */
