@@ -4787,6 +4787,7 @@ async fn cli_persons_rename_migrates_current_work_and_reviews_across_restart() {
             ("content".into(), json!("The new person already participates in the graph.")),
             ("status".into(), json!("sent")),
         ]),
+        evidence: Vec::new(),
         expected_subject: None,
         idempotency_key: Some("cli-known-rename-person".into()),
     }).unwrap();

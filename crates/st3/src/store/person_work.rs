@@ -2814,6 +2814,7 @@ mission "writer-load" state="ready" {
                 ("content".into(), json!("This person already participates in the graph.")),
                 ("status".into(), json!("sent")),
             ]),
+            evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: Some("rename-destination-known".into()),
         }).unwrap();
