@@ -8,12 +8,12 @@
 # Drops the variables that SELECT a repository or an identity. Transport and credential variables (GIT_SSH_COMMAND, GIT_ASKPASS,
 # GIT_TERMINAL_PROMPT, GIT_HTTP_*, GIT_CONFIG_*) are kept: the notes push needs them and they do not name a repository.
 #
-# Uses only `export -p` (a builtin in every bash build; `compgen` is missing from the non-interactive bash of a nix shell, which made
+# Uses only `export -p` (a builtin in every bash build, printing `declare -x NAME=` or, in POSIX mode, `export NAME=`; `compgen` is missing from the non-interactive bash of a nix shell, which made
 # the first version of this file a silent no-op there) and checks its own result: a failed scrub stops the caller.
 _git_env_selecting='GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX GIT_QUARANTINE_PATH GIT_REPLACE_REF_BASE GIT_NO_REPLACE_OBJECTS GIT_GRAFT_FILE GIT_SHALLOW_FILE GIT_INTERNAL_SUPER_PREFIX GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE'
 _git_env_remaining() {
   local name
-  for name in $(export -p | sed -n 's/^declare -x \(GIT_[A-Za-z0-9_]*\)[= ].*/\1/p'); do
+  for name in $(export -p | sed -n -e 's/^declare -x \(GIT_[A-Za-z0-9_]*\)[= ].*/\1/p' -e 's/^export \(GIT_[A-Za-z0-9_]*\)[= ].*/\1/p'); do
     case " $_git_env_selecting " in
       *" $name "*) printf '%s\n' "$name" ;;
       *) case "$name" in GIT_PUSH_OPTION*) printf '%s\n' "$name" ;; esac ;;

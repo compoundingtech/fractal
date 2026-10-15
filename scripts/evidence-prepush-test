@@ -374,11 +374,18 @@ class Hook(unittest.TestCase):
 
     def test_it_works_in_a_bash_without_compgen_the_hosted_nix_shell_has_none(self):
         # `enable -n compgen` removes the builtin, as in a bash built without readline: the first version did nothing there.
-        done = self.source_git_env_clean(prelude='enable -n compgen; ', GIT_DIR='/nowhere', GIT_WORK_TREE='/nowhere', GIT_INDEX_FILE='/nowhere')
+        done = self.source_git_env_clean(prelude='enable -n compgen 2>/dev/null || true; ', GIT_DIR='/nowhere', GIT_WORK_TREE='/nowhere', GIT_INDEX_FILE='/nowhere')
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertNotIn('compgen', done.stderr)
+        self.assertEqual(done.stderr, '')  # the scrub itself says nothing and needs no compgen (a bash without it has none to disable)
         for name in ('GIT_DIR=', 'GIT_WORK_TREE=', 'GIT_INDEX_FILE='):
             self.assertNotIn(name, done.stdout)
+
+    def test_it_works_in_posix_mode_where_export_p_prints_export_not_declare(self):
+        done = self.source_git_env_clean(prelude='set -o posix; ', GIT_DIR='/nowhere', GIT_WORK_TREE='/nowhere', GIT_SSH_COMMAND='ssh')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn('GIT_DIR=', done.stdout)
+        self.assertNotIn('GIT_WORK_TREE=', done.stdout)
+        self.assertIn('GIT_SSH_COMMAND=ssh', done.stdout)
 
     def test_a_scrub_that_did_not_work_stops_the_caller_instead_of_looking_like_success(self):
         done = subprocess.run(['bash', '-c', 'unset() { return 1; }; . scripts/git-env-clean || echo "sourced-failed:$?"'], cwd=ROOT,
@@ -403,7 +410,7 @@ class Hook(unittest.TestCase):
 
     def test_the_stub_works_in_a_bash_without_compgen_too(self):
         bash_env = Path(self.tmp.name) / 'bash-env'
-        bash_env.write_text('enable -n compgen\n')
+        bash_env.write_text('enable -n compgen 2>/dev/null || true\n')
         linked = self.linked_worktree()
         before = self.fingerprint(linked)
         done = self.push_from(linked, STUB_STATUS='3', STUB_FIXTURE='1', BASH_ENV=str(bash_env))
