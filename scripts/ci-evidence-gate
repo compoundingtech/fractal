@@ -42,6 +42,8 @@ PROTECTED = (
     'scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
     '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts', '.github/workflows/workspace-ci.ts',
     'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
+    # What decides who may have a head tree used: the author list and the rule that reads it.
+    '.st/evidence-authors.json', 'scripts/ci-evidence-signing',
 )
 
 NOTES = 'refs/notes/evidence/*:refs/notes/evidence/*'
