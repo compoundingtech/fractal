@@ -110,6 +110,7 @@ fn require_person_process() -> Result<()> {
 
 /// Called before entering the TUI runtime. Remote paired-client dispatch skips this.
 pub fn prepare_plain_ui() -> Result<Option<String>> {
+    st3_client::client_mode::require_local()?;
     require_person_process()?;
     anyhow::ensure!(interactive(), "interactive setup needs a terminal");
     if st3_client::device::Profile::load(&st3_client::device::profile_path()?)?.is_some() {
@@ -148,6 +149,7 @@ pub fn prepare_plain_ui() -> Result<Option<String>> {
 }
 
 pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
+    st3_client::client_mode::require_local()?;
     require_person_process()?;
     let path = args.config.clone().unwrap_or_else(Config::default_path);
     // A new install records auto; a config that already exists keeps whatever mode it has,
@@ -853,6 +855,7 @@ async fn start_daemon(
     service: bool,
     linger: bool,
 ) -> Result<()> {
+    st3_client::client_mode::require_local()?;
     if daemon_ready(config).await {
         return Ok(());
     }

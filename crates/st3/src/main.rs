@@ -62,6 +62,7 @@ mod cli_help;
 mod setup;
 mod onboarding;
 mod change_cli;
+mod client_mode_cli;
 mod directive_note;
 mod completion;
 mod doctor_cli;
@@ -117,6 +118,8 @@ const DEFAULT_DAEMON_WAIT_SECS: u64 = 30;
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect the durable local/client mode and interrupted transitions.
+    ClientMode(client_mode_cli::Args),
     /// Configure this machine and start st, with flags for unattended setup.
     Setup(crate::setup::SetupArgs),
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
@@ -5749,6 +5752,9 @@ async fn run(cli: Cli) -> Result<()> {
     let own = std::env::var("ST_AGENT").ok();
     let mission_run = std::env::var("ST_MISSION_RUN").ok();
     guard_mutating_cli_actor(&cli.command, own.as_deref(), mission_run.as_deref())?;
+    if let Command::ClientMode(args) = &cli.command {
+        return client_mode_cli::run(args, cli.json);
+    }
     if let Command::Setup(args) = cli.command {
         return crate::setup::run(args).await.map(|_| ());
     }
@@ -5811,6 +5817,7 @@ async fn run(cli: Cli) -> Result<()> {
         return run_admission(command, cli.json);
     }
     if let Command::ReplicationWorker(args) = cli.command {
+        st3_client::client_mode::require_local()?;
         let mut config = Config::load_unvalidated(args.config.as_deref())?;
         if let Some(value) = args.node {
             config.node = value;
@@ -5844,6 +5851,7 @@ async fn run(cli: Cli) -> Result<()> {
         telemetry.shutdown();
         return result;
     }
+    st3_client::client_mode::require_local()?;
     let (config, unknown_config_keys) = Config::load_client_unvalidated(None)?;
     let endpoint = cli
         .endpoint
@@ -5856,6 +5864,7 @@ async fn run(cli: Cli) -> Result<()> {
     // Drivers outlive daemon restarts and handle an outage in their own loops; doctor reports one.
     let immediate = Client::new(endpoint.clone());
     match cli.command {
+        Command::ClientMode(_) => unreachable!(),
         Command::Setup(_) => unreachable!(),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
@@ -6733,6 +6742,7 @@ fn daemon_start_version(machine_version: &str) -> Result<&str> {
 }
 
 async fn run_up(args: UpArgs) -> Result<()> {
+    st3_client::client_mode::require_local()?;
     let started_at = Instant::now();
     let mut phase_finished_at = started_at;
     let mut phase_elapsed_ms = || {

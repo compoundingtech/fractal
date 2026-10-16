@@ -886,6 +886,7 @@ pub fn run(mut options: Args) -> Result<()> {
     if args.iter().any(|arg| arg == "--demo") {
         return ui::run_demo(&args);
     }
+    st3_client::client_mode::require_local()?;
     if !io::stdout().is_terminal() {
         anyhow::bail!("st ui needs an interactive terminal");
     }
