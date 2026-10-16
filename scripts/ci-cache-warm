@@ -12,6 +12,7 @@ case "${1:?usage: scripts/ci-cache-warm tests|clippy|fleet-compat|genie|isolatio
   fleet-compat)
     python3 scripts/compat-baseline fleet "$RUNNER_TEMP/baseline"
     cargo test -p st3 --locked --test integration --no-run
+    cargo test -p st3-daemon --locked --lib --no-run
     ;;
   genie) true ;; # nix develop .#genie has already populated the shell.
   isolation-vm)

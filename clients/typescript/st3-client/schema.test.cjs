@@ -4,6 +4,24 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('queued mission deadlines decode null and admission timestamps', async () => {
+    const [{ Option, Schema }, Rich] = await modules;
+    const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');
+    for (const mode of ['strict', 'tolerant']) {
+        const decode = Rich.decodeUnknownSync(Rich.Mission, mode);
+        const queued = structuredClone(wire);
+        queued.run_details[0].after = 'mission-run/predecessor';
+        queued.run_details[0].deadline = null;
+        const value = decode(queued);
+        assert(Option.isNone(value.run_details[0].deadline));
+        assert.equal(Schema.encodeSync(Rich.Mission)(value).run_details[0].deadline, null);
+        queued.run_details[0].deadline = '2026-09-20T11:05:00.000Z';
+        assert(Option.isSome(decode(queued).run_details[0].deadline));
+        assert.equal(Schema.encodeSync(Rich.Mission)(decode(queued)).run_details[0].deadline,
+            '2026-09-20T11:05:00.000Z');
+    }
+});
+
 test('terminal refusal and unconfirmed send envelopes preserve their applied answers', async () => {
     const [{ Schema }, Rich] = await modules;
     const decode = Rich.decodeUnknownSync(Rich.ErrorEnvelope);
@@ -392,6 +410,30 @@ test('normalized conversation fallbacks and open block payloads survive schema r
     assert.deepEqual(Schema.encodeSync(Rich.TimelineBlock)(decoded), block);
 });
 
+test('assistant error views preserve exact native diagnostics in both decoder modes', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = {
+        type: 'assistant_error', status: 'failed', presentation: 'full',
+        is_error: true, label: 'native diagnostic', message: 'native diagnostic',
+        native: {
+            stopReason: 'future-stop', errorMessage: 'native\n\u001bdiagnostic',
+            errorStatus: { future: [false, null, 429] }, errorId: null,
+            retryRecovery: { attempt: 2, future: ['unchanged'] },
+            future: { retained: true },
+        },
+    };
+    for (const mode of ['strict', 'tolerant']) {
+        const decoded = Rich.decodeUnknownSync(Rich.TimelineViewAssistantError, mode)(wire);
+        assert.deepEqual(Schema.encodeSync(Rich.TimelineViewAssistantError)(decoded), wire);
+        const { native, ...legacy } = wire;
+        assert.deepEqual(
+            Schema.encodeSync(Rich.TimelineViewAssistantError)(
+                Rich.decodeUnknownSync(Rich.TimelineViewAssistantError, mode)(legacy)),
+            legacy,
+        );
+    }
+});
+
 
 test('relay omission fixture keeps absent fields, nullable values, and unknown bodies', async () => {
     const [{ Schema }, Rich] = await modules;
@@ -420,4 +462,43 @@ test('phone observation schema keeps histogram pairs and live-share as separate 
         [{...report.samples[1],kind:'latency'}],
         [{...report.samples[1],carrier:'unknown'}],
     ]) assert.throws(()=>decode({...report,samples}));
+});
+
+test('producer conformance fixtures decode strictly without losing tool results', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const replay = require(process.env.ST_TIMELINE_CONFORMANCE_OUTPUT
+        ?? '../../../docs/st3/client-v0/fixtures/timeline-conformance.json');
+    const fixtures = Array.isArray(replay) ? replay : replay.items;
+    assert.ok(fixtures.length > 0);
+    const decode = Rich.decodeUnknownSync(Rich.TimelineEntry, 'strict');
+    for (const entry of fixtures) {
+        assert.doesNotThrow(() => Schema.encodeSync(Rich.TimelineEntry)(decode(entry)), entry.id);
+    }
+});
+
+test('known daemon sender schema gap remains an explicit rejection (issue #1957)', async () => {
+    // https://github.com/compoundingtech/smalltalk/issues/1957 — pending sender amendment.
+    const [, Rich] = await modules;
+    const entry = {
+        id: 'timeline-entry/ada', sequence: 0, revision: 1, final: true,
+        timestamp: '2026-10-12T00:00:00.000Z', role: 'system', type: 'message',
+        body: { message_id: 'message/tester', from: 'daemon/runtime', to: 'agent/ada' },
+    };
+    assert.throws(() => Rich.decodeUnknownSync(Rich.TimelineEntry, 'strict')(entry));
+});
+
+test('exchange carrier additions preserve legacy absence and future carrier values', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = { host_id: 'host/birch', peer_only_envelopes: 5, local_only_envelopes: 0, last_exchange_at: null, estimated_catch_up_seconds: null, diverged_since: null };
+    const decode = Rich.decodeUnknownSync(Rich.SyncPeer, 'strict');
+    assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(wire)), wire);
+    const observed = {
+        ...wire,
+        last_successful_exchange: { at: '2026-10-13T12:00:00.000Z', carrier: 'loopback' },
+        last_failed_exchange: { at: '2026-10-13T11:59:00.000Z', carrier: 'fabric', fabric_route: 'unknown' },
+    };
+    assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(observed)), observed);
+    const future = { ...observed, last_successful_exchange: { ...observed.last_successful_exchange, carrier: 'future-carrier' } };
+    assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(future)), future);
+    assert.throws(() => decode({ ...observed, last_failed_exchange: { carrier: 'fabric' } }));
 });

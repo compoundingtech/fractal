@@ -6,6 +6,13 @@ Messages are durable conversation. Missions track work and its result; [human re
 
 Run `st`, open **Agents**, and select `garden/worker`. Click the conversation composer, type, and press **Enter** to send. In v0.3.4, **c** opens the composer from the conversation. **Ctrl+K** finds an agent or mission; **Ctrl+H** opens Home, and **Ctrl+Q** quits. The conversation shows your Smalltalk messages alongside the harness's transcript and tool calls.
 
+If a conversation fails to open, its error card offers **Ctrl+R** to retry opening it
+without closing the tab. Leave the message box with **Esc** first. On a failed-open
+card this retries only the focused conversation, never an outgoing message; otherwise
+**Ctrl+R** resends a message that was not sent. **Ctrl+Y** speaks into the message box.
+A permanent refusal is not retried automatically: after access or availability changes,
+use **Ctrl+R** to ask again. Your draft is kept.
+
 On the phone, open **Agents**, select the worker, and use its composer. [Build and run the iOS app](ios-app.md) covers local installation first. A phone reads and acts through a paired member; it does not become a replica or run a seat. To begin pairing on your daemon machine:
 
 ```sh
@@ -65,6 +72,37 @@ st conversations ls person/ada
 ```
 
 `send` and `reply` safely recognize a retry with the same content. If a send times out, check its status or retry it; do not assume it failed. An agent's answer belongs in the conversation where you asked it.
+
+Claude's native permission, question and review dialogs hold new Smalltalk channel
+notifications outside the harness. Mail remains durable and releases in mailbox
+order once Claude applies the native answer or the dialog is dismissed; a later session cannot inherit
+the previous session's hold or answer. Native transcript receipt recovery still
+runs for mail already offered, so this hold does not erase delivery/read proof or
+replay uncertain handoffs. An unavailable or stale observation keeps new offers
+held until current evidence returns.
+
+A permission hook's answer-poll timeout does **not** mean the dialog timed out:
+Claude can still be waiting for a terminal answer after that hook stops polling.
+The hold remains while that dialog is open. Merely recording an answer in Smalltalk
+cannot release mail: an expired hook no longer receives that answer. Claude must
+apply the decision or its terminal must show the dialog has closed. A native timeout
+that closes the prompt releases it on that same positive evidence; an ended session
+leaves its mail for its successor. Stale or indeterminate observations never count
+as native closure, including after a fresh heartbeat restores the same episode.
+
+Esc dismissals do not need a remembered dialog: st reads the current native input
+box and idle shortcuts footer after observing the prompt, and checks that the
+runtime and prompt have not changed. This re-derives closure after a daemon restart
+or a dismissal between screen polls. A box shown while Claude is working is not
+idle evidence, and an unreadable screen cannot release the hold.
+
+A body or attachment preparation failure also holds that message and later mail
+in mailbox order. The sender's existing delivery reason explains the preparation
+blocker without exposing raw errors or internal paths. st retains and retries
+the mail, clearing that reason when preparation succeeds, including after a
+channel reconnect. Healthy mail does not add preparation diagnostics. Waiting and
+recovery reports cite the stored message-creation claim, so each FIFO blocker and
+its clear remain tied to the same durable message.
 
 Attach an existing image (up to four). PNG, JPEG, GIF and WebP up to 10 MiB are sent as they are;
 the CLI renders an SVG to PNG, converts a BMP, and scales a larger still image down until it fits,

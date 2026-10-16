@@ -638,6 +638,8 @@ const PROBES: &[Probe] = &[
         "/v1/client/attention/{attention}",
     ),
     get("GET /v1/client/mail-backlog", "/v1/client/mail-backlog"),
+    get("GET /v1/client/slo", "/v1/client/slo"),
+    get("GET /v1/client/slo/history", "/v1/client/slo/history?id=cpu"),
     post("POST /v1/messages/cleanup", "/v1/messages/cleanup", |_, _| {
         json!({ "all": true, "older_than_ms": 1, "dry_run": true })
     }),
@@ -764,6 +766,11 @@ const PROBES: &[Probe] = &[
     get("GET /v1/delivery/hold", "/v1/delivery/hold?subject={seat}"),
     get("GET /v1/claims", "/v1/claims?limit=100"),
     get("GET /v1/claims/by-id/{id}", "/v1/claims/by-id/{claim}"),
+    // A Claude hook's poll for the answer to the prompt or denial it raised.
+    get(
+        "GET /v1/harness-prompts/answer",
+        "/v1/harness-prompts/answer?agent={seat}&episode={seat_claim}",
+    ),
     get("GET /v1/usage", "/v1/usage?since_ms={usage_since}&until_ms={usage_until}"),
     get("GET /v1/usage/messages", "/v1/usage/messages"),
     get("GET /v1/slo", "/v1/slo"),
@@ -1669,7 +1676,7 @@ fn usage_cost_window_is_shared_and_stays_after_cached_history() {
 /// Every route `api.rs` declares is measured or listed in `NOT_MEASURED`, and nothing is both.
 #[test]
 fn the_cost_check_covers_every_route() {
-    let declared = declared_routes(include_str!("../src/api.rs"));
+    let declared = declared_routes(include_str!("../../st3-daemon/src/api.rs"));
     assert!(declared.len() > 100, "found only {} routes", declared.len());
     let measured = PROBES
         .iter()
@@ -1828,7 +1835,7 @@ fn declared_routes(source: &str) -> BTreeSet<String> {
 
 #[test]
 fn the_cost_route_inventory_resolves_the_client_read_forward_constant() {
-    let declared = declared_routes(include_str!("../src/api.rs"));
+    let declared = declared_routes(include_str!("../../st3-daemon/src/api.rs"));
     assert!(declared.contains("POST /v1/internal/client-read/forward"));
 }
 
@@ -2570,6 +2577,18 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
         .and_then(|page| first_string(&page, "id"))
         .unwrap_or_else(|| "bench-missing-claim".into());
     items.insert("claim", claim);
+    // A claim of the probed seat, so the prompt-answer poll reads past its subject check to the
+    // answer lookup, as a hook's poll for its own prompt does.
+    let seat_claim = client
+        .get::<Value>(&format!(
+            "/v1/claims?subject={}&limit=1",
+            urlencoding::encode(&subjects.seats[0])
+        ))
+        .await
+        .ok()
+        .and_then(|page| first_string(&page, "id"))
+        .expect("the probed seat has a claim");
+    items.insert("seat_claim", urlencoding::encode(&seat_claim).into_owned());
     let record = client
         .get::<Value>("/v1/replication/records")
         .await
