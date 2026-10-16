@@ -107,6 +107,7 @@ mod terminal_binding;
 mod tiles_root;
 mod version;
 mod typed_keys;
+mod ui_open;
 
 #[test]
 fn every_test_file_is_built() {

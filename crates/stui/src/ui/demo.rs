@@ -69,6 +69,7 @@ pub fn world() -> World {
         link: Link::Live,
         diverged: Vec::new(),
         stale: Vec::new(),
+        behind: Vec::new(),
         missions_followed: true,
         settled: true,
         active_missions: None,
@@ -147,6 +148,7 @@ pub fn loading() -> World {
         link: Link::Connecting,
         diverged: Vec::new(),
         stale: Vec::new(),
+        behind: Vec::new(),
         missions_followed: true,
         settled: true,
         active_missions: None,
@@ -656,6 +658,7 @@ fn agent(
         details: AgentDetails::default(),
         terminal: !matches!(state, AgentState::Stopped),
         subagents: Vec::new(),
+        reported: None,
     }
 }
 
@@ -783,6 +786,7 @@ fn agents() -> Vec<Agent> {
         details: AgentDetails::default(),
         terminal: false,
         subagents: Vec::new(),
+        reported: None,
     });
     let detail =
         |goal: &str, claimed: &str, next: Option<&str>, queue: &[&str], state: &str| AgentDetails {
