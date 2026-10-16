@@ -7,8 +7,11 @@ so cleanup needs neither a live daemon API nor a scan of unrelated fleet process
 """
 import argparse
 import ctypes
+import fcntl
+import json
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import signal
@@ -18,6 +21,97 @@ import tempfile
 import time
 
 
+class MemoryMeter:
+    """Peak resident memory of every process the test owns, for SMALLTALK_TEST_MEMORY_REPORT.
+
+    Each poll reads the kernel's own high-water mark (VmHWM) of the test process and all its
+    descendants, so a daemon's peak is what the kernel saw, not what a sample happened to catch.
+    A process that exits before the next poll is lost unless the guardian reaps it (an adopted
+    descendant): wait4 then reports its peak. Off unless the variable names a report file, and
+    read-only either way.
+    """
+
+    def __init__(self, test, task_pid, path):
+        self.test = test
+        self.task_pid = task_pid
+        self.path = path
+        self.started = time.monotonic()
+        self.seen = {}
+
+    def scan(self):
+        me = os.getpid()
+        pending = [me]
+        while pending:
+            pid = pending.pop()
+            try:
+                for task in os.listdir(f"/proc/{pid}/task"):
+                    pending.extend(map(int, Path(f"/proc/{pid}/task/{task}/children").read_text().split()))
+            except OSError:
+                pass
+            if pid != me:
+                self.observe(pid)
+
+    def observe(self, pid):
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+            # Field 22, counted after the command name, which may contain spaces.
+            start = stat.rsplit(")", 1)[1].split()[19]
+            status = Path(f"/proc/{pid}/status").read_text()
+            peak = int(re.search(r"^VmHWM:\s+(\d+) kB", status, re.M).group(1))
+        except (OSError, AttributeError, IndexError):
+            return  # gone, a zombie, or a kernel thread: no resident peak to read
+        entry = self.seen.get((pid, start))
+        if entry is None:
+            try:
+                argv = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")[:-1]
+            except OSError:
+                argv = []
+            entry = self.seen[(pid, start)] = {
+                "pid": pid, "name": self.name(pid, argv), "argv": argv[:8],
+                "at_s": round(time.monotonic() - self.started, 1), "peak_kb": 0,
+            }
+        entry["peak_kb"] = max(entry["peak_kb"], peak)
+
+    def reaped(self, pid, peak_kb):
+        """The peak of an adopted descendant that exited. One that died between two polls was
+        never scanned: it still gets a row, unnamed, since its peak is the point."""
+        entries = [e for (p, _), e in self.seen.items() if p == pid]
+        if entries:
+            entries[-1]["peak_kb"] = max(entries[-1]["peak_kb"], peak_kb)
+        else:
+            self.seen[(pid, None)] = {"pid": pid, "name": "?", "argv": [],
+                                      "at_s": round(time.monotonic() - self.started, 1), "peak_kb": peak_kb}
+
+    def name(self, pid, argv):
+        if pid == self.task_pid:
+            return "test"
+        if not argv:
+            return "?"
+        executable = re.sub(r"-[0-9a-f]{16}$", "", os.path.basename(argv[0]))
+        rest = [a for a in argv[1:] if not a.startswith("-")]
+        return f"{executable} {rest[0]}" if rest and re.fullmatch(r"[a-z][a-z0-9-]*", rest[0]) else executable
+
+    def write(self, code):
+        record = {
+            "test": self.test, "exit": code,
+            "wall_s": round(time.monotonic() - self.started, 1),
+            "processes": sorted(self.seen.values(), key=lambda e: -e["peak_kb"]),
+        }
+        line = (json.dumps(record, separators=(",", ":")) + "\n").encode()
+        with open(self.path, "ab") as report:
+            fcntl.flock(report, fcntl.LOCK_EX)  # parallel tests append whole lines
+            report.write(line)
+
+
+def memory_meter(command, task_pid):
+    path = os.environ.get("SMALLTALK_TEST_MEMORY_REPORT")
+    if not path:
+        return None
+    exact = command.index("--exact") + 1 if "--exact" in command else None
+    test = command[exact] if exact and exact < len(command) else os.path.basename(command[0])
+    return MemoryMeter(test, task_pid, path)
+
+
 def kill_group(pid):
     try:
         os.killpg(pid, signal.SIGKILL)
@@ -25,7 +119,7 @@ def kill_group(pid):
         pass
 
 
-def reap_exited_descendants(task_pid):
+def reap_exited_descendants(task_pid, meter=None):
     """Retire adopted PTYs during the test, preserving the task's exit status.
 
     A stopped PTY must disappear from /proc before suspend/resume checks continue.
@@ -34,7 +128,9 @@ def reap_exited_descendants(task_pid):
     children = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
     for pid in map(int, children.read_text().split()):
         if pid != task_pid:
-            os.waitpid(pid, os.WNOHANG)
+            reaped, _, usage = os.wait4(pid, os.WNOHANG)
+            if reaped and meter:
+                meter.reaped(pid, usage.ru_maxrss)  # kB on Linux
 
 
 def reap_descendants():
@@ -88,6 +184,7 @@ def guardian(command, watched, result, temporary_roots=(), keep=False):
             if keep:
                 print(f"isolated test keeping {root}", file=sys.stderr, flush=True)
         task = subprocess.Popen(command, env=env, start_new_session=True)
+        meter = memory_meter(command, task.pid)
         with os.fdopen(os.pidfd_open(task.pid), "rb") as task_fd:
             poller = select.poll()
             for fd in [*watched, task_fd.fileno()]:
@@ -95,12 +192,18 @@ def guardian(command, watched, result, temporary_roots=(), keep=False):
             # pidfds avoid PID reuse and the check/launch race. An already dead
             # owner is immediately readable, including after the double fork.
             while not interrupted and not poller.poll(100):
-                reap_exited_descendants(task.pid)
+                if meter:
+                    meter.scan()
+                reap_exited_descendants(task.pid, meter)
     finally:
+        if meter:
+            meter.scan()  # the daemons are still alive here; teardown kills them next
         if task is not None:
             kill_group(task.pid)
             code = task.wait()
         reap_descendants()
+        if meter:
+            meter.write(code)
         from st3_test_evidence import finish
         try:
             finish(Path(evidence_manifest.name), code)
