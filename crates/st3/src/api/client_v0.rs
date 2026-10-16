@@ -2891,6 +2891,8 @@ pub(super) fn capabilities(session: &ClientSession) -> Vec<Value> {
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    // Agent rows carry st's presentation (docs/clients/ui-contract.md, Agent).
+    capabilities.push(json!({"id":"presentation", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities
 }
 
@@ -3235,6 +3237,7 @@ pub(super) fn mission_list_cards_with(
                 "id":step.subject,"path":step.step,"title":step.title,"state":client_work_state(&step.status),
                 "attempt":step.attempt,"assignee":step.assigned_to,"claimant":step.claimant,
                 "agentless":step.agentless,"since":client_timestamp(step.updated_at_unix_ms),
+                "keep_open":crate::mission::step_keeps_open(definition.map(|d| &d.mission), &step.step),
                 "progress_at": null,
                 "blocked_reason":step.blocked_reason.as_deref().or_else(|| scheduler_fault.as_deref().filter(|_| step.status=="pending")),"blockers":step.blockers,
                 "goals":step.goals,"constraints":step.constraints
@@ -3258,6 +3261,7 @@ pub(super) fn mission_list_cards_with(
         let historical = matches!(state,"completed"|"failed"|"cancelled"|"retired");
         Ok(json!({"id":id,"kind":"mission","revision":revision,"updated_at":client_timestamp(updated),
             "title":id.trim_start_matches("mission/"),"state":state,"mission_revision":revision,
+            "system":crate::mission::is_system(id, definition.map(|d| &d.mission)),
             "runs":newest.iter().rev().map(|r| r["id"].clone()).collect::<Vec<_>>(),
             "run_details":details,"active_runs":active,"total_runs":overview["total_runs"],
             "run_counts":overview["counts"],"runs_truncated":overview["total_runs"].as_u64().unwrap_or(0)>newest.len() as u64,
@@ -3564,6 +3568,7 @@ fn mission_resources_filtered(
                                     "assignee": step.assigned_to,
                                     "claimant": step.claimant,
                                     "agentless": step.agentless,
+                                    "keep_open": crate::mission::step_keeps_open(definition.map(|(definition, _)| definition), &step.step),
                                     "since": client_timestamp(step.updated_at_unix_ms),
                                     "last_progress": step.progress_summary,
                                     "progress_at": step.progress_at_unix_ms.map(client_timestamp),
@@ -3635,6 +3640,7 @@ fn mission_resources_filtered(
                 "title": mission.strip_prefix("mission/").unwrap_or(&mission),
                 "state": state,
                 "mission_revision": revision,
+                "system": crate::mission::is_system(&mission, definition.map(|(definition, _)| definition)),
                 "runs": runs.into_iter().map(|run| run.subject).collect::<Vec<_>>(),
                 "run_details": run_details,
                 "must_act": must_act,
@@ -3687,12 +3693,14 @@ fn runtime_resources_for_owner(
             BTreeSet::from([owner.to_owned()]),
             snapshot.store_index,
             history,
+            crate::store::ClaimsReduction::Runtime,
         )?
     } else {
         state.store.status_for_claim_kind_at(
             "runtime.observed",
             Some(snapshot.store_index),
             history,
+            crate::store::ClaimsReduction::Runtime,
         )?
     };
     runtime_resources_from_status(state, snapshot, session, status)
@@ -3710,7 +3718,7 @@ fn runtime_resources_for_id(
         include_owner.then_some(id),
         snapshot.store_index,
     )?;
-    let status = state.store.status_for_subject_names_at(subjects, snapshot.store_index, true)?;
+    let status = state.store.status_for_subject_names_at(subjects, snapshot.store_index, true, crate::store::ClaimsReduction::Runtime)?;
     Ok(runtime_resources_from_status(state, snapshot, session, status)?
         .into_iter()
         .filter(|runtime| runtime["id"] == id || (include_owner && runtime["owner_id"] == id))
@@ -4348,10 +4356,12 @@ fn machine_resources_and_hosts(
         .collect::<BTreeSet<_>>();
     host_ids.extend(configured_hosts.iter().cloned());
     host_ids.extend(host_runtime_ids.keys().cloned());
-    let status =
-        state
-            .store
-            .status_for_subject_prefix_at("host/", Some(snapshot.store_index), history)?;
+    let status = state.store.status_for_subject_prefix_at(
+        "host/",
+        Some(snapshot.store_index),
+        history,
+        crate::store::ClaimsReduction::Summary,
+    )?;
     let mut host_statuses = status
         .subjects
         .into_iter()
@@ -10290,6 +10300,7 @@ fn validate_message_session(
             BTreeSet::from([recipient.clone()]),
             snapshot.store_index,
             false,
+            crate::store::ClaimsReduction::Summary,
         )
         .map_err(ApiError::internal)?;
     let current_session = status
@@ -12937,6 +12948,15 @@ mission "queue-parity" state="ready" {
         assert_eq!(observed.load(Ordering::SeqCst), 1);
         socket.close(None).await.unwrap();
         server.abort();
+    }
+
+    #[test]
+    fn a_daemon_serving_presentations_advertises_them() {
+        assert!(capabilities(&ClientSession::local(None).unwrap()).iter().any(|capability| {
+            capability["id"] == "presentation"
+                && capability["version"] == 1
+                && capability["state"] == "granted"
+        }));
     }
 
     #[tokio::test]
@@ -19291,7 +19311,7 @@ mission "example/zero-run" state="ready" {
         append("agent/retired", json!({"status":"stopped", "runtime_id":"old", "incarnation_id":"retired"}));
         let current = state.store.index().unwrap();
         for index in [before, current] {
-            let roster = state.store.status_for_subject_prefix_at("agent/", Some(index), true).unwrap();
+            let roster = state.store.status_for_subject_prefix_at("agent/", Some(index), true, crate::store::ClaimsReduction::Full).unwrap();
             for subject in roster.subjects {
                 let exact = state.store.status_history(Some(&subject.subject), None, Some(index)).unwrap();
                 assert_eq!(serde_json::to_value(&exact.subjects[0]).unwrap(), serde_json::to_value(&subject).unwrap());
@@ -19361,7 +19381,7 @@ mission "example/zero-run" state="ready" {
         }
         state.store.forget_current_views();
         for index in snapshots {
-            let roster = state.store.status_for_subject_prefix_at("agent/", Some(index), true).unwrap();
+            let roster = state.store.status_for_subject_prefix_at("agent/", Some(index), true, crate::store::ClaimsReduction::Full).unwrap();
             let subject = &roster.subjects[0];
             let fields = subject.actual.as_ref().map(|actual| actual.get("fields").unwrap_or(actual)).unwrap();
             let incarnation = fields.get("incarnation_id").and_then(Value::as_str)
@@ -23301,6 +23321,61 @@ mission "example/zero-run" state="ready" {
         assert_eq!(runtime_detail(
             State(state), Extension(pinned), Extension(session), AxumPath("shared".into()),
         ).await.unwrap().0, expected);
+    }
+
+    #[test]
+    fn runtime_roster_fixed_page_cost_ignores_subject_history() {
+        crate::profile::init_from_env();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "runtime-perf");
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let mut previous = None;
+        let mut written = 0;
+        for history in [32, 512, 7_900] {
+            for index in written..history {
+                state.store.append_claim(&ClaimInput {
+                    subject: "agent/runtime-perf".into(),
+                    kind: if index == 0 { "runtime.observed" } else { "harness.diagnostic" }.into(),
+                    actor: Some("agent/runtime-perf".into()),
+                    fields: serde_json::from_value(if index == 0 {
+                        json!({"runtime_id": "fixed-runtime", "status": "running", "terminal": false})
+                    } else {
+                        json!({"code": "retained-diagnostic", "reason": format!("retained diagnostic {index}")})
+                    }).unwrap(),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+            written = history;
+            let snapshot = new_client_snapshot(&state);
+            let measure = |mode| {
+                state.store.forget_current_views();
+                let profile = crate::profile::Op::start(
+                    format!("GET /v1/client/runtimes?limit=100 history={history} mode={mode:?}"), None,
+                );
+                let entered = crate::profile::enter(profile.as_ref());
+                let started = std::time::Instant::now();
+                let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+                let status = state.store.status_for_claim_kind_at(
+                    "runtime.observed", Some(snapshot.store_index), false, mode,
+                ).unwrap();
+                let resources = runtime_resources_from_status(&state, &snapshot, &session, status).unwrap();
+                let cost = scope.finish();
+                let elapsed = started.elapsed().as_secs_f64() * 1_000.0;
+                drop(entered);
+                if let Some(profile) = profile { profile.finish(); }
+                (resources, cost, elapsed)
+            };
+            let (before, old_cost, before_ms) = measure(crate::store::ClaimsReduction::Full);
+            let (after, cost, after_ms) = measure(crate::store::ClaimsReduction::Runtime);
+            assert_eq!(before, after);
+            assert_eq!(after.len(), 1, "fixed live roster fits the fixed 100-item page");
+            eprintln!("runtime-roster history={history} page=100 live=1 before_ms={before_ms:.3} after_ms={after_ms:.3} before={old_cost:?} after={cost:?}");
+            if let Some(prior) = previous {
+                assert!(cost.vm_steps <= prior + 500, "runtime roster work grew with history: {prior} -> {cost:?}");
+            }
+            assert!(old_cost.vm_steps > cost.vm_steps, "full-history negative oracle: {old_cost:?} vs {cost:?}");
+            previous = Some(cost.vm_steps);
+        }
     }
 
     #[tokio::test]
