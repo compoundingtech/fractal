@@ -16,6 +16,7 @@ mod binary_payloads;
 mod boot_canaries;
 mod broken_gates;
 mod claude_idle;
+mod claude_statusline;
 mod client_creation;
 mod client_glasses;
 mod client_presence;
@@ -106,6 +107,7 @@ mod terminal_binding;
 mod tiles_root;
 mod version;
 mod typed_keys;
+mod ui_open;
 
 #[test]
 fn every_test_file_is_built() {

@@ -17,6 +17,55 @@ const PERSON_STEPS_QUERY: &str = "SELECT subject FROM step_runs
     AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject";
 
 impl Store {
+    /// The person-attention collection at `now`, with the first instant after `now` at which
+    /// the unchanged collection changes.
+    ///
+    /// The collection only admits items as their waiting time arrives; it has no clock-driven
+    /// removals, so one read of its eventual projection serves both: the rows already waiting,
+    /// in the eventual order, and the earliest admission still ahead. This reuses the same
+    /// recipient, generation, run, declaration and resolution filters, including registered
+    /// custom attention. An ask's waiting time can predate its asking claim (for migrated
+    /// asks), so both gates must open before its row is visible.
+    ///
+    /// Observer/reconcile grace, final-step fault aging, checkpoint waits and runtime faults
+    /// belong to `fault_snapshot`, not this collection. Person attention reads stored step
+    /// state, not effective wake, lease or execution-deadline state. Those clocks therefore
+    /// cannot change this projection without another graph write.
+    pub(crate) fn attention_collection_snapshot(
+        &self,
+        person: Option<&str>,
+        now: u128,
+    ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
+        let eventual = self.attention_snapshot(person, u128::MAX)?;
+        let connection = self.readers.get();
+        let mut starts = Vec::with_capacity(eventual.len());
+        for item in &eventual {
+            let mut starts_at = item.requested_at_unix_ms;
+            if item.kind == "person-step"
+                && let Some(ask) = person_work::request(&connection, &item.subject)?
+            {
+                starts_at = starts_at.max(ask.accepted_at_unix_ms);
+            }
+            starts.push(starts_at);
+        }
+        let mut valid_until = None;
+        let rows = eventual
+            .into_iter()
+            .zip(starts)
+            .filter(|(_, starts_at)| {
+                if *starts_at > now {
+                    valid_until =
+                        Some(valid_until.map_or(*starts_at, |kept: u128| kept.min(*starts_at)));
+                    false
+                } else {
+                    true
+                }
+            })
+            .map(|(item, _)| item)
+            .collect();
+        Ok((rows, valid_until))
+    }
+
     /// The mission context of a person ask a mission step made: its mission, and the step that
     /// waits on the answer with its goal. `None` for a standalone ask or an update, which belong
     /// to no mission of their own.
@@ -869,6 +918,51 @@ impl Store {
         Ok(items)
     }
 
+    /// A completed after-step with an unarmed budget is missing admission provenance,
+    /// not queued work. Keep the time unknown and make its loss an actionable fault.
+    fn missing_admission_clock_faults(
+        &self,
+        person: Option<&str>,
+    ) -> Result<Vec<AttentionItemView>> {
+        let connection = self.readers.get();
+        // Begin with the small open-run index, then point-read each deadline and its
+        // after-steps. Finished history is never scanned for this fault.
+        let runs = connection.prepare_cached(&format!(
+            "SELECT mission_runs.id FROM mission_runs INDEXED BY mission_runs_open_index
+             CROSS JOIN mission_run_deadlines AS deadlines
+             WHERE {OPEN_MISSION_RUN} AND deadlines.run_id=mission_runs.id
+               AND deadlines.deadline_at_unix_ms IS NULL
+               AND EXISTS(SELECT 1 FROM step_runs INDEXED BY step_runs_run_index
+                 WHERE step_runs.run_id=mission_runs.id AND step_runs.step_path=?1
+                   AND step_runs.status='completed')"
+        ))?.query_map([crate::mission::AFTER_RUN_STEP], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut items = Vec::new();
+        for id in runs {
+            let run = mission_run_header_tx(&connection, &id)?;
+            if !person_work::run_live(&connection, &run.subject, Some(&run.generation), true)?
+                || person.is_some_and(|person| person != run.requester)
+            {
+                continue;
+            }
+            items.push(AttentionItemView {
+                episode: format!("deadline-admission-missing:{id}"),
+                priority: "high".into(), kind: "fault".into(), review_mode: None,
+                subject: run.subject.clone(), person: run.requester.clone(),
+                requester_id: None, launch_id: None, variant_id: None, message_id: None,
+                answers: Vec::new(), conversation: None,
+                title: "Run admission time unavailable".into(),
+                detail: "This run was admitted, but its timeout cannot be reconstructed because the accepted admission history is unavailable. Its timeout is not armed. Restore the original admission history from a trusted copy and rebuild the projection, or cancel the run. A retry or duplicate completion cannot start a fresh timeout budget.".into(),
+                mission: Some(run.mission.clone()), mission_run: Some(run.subject.clone()),
+                step: None, targets: vec![run.subject.clone()],
+                requested_at_unix_ms: run.created_at_unix_ms,
+                actions: vec![attention_action("inspect run", &["st", "missions", "show", &run.subject])],
+                request: None,
+            });
+        }
+        Ok(items)
+    }
+
     fn loop_attention_items(
         &self,
         person: Option<&str>,
@@ -1111,6 +1205,7 @@ impl Store {
         let mut items = self.reconcile_fault_attention(person, as_of)?;
         items.extend(self.observer_attention_items(person, as_of)?);
         items.extend(self.loop_attention_items(person, as_of)?);
+        items.extend(self.missing_admission_clock_faults(person)?);
         items.extend(self.parked_runtime_attention_items(person, as_of)?);
         items.extend(self.unstarted_seat_attention_items(person, as_of)?);
         let failures = self.operational_failures()?;
@@ -1700,9 +1795,13 @@ impl Store {
         if person.is_some_and(|person| person != owner) {
             return Ok(Vec::new());
         }
+        let last = last_turn_or_end(connection, seat)?;
         let mut items = Vec::new();
         for (claim, index, at, fields) in denials {
-            if index < started || native_prompt_answer(connection, &claim)?.is_some() {
+            if index < started
+                || moved_on(last.as_ref(), index, at)
+                || native_prompt_answer(connection, &claim)?.is_some()
+            {
                 continue;
             }
             let tool = fields["status"].as_str().unwrap_or("tool");
@@ -1768,11 +1867,17 @@ impl Store {
         let connection = self.readers.get();
         let started = running_since(&connection, seat).map_err(internal)?;
         let answered = native_prompt_answer(&connection, episode).map_err(internal)?;
+        let last = last_turn_or_end(&connection, seat).map_err(internal)?;
         drop(connection);
-        if started.is_none_or(|(started, _)| (denial.store_index as i64) < started) || answered.is_some() {
+        let index = denial.store_index as i64;
+        let at = denial.accepted_at_unix_ms;
+        if started.is_none_or(|(started, _)| index < started)
+            || moved_on(last.as_ref(), index, at)
+            || answered.is_some()
+        {
             return Err(St3Error::new(
                 "stale-fence",
-                "that prompt is no longer waiting: it was answered, or the seat restarted",
+                "that call is no longer waiting: it was answered, the seat moved on, or it restarted",
             ));
         }
         let tool = fields["status"].as_str().unwrap_or("tool").to_owned();
@@ -1843,6 +1948,46 @@ fn running_since(connection: &Connection, seat: &str) -> Result<Option<(i64, Str
         return Ok(None);
     }
     Ok(Some((index, fields["incarnation_id"].as_str().unwrap_or_default().to_owned())))
+}
+
+/// The newest observation of `seat` that began a turn or ended its session: its store position,
+/// state and when that state began. Observations of the seat at rest, which repeat as it is
+/// refreshed, lie after it and are passed over.
+fn last_turn_or_end(connection: &Connection, seat: &str) -> Result<Option<(i64, String, Option<u64>)>> {
+    connection
+        .prepare_cached(&format!(
+            "{} LIMIT 1",
+            newest_claims_of_kind_query("claims.store_index, claims.body", "harness.observed").replace(
+                " ORDER BY",
+                " AND json_extract(claims.body, '$.fields.state') IN ('working', 'ended') ORDER BY"
+            )
+        ))?
+        .query_row(params![seat, i64::MAX], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?
+        .map(|(index, body)| -> Result<(i64, String, Option<u64>)> {
+            let body: Value = serde_json::from_str(&body)?;
+            let fields = body.get("fields").unwrap_or(&body);
+            Ok((
+                index,
+                fields["state"].as_str().unwrap_or_default().to_owned(),
+                fields["observed_since_ms"].as_u64(),
+            ))
+        })
+        .transpose()
+}
+
+/// Whether the seat moved on after its hook raised a denial (at store position `index`, accepted
+/// at `at`), given its newest turn or end (see [`last_turn_or_end`]): it began another turn, or its
+/// session ended. The denied call then waits on nobody, so its alert goes. The `Stop` hook records
+/// the seat's state before it raises the denial, so the turn the denial ended, though it may still
+/// be observed working for a moment, began before it.
+fn moved_on(last: Option<&(i64, String, Option<u64>)>, index: i64, at: u128) -> bool {
+    last.is_some_and(|(observed, state, since)| {
+        *observed > index
+            && (state == "ended" || since.is_some_and(|since| u128::from(since) > at))
+    })
 }
 
 /// The newest few denials `seat`'s hooks raised: their claims, store positions, acceptance times
@@ -2051,6 +2196,16 @@ fn native_prompt_answer_key(observation: &str) -> String {
     format!("native-prompt-answer:{observation}")
 }
 
+/// Decode the shared diagnostic payload for both recent and durable answer lookups.
+fn native_prompt_answer_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Option<String>> {
+    let status = row.get::<_, Option<String>>(offset)?;
+    // A question's answer is its choices, which the reason holds.
+    match status.as_deref() {
+        Some("answer") => row.get(offset + 1),
+        _ => Ok(status),
+    }
+}
+
 /// The answer recorded for the prompt `observation` opened, if any.
 fn native_prompt_answer(connection: &Connection, observation: &str) -> Result<Option<String>> {
     let operation = smallclaims::store::operation_id_for_key(&native_prompt_answer_key(observation));
@@ -2061,16 +2216,101 @@ fn native_prompt_answer(connection: &Connection, observation: &str) -> Result<Op
              WHERE json_extract(body, '$._operation.id') IS NOT NULL
                AND json_extract(body, '$._operation.id')=?1 LIMIT 1",
         )?
-        .query_row([operation], |row| {
-            let status = row.get::<_, Option<String>>(0)?;
-            // A question's answer is its choices, which the reason holds.
-            Ok(match status.as_deref() {
-                Some("answer") => row.get::<_, Option<String>>(1)?,
-                _ => status,
-            })
-        })
+        .query_row([operation], |row| native_prompt_answer_from_row(row, 0))
         .optional()?
         .flatten())
+}
+
+/// Fold the native prompt's terminal-only release into the shared harness view.
+/// Driver heartbeats can restate the old blocked file after Esc/No; their
+/// unchanged episode must not resurrect a resolved hold in sender status/cards.
+pub(super) fn resolve_native_harness_at(
+    connection: &Connection,
+    subject: &str,
+    index: u64,
+    view: &mut crate::model::CurrentHarnessView,
+) -> Result<()> {
+    if view.driver.as_deref() != Some("claude")
+        || view.blocked_on.as_deref() != Some("human")
+        || !matches!(view.ask.as_deref(), Some("permission" | "question" | "review"))
+    {
+        return Ok(());
+    }
+    let Some(claim) = claim_by_id_tx(connection, &view.claim)? else { return Ok(()); };
+    let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    let Some((ownership, transition)) = fields["ownership_sequence"].as_u64()
+        .zip(fields["transition_sequence"].as_u64()) else { return Ok(()); };
+    // A Smalltalk answer is a request for the permission hook, not proof that
+    // Claude received it. The hook may already have exhausted its polling wait.
+    if let Some((NativePromptState::Gone, at)) = native_prompt_sequence_resolution(connection, subject, ownership, transition, index)? {
+        view.state = "idle".into();
+        view.blocked_on = None;
+        view.ask = None;
+        view.reason = None;
+        view.since_unix_ms = at;
+        view.observed_at_unix_ms = view.observed_at_unix_ms.max(at);
+    }
+    Ok(())
+}
+
+/// An episode's release stays durable even after more than sixteen heartbeats.
+/// Ownership/transition sequences identify that exact driver episode, so older
+/// answers cannot release a successor prompt, even with the same tool/reason.
+fn native_prompt_sequence_resolution(
+    connection: &Connection,
+    subject: &str,
+    ownership: u64,
+    transition: u64,
+    index: u64,
+) -> Result<Option<(NativePromptState, u128)>> {
+    let mut observations = connection.prepare_cached(&canonical_sql(
+        "SELECT claims.id FROM claims INDEXED BY claims_harness_episode_index
+         JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 AND claims.kind='harness.observed'
+           AND claims.store_index<=?2
+           AND json_extract(claims.body,'$.fields.ownership_sequence')=?3
+           AND json_extract(claims.body,'$.fields.transition_sequence')=?4
+         ORDER BY CANONICAL_DESC(claims)",
+    ))?;
+    // Native closure is terminal for this episode. A delayed answer request
+    // cannot supersede Gone, even when it arrives later in canonical order.
+    // Operation identity distinguishes closure from an answer: question choices
+    // are answer payloads too, not just the permission words "allow" and "deny".
+    let mut resolutions = connection.prepare_cached(&canonical_sql(
+        "SELECT json_extract(body, '$._operation.id')=?1,
+           json_extract(body, '$.fields.status'), json_extract(body, '$.fields.reason'),
+           accepted_at_unix_ms
+         FROM claims INDEXED BY claims_operation_index
+         WHERE json_extract(body, '$._operation.id') IS NOT NULL
+           AND json_extract(body, '$._operation.id') IN (?1,?2)
+           AND store_index<=?3
+         ORDER BY (json_extract(body, '$._operation.id')=?1) DESC,
+           CANONICAL_DESC(claims) LIMIT 1",
+    ))?;
+    let mut requested_answer = None;
+    for claim in observations.query_map(params![subject, index, ownership, transition], |row| row.get::<_, String>(0))? {
+        smallclaims::read_budget::check()?;
+        let claim = claim?;
+        let gone = native_prompt_gone_operation(&claim);
+        let answer = smallclaims::store::operation_id_for_key(&native_prompt_answer_key(&claim));
+        let resolved: Option<(bool, Option<String>, String)> = resolutions
+            .query_row(params![gone, answer, index], |row| {
+                Ok((row.get(0)?, native_prompt_answer_from_row(row, 1)?, row.get(3)?))
+            })
+            .optional()?;
+        if let Some((gone, answer, at)) = resolved {
+            let state = match (gone, answer) {
+                (false, Some(answer)) => NativePromptState::Answered { answer },
+                _ => NativePromptState::Gone,
+            };
+            let resolution = (state, at.parse()?);
+            if matches!(resolution.0, NativePromptState::Gone) {
+                return Ok(Some(resolution));
+            }
+            requested_answer.get_or_insert(resolution);
+        }
+    }
+    Ok(requested_answer)
 }
 
 /// What a waiting prompt hook needs to know: whether the seat's prompt is still open, answered
@@ -2080,6 +2320,8 @@ fn native_prompt_answer(connection: &Connection, observation: &str) -> Result<Op
 pub enum NativePromptState {
     /// Not yet published, or still waiting on a person.
     Open,
+    /// The person recorded an answer for a live permission hook to apply.
+    /// This is not proof the hook received it or the native dialog closed.
     Answered { answer: String },
     /// Answered in the terminal, replaced or ended: nothing will arrive.
     Gone,
@@ -2121,7 +2363,6 @@ impl Store {
         ownership: u64,
         transition: u64,
     ) -> Result<NativePromptState> {
-        let now = now_ms();
         let connection = self.readers.get();
         // The hook's observation is among the seat's last few: it is published moments after the
         // hook writes it, and a hook that waited past a few later observations has nothing left.
@@ -2134,31 +2375,59 @@ impl Store {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let own = recent.iter().position(|(_, body)| {
+        let own = recent.iter().rposition(|(_, body)| {
             serde_json::from_str::<Value>(body).is_ok_and(|body| {
                 let fields = body.get("fields").unwrap_or(&body);
                 fields["ownership_sequence"] == ownership && fields["transition_sequence"] == transition
+                    && fields["blocked_on"] == "human"
+                    && matches!(fields["ask"].as_str(), Some("permission" | "question" | "review"))
+                    && !matches!(fields["state"].as_str(), Some("indeterminate" | "unknown"))
             })
         });
         let Some(own) = own else {
-            // Not published yet, or long gone: only the first can be answered, so keep waiting.
-            return Ok(if recent.len() == 16 {
+            // A full history window does not prove a just-written prompt is gone:
+            // the driver file can precede publication of its daemon observation.
+            // Only a later ownership/transition sequence proves it was superseded.
+            let superseded = recent.iter().any(|(_, body)| {
+                serde_json::from_str::<Value>(body).is_ok_and(|body| {
+                    let fields = body.get("fields").unwrap_or(&body);
+                    matches!(fields["state"].as_str(), Some("ready" | "working" | "idle" | "ended"))
+                        && fields["ownership_sequence"].as_u64()
+                            .zip(fields["transition_sequence"].as_u64())
+                            .is_some_and(|sequence| sequence > (ownership, transition))
+                })
+            });
+            return Ok(if superseded {
                 NativePromptState::Gone
             } else {
                 NativePromptState::Open
             });
         };
-        // Claude and Codex show one prompt at a time: while every observation since the waiter's
-        // own still waits on that permission, it is the same prompt, and an answer to any of them
-        // is the waiter's. Anything else in between means the prompt is gone, and so does a new
-        // transition that is not a credential edge: a driver writes each prompt as its own
-        // transition, so a later one waiting on the same tool is another prompt.
+        // A delivery channel also waits on questions and reviews, even though only
+        // permission prompts can be answered through st. Do not confuse a later
+        // prompt (or runtime) with a restatement of the waiting episode.
+        let own_body: Value = serde_json::from_str(&recent[own].1)?;
+        let own_fields = own_body.get("fields").unwrap_or(&own_body);
         let mut chain = Vec::new();
         let mut newer: Option<Value> = None;
         for (claim, body) in &recent[..=own] {
             let body: Value = serde_json::from_str(body)?;
             let fields = body.get("fields").unwrap_or(&body);
-            if !answerable(fields, now) {
+            // Staleness can publish an indeterminate snapshot with unchanged
+            // episode counters. Neither it nor unknown axes prove native closure.
+            if matches!(fields["state"].as_str(), Some("indeterminate" | "unknown"))
+                || fields["blocked_on"] == "unknown"
+                || fields["ask"] == "unknown"
+            {
+                continue;
+            }
+            if fields["blocked_on"] != "human"
+                || !matches!(fields["ask"].as_str(), Some("permission" | "question" | "review"))
+                || fields["incarnation_id"] != own_fields["incarnation_id"]
+                || fields["ask"] != own_fields["ask"]
+                || fields["reason"] != own_fields["reason"]
+                || fields["state"] == "ended"
+            {
                 return Ok(NativePromptState::Gone);
             }
             if let Some(newer) = &newer
@@ -2170,6 +2439,7 @@ impl Store {
             newer = Some(fields.clone());
             chain.push(claim.clone());
         }
+        let mut requested_answer = None;
         for claim in &chain {
             // Refused in the terminal, which only the screen showed.
             let refused: bool = connection
@@ -2183,10 +2453,15 @@ impl Store {
                 return Ok(NativePromptState::Gone);
             }
             if let Some(answer) = native_prompt_answer(&connection, claim)? {
-                return Ok(NativePromptState::Answered { answer });
+                requested_answer.get_or_insert(NativePromptState::Answered { answer });
             }
         }
-        Ok(NativePromptState::Open)
+        let durable = native_prompt_sequence_resolution(&connection, seat, ownership, transition, i64::MAX as u64)?
+            .map(|(state, _)| state);
+        if matches!(durable, Some(NativePromptState::Gone)) {
+            return Ok(NativePromptState::Gone);
+        }
+        Ok(requested_answer.or(durable).unwrap_or(NativePromptState::Open))
     }
 
     /// Record `actor`'s answer to the seat's open screen prompt, when `episode` names it: one of
@@ -2373,5 +2648,415 @@ mod person_steps_plan_tests {
             !plan.iter().any(|line| line.starts_with("SCAN step_runs")),
             "the person-step read must not scan step_runs: {plan:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod native_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn choice_answers_remain_answered_and_native_closure_wins_over_delayed_answers() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(&intent, IntentInput { kdl: source, source_name: None })
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "answer-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value, key: Option<String>| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: key,
+                })
+                .unwrap()
+        };
+        // Unchanged live observations are retained locally, not republished to history.
+        // Seed durable historical restatements explicitly: answers fence against the
+        // newest replicated claim, never a local-observation receipt, and this regression
+        // must put the original answer beyond the sixteen-claim history window.
+        let append_harness_history = || {
+            store
+                .connection
+                .batched(|tx| {
+                    append_claim_tx(
+                        tx,
+                        "node",
+                        seat,
+                        "harness.observed",
+                        Some(seat),
+                        &json!({"fields": {
+                            "state":"working", "driver":"claude", "incarnation_id":"one",
+                            "blocked_on":"human", "ask":"question", "reason":"AskUserQuestion",
+                            "ownership_sequence":1, "transition_sequence":3
+                        }}),
+                        &[],
+                        None,
+                    )
+                })
+                .unwrap()
+                .unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}), None);
+        let first = append_harness_history();
+        let choice = r#"{"0":[1],"1":[0,2]}"#;
+        let answered = store
+            .answer_native_prompt(seat, &first.id, choice, "person/avery")
+            .unwrap();
+        assert_eq!(answered.body["fields"]["status"], "answer");
+        assert_eq!(answered.body["fields"]["reason"], choice);
+        let mut restated = append_harness_history();
+        for _ in 0..20 {
+            restated = append_harness_history();
+        }
+        let restatements: u64 = store
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*) FROM claims
+                 WHERE subject=?1 AND kind='harness.observed'
+                   AND store_index>?2 AND store_index<=?3",
+                params![seat, first.store_index, restated.store_index],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restatements, 21, "restatements must exceed the recent-history window");
+        let resolve = |index| {
+            native_prompt_sequence_resolution(&store.readers.get(), seat, 1, 3, index)
+                .unwrap()
+                .map(|(state, _)| state)
+        };
+        let expected = Some(NativePromptState::Answered { answer: choice.into() });
+        assert_eq!(resolve(answered.store_index), expected);
+        assert_eq!(resolve(store.index().unwrap()), expected);
+        assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(),
+            NativePromptState::Answered { answer: choice.into() });
+        let gone = append("harness.diagnostic", json!({
+            "code":"native-prompt-gone", "status":"resolved",
+            "driver":"claude", "incarnation_id":"one"
+        }), Some(native_prompt_gone_key(&first.id)));
+        store
+            .answer_native_prompt(seat, &restated.id, choice, "person/avery")
+            .unwrap();
+        assert_eq!(resolve(gone.store_index), Some(NativePromptState::Gone));
+        assert_eq!(resolve(store.index().unwrap()), Some(NativePromptState::Gone));
+        assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
+        assert_eq!(resolve(answered.store_index), expected);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ClaimInput, PersonStepResponse};
+
+    fn step_back_in_time(store: &Store, subject: &str, accepted_at: &str) {
+        store
+            .connection
+            .lock().expect("fixture writer")
+            .execute(
+                "UPDATE claims SET accepted_at_unix_ms=?2 WHERE subject=?1 AND kind='work.person-asked'",
+                params![subject, accepted_at],
+            )
+            .unwrap();
+    }
+
+    /// The collection snapshot's visible rows must equal a direct read at the same cut, in
+    /// the same order, for every person and boundary.
+    fn parity(store: &Store, person: Option<&str>, now: u128) {
+        let (rows, _) = store.attention_collection_snapshot(person, now).unwrap();
+        let direct = store.attention_snapshot(person, now).unwrap();
+        let keys = |items: &[AttentionItemView]| {
+            items
+                .iter()
+                .map(|item| {
+                    (
+                        item.subject.clone(),
+                        item.episode.clone(),
+                        item.requested_at_unix_ms,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&rows), keys(&direct), "{person:?} at {now}");
+    }
+
+    /// A person ask joins the collection at its asking claim's acceptance, never at the
+    /// waiting time it names: a migrated ask can name a time before it was asked. Fault-only
+    /// clocks (observer state, reconcile faults) never move this collection.
+    #[test]
+    fn person_ask_collection_changes_only_at_the_asks_admission() {
+        let (store, origin, input) = super::super::person_work::tests::fixture();
+        let ask = store.ask_person(&input).unwrap();
+        let admitted = now_ms() + 60_000;
+        store
+            .connection
+            .lock().expect("fixture writer")
+            .execute(
+                "UPDATE claims SET accepted_at_unix_ms=?2,
+                        body=json_set(body, '$.fields.waiting_since', ?3)
+                 WHERE subject=?1 AND kind='work.person-asked'",
+                params![
+                    ask.subject,
+                    admitted.to_string(),
+                    (admitted - 3_600_000).to_string()
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/avery"), admitted - 1)
+                .unwrap()
+                .1,
+            Some(admitted)
+        );
+        assert_eq!(
+            store
+                .attention_collection_snapshot(None, admitted - 1)
+                .unwrap()
+                .1,
+            Some(admitted)
+        );
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/robin"), admitted - 1)
+                .unwrap()
+                .1,
+            None
+        );
+        parity(&store, Some("person/avery"), admitted - 1);
+        parity(&store, None, admitted - 1);
+        parity(&store, Some("person/robin"), admitted - 1);
+        assert!(store
+            .attention_snapshot(Some("person/avery"), admitted - 1)
+            .unwrap()
+            .iter()
+            .all(|item| item.subject != ask.subject));
+        let shown = store.attention_snapshot(Some("person/avery"), admitted).unwrap();
+        let item = shown
+            .iter()
+            .find(|item| item.subject == ask.subject)
+            .expect("the ask joins the collection at its admission");
+        parity(&store, Some("person/avery"), admitted);
+
+        // Fault-collection clocks are not this collection's inputs.
+        for (subject, kind, fields) in [
+            (
+                "observer/issues",
+                "observer.state",
+                json!({"state": "degraded", "reason": "limited"}),
+            ),
+            (
+                origin.subject.as_str(),
+                "reconcile.fault",
+                json!({"scope": "st3.test", "status": "faulted", "reason": "stuck"}),
+            ),
+        ] {
+            store
+                .connection
+                .batched(|tx| -> Result<()> {
+                    append_claim_tx(
+                        tx,
+                        "alder",
+                        subject,
+                        kind,
+                        Some("agent/alder.asker"),
+                        &json!({"fields": fields}),
+                        &[],
+                        None,
+                    )?;
+                    Ok(())
+                })
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/avery"), admitted - 1)
+                .unwrap()
+                .1,
+            Some(admitted)
+        );
+        assert_eq!(
+            store.attention_collection_snapshot(None, admitted - 1).unwrap().1,
+            Some(admitted)
+        );
+        parity(&store, Some("person/avery"), admitted - 1);
+        parity(&store, None, admitted - 1);
+
+        step_back_in_time(&store, &ask.subject, &(now_ms() - 1_000).to_string());
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/avery"), now_ms())
+                .unwrap()
+                .1,
+            None
+        );
+        parity(&store, Some("person/avery"), now_ms());
+        store
+            .finish_person_step(
+                &PersonStepResponse {
+                    delegation: None,
+                    subject: ask.subject.clone(),
+                    actor: "person/avery".into(),
+                    summary: "Friday".into(),
+                    evidence: vec![],
+                    episode: Some(item.episode.clone()),
+                    idempotency_key: "fence-response".into(),
+                    answer: None,
+                },
+                false,
+            )
+            .unwrap();
+        assert!(store
+            .attention_snapshot(Some("person/avery"), now_ms())
+            .unwrap()
+            .iter()
+            .all(|item| item.subject != ask.subject));
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/avery"), now_ms())
+                .unwrap()
+                .1,
+            None
+        );
+        parity(&store, Some("person/avery"), now_ms());
+    }
+
+    /// A ready person step without an ask joins at its activation, and falls back to its
+    /// creation when it was never separately activated.
+    #[test]
+    fn ready_person_step_joins_at_its_activation_and_falls_back_to_its_creation() {
+        let (store, origin, _input) = super::super::person_work::tests::fixture();
+        let review = format!(
+            "step-run/{}/review",
+            origin.generation.trim_start_matches("run-generation/")
+        );
+        store.set_step_state(&review, "ready", None).unwrap();
+        let activated = now_ms() + 120_000;
+        store
+            .connection
+            .lock().expect("fixture writer")
+            .execute(
+                "UPDATE step_runs SET activated_at_unix_ms=?2 WHERE subject=?1",
+                params![review.as_str(), activated.to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/avery"), activated - 1)
+                .unwrap()
+                .1,
+            Some(activated)
+        );
+        parity(&store, Some("person/avery"), activated - 1);
+        assert!(store
+            .attention_snapshot(Some("person/avery"), activated - 1)
+            .unwrap()
+            .iter()
+            .all(|item| item.subject != review));
+        assert!(
+            store
+                .attention_snapshot(Some("person/avery"), activated)
+                .unwrap()
+                .iter()
+                .any(|item| item.subject == review && item.kind == "person-step")
+        );
+        parity(&store, Some("person/avery"), activated);
+        store
+            .connection
+            .lock().expect("fixture writer")
+            .execute(
+                "UPDATE step_runs SET activated_at_unix_ms=NULL WHERE subject=?1",
+                params![review.as_str()],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/avery"), now_ms())
+                .unwrap()
+                .1,
+            None
+        );
+        parity(&store, Some("person/avery"), now_ms());
+        assert!(
+            store
+                .attention_snapshot(Some("person/avery"), now_ms())
+                .unwrap()
+                .iter()
+                .any(|item| item.subject == review)
+        );
+    }
+
+    /// Registered custom attention is admitted with its request, so an active custom card
+    /// leaves no future change, and only its recipient ever sees it.
+    #[test]
+    fn registered_custom_attention_has_no_future_change_once_active() {
+        let store = Store::open_memory("garden").unwrap();
+        let manifest: st3_schema::custom::Manifest = serde_json::from_str(include_str!(
+            "../../../../examples/st3/custom-review.json"
+        ))
+        .unwrap();
+        store
+            .register_custom_kind(&custom::RegistrationRequest {
+                manifest,
+                actor: "agent/garden/seed".into(),
+            })
+            .unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: "custom/garden/review/v1/fence".into(),
+                kind: "custom.garden.review.v1.requested".into(),
+                actor: Some("agent/garden/seed".into()),
+                fields: serde_json::from_value(json!({
+                    "title": "Retain the seed history?",
+                    "detail": "Choose Keep or Discard.",
+                    "recipient": "person/lichen"
+                }))
+                .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        assert!(
+            store
+                .attention_snapshot(Some("person/lichen"), now_ms())
+                .unwrap()
+                .iter()
+                .any(|item| item.subject == "custom/garden/review/v1/fence")
+        );
+        assert_eq!(
+            store
+                .attention_collection_snapshot(Some("person/lichen"), now_ms())
+                .unwrap()
+                .1,
+            None
+        );
+        assert_eq!(
+            store.attention_collection_snapshot(None, now_ms()).unwrap().1,
+            None
+        );
+        parity(&store, Some("person/lichen"), now_ms());
+        parity(&store, None, now_ms());
+        parity(&store, Some("person/avery"), now_ms());
+        assert!(store
+            .attention_snapshot(Some("person/avery"), now_ms())
+            .unwrap()
+            .is_empty());
     }
 }

@@ -46,6 +46,12 @@ keeps the newest observation per origin/subject after the D+2 cut; a two-to-thre
 window holds roughly 5,760-8,640 refresh claims, plus each retained newest claim. These are
 arithmetic bounds, not measured saturated-daemon costs.
 
+The daemon caches its sealed membership view at the store's fleet generation, rather than
+folding the full fleet history on every worker poll. The generation and fold share a read
+snapshot. Fleet claims, their batch/envelope identities, verified signer rows and the pinned
+anchor invalidate it. This view never supplies the client's unsealed local-signer fallback;
+`current` describes an open writer window, not a wall-clock lease.
+
 Gateways cache filtered links and sealed membership for at most five seconds, including
 per-item `reaches()` checks. Links involving current dial-out members never support
 bidirectional owner routes, even while fresh. Dial-out owners return `remote-unavailable`
@@ -70,6 +76,28 @@ conservatively keeps all existing shared blobs.
 A keyed worker signs batches beyond its last processed batch, including envelopes another
 unkeyed process already sealed at startup. Signature requests recover missing signatures after
 an upgrade. Equal envelope inventories alone cannot prove equal claim admission.
+
+Sealing prepares each chunk of local batches on a read transaction before it takes the writer.
+A chunk is at most 64 batches and 16 MiB of payload: a batch that would take it past 16 MiB
+starts the next chunk, and only a first batch larger than that is sealed alone. Preparation reads
+each batch's claims and the blobs they name, signs each claim that has no stored signature,
+encodes and hashes the envelope and its records, and signs each envelope with the member key.
+Under the writer, sealing reads again what it prepared from:
+- the chunk's unsealed batches and their claims;
+- which named blobs are stored;
+- each claim's stored signature;
+- the member key and the fleet id;
+- for the claims it signed, the key, principal, principal acted for and chain the keyring would
+  sign them with now. This is read in one view that no keyring change overlapped, once per
+  distinct signer input (a key grant's issuer and issuer key, and the claim's actor), not once
+  per claim.
+
+Only then does it write the prepared rows. If any of these changed, it writes nothing and
+prepares the chunk again off the writer. Keys added or replaced for principals the chunk's claims
+are not signed as do not count as a change. Claims and blobs are compared by id and hash, which
+name their content. A blob that is not stored when a batch is sealed stays out of its envelope,
+as before. This moves signing and encoding off the writer but does not bound the hold: the
+rereads and writes still grow with the chunk's claims and bytes.
 
 `store::tests::canonical_audit::every_shared_projection_agrees_after_shuffle_restart_and_checkpoint`
 checks both invariants by comparing shared rows, selected readers and per-table digest oracles
@@ -123,6 +151,21 @@ decide it, but it builds no replication snapshot and skips the once-per-process 
 batches skipped behind the sealing frontier. Both read every envelope or batch, about 15 s on a
 two-million-envelope store, and the daemon listens only after admission. The first export or
 replication activation after the daemon serves runs them on a read connection.
+
+Admission prepares each envelope before it takes the writer: it decodes the payload, checks
+the envelope, batch, blob and claim hashes, encodes each claim and, for a runtime that
+classifies without the store (st3's does), classifies its kinds and fields. The writer is held
+only for the checks that read stored state and the writes: the envelope row is still there and
+not dropped by a checkpoint, membership and signatures still admit it, earlier record states
+(a `repaired` record stays repaired), tombstones and blobs. The envelope hash names its bytes,
+so a preparation always describes the row's content. Admission also compares the row's rowid and
+receipt time with those it prepared from; an envelope whose row is seen to differ (deleted and
+received again) is left `pending` for the admission pass that its new receipt runs, and is never
+re-prepared under the writer. Admission prepares at most 8 envelopes and 16 MiB of payload ahead of the
+writer, one larger envelope alone. That is a payload budget, not a bound on resident memory:
+decoded, the set takes roughly twice its payload, plus its structures. The comparison can miss a reused rowid received in the same
+millisecond; only the pure content is reused then, and the hash binds it. This is a partial move of admission's cost, not a bound on its hold: the
+stored-state reads and writes still grow with the envelope's claims and bytes.
 
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each
@@ -541,6 +584,15 @@ Admission commits once per pass over the pending envelopes, so one disk flush co
 
 A node catching up with a peer, one more than one exchange behind it, projects at most every 30 seconds and again as soon as it has caught up. History arrives older than the node's own claims, so the node cannot extend its projection incrementally; projecting after every exchange would replay the whole graph each time. Meanwhile `st now`, `st missions ls` and the terminal UI say the node is syncing.
 
+A claim that reaches a mission run tree out of the replay's order rebuilds that tree from its own
+claims. Runs in one tree affect each other only from the root down: a run that ends cancels the
+runs started from its steps, and step claims read whether the root has ended. While the root has
+never ended, a claim rebuilds only its part of the tree: the run started from the root that it
+is about, with every run below that run and the asks those runs own, or the root with the asks
+it owns. A standing root with thousands of child runs, such as an intake, is not rebuilt for a
+late claim about one request; the 2,085-run intake tree took one 10.5 s writer hold to rebuild.
+A tree whose root has ended, or whose links have not all arrived, rebuilds whole.
+
 Person-work asks, completions and cancellations rebuild only their owning mission run tree.
 Standalone asks embed their run and generation in the asking claim; indexed lookups recover
 that ownership even before the ask is projected. A response received before its ask is replayed
@@ -897,3 +949,31 @@ After a partition, each node continues local work. A later exchange transfers ev
 If two nodes differ, inspect unresolved records and peer errors first. Publish a replacement repair when a record needs correction.
 
 Do not copy one live SQLite file over another. A file copy can discard concurrent authority and local runtime state.
+
+### Carrier evidence for exchanges
+
+Replication and fleet status expose optional `last_successful_exchange` and
+`last_failed_exchange` per peer. Each describes the last **locally initiated**
+exchange or attempt of that outcome and records `at_unix_ms`, the locally dialed
+`carrier` (`tailscale`, `fabric`, `loopback`, or `unknown`), and, for Fabric,
+`fabric_route: "unknown"`. A failed record names the attempted carrier; a
+successful record names the carrier of the accepted exchange. Client sync notices
+expose the same two optional records with an ISO timestamp in `at`.
+
+These are two independent host-local records kept in memory, never replicated
+claims or a growing history. A successful fallback replaces the successful
+record and preserves the failed one, even after the existing `last_error` clears.
+An incoming exchange updates ordinary last-seen status but preserves the outbound
+carrier record and its original timestamp. It cannot establish an incoming carrier:
+Fabric tunnels can arrive on loopback. An inbound-only peer has no carrier record;
+absence means unknown/unavailable evidence, not an inferred loopback route. An older
+worker's locally initiated success can still have carrier `unknown`.
+Restart clears both records;
+absence means evidence is unavailable, even when durable last-seen status exists.
+Worker phase changes, connectivity events and separate probes do not rewrite them.
+
+The worker captures a Fabric route before converting it to its loopback tunnel
+URL. Fabric currently supplies no direct/relay evidence for that exact dial or
+stream. Probe transport, connection presence snapshots and session lifetime
+counters cannot prove the path used by an earlier exchange. Part 2 of #2697
+requires Fabric API evidence; this status addition reports `unknown` meanwhile.
