@@ -13784,7 +13784,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             ("scheduled_at_unix_ms".into(), Value::String(scheduled_at.to_string())),
         ]);
         crate::schedule_standby::add_detail(&mut scheduled_fields, standby_detail.as_ref());
-        let operation = format!("{}:{revision}:{occurrence}", schedule.subject);
+        let operation = if standby_detail.is_some() {
+            // Publication attempts are per host; the occurrence run identity stays shared.
+            format!("{}:{revision}:{occurrence}:standby:{}", schedule.subject, self.host)
+        } else {
+            format!("{}:{revision}:{occurrence}", schedule.subject)
+        };
         if !self
             .armed_schedules
             .lock()
@@ -13793,15 +13798,36 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(());
         }
-        let request = self.store.append_claim(&ClaimInput {
-            subject: schedule.subject.clone(),
-            kind: "schedule.occurrence-scheduled".into(),
-            actor: None,
-            fields: scheduled_fields,
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: Some(format!("clock-wake:{operation}")),
-        })?;
+        let wake_key = format!("clock-wake:{operation}");
+        let request = (|| -> Result<crate::model::ClaimRecord> {
+            if standby_detail.is_some()
+                && let Some(existing) = self.store.operation_claim(&wake_key)? {
+                // A later local retry has a new heartbeat age. Keep the original publication
+                // observation; the due callback still checks current role/history/readiness.
+                anyhow::ensure!(existing.origin == self.host && existing.subject == schedule.subject
+                    && existing.kind == "schedule.occurrence-scheduled"
+                    && existing.body["fields"]["revision"].as_str() == Some(revision.as_str())
+                    && existing.body["fields"]["occurrence"].as_u64() == Some(occurrence),
+                    "the standby scheduling operation does not match this host and occurrence");
+                return Ok(existing);
+            }
+            Ok(self.store.append_claim(&ClaimInput {
+                subject: schedule.subject.clone(),
+                kind: "schedule.occurrence-scheduled".into(),
+                actor: None,
+                fields: scheduled_fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(wake_key),
+            })?)
+        })();
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => {
+                self.armed_schedules.lock().unwrap_or_else(PoisonError::into_inner).remove(&operation);
+                return Err(error);
+            },
+        };
         // The claim's instant remains authoritative when tzdata changes after arming.
         let scheduled_at = request
             .body
@@ -14127,7 +14153,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     crate::schedule_standby::Readiness::Wait { key, until } => { self.arm_restart(&key, until); continue; },
                     crate::schedule_standby::Readiness::Held => continue,
                 }
-                if self.store.mission_spec(mission, Some(revision))?.is_none() {
+                if self.store.mission_spec(mission.strip_prefix("mission/").unwrap_or(mission), Some(revision))?.is_none() {
                     self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable", "the standby has no requested mission revision; this occurrence will not retry")?;
                     continue;
                 }

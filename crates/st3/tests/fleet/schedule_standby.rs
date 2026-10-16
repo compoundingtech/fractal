@@ -156,6 +156,17 @@ async fn fresh_primary_holds_standby_then_returning_primary_does_not_replay_stan
         starts(root.path()).iter().any(|(home, _)| home.contains("/ivory/home"))
     }).await;
     assert!(schedule_claims(&standby, "return", "schedule.work-started").await.iter().all(|claim| claim["origin"] != "jade"), "fresh primary admitted standby work");
+    let first_run = st3::store::Store::scheduled_mission_run_subject("schedule/return", 0);
+    wait_until("first primary run completed and completion replicated before stopping it", 60, || async {
+        for node in [&primary, &standby] {
+            let page: Value = node.client().get(&format!("/v1/claims?subject={first_run}&order=desc&limit=100")).await.unwrap();
+            if !page["claims"].as_array().is_some_and(|claims| claims.iter().any(|claim|
+                claim["kind"] == "mission-run.state" && claim["body"]["fields"]["status"] == "completed")) {
+                return false;
+            }
+        }
+        true
+    }).await;
     primary.stop();
     wait_for_standby("stale-primary standby physically performs next due occurrence", 60, &standby, root.path(), "return", || async {
         starts(root.path()).iter().any(|(home, _)| home.contains("/jade/home"))
