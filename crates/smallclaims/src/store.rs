@@ -1218,7 +1218,7 @@ pub struct InventoryBasis {
     /// envelopes and changes checkpoint tombstones, which moves it; so does any other change
     /// below the inventory's tail. Read from the snapshot the difference was measured against,
     /// so it is cut-consistent with it and costs no read.
-    pub local_generation: i64,
+    pub local_inventory_generation: i64,
     /// Whether the peer sent a compact inventory, compared range by range.
     pub compact: bool,
 }
@@ -1230,7 +1230,7 @@ impl InventoryBasis {
     /// peer that starts advertising one changes the basis, so an upgrade resets the window
     /// once.
     fn changed_to(&self, next: &InventoryBasis) -> bool {
-        self.local_generation != next.local_generation
+        self.local_inventory_generation != next.local_inventory_generation
             || self.compact != next.compact
             || (next.peer_checkpoint.is_some() && self.peer_checkpoint != next.peer_checkpoint)
     }
@@ -4922,7 +4922,7 @@ pub fn sync_progress_forecasts_nothing_from_an_unknown_arrival_rate() {
 pub fn sync_progress_measures_no_rate_across_a_change_of_inventory_basis() {
     let basis = |peer: Option<&str>, compact: bool| InventoryBasis {
         peer_checkpoint: peer.map(str::to_owned),
-        local_generation: 7,
+        local_inventory_generation: 7,
         compact,
     };
     let window = REPLICATION_SYNC_WINDOW_MS;
@@ -4935,7 +4935,7 @@ pub fn sync_progress_measures_no_rate_across_a_change_of_inventory_basis() {
         (
             "local inventory changed",
             InventoryBasis {
-                local_generation: 8,
+                local_inventory_generation: 8,
                 ..basis(Some("checkpoint/a"), true)
             },
             None,
@@ -6490,7 +6490,7 @@ impl Store {
         let progress = sync.entry(relay.to_owned()).or_default();
         let basis = InventoryBasis {
             peer_checkpoint: input.inventory.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
-            local_generation: snapshot.inventory_generation,
+            local_inventory_generation: snapshot.inventory_generation,
             compact: !input.inventory.buckets.is_empty(),
         };
         progress.observe_on(received, difference, basis, now);
