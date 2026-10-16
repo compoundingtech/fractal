@@ -9,6 +9,7 @@ import {
   pendingCalls,
   pendingQuestions,
   promptAnswers,
+  promptAlertKey,
   promptCalls,
   questionAnswer,
   type PendingCall,
@@ -98,7 +99,8 @@ export const AgentAlerts = ({
     <div {...stylex.props(styles.pinned)} data-testid="conversation-alerts">
       <div {...stylex.props(styles.strip)}>
         {alerts.map((alert) => (
-          <PromptAlert key={alert.id} alert={alert} calls={calls} onAnswer={onAnswer} />
+          // A new prompt or revision behind the same alert starts with nothing chosen.
+          <PromptAlert key={promptAlertKey(alert)} alert={alert} calls={calls} onAnswer={onAnswer} />
         ))}
       </div>
     </div>
