@@ -6,6 +6,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::declaration_syntax::*;
 pub use crate::declaration_syntax::parse_duration;
+#[cfg(test)]
+use crate::model::GateSpec;
 use crate::model::{
     DesiredSubject, LaneSpec, LaunchSpec, MemberKind, MemberLifecycle, MemberSpec,
     MissionRevisionOperation, MissionRunCreation, MissionRunDeclaration, NamedCancellation,
