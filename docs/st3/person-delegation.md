@@ -135,8 +135,8 @@ This changes the meaning of `history=true`: attention and unfiltered Now previou
 ignored that flag and returned the open list; they now return only closed source items.
 Older daemons still return the open list, which is not closed-history evidence. Attention
 history rejects `actor`, `owner_run`, `status`, `owner`, `native_only=true`, and a `state`
-other than `resolved` with 400. Now history without `actor` or `owner_run` rejects
-`status`, `owner`, `native_only=true`, and a non-resolved state with 400. With `actor`
+other than `resolved` with 422 `validation-failed`. Now history without `actor` or `owner_run` rejects
+`status`, `owner`, `native_only=true`, and a non-resolved state with 422 `validation-failed`. With `actor`
 or `owner_run`, Now retains its existing work-filtered open/combined list and validation;
 that request is not routed to closed history. No in-repository caller currently sends
 these history requests. The history read path is a separate client behavior alongside

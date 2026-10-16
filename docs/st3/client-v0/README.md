@@ -640,9 +640,9 @@ narrow source adapters in [person delegation](../person-delegation.md).
 source resolutions**, separate from open Home. Previously the history flag was ignored
 and these reads returned the open list; older daemons still do so. An older daemon's
 open result is not closed-history evidence. No in-repository caller currently sends
-these history requests. Attention history returns 400 for `actor`, `owner_run`, `status`,
+these history requests. Attention history returns 422 `validation-failed` for `actor`, `owner_run`, `status`,
 `owner`, `native_only=true`, or a `state` other than `resolved`. Unfiltered Now history
-returns 400 for `status`, `owner`, `native_only=true`, or a non-resolved state. Now with
+returns 422 `validation-failed` for `status`, `owner`, `native_only=true`, or a non-resolved state. Now with
 `actor` or `owner_run` keeps the existing work-filtered open/combined behavior and its
 validation even with `history=true`; that request does not enter the closed-history path.
 

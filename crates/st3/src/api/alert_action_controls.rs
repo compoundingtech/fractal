@@ -302,7 +302,7 @@ async fn attention_history_sparse_pages_keep_the_cut_and_reject_cursor_tampering
                 "person/avery",
             )
             .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
         }
         let (status, resolved) = owner_get(
             app.clone(),
@@ -326,7 +326,7 @@ async fn attention_history_sparse_pages_keep_the_cut_and_reject_cursor_tampering
             )
             .await
             .0,
-            StatusCode::BAD_REQUEST
+            StatusCode::UNPROCESSABLE_ENTITY
         );
         // Now's work-filtered path is intentionally preserved, including with
         // history=true; it must not silently become the closed-only endpoint.
