@@ -217,9 +217,14 @@ which every resubscribe gets. A client on a daemon that sends none keeps reading
 (`GET /v1/client/attention?limit=1`).
 
 A state this client does not know, or a shape the schema forbids (`level` with peers, or another
-state without them), reads as unknown, never level. Older clients ignore the field: the generated
-Rust and Swift decoders read frames by named field, and the TypeScript transport parses frames
-without validating them (fixtures: `fixtures/clients/stream-sync/frames.json`).
+state without them), reads as unknown, never level, and the frame is kept: the Rust client reads
+such a `sync` as none, and the TypeScript transport parses frames without validating them, so a
+reader there must apply the same rule (only `level` without peers is level; only `catching-up` or
+`diverged` with peers is behind; anything else is unknown). Decoding a frame with the generated
+TypeScript schema is stricter: it rejects a forbidden shape as it rejects any malformed field,
+and a state it does not know decodes as unknown. A daemon sends neither. Older clients ignore the
+field: the generated Rust and Swift decoders read frames by named field (fixtures:
+`fixtures/clients/stream-sync/frames.json`).
 
 ## Screen inventories
 
