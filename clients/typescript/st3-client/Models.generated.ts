@@ -1172,6 +1172,7 @@ export type Mission = ResourceHeader & {
   kind: "mission";
   mission_revision: Revision;
   must_act?: MustAct;
+  presentation?: MissionPresentation;
   run_counts?: {
   [key: string]: number;
 };
@@ -1189,7 +1190,42 @@ export type Mission = ResourceHeader & {
   visualization?: (Visualization | null);
 };
 
+export type MissionActionOffer = {
+  action: string;
+  confirm: boolean;
+  id: "retry-step" | "restart-agent" | "cancel-run" | "chat";
+  target: Id;
+};
+
 export type MissionId = string;
+
+export type MissionPresentation = {
+  actions: Array<MissionActionOffer>;
+  card: ("what-you-can-do" | "nothing-to-do" | null);
+  last_progress: string | null;
+  progress: {
+  done: number;
+  total: number;
+};
+  queued_behind: (MissionQueuedBehind | null);
+  settled_at: (Timestamp | null);
+  steps: Array<MissionStepPresentation>;
+  stuck: (MissionStuck | null);
+  system: boolean;
+  who: PresentationActor;
+  word: "decision" | "stalled" | "unstaffed" | "unclaimed" | "queued" | "working" | "watching" | "held" | "idle" | "done" | "failed" | "cancelled" | "not_started";
+};
+
+export type MissionQueuedBehind = {
+  agent: AgentId;
+  busy_with?: ({
+  label: string;
+  mission: Id;
+  path: string;
+} | null);
+  label: string;
+  state?: string | null;
+};
 
 export type MissionRunId = string;
 
@@ -1259,6 +1295,30 @@ export type MissionStep = {
   title?: string | null;
   wake?: (MissionWake | null);
   wake_reason?: string | null;
+};
+
+export type MissionStepPresentation = {
+  attempts: number;
+  blockers: Array<string>;
+  id: StepRunId;
+  keep_open: boolean;
+  note?: string | null;
+  owner: PresentationActor;
+  path: string;
+  title?: string | null;
+  word: "needs_you" | "done" | "working" | "ready" | "waiting" | "cancelled" | "failed" | "pending";
+};
+
+export type MissionStuck = {
+  agent?: ({
+  id: AgentId;
+  label: string;
+  state: string;
+} | null);
+  attempts: number;
+  blockers: Array<string>;
+  step: StepRunId;
+  word: "needs_you" | "done" | "working" | "ready" | "waiting" | "cancelled" | "failed" | "pending";
 };
 
 export type MissionWake = {
@@ -1491,6 +1551,13 @@ export type PlannerConfig = {
   provider: "codex" | "claude" | "pi" | "omp" | "opencode";
 };
 
+export type PresentationActor = {
+  agent?: AgentId;
+  kind: "person" | "agent" | "st" | "nobody";
+  label?: string;
+  person?: Id;
+};
+
 export type ProjectionEvent = Omit<{
   body: {
 
@@ -1507,7 +1574,7 @@ export type ProjectionEvent = Omit<{
 }, 'type' | 'body'> & ({ type: "timeline.delta"; body: TimelineDelta });
 
 export type PromptRespondParameters = {
-  answer: "allow" | "deny";
+  answer: string;
   episode: string;
   target_id: Id;
 };
@@ -2069,7 +2136,7 @@ export type TimelineUsageBody = {
   turn_id?: string;
 };
 
-export type TimelineView = (TimelineViewBash | TimelineViewEdit | TimelineViewWrite | TimelineViewRead | TimelineViewSearch | TimelineViewTodo | TimelineViewAsk | TimelineViewTask | TimelineViewHub | TimelineViewEval | TimelineViewGeneric | TimelineViewIrc | TimelineViewJob | TimelineViewSkill | TimelineViewCompaction | TimelineViewAssistantError | TimelineViewModelChange | TimelineViewThinkingLevel | TimelineViewTitle | TimelineViewSessionExit | TimelineViewToolStart | TimelineViewResetBoundary | TimelineViewCredentialPin | {
+export type TimelineView = (TimelineViewBash | TimelineViewEdit | TimelineViewWrite | TimelineViewRead | TimelineViewSearch | TimelineViewTodo | TimelineViewAsk | TimelineViewTask | TimelineViewHub | TimelineViewEval | TimelineViewGeneric | TimelineViewIrc | TimelineViewJob | TimelineViewSkill | TimelineViewCompaction | TimelineViewAssistantError | TimelineViewModelChange | TimelineViewThinkingLevel | TimelineViewTitle | TimelineViewSessionExit | TimelineViewToolStart | TimelineViewResetBoundary | TimelineViewCredentialPin | TimelineViewOmpEvent | {
   type: string;
 });
 
@@ -2213,6 +2280,14 @@ export type TimelineViewModelChange = {
   model: string;
   role?: string;
   type: "model_change";
+};
+
+export type TimelineViewOmpEvent = {
+  attribution?: unknown;
+  content?: unknown;
+  details?: unknown;
+  kind: string;
+  type: "omp_event";
 };
 
 export type TimelineViewRead = {
