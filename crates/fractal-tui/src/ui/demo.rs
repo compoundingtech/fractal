@@ -107,6 +107,7 @@ pub fn world() -> World {
         agent_messages: None,
         slo: Load::Ready(slo()),
         slo_history: slo_history(),
+        slo_stale: None,
         clients: Load::Ready(vec![
             Connected {
                 client: s("stui 0.1.0+1ecae71"),
@@ -173,6 +174,7 @@ pub fn loading() -> World {
         agent_messages: None,
         slo: Load::Loading,
         slo_history: BTreeMap::new(),
+        slo_stale: None,
         clients: Load::Loading,
     }
 }
