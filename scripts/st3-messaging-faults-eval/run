@@ -779,8 +779,31 @@ agent "fault-probe" {{
         write_json(directory / "after.json", {"agent": after_card, "processes": after})
         write_json(directory / "trace.json", claims)
         write_json(directory / "reader.json", all_receipts)
+        statuses = {}
         for node in nodes:
-            write_json(directory / f"{node.name}-replication.json", await node.api("/v1/replication/status"))
+            statuses[node.name] = await node.api("/v1/replication/status")
+            write_json(directory / f"{node.name}-replication.json", statuses[node.name])
+        if result["failures"]:
+            # CI keeps only the log, and the test prints this whole result when a case fails: say
+            # what the replication workers and the link did around the clear, relative to it, so a
+            # recovery that took 12 s names the wait it spent them in.
+            def around(at):
+                return None if at is None else int(at - cleared)
+            result["recovery_diagnosis"] = {
+                "workers_at_end": {
+                    name: [{"peer": peer.get("peer"), "status": peer.get("status"),
+                            "phase": (peer.get("worker") or {}).get("phase"),
+                            "last_attempt_ms_from_clear": around((peer.get("worker") or {}).get("last_attempt_at_unix_ms")),
+                            "next_retry_ms_from_clear": around((peer.get("worker") or {}).get("next_retry_at_unix_ms")),
+                            "last_failure_ms_from_clear": around(peer.get("last_failure_at_unix_ms")),
+                            "last_error": (peer.get("last_error") or "")[:160]}
+                           for peer in (status or {}).get("peers", [])]
+                    for name, status in statuses.items()},
+                "link_ms_from_clear": [
+                    [around(event["at_unix_ms"]), event.get("port"), event["event"], event.get("line", "")[:32],
+                     event.get("enabled")]
+                    for event in link.events if cleared - 5000 <= event["at_unix_ms"] <= cleared + 30000][:70],
+            }
     except Exception as error:
         result["fixture_error_phase"] = phase
         result["failures"].append(f"fixture error: {type(error).__name__}: {error}")
