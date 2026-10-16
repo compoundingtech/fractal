@@ -5105,7 +5105,17 @@ pub(super) async fn mission_detail(
     let snapshot_index = snapshot.store_index;
     let selected = client_detail_id("mission", &id);
     let items = super::blocking_store(move || {
-        mission_resources(&store, snapshot_index, true, Some(&selected))
+        let mut items = mission_resources(&store, snapshot_index, true, Some(&selected))?;
+        // The presentation the missions list publishes for this mission; a read computes none.
+        if let Some(published) = store.published_missions_list().newest()
+            && let Some(card) = published.rows.cards.get(&selected)
+            && let Some(presentation) = card.get("presentation")
+        {
+            for item in &mut items {
+                item["presentation"] = presentation.clone();
+            }
+        }
+        Ok(items)
     })
     .await?;
     client_detail(items, "mission", &id)
@@ -6106,7 +6116,7 @@ fn native_slice_page_at_generation(
     let _page_preparation = crate::profile::span("conversation/page-preparation");
     // A page never outgrows what a paired reader can take from a remote owner (its reads are
     // capped at 1 MiB): a seat with very large entries gets a shorter newest page and a cursor
-    // for the rest, not a refusal that leaves its conversation unreadable.
+    // for the rest. A lone entry can exceed the target budget, but not the hard ceiling.
     has_more |= bound_page_bytes(&mut items, TIMELINE_PAGE_BYTE_BUDGET);
     let next_cursor = if has_more {
         let boundary = items.last()
@@ -6215,17 +6225,44 @@ const NATIVE_ECHO_SCAN_ITEMS: usize = 256;
 
 /// The most a timeline page's entries may serialize to, leaving room under a peer's 1 MiB cap on
 /// a remote client read for the envelope and the page header.
-const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
+pub(super) const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
 
-/// Keep the newest entries (first in `items`) whose serialized size fits `budget`, but always
-/// at least one. True when any were dropped, so the page continues from its new last entry.
+/// Replace a timeline entry that alone exceeds the response ceiling with a visible error entry
+/// that keeps its identity and place, so the page it is on still opens and continues past it.
+pub(super) fn cut_oversized_timeline_entry(item: &mut Value, size: usize) {
+    item["type"] = json!("error");
+    item["role"] = json!("system");
+    item["body"] = json!({
+        "code": "timeline-entry-too-large",
+        "message": format!("[st truncated this timeline entry: size limit; {size} bytes]"),
+        "retryable": false,
+        "details": {"size": size},
+    });
+}
+
+/// Keep complete newest entries within the target budget. One larger entry may be served
+/// alone up to the hard response ceiling; one above the ceiling is replaced, keeping its
+/// identity and place, by a visible error entry that says it was cut. Continuation uses the
+/// actual last returned key.
 fn bound_page_bytes<K>(items: &mut Vec<(Value, K)>, budget: usize) -> bool {
-    let mut bytes = 0usize;
+    let ceiling = CLIENT_MAX_RESPONSE_BYTES - 128_000;
+    let mut bytes = 2usize; // JSON array delimiters.
     for index in 0..items.len() {
-        bytes = bytes.saturating_add(serde_json::to_vec(&items[index].0).map_or(0, |encoded| encoded.len()));
-        if bytes > budget && index > 0 {
-            items.truncate(index);
-            return true;
+        let size = serde_json::to_vec(&items[index].0).map_or(0, |encoded| encoded.len());
+        bytes = bytes
+            .saturating_add(size)
+            .saturating_add(usize::from(index > 0));
+        if bytes > budget {
+            if index > 0 {
+                items.truncate(index);
+                return true;
+            }
+            if bytes > ceiling {
+                cut_oversized_timeline_entry(&mut items[0].0, size);
+            }
+            let more = items.len() > 1;
+            items.truncate(1);
+            return more;
         }
     }
     false
@@ -12869,6 +12906,71 @@ mission "queue-parity" state="ready" {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn collections_socket_accepts_128_byte_subscription_ids_and_refuses_129_bytes() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let app = axum::Router::new().route(
+            "/stream",
+            axum::routing::get(move |upgrade: WebSocketUpgrade| {
+                let state = state.clone();
+                async move {
+                    upgrade.on_upgrade(move |socket| {
+                        collection_stream_socket_with_reader(
+                            socket,
+                            state,
+                            ClientSession::local(None).unwrap(),
+                            None,
+                            |state, session, request, permit| async move {
+                                collection_items(&state, &session, &request, permit).await
+                            },
+                        )
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream"))
+            .await
+            .unwrap();
+        // Multibyte ids distinguish the byte limit from a character-count limit.
+        let accepted = "é".repeat(64);
+        let refused = format!("{accepted}x");
+        assert_eq!(accepted.len(), 128);
+        assert_eq!(refused.len(), 129);
+        for (id, kind) in [(&accepted, "snapshot"), (&refused, "error")] {
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({"kind":"subscribe","id":id,"collection":"work","limit":2})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(frame["id"], id.as_str());
+            assert_eq!(frame["kind"], kind);
+            if kind == "error" {
+                assert_eq!(
+                    frame["message"],
+                    "invalid subscription or subscription limit exceeded"
+                );
+            }
+        }
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
+
     #[test]
     fn missions_first_page_has_bounded_queries_with_thousands_of_definitions() {
         let root = tempfile::tempdir().unwrap();
@@ -15058,10 +15160,30 @@ mission "queue-parity" state="ready" {
         let mut small = vec![entry(10), entry(10)];
         assert!(!bound_page_bytes(&mut small, 768 * 1024));
         assert_eq!(small.len(), 2);
-        // One entry larger than the whole budget is still served, alone.
-        let mut huge = vec![entry(2_000_000), entry(10)];
+        // Above the soft budget but below the hard ceiling: serve it alone and continue.
+        // 896 KiB fits; 900 KiB exceeds the exact 920,576-byte ceiling before JSON overhead.
+        let large = entry(896 * 1024);
+        let mut lone = vec![large.clone()];
+        assert!(!bound_page_bytes(&mut lone, 768 * 1024));
+        assert_eq!(lone, vec![large.clone()]);
+        let mut followed = vec![large.clone(), entry(10)];
+        assert!(bound_page_bytes(&mut followed, 768 * 1024));
+        assert_eq!(followed, vec![large]);
+        // A single entry beyond the hard ceiling is cut visibly: it keeps its place and the
+        // page continues after it, instead of failing the whole page.
+        let mut huge = vec![
+            (json!({"id":"timeline-entry/big","sequence":9,"body":{"text":"x".repeat(2_000_000)}}), ()),
+            entry(10),
+        ];
         assert!(bound_page_bytes(&mut huge, 768 * 1024));
         assert_eq!(huge.len(), 1);
+        let cut = &huge[0].0;
+        assert_eq!(cut["id"], "timeline-entry/big");
+        assert_eq!(cut["sequence"], 9);
+        assert_eq!(cut["type"], "error");
+        assert_eq!(cut["body"]["code"], "timeline-entry-too-large");
+        assert!(cut["body"]["message"].as_str().unwrap().contains("st truncated"));
+        assert!(serde_json::to_vec(cut).unwrap().len() < 1024);
     }
 
     #[test]
@@ -19924,6 +20046,79 @@ mission "example/zero-run" state="ready" {
             assert!(walked.len() < expected.len());
         }
         assert_eq!(walked, expected);
+    }
+
+    #[test]
+    fn omp_event_keyset_pages_keep_typed_views_and_walk_every_event_once() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "omp-envelope-pages");
+        let session_id = "session/omp-envelope-pages";
+        let path = root.path().join("omp-events.jsonl");
+        let mut transcript = String::new();
+        for index in 0..100 {
+            let record = json!({
+                "type":"custom_message", "customType":"notice", "attribution":"agent",
+                "content":"x".repeat(8000),
+                "details":{"from":"worker", "id":index, "message":"x".repeat(8000)},
+            });
+            transcript.push_str(&format!("{record}\n"));
+        }
+        std::fs::write(&path, transcript).unwrap();
+        let mut source = page_test_source(&path, session_id);
+        source.driver = crate::external_sessions::ExternalDriver::Omp;
+        let snapshot = new_client_snapshot(&state);
+        let mut session = ClientSession::local(Some("person/alex")).unwrap();
+        session.conversation_blocks = true;
+        let expected: std::collections::BTreeSet<_> =
+            conversation_blocks::read(&source, &session, session_id)
+                .unwrap()
+                .into_iter()
+                .map(|item| item["id"].as_str().unwrap().to_owned())
+                .collect();
+        let mut received = std::collections::BTreeSet::new();
+        let mut query = ClientListQuery {
+            limit: Some(100),
+            ..Default::default()
+        };
+        let mut previous_boundary = None;
+        let mut pages = 0;
+        loop {
+            let page = native_slice_page(&state, &snapshot, &session, session_id, &query, &source)
+                .unwrap()
+                .0;
+            assert!(serde_json::to_vec(&page).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
+            let items = page["items"].as_array().unwrap();
+            assert!(!items.is_empty());
+            assert!(
+                items
+                    .windows(2)
+                    .all(|pair| pair[0]["sequence"].as_u64().unwrap()
+                        < pair[1]["sequence"].as_u64().unwrap())
+            );
+            if let Some(before) = previous_boundary {
+                assert!(items.last().unwrap()["sequence"].as_u64().unwrap() < before);
+            }
+            previous_boundary = items.first().unwrap()["sequence"].as_u64();
+            for item in items {
+                assert!(received.insert(item["id"].as_str().unwrap().to_owned()));
+                let block = &item["body"]["blocks"][0];
+                assert_eq!(block["kind"], "text");
+                assert_eq!(block["view"]["type"], "omp_event");
+                assert_eq!(block["view"]["content"], "x".repeat(8000));
+                assert_eq!(block["view"]["attribution"], "agent");
+            }
+            pages += 1;
+            query.cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
+            if query.cursor.is_none() {
+                break;
+            }
+            assert!(pages < 100);
+        }
+        assert!(
+            pages > 1,
+            "the byte budget, not count, must split this native page"
+        );
+        assert_eq!(received, expected);
     }
 
     #[test]

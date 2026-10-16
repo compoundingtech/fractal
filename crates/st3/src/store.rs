@@ -1,3 +1,16 @@
+// Literal recipient predicates shared with the private point qualification reader.
+// Callers choose their own indexed subject/candidate traversal, not a new eligibility domain.
+macro_rules! message_sent_recipient_match {
+    () => {
+        "json_extract(body, '$.fields.to') IN (?1, ?2)"
+    };
+}
+macro_rules! message_desired_recipient_match {
+    () => {
+        "json_extract(child.value, '$.name')='to' AND json_extract(child.value, '$.arguments[0]') IN (?1, ?2)"
+    };
+}
+
 mod trace_principal;
 #[cfg(test)]
 mod accountable_tests;
@@ -20,6 +33,9 @@ mod mailbox_changes;
 mod mailbox_lease;
 #[cfg(test)]
 mod message_send_tests;
+// Qualification only: no production caller or Source registration.
+#[cfg(test)]
+mod message_point_qualification;
 #[cfg(test)]
 mod message_thread_legacy_rank_dependency_tests;
 #[cfg(test)]
@@ -32,6 +48,9 @@ mod owned_sets_tests;
 #[cfg(test)]
 mod usage_fold_tests;
 mod resources;
+mod resource_preparation;
+#[cfg(test)]
+mod resource_preparation_fence_tests;
 mod github_workflow_failures;
 pub mod git_changes;
 pub(crate) mod message_subscriptions;
@@ -169,6 +188,7 @@ mod revision_seats;
 pub(crate) mod delegation;
 mod limits;
 mod database_size;
+pub(crate) mod projection_divergence;
 pub use database_size::DatabaseSize;
 mod person_work;
 mod reconcile_work_context;
@@ -3394,6 +3414,9 @@ fn agent_resources_entry_hits(
         }
 }
 
+/// The runs that wait on a person, and the open human gates among them.
+pub(crate) type HumanAttention = (BTreeSet<String>, Vec<st3_ui_model::missions::Gate>);
+
 impl Store {
     /// The explicitly registered keyed views for this graph. This getter performs no reads
     /// or installation; availability and source coverage must be checked in a snapshot.
@@ -4094,6 +4117,11 @@ impl Store {
     /// including a replacement at the same graph index after local activity or a deadline.
     pub(crate) fn subscribe_agent_roster(&self) -> tokio::sync::watch::Receiver<u64> {
         self.smalltalk.agent_roster_published.subscribe()
+    }
+
+    /// The revision `subscribe_agent_roster` follows, now.
+    pub(crate) fn agent_roster_revision(&self) -> u64 {
+        *self.smalltalk.agent_roster_published.borrow()
     }
 
     /// Queue selection changes at lease expiry even when the claim frontier is unchanged.
@@ -5499,6 +5527,7 @@ impl Store {
             .map_err(internal)?;
         let mut flat = Vec::new();
         flatten_steps(&mission, default_selector.clone(), &[], &mut flat);
+        let parents = crate::mission::parent_step_index(&mission);
         for (step, selector, constraints) in flat {
             let (assignee, available_to, agentless) = interpolate_selector(&selector, &variables)?;
             let step_subject = format!("step-run/{generation_id}/{}", step.path);
@@ -5509,7 +5538,10 @@ impl Store {
             step_variables.insert("ST_ASSIGNEE".into(), assignee.clone().unwrap_or_default());
             step_variables.insert(
                 "ST_PARENT_STEP_RUN".into(),
-                crate::mission::parent_step_path(&mission, &step.path)
+                parents
+                    .get(step.path.as_str())
+                    .copied()
+                    .flatten()
                     .map(|path| format!("step-run/{generation_id}/{path}"))
                     .or_else(|| parent_step_run.clone())
                     .unwrap_or_default(),
@@ -8796,6 +8828,7 @@ impl Store {
             })?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
         let mut visible = Vec::with_capacity(views.len());
+        let mut definitions = PinnedDefinitions::default();
         for mut view in views {
             if actor.is_some() && !detailed {
                 // A pending available-to step or a draining run can become visible
@@ -8806,9 +8839,14 @@ impl Store {
                 smallclaims::touched::note_read(|| view.generation.clone());
             }
             if detailed {
-                enrich_step_queue_at(&connection, &mut view, snapshot_unix_ms)?;
+                enrich_step_queue_cached(&connection, &mut view, snapshot_unix_ms, &mut definitions)?;
             } else {
-                enrich_step_queue_for_reconcile_at(&connection, &mut view, snapshot_unix_ms)?;
+                enrich_step_queue_for_reconcile_cached(
+                    &connection,
+                    &mut view,
+                    snapshot_unix_ms,
+                    &mut definitions,
+                )?;
             }
             view.carried_claimant = carried_claimants.get(&view.subject).cloned();
             if run_phases
@@ -8922,6 +8960,7 @@ impl Store {
             step_run_from_row,
         )?;
         let (mut skipped, mut page) = (0, Vec::new());
+        let mut definitions = PinnedDefinitions::default();
         for row in rows {
             let mut view = row?;
             if !visible(&view)? {
@@ -8934,7 +8973,7 @@ impl Store {
             if page.len() == limit {
                 return Ok((page, true));
             }
-            enrich_step_queue_at(&connection, &mut view, snapshot_unix_ms)?;
+            enrich_step_queue_cached(&connection, &mut view, snapshot_unix_ms, &mut definitions)?;
             page.push(view);
         }
         Ok((page, false))
@@ -8991,9 +9030,10 @@ impl Store {
             step_run_from_row,
         )?;
         let mut visible = Vec::new();
+        let mut definitions = PinnedDefinitions::default();
         for row in rows {
             let mut view = row?;
-            enrich_step_queue_at(&connection, &mut view, snapshot_unix_ms)?;
+            enrich_step_queue_cached(&connection, &mut view, snapshot_unix_ms, &mut definitions)?;
             let visible_to_actor = actor.as_ref().is_none_or(|actor| {
                 view.assigned_to.as_deref() == Some(actor.as_str())
                     || view.claimant.as_deref() == Some(actor.as_str())
@@ -9012,7 +9052,7 @@ impl Store {
             .query_row(
                 "SELECT mission_runs.status, mission_runs.current_generation_id,
                         mission_runs.mode, run_generations.status,
-                        root_runs.status, root_runs.phase
+                        root_runs.status, root_runs.phase, mission_runs.phase
                  FROM mission_runs
                  JOIN run_generations ON run_generations.id=?2
                  JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
@@ -9029,6 +9069,7 @@ impl Store {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
@@ -9049,7 +9090,7 @@ impl Store {
         let mut statement = connection.prepare(
             "SELECT mission_runs.id, run_generations.id, mission_runs.status,
                     mission_runs.current_generation_id, mission_runs.mode,
-                    run_generations.status, root_runs.status, root_runs.phase
+                    run_generations.status, root_runs.status, root_runs.phase, mission_runs.phase
              FROM mission_runs
              JOIN run_generations ON run_generations.run_id=mission_runs.id
              JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
@@ -9066,6 +9107,7 @@ impl Store {
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
                     ),
                 ))
             })?
@@ -9088,7 +9130,7 @@ impl Store {
 
     fn work_annotation_with_owner(
         work: &StepRunView,
-        owner: Option<(String, String, String, String, String, String)>,
+        owner: Option<(String, String, String, String, String, String, String)>,
     ) -> OperationalAnnotation {
         let mut reasons: Vec<String> = Vec::new();
         if let Some((
@@ -9098,6 +9140,7 @@ impl Store {
             generation_status,
             root_status,
             root_phase,
+            run_phase,
         )) = owner
         {
             if is_terminal_run_state(&run_status) {
@@ -9113,6 +9156,16 @@ impl Store {
             }
             if is_terminal_run_state(&root_status) || root_phase == "terminal" {
                 reasons.push("terminal-root-owner".into());
+            }
+            if work.status == "pending"
+                && reasons.is_empty()
+                && run_phase != "terminal"
+                && !run_phase.starts_with("cleanup-")
+                && !root_phase.starts_with("cleanup-")
+            {
+                // Pending work belongs to the runtime's readiness evaluator. This names
+                // that owner without claiming its dependency predicates have been checked.
+                reasons.push("waiting for daemon/runtime to evaluate readiness".into());
             }
         }
         if work
@@ -13379,6 +13432,12 @@ impl Store {
         .transpose()
     }
 
+    /// Compare shared claims by canonical order, independent of replica arrival.
+    pub(crate) fn claim_is_after(&self, left: &str, right: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        Ok(canonical::claim_key(&connection, left)? > canonical::claim_key(&connection, right)?)
+    }
+
     pub fn agent_declaration_revisions(&self, subject: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare(&format!(
@@ -14470,24 +14529,18 @@ impl Store {
         // they can reconcile delivery receipts. Start at the indexed recipient
         // claims, not every lifecycle claim for every message in the fleet.
         let fast_recipient = recipient.as_deref();
-        let bare_recipient = fast_recipient.map(|value| {
-            value
-                .strip_prefix("agent/")
-                .filter(|suffix| !suffix.contains('/'))
-                .unwrap_or(value)
-        });
+        let bare_recipient = fast_recipient.map(message_bare_recipient);
         if let (Some(recipient), Some(bare_recipient)) = (fast_recipient, bare_recipient) {
             let mut statement = connection.prepare(if delivery {
-                "WITH candidates(subject) AS (
+                concat!("WITH candidates(subject) AS (
                      SELECT subject FROM claims INDEXED BY claims_message_to_index
                      WHERE kind='message.sent'
-                       AND json_extract(body, '$.fields.to') IN (?1, ?2)
+                       AND ", message_sent_recipient_match!(), "
                      UNION
                      SELECT desired.subject FROM desired,
                             json_each(desired.body, '$.children') child
                      WHERE desired.kind='message'
-                       AND json_extract(child.value, '$.name')='to'
-                       AND json_extract(child.value, '$.arguments[0]') IN (?1, ?2)
+                       AND ", message_desired_recipient_match!(), "
                  ), created AS (
                      SELECT subject,
                             (SELECT MIN(store_index) FROM claims
@@ -14508,18 +14561,17 @@ impl Store {
                      SELECT 1 FROM claims closed
                      WHERE closed.subject=ranked.subject AND closed.kind='message.closed'
                    ))
-                 ORDER BY created_index, subject LIMIT ?5"
+                 ORDER BY created_index, subject LIMIT ?5")
             } else {
-                "WITH candidates(subject) AS (
+                concat!("WITH candidates(subject) AS (
                      SELECT subject FROM claims INDEXED BY claims_message_to_index
                      WHERE kind='message.sent'
-                       AND json_extract(body, '$.fields.to') IN (?1, ?2)
+                       AND ", message_sent_recipient_match!(), "
                      UNION
                      SELECT desired.subject FROM desired,
                             json_each(desired.body, '$.children') child
                      WHERE desired.kind='message'
-                       AND json_extract(child.value, '$.name')='to'
-                       AND json_extract(child.value, '$.arguments[0]') IN (?1, ?2)
+                       AND ", message_desired_recipient_match!(), "
                  ), created AS (
                      SELECT subject,
                             (SELECT MIN(store_index) FROM claims
@@ -14532,7 +14584,7 @@ impl Store {
                      SELECT 1 FROM claims closed
                      WHERE closed.subject=created.subject AND closed.kind='message.closed'
                    ))
-                 ORDER BY created_index, subject LIMIT ?5"
+                 ORDER BY created_index, subject LIMIT ?5")
             })?;
             let mut subjects = statement
                 .query_map(
@@ -15222,9 +15274,36 @@ impl Store {
     }
 
     pub(crate) fn human_attention_runs_at(&self, now: u128) -> Result<BTreeSet<String>> {
+        Ok(self.human_attention_at(now)?.0)
+    }
+
+    /// The runs that wait on a person, with the open human gates among them: each gate's
+    /// mission, the step it holds when it holds one, and the person it waits on.
+    pub(crate) fn human_attention(&self) -> Result<HumanAttention> {
+        self.human_attention_at(now_ms())
+    }
+
+    /// [`Store::human_attention`] with person asks evaluated at `now`.
+    pub(crate) fn human_attention_at(&self, now: u128) -> Result<HumanAttention> {
         let mut items = self.mission_run_attention_items(None)?;
+        let gates = items
+            .iter()
+            .filter(|item| item.kind == "human-gate")
+            .filter_map(|item| {
+                let mission = item.mission.as_deref()?;
+                Some(st3_ui_model::missions::Gate {
+                    mission: if mission.starts_with("mission/") {
+                        mission.to_owned()
+                    } else {
+                        format!("mission/{mission}")
+                    },
+                    step: item.step.clone(),
+                    person: item.person.clone(),
+                })
+            })
+            .collect();
         items.extend(self.person_attention_items(None, now)?);
-        Ok(items.into_iter().filter_map(|item| item.mission_run).collect())
+        Ok((items.into_iter().filter_map(|item| item.mission_run).collect(), gates))
     }
 
     /// The attention items that belong to a mission run: gate reviews, launch approvals and
@@ -15461,7 +15540,7 @@ impl Store {
                     ),
                     launch_id: None,
                     variant_id: None,
-                    message_id: None, answers: Vec::new(), conversation: None,
+                    message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
                     title: "Subscription mission failed".into(),
                     detail: format!("{code}: {reason}"),
                     mission: None,
@@ -15702,6 +15781,77 @@ impl Store {
         subscriptions: &[(String, SubscriptionSpec)],
         current: Option<&(dyn Fn() -> bool + Sync)>,
     ) -> Result<ResourceObservationOutcome, St3Error> {
+        let fence = resource_preparation::Fence::new(self);
+        for pass in 0..2 {
+            let prepared = fence.prepare(self, |connection| {
+                resource_preparation::inputs(
+                    connection,
+                    observer,
+                    desired_revision,
+                    attempt,
+                    resource,
+                    &canonical_json_value(facts),
+                    subscriptions,
+                )
+            });
+            #[cfg(test)]
+            resource_preparation::before_validate(self, pass);
+            #[cfg(not(test))]
+            let _ = pass;
+            let outcome = self.record_resource_observation_attempt(
+                observer,
+                desired_revision,
+                attempt,
+                resource,
+                cursor,
+                facts,
+                next_check_unix_ms,
+                subscriptions,
+                current,
+                Some((&fence, prepared)),
+            )?;
+            if let Some(outcome) = outcome {
+                return Ok(outcome);
+            }
+            #[cfg(test)]
+            resource_preparation::COUNTS.with(|counts| counts.borrow_mut().invalidated += 1);
+        }
+        // Exactly two unusable/stale preparations, then ONE invocation of the existing
+        // canonical writer path. This preserves API progress, not a writer-hold cap.
+        #[cfg(test)]
+        resource_preparation::COUNTS.with(|counts| counts.borrow_mut().fallback += 1);
+        self.record_resource_observation_attempt(
+            observer,
+            desired_revision,
+            attempt,
+            resource,
+            cursor,
+            facts,
+            next_check_unix_ms,
+            subscriptions,
+            current,
+            None,
+        )?
+        .ok_or_else(|| St3Error::new("internal", "canonical observation returned no outcome"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_resource_observation_attempt(
+        &self,
+        observer: &str,
+        desired_revision: &str,
+        attempt: Option<&str>,
+        resource: &str,
+        cursor: Option<&str>,
+        facts: &Value,
+        next_check_unix_ms: u128,
+        subscriptions: &[(String, SubscriptionSpec)],
+        current: Option<&(dyn Fn() -> bool + Sync)>,
+        preparation: Option<(
+            &resource_preparation::Fence,
+            resource_preparation::Prepared<Result<resource_preparation::Inputs, St3Error>>,
+        )>,
+    ) -> Result<Option<ResourceObservationOutcome>, St3Error> {
         let facts = canonical_json_value(facts);
         let operation_hash = canonical_hash(&(
             observer,
@@ -15713,191 +15863,54 @@ impl Store {
         ))
         .map_err(internal)?;
         let idempotency_key = format!("resource-observation:{operation_hash}");
-        self.connection
-            .batched(|transaction| -> Result<ResourceObservationOutcome, St3Error> {
+        #[cfg(test)]
+        let measurement = Mutex::new(None);
+        #[cfg(test)]
+        let pending = Mutex::new(None);
+        #[cfg(test)]
+        let enqueued = std::time::Instant::now();
+        #[cfg(test)]
+        let canonical = preparation.is_none();
+        #[cfg(test)]
+        let cached = std::sync::atomic::AtomicBool::new(false);
+        let result = self.connection
+            .batched(|transaction| -> Result<Option<ResourceObservationOutcome>, St3Error> {
+                #[cfg(test)]
+                let _measurement = resource_preparation::WriterMeasure::new(&measurement);
+                #[cfg(test)]
+                { *pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(enqueued.elapsed()); }
                 check_observer_completion(transaction, observer, desired_revision, current)?;
                 let outcome = (|| {
                 if let Some(response) = smallclaims::store::idempotency::cached_response(transaction, &idempotency_key)?
                 {
-                    return serde_json::from_str(&response).map_err(internal);
+                    #[cfg(test)]
+                    cached.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return serde_json::from_str(&response).map(Some).map_err(internal);
                 }
-                let mut active_subscriptions = Vec::new();
-                for (subject, expected) in subscriptions {
-                    let Some(desired) = current_desired_row_tx(transaction, subject).map_err(internal)?
-                    else {
-                        continue;
-                    };
-                    if desired.kind != "subscription" {
-                        continue;
+                let resource_preparation::Inputs { active_subscriptions, normalized_observation, previous, baseline, repository_facts, legacy_collections, changed_fields, repository_changed_fields, recorded_items, discovered, observer_health_is_current, subscription_states, changed, should_record } = match preparation {
+                    Some((fence, mut prepared)) => {
+                        if !fence.current(self, transaction, &prepared) {
+                            return Ok(None);
+                        }
+                        prepared.value.take().expect("validated preparation has a value")?
                     }
-                    let value = serde_json::from_str(&desired.body).map_err(internal)?;
-                    if crate::graph::subscription_spec(&value).as_ref() == Some(expected)
-                        && !expected.stopped
-                    {
-                        active_subscriptions.push((subject.clone(), expected.clone()));
-                    }
-                }
-                let normalized_observation = normalize_resource_observation(
-                    transaction,
-                    &ClaimInput {
-                        subject: resource.into(),
-                        kind: "resource.observed".into(),
-                        actor: None,
-                        fields: BTreeMap::from([("facts".into(), facts.clone())]),
-                        evidence: Vec::new(),
-                        expected_subject: None,
-                        idempotency_key: None,
-                    },
-                )?
-                .expect("a resource observation is normalized");
-                let resource_kind = normalized_observation
-                    .get("kind")
-                    .cloned()
-                    .expect("a normalized resource observation has a kind");
-                let facts = normalized_observation
-                    .get("facts")
-                    .expect("a normalized resource observation has facts");
-                let previous = latest_actual(transaction, resource)
-                    .map_err(internal)?
-                    .and_then(|actual| actual.get("facts").cloned());
-                let baseline = previous.is_none();
-                let previous_object = previous.as_ref().and_then(Value::as_object);
-                let current_object = facts.as_object().ok_or_else(|| {
-                    St3Error::new(
-                        "invalid-resource-observation",
-                        "resource observation facts must be an object",
-                    )
-                })?;
-                // A repository's collections name the items an observation saw. Each item is its
-                // own resource, so the repository resource keeps only its own facts and a change
-                // to one item records only that item.
-                let collection = |field: &str| {
-                    REPOSITORY_COLLECTIONS
-                        .iter()
-                        .any(|(name, _, _)| *name == field)
+                    None => resource_preparation::inputs(transaction, observer, desired_revision,
+                        attempt, resource, &facts, subscriptions)?,
                 };
-                let repository_facts = Value::Object(
-                    current_object
-                        .iter()
-                        .filter(|(field, _)| !collection(field))
-                        .map(|(field, value)| (field.clone(), value.clone()))
-                        .collect(),
-                );
-                let legacy_collections = previous_object
-                    .is_some_and(|previous| previous.keys().any(|field| collection(field)));
-                let mut changed_fields = BTreeSet::new();
-                for field in current_object
-                    .keys()
-                    .chain(previous_object.into_iter().flat_map(serde_json::Map::keys))
-                    .filter(|field| !collection(field))
-                {
-                    if previous_object.and_then(|object| object.get(field)) != current_object.get(field) {
-                        changed_fields.insert(field.clone());
-                    }
-                }
-                let repository_changed_fields = changed_fields.iter().cloned().collect::<Vec<_>>();
-                let mut recorded_items = HashMap::new();
-                for (field, segment, _) in REPOSITORY_COLLECTIONS {
-                    for number in current_object
-                        .get(field)
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|item| item.get("number").and_then(Value::as_u64))
-                    {
-                        let subject = format!("{resource}/{segment}/{number}");
-                        let recorded = latest_actual(transaction, &subject)
-                            .map_err(internal)?
-                            .and_then(|actual| actual.get("facts").cloned());
-                        let observed_at = transaction
-                            .query_row(
-                                &canonical_sql(
-                                    "SELECT accepted_at_unix_ms FROM claims
-                                     WHERE subject=?1 AND kind='resource.observed'
-                                     ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1",
-                                ),
-                                [&subject],
-                                |row| row.get::<_, String>(0),
-                            )
-                            .optional()
-                            .map_err(internal)?
-                            .and_then(|at| at.parse::<u128>().ok())
-                            .unwrap_or_default();
-                        recorded_items.insert(subject, recorded.map(|facts| (facts, observed_at)));
-                    }
-                }
-                let mut discovered = Vec::new();
-                for (field, _, _) in REPOSITORY_COLLECTIONS {
-                    let items = discovered_collection_items(
-                        resource,
-                        field,
-                        previous.as_ref(),
-                        &facts,
-                        &mut |subject| {
-                            recorded_items
-                                .get(subject)
-                                .cloned()
-                                .flatten()
-                                .map(|(facts, _)| facts)
-                        },
-                    );
-                    changed_fields.extend(items.iter().flat_map(|item| item.data_types.iter().cloned()));
-                    discovered.extend(items.into_iter().map(|item| (field, item)));
-                }
-                let changed_fields = changed_fields.into_iter().collect::<Vec<_>>();
-                let observer_health_is_current = latest_actual(transaction, observer)
-                    .map_err(internal)?
-                    .is_some_and(|actual| {
-                        actual.get("state").and_then(Value::as_str) == Some("healthy")
-                            && actual.get("revision").and_then(Value::as_str) == Some(desired_revision)
-                            && actual.get("reason").is_none()
-                    });
-                let mut subscription_states = BTreeMap::new();
-                for (subscription_subject, subscription) in &active_subscriptions {
-                    let target_exists = if subscription.delivery == "message" {
-                        transaction
-                            .query_row(
-                                "SELECT 1 FROM desired WHERE subject=?1 AND kind='agent'",
-                                [&subscription.to],
-                                |_| Ok(()),
-                            )
-                            .optional()
-                            .map_err(internal)?
-                            .is_some()
-                    } else {
-                        true
-                    };
-                    let status = if target_exists { "active" } else { "pending" };
-                    let current_status = latest_actual(transaction, subscription_subject)
-                        .map_err(internal)?
-                        .and_then(|actual| {
-                            actual
-                                .get("state")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned)
-                        });
-                    subscription_states.insert(
-                        subscription_subject.clone(),
-                        (
-                            target_exists,
-                            status,
-                            current_status.as_deref() != Some(status),
-                        ),
-                    );
-                }
-                let changed = baseline || !changed_fields.is_empty() || !discovered.is_empty();
-                let should_record = changed
-                    || legacy_collections
-                    || attempt.is_some()
-                    || !observer_health_is_current
-                    || subscription_states.values().any(|(_, _, changed)| *changed);
+                let resource_kind = normalized_observation.get("kind").cloned()
+                    .expect("a normalized resource observation has a kind");
+                let facts = normalized_observation.get("facts")
+                    .expect("a normalized resource observation has facts");
+                let previous_object = previous.as_ref().and_then(Value::as_object);
+                let current_object = facts.as_object()
+                    .expect("prepared resource facts are an object");
                 if !should_record {
-                    return Ok(ResourceObservationOutcome {
+                    return Ok(Some(ResourceObservationOutcome {
                         baseline,
                         changed_fields,
                         observation_claim: None,
                         message_subjects: Vec::new(),
-                    });
+                    }));
                 }
                 let now = write_time(transaction, &self.origin).map_err(internal)?;
                 let sequence = next_replica_sequence(transaction, &self.origin).map_err(internal)?;
@@ -16696,12 +16709,34 @@ impl Store {
                         ],
                     )
                     .map_err(internal)?;
-                Ok(outcome)
+                Ok(Some(outcome))
                 })()?;
                 check_observer_completion(transaction, observer, desired_revision, current)?;
                 Ok(outcome)
             })
-            .map_err(|error| St3Error::new("internal", error))?
+            .map_err(|error| St3Error::new("internal", error));
+        #[cfg(test)]
+        if let Some((elapsed, work)) = measurement
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            resource_preparation::COUNTS
+                .with(|counts| counts.borrow_mut().writer.push((canonical, elapsed, work)));
+        }
+        #[cfg(test)]
+        resource_preparation::COUNTS.with(|counts| {
+            let mut counts = counts.borrow_mut();
+            if cached.load(std::sync::atomic::Ordering::Relaxed) {
+                counts.cached += 1;
+            } else if !canonical && matches!(&result, Ok(Ok(Some(_)))) {
+                counts.fast += 1;
+            }
+            counts.acknowledged.push(enqueued.elapsed());
+            counts
+                .until_callback
+                .push(pending.into_inner().unwrap_or_else(PoisonError::into_inner));
+        });
+        result?
     }
 
     /// Every mission request that a subscription recorded, oldest first, with its disposition.
@@ -18298,7 +18333,7 @@ impl Store {
             items.push(AttentionItemView {
                 episode: first.episode.clone(), priority: "high".into(), kind: "harness-login".into(), review_mode: None,
                 subject: first.subject.clone(), person: owner, requester_id: None, launch_id: None,
-                variant_id: None, message_id: None, answers: Vec::new(), conversation: Some(first.subject.clone()),
+                variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: Some(first.subject.clone()),
                 title, detail,
                 request: None, mission: None, mission_run: None, step: None,
                 targets: names.iter().map(|name| (*name).to_owned()).collect(),
@@ -20647,7 +20682,7 @@ fn select_desired_row(rows: Vec<(String, String, String)>) -> Result<Option<Desi
 }
 
 fn current_desired_row_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<Option<DesiredRow>> {
     transaction
@@ -20963,7 +20998,7 @@ fn validate_claim_cardinality(
 }
 
 fn normalize_resource_observation(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     input: &ClaimInput,
 ) -> Result<Option<BTreeMap<String, Value>>, St3Error> {
     if input.kind != "resource.observed" {
@@ -21082,7 +21117,7 @@ fn resource_facts(fields: &BTreeMap<String, Value>) -> Result<BTreeMap<String, V
 }
 
 fn latest_resource_kind(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<Option<String>, St3Error> {
     let bodies = {
@@ -25534,6 +25569,23 @@ fn message_canonical_key_tx(connection: &Connection, subject: &str) -> Result<ca
 #[path = "store/message_canonical_sort_tests.rs"]
 mod message_canonical_sort_tests;
 
+fn message_bare_recipient(value: &str) -> &str {
+    value
+        .strip_prefix("agent/")
+        .filter(|suffix| !suffix.contains('/'))
+        .unwrap_or(value)
+}
+
+fn message_reminder_rank(tags: &[String]) -> Option<(&str, u64)> {
+    let reminder = tags.iter().find_map(|tag| tag.strip_prefix("reminder:"))?;
+    let version = tags
+        .iter()
+        .find_map(|tag| tag.strip_prefix("version:"))
+        .and_then(|version| version.parse::<u64>().ok())
+        .unwrap_or_default();
+    Some((reminder, version))
+}
+
 fn selected_actionable_messages(
     connection: &Connection,
     messages: Vec<MessageView>,
@@ -25541,20 +25593,10 @@ fn selected_actionable_messages(
     let mut selected_reminders = BTreeMap::<String, (u64, MessageView)>::new();
     let mut selected = Vec::new();
     for message in messages {
-        let reminder = message
-            .tags
-            .iter()
-            .find_map(|tag| tag.strip_prefix("reminder:"));
-        let Some(reminder) = reminder else {
+        let Some((reminder, version)) = message_reminder_rank(&message.tags) else {
             selected.push(message);
             continue;
         };
-        let version = message
-            .tags
-            .iter()
-            .find_map(|tag| tag.strip_prefix("version:"))
-            .and_then(|version| version.parse::<u64>().ok())
-            .unwrap_or_default();
         let replace = selected_reminders
             .get(reminder)
             .is_none_or(|(current, selected)| {
@@ -25908,7 +25950,7 @@ fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
         requester_id: None,
         launch_id: None,
         variant_id: None,
-        message_id: None, answers: Vec::new(), conversation: None,
+        message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
         title: review
             .title
             .clone()
@@ -25974,7 +26016,7 @@ fn attention_item_from_planning(
             "launch-variant/{}/{}",
             session.id, candidate.variant
         )),
-        message_id: None, answers: Vec::new(),
+        message_id: None, prompt_call: None, answers: Vec::new(),
         conversation: attention_snapshot::agent(&session.planner),
         title: format!("Approve mission/{}", session.mission),
         detail: "The current launch preview is ready for approval.".into(),
@@ -26033,7 +26075,7 @@ fn attention_item_from_revision(
         requester_id: None,
         launch_id: None,
         variant_id: None,
-        message_id: None, answers: Vec::new(),
+        message_id: None, prompt_call: None, answers: Vec::new(),
         conversation: attention_snapshot::agent(&proposal.actor),
         title: format!("Approve a revision of {}", run.mission),
         detail: proposal.reason.clone(),
@@ -26090,7 +26132,7 @@ fn attention_item_from_failure(request: AttentionRequestView) -> AttentionItemVi
         requester_id: Some(request.actor),
         launch_id: None,
         variant_id: None,
-        message_id: None, answers: Vec::new(), conversation: None,
+        message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
         title: request.title,
         detail: request.reason,
         mission: None,
@@ -28892,6 +28934,8 @@ thread_local! {
     static STATUS_AFTER_DESIRED_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Steps whose queue, timing and wake a read enriched, so a test can see a read's work.
     pub(crate) static STEPS_ENRICHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Pinned mission definitions a read parsed, so a test can see one parse serve a whole run.
+    pub(crate) static DEFINITIONS_PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The SQLite work each work action did inside its writer job, by idempotency key, so a test
@@ -29647,7 +29691,7 @@ fn classify_replicated_claim_with_registry(
             ),
         )
     })?;
-    if let Err(error) = registry.validate_claim(&claim.subject, &claim.kind, &fields) {
+    if let Err(error) = registry.validate_replicated_claim(&claim.subject, &claim.kind, &fields) {
         // A peer may already publish a field introduced by a newer schema. Keep
         // that authenticated record retryable so an upgrade can admit the
         // original claim without replacing or rewriting it.
@@ -33969,6 +34013,17 @@ fn enrich_step_queue_at(
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
 ) -> rusqlite::Result<()> {
+    enrich_step_queue_cached(connection, view, snapshot_unix_ms, &mut PinnedDefinitions::default())
+}
+
+/// [`enrich_step_queue_at`] for the steps of one read: the pinned definitions already parsed for
+/// an earlier step of it are reused, not parsed again for each step.
+fn enrich_step_queue_cached(
+    connection: &Connection,
+    view: &mut StepRunView,
+    snapshot_unix_ms: u128,
+    definitions: &mut PinnedDefinitions,
+) -> rusqlite::Result<()> {
     #[cfg(test)]
     STEPS_ENRICHED.with(|enriched| enriched.set(enriched.get() + 1));
     apply_effective_step_state(connection, view, snapshot_unix_ms)?;
@@ -33988,7 +34043,7 @@ fn enrich_step_queue_at(
     enrich_step_summaries_at(connection, view, snapshot_unix_ms)?;
     enrich_step_nudge_at(connection, view, snapshot_unix_ms)?;
     enrich_step_wake_at(connection, view, snapshot_unix_ms)?;
-    enrich_step_definition(connection, view)?;
+    enrich_step_definition_cached(connection, view, definitions)?;
     adhoc_work::enrich_handoff(connection, view, snapshot_unix_ms)?;
     person_work::enrich_responses(connection, view)
 }
@@ -34108,13 +34163,28 @@ fn enrich_step_summaries_at(
     Ok(())
 }
 
+#[cfg(test)]
 fn enrich_step_queue_for_reconcile_at(
     connection: &Connection,
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
 ) -> rusqlite::Result<()> {
+    enrich_step_queue_for_reconcile_cached(
+        connection,
+        view,
+        snapshot_unix_ms,
+        &mut PinnedDefinitions::default(),
+    )
+}
+
+fn enrich_step_queue_for_reconcile_cached(
+    connection: &Connection,
+    view: &mut StepRunView,
+    snapshot_unix_ms: u128,
+    definitions: &mut PinnedDefinitions,
+) -> rusqlite::Result<()> {
     apply_effective_step_state(connection, view, snapshot_unix_ms)?;
-    enrich_step_definition(connection, view)?;
+    enrich_step_definition_cached(connection, view, definitions)?;
     adhoc_work::enrich_handoff(connection, view, snapshot_unix_ms)?;
     person_work::enrich_responses(connection, view)
 }
@@ -34149,8 +34219,38 @@ fn pinned_generation_mission_tx(
 }
 
 fn enrich_step_definition(connection: &Connection, view: &mut StepRunView) -> rusqlite::Result<()> {
-    if let Some(mission) = pinned_generation_mission_tx(connection, &view.generation)? {
-        apply_step_definition(view, &mission);
+    enrich_step_definition_cached(connection, view, &mut PinnedDefinitions::default())
+}
+
+/// The pinned definitions one read has parsed, by generation. A generation's definition is the
+/// whole mission, so parsing it again for each of the run's steps costs the square of the run's
+/// size (4,200 steps: 170 s in a debug build).
+#[derive(Default)]
+struct PinnedDefinitions(BTreeMap<String, Option<MissionSpec>>);
+
+impl PinnedDefinitions {
+    fn of(
+        &mut self,
+        connection: &Connection,
+        generation: &str,
+    ) -> rusqlite::Result<Option<&MissionSpec>> {
+        if !self.0.contains_key(generation) {
+            #[cfg(test)]
+            DEFINITIONS_PARSED.with(|parsed| parsed.set(parsed.get() + 1));
+            let mission = pinned_generation_mission_tx(connection, generation)?;
+            self.0.insert(generation.to_owned(), mission);
+        }
+        Ok(self.0[generation].as_ref())
+    }
+}
+
+fn enrich_step_definition_cached(
+    connection: &Connection,
+    view: &mut StepRunView,
+    definitions: &mut PinnedDefinitions,
+) -> rusqlite::Result<()> {
+    if let Some(mission) = definitions.of(connection, &view.generation)? {
+        apply_step_definition(view, mission);
     }
     Ok(())
 }
@@ -35869,9 +35969,10 @@ fn mission_run_view_and_definition_tx(
     } else {
         pinned_generation_mission_tx(connection, &view.generation)?
     };
+    let mut definitions = PinnedDefinitions::default();
     for step in &mut view.steps {
         if presentation {
-            enrich_step_queue(connection, step)?;
+            enrich_step_queue_cached(connection, step, now_ms(), &mut definitions)?;
         } else {
             let snapshot_unix_ms = now_ms();
             apply_effective_step_state(connection, step, snapshot_unix_ms)?;
@@ -36223,8 +36324,9 @@ fn run_generation_view_tx(
     view.steps = statement
         .query_map([generation_id], step_run_from_row)?
         .collect::<Result<Vec<_>, _>>()?;
+    let mut definitions = PinnedDefinitions::default();
     for step in &mut view.steps {
-        enrich_step_queue(connection, step)?;
+        enrich_step_queue_cached(connection, step, now_ms(), &mut definitions)?;
     }
     Ok(view)
 }
@@ -36748,6 +36850,11 @@ mod tests {
     mod fault_history_tests {
         use super::*;
         include!("store/fault_history_tests.rs");
+    }
+
+    mod projection_divergence_tests {
+        use super::*;
+        include!("store/projection_divergence_tests.rs");
     }
 
     #[test]
@@ -46470,6 +46577,100 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
     }
 
     #[test]
+    fn future_arrangement_vocabulary_waits_on_replication_but_is_refused_locally() {
+        let subject = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
+        for (operation, code) in [
+            (json!({"op":"future.rename","name":"new"}), "invalid-arrangement-operations"),
+            (json!({"op":"subject.place","subject":"future/item","folder":null,"key":"a0"}), "invalid-subject-reference"),
+        ] {
+            let source = Store::open_memory("source").unwrap();
+            let mut input = ClaimInput {
+                subject: subject.into(), kind: "arrangement.edited".into(),
+                actor: Some("person/ada".into()),
+                fields: BTreeMap::from([
+                    ("owner".into(), json!("person/ada")),
+                    ("operations".into(), json!([{"op":"create","name":"original"}])),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            };
+            source.append_claim(&input).unwrap();
+            input.fields.insert("operations".into(), json!([operation.clone()]));
+            assert_eq!(source.append_claim(&input).unwrap_err().code, code);
+            let mut exchange = exchange_from(&source, &ReplicationInventory::default());
+            let candidate = rewrite_envelope(&exchange.envelopes[0], |payload| {
+                let claim = &mut payload.batch.claims[0];
+                claim.body["fields"]["operations"] = json!([operation]);
+                claim.id = claim_hash(&claim.batch_id, &claim.subject, &claim.kind,
+                    &claim.origin, claim.actor.as_deref(), &claim.body, &claim.predecessors).unwrap();
+            });
+            exchange.envelopes = vec![candidate.clone()];
+            exchange.inventory.envelopes = vec![ReplicaEnvelopeId {
+                writer: candidate.writer.clone(), sequence: candidate.sequence, hash: candidate.hash.clone(),
+            }];
+            let target = Store::open_memory("target").unwrap();
+            let admission = receive_and_project(&target, "source", &exchange);
+            assert_eq!((admission.valid, admission.unknown, admission.invalid), (0, 1, 0));
+            let records = target.replica_records(true).unwrap();
+            assert_eq!(records[0].state, "unknown");
+            assert_eq!(records[0].error_code.as_deref(), Some("unknown-claim-field"));
+            assert!(target.latest_claim(subject, None).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn arrangement_vocabulary_upgrade_applies_the_original_waiting_claim() {
+        let subject = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
+        for operation in [
+            json!({"op":"rename","name":"upgraded"}),
+            json!({"op":"subject.place","subject":"mission/future","folder":null,"key":"a0"}),
+        ] {
+            let source = Store::open_memory("source").unwrap();
+            let mut input = ClaimInput {
+                subject: subject.into(), kind: "arrangement.edited".into(), actor: Some("person/ada".into()),
+                fields: BTreeMap::from([("owner".into(), json!("person/ada")),
+                    ("operations".into(), json!([{"op":"create","name":"original"}]))]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            };
+            source.append_claim(&input).unwrap();
+            input.fields.insert("operations".into(), json!([operation.clone()]));
+            let claim = source.append_claim(&input).unwrap();
+            let exchange = exchange_from(&source, &ReplicationInventory::default());
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("claims.sqlite3");
+            let older = Store::open(&path, "target").unwrap();
+            let mut registry = st3_schema::registry().clone();
+            if operation["op"] == "rename" {
+                registry.arrangement_operations.retain(|tag| tag != "rename");
+            } else {
+                registry.subjects.remove("mission").unwrap();
+            }
+            older.set_claim_registry(registry);
+            let admission = receive_and_project(&older, "source", &exchange);
+            assert_eq!((admission.valid, admission.unknown, admission.invalid), (1, 1, 0));
+            let records = older.replica_records(true).unwrap();
+            assert_eq!(records[0].state, "unknown");
+            assert_eq!(records[0].claim_id.as_deref(), Some(claim.id.as_str()));
+            assert_eq!(records[0].error_code.as_deref(), Some("unknown-claim-field"));
+            drop(older);
+
+            let upgraded = Store::open(&path, "target").unwrap();
+            let admission = upgraded.validate_replication_backlog().unwrap();
+            assert_eq!(admission.invalid, 0);
+            assert!(upgraded.replica_records(true).unwrap().is_empty());
+            upgraded.rebuild_claim_projections().unwrap();
+            let resource = upgraded.arrangement(subject, upgraded.index().unwrap()).unwrap().unwrap();
+            if operation["op"] == "rename" {
+                assert_eq!(resource["body"]["name"]["value"], "upgraded");
+                assert_eq!(resource["body"]["name"]["revision"], claim.id);
+            } else {
+                assert_eq!(resource["body"]["placements"]["mission/future"]["value"]["key"], "a0");
+                assert_eq!(resource["body"]["placements"]["mission/future"]["revision"], claim.id);
+            }
+            assert_eq!(upgraded.latest_claim(subject, None).unwrap().unwrap().id, claim.id);
+        }
+    }
+
+    #[test]
     fn one_invalid_blob_does_not_block_an_unrelated_valid_claim() {
         let source = Store::open_memory("source").unwrap();
         let valid = source
@@ -46490,6 +46691,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
                 .insert("0".repeat(64), b"wrong bytes".to_vec());
         });
         let input = ReplicationExchange {
+            build: None,
             projection_digests: Default::default(),
             peer: "source".into(),
             fleet_id: TEST_FLEET.into(),
@@ -46563,6 +46765,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
             .unwrap();
         });
         let make_exchange = |envelopes: Vec<ReplicaEnvelope>| ReplicationExchange {
+            build: None,
             projection_digests: Default::default(),
             peer: "source".into(),
             fleet_id: TEST_FLEET.into(),
@@ -46613,6 +46816,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
     /// One exchange carrying exactly `envelopes`, as a peer that holds only those would send it.
     pub(super) fn exchange_of(peer: &str, envelopes: Vec<ReplicaEnvelope>) -> ReplicationExchange {
         ReplicationExchange {
+            build: None,
             projection_digests: Default::default(),
             peer: peer.into(),
             fleet_id: TEST_FLEET.into(),
@@ -47684,6 +47888,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
                     "source",
                     FLEET,
                     &ReplicationExchange {
+                        build: None,
                         projection_digests: Default::default(),
                         peer: "source".into(),
                         fleet_id: FLEET.into(),
@@ -59888,6 +60093,85 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
             store.answer_native_prompt(seat, &old.id, "approve-kind", "person/avery").unwrap_err().code,
             "stale-fence"
         );
+    }
+
+    /// A prompt names the exact call it asks about, as its hook published it for that very
+    /// observation; a later prompt's call is never an earlier one's, and an unnamed call is none.
+    #[test]
+    fn a_prompt_names_the_exact_call_its_hook_published() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "call-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        let call_of_prompt = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .find(|item| item.kind == "harness-prompt")
+                .unwrap()
+                .prompt_call
+        };
+        let asked = |transition: u64| {
+            append(
+                "harness.observed",
+                json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                    "blocked_on":"human", "ask":"permission", "reason":"Bash",
+                    "ownership_sequence":1, "transition_sequence":transition}),
+            )
+        };
+        let published = |transition: u64, call: &str| {
+            append(
+                "harness.diagnostic",
+                json!({"severity":"warning", "status":"shown", "code":"native-prompt-call",
+                    "driver":"claude", "ownership_sequence":1,
+                    "matched_line": json!({"call_id": call, "transition": transition}).to_string()}),
+            )
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
+        asked(3);
+        assert_eq!(call_of_prompt(), None, "not named yet: allowed only in the terminal");
+        published(3, "toolu_7");
+        assert_eq!(call_of_prompt().as_deref(), Some("toolu_7"));
+        // The next prompt is its own observation: the earlier call is not its call.
+        append(
+            "harness.observed",
+            json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":null, "ask":null, "ownership_sequence":1, "transition_sequence":4}),
+        );
+        asked(5);
+        assert_eq!(call_of_prompt(), None);
+        published(5, "toolu_9");
+        assert_eq!(call_of_prompt().as_deref(), Some("toolu_9"));
     }
 
     /// A denied call waits on its person only until the seat moves on: once the seat begins another

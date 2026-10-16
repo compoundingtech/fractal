@@ -2013,6 +2013,10 @@ impl Ui {
             }
             // A usage tab names its group whatever the list groups by, so it draws from its key.
             Some(pane @ Pane::Usage(_)) => self.draw_pane(buf, content, &pane),
+            // A session has no sidebar agent selection: render the tab's subject directly.
+            Some(Pane::Agent(Some(id))) if id.starts_with("session/") => {
+                self.draw_pane(buf, content, &Pane::Agent(Some(id)))
+            }
             // A terminal tab that is not the attached one says so, rather than drawing whatever
             // stui's own tab has selected.
             Some(Pane::Terminal(id))
@@ -2089,6 +2093,8 @@ impl Ui {
     /// A pane whose subject st no longer lists. Unknown while its list is still loading.
     fn subject_gone(&self, pane: &Pane) -> bool {
         match pane {
+            // Saved and child sessions are not members of the agent inventory.
+            Pane::Agent(Some(id)) if id.starts_with("session/") => false,
             Pane::Terminal(id) if id.starts_with("terminal/") => false,
             Pane::Agent(Some(id)) | Pane::Terminal(id) => self
                 .world
@@ -2792,9 +2798,15 @@ impl Ui {
             // Ctrl+R tries again: it sends a message st never had again. Speaking into the box is
             // Ctrl+Y, with the box open or not (Nathan, 2026-10-05: it did nothing until a letter
             // had opened the box; 2026-10-14: Ctrl+R means retry, so voice moved off it).
-            KeyCode::Char('r') if control && conversation.is_some() && self.live => {
-                if let Some(entry) = self.undelivered() {
-                    self.effects.push(Effect::Resend { entry });
+            KeyCode::Char('r') if control && quiet && !sidebar_keys && self.live => {
+                // A failed open owns retry before resend, including read-only child sessions.
+                if !self.retry_conversation() {
+                    if conversation.is_none() {
+                        return false;
+                    }
+                    if let Some(entry) = self.undelivered() {
+                        self.effects.push(Effect::Resend { entry });
+                    }
                 }
             }
             KeyCode::Char('y') if control && conversation.is_some() && self.live => self.start_voice(),
@@ -3170,6 +3182,20 @@ impl Ui {
     /// Show `pane` in this glass: where it already shows, else as `how` says. Home stays Home,
     /// so what opens from Home gets its own tab, and a Home item opens on Home itself.
     pub(crate) fn open_in_glass(&mut self, pane: Pane, how: Open) {
+        self.open_in_glass_inner(pane.clone(), how);
+        // Opening an agent attaches its terminal once its tab has stayed in front a moment,
+        // unless this device chose its conversation. Only opening does: moving the focus to a
+        // tab or split already open only focuses it.
+        if !self.conversation_first()
+            && let Pane::Agent(Some(id)) = &pane
+            && id.starts_with("agent/")
+            && self.focused_pane().as_ref() == Some(&pane)
+        {
+            self.attach_when = Some((id.clone(), Instant::now()));
+        }
+    }
+
+    fn open_in_glass_inner(&mut self, pane: Pane, how: Open) {
         if let Some(glasses) = self.glasses.as_mut() {
             glasses.home = false;
         }
@@ -4041,12 +4067,6 @@ impl Ui {
         // A message box belongs to the pane it was opened in: once another pane or tab has the
         // focus, typing must not go on into a draft nobody can see (Nathan, 2026-10-07).
         if before != (self.tab, self.selected_id()) {
-            if !self.conversation_first()
-                && let Some(Pane::Agent(Some(id))) = self.focused_pane()
-                && id.starts_with("agent/")
-            {
-                self.attach_when = Some((id, Instant::now()));
-            }
             self.editing = false;
             self.chat = None;
             self.answering = None;
@@ -4745,13 +4765,20 @@ mod tests {
             Open::Tab,
         );
         ui.effects.clear();
-        // Passing through the agent's tab: nothing attaches.
-        ui.show_tab(0);
-        ui.show_tab(1);
+        // Opened and passed by at once: nothing attaches.
+        std::thread::sleep(ATTACH_DWELL + std::time::Duration::from_millis(50));
         ui.step_default_view();
         assert!(ui.effects.is_empty(), "{:?}", ui.effects);
-        // Staying on it does, and the tab is the terminal now.
+        // Moving the focus back to its tab only focuses it.
         ui.show_tab(0);
+        std::thread::sleep(ATTACH_DWELL + std::time::Duration::from_millis(50));
+        ui.step_default_view();
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        // Opening it, and staying, attaches, and the tab is the terminal now.
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
+            Open::Tab,
+        );
         std::thread::sleep(ATTACH_DWELL + std::time::Duration::from_millis(50));
         ui.step_default_view();
         assert!(
@@ -6045,6 +6072,37 @@ mod tests {
             ui.conversation_state.drafts["agent/example/atlas/builder"],
             "hello"
         );
+        ui.editing = false;
+        ui.world.conversations.insert(
+            "agent/example/atlas/builder".into(),
+            Load::Failed("access refused".into()),
+        );
+        ctrl(&mut ui, 'r');
+        assert_eq!(
+            ui.effects,
+            [Effect::RetryConversation {
+                target: "agent/example/atlas/builder".into(),
+            }],
+            "a failed-open card retries only its subscription, never message resend"
+        );
+        assert_eq!(
+            ui.conversation_state.drafts["agent/example/atlas/builder"],
+            "hello"
+        );
+        ui.effects.clear();
+        ui.world.conversations.insert(
+            "agent/example/atlas/builder".into(),
+            Load::Failed("access refused".into()),
+        );
+        let sidebar = &mut ui.glasses.as_mut().unwrap().sidebar;
+        sidebar.shown = true;
+        sidebar.focused = true;
+        ctrl(&mut ui, 'r');
+        assert!(ui.effects.is_empty(), "sidebar focus must not retry the conversation behind it");
+        assert!(matches!(
+            ui.world.conversations["agent/example/atlas/builder"],
+            Load::Failed(_)
+        ));
     }
 
     #[test]
