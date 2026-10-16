@@ -410,6 +410,19 @@ while st2 remains a member; the filters preserve execution coverage rather than 
 Matching rendered hooks are installed by a CI binary that calls the driver
 library directly, rather than by the legacy runner CLI.
 
+Outside GitHub Actions on Linux, `scripts/ci-nextest run` keeps the tests' temporary files in a
+per-run directory `/dev/shm/st-nextest.XXXXXX` (removed when the run ends) when `TMPDIR` is unset,
+`/tmp` or `/var/tmp` and `/dev/shm` has 4 GiB free. The file-backed SQLite stores sync every WAL
+commit, and that wait is most of the wall time of the tests that use them (the st3 library set
+measured 251 s on tmpfs against 407 s on disk with the same CPU, about 0.5 GiB of scratch either
+way). The 4 GiB check is made at start and reserves nothing: concurrent local runs share that RAM. A run
+killed with SIGKILL leaves its directory in RAM until reboot; sweep with
+`find /dev/shm -maxdepth 1 -name 'st-nextest.*' -mmin +1440 -exec rm -rf {} +`. Set
+`ST_NEXTEST_TMPDIR=disk` to keep the disk. CI never takes this branch, so the hosted runs keep real
+disks and every test that syncs to one; a local tmpfs pass does not exercise fsync or disk behavior
+and is not evidence for those tests, and nothing a local run produces stands in for the hosted
+required checks.
+
 The old trusted fleet runner and st merge train are retired; there is no operations installation
 handoff. Namespace workflows use this script from the checkout and land through GitHub's merge
 queue. Provider fixtures, rendered hooks, workspace Clippy and the isolation archive keep their
@@ -1254,7 +1267,7 @@ retry follows quota exhaustion.
 
 Test archive transfer verifies the complete ZIP before exposing consumer inputs. The four
 archive consumers download only the successful producer artifact ID, verify its API size
-and SHA256, verify the producer-output manifest hash and all five ZIP members, then
+and SHA256, verify the producer-output manifest hash and all four ZIP members, then
 publish a fresh private directory atomically. A failed or incomplete transfer gets at most
 one repeat download of that same ID (each ZIP request has a 10-minute limit); interrupted
 requests retain their signal status. No compiler or test is retried. Source, run, successful
@@ -1292,3 +1305,14 @@ deadline. Signed storage URLs, credentials and raw HTTP errors are excluded.
 Final failure removes the private partial and starts no tests. These diagnostics
 distinguish a zero-byte stall from an interrupted transfer; transport recovery
 does not waive a failed gate or authorize a workflow rerun.
+
+The producer now adds the three component byte lengths to its hash-bound version-2
+manifest and prints them in the log and step summary. Consumers also print each
+verified ZIP member's payload and compressed byte lengths, using metadata already
+read for whole-ZIP/hash/CRC verification. This adds no network request, payload
+reread, tar inventory pass or extra artifact member. Older manifests without the
+optional byte lengths still verify; a present size inventory must exactly match
+the files. Reporting failures do not change a producer or verification result.
+These numbers distinguish workspace.tar.zst from the standalone gateway and build
+metadata; they do not yet identify members inside the compressed workspace archive
+or establish that any executable is safe to remove.

@@ -530,13 +530,13 @@ where
         let wake = Arc::new(Wake(tokio::sync::Notify::new()));
         let waker = std::task::Waker::from(wake.clone());
         let mut future = Box::pin(future);
+        let workers = store.connection.write_workers().with_requester(requester, route);
         loop {
             // No blocking parent parks while this admission is pending. Only a
             // synchronous poll (or its dependent writer child) retains capacity.
             let polling_store = store.clone();
             let polling_waker = waker.clone();
-            let (result, returned_future, returned_scope) = store.connection.write_workers()
-                .with_requester(requester.clone(), route.clone())
+            let (result, returned_future, returned_scope) = workers.clone()
                 .spawn_blocking(move || {
                     let mut cx = Context::from_waker(&polling_waker);
                     let result = with_handler(|| with_store(Some(polling_store), || {

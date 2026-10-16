@@ -41,21 +41,7 @@ pub struct ProviderObservation {
 /// not finish in one poll, so an observer's declared interval does not delay it.
 pub const PROVIDER_CONTINUE_MS: u128 = 1_000;
 
-/// GitHub refused a request until a known time: a primary or secondary rate limit. It clears
-/// on its own at `retry_at_unix_ms`.
-#[derive(Debug)]
-pub struct ProviderRateLimit {
-    pub retry_at_unix_ms: u128,
-    pub status: u16,
-}
-
-impl std::fmt::Display for ProviderRateLimit {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "GitHub HTTP {} rate limit", self.status)
-    }
-}
-
-impl std::error::Error for ProviderRateLimit {}
+pub use crate::github_admission::ProviderRateLimit;
 
 /// GitHub rejected the token itself. Nothing changes until a person signs in again.
 #[derive(Debug)]
@@ -497,6 +483,12 @@ tokio::task_local! {
 /// Count the GitHub requests `future` sends against `observer`.
 pub(crate) async fn spend_as<F: Future>(observer: String, future: F) -> F::Output {
     GITHUB_SPENDER.scope(observer, future).await
+}
+
+/// The reconciler supplies this task-local caller; shell variables and request
+/// headers cannot select an admission identity.
+pub(crate) fn github_spender() -> Option<String> {
+    GITHUB_SPENDER.try_with(Clone::clone).ok()
 }
 
 /// Requests sent outside any observation.

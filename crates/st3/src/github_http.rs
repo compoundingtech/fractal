@@ -1,9 +1,11 @@
 //! Authentication and the one send path for daemon GitHub HTTP requests.
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::future::Future;
 use std::io::Read as _;
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::MetadataExt as _;
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -11,6 +13,8 @@ use std::time::SystemTime;
 use tokio::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
+
+pub(crate) use crate::config::open_token_file;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 
@@ -116,34 +120,6 @@ fn default_version(environment: &BTreeMap<String, String>) -> Result<DefaultVers
     })
 }
 
-/// Validate the opened descriptor before reading its contents, including on every reload.
-/// Nonblocking open lets a configured FIFO fail validation without hanging startup.
-pub(crate) fn open_token_file(path: &Path) -> Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-        .open(path)
-        .with_context(|| format!("open GitHub token file {}", path.display()))?;
-    let metadata = file.metadata().context("inspect GitHub token file")?;
-    validate_token_file_metadata(&metadata, unsafe { libc::geteuid() })?;
-    Ok(file)
-}
-
-fn validate_token_file_metadata(metadata: &std::fs::Metadata, effective_uid: u32) -> Result<()> {
-    anyhow::ensure!(
-        metadata.is_file(),
-        "GitHub token file must be a regular file"
-    );
-    anyhow::ensure!(
-        metadata.permissions().mode() & 0o077 == 0,
-        "GitHub token file must grant no permissions to group or others; use chmod 600"
-    );
-    anyhow::ensure!(
-        metadata.uid() == effective_uid,
-        "GitHub token file must be owned by the daemon account"
-    );
-    Ok(())
-}
 
 fn read_token_file(file: File) -> Result<String> {
     let mut bytes = Vec::new();
@@ -293,6 +269,7 @@ pub(crate) fn configure(config: &crate::config::Config) -> Result<()> {
         );
         return Ok(());
     }
+    crate::github_admission::configure(config.state_dir.join("github-admission.json"), config.github.observer_requests_per_hour.map(|cap| cap as usize));
     SOURCE
         .set(Arc::new(config.clone()))
         .map_err(|_| anyhow::anyhow!("GitHub source was already configured"))
@@ -389,12 +366,30 @@ pub(crate) async fn lookup_github_token(environment: &BTreeMap<String, String>) 
     Ok(token.to_owned())
 }
 
+fn request_resource(path: &str) -> &'static str {
+    match path {
+        "/graphql" | "/api/graphql" => "graphql",
+        path if path.starts_with("/search/") || path.starts_with("/api/v3/search/") => "search",
+        _ => "core",
+    }
+}
+
 /// Send exactly once, including mutations. A 401 invalidates only the credential used here;
 /// another poll can acquire again after backoff. Never retry the original HTTP request.
 pub(crate) async fn send(
     request: reqwest::RequestBuilder,
     auth: &GithubAuth,
 ) -> Result<reqwest::Response> {
+    // Admission precedes both the credential-bearing local send and the
+    // authorized RPC. A failed send remains spent; there is no HTTP retry.
+    if let Some(config) = SOURCE.get() {
+        let resource = request.try_clone().and_then(|copy| copy.build().ok())
+            .map(|copy| request_resource(copy.url().path())).unwrap_or("core");
+        crate::github_admission::before_send(
+            config.state_dir.join("github-admission.json"),
+            crate::resource::github_spender(), resource.into(), config.github.observer_requests_per_hour.map(|cap| cap as usize),
+        ).await?;
+    }
     match auth {
         GithubAuth::Authorized { config, profile } => {
             send_authorized_with(
@@ -1104,7 +1099,7 @@ mod tests {
         let metadata = std::fs::metadata(path).unwrap();
         let other_uid = metadata.uid().wrapping_add(1);
         assert!(
-            validate_token_file_metadata(&metadata, other_uid)
+            crate::config::validate_token_file_metadata(&metadata, other_uid)
                 .unwrap_err()
                 .to_string()
                 .contains("owned by")

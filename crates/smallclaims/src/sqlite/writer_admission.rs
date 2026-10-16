@@ -1,46 +1,61 @@
 //! Admission of top-level writer-bound callbacks before they occupy blocking threads.
 use super::*;
 use std::future::Future;
-use std::collections::BTreeMap;
 use std::time::Instant;
 
-#[derive(Default)]
 pub(super) struct WorkerQueue {
-    pending: Mutex<BTreeMap<u64, Instant>>,
-    next: AtomicU64,
+    epoch: Instant,
+    depth: AtomicU64,
+    enqueued_micros: AtomicU64,
 }
 
 impl WorkerQueue {
     pub(super) fn new() -> Arc<Self> {
-        let queue = Arc::new(Self::default());
+        let queue = Arc::new(Self {
+            epoch: Instant::now(),
+            depth: AtomicU64::new(0),
+            enqueued_micros: AtomicU64::new(0),
+        });
         telemetry::register_worker_queue(&queue);
         queue
     }
 
     pub(super) fn sample(&self) -> (u64, f64) {
-        let pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        (pending.len() as u64, pending.first_key_value().map_or(0.0, |(_, at)| at.elapsed().as_secs_f64()))
+        let depth = self.depth.load(Ordering::Relaxed);
+        if depth == 0 {
+            return (0, 0.0);
+        }
+        let mean_enqueue = self.enqueued_micros.load(Ordering::Relaxed) / depth;
+        // Independent atomic samples are approximate during concurrent changes.
+        // Saturation avoids a negative age when a new enqueue races observation.
+        let age = self.micros().saturating_sub(mean_enqueue);
+        (depth, std::time::Duration::from_micros(age).as_secs_f64())
+    }
+
+    fn micros(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_micros()).unwrap_or(u64::MAX)
     }
 
     fn enqueue(self: &Arc<Self>) -> QueuedWorker {
         std::sync::LazyLock::force(&telemetry::METRICS);
-        let mut pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
         let at = Instant::now();
-        pending.insert(id, at);
-        QueuedWorker { queue: self.clone(), id, at }
+        let micros = self.micros();
+        self.enqueued_micros.fetch_add(micros, Ordering::Relaxed);
+        self.depth.fetch_add(1, Ordering::Relaxed);
+        QueuedWorker { queue: self.clone(), micros, at }
     }
 }
 
 struct QueuedWorker {
     queue: Arc<WorkerQueue>,
-    id: u64,
+    micros: u64,
     at: Instant,
 }
 
 impl Drop for QueuedWorker {
     fn drop(&mut self) {
-        self.queue.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.id);
+        self.queue.depth.fetch_sub(1, Ordering::Relaxed);
+        self.queue.enqueued_micros.fetch_sub(self.micros, Ordering::Relaxed);
     }
 }
 
@@ -118,12 +133,13 @@ impl WritePermit {
 }
 
 /// An owned admission handle, so a store can move into its own blocking callback.
+#[derive(Clone)]
 pub struct WriteWorkers {
     admission: Arc<Semaphore>,
     inherited: Option<WritePermit>,
     queue: Arc<WorkerQueue>,
     requester: Option<Arc<tokio::sync::oneshot::Sender<()>>>,
-    route: Option<String>,
+    route: Option<opentelemetry::KeyValue>,
 }
 
 impl WriteWorkers {
@@ -131,7 +147,7 @@ impl WriteWorkers {
     /// `route` must be the router's normalized matched path, never a raw URI.
     pub fn with_requester(mut self, requester: Arc<tokio::sync::oneshot::Sender<()>>, route: String) -> Self {
         self.requester = Some(requester);
-        self.route = Some(route);
+        self.route = Some(opentelemetry::KeyValue::new("origin", Arc::<str>::from(route)));
         self
     }
 
@@ -163,14 +179,11 @@ impl WriteWorkers {
                 drop(queued);
                 telemetry::METRICS.worker_wait.record(
                     wait.as_secs_f64(),
-                    &[self.route.map_or_else(
-                        || opentelemetry::KeyValue::new("origin", "other"),
-                        |route| opentelemetry::KeyValue::new("origin", route),
-                    )],
+                    &[self.route.unwrap_or_else(|| opentelemetry::KeyValue::new("origin", "other"))],
                 );
             }
             if self.requester.is_some_and(|requester| requester.is_closed()) {
-                telemetry::METRICS.worker_abandoned.add(1, &[opentelemetry::KeyValue::new("outcome", "ran")]);
+                telemetry::METRICS.abandoned_callback_starts.add(1, &[opentelemetry::KeyValue::new("outcome", "ran")]);
             }
             permit.run(work)
         }).await

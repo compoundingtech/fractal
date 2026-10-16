@@ -248,6 +248,10 @@ GET /v1/client/agents SERVER / first_frame     st.roster.rebuild INTERNAL root (
 | --- | --- | --- |
 | `st.roster.path` | string enum | `published_complete`, `published_head`, `exact_warm`, `exact_cold`, `filtered_full`, `not_ready`; any status-filtered read is `filtered_full` |
 | `st.roster.fresh_requested` | boolean | The HTTP agents query's `fresh` value, including exact reads, published first pages, continuations and `not_ready`; WebSocket reads and background rebuild roots report `false` because they have no freshness query |
+| `st.roster.fresh_wait` | string enum | Exit of the fresh published-first-page wait: `published`, `unchanged`, `refresh_failed`, `disconnected`, `timeout`, `read_failed`; absent when no wait ran |
+| `st.roster.fresh_wait_cut` | integer | Actual wait target read when the wait starts, distinct from the earlier request cut and the publication served; absent if that index read failed |
+| `st.roster.fresh_proof` | string enum | Proof for the exact complete publication served: `not_checked` for other wait exits, `verified`, `refused` (including head-only, not-ready or evicted publication), `read_failed` |
+| `st.roster.fresh_unchanged_verified` | boolean | True exactly when `fresh_proof=verified`; only an `unchanged` wait exit can receive verification |
 | `st.roster.requested_cut` | integer | Store index of the read's snapshot |
 | `st.roster.publication_cut` | integer | Store index of the publication served; absent for `not_ready` |
 | `st.roster.worker_queue_ms` | double | Cumulative submission-to-start time of the read's blocking workers, excluding reader acquisition and execution |
@@ -369,10 +373,12 @@ Duration buckets are
 | Instrument | Type | Unit | Additional attributes / meaning |
 | --- | --- | --- | --- |
 | `db.client.operation.duration` | Histogram | `s` | `db.operation.name=write.batched` or `write.lend`; writer enqueue through ACK |
-| `st.db.writer.queue.duration` | Histogram | `s` | —; enqueue through writer dequeue |
+| `st.db.writer.queue.duration` | Histogram | `s` | `st.db.writer.origin`; enqueue through writer dequeue |
 | `st.db.writer.batch.size` | Histogram | `{job}` | —; jobs in a writer batch |
 | `st.db.writer.commit.duration` | Histogram | `s` | —; writer commit duration |
 | `st.db.writer.batch.duration` | Histogram | `s` | —; whole writer batch duration |
+| `st.db.writer.hold` | Histogram | `s` | `st.db.writer.origin`; acquisition through release, including loans and batched writes |
+| `st.db.writer.current_hold` | Observable gauge | `s` | `st.db.writer.origin`; current hold age, zero when idle |
 | `db.client.connection.wait_time` | Histogram | `s` | `db.operation.name=read`; reader checkout wait |
 | `st.db.readers.open` | Observable gauge | `{connection}` | —; current open readers |
 | `st.db.readers.idle` | Observable gauge | `{connection}` | —; current idle readers |
@@ -380,11 +386,30 @@ Duration buckets are
 | `st.db.wal.size` | Observable gauge | `By` | —; stat the main database's `-wal` file |
 | `st.db.wal.checkpoint.duration` | Histogram | `s` | `db.operation.name=checkpoint.truncate`; truncate checkpoint duration |
 
-Every storage metric carries `db.system.name=sqlite`. These are the complete attribute
-sets: at most two combinations per instrument, with no paths, SQL, ids, or other
-unbounded attributes. Duration histograms use the seconds buckets above; batch size uses
-explicit boundaries `1`, `2`, `4`, `8`, `16`, `32`, `64`, `128`, `256`.
-Storage metrics are not sampled.
+Every storage metric carries `db.system.name=sqlite`. Writer hold and queue origins reuse
+the bounded writer-span vocabulary: normalized router `MatchedPath` templates prefixed
+by one of nine HTTP methods, the fourteen fixed task names in the storage origin table,
+and `other` for unknown origins. No paths, SQL, ids, or raw request URIs are attributes.
+Each batch's hold uses its first queued operation's origin for its entire lifetime;
+loans use the borrowing caller's origin. When multiple stores share an origin, the
+current-hold gauge reports their maximum age, and reports zero for previously seen
+origins after release. Collection does not require storage phase spans to be enabled.
+Receive, admission, repair, and replay retain `POST /v1/internal/replication/receive`
+through the blocking request scope; deferred wake passes retain `POST /v1/internal/replication-wake`.
+The independent contention retry uses `task replication-projection-retry`. Startup uses
+the existing `startup validate-replication-backlog`, `startup apply-replication-repairs`,
+and `startup project-replication-backlog` labels. These are four additional closed values,
+not dynamic task labels or new origin sources.
+Wait and hold histogram boundaries are `0.001`, `0.005`, `0.01`, `0.025`, `0.05`, `0.1`,
+`0.25`, `0.5`, `1`, `2.5`, `5`, `10`, `15`, `30`, `60`, `120`, `300`, `600` seconds.
+Other duration histograms use the seconds buckets above; batch size uses explicit
+boundaries `1`, `2`, `4`, `8`, `16`, `32`, `64`, `128`, `256`. Storage metrics are not sampled.
+
+The daemon exports `st.runtime.lag` as an observable gauge in seconds with no instrument
+attributes. One Tokio sleep per second measures expected-versus-actual wakeup delay;
+the SDK samples the maximum of the last delay and an overdue pending wakeup, so a
+stalled runtime remains visible before the sampling task resumes.
+Synchronous storage-only telemetry registers no lag instrument when no Tokio runtime exists.
 
 ### Write-worker admission
 
@@ -395,16 +420,19 @@ They use the existing SDK meter provider and daemon resource identity.
 | Instrument | Kind | Unit | Attributes / meaning |
 | --- | --- | --- | --- |
 | `st.write_workers.queue.depth` | Observable gauge | `{job}` | Queued, not-yet-started top-level callbacks |
-| `st.write_workers.queue.oldest_age` | Observable gauge | `s` | Age of the oldest queued callback; zero when empty |
+| `st.write_workers.queue.mean_age` | Observable gauge | `s` | Maximum per-store mean age of queued callbacks; zero when empty |
 | `st.write_workers.queue.wait` | Histogram | `s` | `origin`: normalized HTTP route when available, otherwise `other`; enqueue through callback start (or explicit admission grant) |
-| `st.write_workers.abandoned` | Counter | `{job}` | `outcome=ran`: callbacks starting after their request waiter was dropped |
+| `st.write_workers.abandoned_callback_starts` | Counter | `{job}` | `outcome=ran`: callbacks starting after their request waiter was dropped |
 
 Inherited dependent callbacks do not add queue entries. Pending admission cancellation
 removes the entry; admitted callbacks remain queued until their blocking thread starts.
 Explicit `admit_write` calls leave the queue when granted capacity. Each store tracks
-pending enqueue timestamps in an ordered map; observable callbacks read only its length
-and head under a short mutex, without scanning jobs or taking a store/writer lock.
-Across stores the gauges sum depth and take the maximum oldest age.
+depth and the sum of monotonic enqueue timestamps in two relaxed atomics; enqueue and
+drop each perform two atomic updates, without a mutex, map allocation or job scan.
+Mean age is approximate during concurrent changes (negative ages saturate to zero).
+Across stores the gauges sum depth and take the maximum per-store mean age. This
+replaces the originally proposed oldest-age metric; it cannot identify a single old
+outlier behind otherwise young callbacks. The wait histogram remains unchanged.
 
 Mutation handlers retain their existing detached completion behavior. A closed response
 oneshot detects abandonment before each synchronous handler poll; it only counts and
@@ -416,11 +444,11 @@ does not skip jobs and emits only `ran`. Wait histograms use the storage duratio
 An alert for sustained admission delay can use:
 
 ```promql
-max by (host_name) (st_write_workers_queue_oldest_age_seconds * on(instance) group_left(host_name) target_info{job="infra/st-daemon"}) > 5
+max by (host_name) (st_write_workers_queue_mean_age_seconds * on(instance) group_left(host_name) target_info{job="infra/st-daemon"}) > 5
 ```
 
-Proof: `worker_queue_exports_wait_and_abandoned_requests` blocks worker capacity,
-checks exported depth and oldest age, drops the requester before start, and checks
+Proof: `worker_queue_exports_wait_and_abandoned_callback_starts` blocks worker capacity,
+checks exported depth and mean age, drops the requester before start, and checks
 the exported abandonment counter, wait histogram, and empty-queue reset. It also
 checks pending-admission cancellation removes queue entries.
 
