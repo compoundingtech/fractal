@@ -125,6 +125,7 @@ pub mod test_support;
 pub mod terminal_fabric;
 pub mod terminal_binding;
 /// Runs each agent as its own Unix user, in its own namespaces and root-owned cgroup.
+pub mod tile_registry;
 pub mod tiles;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
