@@ -46,6 +46,12 @@ keeps the newest observation per origin/subject after the D+2 cut; a two-to-thre
 window holds roughly 5,760-8,640 refresh claims, plus each retained newest claim. These are
 arithmetic bounds, not measured saturated-daemon costs.
 
+The daemon caches its sealed membership view at the store's fleet generation, rather than
+folding the full fleet history on every worker poll. The generation and fold share a read
+snapshot. Fleet claims, their batch/envelope identities, verified signer rows and the pinned
+anchor invalidate it. This view never supplies the client's unsealed local-signer fallback;
+`current` describes an open writer window, not a wall-clock lease.
+
 Gateways cache filtered links and sealed membership for at most five seconds, including
 per-item `reaches()` checks. Links involving current dial-out members never support
 bidirectional owner routes, even while fresh. Dial-out owners return `remote-unavailable`
@@ -70,6 +76,28 @@ conservatively keeps all existing shared blobs.
 A keyed worker signs batches beyond its last processed batch, including envelopes another
 unkeyed process already sealed at startup. Signature requests recover missing signatures after
 an upgrade. Equal envelope inventories alone cannot prove equal claim admission.
+
+Sealing prepares each chunk of local batches on a read transaction before it takes the writer.
+A chunk is at most 64 batches and 16 MiB of payload: a batch that would take it past 16 MiB
+starts the next chunk, and only a first batch larger than that is sealed alone. Preparation reads
+each batch's claims and the blobs they name, signs each claim that has no stored signature,
+encodes and hashes the envelope and its records, and signs each envelope with the member key.
+Under the writer, sealing reads again what it prepared from:
+- the chunk's unsealed batches and their claims;
+- which named blobs are stored;
+- each claim's stored signature;
+- the member key and the fleet id;
+- for the claims it signed, the key, principal, principal acted for and chain the keyring would
+  sign them with now. This is read in one view that no keyring change overlapped, once per
+  distinct signer input (a key grant's issuer and issuer key, and the claim's actor), not once
+  per claim.
+
+Only then does it write the prepared rows. If any of these changed, it writes nothing and
+prepares the chunk again off the writer. Keys added or replaced for principals the chunk's claims
+are not signed as do not count as a change. Claims and blobs are compared by id and hash, which
+name their content. A blob that is not stored when a batch is sealed stays out of its envelope,
+as before. This moves signing and encoding off the writer but does not bound the hold: the
+rereads and writes still grow with the chunk's claims and bytes.
 
 `store::tests::canonical_audit::every_shared_projection_agrees_after_shuffle_restart_and_checkpoint`
 checks both invariants by comparing shared rows, selected readers and per-table digest oracles
@@ -123,6 +151,21 @@ decide it, but it builds no replication snapshot and skips the once-per-process 
 batches skipped behind the sealing frontier. Both read every envelope or batch, about 15 s on a
 two-million-envelope store, and the daemon listens only after admission. The first export or
 replication activation after the daemon serves runs them on a read connection.
+
+Admission prepares each envelope before it takes the writer: it decodes the payload, checks
+the envelope, batch, blob and claim hashes, encodes each claim and, for a runtime that
+classifies without the store (st3's does), classifies its kinds and fields. The writer is held
+only for the checks that read stored state and the writes: the envelope row is still there and
+not dropped by a checkpoint, membership and signatures still admit it, earlier record states
+(a `repaired` record stays repaired), tombstones and blobs. The envelope hash names its bytes,
+so a preparation always describes the row's content. Admission also compares the row's rowid and
+receipt time with those it prepared from; an envelope whose row is seen to differ (deleted and
+received again) is left `pending` for the admission pass that its new receipt runs, and is never
+re-prepared under the writer. Admission prepares at most 8 envelopes and 16 MiB of payload ahead of the
+writer, one larger envelope alone. That is a payload budget, not a bound on resident memory:
+decoded, the set takes roughly twice its payload, plus its structures. The comparison can miss a reused rowid received in the same
+millisecond; only the pure content is reused then, and the hash binds it. This is a partial move of admission's cost, not a bound on its hold: the
+stored-state reads and writes still grow with the envelope's claims and bytes.
 
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each
@@ -400,7 +443,19 @@ without resetting its failure count. It neither exports an inventory nor records
 Probes do not extend their own eligibility window. Only authenticated activity, including an
 overload answer, keeps the 30-second cap active; a peer that answers probes but keeps failing
 signed exchanges returns to the long retry schedule after five minutes. A route that has never
-worked or a replaced route keeps the long retry schedule. Graph wakes
+worked or a replaced route keeps the long retry schedule.
+
+An outage is different from a refusal. When the failed exchange got no response head on its
+route, the peer never answered: the connection could not be made, or was closed, reset or
+aborted first. If a probe of that same route then answers, the link is back, and the exchange
+is retried at that probe instead of up to 30 seconds after the failure. That early attempt is
+spent until a probe finds the route down again or an exchange over it succeeds, so a link that
+answers `HEAD` but drops every exchange costs one early attempt (one export, signature and
+exchange) per outage and recovery, and otherwise keeps the 30-second cap. A peer that answered
+and failed (an error status, an overload, a body cut off after its head), or one that stalled
+until the exchange timed out after connecting, keeps the cap. The failure count is kept across
+an early attempt. The classification rests on how reqwest 0.12.28 and hyper 1.11.0 report a
+close before the response head; a control fails if that changes. Graph wakes
 still leave intentionally absent peers alone. Transport life only schedules an exchange;
 the exchange still authenticates every claim and peer.
 
