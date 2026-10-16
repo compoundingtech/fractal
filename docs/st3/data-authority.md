@@ -82,6 +82,12 @@ inside the daemon's writer transaction. Source runtime, spool sequence, claim ki
 semantics identify an exact retry; changed input is rejected. Graph-derived claim fields are
 persisted in the spool before the first HTTP attempt so retries preserve their original attribution.
 
+Authority reads reuse up to 64 harness-spool SQLite connections per thread, evicting the
+least recently used connection at capacity. Only connections are retained: each check opens
+a fresh read transaction and releases it before returning, so subsequent checks observe
+committed producer writes without retaining a WAL snapshot. Reads still validate the spool
+format and provider/runtime binding; replacing the spool inode invalidates its connection.
+
 The outbox is transport recovery state, not graph authority. The daemon retains each admitted
 observation under its existing local/latest/durable policy. Producer snapshots remain local
 coalescing and ownership evidence; timeline producers read only the previous matching entry and
