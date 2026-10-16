@@ -85,6 +85,8 @@ mod owned_sets;
 mod published_attention;
 pub use published_attention::start_attention_list;
 #[cfg(test)]
+pub(crate) use revision_changes::revision_card;
+#[cfg(test)]
 pub(crate) use published_attention::{
     attention_fleet, present_attention, published_attention_rows, refresh_attention_list,
     refresh_attention_list_with,
@@ -95,6 +97,7 @@ mod client_observations;
 mod terminal_view;
 mod work_response;
 mod published_lists;
+mod revision_changes;
 #[cfg(target_os = "linux")]
 mod tile_endpoint;
 #[cfg(target_os = "linux")]
