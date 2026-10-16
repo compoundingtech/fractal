@@ -6,6 +6,8 @@ import stat
 import subprocess
 import tempfile
 
+assert os.geteuid() != 0, 'cleanup permission fixtures require an unprivileged user'
+
 root = Path(__file__).resolve().parent.parent
 script = (root / 'scripts/ci-genie-cache-verify').read_text()
 # Load the actual EXIT function without starting Nix or a build. The fixtures exercise
