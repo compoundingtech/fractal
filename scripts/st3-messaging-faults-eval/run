@@ -482,6 +482,12 @@ async def run_case(args, case, directory, candidate, old, replacement):
 
     def enter(name):
         marks.append((name, time.monotonic()))
+        # Flushed at every phase so a case that is killed or never finishes still says where it was.
+        # A sidecar only: failing to write it must not fail the case or skip its cleanup.
+        try:
+            write_json(directory / "phases.json", [[mark, round(at - marks[0][1], 2)] for mark, at in marks])
+        except OSError:
+            pass
         return name
     phase = enter("setup")
     try:
