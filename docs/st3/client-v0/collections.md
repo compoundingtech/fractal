@@ -200,6 +200,27 @@ updates and another person's attention changes. Core list/filter/get behavior
 is unchanged. Summary freshness is carried by its snapshot fence; equal counts
 retain their prior row timestamp so an unchanged count emits no delta.
 
+## Sync on the stream
+
+A window frame of the `attention` collection may carry `sync` (`StreamSync`): this host's
+replication, taken when the frame was built. It is `{state: "level"}` while this host is current,
+or `{state: "catching-up" | "diverged", peers}` naming the peers it lacks envelopes from or
+projects a different graph than, with the same `SyncPeer` a page's `sync` carries. Unlike a page's
+`SyncNotice`, which is absent while level, it says `level` explicitly: on the stream an absent
+`sync` means unknown, as from a daemon that does not send it, never level.
+
+A daemon that sends it puts it on every `snapshot` frame of the collection, and on a `changes`
+frame only when it changed since the subscription's previous frame: its state, or which peers
+(by `host_id`) are named, including the change back to `level`. A peer's counts moving is not a
+change. A client that missed a changes frame learns the current value from the next snapshot,
+which every resubscribe gets. A client on a daemon that sends none keeps reading a page's `sync`
+(`GET /v1/client/attention?limit=1`).
+
+A state this client does not know, or a shape the schema forbids (`level` with peers, or another
+state without them), reads as unknown, never level. Older clients ignore the field: the generated
+Rust and Swift decoders read frames by named field, and the TypeScript transport parses frames
+without validating them (fixtures: `fixtures/clients/stream-sync/frames.json`).
+
 ## Screen inventories
 
 Optional capability `inventory-collections` version 1 advertises six additional
