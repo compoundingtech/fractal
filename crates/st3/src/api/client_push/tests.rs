@@ -290,10 +290,9 @@ async fn push_invalid_and_identity_body_extras_never_mutate_or_echo_inputs() {
         b"{}".to_vec(),
         b" ".to_vec(),
     ] {
-        assert_eq!(
-            send(app.clone(), "DELETE", Some(CREDENTIAL), bytes).await.0,
-            StatusCode::BAD_REQUEST
-        );
+        let (status, response) = send(app.clone(), "DELETE", Some(CREDENTIAL), bytes).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+        assert_eq!(response["code"], "validation-failed", "{response}");
     }
     assert_eq!(state.store.index().unwrap(), before);
     assert_eq!(
