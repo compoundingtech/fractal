@@ -182,9 +182,103 @@ pub fn load(path: &Path) -> Result<Demo> {
         fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     let base = path
         .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    parse(&source, &base).with_context(|| format!("{} is not a demo st can play", path.display()))
+    let demo = parse(&source, &base)
+        .with_context(|| format!("{} is not a demo st can play", path.display()))?;
+    // A link beside the demo must not lead elsewhere on the machine either.
+    let folder = base
+        .canonicalize()
+        .with_context(|| format!("cannot read {}", base.display()))?;
+    for file in demo.files() {
+        let real = file
+            .canonicalize()
+            .with_context(|| format!("cannot read {}", file.display()))?;
+        ensure!(
+            real.starts_with(&folder),
+            "{} leads outside the demo's folder; a demo reads only files beside it",
+            file.display()
+        );
+    }
+    Ok(demo)
+}
+
+/// What a seed declaration may hold: names and the shape of a mission, and nothing that runs.
+/// st gives each agent its stand-in, and a step moves only when a beat moves it, so a harness,
+/// command, environment or gate in a demo would only ever run something the demo did not mean.
+/// Each entry is a node, the properties it may have, and the children it may have.
+const DECLARATIONS: &[(&str, &[&str], &[&str])] = &[
+    ("agent", &[], &["name", "description", "role", "type"]),
+    ("person", &[], &["name"]),
+    (
+        "mission",
+        &["state"],
+        &["goal", "constraint", "assigned-to", "available-to", "step"],
+    ),
+    (
+        "step",
+        &["timeout"],
+        &["title", "goal", "constraint", "assigned-to", "available-to", "depends-on"],
+    ),
+];
+
+fn check_declaration(node: &KdlNode, line_of: &dyn Fn(&KdlNode) -> usize) -> Result<()> {
+    let kind = node.name().value();
+    let (_, properties, fields) = DECLARATIONS
+        .iter()
+        .find(|(name, ..)| *name == kind)
+        .with_context(|| format!("line {}: `{kind}` is not declared in a demo", line_of(node)))?;
+    for entry in node.entries() {
+        if let Some(name) = entry.name() {
+            ensure!(
+                properties.contains(&name.value()),
+                "line {}: a demo's `{kind}` takes {}, not `{}`",
+                line_of(node),
+                listed(properties, "no properties"),
+                name.value()
+            );
+        }
+    }
+    for child in children(node) {
+        let name = child.name().value();
+        ensure!(
+            fields.contains(&name),
+            "line {}: a demo's `{kind}` holds {}, not `{name}`: its agents are scripted, and \
+             nothing in a demo runs a command",
+            line_of(child),
+            listed(fields, "nothing")
+        );
+        // A mission's steps are checked in turn; `depends-on` only names steps.
+        if name == "step" {
+            check_declaration(child, line_of)?;
+        }
+    }
+    Ok(())
+}
+
+fn listed(names: &[&str], none: &str) -> String {
+    match names {
+        [] => none.to_owned(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
+/// A file a demo names, beside the demo file: a relative path without `..`, so a demo cannot
+/// put a file from elsewhere on the machine into its store and onto the screen.
+fn beside(base: &Path, file: &str) -> Result<PathBuf> {
+    use std::path::Component;
+    let path = Path::new(file);
+    ensure!(
+        !file.is_empty()
+            && path
+                .components()
+                .all(|part| matches!(part, Component::Normal(_) | Component::CurDir)),
+        "{file:?} is not beside the demo: name a file in the demo's folder or below it, without .. \
+         or a leading /"
+    );
+    Ok(base.join(path))
 }
 
 pub fn parse(source: &str, base: &Path) -> Result<Demo> {
@@ -234,6 +328,7 @@ pub fn parse(source: &str, base: &Path) -> Result<Demo> {
     for node in seed_nodes.map(children).unwrap_or_default() {
         let at = line_of(node);
         if GRAPH_NODES.contains(&node.name().value()) {
+            check_declaration(node, &line_of)?;
             if node.name().value() == "agent" {
                 let agent = first_string(node)
                     .with_context(|| format!("line {at}: `agent` needs a name"))?;
@@ -311,6 +406,20 @@ pub fn parse(source: &str, base: &Path) -> Result<Demo> {
         seed,
         beats,
     })
+}
+
+impl Demo {
+    /// The files the demo reads: documents and attached images.
+    fn files(&self) -> impl Iterator<Item = &PathBuf> {
+        self.seed
+            .iter()
+            .chain(self.beats.iter().map(|beat| &beat.action))
+            .flat_map(|action| match action {
+                Action::Send { attach, .. } => attach.iter().collect::<Vec<_>>(),
+                Action::Document { file, .. } => vec![file],
+                _ => Vec::new(),
+            })
+    }
 }
 
 impl Action {
@@ -457,7 +566,8 @@ fn action(node: &KdlNode, base: &Path) -> Result<Action> {
                 subject: string("subject")?,
                 text: text(0),
                 attach: string("attach")?
-                    .map(|file| vec![base.join(file)])
+                    .map(|file| beside(base, &file).map(|file| vec![file]))
+                    .transpose()?
                     .unwrap_or_default(),
             }
         }
@@ -552,7 +662,7 @@ fn action(node: &KdlNode, base: &Path) -> Result<Action> {
         }
         "document" => {
             positional(1, "document \"NAME\" file=\"notes.md\"")?;
-            let file = base.join(string("file")?.context("`document` needs file=\"PATH\"")?);
+            let file = beside(base, &string("file")?.context("`document` needs file=\"PATH\"")?)?;
             Action::Document {
                 name: qualified("doc", &arguments[0]),
                 file,
@@ -684,19 +794,16 @@ fn unindent(text: &str) -> String {
 
 // ---- Playing -------------------------------------------------------------------------------
 
-/// Where a demo keeps what outlives its daemon: the daemon's pid and the presenter's log.
-fn demo_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("st3-demo")
-}
+/// The file that marks an instance as one a demo made, in the instance's own folder. A demo
+/// erases only such an instance, or a new one, unless the presenter asks with --reset.
+const MARKER: &str = ".st-demo";
 
 /// Reset the instance, seed the demo, then play it in the terminal interface `show` opens.
 /// Returns once the presenter quits the interface; the daemon and the agents stop with it.
 pub fn play(
     demo: Demo,
-    instance: &str,
+    instance: &crate::instance::Instance,
+    reset: bool,
     show: impl FnOnce(stui::playback::Playback) -> Result<()>,
 ) -> Result<()> {
     use std::io::IsTerminal as _;
@@ -705,21 +812,29 @@ pub fn play(
         "a demo plays in the terminal interface: run it in a terminal"
     );
     let exe = std::env::current_exe().context("cannot find this st executable")?;
-    let dir = demo_dir();
-    fs::create_dir_all(&dir)?;
-    stop_daemon(&dir)?;
     let config = crate::config::Config::default();
+    let config_path = crate::config::Config::default_path();
+    let cache = instance.cache_home().join("st3");
+    // Where a demo keeps what outlives its daemon: the daemon's pid and the presenter's log.
+    let dir = instance.state_home().join("st3-demo");
+    // The last play's daemon, if it is still running.
+    stop_daemon(&dir)?;
+    let work = config.work_root.clone().unwrap_or_else(|| instance.work_dir());
     // A daemon this player did not start (the instance's service) owns the graph: leave it be.
     ensure!(
         std::os::unix::net::UnixStream::connect(&config.socket).is_err(),
-        "the {instance} instance's daemon is running and a demo runs its own: stop it with \
-         st --instance {instance} service stop, or play the demo in another instance"
+        "the {name} instance's daemon is running and a demo runs its own: stop it with \
+         st --instance {name} service stop, or play the demo in another instance",
+        name = instance.name()
     );
-    reset_state(&config)?;
-    write_config(&demo)?;
+    claim_instance(instance, &config_path, &config.state_dir, &cache, reset)?;
+    let instance = instance.name();
+    reset_state(&config, &cache)?;
+    fs::create_dir_all(&dir)?;
+    write_config(&demo, &config_path)?;
     println!("Resetting the {instance} instance and starting its daemon…");
     let daemon = Daemon::start(&exe, &dir)?;
-    let runner = Runner::new(exe.clone(), &demo, &dir)?;
+    let runner = Runner::new(exe.clone(), &demo, &dir, &work)?;
     let outcome = (|| {
         runner.wait_for_daemon()?;
         println!("Seeding {}…", demo.title.as_deref().unwrap_or(&demo.name));
@@ -752,8 +867,47 @@ pub fn play(
     Ok(())
 }
 
+/// Make sure the instance is one a demo may erase, and mark it as the demo's. An instance a demo
+/// did not make keeps its graph, cache and config untouched unless the presenter passed --reset.
+fn claim_instance(
+    instance: &crate::instance::Instance,
+    config: &Path,
+    state: &Path,
+    cache: &Path,
+    reset: bool,
+) -> Result<()> {
+    let marker = instance.root().join(MARKER);
+    let holds = |path: &Path| {
+        fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some()) || path.is_file()
+    };
+    let held = [state, cache, config]
+        .into_iter()
+        .filter(|path| holds(path))
+        .collect::<Vec<_>>();
+    if !held.is_empty() && !marker.exists() {
+        let listed = held
+            .iter()
+            .map(|path| format!("  {}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ensure!(
+            reset,
+            "the {} instance was not made by a demo, and playing one erases it:\n{listed}\n\
+             Play in a new instance, or pass --reset to erase these.",
+            instance.name()
+        );
+        println!("Erasing what the {} instance held:\n{listed}", instance.name());
+    }
+    fs::create_dir_all(instance.root())?;
+    fs::write(
+        &marker,
+        "This instance belongs to st demo play, which erases it each time a demo plays.\n",
+    )
+    .with_context(|| format!("cannot write {}", marker.display()))
+}
+
 /// Remove the instance's graph and sockets, so the demo starts from nothing.
-fn reset_state(config: &crate::config::Config) -> Result<()> {
+fn reset_state(config: &crate::config::Config, cache: &Path) -> Result<()> {
     if config.state_dir.exists() {
         fs::remove_dir_all(&config.state_dir)
             .with_context(|| format!("cannot reset {}", config.state_dir.display()))?;
@@ -762,17 +916,14 @@ fn reset_state(config: &crate::config::Config) -> Result<()> {
         let _ = fs::remove_file(socket);
     }
     // The interface's cache: its last picture of the graph and unsent drafts of the last play.
-    if let Some(cache) = crate::instance::current().map(|instance| instance.cache_home().join("st3"))
-        && cache.exists()
-    {
-        fs::remove_dir_all(&cache).with_context(|| format!("cannot reset {}", cache.display()))?;
+    if cache.exists() {
+        fs::remove_dir_all(cache).with_context(|| format!("cannot reset {}", cache.display()))?;
     }
     Ok(())
 }
 
 /// The instance's config: the demo's person and machine name, nothing else.
-fn write_config(demo: &Demo) -> Result<()> {
-    let path = crate::config::Config::default_path();
+fn write_config(demo: &Demo, path: &Path) -> Result<()> {
     fs::create_dir_all(path.parent().context("the config path has no folder")?)?;
     let config = format!(
         "# Written by st demo play for {}; each play rewrites it.\nnode = {}\nperson = {}\naccess_mode = \"auto\"\n",
@@ -780,7 +931,7 @@ fn write_config(demo: &Demo) -> Result<()> {
         toml_string(&demo.machine),
         toml_string(&demo.me),
     );
-    fs::write(&path, config).with_context(|| format!("cannot write {}", path.display()))
+    fs::write(path, config).with_context(|| format!("cannot write {}", path.display()))
 }
 
 fn toml_string(value: &str) -> String {
@@ -900,6 +1051,8 @@ struct Runner {
     exe: PathBuf,
     me: String,
     log: std::sync::Mutex<fs::File>,
+    /// The demo's own folder in the instance's state: the seed it applied and its asks.
+    dir: PathBuf,
     workspace: PathBuf,
     counter: std::sync::atomic::AtomicU64,
     /// Each stored document's reference (`doc/NAME@HASH`), which its pane opens.
@@ -912,16 +1065,14 @@ struct Runner {
 }
 
 impl Runner {
-    fn new(exe: PathBuf, demo: &Demo, dir: &Path) -> Result<Self> {
-        let workspace = crate::config::Config::default()
-            .work_root
-            .unwrap_or_else(|| crate::instance::current().map_or_else(|| PathBuf::from("."), |instance| instance.work_dir()))
-            .join("demo");
+    fn new(exe: PathBuf, demo: &Demo, dir: &Path, work: &Path) -> Result<Self> {
+        let workspace = work.join("demo");
         fs::create_dir_all(&workspace)?;
         Ok(Self {
             exe,
             me: demo.me.clone(),
             log: std::sync::Mutex::new(fs::File::create(dir.join("play.log"))?),
+            dir: dir.to_path_buf(),
             workspace,
             counter: Default::default(),
             documents: Default::default(),
@@ -970,7 +1121,7 @@ impl Runner {
     }
 
     fn seed(&self, demo: &Demo) -> Result<()> {
-        let graph = demo_dir().join("seed.kdl");
+        let graph = self.dir.join("seed.kdl");
         fs::write(&graph, self.with_stand_ins(demo)?)?;
         self.st(
             None,
@@ -1004,10 +1155,8 @@ impl Runner {
                 continue;
             }
             let name = first_string(node).unwrap_or_default();
+            // parse() allowed nothing that runs, so st's stand-in is the agent's only process.
             let body = node.ensure_children();
-            body.nodes_mut().retain(|child| {
-                !["command", "argv", "workspace", "harness"].contains(&child.name().value())
-            });
             let mut workspace = KdlNode::new("workspace");
             workspace.push(
                 self.workspace
@@ -1356,7 +1505,7 @@ impl Runner {
                     })).collect::<Vec<_>>(),
                 });
                 let n = self.next();
-                let file = demo_dir().join(format!("ask-{n}.json"));
+                let file = self.dir.join(format!("ask-{n}.json"));
                 fs::write(&file, serde_json::to_vec_pretty(&request)?)?;
                 let file = file.to_string_lossy().into_owned();
                 let key = format!("demo-ask-{}-{n}", std::process::id());
@@ -1619,6 +1768,7 @@ beats {
             exe: PathBuf::from("/opt/st/st3"),
             me: "person/robin".into(),
             log: std::sync::Mutex::new(tempfile::tempfile().unwrap()),
+            dir: workspace.to_path_buf(),
             workspace: workspace.to_path_buf(),
             counter: Default::default(),
             documents: Default::default(),
@@ -1735,6 +1885,100 @@ beats {
         assert_eq!(workspace.len(), 1, "{graph}");
         assert!(root.path().join("harbor-builder").is_dir());
         crate::graph::parse_intent(&graph, "studio").unwrap();
+    }
+
+    #[test]
+    fn a_seed_declares_nothing_that_runs() {
+        for (change, refused) in [
+            (("{ name \"Builder\"; }", "{ name \"Builder\"; command \"rm -rf ~\"; }"), "`command`"),
+            (("{ name \"Builder\"; }", "{ name \"Builder\"; argv \"sh\" \"-c\" \"x\"; }"), "`argv`"),
+            (("{ name \"Builder\"; }", "{ name \"Builder\"; claude { model \"x\"; }; }"), "`claude`"),
+            (("{ name \"Builder\"; }", "{ name \"Builder\"; env { HOME \"/\"; }; }"), "`env`"),
+            (("{ name \"Builder\"; }", "{ name \"Builder\"; workspace \"/\"; }"), "`workspace`"),
+            (("agent \"harbor/builder\" {", "agent \"harbor/builder\" host=\"x\" {"), "`host`"),
+            (("goal \"Ship it.\"", "goal \"Ship it.\"\n    gate \"x\" exec=\"touch /tmp/x\""), "`gate`"),
+            (("goal \"Build it.\";", "goal \"Build it.\"; gate \"x\" exec=\"touch /tmp/x\";"), "`gate`"),
+        ] {
+            let source = SMALL.replacen(change.0, change.1, 1);
+            assert_ne!(source, SMALL, "{change:?}");
+            let error = format!("{:#}", parse(&source, Path::new(".")).unwrap_err());
+            assert!(error.contains(refused), "{change:?}: {error}");
+            assert!(error.contains("line "), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_demo_reads_only_files_beside_it() {
+        for file in ["../secret.md", "/etc/passwd", "notes/../../secret.md", ""] {
+            for line in [
+                format!("document \"x\" file={file:?}"),
+                format!("send from=\"person/robin\" to=\"agent/harbor/builder\" attach={file:?} \"x\""),
+            ] {
+                let source = SMALL.replace("  run \"harbor/release\"", &format!("  {line}\n  run \"harbor/release\""));
+                let error = format!("{:#}", parse(&source, Path::new("/demos")).unwrap_err());
+                assert!(error.contains("is not beside the demo"), "{line}: {error}");
+            }
+        }
+        // A link beside the demo that leads elsewhere is refused when the file is loaded.
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("demo");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(root.path().join("secret.md"), "elsewhere").unwrap();
+        std::os::unix::fs::symlink(root.path().join("secret.md"), folder.join("notes.md")).unwrap();
+        let file = folder.join("demo.kdl");
+        let source = SMALL.replace(
+            "  run \"harbor/release\"",
+            "  document \"notes\" file=\"notes.md\"\n  run \"harbor/release\"",
+        );
+        fs::write(&file, &source).unwrap();
+        let error = format!("{:#}", load(&file).unwrap_err());
+        assert!(error.contains("leads outside the demo's folder"), "{error}");
+        fs::remove_file(folder.join("notes.md")).unwrap();
+        fs::write(folder.join("notes.md"), "beside").unwrap();
+        load(&file).unwrap();
+    }
+
+    #[test]
+    fn a_demo_erases_only_an_instance_a_demo_made() {
+        let home = tempfile::tempdir().unwrap();
+        let instance = crate::instance::Instance::new(home.path(), "work").unwrap();
+        let config = instance.config_home().join("st3/config.toml");
+        let state = instance.state_home().join("st3");
+        let cache = instance.cache_home().join("st3");
+        // An instance someone works in: its graph, its cache and its config.
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, "node = \"desk\"\n").unwrap();
+        fs::create_dir_all(&state).unwrap();
+        fs::write(state.join("graph.sqlite"), "the real graph").unwrap();
+        let error = format!(
+            "{:#}",
+            claim_instance(&instance, &config, &state, &cache, false).unwrap_err()
+        );
+        assert!(error.contains("was not made by a demo"), "{error}");
+        assert!(error.contains("--reset"), "{error}");
+        assert!(error.contains(&state.display().to_string()), "{error}");
+        assert!(error.contains(&config.display().to_string()), "{error}");
+        // Refused untouched: nothing erased, nothing written.
+        assert_eq!(fs::read_to_string(state.join("graph.sqlite")).unwrap(), "the real graph");
+        assert_eq!(fs::read_to_string(&config).unwrap(), "node = \"desk\"\n");
+        assert!(!instance.root().join(MARKER).exists());
+        // --reset takes it over, and from then on a play needs no flag.
+        claim_instance(&instance, &config, &state, &cache, true).unwrap();
+        assert!(instance.root().join(MARKER).is_file());
+        claim_instance(&instance, &config, &state, &cache, false).unwrap();
+        // A new instance, or one holding only its installed binaries, is the demo's at once.
+        let fresh = crate::instance::Instance::new(home.path(), "demo").unwrap();
+        fs::create_dir_all(fresh.bin_dir()).unwrap();
+        fs::write(fresh.bin_dir().join("st"), "binary").unwrap();
+        claim_instance(
+            &fresh,
+            &fresh.config_home().join("st3/config.toml"),
+            &fresh.state_home().join("st3"),
+            &fresh.cache_home().join("st3"),
+            false,
+        )
+        .unwrap();
+        assert!(fresh.root().join(MARKER).is_file());
     }
 
     #[test]

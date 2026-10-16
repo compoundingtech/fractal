@@ -60,7 +60,7 @@ beats {
   say "agent/garden/gardener" after="300ms" "Watering bed three of the invented greenhouse now."
   claim "agent/garden/gardener" run="garden/watering/1" step="water"
   open "doc/garden/notes" after="200ms" split="right" by="agent/garden/gardener"
-  focus "agent/garden/gardener" after="1s"
+  focus "agent/garden/gardener" after="400ms"
   type "Thanks, gardener" after="200ms" speed="80/s"
 }
 "#;
@@ -202,7 +202,7 @@ fn a_demo_plays_in_its_own_instance_and_ends_with_the_interface() {
     assert!(!home.join(".local/state/st3").exists());
 
     // The first beat waits for the presenter: nothing opens until F8.
-    std::thread::sleep(Duration::from_millis(800));
+    std::thread::sleep(Duration::from_millis(400));
     assert!(
         !screen.lock().unwrap().contains("thirsty"),
         "the conversation opened before the key:\n{}",

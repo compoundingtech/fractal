@@ -337,12 +337,17 @@ enum DemoCommand {
     /// Reset the instance, seed the demo, and play it in the terminal interface.
     ///
     /// Needs an instance, so your own fleet is never touched: st --instance demo demo play
-    /// FILE. Each run erases that instance's graph and starts from the beginning. Press the
+    /// FILE. Each run erases that instance's graph and starts from the beginning. It refuses
+    /// an instance that holds a graph or config a demo did not make, unless --reset. Press the
     /// advance key (F8 unless the file names another) for each beat that waits for a key, and
     /// Ctrl+Q to end; the demo's daemon and agents stop with it.
     Play {
         /// The demo file.
         file: PathBuf,
+        /// Erase an instance a demo did not make: its graph, its interface cache and its
+        /// config. Without it, a demo plays only in a new instance or one a demo made.
+        #[arg(long)]
+        reset: bool,
     },
     /// Check a demo file and list its beats, without playing it.
     Check {
@@ -5506,7 +5511,7 @@ fn run_demo(command: DemoCommand) -> ExitCode {
                 Ok(())
             }
             DemoCommand::Seat { player } => st3::demo::seat(player),
-            DemoCommand::Play { file } => {
+            DemoCommand::Play { file, reset } => {
                 let instance = st3::instance::current().context(
                     "a demo plays in its own instance, so your fleet is never touched: st --instance demo demo play FILE",
                 )?;
@@ -5516,7 +5521,7 @@ fn run_demo(command: DemoCommand) -> ExitCode {
                     // SAFETY: no other thread exists yet; the player starts after this.
                     unsafe { std::env::remove_var(name) };
                 }
-                st3::demo::play(demo, instance.name(), |playback| {
+                st3::demo::play(demo, &instance, reset, |playback| {
                     stui::run(stui::Args::default().with_playback(playback))
                 })
             }

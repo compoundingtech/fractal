@@ -17,8 +17,17 @@ A demo always plays in an [instance](instances.md), so your own fleet is never t
 play erases that instance's graph, starts its daemon, seeds the demo and opens the interface. To
 start over, quit with **Ctrl+Q** and run the same command again. The instance needs no setup
 first: the play writes its config (the demo's person and machine name) and leaves its services
-alone. Use an instance you keep only for demos, because a play replaces its config and its graph. A
-play runs its own daemon; if the instance's service is running, it says so and changes nothing.
+alone. A play runs its own daemon; if the instance's service is running, it says so and changes
+nothing.
+
+A demo erases only an instance a demo made. The first play marks the instance with a
+`.st-demo` file in `~/.st-instance/NAME`. If the instance already holds a graph, an interface
+cache or a config without that mark, the play lists them and stops without touching anything.
+Play in a new instance instead, or pass `--reset` to erase them and make the instance the demo's:
+
+```sh
+st --instance demo demo play --reset examples/demos/release-day.kdl
+```
 
 Two examples are in [`examples/demos`](../../examples/demos):
 
@@ -76,8 +85,18 @@ beats {
 The `seed` holds `agent`, `mission` and `person` declarations, written as for
 [`st apply`](kdl-lifecycle.md), plus actions that run before the interface opens. An agent's
 name has a slash (`copperwren/builder` is `agent/copperwren/builder`). st gives each agent a
-process that does nothing, in place of a harness, and a folder in the instance's work root. Any
-`harness`, `command` or `workspace` in the declaration is replaced.
+process that does nothing, in place of a harness, and a folder in the instance's work root.
+
+A declaration holds only names and the shape of a mission, and nothing that runs:
+
+| Declaration | Properties | Children |
+| --- | --- | --- |
+| `agent` | none | `name`, `description`, `role`, `type` |
+| `person` | none | `name` |
+| `mission` | `state` | `goal`, `constraint`, `assigned-to`, `available-to`, `step` |
+| `step` | `timeout` | `title`, `goal`, `constraint`, `assigned-to`, `available-to`, `depends-on` |
+
+Anything else, such as a harness, `command`, `env` or `gate`, is refused with its line.
 
 The `beats` run in order once the interface is open. A beat without `after` waits for the
 advance key. `after="1.5s"` fires that long after the previous beat (`ms`, `s`, `m` and `h`
@@ -118,7 +137,9 @@ ask "agent/marrowpine/migrator" title="Run the invoice migration now?" "Run it n
 shown beside the answer. Answering the alert in the interface records the answer; nothing
 follows from it unless a later beat shows it.
 
-Paths in `attach` and `file` are relative to the demo file.
+Paths in `attach` and `file` are relative to the demo file, and stay in its folder or below it.
+A path that starts with `/`, goes up with `..`, or is a link to a file elsewhere is refused, so a
+demo cannot show a file from elsewhere on the machine.
 
 ## Public screencasts
 
