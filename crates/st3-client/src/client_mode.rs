@@ -143,6 +143,10 @@ impl Store {
     /// separate namespace, not another location for the default instance's daemon state.
     pub fn for_instance(instance: Option<&str>) -> Result<Self> {
         let home = account_home().context("Cannot determine authoritative client-mode state")?;
+        Self::in_account_home(home, instance)
+    }
+
+    fn in_account_home(home: PathBuf, instance: Option<&str>) -> Result<Self> {
         let legacy = match instance {
             Some(name) => {
                 ensure!(
@@ -623,9 +627,15 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
+    fn private_tempdir() -> Result<tempfile::TempDir> {
+        Ok(tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()?)
+    }
+
     #[test]
     fn absent_status_is_read_only_and_transition_survives_reopen() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = private_tempdir()?;
         let store = Store::at(root.path().join("new/mode.json"))?;
         assert_eq!(store.read()?, State::default());
         assert!(!root.path().join("new").exists());
@@ -652,7 +662,7 @@ mod tests {
 
     #[test]
     fn malformed_public_symlink_and_future_state_refuse() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         // Establish enrollment before testing malformed contents rather than a missing marker.
         drop(store.lock()?);
@@ -679,7 +689,7 @@ mod tests {
 
     #[test]
     fn missing_enrolled_state_refuses_even_before_first_publication() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         assert!(!store.enrolled()?);
         let update = store.lock()?;
@@ -693,7 +703,7 @@ mod tests {
 
     #[test]
     fn missing_enrollment_for_a_published_mode_is_not_unconfigured() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         store.lock()?.publish(State::Local {
             version: 1,
@@ -706,7 +716,7 @@ mod tests {
 
     #[test]
     fn deleting_a_published_mode_does_not_restore_local_access() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         store.lock()?.publish(State::Transition {
             version: 1,
@@ -721,7 +731,7 @@ mod tests {
 
     #[test]
     fn user_owned_ancestor_symlinks_are_rejected() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = private_tempdir()?;
         fs::create_dir(root.path().join("real"))?;
         symlink(root.path().join("real"), root.path().join("alias"))?;
         let store = Store::at(root.path().join("alias/private/mode.json"))?;
@@ -732,7 +742,7 @@ mod tests {
 
     #[test]
     fn startup_and_first_enrollment_serialize_in_both_orders() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         let producer = store.local_start()?;
         assert!(!store.enrolled()?);
@@ -749,7 +759,7 @@ mod tests {
 
     #[test]
     fn exec_child_does_not_keep_a_dropped_startup_lease() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         let producer = store.local_start()?;
         let mut child = std::process::Command::new("sh")
@@ -766,7 +776,7 @@ mod tests {
 
     #[test]
     fn relocation_never_ignores_legacy_authority_evidence() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = private_tempdir()?;
         let path = root.path().join("mode.json");
         reject_legacy_evidence(&path)?;
         for artifact in [
@@ -783,7 +793,7 @@ mod tests {
 
     #[test]
     fn group_writable_authority_refuses() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o775))?;
         assert!(store.local_start().is_err());
@@ -798,8 +808,108 @@ mod tests {
     }
 
     #[test]
+    fn shared_local_directory_does_not_redirect_private_authority() -> Result<()> {
+        let root = private_tempdir()?;
+        fs::create_dir(root.path().join(".local"))?;
+        fs::set_permissions(
+            root.path().join(".local"),
+            fs::Permissions::from_mode(0o775),
+        )?;
+        let mut store = Store::in_account_home(root.path().to_path_buf(), None)?;
+        store.account = false; // fixture home, not the real NSS account
+        assert_eq!(store.read()?, State::default());
+        assert!(!store.authority_root.exists());
+        let startup = store.local_start()?;
+        assert!(!store.authority_root.exists());
+        drop(startup);
+        store.lock()?.publish(State::Local {
+            version: 1,
+            generation: 1,
+        })?;
+        assert_eq!(
+            fs::metadata(&store.authority_root)?.permissions().mode() & 0o777,
+            0o700
+        );
+        fs::set_permissions(&store.authority_root, fs::Permissions::from_mode(0o775))?;
+        assert!(store.read().is_err());
+        assert!(store.local_start().is_err());
+        Ok(())
+    }
+
+    // Launched only by the regression below. No live daemon/account files are touched.
+    #[test]
+    fn lease_holder_subprocess() -> Result<()> {
+        let Some(path) = std::env::var_os("ST_CLIENT_MODE_LEASE_TEST_PATH") else {
+            return Ok(());
+        };
+        let store = Store::at(PathBuf::from(path))?;
+        let _lease = store.local_start()?;
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "printf 'LEASE_CHILD_READY\n'; read line"])
+            .spawn()?;
+        println!("LEASE_CHILD_PID={}", child.id());
+        std::io::stdout().flush()?;
+        // Parent test kills this holder; the exec child remains blocked on the parent's pipe.
+        let result = child.wait();
+        result?;
+        Ok(())
+    }
+
+    #[test]
+    fn killed_holder_releases_lease_while_exec_child_survives() -> Result<()> {
+        use std::io::{BufRead as _, BufReader};
+        let root = private_tempdir()?;
+        let path = root.path().join("mode.json");
+        let store = Store::at(path.clone())?;
+        let mut holder = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "client_mode::tests::lease_holder_subprocess",
+                "--nocapture",
+            ])
+            .env("ST_CLIENT_MODE_LEASE_TEST_PATH", &path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()?;
+        let mut output = BufReader::new(holder.stdout.take().context("holder output")?);
+        let outcome = (|| -> Result<()> {
+            let mut ready = false;
+            let mut child_pid = None;
+            while !ready || child_pid.is_none() {
+                let mut line = String::new();
+                ensure!(
+                    output.read_line(&mut line)? != 0,
+                    "Lease helper exited before readiness"
+                );
+                ready |= line.trim() == "LEASE_CHILD_READY";
+                if let Some(pid) = line.trim().strip_prefix("LEASE_CHILD_PID=") {
+                    child_pid = Some(pid.parse::<libc::pid_t>()?);
+                }
+            }
+            ensure!(
+                store.lock().is_err(),
+                "Live helper must own the shared lease"
+            );
+            holder.kill()?;
+            holder.wait()?;
+            ensure!(
+                unsafe { libc::kill(child_pid.unwrap(), 0) } == 0,
+                "Exec child must still be alive after holder exits"
+            );
+            let _enrollment = store.lock()?;
+            Ok(())
+        })();
+        let _ = holder.kill();
+        let _ = holder.wait();
+        drop(holder.stdin.take()); // releases the surviving child's read, without polling
+        let mut remaining = String::new();
+        output.read_to_string(&mut remaining)?; // EOF also proves the child closed its output
+        outcome
+    }
+
+    #[test]
     fn stale_generations_cannot_replace_a_fenced_state() -> Result<()> {
-        let root = tempfile::tempdir()?;
+        let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         let mut update = store.lock()?;
         assert!(
