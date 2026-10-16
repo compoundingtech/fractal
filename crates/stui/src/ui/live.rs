@@ -1151,18 +1151,18 @@ pub fn run(context: Context) -> Result<()> {
                         }
                     }
                     match result {
-                        InventoryRead::Rows(inventory, outcome) => match outcome {
-                            Ok(rows) => match inventory {
+                        // A failed read keeps the last good rows; the stale note says so if it lasts.
+                        InventoryRead::Rows(inventory, outcome) => if let Ok(rows) = outcome {
+                            match inventory {
                                 Inventory::Machines => model.machines = rows,
                                 Inventory::Devices => model.devices = rows,
                                 Inventory::Sessions => model.sessions = rows,
                                 _ => unreachable!(),
-                            },
-                            Err(_) => {}
+                            }
                         },
-                        InventoryRead::Terminals(outcome) => match outcome {
-                            Ok((rows, has_more)) => { ui.resource_sidebar.terminals = terminal_rows(rows); ui.resource_sidebar.terminals_has_more = has_more; },
-                            Err(_) => {}
+                        InventoryRead::Terminals(outcome) => if let Ok((rows, has_more)) = outcome {
+                            ui.resource_sidebar.terminals = terminal_rows(rows);
+                            ui.resource_sidebar.terminals_has_more = has_more;
                         },
                         InventoryRead::Clients(outcome) => match outcome {
                             Ok(clients) => model.clients = Some(Ok(clients)),
