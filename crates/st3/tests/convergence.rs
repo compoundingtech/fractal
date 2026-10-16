@@ -258,7 +258,9 @@ fn tmpfs_scratch() -> Option<tempfile::TempDir> {
     }
     // SAFETY: statvfs returned 0, so it initialized the struct.
     let stats = unsafe { stats.assume_init() };
-    let available = stats.f_bavail as u64 * stats.f_frsize as u64;
+    // The statvfs fields are u64 on 64-bit Linux and narrower elsewhere.
+    #[allow(clippy::unnecessary_cast)]
+    let available = (stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64);
     if available < TMPFS_ROOM_BYTES {
         return None;
     }
