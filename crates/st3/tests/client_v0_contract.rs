@@ -3089,6 +3089,11 @@ async fn operational_lists_share_one_versioned_paginated_shape() {
             })
             .unwrap();
     }
+    let seeded_cut = store.index().unwrap();
+    st3::api::start_published_lists(&state);
+    tokio::time::timeout(std::time::Duration::from_secs(10),
+        st3::api::wait_published_lists_at_least(&store, seeded_cut))
+        .await.expect("operational lists publish the seeded runtime cut").unwrap();
     let app = st3::api::router(state);
     for collection in [
         "attention",

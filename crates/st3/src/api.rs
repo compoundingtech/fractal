@@ -101,7 +101,7 @@ pub use tile_endpoint::{
     SOCKET as TILE_ENDPOINT_SOCKET, spawn as spawn_tile_endpoints,
     spawn_from as spawn_tile_endpoints_from,
 };
-pub use published_lists::start_published_lists;
+pub use published_lists::{start_published_lists, wait_published_lists_at_least};
 mod changes;
 
 pub(crate) use client_v0::raw_terminal::splice as raw_terminal_splice;
@@ -482,6 +482,8 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Build routes only. The owner starts background publications with
+/// [`start_published_lists`]; a bare router refuses unpublished current runtime reads.
 pub fn router(state: AppState) -> Router {
     crate::relay_trace::init();
     delivery_presence::start();
