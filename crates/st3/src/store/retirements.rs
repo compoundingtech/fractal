@@ -640,7 +640,9 @@ mod tests {
         registry.claims.get_mut(KIND).unwrap().fields.remove("successor");
         older.set_claim_registry(registry);
         older.import_replication("orchid", &owner.export_replication(0).unwrap()).unwrap();
-        assert!(older.agent_retirement(SUBJECT).unwrap().is_none());
+        // An older reader retains the base retirement; it ignores only the
+        // successor capability added to that claim's optional fields.
+        assert!(older.agent_retirement(SUBJECT).unwrap().is_some());
         assert!(older.messages(Some(SUBJECT), false).unwrap().iter().any(|message| message.subject == sent.subject));
         assert!(older.messages(Some("agent/example/successor"), false).unwrap().is_empty());
     }

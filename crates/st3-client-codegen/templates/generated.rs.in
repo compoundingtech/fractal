@@ -64,6 +64,8 @@ pub enum ErrorCode {
     RecipientRetired,
     LifecycleUnavailable,
     RetirementUpgradeRequired,
+    InvalidCustodySuccessor,
+    CustodyPending,
     NotFound,
     Forbidden,
     UnsupportedCapability,

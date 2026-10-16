@@ -28036,10 +28036,15 @@ mod tests {
             panic!("conversations ls")
         };
         assert_eq!(args.actor.as_deref(), Some("agent/run-1/worker"));
-        assert!(
-            Cli::try_parse_from(["st3", "conversations", "ls", "agent/a", "--as", "agent/b"])
-                .is_err()
-        );
+        let cli = Cli::try_parse_from([
+            "st3", "conversations", "ls", "agent/a", "--as", "agent/b",
+        ])
+        .expect("named successor may list the retired mailbox as itself");
+        let Command::Conversations { command: MessageCommand::Ls(args) } = cli.command else {
+            panic!("conversations ls")
+        };
+        assert_eq!(args.identity.as_deref(), Some("agent/a"));
+        assert_eq!(args.actor.as_deref(), Some("agent/b"));
     }
 
     #[test]
@@ -31921,10 +31926,10 @@ mod tests {
         assert!(socket.exists());
         let client = Client::unix(&socket);
         let read = read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
-        assert_eq!(read.status, "read");
         let signed = store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap();
         assert_eq!(signed.actor.as_deref(), Some("agent/example/new"));
         assert_eq!(signed.body["fields"]["acting_for"], "agent/example/old");
+        assert_eq!(read.status, "read");
         read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
         assert_eq!(store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap().id, signed.id);
         server.abort();
