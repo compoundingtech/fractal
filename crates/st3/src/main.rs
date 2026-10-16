@@ -27209,17 +27209,17 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
 }
 
 /// Seal and verify checkpoints every ten minutes. The proof copies the store and replays it, so
-/// it runs on a blocking thread, and a copy left by a crash is removed first.
+/// it runs on a blocking thread, and an owned copy left by a crash is swept first.
 async fn run_checkpoints(store: Arc<Store>, context: st3::store::CheckpointContext) {
     const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
-    // A proof copy is only ever useful to the proof that made it. A staged capture is kept: it
-    // resumes where it stopped while its store-index cut still holds (#2492).
-    if let Ok(entries) = std::fs::read_dir(&context.scratch) {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with("proof-") {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+    // A proof copy is useful only to its owner. Sweep marked orphans under its lock; a live
+    // proof or a cleanup error stays visible and prevents a later proof from consuming space.
+    let sweep_store = store.clone();
+    let sweep_dir = context.scratch.clone();
+    match tokio::task::spawn_blocking(move || sweep_store.sweep_checkpoint_proof_scratch(&sweep_dir)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("st3: checkpoint proof startup cleanup failed: {error:#}"),
+        Err(error) => eprintln!("st3: checkpoint proof startup cleanup stopped: {error}"),
     }
     loop {
         let store = store.clone();

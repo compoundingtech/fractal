@@ -633,8 +633,11 @@ fn clone_file(_source: &Path, _target: &Path) -> std::io::Result<()> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
 
-fn open_checkpoint_copy(copy: &Path) -> Result<Connection> {
+fn open_checkpoint_copy(copy: &Path, space: Option<&super::checkpoint_space::SpaceGuard>) -> Result<Connection> {
     let connection = Connection::open(copy)?;
+    if let Some(space) = space {
+        space.install(&connection);
+    }
     projection_digest::register(&connection)?;
     // This scratch transaction can rewrite most of the store twice. Its rollback journal
     // belongs on disk, not in an allocation proportional to the database's size. The copy is
@@ -784,7 +787,7 @@ pub fn prove_on_copy(
     sealed: &SealedSet,
     plan: &DropPlan,
 ) -> Result<CheckpointProof> {
-    prove(runtime, copy, &InMemoryProof { sealed, plan }, false)
+    prove(runtime, copy, &InMemoryProof { sealed, plan }, false, None)
 }
 
 /// `prove_on_copy` for a copy that is deleted afterwards. Keeping the sealed set and numbering
@@ -796,8 +799,9 @@ fn prove_on_scratch_copy(
     runtime: &dyn Runtime,
     copy: &Path,
     input: &dyn ProofInput,
+    space: Option<&super::checkpoint_space::SpaceGuard>,
 ) -> Result<CheckpointProof> {
-    prove(runtime, copy, input, true)
+    prove(runtime, copy, input, true, space)
 }
 
 /// Read every dropped subject's answers on `transaction`, a page of subjects at a time, into
@@ -962,10 +966,11 @@ fn prove(
     copy: &Path,
     input: &dyn ProofInput,
     commit_preparation: bool,
+    space: Option<&super::checkpoint_space::SpaceGuard>,
 ) -> Result<CheckpointProof> {
     let _completion = super::checkpoint_completion::Completion::work();
     runtime.checkpoint_preflight()?;
-    let mut connection = open_checkpoint_copy(copy)?;
+    let mut connection = open_checkpoint_copy(copy, space)?;
     input.attach(&connection)?;
     let transaction = connection.transaction()?;
     // Keep only the sealed set.
@@ -1610,10 +1615,28 @@ impl Store {
             .collect()
     }
 
+    /// At daemon startup, remove only proof scratch whose owner lock is no longer held. A
+    /// cleanup error is reported and the next proof refuses until the scratch is cleared.
+    pub fn sweep_checkpoint_proof_scratch(&self, scratch: &Path) -> Result<()> {
+        if scratch.exists() {
+            drop(super::checkpoint_space::ProofOwnership::acquire(scratch)?);
+        }
+        Ok(())
+    }
+
     /// Copy this store to `copy` from one consistent snapshot, while the writer carries on: a
     /// filesystem clone where the filesystem can make one, otherwise a full `VACUUM INTO` copy.
     pub fn copy_store_to(&self, copy: &Path) -> Result<StoreCopy> {
-        if !self.shared_memory && self.clone_store_to(copy)? {
+        self.copy_store_to_guarded(copy, None)
+    }
+
+    fn copy_store_to_guarded(
+        &self,
+        copy: &Path,
+        space: Option<&super::checkpoint_space::SpaceGuard>,
+    ) -> Result<StoreCopy> {
+        if !self.shared_memory && self.clone_store_to_guarded(copy, space)? {
+            if let Some(space) = space { space.check_now()?; }
             return Ok(StoreCopy::Clone);
         }
         // `VACUUM INTO` reads the whole store in one transaction on a connection of its own, which
@@ -1627,8 +1650,10 @@ impl Store {
             OpenFlags::SQLITE_OPEN_READ_WRITE
         };
         let connection = Connection::open_with_flags(&self.path, flags)?;
+        if let Some(space) = space { space.install(&connection); }
         connection.execute_batch("PRAGMA busy_timeout = 5000;")?;
         connection.execute("VACUUM INTO ?1", [copy.to_string_lossy()])?;
+        if let Some(space) = space { space.check_now()?; }
         Ok(StoreCopy::Full)
     }
 
@@ -1637,7 +1662,11 @@ impl Store {
     /// the store file, and the frames it reads stay in the WAL, so the two clones open as the
     /// snapshot or a later commit. The `-shm` index is not copied: opening the copy rebuilds it
     /// from the WAL. False, with nothing left at `copy`, where the filesystem cannot clone.
-    fn clone_store_to(&self, copy: &Path) -> Result<bool> {
+    fn clone_store_to_guarded(
+        &self,
+        copy: &Path,
+        space: Option<&super::checkpoint_space::SpaceGuard>,
+    ) -> Result<bool> {
         let mut wal = self.path.as_os_str().to_os_string();
         wal.push("-wal");
         let wal = PathBuf::from(wal);
@@ -1664,7 +1693,9 @@ impl Store {
             Err(_) => return Ok(false),
         }
         // Fold the cloned WAL into the copy, so it is one file, as a `VACUUM INTO` copy is.
-        Connection::open(copy)?.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
+        let cloned = Connection::open(copy)?;
+        if let Some(space) = space { space.install(&cloned); }
+        cloned.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
         Ok(true)
     }
 
@@ -1720,15 +1751,26 @@ impl Store {
     fn prove_checkpoint_input(&self, input: &dyn ProofInput, scratch: &Path) -> Result<CheckpointProof> {
         let _completion = super::checkpoint_completion::Completion::work();
         self.runtime.checkpoint_preflight()?;
-        fs::create_dir_all(scratch)?;
+        // Admission precedes even the lock file. A failed proof cannot spend the writer's reserve.
+        let space = if self.shared_memory { None } else {
+            Some(super::checkpoint_space::SpaceGuard::admit(&self.path, scratch, false)?)
+        };
+        let ownership = super::checkpoint_space::ProofOwnership::acquire(scratch)?;
         let copy = scratch.join(format!("proof-{}.sqlite3", Uuid::now_v7().simple()));
-        let result = self
-            .copy_store_to(&copy)
-            .and_then(|_| prove_on_scratch_copy(&*self.runtime, &copy, input));
-        for suffix in ["", "-journal", "-wal", "-shm"] {
-            let _ = fs::remove_file(format!("{}{suffix}", copy.display()));
+        ownership.mark(&copy)?;
+        let result = (|| {
+            if let Some(space) = &space { space.check_now()?; }
+            self.copy_store_to_guarded(&copy, space.as_ref())?;
+            prove_on_scratch_copy(&*self.runtime, &copy, input, space.as_ref())
+        })();
+        let result = match space.as_ref() { Some(space) => space.explain(result), None => result };
+        let cleanup = ownership.finish(&copy);
+        match (result, cleanup) {
+            (Ok(proof), Ok(())) => Ok(proof),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(error.context(format!("also {cleanup}"))),
         }
-        result
     }
 
     /// `st replication checkpoint plan`: plan and prove one checkpoint without changing anything.
@@ -1792,7 +1834,7 @@ mod memory_tests {
     fn checkpoint_copy_spills_rollback_and_temporary_pages_to_disk() {
         let scratch = tempfile::tempdir().unwrap();
         let copy = scratch.path().join("proof.sqlite3");
-        let mut connection = open_checkpoint_copy(&copy).unwrap();
+        let mut connection = open_checkpoint_copy(&copy, None).unwrap();
         assert_eq!(
             connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0)).unwrap(),
             "delete"

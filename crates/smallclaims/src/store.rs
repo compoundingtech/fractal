@@ -60,6 +60,7 @@ pub mod events;
 pub mod idempotency;
 mod inventory_generation;
 mod checkpoint_capture_epoch;
+mod checkpoint_space;
 pub use binary_payloads::PayloadConversion;
 pub mod canonical;
 pub mod checkpoint;
