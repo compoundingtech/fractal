@@ -2502,7 +2502,7 @@ fn unsigned_refusal(peer: &str, status: StatusCode, body: &[u8]) -> String {
     match reason {
         Some(reason) => format!("peer {peer} refused the exchange with an unsigned {status}: {reason}"),
         None => format!(
-            "peer {peer} answered an unsigned {status} ({} body bytes, not read)",
+            "peer {peer} answered an unsigned {status} ({} body bytes, not shown)",
             body.len()
         ),
     }
