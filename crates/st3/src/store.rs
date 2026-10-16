@@ -32,6 +32,9 @@ mod owned_sets_tests;
 #[cfg(test)]
 mod usage_fold_tests;
 mod resources;
+mod resource_preparation;
+#[cfg(test)]
+mod resource_preparation_fence_tests;
 mod github_workflow_failures;
 pub mod git_changes;
 pub(crate) mod message_subscriptions;
@@ -45,6 +48,8 @@ mod card_fold;
 mod card_fold_tests;
 #[cfg(test)]
 mod roster_controls;
+#[cfg(test)]
+mod roster_fresh_proof_tests;
 #[cfg(test)]
 mod agents_window_deadline_tests;
 pub(crate) mod step_labels;
@@ -3845,6 +3850,61 @@ impl Store {
         })
     }
 
+    /// The unchanged-card proof for the exact complete publication a response selected,
+    /// rather than the newest one when the proof happens to run. No fold or write occurs.
+    /// Keep the original wait predicate above unchanged: this is an additional observation
+    /// for the served rows, not a new freshness/refresh admission policy.
+    pub(crate) fn served_agent_roster_unchanged_through(
+        &self,
+        through: u64,
+        history: bool,
+        cut: u64,
+        published_at: u128,
+        cards: &Arc<Vec<Value>>,
+    ) -> Result<bool> {
+        if self.smalltalk.agent_roster_refresh.get().is_none()
+            || self.agent_roster_faults_pending(history)
+        {
+            return Ok(false);
+        }
+        self.read_snapshot(|physical| {
+            if cut > through || through > physical {
+                return Ok(false);
+            }
+            let Some((local, valid_until)) = self
+                .smalltalk
+                .agent_resources_cache
+                .lock()
+                .expect("agent resources cache poisoned")
+                .iter()
+                .find(|entry| {
+                    entry.history == history
+                        && entry.covered.is_none()
+                        && entry.index == cut
+                        && entry.published_at_unix_ms == published_at
+                        && Arc::ptr_eq(&entry.items, cards)
+                })
+                .map(|entry| (entry.local, entry.valid_until_unix_ms))
+            else {
+                return Ok(false);
+            };
+            if valid_until.is_some_and(|expiry| now_ms() >= expiry)
+                || roster_local_frontier(&self.readers.get(), through)? != local
+            {
+                return Ok(false);
+            }
+            if cut == through {
+                return Ok(true);
+            }
+            Ok(match self.changed_agent_resources(cut, through, cards)? {
+                AgentResourcesChange::Delta(delta) => {
+                    delta.subjects.is_empty() && !delta.queues && !delta.membership
+                }
+                AgentResourcesChange::Invalidated { .. } => false,
+            })
+        })
+    }
+
     /// Note that an agents list read asked for the roster now, so a forget refolds it at once.
     pub(crate) fn note_agent_roster_read(&self) {
         self.smalltalk.agent_roster_read_at.store(now_ms() as u64, std::sync::atomic::Ordering::Release);
@@ -4009,6 +4069,25 @@ impl Store {
             })?;
         crate::otel::record_roster("hit", head.0.len());
         Some((cut, refs, head.0, head.1))
+    }
+
+    /// When this node committed its first claim after store index `after`, through `through`,
+    /// in Unix ms; `None` when every claim between came from another node, or there is none.
+    pub(crate) fn first_local_commit_after(
+        &self,
+        after: u64,
+        through: u64,
+    ) -> Result<Option<u128>> {
+        let accepted: Option<String> = self
+            .readers
+            .get()
+            .prepare_cached(
+                "SELECT accepted_at_unix_ms FROM claims WHERE store_index>?1 AND store_index<=?2
+                 AND origin=?3 ORDER BY store_index LIMIT 1",
+            )?
+            .query_row(params![after as i64, through as i64, self.origin()], |row| row.get(0))
+            .optional()?;
+        Ok(accepted.and_then(|accepted| accepted.parse().ok()))
     }
 
     /// Follows the revision of complete current roster publications: it rises with every one,
@@ -8240,6 +8319,32 @@ impl Store {
         )
     }
 
+    /// Native lease polling needs only current held claims, never list presentation or timing.
+    pub fn work_for_renewal(&self, actor: &str) -> Result<Vec<StepRunView>> {
+        let actor = normalize_actor(actor, "agent");
+        let snapshot = now_ms();
+        let connection = self.readers.get();
+        let views = connection
+            .prepare_cached(
+                "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
+                        lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
+                 FROM step_runs INDEXED BY step_runs_lease_index
+                 WHERE lease_owner=?1 AND agentless=0
+                   AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
+                 ORDER BY subject",
+            )?
+            .query_map([&actor], step_run_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut held = Vec::with_capacity(views.len());
+        for mut view in views {
+            apply_effective_step_state(&connection, &mut view, snapshot)?;
+            if view.work_claim_is_held_by(&actor) {
+                held.push(view);
+            }
+        }
+        Ok(held)
+    }
+
     /// The steps of the client work list, or with `history` of the work history, that a
     /// claimant holds at the snapshot, with the status and claimant those lists show. Only a
     /// step whose lease names an owner can have a claimant, so this reads the leased steps by
@@ -8907,7 +9012,7 @@ impl Store {
             .query_row(
                 "SELECT mission_runs.status, mission_runs.current_generation_id,
                         mission_runs.mode, run_generations.status,
-                        root_runs.status, root_runs.phase
+                        root_runs.status, root_runs.phase, mission_runs.phase
                  FROM mission_runs
                  JOIN run_generations ON run_generations.id=?2
                  JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
@@ -8924,6 +9029,7 @@ impl Store {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
@@ -8944,7 +9050,7 @@ impl Store {
         let mut statement = connection.prepare(
             "SELECT mission_runs.id, run_generations.id, mission_runs.status,
                     mission_runs.current_generation_id, mission_runs.mode,
-                    run_generations.status, root_runs.status, root_runs.phase
+                    run_generations.status, root_runs.status, root_runs.phase, mission_runs.phase
              FROM mission_runs
              JOIN run_generations ON run_generations.run_id=mission_runs.id
              JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
@@ -8961,6 +9067,7 @@ impl Store {
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
                     ),
                 ))
             })?
@@ -8983,7 +9090,7 @@ impl Store {
 
     fn work_annotation_with_owner(
         work: &StepRunView,
-        owner: Option<(String, String, String, String, String, String)>,
+        owner: Option<(String, String, String, String, String, String, String)>,
     ) -> OperationalAnnotation {
         let mut reasons: Vec<String> = Vec::new();
         if let Some((
@@ -8993,6 +9100,7 @@ impl Store {
             generation_status,
             root_status,
             root_phase,
+            run_phase,
         )) = owner
         {
             if is_terminal_run_state(&run_status) {
@@ -9008,6 +9116,16 @@ impl Store {
             }
             if is_terminal_run_state(&root_status) || root_phase == "terminal" {
                 reasons.push("terminal-root-owner".into());
+            }
+            if work.status == "pending"
+                && reasons.is_empty()
+                && run_phase != "terminal"
+                && !run_phase.starts_with("cleanup-")
+                && !root_phase.starts_with("cleanup-")
+            {
+                // Pending work belongs to the runtime's readiness evaluator. This names
+                // that owner without claiming its dependency predicates have been checked.
+                reasons.push("waiting for daemon/runtime to evaluate readiness".into());
             }
         }
         if work
@@ -15608,6 +15726,77 @@ impl Store {
         subscriptions: &[(String, SubscriptionSpec)],
         current: Option<&(dyn Fn() -> bool + Sync)>,
     ) -> Result<ResourceObservationOutcome, St3Error> {
+        let fence = resource_preparation::Fence::new(self);
+        for pass in 0..2 {
+            let prepared = fence.prepare(self, |connection| {
+                resource_preparation::inputs(
+                    connection,
+                    observer,
+                    desired_revision,
+                    attempt,
+                    resource,
+                    &canonical_json_value(facts),
+                    subscriptions,
+                )
+            });
+            #[cfg(test)]
+            resource_preparation::before_validate(self, pass);
+            #[cfg(not(test))]
+            let _ = pass;
+            let outcome = self.record_resource_observation_attempt(
+                observer,
+                desired_revision,
+                attempt,
+                resource,
+                cursor,
+                facts,
+                next_check_unix_ms,
+                subscriptions,
+                current,
+                Some((&fence, prepared)),
+            )?;
+            if let Some(outcome) = outcome {
+                return Ok(outcome);
+            }
+            #[cfg(test)]
+            resource_preparation::COUNTS.with(|counts| counts.borrow_mut().invalidated += 1);
+        }
+        // Exactly two unusable/stale preparations, then ONE invocation of the existing
+        // canonical writer path. This preserves API progress, not a writer-hold cap.
+        #[cfg(test)]
+        resource_preparation::COUNTS.with(|counts| counts.borrow_mut().fallback += 1);
+        self.record_resource_observation_attempt(
+            observer,
+            desired_revision,
+            attempt,
+            resource,
+            cursor,
+            facts,
+            next_check_unix_ms,
+            subscriptions,
+            current,
+            None,
+        )?
+        .ok_or_else(|| St3Error::new("internal", "canonical observation returned no outcome"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_resource_observation_attempt(
+        &self,
+        observer: &str,
+        desired_revision: &str,
+        attempt: Option<&str>,
+        resource: &str,
+        cursor: Option<&str>,
+        facts: &Value,
+        next_check_unix_ms: u128,
+        subscriptions: &[(String, SubscriptionSpec)],
+        current: Option<&(dyn Fn() -> bool + Sync)>,
+        preparation: Option<(
+            &resource_preparation::Fence,
+            resource_preparation::Prepared<Result<resource_preparation::Inputs, St3Error>>,
+        )>,
+    ) -> Result<Option<ResourceObservationOutcome>, St3Error> {
         let facts = canonical_json_value(facts);
         let operation_hash = canonical_hash(&(
             observer,
@@ -15619,191 +15808,54 @@ impl Store {
         ))
         .map_err(internal)?;
         let idempotency_key = format!("resource-observation:{operation_hash}");
-        self.connection
-            .batched(|transaction| -> Result<ResourceObservationOutcome, St3Error> {
+        #[cfg(test)]
+        let measurement = Mutex::new(None);
+        #[cfg(test)]
+        let pending = Mutex::new(None);
+        #[cfg(test)]
+        let enqueued = std::time::Instant::now();
+        #[cfg(test)]
+        let canonical = preparation.is_none();
+        #[cfg(test)]
+        let cached = std::sync::atomic::AtomicBool::new(false);
+        let result = self.connection
+            .batched(|transaction| -> Result<Option<ResourceObservationOutcome>, St3Error> {
+                #[cfg(test)]
+                let _measurement = resource_preparation::WriterMeasure::new(&measurement);
+                #[cfg(test)]
+                { *pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(enqueued.elapsed()); }
                 check_observer_completion(transaction, observer, desired_revision, current)?;
                 let outcome = (|| {
                 if let Some(response) = smallclaims::store::idempotency::cached_response(transaction, &idempotency_key)?
                 {
-                    return serde_json::from_str(&response).map_err(internal);
+                    #[cfg(test)]
+                    cached.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return serde_json::from_str(&response).map(Some).map_err(internal);
                 }
-                let mut active_subscriptions = Vec::new();
-                for (subject, expected) in subscriptions {
-                    let Some(desired) = current_desired_row_tx(transaction, subject).map_err(internal)?
-                    else {
-                        continue;
-                    };
-                    if desired.kind != "subscription" {
-                        continue;
+                let resource_preparation::Inputs { active_subscriptions, normalized_observation, previous, baseline, repository_facts, legacy_collections, changed_fields, repository_changed_fields, recorded_items, discovered, observer_health_is_current, subscription_states, changed, should_record } = match preparation {
+                    Some((fence, mut prepared)) => {
+                        if !fence.current(self, transaction, &prepared) {
+                            return Ok(None);
+                        }
+                        prepared.value.take().expect("validated preparation has a value")?
                     }
-                    let value = serde_json::from_str(&desired.body).map_err(internal)?;
-                    if crate::graph::subscription_spec(&value).as_ref() == Some(expected)
-                        && !expected.stopped
-                    {
-                        active_subscriptions.push((subject.clone(), expected.clone()));
-                    }
-                }
-                let normalized_observation = normalize_resource_observation(
-                    transaction,
-                    &ClaimInput {
-                        subject: resource.into(),
-                        kind: "resource.observed".into(),
-                        actor: None,
-                        fields: BTreeMap::from([("facts".into(), facts.clone())]),
-                        evidence: Vec::new(),
-                        expected_subject: None,
-                        idempotency_key: None,
-                    },
-                )?
-                .expect("a resource observation is normalized");
-                let resource_kind = normalized_observation
-                    .get("kind")
-                    .cloned()
-                    .expect("a normalized resource observation has a kind");
-                let facts = normalized_observation
-                    .get("facts")
-                    .expect("a normalized resource observation has facts");
-                let previous = latest_actual(transaction, resource)
-                    .map_err(internal)?
-                    .and_then(|actual| actual.get("facts").cloned());
-                let baseline = previous.is_none();
-                let previous_object = previous.as_ref().and_then(Value::as_object);
-                let current_object = facts.as_object().ok_or_else(|| {
-                    St3Error::new(
-                        "invalid-resource-observation",
-                        "resource observation facts must be an object",
-                    )
-                })?;
-                // A repository's collections name the items an observation saw. Each item is its
-                // own resource, so the repository resource keeps only its own facts and a change
-                // to one item records only that item.
-                let collection = |field: &str| {
-                    REPOSITORY_COLLECTIONS
-                        .iter()
-                        .any(|(name, _, _)| *name == field)
+                    None => resource_preparation::inputs(transaction, observer, desired_revision,
+                        attempt, resource, &facts, subscriptions)?,
                 };
-                let repository_facts = Value::Object(
-                    current_object
-                        .iter()
-                        .filter(|(field, _)| !collection(field))
-                        .map(|(field, value)| (field.clone(), value.clone()))
-                        .collect(),
-                );
-                let legacy_collections = previous_object
-                    .is_some_and(|previous| previous.keys().any(|field| collection(field)));
-                let mut changed_fields = BTreeSet::new();
-                for field in current_object
-                    .keys()
-                    .chain(previous_object.into_iter().flat_map(serde_json::Map::keys))
-                    .filter(|field| !collection(field))
-                {
-                    if previous_object.and_then(|object| object.get(field)) != current_object.get(field) {
-                        changed_fields.insert(field.clone());
-                    }
-                }
-                let repository_changed_fields = changed_fields.iter().cloned().collect::<Vec<_>>();
-                let mut recorded_items = HashMap::new();
-                for (field, segment, _) in REPOSITORY_COLLECTIONS {
-                    for number in current_object
-                        .get(field)
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|item| item.get("number").and_then(Value::as_u64))
-                    {
-                        let subject = format!("{resource}/{segment}/{number}");
-                        let recorded = latest_actual(transaction, &subject)
-                            .map_err(internal)?
-                            .and_then(|actual| actual.get("facts").cloned());
-                        let observed_at = transaction
-                            .query_row(
-                                &canonical_sql(
-                                    "SELECT accepted_at_unix_ms FROM claims
-                                     WHERE subject=?1 AND kind='resource.observed'
-                                     ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1",
-                                ),
-                                [&subject],
-                                |row| row.get::<_, String>(0),
-                            )
-                            .optional()
-                            .map_err(internal)?
-                            .and_then(|at| at.parse::<u128>().ok())
-                            .unwrap_or_default();
-                        recorded_items.insert(subject, recorded.map(|facts| (facts, observed_at)));
-                    }
-                }
-                let mut discovered = Vec::new();
-                for (field, _, _) in REPOSITORY_COLLECTIONS {
-                    let items = discovered_collection_items(
-                        resource,
-                        field,
-                        previous.as_ref(),
-                        &facts,
-                        &mut |subject| {
-                            recorded_items
-                                .get(subject)
-                                .cloned()
-                                .flatten()
-                                .map(|(facts, _)| facts)
-                        },
-                    );
-                    changed_fields.extend(items.iter().flat_map(|item| item.data_types.iter().cloned()));
-                    discovered.extend(items.into_iter().map(|item| (field, item)));
-                }
-                let changed_fields = changed_fields.into_iter().collect::<Vec<_>>();
-                let observer_health_is_current = latest_actual(transaction, observer)
-                    .map_err(internal)?
-                    .is_some_and(|actual| {
-                        actual.get("state").and_then(Value::as_str) == Some("healthy")
-                            && actual.get("revision").and_then(Value::as_str) == Some(desired_revision)
-                            && actual.get("reason").is_none()
-                    });
-                let mut subscription_states = BTreeMap::new();
-                for (subscription_subject, subscription) in &active_subscriptions {
-                    let target_exists = if subscription.delivery == "message" {
-                        transaction
-                            .query_row(
-                                "SELECT 1 FROM desired WHERE subject=?1 AND kind='agent'",
-                                [&subscription.to],
-                                |_| Ok(()),
-                            )
-                            .optional()
-                            .map_err(internal)?
-                            .is_some()
-                    } else {
-                        true
-                    };
-                    let status = if target_exists { "active" } else { "pending" };
-                    let current_status = latest_actual(transaction, subscription_subject)
-                        .map_err(internal)?
-                        .and_then(|actual| {
-                            actual
-                                .get("state")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned)
-                        });
-                    subscription_states.insert(
-                        subscription_subject.clone(),
-                        (
-                            target_exists,
-                            status,
-                            current_status.as_deref() != Some(status),
-                        ),
-                    );
-                }
-                let changed = baseline || !changed_fields.is_empty() || !discovered.is_empty();
-                let should_record = changed
-                    || legacy_collections
-                    || attempt.is_some()
-                    || !observer_health_is_current
-                    || subscription_states.values().any(|(_, _, changed)| *changed);
+                let resource_kind = normalized_observation.get("kind").cloned()
+                    .expect("a normalized resource observation has a kind");
+                let facts = normalized_observation.get("facts")
+                    .expect("a normalized resource observation has facts");
+                let previous_object = previous.as_ref().and_then(Value::as_object);
+                let current_object = facts.as_object()
+                    .expect("prepared resource facts are an object");
                 if !should_record {
-                    return Ok(ResourceObservationOutcome {
+                    return Ok(Some(ResourceObservationOutcome {
                         baseline,
                         changed_fields,
                         observation_claim: None,
                         message_subjects: Vec::new(),
-                    });
+                    }));
                 }
                 let now = write_time(transaction, &self.origin).map_err(internal)?;
                 let sequence = next_replica_sequence(transaction, &self.origin).map_err(internal)?;
@@ -16602,12 +16654,34 @@ impl Store {
                         ],
                     )
                     .map_err(internal)?;
-                Ok(outcome)
+                Ok(Some(outcome))
                 })()?;
                 check_observer_completion(transaction, observer, desired_revision, current)?;
                 Ok(outcome)
             })
-            .map_err(|error| St3Error::new("internal", error))?
+            .map_err(|error| St3Error::new("internal", error));
+        #[cfg(test)]
+        if let Some((elapsed, work)) = measurement
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            resource_preparation::COUNTS
+                .with(|counts| counts.borrow_mut().writer.push((canonical, elapsed, work)));
+        }
+        #[cfg(test)]
+        resource_preparation::COUNTS.with(|counts| {
+            let mut counts = counts.borrow_mut();
+            if cached.load(std::sync::atomic::Ordering::Relaxed) {
+                counts.cached += 1;
+            } else if !canonical && matches!(&result, Ok(Ok(Some(_)))) {
+                counts.fast += 1;
+            }
+            counts.acknowledged.push(enqueued.elapsed());
+            counts
+                .until_callback
+                .push(pending.into_inner().unwrap_or_else(PoisonError::into_inner));
+        });
+        result?
     }
 
     /// Every mission request that a subscription recorded, oldest first, with its disposition.
@@ -20585,7 +20659,7 @@ fn select_desired_row(rows: Vec<(String, String, String)>) -> Result<Option<Desi
 }
 
 fn current_desired_row_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<Option<DesiredRow>> {
     transaction
@@ -20901,7 +20975,7 @@ fn validate_claim_cardinality(
 }
 
 fn normalize_resource_observation(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     input: &ClaimInput,
 ) -> Result<Option<BTreeMap<String, Value>>, St3Error> {
     if input.kind != "resource.observed" {
@@ -21020,7 +21094,7 @@ fn resource_facts(fields: &BTreeMap<String, Value>) -> Result<BTreeMap<String, V
 }
 
 fn latest_resource_kind(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<Option<String>, St3Error> {
     let bodies = {
@@ -27927,6 +28001,28 @@ mission "garden" state="ready" {
             .unwrap()
     }
 
+    /// A publication's freshness is timed from this node's own commits: a claim another node
+    /// wrote, with that node's clock, is not one.
+    #[test]
+    fn the_first_local_commit_after_a_cut_skips_claims_another_node_wrote() {
+        let member = key();
+        let (_, a, stores) = fleet(&[("b", &member)]);
+        let b = &stores[0];
+        let before = b.index().unwrap();
+        note(&a, "written on a");
+        sync(&a, b);
+        let replicated = b.index().unwrap();
+        assert!(replicated > before, "a's claim reached b");
+        assert_eq!(b.first_local_commit_after(before, replicated).unwrap(), None);
+        let local = note(b, "written on b");
+        let through = b.index().unwrap();
+        assert_eq!(
+            b.first_local_commit_after(before, through).unwrap(),
+            Some(local.accepted_at_unix_ms)
+        );
+        assert_eq!(b.first_local_commit_after(through, through).unwrap(), None);
+    }
+
     /// The anchor `a` founds the fleet and admits each named member.
     fn fleet(members: &[(&str, &Arc<MemberKey>)]) -> (Arc<MemberKey>, Store, Vec<Store>) {
         let anchor = key();
@@ -33831,8 +33927,9 @@ fn enrich_step_nudge_at(
     Ok(())
 }
 
-/// Copies the worker's latest progress summary and its completion summary for the
-/// current attempt from the work claims, so views can show them without a history read.
+/// Reads the current attempt's summaries, following revision carry links back to
+/// the cutover snapshot. Successor reports supersede inherited reports, while a
+/// new attempt cannot inherit the predecessor attempt's notes.
 fn enrich_step_summaries_at(
     connection: &Connection,
     view: &mut StepRunView,
@@ -33840,57 +33937,80 @@ fn enrich_step_summaries_at(
 ) -> rusqlite::Result<()> {
     let mut statement = connection.prepare_cached(&canonical_sql(
         "SELECT kind, body, accepted_at_unix_ms FROM claims
-         WHERE subject=?1 AND kind IN ('work.progress','work.submitted')
-         ORDER BY CANONICAL_ASC(claims)",
+         WHERE subject=?1 AND kind IN ('work.progress','work.submitted','step-run.carried')
+         ORDER BY CANONICAL_DESC(claims)",
     ))?;
-    let events = statement
-        .query_map([&view.subject], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
     view.progress_summary = None;
     view.progress_at_unix_ms = None;
     view.completion_summary = None;
     view.submitted_incarnation = None;
-    for (kind, body, accepted) in events {
-        let accepted = accepted.parse::<u128>().unwrap_or(0);
-        if accepted > snapshot_unix_ms {
+    let mut submitted = false;
+    let mut subject = view.subject.clone();
+    let mut snapshot = snapshot_unix_ms;
+    let mut visited = BTreeSet::new();
+    loop {
+        if !visited.insert(subject.clone()) {
+            // Replicated carry links can form a cycle. Keep the reports already
+            // read and stop at the repeated subject, without following it again.
             break;
         }
-        let body = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
-        let fields = body.get("fields").unwrap_or(&body);
-        if fields.get("attempt").and_then(Value::as_u64) != Some(u64::from(view.attempt)) {
-            continue;
-        }
-        if fields.get("handoff_acknowledged").is_some() {
-            continue;
-        }
-        if kind == "work.submitted" {
-            // Bind only this attempt's submission, including reports without a summary.
-            // Legacy claims carry no submitting incarnation; the cleared lease is no proof.
-            view.submitted_incarnation = fields
-                .get("submitted_incarnation")
+        let mut predecessor = None;
+        let mut events = statement.query([&subject])?;
+        while let Some(row) = events.next()? {
+            let kind = row.get::<_, String>(0)?;
+            let body = row.get::<_, String>(1)?;
+            let accepted = row.get::<_, String>(2)?.parse::<u128>().unwrap_or(0);
+            if accepted > snapshot {
+                continue;
+            }
+            let body = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+            let fields = body.get("fields").unwrap_or(&body);
+            if fields.get("attempt").and_then(Value::as_u64) != Some(u64::from(view.attempt)) {
+                continue;
+            }
+            if kind == "step-run.carried" {
+                if predecessor.is_none() {
+                    predecessor = fields
+                        .get("source_step_run")
+                        .and_then(Value::as_str)
+                        .map(|source| (source.to_owned(), accepted));
+                }
+                continue;
+            }
+            if fields.get("handoff_acknowledged").is_some() {
+                continue;
+            }
+            if kind == "work.submitted" && !submitted {
+                // A newer submission without an incarnation must not borrow an older one.
+                submitted = true;
+                view.submitted_incarnation = fields
+                    .get("submitted_incarnation")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+            let Some(summary) = fields
+                .get("summary")
                 .and_then(Value::as_str)
-                .map(str::to_owned);
+                .map(str::trim)
+                .filter(|summary| !summary.is_empty())
+            else {
+                continue;
+            };
+            if kind == "work.progress" && view.progress_summary.is_none() {
+                view.progress_summary = Some(summary.to_owned());
+                view.progress_at_unix_ms = Some(accepted);
+            } else if kind == "work.submitted" && view.completion_summary.is_none() {
+                view.completion_summary = Some(summary.to_owned());
+            }
         }
-        let Some(summary) = fields
-            .get("summary")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|summary| !summary.is_empty())
-        else {
-            continue;
+        if view.progress_summary.is_some() && view.completion_summary.is_some() && submitted {
+            break;
+        }
+        let Some((source, cutover)) = predecessor else {
+            break;
         };
-        if kind == "work.progress" {
-            view.progress_summary = Some(summary.to_owned());
-            view.progress_at_unix_ms = Some(accepted);
-        } else {
-            view.completion_summary = Some(summary.to_owned());
-        }
+        subject = source;
+        snapshot = cutover;
     }
     Ok(())
 }
@@ -34314,11 +34434,18 @@ pub(crate) fn step_timing_lease_at(
     Ok(started.and(lease))
 }
 
+#[cfg(test)]
+thread_local! {
+    static STEP_TIMING_FOLD_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A step's step and work events in canonical order, as its execution timing folds them.
 fn step_timing_events(
     connection: &Connection,
     subject: &str,
 ) -> rusqlite::Result<Vec<(String, Value, u128)>> {
+    #[cfg(test)]
+    STEP_TIMING_FOLD_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut statement = connection.prepare(&canonical_sql(
         "SELECT claims.kind, claims.body, claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id
@@ -45959,6 +46086,181 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
     }
 
     #[test]
+    fn review_reader_old_peer_quarantines_and_retries_original_bytes() {
+        for kind in std::iter::once("gate.requested").chain(st3_schema::review::KINDS) {
+            let current = Store::open_memory("ada").unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("review.sqlite");
+            let older = Store::open(&path, "tester").unwrap();
+            let mut registry = st3_schema::registry().clone();
+            for new_kind in st3_schema::review::KINDS {
+                registry.claims.remove(new_kind);
+            }
+            for name in st3_schema::review::REQUEST_FIELDS {
+                registry
+                    .claims
+                    .get_mut("gate.requested")
+                    .unwrap()
+                    .fields
+                    .remove(name);
+            }
+            assert_ne!(registry.digest(), st3_schema::registry().digest());
+            older.set_claim_registry(registry);
+            let observe = |store: &Store, subject: &str, status: &str| {
+                store
+                    .append_claim(&ClaimInput {
+                        subject: subject.into(),
+                        kind: "transport.observed".into(),
+                        actor: None,
+                        fields: BTreeMap::from([("status".into(), json!(status))]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: None,
+                    })
+                    .unwrap()
+            };
+            let bootstrap = observe(&current, "host/ada", "up");
+            receive_and_project(
+                &older,
+                "ada",
+                &exchange_from(&current, &ReplicationInventory::default()),
+            );
+            current.project_replication_backlog().unwrap();
+            assert!(!current.replication_projection_needs_recovery().unwrap());
+            // An empty store's initial replay is legitimate. Everything after this
+            // healthy baseline, including reopening with the new registry, must be incremental.
+            assert!(!older.replication_projection_needs_recovery().unwrap());
+            FULL_REPLAYS.with(|count| count.set(0));
+            const DAY_MS: u128 = 24 * 60 * 60 * 1_000;
+            current
+                .set_write_clock_at(bootstrap.accepted_at_unix_ms + DAY_MS)
+                .unwrap();
+            let spec = st3_schema::registry().claim(kind).unwrap();
+            let mut fields = BTreeMap::new();
+            for (name, field) in &spec.fields {
+                if !field.required { continue; }
+                let value = match field.value_type {
+                    st3_schema::ValueType::Integer => json!(1),
+                    st3_schema::ValueType::Array => json!([]),
+                    st3_schema::ValueType::Object => json!({}),
+                    st3_schema::ValueType::SubjectReference => json!(format!("{}/tester", field.reference_families.first().map_or("mission-run", String::as_str))),
+                    _ => json!(field.values.first().map_or("receipt", String::as_str)),
+                };
+                fields.insert(name.clone(), value);
+            }
+            if matches!(kind, "gate.head-bound" | "gate.review-verdict" | "gate.requested") {
+                fields.insert("change".into(), json!({"kind":"github.pull-request","subject":"resource/project/review"}));
+            }
+            if matches!(kind, "gate.head-bound" | "gate.requested") {
+                fields.insert("head".into(), json!({"kind":"git.commit","sha":"a".repeat(40)}));
+            }
+            if matches!(kind, "gate.review-verdict" | "gate.remediation-attached") {
+                fields.insert("reviewed_head".into(), json!({"kind":"git.commit","sha":"a".repeat(40)}));
+            }
+            if kind == "gate.requested" {
+                fields.extend(BTreeMap::from([
+                    ("gate_subject".into(),json!("gate-operation/tester")),
+                    ("generation".into(),json!("run-generation/tester")), ("episode".into(),json!(1)),
+                    ("scope".into(),json!({"coverage":["implementation"]})),
+                    ("author".into(),json!("agent/alex")), ("binding_claim".into(),json!("binding")),
+                    ("delta_ref".into(),json!("doc/project/delta")),
+                ]));
+            }
+            let claim = current.append_claim(&ClaimInput {
+                subject:"gate-operation/tester".into(), kind:kind.into(), actor:None,
+                fields, evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+            }).unwrap();
+            let exchange = exchange_from(&current, &older.replication_inventory().unwrap());
+            assert_eq!(exchange.envelopes.len(), 1);
+            let original_envelope = &exchange.envelopes[0];
+            // Hold the old review envelope while the old peer makes ninety days of
+            // unrelated progress. No sleeps or wall-clock timing can weaken this lag.
+            for day in 2..=90 {
+                older
+                    .set_write_clock_at(bootstrap.accepted_at_unix_ms + day * DAY_MS)
+                    .unwrap();
+                observe(&older, "host/tester", "up");
+            }
+            older.project_replication_backlog().unwrap();
+            let admission = receive_and_project(&older, "ada", &exchange);
+            assert_eq!((admission.valid, admission.unknown, admission.invalid), (0,1,0), "{kind}");
+            let records = older.replica_records(true).unwrap();
+            assert_eq!(records.len(),1);
+            assert_eq!(records[0].state,"unknown");
+            assert_eq!(records[0].error_code.as_deref(),Some(if kind == "gate.requested" { "unknown-claim-field" } else { "unknown-claim-kind" }));
+            let raw: Vec<u8> = older.readers.get().query_row(
+                "SELECT raw FROM replica_records WHERE claim_id=?1",[&claim.id],|row|row.get(0),
+            ).unwrap();
+            assert!(!raw.is_empty());
+            assert!(older.claims_for(&claim.subject,Some(kind)).unwrap().is_empty());
+            assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0, "{kind}: lagged receipt");
+            assert!(!older.replication_projection_needs_recovery().unwrap());
+            // Known remote work after the unknown record must still cross the same
+            // writer chain and advance the projection over several inventory pages.
+            for day in 2..=25 {
+                current
+                    .set_write_clock_at(bootstrap.accepted_at_unix_ms + day * DAY_MS)
+                    .unwrap();
+                observe(&current, "host/ada", if day == 25 { "down" } else { "up" });
+            }
+            let mut pages = 0;
+            loop {
+                let mut inventory = older.replication_inventory().unwrap();
+                inventory.accepts = Some(4);
+                let page = exchange_from(&current, &inventory);
+                if page.envelopes.is_empty() {
+                    break;
+                }
+                assert!(pages < 6, "{kind}: catch-up inventory must advance");
+                pages += 1;
+                let admission = receive_and_project(&older, "ada", &page);
+                assert_eq!(admission.invalid, 0, "{kind}");
+                assert!(admission.valid > 0, "{kind}");
+                assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0, "{kind}: catch-up page");
+                assert!(!older.replication_projection_needs_recovery().unwrap());
+            }
+            assert_eq!(pages, 6, "{kind}: exercise paginated catch-up");
+            let latest = older.latest_claim("host/ada", Some("transport.observed")).unwrap().unwrap();
+            assert_eq!(latest.body["fields"]["status"], "down", "{kind}: unrelated work progressed");
+            assert_eq!(older.replica_records(true).unwrap().len(), 1, "{kind}");
+            assert!(older.claims_for(&claim.subject, Some(kind)).unwrap().is_empty());
+            drop(older);
+            let upgraded = Store::open(&path,"tester").unwrap();
+            assert!(!upgraded.replication_projection_needs_recovery().unwrap());
+            let admitted = upgraded.validate_replication_backlog().unwrap();
+            assert_eq!((admitted.valid,admitted.unknown,admitted.invalid),(1,0,0));
+            upgraded.project_replication_backlog().unwrap();
+            let retained = upgraded.claims_for(&claim.subject,Some(kind)).unwrap();
+            assert_eq!(retained.len(),1);
+            assert_eq!(retained[0].id,claim.id);
+            assert_eq!(retained[0].body,claim.body);
+            let retried_raw: Vec<u8> = upgraded.readers.get().query_row(
+                "SELECT raw FROM replica_records WHERE claim_id=?1",[&claim.id],|row|row.get(0),
+            ).unwrap();
+            assert_eq!(raw,retried_raw);
+            assert!(upgraded.replica_records(true).unwrap().is_empty(), "{kind}");
+            assert_eq!(
+                upgraded.latest_claim("host/ada", Some("transport.observed")).unwrap().unwrap().id,
+                latest.id,
+                "{kind}: retry preserves unrelated projection"
+            );
+            let relayed = exchange_from(&upgraded, &ReplicationInventory::default());
+            let retained_envelope = relayed.envelopes.iter().find(|envelope| {
+                envelope.writer == original_envelope.writer
+                    && envelope.sequence == original_envelope.sequence
+            }).unwrap();
+            assert_eq!(retained_envelope.hash, original_envelope.hash, "{kind}");
+            assert_eq!(
+                retained_envelope.payload.bytes().unwrap(),
+                original_envelope.payload.bytes().unwrap(),
+                "{kind}: retry and relay retain the original hash-authenticated envelope bytes"
+            );
+            assert!(!upgraded.replication_projection_needs_recovery().unwrap());
+            assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0, "{kind}: upgrade retry");
+        }
+    }
+
+    #[test]
     fn an_unknown_field_is_retryable_and_an_old_schema_rejection_is_readmitted() {
         let source = Store::open_memory("source").unwrap();
         let claim = source
@@ -55407,6 +55709,316 @@ version 2
             evidence: Vec::new(),
             idempotency_key: key.into(),
         }
+    }
+
+    #[test]
+    fn revise_notes_carry_progress_for_active_and_completed_steps() {
+        let store = Store::open_memory("node").unwrap();
+        let source = CARRY_SOURCE.replace(
+            "step \"other\"",
+            "step \"done\" { assigned-to \"agent/worker\"; goal \"Finish the work.\" }\n    step \"other\"",
+        );
+        publish_carry(&store, &source, "notes-one");
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "carry".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/requester".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "notes-run".into(),
+            })
+            .unwrap();
+        let step = |run: &MissionRunView, path: &str| {
+            run.steps
+                .iter()
+                .find(|step| step.step == path)
+                .unwrap()
+                .clone()
+        };
+        let report = |subject: &str, action: &str, key: &str, summary: &str| {
+            let mut request = carry_request("one", key);
+            request.summary = Some(summary.into());
+            store.work_action(subject, action, &request).unwrap()
+        };
+        let done = step(&run, "done").subject;
+        store.set_step_state(&done, "ready", None).unwrap();
+        report(&done, "claim", "notes-claim-done", "Starting");
+        report(&done, "progress", "notes-done", "Decision: keep the result");
+        report(&done, "complete", "notes-complete", "The result is ready");
+        store.set_step_state(&done, "completed", None).unwrap();
+        let work = step(&run, "work").subject;
+        store.set_step_state(&work, "ready", None).unwrap();
+        report(&work, "claim", "notes-claim-work", "Starting");
+        report(&work, "progress", "notes-work", "Checking the result");
+        let original = store.mission_run(&run.subject).unwrap().unwrap();
+        let mut current = original.clone();
+        for revision in 2..=3 {
+            let next = publish_carry(
+                &store,
+                &source.replace("Use the first goal.", &format!("Use goal {revision}.")),
+                &format!("notes-publish-{revision}"),
+            );
+            current = store
+                .adopt_mission_revision(
+                    &run.id,
+                    &next,
+                    "person/requester",
+                    "adjust the other step",
+                    &format!("notes-revise-{revision}"),
+                )
+                .unwrap();
+            for path in ["work", "done"] {
+                let before = step(&original, path);
+                let after = step(&current, path);
+                assert_ne!(before.subject, after.subject);
+                assert_eq!(after.status, before.status);
+                assert_eq!(after.progress_summary, before.progress_summary, "{path}");
+                assert_eq!(
+                    after.progress_at_unix_ms, before.progress_at_unix_ms,
+                    "{path}"
+                );
+                assert_eq!(
+                    after.completion_summary, before.completion_summary,
+                    "{path}"
+                );
+                assert_eq!(
+                    after.submitted_incarnation, before.submitted_incarnation,
+                    "{path}"
+                );
+            }
+        }
+        let carried = step(&current, "work");
+        let updated = report(
+            &carried.subject,
+            "progress",
+            "notes-new-progress",
+            "The check passed",
+        );
+        assert_eq!(
+            updated.progress_summary.as_deref(),
+            Some("The check passed")
+        );
+        let target = Store::open_memory("target").unwrap();
+        target
+            .import_replication("node", &store.export_replication(0).unwrap())
+            .unwrap();
+        for path in ["work", "done"] {
+            let expected = store
+                .step_run(&step(&current, path).subject)
+                .unwrap()
+                .unwrap();
+            let replicated = target.step_run(&expected.subject).unwrap().unwrap();
+            assert_eq!(replicated.progress_summary, expected.progress_summary);
+            assert_eq!(replicated.progress_at_unix_ms, expected.progress_at_unix_ms);
+            assert_eq!(replicated.completion_summary, expected.completion_summary);
+        }
+        store
+            .set_step_state(&carried.subject, "failed", Some("try again"))
+            .unwrap();
+        store
+            .retry_step(&carried.subject, "a new attempt", 0)
+            .unwrap();
+        let retried = store.step_run(&carried.subject).unwrap().unwrap();
+        assert_eq!(
+            retried.progress_summary, None,
+            "carried notes belong to attempt 1"
+        );
+        assert_eq!(retried.completion_summary, None);
+    }
+
+    #[test]
+    fn revise_notes_inheritance_uses_the_cutover_snapshot() {
+        let store = Store::open_memory("node").unwrap();
+        publish_carry(&store, CARRY_SOURCE, "snapshot-notes-mission");
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "carry".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/requester".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "snapshot-notes-run".into(),
+            })
+            .unwrap();
+        let source = &run.steps[0].subject;
+        let mut successor = run.steps[1].clone();
+        let append = |subject: &str, kind: &str, at: &str, fields: Value| {
+            let claim = store
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: kind.into(),
+                    actor: Some("agent/node.worker".into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            // Deterministic fixture times avoid depending on wall-clock tick boundaries.
+            store
+                .connection
+                .write()
+                .execute(
+                    "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+                    params![claim.id, at],
+                )
+                .unwrap();
+        };
+        append(
+            source,
+            "work.progress",
+            "100",
+            json!({"attempt": 1, "summary": "Before cutover"}),
+        );
+        append(
+            source,
+            "work.submitted",
+            "110",
+            json!({"attempt": 1, "summary": "Finished", "submitted_incarnation": "one"}),
+        );
+        append(
+            &successor.subject,
+            "step-run.carried",
+            "200",
+            json!({"attempt": 1, "source_step_run": source}),
+        );
+        append(
+            source,
+            "work.progress",
+            "300",
+            json!({"attempt": 1, "summary": "After cutover"}),
+        );
+        append(
+            &successor.subject,
+            "work.progress",
+            "400",
+            json!({"attempt": 1, "summary": "Successor note"}),
+        );
+        let connection = store.readers.get();
+        enrich_step_summaries_at(&connection, &mut successor, 250).unwrap();
+        assert_eq!(
+            successor.progress_summary.as_deref(),
+            Some("Before cutover")
+        );
+        assert_eq!(successor.progress_at_unix_ms, Some(100));
+        assert_eq!(successor.completion_summary.as_deref(), Some("Finished"));
+        assert_eq!(successor.submitted_incarnation.as_deref(), Some("one"));
+        enrich_step_summaries_at(&connection, &mut successor, 500).unwrap();
+        assert_eq!(
+            successor.progress_summary.as_deref(),
+            Some("Successor note")
+        );
+        assert_eq!(successor.progress_at_unix_ms, Some(400));
+        successor.attempt = 2;
+        enrich_step_summaries_at(&connection, &mut successor, 500).unwrap();
+        assert_eq!(successor.progress_summary, None);
+        assert_eq!(successor.completion_summary, None);
+        assert_eq!(successor.submitted_incarnation, None);
+    }
+
+    #[test]
+    fn revise_notes_replicated_carries_choose_the_newest_link_and_stop_at_cycles() {
+        let store = Store::open_memory("node").unwrap();
+        publish_carry(&store, CARRY_SOURCE, "replicated-notes-mission");
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "carry".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/requester".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "replicated-notes-run".into(),
+            })
+            .unwrap();
+        let peer = Store::open_memory("peer").unwrap();
+        peer.import_replication("node", &store.export_replication(0).unwrap())
+            .unwrap();
+        let older = &run.steps[0].subject;
+        let newer = format!("{older}-newer");
+        let mut successor = run.steps[1].clone();
+        let append = |store: &Store, subject: &str, kind: &str, fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: kind.into(),
+                    actor: Some("agent/node.worker".into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        let older_note = append(
+            &store,
+            older,
+            "work.progress",
+            json!({"attempt": 1, "summary": "Older lineage"}),
+        );
+        let older_link = append(
+            &store,
+            &successor.subject,
+            "step-run.carried",
+            json!({"attempt": 1, "source_step_run": older}),
+        );
+        let newer_note = append(
+            &peer,
+            &newer,
+            "work.progress",
+            json!({"attempt": 1, "summary": "Newer lineage"}),
+        );
+        let newer_link = append(
+            &peer,
+            &successor.subject,
+            "step-run.carried",
+            json!({"attempt": 1, "source_step_run": newer}),
+        );
+        let cycle = append(
+            &peer,
+            &newer,
+            "step-run.carried",
+            json!({"attempt": 1, "source_step_run": successor.subject}),
+        );
+        store
+            .import_replication("peer", &peer.export_replication(0).unwrap())
+            .unwrap();
+        assert_eq!(
+            store
+                .claims_for(&successor.subject, Some("step-run.carried"))
+                .unwrap()
+                .len(),
+            2
+        );
+        // Set deterministic snapshot times after replication has preserved both
+        // concurrent links. Equal cutover times make the cycle reachable.
+        for (claim, at) in [
+            (older_note, "100"),
+            (older_link, "200"),
+            (newer_note, "150"),
+            (newer_link, "250"),
+            (cycle, "250"),
+        ] {
+            store
+                .connection
+                .write()
+                .execute(
+                    "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+                    params![claim.id, at],
+                )
+                .unwrap();
+        }
+        let connection = store.readers.get();
+        enrich_step_summaries_at(&connection, &mut successor, 225).unwrap();
+        assert_eq!(successor.progress_summary.as_deref(), Some("Older lineage"));
+        enrich_step_summaries_at(&connection, &mut successor, 300).unwrap();
+        assert_eq!(successor.progress_summary.as_deref(), Some("Newer lineage"));
+        assert_eq!(successor.progress_at_unix_ms, Some(150));
+        assert_eq!(successor.completion_summary, None);
+        assert_eq!(successor.submitted_incarnation, None);
     }
 
     #[test]
