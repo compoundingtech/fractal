@@ -21,17 +21,13 @@ printer computes this digest; the checked-in snapshot omits it and the equality
 test compares the contract body. The printed `actor_semantics` reminder comes
 first: actor: none means no --as syntax.
 
-Version-policy proposal (pending Intake/Nathan approval in
-[#3061 comment 6207525882](https://github.com/compoundingtech/smalltalk/pull/3061#issuecomment-6207525882)):
-retain `kind: st3.actor-contract.v1` and numeric `version: 1` for additive optional
-metadata and additional command/alias entries. The digest identifies exact
-per-binary content; a command's classification changing is a content change,
-not automatically a format-version change. Bump the kind suffix and numeric
-version together for removed or renamed required fields, changed field types,
-or changed field/enum interpretation that breaks readers. Compatibility of
-classification-value and enum additions is still an explicit open question.
-This proposal is not an approved compatibility guarantee and does not claim
-that readers implement unsupported-version rejection.
+Version policy:
+
+kind st3.actor-contract.v1 and version 1 stay for: new commands, new aliases, new optional fields on an entry, and new values of an existing enum (actor, and any later enum). Readers MUST ignore unknown fields and MUST treat an unknown enum value as unknown, never as one of the values they know; they must not infer --as syntax, person support or authority from an unknown value. kind and version bump together for: a removed or renamed field, a changed field type, a removed enum value, or a changed meaning of an existing field or value. contract_sha256 changes with ANY content change (a command moving class included) and identifies one binary build; it is not a version. The contract describes argv syntax and is never an authorization input.
+
+No actor-contract reader exists in this repository yet; the unknown-enum rule
+is a requirement on future readers. Existing tests parse JSON only to check the
+producer's output and snapshot, not to interpret unknown actor values.
 
 `actor` means whether argv accepts `--as`: `none`, `optional`, or `required`.
 `actor_environment` names an environment default, if one exists. `accepts_person`
