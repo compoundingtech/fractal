@@ -45111,6 +45111,7 @@ agent "worker.one" { workspace "/tmp"; command "true"; restart always; }
                     "claim",
                     &WorkRequest {
                         wait_ms: None,
+                        wait_on: None,
                         actor: Some(actor.into()),
                         incarnation: Some(format!("{key}-incarnation")),
                         summary: None,
