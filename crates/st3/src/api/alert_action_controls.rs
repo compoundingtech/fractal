@@ -288,6 +288,66 @@ async fn attention_history_sparse_pages_keep_the_cut_and_reject_cursor_tampering
             evidence:vec![],expected_subject:None,idempotency_key:Some(format!("irrelevant-{number}"))}).unwrap();
     }
     let app = router(state.clone());
+    let before_routes = state.store.index().unwrap();
+    for collection in ["attention", "now"] {
+        for filter in [
+            "status=ready",
+            "owner=agent%2Falder.helper",
+            "native_only=true",
+            "state=open",
+        ] {
+            let (status, refused) = owner_get(
+                app.clone(),
+                &format!("/v1/client/{collection}?history=true&{filter}"),
+                "person/avery",
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        }
+        let (status, resolved) = owner_get(
+            app.clone(),
+            &format!("/v1/client/{collection}?history=true&state=resolved"),
+            "person/avery",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{resolved}");
+        assert_eq!(resolved["items"].as_array().unwrap().len(), 1);
+        assert_eq!(resolved["items"][0]["episode"], denial.id);
+    }
+    for filter in [
+        "actor=agent%2Falder.helper",
+        "owner_run=mission-run%2Fhistory-no-such",
+    ] {
+        assert_eq!(
+            owner_get(
+                app.clone(),
+                &format!("/v1/client/attention?history=true&{filter}"),
+                "person/avery",
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        // Now's work-filtered path is intentionally preserved, including with
+        // history=true; it must not silently become the closed-only endpoint.
+        let (status, current) = owner_get(
+            app.clone(),
+            &format!("/v1/client/now?{filter}"),
+            "person/avery",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{current}");
+        let (status, history) = owner_get(
+            app.clone(),
+            &format!("/v1/client/now?history=true&{filter}"),
+            "person/avery",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{history}");
+        assert_eq!(history["items"], current["items"]);
+        assert!(history["page"].get("omitted_items").is_none());
+    }
+    assert_eq!(state.store.index().unwrap(), before_routes);
     let (status, mut page) = owner_get(
         app.clone(),
         "/v1/client/attention?history=true&limit=1",
@@ -413,6 +473,48 @@ async fn attention_history_filters_foreign_missing_sources_before_reporting_omis
     )
     .await;
     assert_eq!(original["items"].as_array().unwrap().len(), 1);
+    let path = format!(
+        "/v1/client/attention/{}",
+        urlencoding::encode(&format!("attention/closed/{}", answer.id))
+    );
+    let mut wide_original = denial.body.clone();
+    wide_original["fields"]["reason"] = json!("x".repeat(1_048_577));
+    state
+        .store
+        .connection
+        .batched(|tx| -> anyhow::Result<()> {
+            tx.execute(
+                "UPDATE claims SET body=?1 WHERE id=?2",
+                rusqlite::params![wide_original.to_string(), denial.id],
+            )?;
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    let before_detail = state.store.index().unwrap();
+    // The readable resolution establishes the represented owner even though
+    // its original is oversized: that owner gets unavailable; a stranger gets 404.
+    assert_eq!(
+        owner_get(app.clone(), &path, "person/avery").await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        owner_get(app.clone(), &path, "person/other").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(state.store.index().unwrap(), before_detail);
+    state
+        .store
+        .connection
+        .batched(|tx| -> anyhow::Result<()> {
+            tx.execute(
+                "UPDATE claims SET body=?1 WHERE id=?2",
+                rusqlite::params![denial.body.to_string(), denial.id],
+            )?;
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
     // An authored partial-replica image, not an admitted signed claim: the answer
     // identifies another person but its cited original is absent at this cut.
     let mut body = answer.body.clone();
@@ -453,10 +555,6 @@ async fn attention_history_filters_foreign_missing_sources_before_reporting_omis
     .await;
     assert_eq!(status, StatusCode::OK, "{own_missing}");
     assert_eq!(own_missing["page"]["omitted_items"], 1);
-    let path = format!(
-        "/v1/client/attention/{}",
-        urlencoding::encode(&format!("attention/closed/{}", answer.id))
-    );
     assert_eq!(
         owner_get(app.clone(), &path, "person/avery").await.0,
         StatusCode::NOT_FOUND

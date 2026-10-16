@@ -120,8 +120,10 @@ fn decode_rows(mut rows: rusqlite::Rows<'_>, person: Option<&str>) -> Result<Vec
         };
         match row.get::<_, Option<bool>>(19)? {
             Some(false) => {
-                // Keep its index for sparse paging, without retrieving/decoding
-                // a noise body, charging decode budget or reporting an omission.
+                // Keep its index without transferring/deserializing a noise body
+                // in Rust, charging the Rust decode budget or counting an omission.
+                // SQL has already classified bounded JSON and may parse or traverse
+                // the same body more than once; this branch does not eliminate it.
                 result.push(candidate);
                 continue;
             }

@@ -90,6 +90,11 @@ deployment hosts do not define that set. An offline or unverified admitted membe
 operation unavailable; a removed member must upgrade before re-admission or replay/rejoin.
 Do not resume an older receiver against this history before it upgrades. This is a rollout
 order, not an automatic capability gate or permission to change membership.
+Before use, the Operations rollout receipt must name each actual member and eligible
+receiver, its installed full source/build, and whether its claim schema, source rule,
+history fold/read and client-serving daemon are available. Include offline and rejoining
+members explicitly. This source change supplies no qualified host inventory; missing
+receipts mean availability is unknown, not permission to rely on the widened policy.
 
 An older registry does not ignore the extra audit fields: it holds the authenticated denial
 answer as `unknown-claim-field`, outside admitted/projected claims, for later revalidation.
@@ -100,7 +105,9 @@ old-registry signed-exchange control pins these expected receive outcomes; its e
 required before qualification. An older client-v0 server ignores the optional proof parameter
 and then refuses the agent through its ordinary person-only answer check, possibly with a
 misleading person-only answer error. Use a server containing this change before sending proof.
-`dismiss` already worked on the person's server path; this change adds it to the public enum.
+`dismiss` already worked on the person's server path. The public answer remains main's
+bounded string, including plan, question and screen answers; the optional proof narrows
+an agent's answer to `dismiss`.
 On the wire, ordinary person requests still omit the proof. Swift's initializer defaults it
 to nil and TypeScript's property is optional. Rust callers using a struct literal must add
 `delegation: None` or use the existing default; this is a source adjustment for those callers.
@@ -111,6 +118,10 @@ attention card ID instead, also supply the update's original `work.person-asked`
 `--episode`. This cancels that update source, preserves its history and leaves unrelated
 claimed work alone. It cannot withdraw another sender's update or use this route to cancel
 a question; an explicit ask keeps `st work cancel-ask` semantics.
+Source-kind validation currently precedes requester authorization: an ask receives
+`invalid-update-withdrawal` even from a stranger, while a stranger's actual update
+receives `forbidden`. The error can distinguish those source kinds; neither refusal
+authorizes an action or reveals the update's text.
 
 Withdrawal removes the update from open Home, not from its recipient's client history.
 `GET /v1/client/attention?history=true` (also `/v1/client/alerts`) lists resolved source
@@ -119,6 +130,17 @@ records for sender withdrawals and delegated denial dismissals. With no work fil
 and request remain readable, marked withdrawn by the sender with its reason. A dismissed
 denial retains its original reason, the agent and represented person, instruction reference
 and quote, policy and episode. These rows offer no action and are not open alerts.
+
+This changes the meaning of `history=true`: attention and unfiltered Now previously
+ignored that flag and returned the open list; they now return only closed source items.
+Older daemons still return the open list, which is not closed-history evidence. Attention
+history rejects `actor`, `owner_run`, `status`, `owner`, `native_only=true`, and a `state`
+other than `resolved` with 400. Now history without `actor` or `owner_run` rejects
+`status`, `owner`, `native_only=true`, and a non-resolved state with 400. With `actor`
+or `owner_run`, Now retains its existing work-filtered open/combined list and validation;
+that request is not routed to closed history. No in-repository caller currently sends
+these history requests. The history read path is a separate client behavior alongside
+dismissal and withdrawal, not a claim that open Home now includes closed cards.
 
 Each closed resource has an `attention/closed/CLAIM_ID` ID naming its immutable resolution;
 select that ID through the ordinary attention/detail endpoint. The old hashed open-card ID
@@ -131,6 +153,11 @@ A person session is forced to that person's recorded-owner filter. Another perso
 closed detail returns 404. As with the existing attention list, an agent session
 that supplies no `person` filter can read all owners' retained resolutions; this change does
 not invent per-agent privacy or impersonate a person.
+If a readable resolution still establishes the owner but its original is oversized,
+that owner's exact detail returns 503 while another person's read returns 404. The
+status distinguishes an unavailable own item from an absent or unauthorized item;
+it does not expose the source text. An unreadable row that cannot establish ownership
+also returns 404 to a person session.
 
 History pages scan at most 32 candidates plus one lookahead from the two indexed source
 kinds before recipient/type filtering. Each kind producer takes at most 33 indexed entries;
@@ -147,11 +174,18 @@ sort plan are authored hosted controls, not measured cost or time evidence. If t
 expires before traversal finishes, clients must report incomplete history and refresh;
 they must not claim an empty or complete history or run an unbounded automatic scan.
 
-`page.omitted_items` is present only on this history path, including zero. Known unrelated
+`page.omitted_items` is an **approximate** diagnostic count, present only on this history
+path, including zero. It can undercount rows that decode but cannot bind to a valid
+original in the resource mapper, and overcount damaged rows whose owner or relevance
+cannot be established. Zero is not proof of complete owner history, and the count is
+not an exact number of missing items for that person. Known unrelated
 diagnostics are identified by a SQL relevance flag and skipped without Rust decoding,
-decode-budget charge or omission count. A malformed or over-width diagnostic body cannot
+decode-budget charge or omission count. SQL still validates and classifies bounded JSON
+per candidate and can parse or traverse it more than once; that work is not charged to
+the Rust decode-byte budget. The indexed `claims_kind_index` plan and limits above are
+unchanged, and do not certify negligible SQL cost. A malformed or over-width diagnostic body cannot
 be classified safely; it contributes only an anonymous, conservative omission rather than
-requiring unbounded parsing to prove it is noise. The count covers scanned candidates that could not be safely decoded, lacked a linked source at the captured cut,
+requiring unbounded parsing to prove it is noise. The count includes scanned candidates that could not be safely decoded, had a detected missing linked source at the captured cut,
 or exceeded the per-page decode/item byte budget. The cursor advances past those indices.
 Clients must retain an incomplete-history warning when this count is nonzero, even on the
 last page, and refresh after source replication/repair. Known foreign-owner rows are

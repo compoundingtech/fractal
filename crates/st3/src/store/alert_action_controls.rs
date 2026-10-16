@@ -972,7 +972,7 @@ fn a_person_read_racing_sender_withdrawal_has_one_terminal_source_outcome() {
 fn update_only_withdrawal_cannot_cancel_an_attached_question() {
     let (store, origin, input) = person_work::tests::fixture();
     let ask = store.ask_person(&input).unwrap();
-    let request = crate::model::PersonStepResponse {
+    let mut request = crate::model::PersonStepResponse {
         delegation: None,
         subject: ask.subject.clone(),
         actor: input.actor,
@@ -982,10 +982,19 @@ fn update_only_withdrawal_cannot_cancel_an_attached_question() {
         answer: None,
         idempotency_key: "wrong-kind-withdraw".into(),
     };
+    let index = store.index().unwrap();
     assert_eq!(
         store.withdraw_person_update(&request).unwrap_err().code,
         "invalid-update-withdrawal"
     );
+    // The existing source-kind refusal precedes ownership validation. The
+    // separate update control requires forbidden for a stranger's actual update.
+    request.actor = "agent/node.intruder".into();
+    assert_eq!(
+        store.withdraw_person_update(&request).unwrap_err().code,
+        "invalid-update-withdrawal"
+    );
+    assert_eq!(store.index().unwrap(), index);
     assert_eq!(
         store.step_run(&ask.subject).unwrap().unwrap().status,
         "ready"
