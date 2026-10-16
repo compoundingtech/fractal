@@ -424,7 +424,7 @@ fn cli_backoff_path() -> Option<PathBuf> {
                 .filter(|value| !value.is_empty())
                 .map(|home| PathBuf::from(home).join(".local/state"))
         })?;
-    Some(crate::product_dirs::resolve(base.join("st3"), base.join("fractal")).join("otel-cli-backoff"))
+    Some(st3_client::product_dirs::resolve(base.join("st3"), base.join("fractal")).join("otel-cli-backoff"))
 }
 
 fn unix_seconds() -> u64 {

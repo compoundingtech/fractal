@@ -149,7 +149,7 @@ pub fn prepare_plain_ui() -> Result<Option<String>> {
 
 pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     require_person_process()?;
-    let path = args.config.clone().unwrap_or_else(Config::creation_path);
+    let path = args.config.clone().unwrap_or_else(Config::default_path);
     // A new install records auto; a config that already exists keeps whatever mode it has,
     // including none, which reads as bypass.
     let mut config = if path.try_exists()? {

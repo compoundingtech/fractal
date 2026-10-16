@@ -450,7 +450,7 @@ fn parse_duration_ms(value: &str, name: &str) -> Result<u64> {
 
 impl Default for Config {
     fn default() -> Self {
-        let state_dir = crate::product_dirs::state_dir();
+        let state_dir = st3_client::product_dirs::state_dir();
         let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| state_dir.join("run"));
@@ -512,17 +512,7 @@ impl Config {
     }
 
     pub fn default_path() -> PathBuf {
-        crate::product_dirs::config_dir().join("config.toml")
-    }
-
-    /// Existing config stays selected; new installations create only the legacy path.
-    pub fn creation_path() -> PathBuf {
-        let selected = Self::default_path();
-        if selected.exists() {
-            selected
-        } else {
-            crate::product_dirs::config_creation_dir().join("config.toml")
-        }
+        st3_client::product_dirs::config_dir().join("config.toml")
     }
 
     pub fn load(path: Option<&Path>) -> Result<Self> {

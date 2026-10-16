@@ -84,7 +84,7 @@ impl Instance {
         anyhow::ensure!(home.is_absolute(), "HOME is not an absolute directory");
         Ok(Self {
             name: name.to_owned(),
-            root: crate::product_dirs::instance_root(home, name),
+            root: st3_client::product_dirs::instance_root(home, name),
             legacy_root: home.join(ROOT_DIRECTORY).join(name),
         })
     }
@@ -307,6 +307,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let new = home.path().join(".fractal-instance/try");
         std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(
+            new.join(st3_client::product_dirs::RECEIPT_FILE),
+            format!("{}\n", st3_client::product_dirs::MIGRATION_ID),
+        ).unwrap();
         let instance = Instance::new(home.path(), "try").unwrap();
         assert_eq!(instance.root(), new);
         assert_eq!(instance.state_home(), new.join("state"));

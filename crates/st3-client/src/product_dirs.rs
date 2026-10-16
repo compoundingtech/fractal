@@ -10,17 +10,17 @@ pub const RECEIPT_FILE: &str = ".fractal-migration-completed";
 pub const MIGRATION_ID: &str = "arn:lmig:smalltalk:2026-10-16-state-dirs-fractal";
 static WARNED: AtomicBool = AtomicBool::new(false);
 
-/// Locate existing data, preferring the destination only when it is unambiguous.
+/// Locate completed migrated data; unreceipted destinations never become authoritative.
 /// With neither directory present, callers still create the legacy directory.
 pub fn resolve(old: PathBuf, new: PathBuf) -> PathBuf {
     if !new.exists() {
         return old;
     }
-    if old.exists() && !completed(&new) {
+    if !completed(&new) {
         if !WARNED.swap(true, Ordering::Relaxed) {
             eprintln!(
-                "st: both {} and {} exist without a completed migration receipt; using the old directory",
-                old.display(), new.display()
+                "st: {} has no completed migration receipt; using {}",
+                new.display(), old.display()
             );
         }
         return old;
@@ -31,11 +31,6 @@ pub fn resolve(old: PathBuf, new: PathBuf) -> PathBuf {
 fn completed(directory: &Path) -> bool {
     std::fs::read_to_string(directory.join(RECEIPT_FILE))
         .is_ok_and(|receipt| receipt.strip_suffix('\n') == Some(MIGRATION_ID))
-}
-
-/// The creation path remains legacy until the live migration's writer cutover.
-pub fn config_creation_dir() -> PathBuf {
-    xdg_base("XDG_CONFIG_HOME", ".config").join("st3")
 }
 
 pub fn config_dir() -> PathBuf {
@@ -80,37 +75,64 @@ mod tests {
         const CHILD: &str = "ST_PRODUCT_DIRS_TEST_CHILD";
         if let Some(root) = std::env::var_os(CHILD) {
             let root = PathBuf::from(root);
+            let selected = std::env::var("ST_PRODUCT_DIRS_TEST_SELECTED").unwrap();
+            let config_dir = root.join("config").join(&selected);
+            let state_dir = root.join("state").join(&selected);
+            assert_eq!(st3::config::Config::default_path(), config_dir.join("config.toml"));
+            assert_eq!(st3::config::Config::default().state_dir, state_dir);
             assert_eq!(
-                crate::config::Config::default_path(),
-                root.join("config/fractal/config.toml")
+                crate::discover_unix_endpoint(None).unwrap(),
+                st3::config::Config::default().socket
             );
-            assert_eq!(crate::config::Config::default().state_dir, root.join("state/fractal"));
             assert_eq!(
-                crate::config::Config::creation_path(),
-                root.join("config/st3/config.toml")
+                crate::device::profile_path().unwrap(),
+                config_dir.join("stui-devices.json")
+            );
+            let path = st3::config::Config::default_path();
+            st3::config::Config::default().initialize_install_config(&path).unwrap();
+            assert_eq!(st3::config::Config::load(None).unwrap().state_dir, state_dir);
+            assert_eq!(
+                crate::discover_unix_endpoint(None).unwrap(),
+                st3::config::Config::default().socket
             );
             return;
         }
-        let root = tempfile::tempdir().unwrap();
-        for path in ["config/fractal", "state/fractal", "home"] {
-            std::fs::create_dir_all(root.path().join(path)).unwrap();
+        for receipted in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            for path in ["config/fractal", "config/st3", "state/fractal", "state/st3", "home"] {
+                std::fs::create_dir_all(root.path().join(path)).unwrap();
+            }
+            if receipted {
+                for path in ["config/fractal", "state/fractal"] {
+                    std::fs::write(
+                        root.path().join(path).join(RECEIPT_FILE),
+                        format!("{MIGRATION_ID}\n"),
+                    ).unwrap();
+                }
+            }
+            let (selected, ignored) = if receipted { ("fractal", "st3") } else { ("st3", "fractal") };
+            std::fs::write(
+                root.path().join("config").join(ignored).join("config.toml"),
+                "socket = '/wrong-daemon.sock'\n",
+            ).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "product_dirs::tests::xdg_environment_reaches_config_and_state_readers",
+                    "--nocapture",
+                ])
+                .env(CHILD, root.path())
+                .env("ST_PRODUCT_DIRS_TEST_SELECTED", selected)
+                .env("HOME", root.path().join("home"))
+                .env("XDG_CONFIG_HOME", root.path().join("config"))
+                .env("XDG_STATE_HOME", root.path().join("state"))
+                .env_remove("ST_INSTANCE")
+                .env_remove("XDG_RUNTIME_DIR")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(root.path().join("config").join(selected).join("config.toml").exists());
         }
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "product_dirs::tests::xdg_environment_reaches_config_and_state_readers",
-                "--nocapture",
-            ])
-            .env(CHILD, root.path())
-            .env("HOME", root.path().join("home"))
-            .env("XDG_CONFIG_HOME", root.path().join("config"))
-            .env("XDG_STATE_HOME", root.path().join("state"))
-            .env_remove("ST_INSTANCE")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert!(!root.path().join("config/st3").exists());
-        assert!(!root.path().join("state/st3").exists());
     }
 
     #[test]
@@ -118,7 +140,7 @@ mod tests {
         for (old_exists, new_exists, receipt, expected_new) in [
             (false, false, None, false),
             (true, false, None, false),
-            (false, true, None, true),
+            (false, true, None, false),
             (true, true, None, false),
             (true, true, Some("incomplete\n"), false),
             (true, true, Some("another-migration\n"), false),
@@ -168,6 +190,8 @@ mod tests {
         );
         std::fs::remove_dir_all(&old).unwrap();
         assert_eq!(instance_root(home.path(), "try"), new);
+        std::fs::remove_file(new.join(RECEIPT_FILE)).unwrap();
+        assert_eq!(instance_root(home.path(), "try"), old);
     }
 
     #[test]
@@ -181,6 +205,11 @@ mod tests {
             assert_eq!(selected, override_path);
             assert_eq!(product_dir(&selected), selected.join("st3"));
             std::fs::create_dir_all(selected.join("fractal")).unwrap();
+            assert_eq!(product_dir(&selected), selected.join("st3"));
+            std::fs::write(
+                selected.join("fractal").join(RECEIPT_FILE),
+                format!("{MIGRATION_ID}\n"),
+            ).unwrap();
             assert_eq!(product_dir(&selected), selected.join("fractal"));
             assert!(!default.exists());
         }

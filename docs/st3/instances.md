@@ -22,22 +22,24 @@ error, so a seat of one instance cannot start another by accident.
 
 ## Directory discovery
 
-The daemon and CLI resolve existing product config and state directories under
-`fractal`, falling back to `st3` under the same XDG base (`~/.config` and
+The daemon, CLI, standalone client and TUI share one resolver for product config
+and state directories under `fractal`, falling back to `st3` under the same XDG base (`~/.config` and
 `~/.local/state` by default, including on macOS). Instance roots resolve
 `~/.fractal-instance/NAME`, falling back to `~/.st-instance/NAME`; selection is
 per name, and `--instance` still wins over `ST_INSTANCE`.
 
-When both candidates exist, the new directory is selected only if its
+The new directory is selected only if its
 `.fractal-migration-completed` file contains exactly
 `arn:lmig:smalltalk:2026-10-16-state-dirs-fractal` followed by a newline.
-Otherwise the old directory is used with one warning per process. A receipt
+This receipt is required even when the old directory is absent: an unreceipted
+destination may be a torn copy or foreign data. Otherwise the old path is used,
+with one warning per process when an unreceipted destination exists. A receipt
 is local to the directory it certifies, not its parent or another instance.
 Only the migration's verified completion may write it.
 
-Discovery does not move files or create directories. With neither candidate
-present, creation remains at the old path. A missing default config is also
-created under `st3`, not `fractal`. Explicit config/state paths are unchanged.
+Discovery does not move files or create directories. Creators use the same
+selected root as readers, so a new config file is always read back. Without
+a completed receipt that root remains the old path. Explicit config/state paths are unchanged.
 Instance workspaces remain under `~/.st-instance/NAME/work`; workspace
 relocation is separate. The external installers, hooks and Home Manager
 declarations still use their existing paths; this reader expansion does not

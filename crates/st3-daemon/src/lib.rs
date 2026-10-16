@@ -20,7 +20,6 @@ pub(crate) mod checkout;
 pub mod claude_channel;
 pub mod client;
 pub mod config;
-pub mod product_dirs;
 pub mod conversation_search;
 pub mod creation;
 pub mod repositories;
