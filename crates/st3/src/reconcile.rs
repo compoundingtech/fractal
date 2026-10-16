@@ -14127,7 +14127,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     crate::schedule_standby::Readiness::Wait { key, until } => { self.arm_restart(&key, until); continue; },
                     crate::schedule_standby::Readiness::Held => continue,
                 }
-                if self.store.mission_spec(mission, Some(revision)).map_err(anyhow::Error::new)?.is_none() {
+                if self.store.mission_spec(mission, Some(revision))?.is_none() {
                     self.fail_schedule_work(schedule, &request.id, "standby-work-unavailable", "the standby has no requested mission revision; this occurrence will not retry")?;
                     continue;
                 }
