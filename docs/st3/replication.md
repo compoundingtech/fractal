@@ -141,6 +141,13 @@ not know remain in the original envelope and in retryable `unknown` receipt reco
 claims in that envelope and later envelopes from the same writer continue to project. An
 unknown claim alone does not degrade its envelope or mark a projection unhealthy.
 
+For `arrangement.edited`, an unfamiliar operation tag or placement subject family also waits
+as `unknown-claim-field`. Admission uses the receiving member's operation vocabulary and subject
+registry; upgrading admits the original immutable edit and projects its original revisions.
+Malformed known operations and references remain invalid. Local client edits do not use this
+leniency: they refuse unknown tags with `invalid-arrangement-operations` and unknown placement
+families with `invalid-subject-reference`.
+
 `st replication status` reports `waiting` claims; JSON exposes `waiting_claims` and retains
 `unknown_records` for existing readers. Doctor reports the waiting count without treating it
 as a fault. At daemon startup, admission retries those original records using the upgraded
@@ -443,7 +450,19 @@ without resetting its failure count. It neither exports an inventory nor records
 Probes do not extend their own eligibility window. Only authenticated activity, including an
 overload answer, keeps the 30-second cap active; a peer that answers probes but keeps failing
 signed exchanges returns to the long retry schedule after five minutes. A route that has never
-worked or a replaced route keeps the long retry schedule. Graph wakes
+worked or a replaced route keeps the long retry schedule.
+
+An outage is different from a refusal. When the failed exchange got no response head on its
+route, the peer never answered: the connection could not be made, or was closed, reset or
+aborted first. If a probe of that same route then answers, the link is back, and the exchange
+is retried at that probe instead of up to 30 seconds after the failure. That early attempt is
+spent until a probe finds the route down again or an exchange over it succeeds, so a link that
+answers `HEAD` but drops every exchange costs one early attempt (one export, signature and
+exchange) per outage and recovery, and otherwise keeps the 30-second cap. A peer that answered
+and failed (an error status, an overload, a body cut off after its head), or one that stalled
+until the exchange timed out after connecting, keeps the cap. The failure count is kept across
+an early attempt. The classification rests on how reqwest 0.12.28 and hyper 1.11.0 report a
+close before the response head; a control fails if that changes. Graph wakes
 still leave intentionally absent peers alone. Transport life only schedules an exchange;
 the exchange still authenticates every claim and peer.
 
@@ -812,6 +831,44 @@ wrongly. That defect is fixed in the build, with a test that fails without the f
 readmit envelopes a node already holds, does not replay its graph from nothing, and does not
 fetch a peer's projected rows. A member on an older build that still starts a heal gets an
 unsigned 404 from `/v1/peer/heal`, reports the heal as unavailable, and backs off.
+
+### A divergence is a P1 bug
+
+A divergence is a projection pure-function bug that needs a reproduction, never something to
+repair. Where the daemon's environment sets `ST3_DIVERGENCE_CHECK_INTERVAL_MS`, it looks for
+divergences at that interval, never more often than hourly; unset or zero, it never looks. The
+check is cheap by construction. Exchanges already compare digests; with the check on, a
+comparison that first finds a difference also keeps what a reproduction needs, with one pass over
+the inventory in memory, and a difference that lasts keeps the range it opened with. The check
+reads those comparisons in memory and, with one indexed read on the reader pool, every divergence
+fault and recovery on its own and its peers' daemon subjects, however old: an episode is open while
+a failure in it has no recovery that names it. That read goes through every `operational.failure`
+and `operational.recovered` claim ever recorded on those daemon subjects and keeps the divergence
+ones, so a daemon with a very large operational-fault history pays for all of it on each check. It skips a round while the store's writer or a
+write transaction ran over its target in the last minute, or replication is catching up or has put projection off, waiting a minute and
+then doubling. It writes only to open or end a fault.
+
+Each divergence is one `operational.failure` claim on the daemon subject (`daemon/NODE`) of the
+member that recorded it, with the condition `projection-divergence`, an episode starting
+`projection-divergence/` and severity `error`, so it shows as a high-priority fault for the
+fleet's fault agent. Its episode is one per member pair and projection, whichever member
+records it first. Its `reproduction` field names the projection, both members, the claim range
+(the inventory digest at the comparison that first found it and each writer's highest sequence
+in it), both members' digests for that projection, and both builds; a peer whose exchange does not
+say its build is recorded as `unknown`. Exchanges carry the sender's `build` for this; older peers
+leave it out. Nothing repairs the divergence. Its fault ends with an `operational.recovered`
+claim when the latest comparison with that peer, at the same envelopes, found the whole graph
+equal and no difference since. While another projection still differs with that peer, the
+episode stays open; that projection opens its own episode. The same pair and projection
+diverging again reopens the same episode. Comparisons are held in memory, so after a restart an
+open fault stays open until the next comparison that agrees.
+
+The `projection-divergence` objective in `slo/targets.toml` counts open divergence faults
+fleet-wide, with a target of none. A daemon that runs the check keeps the count its last check
+read, so `st doctor` (as `slo/projection-divergence`), `st slo` and the SLO history read no claims
+for it; a daemon that never checks shows neither the line nor the row. A miss is `info`, like any
+other target's: the fault goes to the fleet's fault agent, and while a peer still differs the
+replication check fails `st doctor` as above.
 
 ### First sync
 
