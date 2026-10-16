@@ -139,7 +139,7 @@ describe('gatewayPromptAnswers', () => {
       capabilities: async () => capabilities(true),
       promptRespond: async (request: unknown) => {
         sent.push(request)
-        return { value: { id: 'action/a', status: 'applied', targets: [seat] }, snapshot }
+        return { value: { id: 'action/a', status: 'accepted', targets: [seat] }, snapshot }
       },
     } as unknown as St3Client
     const port = gatewayPromptAnswers(client)
@@ -161,6 +161,15 @@ describe('gatewayPromptAnswers', () => {
       _tag: 'Refused',
       detail: 'that prompt is no longer waiting: it was answered or replaced.',
     })
+
+    // Only an accepted or completed action is an answer sent; any other word is no confirmation.
+    for (const [status, tag] of [['completed', 'Sent'], ['rejected', 'Refused'], ['queued', 'Refused']] as const) {
+      const answered = gatewayPromptAnswers({
+        capabilities: async () => capabilities(true),
+        promptRespond: async () => ({ value: { id: 'action/b', status, targets: [seat] }, snapshot }),
+      } as unknown as St3Client)
+      expect((await answered.respond({ alert: promptAlert as never, answer: 'allow' }))._tag, status).toBe(tag)
+    }
 
     let called = false
     const ungranted = gatewayPromptAnswers({

@@ -53,9 +53,11 @@ export const gatewayPromptAnswers = (client: St3Client): PromptAnswerPort => ({
         fence: { snapshot_id: snapshot, subject_revisions: { [alert.id]: alert.revision } },
         parameters: { target_id: alert.target_id, episode: alert.episode, answer },
       })
-      return (response.value as { status?: unknown }).status === 'rejected'
+      const status = (response.value as { status?: unknown }).status
+      if (status === 'accepted' || status === 'completed') return { _tag: 'Sent' }
+      return status === 'rejected'
         ? { _tag: 'Refused', detail: 'st did not take this answer. Answer it in the seat\'s terminal.' }
-        : { _tag: 'Sent' }
+        : { _tag: 'Refused', detail: 'st did not say whether it took this answer; check the alert before answering again.' }
     } catch (error) {
       return {
         _tag: 'Refused',
