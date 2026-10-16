@@ -206,6 +206,16 @@ def sign(base, line, always, attempt, tree):
     return done.returncode, (done.stdout + done.stderr).strip()
 
 
+def signed_record(text):
+    """The record id from evidence-wrap's JSON summary, or None when nothing was signed."""
+    start = text.find('{')
+    try:
+        summary = json.JSONDecoder().raw_decode(text[start:])[0] if start >= 0 else {}
+    except ValueError:
+        return None
+    return summary.get('record') if isinstance(summary, dict) else None
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--base', default='origin/main')
@@ -239,10 +249,14 @@ def main(argv):
                 finally:
                     git('worktree', 'remove', '--force', str(tree), check=False)
                     shutil.rmtree(scratch, ignore_errors=True)
-                print(f'check=select.{plugin.CHECK} signed={"yes" if code == 0 else "no"} '
+                # evidence-wrap exits with the record's exit code, so a signed `run` decision exits 1 too:
+                # whether a record was signed is read from its summary, not from the exit code.
+                record = signed_record(text)
+                print(f'check=select.{plugin.CHECK} signed={"yes" if record else "no"} record={record or "none"} '
                       + ' '.join(f'{n}={r["exit_code"]}' for n, r in always.items()))
                 if code != 0:
-                    print(text, file=sys.stderr)
+                    if not record:
+                        print(text, file=sys.stderr)
                     status = 1
     finally:
         os.unlink(tool)

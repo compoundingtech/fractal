@@ -232,6 +232,12 @@ class Sign(unittest.TestCase):
         for path in seen['paths']:
             self.assertFalse(Path(path).exists(), path)
 
+    def test_a_signed_run_decision_names_its_record_and_a_refusal_names_none(self):
+        summary = json.dumps({'record': 'r' * 40, 'exit_code': 1, 'verified': False, 'pushed': False}, indent=2)
+        self.assertEqual(select.signed_record(summary + '\n'), 'r' * 40)
+        self.assertIsNone(select.signed_record('evidence-wrap: the signer refused: inputs must be short nonempty strings'))
+        self.assertIsNone(select.signed_record('{not json'))
+
     def test_the_facts_inputs_pass_the_signers_own_rules_for_both_decisions(self):
         signer = load('evidence_sign', ROOT / 'scripts/evidence-sign')
         always = {'whole-tree-lints': {'command': ['true'], 'exit_code': 0, 'output_sha256': '0' * 64}}
