@@ -712,6 +712,29 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
+    /// Every lease-owning test gets its own descriptor table. Parallel tests in
+    /// one process can fork while another case holds a flock: CLOEXEC closes the
+    /// inherited fd only at exec, not at fork. The outer runner owns no leases.
+    fn isolated_case(name: &str) -> Result<bool> {
+        // Deliberate red control for the descriptor-table regression below only.
+        if std::env::var_os("ST_CLIENT_MODE_DISABLE_TEST_ISOLATION").is_some() {
+            return Ok(false);
+        }
+        if std::env::var("ST_CLIENT_MODE_TEST_CASE").ok().as_deref() == Some(name) {
+            return Ok(false);
+        }
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                &format!("client_mode::tests::{name}"),
+                "--nocapture",
+            ])
+            .env("ST_CLIENT_MODE_TEST_CASE", name)
+            .status()?;
+        ensure!(status.success(), "Isolated client-mode case failed: {name}");
+        Ok(true)
+    }
+
     fn private_tempdir() -> Result<tempfile::TempDir> {
         Ok(tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
@@ -720,6 +743,9 @@ mod tests {
 
     #[test]
     fn absent_status_is_read_only_and_transition_survives_reopen() -> Result<()> {
+        if isolated_case("absent_status_is_read_only_and_transition_survives_reopen")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let store = Store::in_account_home(root.path().to_path_buf(), None)?;
         assert_eq!(store.read()?, State::default());
@@ -745,6 +771,9 @@ mod tests {
 
     #[test]
     fn malformed_public_symlink_and_future_state_refuse() -> Result<()> {
+        if isolated_case("malformed_public_symlink_and_future_state_refuse")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         // Establish enrollment before testing malformed contents rather than a missing marker.
@@ -772,6 +801,9 @@ mod tests {
 
     #[test]
     fn missing_enrolled_state_refuses_even_before_first_publication() -> Result<()> {
+        if isolated_case("missing_enrolled_state_refuses_even_before_first_publication")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         assert!(!store.enrolled()?);
@@ -786,6 +818,9 @@ mod tests {
 
     #[test]
     fn missing_enrollment_for_a_published_mode_is_not_unconfigured() -> Result<()> {
+        if isolated_case("missing_enrollment_for_a_published_mode_is_not_unconfigured")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         store.lock()?.publish(State::Local {
@@ -799,6 +834,9 @@ mod tests {
 
     #[test]
     fn deleting_a_published_mode_does_not_restore_local_access() -> Result<()> {
+        if isolated_case("deleting_a_published_mode_does_not_restore_local_access")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         store.lock()?.publish(State::Transition {
@@ -814,6 +852,9 @@ mod tests {
 
     #[test]
     fn user_owned_ancestor_symlinks_are_rejected() -> Result<()> {
+        if isolated_case("user_owned_ancestor_symlinks_are_rejected")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         fs::create_dir(root.path().join("real"))?;
         symlink(root.path().join("real"), root.path().join("alias"))?;
@@ -825,6 +866,9 @@ mod tests {
 
     #[test]
     fn startup_and_first_enrollment_serialize_in_both_orders() -> Result<()> {
+        if isolated_case("startup_and_first_enrollment_serialize_in_both_orders")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         let producer = store.local_start()?;
@@ -842,21 +886,7 @@ mod tests {
 
     #[test]
     fn exec_child_does_not_keep_a_dropped_startup_lease() -> Result<()> {
-        // Parallel test threads can fork while this thread owns an fd. Run the lease
-        // holder in a separate exact-test process, so unrelated tests cannot inherit it.
-        if std::env::var_os("ST_CLIENT_MODE_EXEC_FD_ISOLATED").is_none() {
-            let status = std::process::Command::new(std::env::current_exe()?)
-                .args([
-                    "--exact",
-                    "client_mode::tests::exec_child_does_not_keep_a_dropped_startup_lease",
-                    "--nocapture",
-                ])
-                .env("ST_CLIENT_MODE_EXEC_FD_ISOLATED", "1")
-                .status()?;
-            ensure!(
-                status.success(),
-                "Isolated exec descriptor regression failed"
-            );
+        if isolated_case("exec_child_does_not_keep_a_dropped_startup_lease")? {
             return Ok(());
         }
         let root = private_tempdir()?;
@@ -874,8 +904,256 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fork_only_child_retains_the_lease_until_it_exits() -> Result<()> {
+        if isolated_case("fork_only_child_retains_the_lease_until_it_exits")? {
+            return Ok(());
+        }
+        let root = private_tempdir()?;
+        let store = Store::at(root.path().join("mode.json"))?;
+        let lease = store.local_start()?;
+        let mut ready = [-1; 2];
+        let mut release = [-1; 2];
+        ensure!(
+            unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) } == 0,
+            "ready pipe"
+        );
+        ensure!(
+            unsafe { libc::pipe2(release.as_mut_ptr(), libc::O_CLOEXEC) } == 0,
+            "release pipe"
+        );
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            // Only async-signal-safe libc operations after fork, before _exit.
+            unsafe {
+                libc::close(ready[0]);
+                libc::close(release[1]);
+                let byte = 1u8;
+                if libc::write(ready[1], (&byte as *const u8).cast(), 1) != 1 {
+                    libc::_exit(2);
+                }
+                let mut byte = 0u8;
+                let received = libc::read(release[0], (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(if received == 1 { 0 } else { 3 });
+            }
+        }
+        ensure!(pid > 0, "fork fixture failed");
+        unsafe {
+            libc::close(ready[1]);
+            libc::close(release[0]);
+        }
+        let mut ready_file = unsafe { File::from_raw_fd(ready[0]) };
+        let mut release_file = unsafe { File::from_raw_fd(release[1]) };
+        let mut reaped = false;
+        let outcome = (|| -> Result<()> {
+            let mut byte = [0u8; 1];
+            ready_file.read_exact(&mut byte)?;
+            drop(lease);
+            ensure!(
+                store.lock().is_err(),
+                "Fork-only child must remain a real lease holder"
+            );
+            release_file.write_all(&[1])?;
+            let mut status = 0;
+            ensure!(
+                unsafe { libc::waitpid(pid, &mut status, 0) } == pid,
+                "wait for exact child"
+            );
+            reaped = true;
+            ensure!(
+                libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                "fork-only child failed"
+            );
+            let _enrollment = store.lock()?;
+            Ok(())
+        })();
+        // Also clean up the exact owned child on an assertion or pipe failure.
+        if outcome.is_err() && !reaped {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+                libc::waitpid(pid, std::ptr::null_mut(), 0);
+            }
+        }
+        outcome
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lease_cross_case_a() -> Result<()> {
+        let Some(socket) = std::env::var_os("ST_CLIENT_MODE_CROSS_CASE_SOCKET") else {
+            return Ok(());
+        };
+        if isolated_case("lease_cross_case_a")? {
+            return Ok(());
+        }
+        let mut channel = std::os::unix::net::UnixStream::connect(socket)?;
+        channel.write_all(b"A")?;
+        let store = Store::at(PathBuf::from(
+            std::env::var_os("ST_CLIENT_MODE_CROSS_CASE_STORE").context("control store")?,
+        ))?;
+        let lease = store.local_start()?;
+        channel.write_all(b"H")?;
+        let mut command = [0];
+        channel.read_exact(&mut command)?;
+        ensure!(command == *b"D", "drop command");
+        drop(lease);
+        let result = store.lock();
+        channel.write_all(if result.is_ok() { b"Y" } else { b"N" })?;
+        channel.read_exact(&mut command)?;
+        ensure!(command == *b"X", "cleanup command");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lease_cross_case_b() -> Result<()> {
+        let Some(socket) = std::env::var_os("ST_CLIENT_MODE_CROSS_CASE_SOCKET") else {
+            return Ok(());
+        };
+        if isolated_case("lease_cross_case_b")? {
+            return Ok(());
+        }
+        let mut channel = std::os::unix::net::UnixStream::connect(socket)?;
+        channel.write_all(b"B")?;
+        let mut command = [0];
+        channel.read_exact(&mut command)?;
+        ensure!(command == *b"F", "fork command");
+        let mut ready = [-1; 2];
+        let mut release = [-1; 2];
+        ensure!(
+            unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) } == 0,
+            "ready pipe"
+        );
+        ensure!(
+            unsafe { libc::pipe2(release.as_mut_ptr(), libc::O_CLOEXEC) } == 0,
+            "release pipe"
+        );
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe {
+                libc::close(ready[0]);
+                libc::close(release[1]);
+                let byte = 1u8;
+                if libc::write(ready[1], (&byte as *const u8).cast(), 1) != 1 {
+                    libc::_exit(2);
+                }
+                let mut byte = 0u8;
+                let received = libc::read(release[0], (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(if received == 1 { 0 } else { 3 });
+            }
+        }
+        ensure!(pid > 0, "fork control");
+        unsafe {
+            libc::close(ready[1]);
+            libc::close(release[0]);
+        }
+        let mut ready_file = unsafe { File::from_raw_fd(ready[0]) };
+        let mut release_file = unsafe { File::from_raw_fd(release[1]) };
+        let mut reaped = false;
+        let outcome = (|| -> Result<()> {
+            let mut byte = [0];
+            ready_file.read_exact(&mut byte)?;
+            channel.write_all(b"C")?;
+            channel.read_exact(&mut command)?;
+            ensure!(command == *b"X", "release child command");
+            release_file.write_all(&[1])?;
+            let mut status = 0;
+            ensure!(
+                unsafe { libc::waitpid(pid, &mut status, 0) } == pid,
+                "reap exact control child"
+            );
+            reaped = true;
+            ensure!(
+                libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                "control child exit"
+            );
+            channel.write_all(b"E")?;
+            Ok(())
+        })();
+        if outcome.is_err() && !reaped {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+                libc::waitpid(pid, std::ptr::null_mut(), 0);
+            }
+        }
+        outcome
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parallel_case_descriptor_isolation_prevents_cross_test_fork_leaks() -> Result<()> {
+        if isolated_case("parallel_case_descriptor_isolation_prevents_cross_test_fork_leaks")? {
+            return Ok(());
+        }
+        let root = private_tempdir()?;
+        let socket = root.path().join("cases.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket)?;
+        let mut cases = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "client_mode::tests::lease_cross_case_",
+                "--test-threads=2",
+                "--nocapture",
+            ])
+            .env("ST_CLIENT_MODE_CROSS_CASE_SOCKET", &socket)
+            .env(
+                "ST_CLIENT_MODE_CROSS_CASE_STORE",
+                root.path().join("mode.json"),
+            )
+            .spawn()?;
+        let outcome = (|| -> Result<()> {
+            let mut a = None;
+            let mut b = None;
+            for _ in 0..2 {
+                let (mut channel, _) = listener.accept()?;
+                let mut role = [0];
+                channel.read_exact(&mut role)?;
+                match role[0] {
+                    b'A' => {
+                        ensure!(a.is_none(), "duplicate case A");
+                        a = Some(channel);
+                    }
+                    b'B' => {
+                        ensure!(b.is_none(), "duplicate case B");
+                        b = Some(channel);
+                    }
+                    _ => anyhow::bail!("unknown control case"),
+                }
+            }
+            let (mut a, mut b) = (a.context("case A")?, b.context("case B")?);
+            let mut signal = [0];
+            a.read_exact(&mut signal)?;
+            ensure!(signal == *b"H", "case A lease held");
+            b.write_all(b"F")?;
+            b.read_exact(&mut signal)?;
+            ensure!(signal == *b"C", "case B child forked");
+            a.write_all(b"D")?;
+            let mut acquired = [0];
+            a.read_exact(&mut acquired)?;
+            // Always release/reap the intentional holder before asserting red/green.
+            b.write_all(b"X")?;
+            b.read_exact(&mut signal)?;
+            ensure!(signal == *b"E", "case B child reaped");
+            a.write_all(b"X")?;
+            ensure!(cases.wait()?.success(), "control cases failed");
+            ensure!(
+                acquired == *b"Y",
+                "Unisolated fork inherited another test case's lease (deterministic red control)"
+            );
+            Ok(())
+        })();
+        if outcome.is_err() {
+            let _ = cases.kill();
+            let _ = cases.wait();
+        }
+        outcome
+    }
+
     #[test]
     fn relocation_never_ignores_legacy_authority_evidence() -> Result<()> {
+        if isolated_case("relocation_never_ignores_legacy_authority_evidence")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let path = root.path().join("mode.json");
         reject_legacy_evidence(&path)?;
@@ -893,6 +1171,9 @@ mod tests {
 
     #[test]
     fn group_writable_authority_refuses() -> Result<()> {
+        if isolated_case("group_writable_authority_refuses")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o775))?;
@@ -909,6 +1190,9 @@ mod tests {
 
     #[test]
     fn shared_local_directory_does_not_redirect_private_authority() -> Result<()> {
+        if isolated_case("shared_local_directory_does_not_redirect_private_authority")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         fs::create_dir(root.path().join(".local"))?;
         fs::set_permissions(
@@ -956,6 +1240,9 @@ mod tests {
 
     #[test]
     fn killed_holder_releases_lease_while_exec_child_survives() -> Result<()> {
+        if isolated_case("killed_holder_releases_lease_while_exec_child_survives")? {
+            return Ok(());
+        }
         use std::io::{BufRead as _, BufReader};
         let root = private_tempdir()?;
         let path = root.path().join("mode.json");
@@ -1008,6 +1295,9 @@ mod tests {
 
     #[test]
     fn publication_stays_on_opened_directory_after_path_substitution() -> Result<()> {
+        if isolated_case("publication_stays_on_opened_directory_after_path_substitution")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let authority = root.path().join("authority");
         fs::create_dir(&authority)?;
@@ -1036,6 +1326,9 @@ mod tests {
 
     #[test]
     fn recovery_artifact_without_marker_is_never_legacy() -> Result<()> {
+        if isolated_case("recovery_artifact_without_marker_is_never_legacy")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         fs::write(store.path().with_extension("recovery"), b"interrupted")?;
@@ -1046,6 +1339,9 @@ mod tests {
 
     #[test]
     fn absent_account_anchor_cannot_report_uninitialized_local() -> Result<()> {
+        if isolated_case("absent_account_anchor_cannot_report_uninitialized_local")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let store = Store::in_account_home(root.path().join("missing-home"), None)?;
         assert!(store.read().is_err());
@@ -1057,6 +1353,9 @@ mod tests {
 
     #[test]
     fn stale_generations_cannot_replace_a_fenced_state() -> Result<()> {
+        if isolated_case("stale_generations_cannot_replace_a_fenced_state")? {
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         let mut update = store.lock()?;
