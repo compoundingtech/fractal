@@ -412,7 +412,7 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                 agent_dir: private_dir,
                 session_dir: root.path().join("sessions"),
             };
-            env.extend(paths.environment("ownership-real-peer"));
+            env.extend(paths.environment(SUBJECT.strip_prefix("agent/").unwrap()));
             let start_runtime = runtime.clone();
             let start_name = name.clone();
             let cwd = root.path().to_owned();
