@@ -95,7 +95,7 @@ fn inherited_hook_processes_cannot_bind_record_context_or_request_permission() {
                 serde_json::from_slice(&fs::read(session_dir.join("binding.json")).unwrap())
                     .unwrap();
             assert_eq!(
-                binding["native_session_id"], PRIMARY,
+                binding["nativeSessionId"], PRIMARY,
                 "positive real SessionStart must bind fully"
             );
             let raw = include_bytes!(

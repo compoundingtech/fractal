@@ -114,6 +114,18 @@ async fn helper(role: &str) {
         st_drivers::harness_events::enable(&dir, runtime).unwrap();
         let seq = st_drivers::harness_state::claim(&dir, "ownership-real-peer", "claude", SESSION)
             .unwrap();
+        // claim() deliberately installs an Ended/superseded fence. This fixture's
+        // live wrapper must publish provider state before exercising native admission,
+        // just as the real wrapper does; a graph harness claim alone is not authority.
+        use st_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
+        Writer::new(&dir, "ownership-real-peer", "claude", None)
+            .with_ownership(SESSION, seq)
+            .observe(Observation::new(
+                Activity::Active,
+                BlockedOn::None,
+                InputBuffer::Empty,
+            ))
+            .unwrap();
         let wrapper = st_drivers::claude_process::process(std::process::id()).unwrap();
         fs::OpenOptions::new()
             .write(true)
@@ -169,7 +181,10 @@ async fn helper(role: &str) {
                 let fence: Fence = serde_json::from_value(request["fence"].clone()).unwrap();
                 match client.post::<_, Fence>("/v1/mailbox/bind", &fence).await {
                     Ok(bound) => json!({"ok":true,"fence":bound}),
-                    Err(_) => json!({"ok":false}),
+                    Err(error) => {
+                        eprintln!("ownership fixture bind role={role}: {error}");
+                        json!({"ok":false})
+                    }
                 }
             }
             "open" => {
@@ -527,7 +542,7 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                 json!({"op":"bind","fence":requested}),
             )
             .await;
-            assert_eq!(bound["ok"], true);
+            assert_eq!(bound["ok"], true, "positive primary bind: {bound}");
             let fence: Fence = serde_json::from_value(bound["fence"].clone()).unwrap();
             assert_eq!(
                 call(
