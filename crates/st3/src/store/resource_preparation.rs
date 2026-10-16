@@ -43,11 +43,13 @@ impl NativeCut {
 }
 
 fn temporary_schema_safe(connection: &Connection) -> bool {
-    // CoreStore installs only this writer-local clock. Other TEMP objects may shadow main
-    // dependencies on one connection, so choose the unchanged path until a reopen instead.
+    // The writer clock and the canonical replay's retained ID-order scratch table do not
+    // shadow any preparation input. File-backed open can leave the latter empty after replay.
+    // Admit only these table names, never TEMP views, indexes or triggers. Every other TEMP
+    // object still selects the unchanged path; native schema cookies fence later changes.
     // This is catalog work, explicitly included in seed/validation accounting, not history.
     connection.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name!='write_clock' OR type!='table')",
+        "SELECT NOT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name NOT IN ('write_clock','heal_replay_base_order') OR type!='table')",
         [], |row| row.get::<_, bool>(0),
     ).unwrap_or(false)
 }

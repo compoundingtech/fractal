@@ -1,7 +1,10 @@
 use super::*;
 
 fn fixture() -> (Store, String) {
-    let store = Store::open_memory("prepared-fixture").unwrap();
+    fixture_for(Store::open_memory("prepared-fixture").unwrap())
+}
+
+fn fixture_for(store: Store) -> (Store, String) {
     let source = r#"version 2
 resource "fixture" { kind "vcs.pull-request" }
 observer "fixture" {
@@ -283,12 +286,57 @@ fn tokens_do_not_cross_store_or_fence_incarnations_and_nested_pins_are_unavailab
 fn a_reopened_store_cannot_reuse_the_old_handles_token() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.sqlite");
-    let store = Store::open(&path, "prepared-reopen").unwrap();
+    let (store, revision) = fixture_for(Store::open(&path, "prepared-reopen").unwrap());
+    assert!(store.connection.write().query_row(
+        "SELECT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name='heal_replay_base_order' AND type='table')",
+        [], |row| row.get::<_, bool>(0),
+    ).unwrap(), "file-backed open must exercise the retained replay scratch table");
     let fence = Fence::new(&store);
     let prepared = fence.prepare(&store, |_| ());
-    assert!(prepared.value.is_some());
+    assert!(
+        prepared.value.is_some(),
+        "known replay scratch must not disable preparation"
+    );
+    assert!(fence.current(&store, &store.connection.write(), &prepared));
+    observe(&store, &revision, 1);
+    take_counts();
+    observe(&store, &revision, 2);
+    let file_backed = take_counts();
+    assert_eq!(
+        (
+            file_backed.fast,
+            file_backed.invalidated,
+            file_backed.fallback
+        ),
+        (1, 0, 0)
+    );
+    assert_eq!(file_backed.seed.len(), 1);
+    assert_eq!(file_backed.preparation.len(), 1);
+    assert_eq!(file_backed.writer.len(), 1);
+    assert!(!file_backed.writer[0].0);
+    store
+        .connection
+        .write()
+        .execute_batch("CREATE TEMP TABLE invented_shadow(value TEXT)")
+        .unwrap();
+    assert!(fence.prepare(&store, |_| ()).value.is_none());
+    store.connection.write().execute_batch(
+        "DROP TABLE temp.invented_shadow;
+         CREATE TEMP TRIGGER invented_replay_trigger AFTER INSERT ON heal_replay_base_order BEGIN SELECT 1; END;",
+    ).unwrap();
+    assert!(
+        fence.prepare(&store, |_| ()).value.is_none(),
+        "a TEMP trigger on an admitted scratch table is still refused"
+    );
     drop(store);
     let reopened = Store::open(&path, "prepared-reopen").unwrap();
+    let reopened_fence = Fence::new(&reopened);
+    let fresh = reopened_fence.prepare(&reopened, |_| ());
+    assert!(
+        fresh.value.is_some(),
+        "a fresh file-backed incarnation can prepare"
+    );
+    assert!(reopened_fence.current(&reopened, &reopened.connection.write(), &fresh));
     assert!(fence.prepare(&reopened, |_| ()).value.is_none());
     assert!(!fence.current(&reopened, &reopened.connection.write(), &prepared));
     // The retained Arc allocation prevents an address-reused native handle from making a

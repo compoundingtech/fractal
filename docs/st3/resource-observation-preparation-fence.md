@@ -119,9 +119,14 @@ performs BEGIN and a first current_index read before the input closure. It
 cannot join an old same-store request/pin because those were excluded on the
 same thread before seed. Its guard rolls back/releases on every exit, before
 validation is enqueued. TEMP objects could change name resolution differently
-on the writer and reader; the private path permits only the existing write_clock
-table and otherwise selects the old path. The TEMP catalog check is additional
-SQL cost, not free metadata. It admits no alternate table/view/trigger shadow.
+on the writer and reader; the private path permits only the write_clock table
+and the retained heal_replay_base_order table used by canonical replay. Neither
+name shadows a preparation dependency. File-backed initial open runs that replay
+and retains its empty scratch table; rejecting it would disable the optimization.
+Every other TEMP object, including triggers and views, selects the old path.
+The TEMP catalog check is additional SQL cost, not free metadata; later schema
+changes still invalidate the native cut. The file-backed/reopen control requires
+actual fast observation without weakening the unknown-TEMP rejection.
 
 The actual production call is reconcile's async observer completion, after the
 provider await and prior reader guards have ended. It holds no writer loan,
