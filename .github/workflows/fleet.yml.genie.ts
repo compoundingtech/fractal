@@ -24,6 +24,8 @@ import {
   evidenceStepNames,
   evidenceStepSteps,
   linuxStageRunner,
+  lowPriorityStageRunner,
+  lowPrioritySupportingStageRunsOn,
   linuxStageRunsOn,
   perfStoresCache,
   mailStageRunsOn,
@@ -305,7 +307,7 @@ export default githubWorkflow(withQueueWatch(readyPRJobs(auditCaches({
   // actionlint must know the Namespace shape label the stage jobs use.
   actionlint: {
     ...defaultActionlintConfig,
-    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner],
+    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner, ...lowPriorityStageRunner],
   },
   jobs: wireEvidenceSkips({
     [pickRunnerJobId]: pickRunnerJob,
@@ -557,6 +559,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     'linux-fleet-compat': linuxStageJob({
       name: 'linux-fleet-compat',
       stage: 'fleet-compat',
+      runsOn: lowPrioritySupportingStageRunsOn,
       setup: commonSetupSteps,
       description: 'Run fleet compatibility against the pinned older st3',
     }),
@@ -703,7 +706,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
     'perf-cost': namespaceStageJob({
       name: 'perf-cost',
       stage: 'cost',
-      runsOn: linuxStageRunner,
+      runsOn: lowPriorityStageRunner,
       condition: "github.event_name != 'merge_group'",
       setup: commonSetupSteps,
       description: 'Run the cost check',

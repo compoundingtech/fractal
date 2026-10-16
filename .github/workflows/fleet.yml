@@ -2239,7 +2239,7 @@ jobs:
     name: linux-fleet-compat
     needs: [pick-runner, evidence-gate-linux-gate]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.evidence-gate-linux-gate.outputs.skip == 'true')) }}
-    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (startsWith(needs.pick-runner.outputs.ci1 || '', '["nscloud-') && format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=5","namespace-features:github.run-id={0}"]', github.run_id) || needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=5;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=5","namespace-features:github.run-id={0}"]', github.run_id)) }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
@@ -2837,7 +2837,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'merge_group') }}
     runs-on:
       [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}",
+        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=5",
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 120
