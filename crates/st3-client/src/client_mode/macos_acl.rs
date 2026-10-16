@@ -73,6 +73,11 @@ mod tests {
     unsafe extern "C" {
         fn st_client_mode_acl_check_export(bytes: *const u8, size: usize) -> u32;
         fn st_client_mode_acl_export_layout(out: *mut usize);
+        fn st_client_mode_acl_query_result(
+            result: i32,
+            error: i32,
+            out: *mut NativeObservation,
+        ) -> u32;
         fn st_client_mode_acl_check_entry(
             flags: u32,
             rights: u64,
@@ -180,9 +185,9 @@ mod tests {
                 "everyone allow write,file_inherit,only_inherit",
             ),
         ] {
-            assert_ne!(
+            assert_eq!(
                 inspect_fixture(name, Some(ace), false),
-                AclDisposition::Accepted
+                AclDisposition::AllowGrant
             );
         }
     }
@@ -197,11 +202,22 @@ mod tests {
                 "everyone allow read,file_inherit,only_inherit",
             ),
         ] {
-            assert_ne!(
+            assert_eq!(
                 inspect_fixture(name, Some(ace), true),
-                AclDisposition::Accepted
+                AclDisposition::AllowGrant
             );
         }
+    }
+
+    #[test]
+    fn query_enoent_is_not_missing_property() {
+        let mut out = NativeObservation::default();
+        assert_eq!(
+            unsafe { st_client_mode_acl_query_result(-1, libc::ENOENT, &mut out) },
+            1
+        );
+        assert_eq!(out.reason, 1);
+        assert_eq!(out.os_error, libc::ENOENT);
     }
 
     #[test]

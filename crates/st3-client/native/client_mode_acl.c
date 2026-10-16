@@ -1,6 +1,7 @@
 // FD-only macOS authority inspection. Kept behind the Mac-unavailable guard until
 // the exact native fixture matrix is qualified. No ACLs or permissions are changed.
 #include <sys/acl.h>
+#include <sys/stat.h>
 #include <membership.h>
 #include <errno.h>
 #include <stdint.h>
@@ -53,6 +54,16 @@ static int known_tag(acl_tag_t t) {
     case ACL_EXTENDED_ALLOW: case ACL_EXTENDED_DENY: return 1;
     }
     return 0;
+}
+
+// Query errors are errors even when errno happens to be ENOENT. Absence is
+// accepted only from a successful property-presence query after successful fstatx.
+uint32_t st_client_mode_acl_query_result(int result, int saved_errno,
+                                       struct st_acl_observation *out) {
+    if (result == 0) return 0;
+    out->reason = 1;
+    out->os_error = saved_errno;
+    return 1;
 }
 
 // Pure validation of the public exported representation. Arbitrary alignment is
@@ -121,6 +132,9 @@ void st_client_mode_acl_inspect(int fd, int private_object,
     // Deferred inheritance could change the ACL at rename; explicitly unsupported.
     const uint32_t acl_flags = KAUTH_ACL_NO_INHERIT;
     acl_t acl = NULL;
+    filesec_t security = NULL;
+    struct stat metadata;
+    int acl_present = 0;
     struct kauth_filesec *external = NULL;
     uint64_t maximum = 0;
     memset(out, 0, sizeof(*out));
@@ -131,12 +145,17 @@ void st_client_mode_acl_inspect(int fd, int private_object,
         ((out->observed_maximum = maximum), maximum != rights)) {
         out->reason = 3; goto done;
     }
-    errno = 0;
-    acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
-    if (acl == NULL) {
-        // Only the library's explicit missing-property result means no ACL.
-        if (errno != ENOENT) { out->reason = 1; out->os_error = errno; }
-        goto done;
+    security = filesec_init();
+    if (security == NULL) { out->reason = 1; out->os_error = errno; goto done; }
+    int queried = fstatx_np(fd, &metadata, security);
+    int query_errno = errno;
+    if (st_client_mode_acl_query_result(queried, query_errno, out) != 0) goto done;
+    if (filesec_query_property(security, FILESEC_ACL, &acl_present) != 0) {
+        out->reason = 1; out->os_error = errno; goto done;
+    }
+    if (acl_present == 0) goto done;
+    if (acl_present != 1 || filesec_get_property(security, FILESEC_ACL, &acl) != 0 || acl == NULL) {
+        out->reason = 1; out->os_error = errno; goto done;
     }
     ssize_t size = acl_size(acl);
     if (size < 0 || !KAUTH_FILESEC_VALID((size_t)size) ||
@@ -187,5 +206,6 @@ void st_client_mode_acl_inspect(int fd, int private_object,
     }
 done:
     free(external);
+    if (security != NULL) filesec_free(security);
     if (acl != NULL) acl_free(acl);
 }
