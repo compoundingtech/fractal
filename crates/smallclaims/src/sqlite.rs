@@ -961,7 +961,10 @@ fn run_write_batch(
     let op_count = answers.len();
     // Shared transaction work has its own operation, never the first submitter's. Do not
     // keep this scope entered while running jobs: Op::enter preserves an existing origin.
-    let committed = crate::task_cpu::blocking("writer.batch.commit", || {
+    let committed = {
+        // A lexical guard does not capture connection while transaction still borrows it.
+        // Consume the transaction first, then borrow connection for postcommit observers.
+        let _scope = crate::task_cpu::blocking_scope("writer.batch.commit");
         let committed = match (transaction, failure) {
             (Some(transaction), None) => {
                 let finalize_started = attribution.as_ref().map(|_| std::time::Instant::now());
@@ -1007,7 +1010,7 @@ fn run_write_batch(
             batch.finish(started.elapsed(), post_commit_started.elapsed(), op_count);
         }
         committed.map_err(|error| format!("{error:#}"))
-    });
+    };
     // Finish samples before callers snapshot their operations. End holds before ACK
     // delivery too: channel backpressure is no longer counted as writer-held time.
     drop(hold);

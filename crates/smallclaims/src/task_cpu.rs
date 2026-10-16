@@ -75,30 +75,44 @@ impl Drop for Accumulator<'_> {
     }
 }
 
-struct Sample<'a, 'm> {
+struct Sampling {
     started: Option<Duration>,
     nested: bool,
+}
+
+impl Sampling {
+    fn start() -> Self {
+        let nested = MEASURING.with(|active| active.replace(true));
+        Self { started: (!nested).then(thread_cpu).flatten(), nested }
+    }
+
+    fn finish(&self, accumulator: &mut Accumulator<'_>) {
+        let ended = (!self.nested).then(thread_cpu).flatten();
+        MEASURING.with(|active| active.set(self.nested));
+        accumulator.polls += 1;
+        if let Some(elapsed) = self.started.zip(ended).and_then(|(start, end)| end.checked_sub(start)) {
+            accumulator.cpu += elapsed;
+        }
+        if accumulator.flushed.elapsed() >= Duration::from_secs(1) {
+            accumulator.flush();
+        }
+    }
+}
+
+struct Sample<'a, 'm> {
+    sampling: Sampling,
     accumulator: &'a mut Accumulator<'m>,
 }
 
 impl<'a, 'm> Sample<'a, 'm> {
     fn start(accumulator: &'a mut Accumulator<'m>) -> Self {
-        let nested = MEASURING.with(|active| active.replace(true));
-        Self { started: (!nested).then(thread_cpu).flatten(), nested, accumulator }
+        Self { sampling: Sampling::start(), accumulator }
     }
 }
 
 impl Drop for Sample<'_, '_> {
     fn drop(&mut self) {
-        let ended = (!self.nested).then(thread_cpu).flatten();
-        MEASURING.with(|active| active.set(self.nested));
-        self.accumulator.polls += 1;
-        if let Some(elapsed) = self.started.zip(ended).and_then(|(start, end)| end.checked_sub(start)) {
-            self.accumulator.cpu += elapsed;
-        }
-        if self.accumulator.flushed.elapsed() >= Duration::from_secs(1) {
-            self.accumulator.flush();
-        }
+        self.sampling.finish(self.accumulator);
     }
 }
 
@@ -123,9 +137,43 @@ async fn measured<F: Future>(name: &'static str, future: F, metrics: &Instrument
 
 /// Measure one blocking invocation, and label any writer work it performs.
 pub fn blocking<T>(name: &'static str, work: impl FnOnce() -> T) -> T {
-    let mut accumulator = Accumulator::new(name, &METRICS);
-    let _sample = Sample::start(&mut accumulator);
-    crate::profile::task(name, work)
+    let _scope = blocking_scope(name);
+    work()
+}
+
+/// Lexical blocking accounting for code whose sequential borrows cannot share a closure.
+/// Synchronous and !Send: thread-clock samples and TLS must end on the entering thread.
+pub(crate) struct BlockingScope {
+    profile: Option<crate::profile::TaskScope>,
+    sampling: Option<Sampling>,
+    accumulator: Accumulator<'static>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+pub(crate) fn blocking_scope(name: &'static str) -> BlockingScope {
+    let accumulator = Accumulator::new(name, &METRICS);
+    let sampling = Sampling::start();
+    let mut scope = BlockingScope {
+        profile: None,
+        sampling: Some(sampling),
+        accumulator,
+        _thread: std::marker::PhantomData,
+    };
+    // Install the sampling guard before profile entry, including its unwind path.
+    scope.profile = Some(crate::profile::task_scope(name));
+    scope
+}
+
+impl Drop for BlockingScope {
+    fn drop(&mut self) {
+        // Keep a Sample guard alive while profiling exits, so even an exit panic
+        // restores sampling TLS. Its drop precedes the accumulator's OTel flush.
+        let _sample = Sample {
+            sampling: self.sampling.take().expect("one blocking scope exit"),
+            accumulator: &mut self.accumulator,
+        };
+        drop(self.profile.take());
+    }
 }
 
 #[cfg(test)]
@@ -134,6 +182,111 @@ mod tests {
     use opentelemetry::metrics::MeterProvider as _;
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
     use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+
+    #[test]
+    fn lexical_and_callback_scopes_match_on_success_nesting_and_unwind() {
+        const CHILD: &str = "ST3_BLOCKING_SCOPE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact",
+                    "task_cpu::tests::lexical_and_callback_scopes_match_on_success_nesting_and_unwind",
+                    "--nocapture"])
+                .env(CHILD, "1")
+                .env("ST3_PROFILE_DIR", directory.path())
+                .env("ST3_PROFILE_SLOW_MS", "0")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        crate::profile::init_from_env();
+        for (lexical, name) in [(false, "test.callback"), (true, "test.lexical"),
+            (false, "test.callback.panic"), (true, "test.lexical.panic")] {
+            let panics = name.ends_with(".panic");
+            let work = || {
+                assert!(MEASURING.with(Cell::get));
+                assert_eq!(crate::performance::current().unwrap().kind(), name);
+                assert!(crate::profile::current().is_some());
+                {
+                    let nested = blocking_scope("test.nested");
+                    assert!(nested.sampling.as_ref().unwrap().nested);
+                    assert_eq!(crate::performance::current().unwrap().kind(), name);
+                }
+                assert!(MEASURING.with(Cell::get), "nested exit must retain outer scope");
+                if panics { panic!("exercise scope unwind"); }
+                42
+            };
+            let result = std::panic::catch_unwind(|| {
+                if lexical {
+                    let scope = blocking_scope(name);
+                    assert!(!scope.sampling.as_ref().unwrap().nested);
+                    work()
+                } else {
+                    blocking(name, work)
+                }
+            });
+            assert_eq!(result.is_err(), panics);
+            if let Ok(value) = result { assert_eq!(value, 42); }
+            assert!(!MEASURING.with(Cell::get));
+            assert!(crate::performance::current().is_none());
+            assert!(crate::profile::current().is_none());
+        }
+        // Neither entry form creates a new profile operation inside an existing one.
+        let existing = crate::profile::Op::start("test.existing", None).unwrap();
+        {
+            let _entered = existing.enter();
+            blocking("test.callback.existing", || ());
+            let _scope = blocking_scope("test.lexical.existing");
+        }
+        existing.finish();
+        provider.force_flush().unwrap();
+        let exported = exporter.get_finished_metrics().unwrap();
+        let mut polls = std::collections::BTreeMap::new();
+        let mut cpu = std::collections::BTreeMap::new();
+        for metric in exported.iter().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics()) {
+            match metric.data() {
+                AggregatedMetrics::U64(MetricData::Sum(sum)) if metric.name() == "st.task.polls" => {
+                    for point in sum.data_points() {
+                        let task = point.attributes().find(|attribute| attribute.key.as_str() == "st.task").unwrap();
+                        *polls.entry(task.value.to_string()).or_insert(0) += point.value();
+                    }
+                }
+                AggregatedMetrics::F64(MetricData::Sum(sum)) if metric.name() == "st.task.cpu_time" => {
+                    for point in sum.data_points() {
+                        let task = point.attributes().find(|attribute| attribute.key.as_str() == "st.task").unwrap();
+                        *cpu.entry(task.value.to_string()).or_insert(0.0) += point.value();
+                    }
+                }
+                _ => {}
+            }
+        }
+        for name in ["test.callback", "test.lexical", "test.callback.panic", "test.lexical.panic"] {
+            assert_eq!(polls[name], 1, "one CPU invocation, including unwind");
+        }
+        assert_eq!(polls["test.nested"], 4);
+        assert_eq!(cpu.get("test.nested").copied().unwrap_or(0.0), 0.0);
+        let slow = std::path::PathBuf::from(std::env::var_os("ST3_PROFILE_DIR").unwrap()).join("slow.jsonl");
+        let records = std::fs::read_to_string(slow).unwrap().lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+        for name in ["test.callback", "test.lexical", "test.callback.panic", "test.lexical.panic"] {
+            let own = records.iter().filter(|record| record["label"] == name).collect::<Vec<_>>();
+            assert_eq!(own.len(), 1);
+            assert_eq!(own[0]["completion"], if name.ends_with(".panic") { "dropped" } else { "finished" });
+        }
+        assert_eq!(records.iter().filter(|record| record["label"] == "test.existing").count(), 1);
+        assert!(!records.iter().any(|record| matches!(record["label"].as_str(),
+            Some("test.nested" | "test.callback.existing" | "test.lexical.existing"))));
+        let performance = crate::performance::snapshot();
+        for name in ["test.callback", "test.lexical", "test.callback.panic", "test.lexical.panic"] {
+            let own = performance["requests"].as_array().unwrap().iter().find(|row| row["kind"] == name).unwrap();
+            assert_eq!(own["count"], if name.ends_with(".panic") { 0 } else { 1 });
+        }
+    }
 
     #[tokio::test]
     async fn busy_future_accrues_cpu_but_sleep_does_not() {
