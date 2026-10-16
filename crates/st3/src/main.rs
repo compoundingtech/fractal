@@ -20372,6 +20372,16 @@ async fn drive_st2_native(
                     fs::write(PathBuf::from(root).join("fence-received"),
                         if task.is_finished() { "finished" } else { "pending" })?;
                 }
+                // The subscription can reopen after the provider has ended, and the daemon then
+                // fences it as terminal. With the provider's task returned there is nothing left
+                // to deliver to: stop listening and let the task arm record the exit.
+                if let Some(st3::mailbox::Frame::Fenced { reason }) = &frame
+                    && provider_ended_refusal(reason)
+                    && provider_task_settled(&task).await
+                {
+                    mailbox.subscription = None;
+                    continue;
+                }
                 let mail_changed = matches!(&frame, Some(st3::mailbox::Frame::Mailbox { .. }));
                 mailbox.accept(frame, &runtime_id)?;
                 if driver == "opencode" && mail_changed
@@ -25147,7 +25157,12 @@ fn claude_attachment_path(fence: &st3::mailbox::Fence) -> String {
 /// The daemon's refusal of a binding whose provider has already ended.
 fn provider_ended_before_bind(error: &anyhow::Error) -> bool {
     st3::client::api_error_code(error) == Some("stale-mailbox-session")
-        && format!("{error:#}").contains("the provider authority is terminal")
+        && provider_ended_refusal(&format!("{error:#}"))
+}
+
+/// The text of that refusal, as a bind error or a fenced subscription carries it.
+fn provider_ended_refusal(text: &str) -> bool {
+    text.contains("stale-mailbox-session") && text.contains("the provider authority is terminal")
 }
 
 /// Whether the provider's task has returned, waiting briefly for it: its terminal record is
@@ -26221,6 +26236,19 @@ mod projection_contention_retry_tests {
         retry.finish(now + Duration::from_secs(30), 1, false);
         assert_eq!(retry.poll(now + Duration::from_secs(31), 2, true), None);
         assert_eq!(retry.poll(now + Duration::from_secs(61), 2, true), Some(1));
+    }
+    #[test]
+    fn only_the_terminal_provider_refusal_counts_as_an_ended_provider() {
+        assert!(provider_ended_refusal(
+            "st API returned 422 stale-mailbox-session: the provider authority is terminal"
+        ));
+        for other in [
+            "st API returned 422 stale-mailbox-session: the provider session was superseded",
+            "st API returned 422 mailbox-session-starting: waiting for provider ownership",
+            "st API returned 500 internal: the provider authority is terminal",
+        ] {
+            assert!(!provider_ended_refusal(other), "{other}");
+        }
     }
     #[tokio::test(start_paused = true)]
     async fn a_provider_task_that_has_returned_is_settled_and_one_that_has_not_is_not() {
