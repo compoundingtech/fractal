@@ -432,15 +432,25 @@ impl PtyRuntime {
             .iter()
             .map(OsString::as_os_str)
             .collect::<Vec<_>>();
+        // The launcher's final environment is known before the host systemd session is
+        // chosen, so the seat overlay joins the base here rather than after wrapping.
+        let launcher_environment = self.command_environment.as_ref().map(|base| {
+            let mut environment = base.clone();
+            environment.extend(terminal_env.clone());
+            environment
+        });
         const ATTEMPTS: u32 = 4;
         let mut last_failure = None;
         for attempt in 0..ATTEMPTS {
-            let mut command =
-                crate::wrap_isolated(&unit, std::ffi::OsStr::new(&self.binary), &argument_refs);
-            if let Some(environment) = &self.command_environment {
-                command.env_clear().envs(environment);
+            let mut command = crate::isolate::wrap_in(
+                &unit,
+                std::ffi::OsStr::new(&self.binary),
+                &argument_refs,
+                launcher_environment.as_ref(),
+            );
+            if launcher_environment.is_none() {
+                command.envs(&terminal_env);
             }
-            command.envs(&terminal_env);
             crate::pty_launch_environment::configure_pty_placement(&mut command, &self.root);
             // A later failed attempt cannot close a producer created by an earlier
             // attempt. Only failure to create the first launcher proves rejection.
