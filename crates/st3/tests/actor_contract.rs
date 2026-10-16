@@ -33,6 +33,24 @@ fn actor_contract_prints_without_daemon_or_config() {
     );
     assert!(value.get("effective").is_none());
     assert!(!home.path().join("config").exists());
+    // An absent file alone would not detect a loader that tolerates missing config.
+    // A malformed file must also be irrelevant to static mode.
+    let config_dir = home.path().join("config/st3");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "not valid TOML = [").unwrap();
+    let static_with_invalid_config = command(home.path())
+        .args(["actor-contract", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        static_with_invalid_config.status.success(),
+        "{}",
+        String::from_utf8_lossy(&static_with_invalid_config.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&static_with_invalid_config.stdout).unwrap(),
+        value
+    );
     let refused = command(home.path())
         .args(["actor-contract", "--as", "person/operator"])
         .output()
@@ -68,6 +86,24 @@ fn actor_contract_effective_uses_real_config_resolution() {
         config_dir.join("config.toml").to_str().unwrap()
     );
     assert!(value["effective"]["instance"].is_null());
+    assert_eq!(
+        value["effective"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["config_path", "instance", "state_dir"].into_iter().collect(),
+        "effective mode must expose metadata only, not config values"
+    );
+    let static_output = command(home.path())
+        .args(["actor-contract", "--json"])
+        .output()
+        .unwrap();
+    assert!(static_output.status.success());
+    let static_value: serde_json::Value = serde_json::from_slice(&static_output.stdout).unwrap();
+    assert_eq!(value["contract"], static_value["contract"]);
+    assert_eq!(value["contract_sha256"], static_value["contract_sha256"]);
 }
 
 #[test]
@@ -90,6 +126,13 @@ fn actor_contract_effective_uses_selected_instance() {
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["effective"]["instance"], "contract-test");
+    assert_eq!(
+        value["effective"]["config_path"],
+        home.path()
+            .join(".st-instance/contract-test/config/st3/config.toml")
+            .to_str()
+            .unwrap()
+    );
     assert_eq!(
         value["effective"]["state_dir"],
         home.path()

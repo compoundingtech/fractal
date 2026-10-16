@@ -137,7 +137,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn actor_contract_records_aliases_and_runtime_person_exceptions() {
+    fn actor_contract_records_runtime_person_exceptions() {
         let value = generate(super::super::Cli::command());
         let commands = &value["contract"]["commands"];
         for path in ["st conversations send", "st conversations reply"] {
@@ -174,7 +174,75 @@ mod tests {
     }
 
     #[test]
-    fn actor_contract_has_no_unclassified_commands() {
+    fn actor_contract_records_real_command_aliases() {
+        let value = generate(super::super::Cli::command());
+        assert_eq!(value["contract"]["aliases"]["st alerts"], json!(["attention"]));
+        assert_eq!(value["contract"]["aliases"]["st changes list"], json!(["ls"]));
+        for (alias, canonical) in [
+            ("attention ls", "alerts ls"),
+            ("changes ls", "changes list"),
+        ] {
+            // `changes list` needs a repository, so supply it with the alias.
+            let mut argv = vec!["st"];
+            argv.extend(alias.split_whitespace());
+            if canonical == "changes list" {
+                argv.extend(["--repository", "probe"]);
+            }
+            let matches = super::super::Cli::command()
+                .try_get_matches_from(argv)
+                .unwrap();
+            let mut matches = &matches;
+            for name in canonical.split_whitespace() {
+                assert_eq!(matches.subcommand_name(), Some(name));
+                matches = matches.subcommand_matches(name).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn configured_person_supplement_covers_the_reviewed_clap_families() {
+        let inventory =
+            super::super::read_contract_inventory_for_command(super::super::Cli::command());
+        let paths = inventory["commands"].as_array().unwrap();
+        let reviewed = [
+            "st changes list",
+            "st changes show",
+            "st changes sync",
+            "st note",
+            "st note clear",
+            "st note set",
+            "st setup",
+            "st ui",
+        ];
+        let actual = paths
+            .iter()
+            .map(|path| path.as_str().unwrap())
+            .filter(|path| {
+                matches!(*path, "st setup" | "st ui" | "st note")
+                    || path.starts_with("st note ")
+                    || path.starts_with("st changes ")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual, reviewed,
+            "configured-person command family changed; review the runtime handlers in the call-site map and update this coverage"
+        );
+        let supplemented = paths
+            .iter()
+            .map(|path| path.as_str().unwrap())
+            .filter(|path| implicit_person(path))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            supplemented,
+            reviewed
+                .into_iter()
+                .filter(|path| !matches!(*path, "st changes list" | "st changes show"))
+                .collect::<Vec<_>>(),
+            "configured-person supplement has missing or unreviewed paths"
+        );
+    }
+
+    fn assert_published_classification(value: &Value) {
         let path = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/st3/actor-contract.json");
         let published: Value = serde_json::from_slice(
@@ -183,30 +251,35 @@ mod tests {
         .unwrap();
         assert!(published.get("contract_sha256").is_none());
         assert_eq!(
-            generate(super::super::Cli::command())["contract"],
+            value["contract"],
             published["contract"],
             "the CLI actor surface changed; review every changed command and regenerate with: st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json; resolve rebase conflicts by regenerating, never by hand-merging"
         );
     }
 
     #[test]
-    fn actor_contract_new_command_invalidates_published_classification() {
-        let original = generate(super::super::Cli::command());
-        let changed = generate(
+    fn actor_contract_has_no_unclassified_commands() {
+        assert_published_classification(&generate(super::super::Cli::command()));
+    }
+
+    #[test]
+    #[should_panic(expected = "the CLI actor surface changed")]
+    fn actor_contract_new_command_fails_the_published_classification_guard() {
+        assert_published_classification(&generate(
             super::super::Cli::command().subcommand(clap::Command::new("unclassified-probe")),
-        );
-        assert_ne!(original, changed);
-        assert!(
-            changed["contract"]["commands"]
-                .get("st unclassified-probe")
-                .is_some()
-        );
+        ));
     }
 
     #[test]
     fn actor_contract_matches_actual_as_acceptance() {
         fn check(command: &clap::Command, path: &str, contract: &Value) {
-            if let Some(entry) = contract["contract"]["commands"].get(path) {
+            let callable = path != "st"
+                && (!command.get_subcommands().any(|child| child.get_name() != "help")
+                    || !command.is_subcommand_required_set());
+            if callable {
+                let entry = contract["contract"]["commands"]
+                    .get(path)
+                    .unwrap_or_else(|| panic!("callable command missing from actor contract: {path}"));
                 let mut argv = path.split_whitespace().collect::<Vec<_>>();
                 argv.extend(["--as", "person/probe"]);
                 let actual = super::super::Cli::command().try_get_matches_from(argv);
@@ -261,6 +334,11 @@ mod tests {
                         assert!(absent.is_ok(), "{path}");
                     }
                 }
+            } else {
+                assert!(
+                    contract["contract"]["commands"].get(path).is_none(),
+                    "non-callable command classified: {path}"
+                );
             }
             for child in command
                 .get_subcommands()

@@ -21,6 +21,18 @@ printer computes this digest; the checked-in snapshot omits it and the equality
 test compares the contract body. The printed `actor_semantics` reminder comes
 first: actor: none means no --as syntax.
 
+Version-policy proposal (pending Intake/Nathan approval in
+[#3061 comment 6207525882](https://github.com/compoundingtech/smalltalk/pull/3061#issuecomment-6207525882)):
+retain `kind: st3.actor-contract.v1` and numeric `version: 1` for additive optional
+metadata and additional command/alias entries. The digest identifies exact
+per-binary content; a command's classification changing is a content change,
+not automatically a format-version change. Bump the kind suffix and numeric
+version together for removed or renamed required fields, changed field types,
+or changed field/enum interpretation that breaks readers. Compatibility of
+classification-value and enum additions is still an explicit open question.
+This proposal is not an approved compatibility guarantee and does not claim
+that readers implement unsupported-version rejection.
+
 `actor` means whether argv accepts `--as`: `none`, `optional`, or `required`.
 `actor_environment` names an environment default, if one exists. `accepts_person`
 means the real argument value parser accepts `person/NAME`; it does not grant
@@ -34,11 +46,14 @@ name in `documents put --as` and the ignored compatibility flags on reads.
 `ignores_actor` identifies those ignored flags. Do not use this contract as an
 authorization decision.
 
-Add `--effective` to include the selected instance, config path and state
-directory. This uses the normal CLI instance activation and config loader, so
-operators do not need to copy XDG or config resolution. The effective fields are
-outside the hashed contract and can differ between calls. No secret config
-fields are printed.
+Add `--effective` to include only the selected `instance`, `config_path` and
+`state_dir` metadata; no config values are printed. Instance activation and the
+existing config loader determine the state directory. **`config_path` always
+reports `Config::default_path()` for the selected instance, not the actual path
+of a custom config file.** Do not use it as evidence of which file was loaded.
+These fields are outside the hashed contract and can differ between calls.
+Without `--effective`, static mode reads no config (even an invalid config is
+irrelevant) and does not contact a daemon.
 
 After a deliberate CLI change, review the changed actor entries and regenerate
 the checked-in contract:
@@ -52,7 +67,11 @@ Use the binary built from the changed source. Resolve any rebase conflict in
 `docs/st3/actor-contract.json` by running that regeneration command, never by
 hand-merging the JSON. The snapshot test fails if a
 command is added or removed, if its actor parser changes the published fields, or
-if an alias changes. Host, account, repository and harness policy remains in the
+if an alias changes. Supplement coverage also compares the reviewed setup/UI,
+note and changes paths against the real clap inventory, so family additions or
+removals require reviewing the identity handlers named beside `implicit_person`.
+This is freshness coverage, not proof of live runtime fallback or authority.
+Host, account, repository and harness policy remains in the
 operator layer. Person-authority enforcement is a separate daemon change.
 
 ## Build from source
