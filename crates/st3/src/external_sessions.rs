@@ -24,13 +24,8 @@ pub(crate) const MAX_EXPOSED_HISTORY: usize = 2_000;
 const MAX_METADATA_LINES: usize = 64;
 const MAX_TIMELINE_LINES: usize = 4_096;
 const MAX_TIMELINE_BYTES: u64 = 32 * 1024 * 1024;
-// Wire size limits and owner references are applied by api/client_v0/conversation_blocks.
-// Typed OMP event views also bound each native value independently; timeline pagination
-// separately budgets encoded entries and response metadata against the gateway's ceiling.
-pub(crate) const MAX_TIMELINE_VALUE_BYTES: usize = 8 * 1024;
-/// Native kind and attribution are identities, not payload: a wide one must not crowd out the
-/// rest of a view.
-pub(crate) const MAX_OMP_EVENT_IDENTITY_BYTES: usize = 256;
+#[cfg(test)]
+use crate::native_views::{MAX_OMP_EVENT_IDENTITY_BYTES, MAX_TIMELINE_VALUE_BYTES, bounded_value};
 const DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(2);
 /// How long a saved-history request waits for a background transcript read before it answers
 /// with the last complete inventory.
@@ -2348,13 +2343,20 @@ pub(crate) fn import_seat(session: &ExternalSession) -> Result<ImportSeat> {
                 .push(KdlEntry::new(session.native_id.clone()));
         }
         ExternalDriver::Omp => {
-            // Managed omp seats use a seat-owned --session-dir. An external
-            // session ID cannot be resolved there; the absolute path loads
-            // the selected transcript without looking up another copy.
-            args.entries_mut().push(KdlEntry::new(format!(
-                "--resume={}",
-                session.transcript.display()
-            )));
+            // Select through the strict handshake, pinning the external transcript
+            // rather than looking up an ID in the seat-owned session directory.
+            let mut env = KdlNode::new("env");
+            let mut body = KdlDocument::new();
+            body.nodes_mut().push(string_node(
+                crate::suspension::RESUME_ENV,
+                &session.native_id,
+            ));
+            body.nodes_mut().push(string_node(
+                crate::rollout::RESUME_PATH_ENV,
+                session.transcript.to_string_lossy().as_ref(),
+            ));
+            env.set_children(body);
+            agent_body.nodes_mut().push(env);
         }
         ExternalDriver::Pi => {
             args.entries_mut().push(KdlEntry::new("--session"));
@@ -4930,27 +4932,6 @@ fn preserve_omp_result_timing(items: &mut [Value], native_result: &Value) {
     }
 }
 
-/// Bound a native value to `limit` bytes. A string is clipped as text, so a value of exactly
-/// `limit` bytes is kept whole; any other value that encodes to more than `limit` becomes
-/// marked JSON text, so the view that carries it stays valid JSON.
-pub(crate) fn bounded_value(value: &Value, limit: usize) -> Value {
-    let text = match value {
-        Value::String(text) => std::borrow::Cow::Borrowed(text.as_str()),
-        _ => std::borrow::Cow::Owned(serde_json::to_string(value).unwrap_or_default()),
-    };
-    if text.len() <= limit {
-        return value.clone();
-    }
-    let mut end = limit;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    json!(format!(
-        "{}\n[st truncated this native timeline value]",
-        &text[..end]
-    ))
-}
-
 fn timeline_item(
     sequence: u64,
     timestamp: &str,
@@ -5585,7 +5566,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn native_only_inventory_accepts_a_physical_path_beneath_symlinked_session_root() {
-        let home = tempfile::tempdir().unwrap();
+        let home = crate::test_support::canonical_tempdir();
         let physical = home.path().join("cold-storage/2026/09/30");
         fs::create_dir_all(&physical).unwrap();
         fs::create_dir_all(home.path().join(".codex")).unwrap();
@@ -7332,6 +7313,110 @@ mod tests {
             format!("part {}", part_count - 1)
         );
         assert!(serde_json::to_vec(&timeline).unwrap().len() <= MAX_TIMELINE_BYTES as usize);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn omp_import_strict_resume_pins_the_transcript_without_authored_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let external = root.path().join("external");
+        fs::create_dir(&external).unwrap();
+        let id = "5f9a6e16-5e30-4bce-b327-9a8241321bd6";
+        let transcript = external.join(format!("2026-10-06_{id}.jsonl"));
+        fs::write(
+            &transcript,
+            format!("{{\"type\":\"session\",\"id\":\"{id}\"}}\n"),
+        )
+        .unwrap();
+        let mut saved = transcript_session(ExternalDriver::Omp, &transcript);
+        saved.native_id = id.into();
+        saved.cwd = Some(root.path().into());
+        let imported = import_seat(&saved).unwrap();
+        let document: KdlDocument = imported.kdl.parse().unwrap();
+        let body = document.get("agent").unwrap().children().unwrap();
+        let environment = body.get("env").unwrap().children().unwrap();
+        assert_eq!(
+            environment
+                .get(crate::suspension::RESUME_ENV)
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .as_string(),
+            Some(id)
+        );
+        assert_eq!(
+            environment
+                .get(crate::rollout::RESUME_PATH_ENV)
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .as_string(),
+            transcript.to_str()
+        );
+        assert!(
+            body.get("harness")
+                .unwrap()
+                .children()
+                .unwrap()
+                .get("args")
+                .is_none()
+        );
+        let managed = root.path().join("provider-sessions");
+        let argv = vec!["omp".into(), "--model".into(), "chosen-model".into()];
+        let selected = crate::native_resume::pi_family_argv(
+            "omp",
+            argv.clone(),
+            &managed,
+            id,
+            Some(&transcript),
+        )
+        .unwrap();
+        assert_eq!(
+            selected,
+            vec![
+                "omp",
+                "--resume",
+                transcript.to_str().unwrap(),
+                "--model",
+                "chosen-model"
+            ]
+        );
+        assert!(managed.is_dir());
+        assert_eq!(
+            fs::read_link(managed.join(transcript.file_name().unwrap())).unwrap(),
+            transcript
+        );
+        assert_eq!(
+            crate::native_resume::pi_family_argv(
+                "omp",
+                vec!["omp".into(), format!("--resume={}", transcript.display())],
+                &managed,
+                id,
+                Some(&transcript),
+            )
+            .unwrap_err()
+            .code,
+            "authored-session-selection"
+        );
+        assert_eq!(
+            crate::native_resume::pi_family_argv(
+                "omp",
+                argv.clone(),
+                &managed,
+                "other-session",
+                Some(&transcript),
+            )
+            .unwrap_err()
+            .code,
+            "transcript-header-mismatch"
+        );
+        fs::remove_file(&transcript).unwrap();
+        assert_eq!(
+            crate::native_resume::pi_family_argv("omp", argv, &managed, id, Some(&transcript))
+                .unwrap_err()
+                .code,
+            "transcript-header-mismatch"
+        );
     }
 
     #[cfg(unix)]

@@ -386,6 +386,8 @@ enum Fetched {
         agent: String,
         outcome: Result<Direct, String>,
     },
+    /// A shell's attach was refused for a reason that passes; it is being tried again.
+    AttachWaiting { agent: String, reason: String },
     /// st gave no direct stream; follow its view of the terminal instead.
     NativeFailed {
         agent: String,
@@ -552,6 +554,8 @@ pub fn run(context: Context) -> Result<()> {
     let mut terminal_owners: BTreeMap<String, String> = BTreeMap::new();
     // When a terminal was asked for, while it connects: the wait is shown, and a long one named.
     let mut attach_started: Option<Instant> = None;
+    // Why the attach in progress is waiting, when st refused it for a reason that passes.
+    let mut attach_note: Option<String> = None;
     // The cursor shape last set, so it changes only when the attached terminal asks.
     let mut cursor_style: Option<crossterm::cursor::SetCursorStyle> = None;
     // The tab shown on the last pass: opening a tab loads what only it needs.
@@ -604,7 +608,10 @@ pub fn run(context: Context) -> Result<()> {
                 .as_deref()
                 .is_some_and(|stale| stale.starts_with("connecting"))
         {
-            view.stale = Some(connecting_text(started.elapsed()));
+            view.stale = Some(match &attach_note {
+                Some(reason) => format!("{} · {reason}, trying again", connecting_text(started.elapsed())),
+                None => connecting_text(started.elapsed()),
+            });
         }
         if extras.live && Instant::now() >= limit_next {
             limit_next = Instant::now() + MESSAGE_LIMIT_RETRY;
@@ -845,6 +852,8 @@ pub fn run(context: Context) -> Result<()> {
                     // A permanent refusal is said once, without "retrying".
                     if !permanent {
                         ui.conversation_failed(&target, &message);
+                    } else {
+                        ui.stalled.remove(&target);
                     }
                     failed.insert(target, message);
                     changed = true;
@@ -1152,6 +1161,7 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
                 Fetched::Native { agent, direct } => {
+                    attach_note = None;
                     let waited = attach_started.take().map(|at| at.elapsed());
                     if let Some(waited) = waited.filter(|waited| *waited >= Duration::from_secs(3))
                     {
@@ -1193,11 +1203,17 @@ pub fn run(context: Context) -> Result<()> {
                         }
                     }
                 }
+                Fetched::AttachWaiting { agent, reason } => {
+                    if ui.terminal.as_ref().is_some_and(|view| view.agent == agent) {
+                        attach_note = Some(reason);
+                    }
+                }
                 Fetched::NativeFailed {
                     agent,
                     runtime_ids,
                     reason,
                 } => {
+                    attach_note = None;
                     if terminal_opens.remove(&agent).is_some() {
                         super::slo::METRICS.add("terminal_open_errors", 1);
                     }
@@ -1478,6 +1494,15 @@ pub fn run(context: Context) -> Result<()> {
                 Effect::LoadContent(key) => {
                     content_reads.enqueue(key);
                 }
+                Effect::RetryConversation { target } => {
+                    retry_conversation_open(
+                        target,
+                        &mut failed,
+                        &mut sessions_requested,
+                        &commands,
+                    );
+                    changed = true;
+                }
                 Effect::OpenTerminal { agent } => {
                     terminal_opens.insert(agent.clone(), Instant::now());
                     // The PTY session's own bytes, through st's raw stream to whichever host owns
@@ -1516,6 +1541,7 @@ pub fn run(context: Context) -> Result<()> {
                         None => terminal_owners.remove(&agent),
                     };
                     attach_started = Some(Instant::now());
+                    attach_note = None;
                     let _ = commands.send(Command::Unfollow);
                     {
                         let client = client.clone();
@@ -1523,13 +1549,31 @@ pub fn run(context: Context) -> Result<()> {
                         let agent = agent.clone();
                         let fallback = ui.terminal_fallback;
                         runtime.spawn(async move {
-                            let attached = attach_known_then_direct(
-                                &client,
-                                &agent,
-                                known,
-                                &runtime_ids,
-                                owner.as_deref(),
-                                fallback,
+                            // A shell has no other view to fall back to, and one started a moment ago
+                            // can be refused while st settles which host runs it: wait, say why, retry.
+                            let delays: &[Duration] = if agent.starts_with("terminal/") {
+                                &ATTACH_RETRY_DELAYS
+                            } else {
+                                &[]
+                            };
+                            let attached = retry_attach(
+                                delays,
+                                |reason| {
+                                    let _ = tx.send(Fetched::AttachWaiting {
+                                        agent: agent.clone(),
+                                        reason: reason.to_owned(),
+                                    });
+                                },
+                                || {
+                                    attach_known_then_direct(
+                                        &client,
+                                        &agent,
+                                        known.clone(),
+                                        &runtime_ids,
+                                        owner.as_deref(),
+                                        fallback,
+                                    )
+                                },
                             )
                             .await;
                             let _ = tx.send(match attached {
@@ -2094,6 +2138,18 @@ fn retry_failed_opens(
     requested.retain(|id| !failed.contains_key(id) || wanted.contains(id));
 }
 
+/// A person's explicit retry clears both the feed failure and the one-shot session read.
+fn retry_conversation_open(
+    target: String,
+    failed: &mut BTreeMap<String, String>,
+    requested: &mut HashSet<String>,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) {
+    failed.remove(&target);
+    requested.remove(&target);
+    let _ = commands.send(Command::Resubscribe { target });
+}
+
 /// Entries per page read back: st's largest, so a long session takes few requests.
 const OLDER_PAGE: usize = 200;
 
@@ -2437,7 +2493,8 @@ async fn perform(
 ) -> Result<(String, Option<String>)> {
     match effect {
         // Glass writes and retries never reach here: the loop handles them itself.
-        Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::Forget { .. } | Effect::LoadContent(_) => {
+        Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::RetryConversation { .. }
+        | Effect::Forget { .. } | Effect::LoadContent(_) => {
             Ok((String::new(), None))
         }
         Effect::EditArrangement(write) => {
@@ -2879,6 +2936,55 @@ async fn send_message(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_shells_attach_waits_out_a_refusal_that_passes_and_says_why() {
+        // Nathan, 2026-10-16: a new terminal ended at once with "could not attach: st cannot tell
+        // yet which host runs this", and the shell was lost to him.
+        let run = |refusals: Vec<&'static str>, delays: usize| {
+            let mut refusals = refusals.into_iter();
+            let mut said = Vec::new();
+            let outcome = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap()
+                .block_on(retry_attach(
+                    &vec![Duration::ZERO; delays],
+                    |reason| said.push(reason.to_owned()),
+                    || {
+                        let next = refusals.next();
+                        async move { next.map_or(Ok(7), |reason| Err(reason.to_owned())) }
+                    },
+                ));
+            (outcome, said)
+        };
+        let unsure = "st cannot tell yet which host runs this";
+        // It works on the third try; each wait said why.
+        let (outcome, said) = run(vec![unsure, "host/example cannot be reached right now"], 5);
+        assert_eq!(outcome, Ok(7));
+        assert_eq!(said, [unsure, "host/example cannot be reached right now"]);
+        // It keeps refusing: the last refusal comes back once the waits are used up.
+        let (outcome, said) = run(vec![unsure; 10], 3);
+        assert_eq!(outcome, Err(unsure.to_owned()));
+        assert_eq!(said.len(), 3);
+        // A terminal that is gone, restarted or not allowed is not retried.
+        for reason in ["it is gone: terminal/x", "not allowed: nope", direct::RESTARTED] {
+            let (outcome, said) = run(vec![reason, unsure], 5);
+            assert_eq!(outcome, Err(reason.to_owned()));
+            assert!(said.is_empty(), "{reason} must not be retried");
+        }
+        // The retried reasons are the words st's own messages use.
+        assert!(super::worth_retrying(&st3_client::plain_message(
+            Some(&st3_client::ErrorCode::RuntimeAuthorityIndeterminate),
+            ""
+        )));
+        assert!(!super::worth_retrying(&st3_client::plain_message(
+            Some(&st3_client::ErrorCode::NotFound),
+            "terminal/x"
+        )));
+        // A refusal that passes waits about a minute and a half before the tab gives up.
+        assert!(super::ATTACH_RETRY_DELAYS.iter().sum::<Duration>() >= Duration::from_secs(90));
+    }
+
     #[test]
     fn hidden_inventory_windows_leave_after_grace_and_period_changes_replace_one_slot() {
         let now = Instant::now();
@@ -4063,6 +4169,67 @@ mod tests {
     }
 
     #[test]
+    fn failed_conversation_hint_and_key_resubscribe_without_resending_messages() {
+        use super::super::{demo, Hit};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        for child in [false, true] {
+            let mut ui = Ui::new(demo::world());
+            ui.live = true;
+            let target = if child {
+                "session/tester-child".to_owned()
+            } else {
+                ui.listing_for(1, 40).ids[0].clone()
+            };
+            ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(target.clone())));
+            let mut failed = BTreeMap::from([(target.clone(), "access refused".into())]);
+            let mut requested = HashSet::from([target.clone()]);
+            ui.world.conversations = conversations(
+                &Model::default(),
+                "person/ada",
+                &BTreeMap::new(),
+                &failed,
+                std::slice::from_ref(&target),
+            );
+            ui.effects.clear();
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+            let shown: String = terminal.backend().buffer().content.iter()
+                .map(ratatui::buffer::Cell::symbol).collect();
+            assert!(shown.contains("access refused"), "{shown}");
+            assert!(shown.contains("Ctrl+R · retry opening this conversation"), "{shown}");
+            assert!(!shown.contains("retrying") && !shown.contains("Trying again"), "{shown}");
+            assert!(ui.effects.is_empty(), "rendering a refusal never retries it");
+
+            ui.conversation_state.drafts.insert(target.clone(), "saved draft".into());
+            let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+            ui.editing = true;
+            ui.key(key);
+            assert!(ui.effects.is_empty(), "a draft owns Ctrl+R while the box is open");
+            assert!(matches!(ui.world.conversations[&target], Load::Failed(_)));
+            ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            ui.key(key);
+            let effects = std::mem::take(&mut ui.effects);
+            let [Effect::RetryConversation { target: reopened }] = effects.as_slice() else {
+                panic!("opening is distinct from message resend: {effects:?}");
+            };
+            assert_eq!(reopened, &target);
+            assert!(matches!(ui.world.conversations[&target], Load::Loading));
+            assert!(!ui.stalled.contains_key(&target));
+            assert_eq!(ui.conversation_state.drafts[&target], "saved draft");
+            let (commands, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+            retry_conversation_open(reopened.clone(), &mut failed, &mut requested, &commands);
+            assert!(matches!(incoming.try_recv().unwrap(), Command::Resubscribe { target: sent } if sent == target));
+            assert!(!failed.contains_key(&target));
+            assert!(!requested.contains(&target));
+            ui.key(key);
+            assert!(ui.effects.is_empty(), "loading does not queue another explicit retry");
+            assert!(incoming.try_recv().is_err(), "no automatic retry is sent");
+        }
+    }
+
+    #[test]
     fn a_session_that_failed_to_open_says_why_and_is_asked_again_when_reopened() {
         let session = "session/example-child".to_owned();
         let failed = BTreeMap::from([(
@@ -4261,6 +4428,70 @@ fn connecting_text(waited: Duration) -> String {
         0..2 => "connecting".into(),
         2..8 => format!("connecting {}s", waited.as_secs()),
         seconds => format!("connecting {seconds}s, st is slow to answer"),
+    }
+}
+
+/// How long a shell's attach keeps trying after st refuses it for a reason that passes: about a
+/// minute and a half in all.
+const ATTACH_RETRY_DELAYS: [Duration; 20] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(3),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+];
+
+/// Whether an attach refused with `reason` may work a moment later: st cannot tell yet which host
+/// runs the terminal, that host is briefly out of reach, or st asked for a pause. A terminal that
+/// is gone, restarted or not allowed is not retried.
+fn worth_retrying(reason: &str) -> bool {
+    [
+        "cannot tell yet which host",
+        "cannot be reached right now",
+        "asked to slow down",
+        "changed while this was on its way",
+    ]
+    .iter()
+    .any(|passing| reason.contains(passing))
+}
+
+/// Try `attempt` again after each delay while it fails for a reason that passes, telling `waiting`
+/// the reason before each wait; the last refusal comes back once the delays are used up.
+async fn retry_attach<T, Fut>(
+    delays: &[Duration],
+    mut waiting: impl FnMut(&str),
+    mut attempt: impl FnMut() -> Fut,
+) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let mut delays = delays.iter();
+    loop {
+        match attempt().await {
+            Err(reason) if worth_retrying(&reason) => match delays.next() {
+                Some(delay) => {
+                    waiting(&reason);
+                    tokio::time::sleep(*delay).await;
+                }
+                None => return Err(reason),
+            },
+            done => return done,
+        }
     }
 }
 
