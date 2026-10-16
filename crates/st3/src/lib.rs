@@ -27,6 +27,7 @@ pub mod repositories;
 pub(crate) mod disk;
 /// Answers the hooks an st3 seat's harness runs: `st driver-hook NAME`.
 pub mod delivery_hold;
+pub(crate) mod delivery_presence;
 pub mod driver_hook;
 pub mod environment;
 /// Offline signed gate observations in immutable git notes refs.

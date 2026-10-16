@@ -75,7 +75,7 @@ mod client_adapters;
 mod client_presence;
 mod client_v0;
 mod custom;
-mod delivery_presence;
+use crate::delivery_presence;
 pub(crate) mod agent_harness;
 #[cfg(test)]
 mod harness_health_controls;
@@ -116,11 +116,7 @@ pub(crate) use client_v0::raw_terminal::{
     ORIGIN_HEADER as RAW_ORIGIN_HEADER,
 };
 
-/// Recheck the initialized live delivery owner before replacing an unattached seat.
-pub(crate) fn claude_channel_attached(store: &Store, subject: &str, incarnation: &str) -> bool {
-    delivery_presence::attachment(subject, incarnation)
-        .is_some_and(|fence| store.check_mailbox(&fence).is_ok())
-}
+pub(crate) use crate::delivery_presence::claude_channel_attached;
 
 #[derive(Clone)]
 pub struct AppState {
