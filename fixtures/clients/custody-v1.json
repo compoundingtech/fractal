@@ -318,8 +318,8 @@
     {
       "case": "daemon-restart-mid-staging",
       "outcome": "UNKNOWN",
-      "reason": "staging-lost",
-      "source_action": "new-challenge-and-operation; no stuck wait; activated holds survive restart"
+      "reason": "proof-snapshot-lost",
+      "source_action": "UNKNOWN; no partial receipt or stuck wait; any new attempt requires a new challenge/operation"
     }
   ],
   "one_bit_mutations": [
@@ -372,6 +372,77 @@
       "mutated_canonical_hex": "73742d637573746f64792d726571756573742d763100000000010000000a666c6565742f746573740000000c6d656d6265722f626c7565790000000b6d656d6265722f706565720000000a656e7465722f74657374000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000764622f7465737400000002000000086f726967696e2f61000000086f726967696e2f62000000000000000900000001c97de6b1642f941438567686ac2fd12f8f00f6c1a0eaf497e2f08dc02df17b213f6f5173126cab57e41bcc4eaa177813cdf93bae08c54308f8d21044517e1777bb260bae487bb06caa3f7256ab3b37416376068119e534264ba50dcc197433970000000000000003",
       "mutated_digest": "36edefd5b6aae85fd5891ad0f0f7fcde405ce245a70f1f49028a8c39ad16e1c3",
       "outcome_with_original_digest": "REFUSE"
+    }
+  ],
+  "contract": "custody-contract revision 4, ordinary-retention semantics; historical coverage encoding remains before-wire-code prerequisite",
+  "retention_policy": "fleet-normal-v1",
+  "receipt_semantics": "consistent peer snapshot at ENTER only; no claim about retention after that snapshot",
+  "reduced_proof_cases": [
+    {
+      "case": "live-required-ref-payloadless-identity-only",
+      "outcome": "FAIL",
+      "reason": "required-live-payload-missing"
+    },
+    {
+      "case": "historical-tombstone-without-verified-certificate",
+      "outcome": "UNKNOWN",
+      "reason": "historical-coverage-unproved"
+    },
+    {
+      "case": "historical-certificate-wrong-participant-or-manifest",
+      "outcome": "UNKNOWN",
+      "reason": "historical-certificate-invalid"
+    },
+    {
+      "case": "earlier-bluey-origin-epoch-not-enumerated",
+      "outcome": "UNKNOWN",
+      "reason": "incomplete-origin-cut"
+    },
+    {
+      "case": "certified-history-missing-kept-state-coverage",
+      "outcome": "UNKNOWN",
+      "reason": "historical-coverage-unproved"
+    },
+    {
+      "case": "snapshot-age-exceeded",
+      "maximum_ms": 5000,
+      "observed_ms": 5001,
+      "outcome": "UNKNOWN",
+      "reason": "snapshot-age-limit"
+    },
+    {
+      "case": "wal-growth-exceeded",
+      "maximum_bytes": 33554432,
+      "observed_bytes": 33554433,
+      "outcome": "UNKNOWN",
+      "reason": "wal-growth-limit"
+    },
+    {
+      "case": "second-concurrent-peer-attempt",
+      "maximum": 1,
+      "outcome": "UNKNOWN",
+      "reason": "peer-proof-busy"
+    },
+    {
+      "case": "escaped-local-write-after-cut",
+      "outcome": "REFUSE-ENTER",
+      "reason": "cut-invalidated"
+    },
+    {
+      "case": "normal-certified-trim-after-receipt",
+      "receipt_asserts_later_retention": false,
+      "hold_created": false,
+      "exit_action": "explicit preserve catch-up or explicit quarantine/fresh-peer bootstrap; never automatic fallback"
+    },
+    {
+      "case": "peer-restart-before-final-response",
+      "outcome": "UNKNOWN",
+      "reason": "proof-snapshot-lost"
+    },
+    {
+      "case": "old-enter-receipt-used-for-exit-bootstrap",
+      "outcome": "REFUSE",
+      "reason": "fresh-exit-proof-required"
     }
   ]
 }
