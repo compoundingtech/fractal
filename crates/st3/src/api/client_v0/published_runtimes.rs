@@ -32,7 +32,9 @@ pub(crate) fn fold(
             return Ok(None);
         }
         let time_unix_ms = store.projection_time_at(index)?;
-        let status = store.status_for_claim_kind_at("runtime.observed", Some(index), false)?;
+        let status = store.status_for_claim_kind_at(
+            "runtime.observed", Some(index), false, crate::store::ClaimsReduction::Runtime,
+        )?;
         let items = runtime_resources_from_status_access(store, "runtime-publication", &client_timestamp(time_unix_ms), status, true, true)?;
         let digest = hex::encode(Sha256::digest(serde_json::to_vec(&items)?));
         Ok(Some((Publication {
