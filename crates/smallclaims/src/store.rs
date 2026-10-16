@@ -41,6 +41,8 @@ pub mod prepared_envelope;
 mod replica_record;
 pub use operation_metadata::OperationMetadata;
 #[cfg(test)]
+mod exchange_budget_tests;
+#[cfg(test)]
 mod projection_busy_tests;
 #[cfg(test)]
 mod receive_writer_tests;
@@ -3735,6 +3737,49 @@ pub const PROJECTION_CHUNK_CLAIMS: usize = 128;
 /// The most envelopes this build takes in one exchange, which it says in each inventory it
 /// sends. Admission commits once per pass, so a page this size admits well within the peer
 /// request timeout, and a first sync needs a few dozen exchanges instead of hundreds.
+/// The most bytes one exchange's JSON may take before compression: the limit a peer inflates to
+/// (`MAX_EXCHANGE_BYTES`), less room for the signed answer that wraps it. A page is chosen by
+/// count, and a page of large envelopes can pass the limit; the peer then refuses the whole body
+/// and the same page is chosen again, so nothing moves.
+pub const REPLICATION_EXCHANGE_BODY_BUDGET: usize = crate::sync::MAX_EXCHANGE_BYTES - 1024 * 1024;
+
+/// Keep only the leading envelopes of `exchange` that fit its serialized body within `budget`
+/// bytes, everything else in it included. The ones dropped stay missing at the peer, so a later
+/// exchange chooses them again. An envelope too large to send even alone is a typed error rather
+/// than an exchange that silently carries nothing.
+pub fn fit_exchange_body(exchange: &mut ReplicationExchange, budget: usize) -> Result<()> {
+    if exchange.envelopes.is_empty() {
+        return Ok(());
+    }
+    let envelopes = std::mem::take(&mut exchange.envelopes);
+    // The body without envelopes includes their empty brackets; each kept envelope adds its own
+    // serialized bytes and, after the first, one separating comma.
+    let mut size = serde_json::to_vec(&*exchange)?.len();
+    let mut kept = 0;
+    for envelope in &envelopes {
+        let added = serde_json::to_vec(envelope)?.len() + usize::from(kept > 0);
+        if size + added > budget {
+            break;
+        }
+        size += added;
+        kept += 1;
+    }
+    if kept == 0 {
+        let first = &envelopes[0];
+        return Err(St3Error::new(
+            "replication-envelope-too-large",
+            format!(
+                "envelope {} {} of {} cannot be sent: its exchange body would pass {budget} bytes",
+                first.writer, first.sequence, first.hash
+            ),
+        )
+        .into());
+    }
+    exchange.envelopes = envelopes;
+    exchange.envelopes.truncate(kept);
+    Ok(())
+}
+
 pub const REPLICATION_PAGE_LIMIT: u32 = 4_096;
 
 /// The page this node asks peers for: `REPLICATION_PAGE_LIMIT`, or less when
@@ -5766,6 +5811,7 @@ impl Store {
         let _timing = time_stage(&self.replication_timers.export);
         exchange.signatures = self.replication_signatures_for(signature_requests)?;
         exchange.signature_requests = self.replication_signature_requests()?;
+        fit_exchange_body(&mut exchange, REPLICATION_EXCHANGE_BODY_BUDGET)?;
         Ok(exchange)
     }
 
