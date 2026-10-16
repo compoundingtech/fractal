@@ -79,6 +79,7 @@ mod launch_cli;
 mod replication_cli;
 mod terminals_cli;
 mod uninstall_cli;
+mod validate_cli;
 mod work_cli;
 use agents_cli::run_agents;
 use attention_cli::run_attention;
@@ -89,6 +90,7 @@ use launch_cli::{run_launch, run_mission_view};
 use replication_cli::run_replication;
 use terminals_cli::run_pty;
 use uninstall_cli::run_uninstall;
+use validate_cli::{ValidateArgs, run_validate};
 use work_cli::{run_wait, run_work};
 
 use presentation::{
@@ -2484,63 +2486,6 @@ struct LaneMarkArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_queue_move_actor)]
     actor: Option<String>,
-}
-
-#[derive(Args)]
-struct ValidateArgs {
-    /// Input KDL files, each parsed independently.
-    #[arg(required = true, num_args = 1..)]
-    files: Vec<PathBuf>,
-}
-
-#[derive(serde::Serialize)]
-struct ValidatedSubject {
-    kind: String,
-    id: String,
-}
-
-#[derive(serde::Serialize)]
-struct ValidatedMission {
-    id: String,
-    revision: String,
-}
-
-fn run_validate(args: &ValidateArgs, json_output: bool) -> Result<()> {
-    let mut subjects = Vec::new();
-    let mut missions = Vec::new();
-    for path in &args.files {
-        let source = std::fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
-        let intent = st3::graph::parse_intent(&source, "local")
-            .with_context(|| format!("validate {}", path.display()))?;
-        for (id, subject) in intent.subjects {
-            subjects.push(ValidatedSubject {
-                kind: subject.kind,
-                id,
-            });
-        }
-        for mission in intent.missions.into_values() {
-            subjects.push(ValidatedSubject {
-                kind: "mission".into(),
-                id: mission.subject,
-            });
-            missions.push(ValidatedMission {
-                id: mission.id,
-                revision: mission.revision,
-            });
-        }
-    }
-    if json_output {
-        print_value(&json!({ "subjects": subjects, "missions": missions }), true)?;
-    } else {
-        for subject in subjects {
-            println!("{} {}", subject.kind, subject.id);
-        }
-        for mission in missions {
-            println!("{}@{}", mission.id, mission.revision);
-        }
-    }
-    Ok(())
 }
 
 #[derive(Args)]
@@ -20722,6 +20667,7 @@ mod tests {
             ("replication", include_str!("replication_cli.rs")),
             ("terminals", include_str!("terminals_cli.rs")),
             ("uninstall", include_str!("uninstall_cli.rs")),
+            ("validate", include_str!("validate_cli.rs")),
             ("work", include_str!("work_cli.rs")),
         ];
         let main_source = include_str!("main.rs");
