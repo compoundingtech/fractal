@@ -1,19 +1,12 @@
 //! The shared syntax of declaration KDL: reading a node's arguments, properties and children,
 //! and validating the names, subjects and maps they carry. Intent parsing (`graph`), mission
 //! parsing (`mission`) and gate parsing (`gate_parse`) all read declarations through these.
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
-use crate::model::{
-    DesiredSubject, GateSpec, LaneSpec, LaunchSpec, MemberKind, MemberLifecycle, MemberSpec,
-    MissionRevisionOperation, MissionRunCreation, MissionRunDeclaration, NamedCancellation,
-    NormalizedIntent, ObserverSpec, PlannerSpec, PlanningFeedbackOperation,
-    PlanningSessionCreation, PlanningSessionDeclaration, QuantifiedFieldSpec,
-    ReplicaRepairDeclaration, ResourceRefreshOperation, RestartIntensity, RestartType,
-    RuntimeResetOperation, ScheduleSpec, St3Error, SubscriptionConditionSpec, SubscriptionSpec,
-};
+use crate::model::St3Error;
 
 /// The context variables st sets for mission steps and gates (`mission`).
 pub(crate) const VARIABLES: &[&str] = &[

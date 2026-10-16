@@ -1,17 +1,9 @@
 //! Parsing a mission's gates: named predicates, built-in executable gates and baseline gates.
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::BTreeMap;
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
-use serde_json::{Map, Value, json};
 
-use crate::model::{
-    DesiredSubject, GateSpec, LaneSpec, LaunchSpec, MemberKind, MemberLifecycle, MemberSpec,
-    MissionRevisionOperation, MissionRunCreation, MissionRunDeclaration, NamedCancellation,
-    NormalizedIntent, ObserverSpec, PlannerSpec, PlanningFeedbackOperation,
-    PlanningSessionCreation, PlanningSessionDeclaration, QuantifiedFieldSpec,
-    ReplicaRepairDeclaration, ResourceRefreshOperation, RestartIntensity, RestartType,
-    RuntimeResetOperation, ScheduleSpec, St3Error, SubscriptionConditionSpec, SubscriptionSpec,
-};
+use crate::model::{GateSpec, St3Error};
 
 use crate::declaration_syntax::*;
 

@@ -1478,7 +1478,7 @@ pub(crate) fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
 
-pub(crate) use crate::peer::{note_remote_read, track_remote_reads};
+pub(crate) use crate::peer::track_remote_reads;
 
 /// A query that asks the daemon to wait for a change makes the request a long poll.
 fn asks_to_wait(query: &str) -> bool {

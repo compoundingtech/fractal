@@ -7,7 +7,7 @@ use sha2::{Digest as _, Sha256};
 use crate::declaration_syntax::*;
 pub use crate::declaration_syntax::parse_duration;
 use crate::model::{
-    DesiredSubject, GateSpec, LaneSpec, LaunchSpec, MemberKind, MemberLifecycle, MemberSpec,
+    DesiredSubject, LaneSpec, LaunchSpec, MemberKind, MemberLifecycle, MemberSpec,
     MissionRevisionOperation, MissionRunCreation, MissionRunDeclaration, NamedCancellation,
     NormalizedIntent, ObserverSpec, PlannerSpec, PlanningFeedbackOperation,
     PlanningSessionCreation, PlanningSessionDeclaration, QuantifiedFieldSpec,
