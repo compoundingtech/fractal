@@ -128,6 +128,9 @@ enum Command {
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
     /// Gate checks run mission and step scripts; loop until scripts run after each round.
     Apply(ApplyArgs),
+    /// Validate KDL files offline using default host "local", without contacting a daemon.
+    /// This is not an authorization or deployment preview.
+    Validate(ValidateArgs),
     /// Inspect owned sets and their source publication receipts.
     Sets {
         #[command(subcommand)]
@@ -3651,6 +3654,63 @@ struct LaneMarkArgs {
 }
 
 #[derive(Args)]
+struct ValidateArgs {
+    /// Input KDL files, each parsed independently.
+    #[arg(required = true, num_args = 1..)]
+    files: Vec<PathBuf>,
+}
+
+#[derive(serde::Serialize)]
+struct ValidatedSubject {
+    kind: String,
+    id: String,
+}
+
+#[derive(serde::Serialize)]
+struct ValidatedMission {
+    id: String,
+    revision: String,
+}
+
+fn run_validate(args: &ValidateArgs, json_output: bool) -> Result<()> {
+    let mut subjects = Vec::new();
+    let mut missions = Vec::new();
+    for path in &args.files {
+        let source = std::fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?;
+        let intent = st3::graph::parse_intent(&source, "local")
+            .with_context(|| format!("validate {}", path.display()))?;
+        for (id, subject) in intent.subjects {
+            subjects.push(ValidatedSubject {
+                kind: subject.kind,
+                id,
+            });
+        }
+        for mission in intent.missions.into_values() {
+            subjects.push(ValidatedSubject {
+                kind: "mission".into(),
+                id: mission.subject,
+            });
+            missions.push(ValidatedMission {
+                id: mission.id,
+                revision: mission.revision,
+            });
+        }
+    }
+    if json_output {
+        print_value(&json!({ "subjects": subjects, "missions": missions }), true)?;
+    } else {
+        for subject in subjects {
+            println!("{} {}", subject.kind, subject.id);
+        }
+        for mission in missions {
+            println!("{}@{}", mission.id, mission.revision);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Args)]
 struct ApplyArgs {
     /// Input KDL files; '-' reads stdin once. All files are previewed and applied together.
     files: Vec<PathBuf>,
@@ -5375,6 +5435,16 @@ fn cli_main() -> ExitCode {
         Err(error) => exit_usage_error(error),
     };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    // Validation must precede identity lookup, configuration loading and client construction.
+    if let Command::Validate(args) = &cli.command {
+        return match run_validate(args, cli.json) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("st: {}", plain_error(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
     // Root runs tiles. Entering one makes namespaces, which needs this process single-threaded,
     // so it runs before any runtime or thread starts.
     if let Command::Tiles(args) = cli.command {
@@ -5857,6 +5927,7 @@ async fn run(cli: Cli) -> Result<()> {
     let immediate = Client::new(endpoint.clone());
     match cli.command {
         Command::Setup(_) => unreachable!(),
+        Command::Validate(_) => unreachable!("validation runs before the CLI runtime"),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),

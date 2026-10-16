@@ -40,6 +40,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "fleet",
             "replication",
             "apply",
+            "validate",
             "sets",
             "backup",
             "doctor",

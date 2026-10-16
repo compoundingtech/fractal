@@ -92,6 +92,13 @@ preview object. `apply FILE --dry-run --check` runs gate commands during the pre
 `missions check FILE` checks gates alone. The legacy `missions publish` and `agents apply`
 commands still work and print a notice naming `st apply`.
 
+`st validate FILE...` checks each KDL file independently, offline, and lists declared subject
+kinds and IDs plus each mission's `id@revision`. `st validate mission.kdl --json` returns one
+object with `subjects` and `missions` arrays. It uses the literal default host `local` rather
+than the daemon's configured node. It never loads configuration, opens a store, runs gates,
+or resolves references against the live graph. An error names the file and parser error code.
+This is not an authorization or deployment preview; use `apply --dry-run` for that preview.
+
 ### 3. `work` — the truthful queue and worker lifecycle
 
 Why: people need an unfiltered view of current work; agents need explicit, fenced lease actions.
