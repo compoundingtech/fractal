@@ -41,6 +41,7 @@ async fn write(stream: &mut UnixStream, value: Value) {
     stream.write_all(&bytes).await.unwrap();
 }
 async fn call(stream: &mut UnixStream, value: Value) -> Value {
+    eprintln!("ownership fixture control operation={}", value["op"]);
     write(stream, value).await;
     read(stream).await
 }
@@ -60,6 +61,10 @@ fn command(role: &str) -> Command {
                 || matches!(key.as_ref(), "HOME" | "PATH")
                 || copied_seat
         }));
+    if let Some(path) = std::env::var_os("ST_TEST_OWNERSHIP_DIAGNOSTICS") {
+        let stderr = fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        command.stderr(stderr);
+    }
     command.args([
         "--exact",
         TEST,
@@ -283,9 +288,19 @@ struct OwnedPty {
     runtime: st_runtime::PtyRuntime,
     name: String,
     incarnation: String,
+    diagnostics: PathBuf,
 }
 impl Drop for OwnedPty {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            use std::io::Read as _;
+            let mut bytes = Vec::new();
+            if let Ok(file) = fs::File::open(&self.diagnostics) {
+                let _ = file.take(16_384).read_to_end(&mut bytes);
+            }
+            eprintln!("owned fixture helper stderr (at most 16KiB): {}",
+                String::from_utf8_lossy(&bytes));
+        }
         let _ = self.runtime.stop_if(&self.name, Some(&self.incarnation));
     }
 }
@@ -378,6 +393,8 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                     control_path.to_str().unwrap().into(),
                 ),
                 ("ST_TEST_OWNERSHIP_API".into(), api.to_str().unwrap().into()),
+                ("ST_TEST_OWNERSHIP_DIAGNOSTICS".into(),
+                    root.path().join("helper-stderr.log").to_str().unwrap().into()),
             ]);
             env.insert("HOME".into(), root.path().to_string_lossy().into_owned());
             let private_dir = crate::hooks::claude_agent_dir(
@@ -419,6 +436,7 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                 runtime: runtime.clone(),
                 name: name.clone(),
                 incarnation: incarnation.clone(),
+                diagnostics: root.path().join("helper-stderr.log"),
             };
             let dir = crate::hooks::claude_agent_dir(
                 &state.state_dir.join("drivers"),

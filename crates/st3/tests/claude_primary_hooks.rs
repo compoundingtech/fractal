@@ -71,11 +71,17 @@ fn inherited_hook_processes_cannot_bind_record_context_or_request_permission() {
     if let Ok(role) = std::env::var(ROLE) {
         let dir = PathBuf::from(std::env::var_os("ST_TEST_PRIMARY_HOOK_DIR").unwrap());
         if role == "provider" {
+            let endpoint = std::env::var_os("ST3_ENDPOINT").unwrap();
+            let listener = UnixListener::bind(endpoint).unwrap();
+            listener.set_nonblocking(true).unwrap();
             std::io::stdin().read_exact(&mut [0u8; 1]).unwrap();
             assert!(
                 helper("nested").status().unwrap().success(),
                 "nested before primary SessionStart"
             );
+            assert!(matches!(listener.accept(), Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock),
+                "secondary before primary must not contact a daemon");
             let out = hook("SessionStart", PRIMARY, None);
             assert!(
                 out.status.success(),
@@ -107,10 +113,31 @@ fn inherited_hook_processes_cannot_bind_record_context_or_request_permission() {
                     .unwrap()
                     .is_some()
             );
+            // The admitted primary SessionStart legitimately submits hook telemetry.
+            // Inspect that request, then establish a clean cut before the next secondary.
+            let (telemetry, _) = listener.accept().expect("primary hook telemetry");
+            telemetry.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+            let mut request = Vec::new();
+            telemetry.take(16_385).read_to_end(&mut request).unwrap();
+            assert!(request.len() <= 16_384, "bounded fixture telemetry request");
+            assert!(request.starts_with(b"POST /v1/claims "));
+            let body = request.windows(4).position(|part| part == b"\r\n\r\n")
+                .expect("telemetry HTTP headers") + 4;
+            let claim: Value = serde_json::from_slice(&request[body..]).unwrap();
+            assert_eq!(claim["kind"], "harness.telemetry");
+            let invocations = claim["fields"]["signals"]["hook_invocations"].as_array().unwrap();
+            assert_eq!(invocations.len(), 1);
+            assert_eq!(invocations[0]["event"], "SessionStart");
+            assert!(matches!(listener.accept(), Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock),
+                "primary emitted only its admitted telemetry request");
             assert!(
                 helper("nested").status().unwrap().success(),
                 "nested after primary SessionStart"
             );
+            assert!(matches!(listener.accept(), Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock),
+                "secondary after primary must not contact a daemon");
         } else {
             assert_eq!(role, "nested");
             let before = records(&dir);
@@ -172,8 +199,6 @@ fn inherited_hook_processes_cannot_bind_record_context_or_request_permission() {
         .unwrap();
     }
     let endpoint = root.path().join("must-not-connect.sock");
-    let listener = UnixListener::bind(&endpoint).unwrap();
-    listener.set_nonblocking(true).unwrap();
     let wrapper = st_drivers::claude_process::process(std::process::id()).unwrap();
     fs::OpenOptions::new()
         .write(true)
@@ -222,8 +247,5 @@ fn inherited_hook_processes_cannot_bind_record_context_or_request_permission() {
     .unwrap();
     child.stdin.take().unwrap().write_all(b"g").unwrap();
     assert!(child.wait().unwrap().success());
-    assert!(
-        matches!(listener.accept(),Err(error) if error.kind()==std::io::ErrorKind::WouldBlock),
-        "secondary permission/binding paths must not contact a daemon"
-    );
+
 }
