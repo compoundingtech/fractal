@@ -108,7 +108,6 @@ pub struct Store {
     path: PathBuf,
     coordination_root: PathBuf,
     authority_root: PathBuf,
-    account: bool,
 }
 
 impl Store {
@@ -125,7 +124,6 @@ impl Store {
             path,
             coordination_root: parent.clone(),
             authority_root: parent,
-            account: false,
         })
     }
 
@@ -176,7 +174,6 @@ impl Store {
             path,
             coordination_root: home.clone(),
             authority_root: root,
-            account: true,
         })
     }
 
@@ -319,18 +316,8 @@ impl Store {
         // No startup creation, even for a legacy account. Missing or hidden homes refuse.
         let file = authority_directory(&self.coordination_root, false)?;
         local_lock_filesystem(&file)?;
-        if self.account
-            && let Some(home) = std::env::var_os("HOME")
-        {
-            let caller_home = authority_directory(Path::new(&home), false)
-                .context("Producer HOME does not identify the effective account home")?;
-            let account = file.metadata()?;
-            let caller = caller_home.metadata()?;
-            ensure!(
-                account.dev() == caller.dev() && account.ino() == caller.ino(),
-                "Producer HOME differs from the effective account home; refusing startup"
-            );
-        }
+        // HOME is deliberately ignored: config/test stores can use another home, but
+        // every producer still locks the NSS account inode, never that alternate path.
         // flock locks the open file description. Separate producer opens share SH locks;
         // CLOEXEC prevents an exec'd seat/helper from retaining its parent's description.
         let operation = if exclusive {
@@ -731,8 +718,7 @@ mod tests {
     #[test]
     fn absent_status_is_read_only_and_transition_survives_reopen() -> Result<()> {
         let root = private_tempdir()?;
-        let mut store = Store::in_account_home(root.path().to_path_buf(), None)?;
-        store.account = false;
+        let store = Store::in_account_home(root.path().to_path_buf(), None)?;
         assert_eq!(store.read()?, State::default());
         assert!(!store.authority_root.exists());
         let mut update = store.lock()?;
@@ -853,6 +839,23 @@ mod tests {
 
     #[test]
     fn exec_child_does_not_keep_a_dropped_startup_lease() -> Result<()> {
+        // Parallel test threads can fork while this thread owns an fd. Run the lease
+        // holder in a separate exact-test process, so unrelated tests cannot inherit it.
+        if std::env::var_os("ST_CLIENT_MODE_EXEC_FD_ISOLATED").is_none() {
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "client_mode::tests::exec_child_does_not_keep_a_dropped_startup_lease",
+                    "--nocapture",
+                ])
+                .env("ST_CLIENT_MODE_EXEC_FD_ISOLATED", "1")
+                .status()?;
+            ensure!(
+                status.success(),
+                "Isolated exec descriptor regression failed"
+            );
+            return Ok(());
+        }
         let root = private_tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
         let producer = store.local_start()?;
@@ -909,8 +912,7 @@ mod tests {
             root.path().join(".local"),
             fs::Permissions::from_mode(0o775),
         )?;
-        let mut store = Store::in_account_home(root.path().to_path_buf(), None)?;
-        store.account = false; // fixture home, not the real NSS account
+        let store = Store::in_account_home(root.path().to_path_buf(), None)?;
         assert_eq!(store.read()?, State::default());
         assert!(!store.authority_root.exists());
         let startup = store.local_start()?;
