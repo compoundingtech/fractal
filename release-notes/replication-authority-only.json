@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Return only the local authority digest to the recent-inbound replication guard",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or projection behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes, migrations or persisted cache changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The same replication_snapshot still seals, judges and computes the digest; comparison, push-on-error and scheduling stay."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Additive default-false authority_only body flag, omitted from ordinary requests and ignored by old daemons. New worker extracts digest from either full or compact local response; old workers get unchanged full summaries. Only typed Backend::authority_digest consumes compact responses; peer exchanges never request them."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal rollout; no new service, collector or writer capacity."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Removes unnecessary full-summary assembly and clone work from guard calls, whose existing full store path was 16.21% of export route wall in one 293 s sample; the removable fraction and CPU saving are UNKNOWN. Shared snapshot work remains. Private controls are UNRUN; hosted work controls and separate finite post-install Ops acceptance remain required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Snapshot/read/decode/digest errors leave a push requested. No stale digest cache, retry waiver or new recovery procedure. Full-summary-only signature-request or advertised-checkpoint query failures no longer affect the compact guard; a successful digest must still match the inbound offer to skip."
+  }
+}

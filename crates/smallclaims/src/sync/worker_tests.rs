@@ -2141,9 +2141,21 @@ struct SlowExport {
     slow: Arc<std::sync::atomic::AtomicBool>,
     fail_next: Arc<std::sync::atomic::AtomicBool>,
     receives: Arc<std::sync::atomic::AtomicUsize>,
+    guard_fault: Arc<std::sync::atomic::AtomicBool>,
+    guard_calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Backend for SlowExport {
+    async fn authority_digest(&self, fleet_id: &str) -> Result<String> {
+        let result = if self.guard_fault.load(std::sync::atomic::Ordering::Relaxed) {
+            Err(anyhow::anyhow!("injected guard refusal"))
+        } else {
+            self.local.authority_digest(fleet_id).await
+        };
+        self.guard_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
+
     async fn export(
         &self,
         fleet_id: &str,
@@ -2248,6 +2260,8 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
         slow: Arc::new(AtomicBool::new(true)),
         fail_next: Arc::new(AtomicBool::new(false)),
         receives: Arc::new(AtomicUsize::new(0)),
+        guard_fault: Arc::new(AtomicBool::new(false)),
+        guard_calls: Arc::new(AtomicUsize::new(0)),
     };
     let state = PeerState::new(
         backend.clone(),
@@ -2650,6 +2664,8 @@ async fn failed_export_job_is_removed_and_identical_retry_preserves_receipt() {
         slow: Arc::new(AtomicBool::new(false)),
         fail_next: Arc::new(AtomicBool::new(true)),
         receives: Arc::new(AtomicUsize::new(0)),
+        guard_fault: Arc::new(AtomicBool::new(false)),
+        guard_calls: Arc::new(AtomicUsize::new(0)),
     };
     let state = PeerState::new(
         backend.clone(),
@@ -2841,6 +2857,8 @@ async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() 
             slow: Arc::new(AtomicBool::new(true)),
             fail_next: Arc::new(AtomicBool::new(false)),
             receives: received.clone(),
+            guard_fault: Arc::new(AtomicBool::new(false)),
+            guard_calls: Arc::new(AtomicUsize::new(0)),
         };
         let state = PeerState::new(backend, "cedar".into(), auth.clone(), fleet.clone());
         requests.push(tokio::spawn(receive_exchange(
@@ -2902,5 +2920,45 @@ async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() 
     );
     for request in requests {
         request.abort();
+    }
+}
+
+
+#[tokio::test]
+async fn authority_guard_error_or_changed_digest_still_opens_the_push_connection() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    for case in ["matching", "changed", "error"] {
+        let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+        let auth = FleetAuth::test(fleet_id, &[7; 32]);
+        let store = Arc::new(plain_memory("alder").unwrap());
+        store.bind_fleet(fleet_id).unwrap();
+        let current = store.replication_authority_digest().unwrap();
+        let offered = if case == "changed" { "f".repeat(64) } else { current.clone() };
+        if case == "changed" { assert_ne!(current, offered); }
+        let context = FleetContext::legacy(BTreeSet::from(["birch".into()]));
+        context.inbound.write().unwrap().insert("birch".into(), tokio::time::Instant::now());
+        context.inbound_authority.write().unwrap().insert("birch".into(), offered);
+        let backend = SlowExport {
+            local: Local(store), slow: Arc::new(AtomicBool::new(false)),
+            fail_next: Arc::new(AtomicBool::new(false)), receives: Arc::new(AtomicUsize::new(0)),
+            guard_fault: Arc::new(AtomicBool::new(case == "error")),
+            guard_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (_routes, routes) = watch::channel(vec![Route::Http(format!("http://{}", listener.local_addr().unwrap()))]);
+        let wake = watch::channel(0).0;
+        let worker = tokio::spawn(dial_peer(backend.clone(), "alder".into(), "birch".into(),
+            routes, auth, context, wake.subscribe()));
+        // A real local wake requests a push; startup itself deliberately does not.
+        wake.send_modify(|generation| *generation += 1);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while backend.guard_calls.load(Ordering::Relaxed) == 0 { tokio::task::yield_now().await; }
+        }).await.expect("the real worker did not reach its recent-inbound guard");
+        let dialed = tokio::time::timeout(
+            if case == "matching" { Duration::from_millis(200) } else { Duration::from_secs(5) },
+            listener.accept()).await;
+        worker.abort();
+        let _ = worker.await;
+        assert_eq!(dialed.is_ok(), case != "matching", "{case}: guard changed push liveness");
     }
 }

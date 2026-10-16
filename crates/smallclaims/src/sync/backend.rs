@@ -38,14 +38,18 @@ pub trait Backend: Clone + Send + Sync + 'static {
         signature_requests: &[ReplicaEnvelopeId],
     ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send;
 
-    /// The recent-inbound guard still requests the complete, unchanged summary.
-    /// A process boundary may mark this local request for count/wall accounting.
-    fn guard_summary(
+    /// Only the recent-inbound guard consumes this digest, never an exchange to send a peer.
+    /// Backends without a compact local path retain the full-summary behavior.
+    fn authority_digest(
         &self,
         fleet_id: &str,
-    ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send {
+    ) -> impl Future<Output = Result<String>> + Send {
         async move {
-            self.export(fleet_id, &ReplicationInventory::default(), true, &[]).await
+            let digest = self.export(fleet_id, &ReplicationInventory::default(), true, &[])
+                .await?.exchange.authority_digest;
+            anyhow::ensure!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+                "invalid authority digest");
+            Ok(digest)
         }
     }
 
