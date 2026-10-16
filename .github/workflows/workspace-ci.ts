@@ -35,7 +35,7 @@ export const performanceRunner = [
   `${linuxStageShape};job.priority=3`,
   'namespace-features:github.run-id=${{ github.run_id }}',
 ] as const
-// Cost and compatibility work use the last Namespace class. This changes queue
+// Optional cost work uses the last Namespace class. This changes queue
 // order only: running instances are not preempted and owned roles stay unchanged.
 export const lowPriorityStageRunner = [
   `${linuxStageShape};job.priority=5`,
@@ -143,14 +143,6 @@ export const linuxRunsOn = pickedOr(
 /** Supporting merge jobs use the priority lane; supporting PR jobs use Namespace. */
 export const supportingLinuxRunsOn = `\${{ fromJSON(${mergeProfileLabels} || ${namespaceLabels(linuxRunner)}) }}`
 export const supportingStageRunsOn = `\${{ fromJSON(${mergeCi1Labels} || ${namespaceLabels(linuxStageRunner)}) }}`
-
-// ci-pick-runner emits either an owned role or this fixed 8x16 shape pair in
-// ci1. Rewrite only its Namespace overflow case; pass every owned choice through.
-const lowPriorityStageLabels = `format('${JSON.stringify(lowPriorityStageRunner).replaceAll('${{ github.run_id }}', '{0}')}', github.run_id)`
-const lowPriorityMergeLabels = `github.event_name == 'merge_group' && (startsWith(needs.${pickRunnerJobId}.outputs.ci1 || '', '["nscloud-') && ${lowPriorityStageLabels} || needs.${pickRunnerJobId}.outputs.ci1 || '["ci1-priority"]')`
-const lowPriorityNamespaceLabels = `github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=5;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || ${lowPriorityStageLabels}`
-export const lowPrioritySupportingStageRunsOn = `\${{ fromJSON(${lowPriorityMergeLabels} || ${lowPriorityNamespaceLabels}) }}`
-
 
 /** A job that needs `pick-runner` still runs when it was skipped (ci1 off). */
 export const afterPickRunner = { needs: [pickRunnerJobId], if: '${{ !cancelled() }}' } as const

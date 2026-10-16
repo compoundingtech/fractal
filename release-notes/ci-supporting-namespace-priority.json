@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Queue Namespace cost and compatibility jobs at priority 5 while preserving owned routing and every check.",
+  "summary": "Queue optional Namespace cost checks at priority 5 while preserving required checks and owned routing.",
   "replay": {
     "status": "none",
     "detail": "CI queue placement only; no deployed state, protocol or assertion change."
