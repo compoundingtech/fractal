@@ -583,6 +583,10 @@ pub struct StepSpec {
     pub path: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
+    /// st's own step that holds its run open while the mission watches: not work. Read it with
+    /// [`crate::mission::step_keeps_open`], which covers revisions published before the flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub keep_open: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -634,6 +638,10 @@ pub struct MissionSpec {
     pub subject: String,
     pub state: MissionState,
     pub revision: String,
+    /// st's own plumbing or a standing observer, which clients fold away until asked. Read it
+    /// with [`crate::mission::is_system`], which covers revisions published before the flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub system: bool,
     #[serde(default)]
     pub inputs: BTreeMap<String, MissionInputSpec>,
     #[serde(default = "default_mission_run_limit")]
@@ -2646,6 +2654,14 @@ pub struct StepRunView {
     pub not_before_unix_ms: Option<u128>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
+}
+
+impl StepRunView {
+    /// The held states whose leases native drivers renew, including verification and blocking.
+    pub fn work_claim_is_held_by(&self, subject: &str) -> bool {
+        matches!(self.status.as_str(), "claimed" | "working" | "verifying" | "blocked")
+            && self.claimant.as_deref() == Some(subject)
+    }
 }
 
 /// Compare an immutable submission receipt with the expected author and result.
