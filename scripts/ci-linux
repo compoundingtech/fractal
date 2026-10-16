@@ -86,10 +86,12 @@ scratch_diagnostic_start() {
       used=$(du -sm "$scratch" 2>/dev/null | cut -f1)
       if [[ "${used:-0}" -gt "$peak" ]]; then peak=$used; echo "$peak" > "$scratch_peak_file"; fi
     done
-  ) &
+  ) >/dev/null 2>&1 &
   scratch_poller=$!
 }
 scratch_diagnostic_finish() {
+  # The poller holds no pipe of the stage (its output is /dev/null), so the stage never waits for it.
+  pkill -P "$scratch_poller" 2>/dev/null || true
   kill "$scratch_poller" 2>/dev/null || true
   echo "Test scratch: TMPDIR=$scratch on $(stat -f -c %T "$scratch"), filesystem $(df -Pm "$scratch" | awk 'NR==2 {print $2}') MiB, peak du of TMPDIR $(cat "$scratch_peak_file") MiB; /dev/shm $(stat -f -c %T /dev/shm 2>/dev/null || echo absent), $(df -Pm /dev/shm 2>/dev/null | awk 'NR==2 {print $2}') MiB, $(df -Pm /dev/shm 2>/dev/null | awk 'NR==2 {print $3}') MiB used at the end; memory $(awk '/MemTotal/ {printf "%d", $2 / 1024}' /proc/meminfo) MiB, peak RSS of the tests not measured"
   rm -f "$scratch_peak_file"
