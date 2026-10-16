@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Prove the complete shell can be obtained without public substituters or the warm global store.
+# Cache and proof directory must share RUNNER_TEMP's filesystem for the hard-link negative control.
 set -euo pipefail
 cache=${1:?usage: ci-genie-cache-verify CACHE SHELL_ROOT PUBLIC_KEY_FILE}
 shell_root=${2:?shell root required}
 public_key=${3:?public key required}
 proof=$(mktemp -d "${RUNNER_TEMP:?}/genie-cache-proof.XXXXXX")
 trap 'rm -rf "$proof"' EXIT
+if [ "$(stat -c %d "$cache")" != "$(stat -c %d "$proof")" ]; then
+  echo '::error::Genie cache and RUNNER_TEMP proof directory must be on the same filesystem'
+  exit 1
+fi
 start=$SECONDS
 nix path-info --recursive --json --json-format 1 "$shell_root" > "$proof/expected.json"
 python3 - "$proof/expected.json" "$shell_root" > "$proof/missing-child" <<'PY'
