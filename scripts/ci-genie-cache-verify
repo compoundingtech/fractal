@@ -6,7 +6,24 @@ cache=${1:?usage: ci-genie-cache-verify CACHE SHELL_ROOT PUBLIC_KEY_FILE}
 shell_root=${2:?shell root required}
 public_key=${3:?public key required}
 proof=$(mktemp -d "${RUNNER_TEMP:?}/genie-cache-proof.XXXXXX")
-trap 'rm -rf "$proof"' EXIT
+cleanup() {
+  result=$?
+  trap - EXIT
+  # Nix restores read-only directories. Only the two owned target stores need their
+  # directory write bits restored; never chmod hard-linked cache inputs or follow symlinks.
+  for proof_store in "$proof/complete-store" "$proof/incomplete-store"; do
+    if [ -d "$proof_store" ] && ! find "$proof_store" -type d -exec chmod u+w {} +; then
+      echo '::error::could not make temporary Genie store directories removable'
+      [ "$result" -ne 0 ] || result=1
+    fi
+  done
+  if ! rm -rf "$proof"; then
+    echo '::error::could not remove temporary Genie cache proof'
+    [ "$result" -ne 0 ] || result=1
+  fi
+  exit "$result"
+}
+trap cleanup EXIT
 if [ "$(stat -c %d "$cache")" != "$(stat -c %d "$proof")" ]; then
   echo '::error::Genie cache and RUNNER_TEMP proof directory must be on the same filesystem'
   exit 1
