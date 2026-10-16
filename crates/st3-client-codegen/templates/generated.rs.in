@@ -493,6 +493,42 @@ pub struct MailBacklog {
     pub threshold_ms: u64,
     pub cleanup_command: String,
 }
+/// Every objective and budget at one moment.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SloList {
+    pub as_of_unix_ms: u64,
+    pub rows: Vec<SloRow>,
+}
+/// One objective (a target with windows and an error budget) or one budget (an allowance that
+/// resets). `remaining_percent` is null when nothing was measured.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SloRow {
+    pub id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub account: Option<String>,
+    pub about: String,
+    pub target: String,
+    pub current: String,
+    pub window: String,
+    pub remaining_percent: Option<f64>,
+    pub status: String,
+    #[serde(default)]
+    pub resets_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub measured_at_unix_ms: Option<u64>,
+    pub explain: String,
+}
+/// What was left of one objective or budget across a period, in equal steps. A step holds its
+/// lowest reading and is null when nothing was read.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SloHistory {
+    pub id: String,
+    pub since_ms: u64,
+    pub until_ms: u64,
+    pub samples: u64,
+    pub steps: Vec<Option<f64>>,
+}
 /// Token spend over a period, one row per agent, mission run, step, model, account and host.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct UsagePeriod {
@@ -972,6 +1008,13 @@ pub struct Mission {
     pub title: String,
     pub state: String,
     pub mission_revision: String,
+    /// st's own plumbing or a standing observer; false from older daemons.
+    #[serde(default)]
+    pub system: bool,
+    /// st's presentation of this mission (MissionPresentation in the schema), absent from older
+    /// daemons. Rust readers decode it as `st3_ui_model::missions::Presentation`.
+    #[serde(default)]
+    pub presentation: Option<Value>,
     #[serde(default)]
     pub runs: Vec<String>,
     #[serde(default)]
@@ -1040,6 +1083,9 @@ pub struct MissionStep {
     pub claimant: Option<String>,
     #[serde(default)]
     pub agentless: bool,
+    /// st's own step that holds its run open; false from older daemons.
+    #[serde(default)]
+    pub keep_open: bool,
     pub since: String,
     #[serde(default)]
     pub last_progress: Option<String>,
@@ -1085,6 +1131,43 @@ pub struct MissionWake {
     pub acknowledged_by: Option<String>,
     #[serde(default)]
     pub failure: Option<String>,
+}
+/// st's presentation of an agent (docs/clients/ui-contract.md, Agent). Words are
+/// fixtures/clients/words.json ids.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AgentPresentation {
+    pub state: String,
+    pub group: String,
+    #[serde(default)]
+    pub because: Option<String>,
+    #[serde(default)]
+    pub now: Option<AgentPresentationNow>,
+    #[serde(default)]
+    pub next: Vec<AgentPresentationWork>,
+    #[serde(default)]
+    pub queued: u64,
+}
+/// A step an agent holds or has queued, named for display.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AgentPresentationWork {
+    pub step: String,
+    pub mission: String,
+    pub path: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// `mission › path`.
+    pub label: String,
+}
+/// What an agent holds now.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AgentPresentationNow {
+    #[serde(flatten)]
+    pub work: AgentPresentationWork,
+    #[serde(default)]
+    pub goal: Option<String>,
+    pub since: String,
+    #[serde(default)]
+    pub holder_down_since: Option<String>,
 }
 /// A step named for display: its mission, run, path, title and first goal.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -1205,6 +1288,9 @@ pub struct Agent {
     pub current_session_id: Option<String>,
     #[serde(default)]
     pub todo: Option<AgentTodo>,
+    /// st's presentation of this agent; absent from older daemons.
+    #[serde(default)]
+    pub presentation: Option<AgentPresentation>,
     #[serde(default)]
     pub current_work_ids: Vec<String>,
     #[serde(default)]

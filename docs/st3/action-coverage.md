@@ -419,4 +419,4 @@ once, every inventory HTTP read is forbidden, and no request follows ready frame
 for longer than the old 60-second interval.
 
 The usage inventory empty-graph socket test verifies that an open period uses the same wall-clock end as the HTTP read, then reconnects without a graph write.
-`st ui` opens the terminal interface; plain `st` does so only with terminal input and output outside an agent seat. The typed-key and paired-device gates in `crates/st3/tests` exercise this entry point. Pair with `st devices complete`.
+`st ui` opens the terminal interface; plain `st` does so only with terminal input and output outside an agent seat. The typed-key and paired-device gates in `crates/st3/tests` exercise this entry point. Pair with `st devices complete`. `st ui open` asks that interface to show an agent or mission; `crates/st3/tests/ui_open.rs` drives it from a seat process against the real interface under a PTY.

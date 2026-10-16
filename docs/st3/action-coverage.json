@@ -2231,6 +2231,15 @@
       "verification": "CLI parser and real st ui under a PTY, raw kitty keys and isolated paired-only members"
     },
     {
+      "command": "st ui open",
+      "description": "Ask the person's open terminal interface on this machine to show an agent, mission or machine in a tab or split",
+      "tests": [
+        "crates/st3/tests/ui_open.rs::a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_interface",
+        "crates/st3/tests/ui_open.rs::an_alert_a_seat_raises_for_itself_shows_above_the_input_and_is_dismissed_there"
+      ],
+      "verification": "real terminal interface under a PTY against a real store; a seat process asks, the picture changes, a missing interface and an unknown subject are reported and nothing stays queued"
+    },
+    {
       "command": "st uninstall",
       "description": "Remove st3 from this machine: leave its fleet, then its services, state, and settings",
       "tests": [
