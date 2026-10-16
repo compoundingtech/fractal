@@ -3734,9 +3734,6 @@ const ADMISSION_WRITER_BUDGET: std::time::Duration = std::time::Duration::from_m
 /// queued lease renewals and messages behind its entire incremental projection.
 pub const PROJECTION_CHUNK_CLAIMS: usize = 128;
 
-/// The most envelopes this build takes in one exchange, which it says in each inventory it
-/// sends. Admission commits once per pass, so a page this size admits well within the peer
-/// request timeout, and a first sync needs a few dozen exchanges instead of hundreds.
 /// The most bytes one exchange's JSON may take before compression: the limit a peer inflates to
 /// (`MAX_EXCHANGE_BYTES`), less room for the signed answer that wraps it. A page is chosen by
 /// count, and a page of large envelopes can pass the limit; the peer then refuses the whole body
@@ -3833,6 +3830,9 @@ fn exchange_body_budget() -> usize {
     REPLICATION_EXCHANGE_BODY_BUDGET
 }
 
+/// The most envelopes this build takes in one exchange, which it says in each inventory it
+/// sends. Admission commits once per pass, so a page this size admits well within the peer
+/// request timeout, and a first sync needs a few dozen exchanges instead of hundreds.
 pub const REPLICATION_PAGE_LIMIT: u32 = 4_096;
 
 /// The page this node asks peers for: `REPLICATION_PAGE_LIMIT`, or less when
