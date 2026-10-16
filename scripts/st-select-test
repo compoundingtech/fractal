@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
@@ -207,6 +208,29 @@ class Classification(unittest.TestCase):
         self.assertEqual(rust.report(metadata, ['crates/alone/src/lib.rs'])['crates'], ['alone'])
         self.assertEqual(rust.report(metadata, ['Cargo.lock'])['crates'], 'all')
 
+
+
+class Sign(unittest.TestCase):
+    def test_the_aggregate_file_is_the_facts_and_every_scratch_file_is_removed(self):
+        seen = {}
+
+        def fake_run(argv, **kw):
+            facts = argv[argv.index('--aggregate') + 1]
+            seen['facts'] = json.loads(Path(facts).read_text())
+            seen['paths'] = [facts, argv[1]]
+            return subprocess.CompletedProcess(argv, 0, 'signed', '')
+
+        line = {'check': 'linux-gate', 'decision': 'covered', 'key': 'k' * 40, 'proof': 'p' * 40,
+                'plugin': 'rust@x', 'inputs_sha256': 'i' * 16}
+        always = {'whole-tree-lints': {'command': ['true'], 'exit_code': 0, 'output_sha256': '0' * 64}}
+        with unittest.mock.patch.object(select, 'git', lambda *a, **k: subprocess.CompletedProcess(a, 0, b'#tool', b'')), \
+                unittest.mock.patch.object(select.subprocess, 'run', fake_run):
+            self.assertEqual(select.sign('base', line, always, '1', ROOT), (0, 'signed'))
+        self.assertEqual(seen['facts']['command'], ['st-select', 'select', 'linux-gate'])
+        self.assertEqual(seen['facts']['exit_code'], 0)
+        self.assertEqual(seen['facts']['inputs']['always.whole-tree-lints'], '0:' + '0' * 16)
+        for path in seen['paths']:
+            self.assertFalse(Path(path).exists(), path)
 
 if __name__ == '__main__':
     unittest.main()

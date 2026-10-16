@@ -186,18 +186,20 @@ def sign(base, line, always, attempt, tree):
              'inputs': {'source_inputs': line['key'] or '', 'covered_by': line['proof'] or '',
                         'plugin': line['plugin'], 'inputs_sha256': line['inputs_sha256'],
                         **{f'always.{n}': f'{r["exit_code"]}:{r["output_sha256"][:16]}' for n, r in always.items()}}}
-    with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as handle:
-        json.dump(facts, handle)
+    with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as facts_file:
+        json.dump(facts, facts_file)
     tools = {n: tempfile.NamedTemporaryFile('wb', suffix=f'-{n}', delete=False) for n in ('evidence-wrap', 'evidence-sign')}
-    for name, handle in tools.items():
-        handle.write(git('show', f'{base}:scripts/{name}').stdout)
-        handle.close()
+    for name, tool_file in tools.items():
+        tool_file.write(git('show', f'{base}:scripts/{name}').stdout)
+        tool_file.close()
     signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, tools['evidence-sign'].name])
-    done = subprocess.run([sys.executable, tools['evidence-wrap'].name, '--check', f'select.{line["check"]}',
-                           '--attempt', attempt, '--signer', signer, '--keys-from', base, '--aggregate', handle.name],
-                          capture_output=True, text=True, cwd=tree)
-    for path in [handle.name, *(t.name for t in tools.values())]:
-        os.unlink(path)
+    try:
+        done = subprocess.run([sys.executable, tools['evidence-wrap'].name, '--check', f'select.{line["check"]}',
+                               '--attempt', attempt, '--signer', signer, '--keys-from', base, '--aggregate', facts_file.name],
+                              capture_output=True, text=True, cwd=tree)
+    finally:
+        for path in [facts_file.name, *(t.name for t in tools.values())]:
+            os.unlink(path)
     return done.returncode, (done.stdout + done.stderr).strip()
 
 
