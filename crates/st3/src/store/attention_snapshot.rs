@@ -918,6 +918,51 @@ impl Store {
         Ok(items)
     }
 
+    /// A completed after-step with an unarmed budget is missing admission provenance,
+    /// not queued work. Keep the time unknown and make its loss an actionable fault.
+    fn missing_admission_clock_faults(
+        &self,
+        person: Option<&str>,
+    ) -> Result<Vec<AttentionItemView>> {
+        let connection = self.readers.get();
+        // Begin with the small open-run index, then point-read each deadline and its
+        // after-steps. Finished history is never scanned for this fault.
+        let runs = connection.prepare_cached(&format!(
+            "SELECT mission_runs.id FROM mission_runs INDEXED BY mission_runs_open_index
+             CROSS JOIN mission_run_deadlines AS deadlines
+             WHERE {OPEN_MISSION_RUN} AND deadlines.run_id=mission_runs.id
+               AND deadlines.deadline_at_unix_ms IS NULL
+               AND EXISTS(SELECT 1 FROM step_runs INDEXED BY step_runs_run_index
+                 WHERE step_runs.run_id=mission_runs.id AND step_runs.step_path=?1
+                   AND step_runs.status='completed')"
+        ))?.query_map([crate::mission::AFTER_RUN_STEP], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut items = Vec::new();
+        for id in runs {
+            let run = mission_run_header_tx(&connection, &id)?;
+            if !person_work::run_live(&connection, &run.subject, Some(&run.generation), true)?
+                || person.is_some_and(|person| person != run.requester)
+            {
+                continue;
+            }
+            items.push(AttentionItemView {
+                episode: format!("deadline-admission-missing:{id}"),
+                priority: "high".into(), kind: "fault".into(), review_mode: None,
+                subject: run.subject.clone(), person: run.requester.clone(),
+                requester_id: None, launch_id: None, variant_id: None, message_id: None,
+                answers: Vec::new(), conversation: None,
+                title: "Run admission time unavailable".into(),
+                detail: "This run was admitted, but its timeout cannot be reconstructed because the accepted admission history is unavailable. Its timeout is not armed. Restore the original admission history from a trusted copy and rebuild the projection, or cancel the run. A retry or duplicate completion cannot start a fresh timeout budget.".into(),
+                mission: Some(run.mission.clone()), mission_run: Some(run.subject.clone()),
+                step: None, targets: vec![run.subject.clone()],
+                requested_at_unix_ms: run.created_at_unix_ms,
+                actions: vec![attention_action("inspect run", &["st", "missions", "show", &run.subject])],
+                request: None,
+            });
+        }
+        Ok(items)
+    }
+
     fn loop_attention_items(
         &self,
         person: Option<&str>,
@@ -1160,6 +1205,7 @@ impl Store {
         let mut items = self.reconcile_fault_attention(person, as_of)?;
         items.extend(self.observer_attention_items(person, as_of)?);
         items.extend(self.loop_attention_items(person, as_of)?);
+        items.extend(self.missing_admission_clock_faults(person)?);
         items.extend(self.parked_runtime_attention_items(person, as_of)?);
         items.extend(self.unstarted_seat_attention_items(person, as_of)?);
         let failures = self.operational_failures()?;
@@ -1749,9 +1795,13 @@ impl Store {
         if person.is_some_and(|person| person != owner) {
             return Ok(Vec::new());
         }
+        let last = last_turn_or_end(connection, seat)?;
         let mut items = Vec::new();
         for (claim, index, at, fields) in denials {
-            if index < started || native_prompt_answer(connection, &claim)?.is_some() {
+            if index < started
+                || moved_on(last.as_ref(), index, at)
+                || native_prompt_answer(connection, &claim)?.is_some()
+            {
                 continue;
             }
             let tool = fields["status"].as_str().unwrap_or("tool");
@@ -1817,11 +1867,17 @@ impl Store {
         let connection = self.readers.get();
         let started = running_since(&connection, seat).map_err(internal)?;
         let answered = native_prompt_answer(&connection, episode).map_err(internal)?;
+        let last = last_turn_or_end(&connection, seat).map_err(internal)?;
         drop(connection);
-        if started.is_none_or(|(started, _)| (denial.store_index as i64) < started) || answered.is_some() {
+        let index = denial.store_index as i64;
+        let at = denial.accepted_at_unix_ms;
+        if started.is_none_or(|(started, _)| index < started)
+            || moved_on(last.as_ref(), index, at)
+            || answered.is_some()
+        {
             return Err(St3Error::new(
                 "stale-fence",
-                "that prompt is no longer waiting: it was answered, or the seat restarted",
+                "that call is no longer waiting: it was answered, the seat moved on, or it restarted",
             ));
         }
         let tool = fields["status"].as_str().unwrap_or("tool").to_owned();
@@ -1892,6 +1948,46 @@ fn running_since(connection: &Connection, seat: &str) -> Result<Option<(i64, Str
         return Ok(None);
     }
     Ok(Some((index, fields["incarnation_id"].as_str().unwrap_or_default().to_owned())))
+}
+
+/// The newest observation of `seat` that began a turn or ended its session: its store position,
+/// state and when that state began. Observations of the seat at rest, which repeat as it is
+/// refreshed, lie after it and are passed over.
+fn last_turn_or_end(connection: &Connection, seat: &str) -> Result<Option<(i64, String, Option<u64>)>> {
+    connection
+        .prepare_cached(&format!(
+            "{} LIMIT 1",
+            newest_claims_of_kind_query("claims.store_index, claims.body", "harness.observed").replace(
+                " ORDER BY",
+                " AND json_extract(claims.body, '$.fields.state') IN ('working', 'ended') ORDER BY"
+            )
+        ))?
+        .query_row(params![seat, i64::MAX], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?
+        .map(|(index, body)| -> Result<(i64, String, Option<u64>)> {
+            let body: Value = serde_json::from_str(&body)?;
+            let fields = body.get("fields").unwrap_or(&body);
+            Ok((
+                index,
+                fields["state"].as_str().unwrap_or_default().to_owned(),
+                fields["observed_since_ms"].as_u64(),
+            ))
+        })
+        .transpose()
+}
+
+/// Whether the seat moved on after its hook raised a denial (at store position `index`, accepted
+/// at `at`), given its newest turn or end (see [`last_turn_or_end`]): it began another turn, or its
+/// session ended. The denied call then waits on nobody, so its alert goes. The `Stop` hook records
+/// the seat's state before it raises the denial, so the turn the denial ended, though it may still
+/// be observed working for a moment, began before it.
+fn moved_on(last: Option<&(i64, String, Option<u64>)>, index: i64, at: u128) -> bool {
+    last.is_some_and(|(observed, state, since)| {
+        *observed > index
+            && (state == "ended" || since.is_some_and(|since| u128::from(since) > at))
+    })
 }
 
 /// The newest few denials `seat`'s hooks raised: their claims, store positions, acceptance times
