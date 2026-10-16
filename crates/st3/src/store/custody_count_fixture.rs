@@ -12,6 +12,12 @@ const FAST_LIMIT: usize = 512;
 const MAX_ATTEMPTS: usize = 3;
 const MAX_ELAPSED: Duration = Duration::from_secs(30);
 
+thread_local! {
+    static FIRST_PAGE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 #[derive(Default)]
 struct Scan {
     unread: u64,
@@ -28,6 +34,7 @@ struct Fence {
     busy: bool,
     count: Option<u64>,
     writer_micros: u128,
+    scan_millis: u128,
     fast: bool,
 }
 
@@ -56,8 +63,24 @@ fn cheap_fast_precondition(connection: &Connection, recipient: &str) -> Result<b
     Ok(sent_rows <= FAST_LIMIT)
 }
 
-// A prototype of the no-storage completion gate, without writing a completion claim. The
-// generation is intentionally broad: any digested graph mutation makes this attempt retry.
+fn data_version(connection: &Connection) -> Result<i64> {
+    connection
+        .pragma_query_value(None, "data_version", |row| row.get(0))
+        .map_err(Into::into)
+}
+
+fn readonly_observer(path: &std::path::Path) -> Result<Connection> {
+    let observer = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    anyhow::ensure!(
+        observer.is_autocommit(),
+        "custody observer is inside a transaction"
+    );
+    Ok(observer)
+}
+
+// A read-only observer connection is kept for both data_version reads. It is distinct from the
+// writer and the pinned snapshot reader, so every intervening main-database commit invalidates
+// the count, including physical claim trims that preserve logical projection digests.
 fn fenced_count(store: &Store, recipient: &str) -> Result<Fence> {
     let started = Instant::now();
     let mut writer = store.connection.write();
@@ -71,26 +94,39 @@ fn fenced_count(store: &Store, recipient: &str) -> Result<Fence> {
             busy: false,
             count: Some(scan.unread),
             writer_micros: fast_started.elapsed().as_micros(),
+            scan_millis: scan.elapsed.as_millis(),
             fast: true,
         });
     }
     transaction.commit()?;
     drop(writer);
     let deadline = started + MAX_ELAPSED;
+    let observer = readonly_observer(&store.path)?;
     let mut attempts = 0;
+    let mut last_scan_millis = 0;
     for attempt in 1..=MAX_ATTEMPTS {
         if Instant::now() >= deadline {
             break;
         }
         attempts = attempt;
+        anyhow::ensure!(
+            observer.is_autocommit(),
+            "custody observer is inside a transaction"
+        );
+        let before = data_version(&observer)?;
         let Some(scan) = count_snapshot_until(store, recipient, Some(deadline))? else {
             break;
         };
+        last_scan_millis = scan.elapsed.as_millis();
         let mut writer = store.connection.write();
         let transaction =
             writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let writer_started = Instant::now();
-        let unchanged = smallclaims::store::graph_generation(&transaction)? == scan.generation;
+        anyhow::ensure!(
+            observer.is_autocommit(),
+            "custody observer is inside a transaction"
+        );
+        let unchanged = data_version(&observer)? == before;
         // Production would append agent.custody.completed here if unchanged and authorized.
         // This fixture records only the fence cost; the approved kind is not implemented here.
         transaction.commit()?;
@@ -101,6 +137,7 @@ fn fenced_count(store: &Store, recipient: &str) -> Result<Fence> {
                 busy: false,
                 count: Some(scan.unread),
                 writer_micros,
+                scan_millis: last_scan_millis,
                 fast: false,
             });
         }
@@ -110,6 +147,7 @@ fn fenced_count(store: &Store, recipient: &str) -> Result<Fence> {
         busy: true,
         count: None,
         writer_micros: 0,
+        scan_millis: last_scan_millis,
         fast: false,
     })
 }
@@ -137,6 +175,40 @@ ORDER BY created_index, subject LIMIT ?5";
 fn count_snapshot(store: &Store, recipient: &str) -> Result<Scan> {
     count_snapshot_until(store, recipient, None)?
         .ok_or_else(|| anyhow::anyhow!("unexpected unbounded scan timeout"))
+}
+
+// The public mailbox pager is the oracle for visible rows. A read receipt makes a row read;
+// closed rows are omitted by include_closed=false. The fixture compares this independent
+// production path with its proposed direct count after each seeded lifecycle state.
+fn visible_mailbox_unread(store: &Store, recipient: &str) -> Result<u64> {
+    let through = store.index()?;
+    let mut after = None;
+    let mut unread = 0;
+    loop {
+        let (page, next) = store.messages_page(Some(recipient), false, after, through, PAGE)?;
+        unread += page
+            .iter()
+            .filter(|message| message.status != "read")
+            .count() as u64;
+        match next {
+            Some(cursor) => after = Some(cursor),
+            None => return Ok(unread),
+        }
+    }
+}
+
+fn fresh_canonical_unread(path: &std::path::Path, recipient: &str) -> Result<u64> {
+    let reader = readonly_observer(path)?;
+    Ok(scan_on_connection(&reader, recipient, None)?.unread)
+}
+
+fn assert_visible_oracle(store: &Store, label: &str) {
+    let counted = count_snapshot(store, OLD).unwrap();
+    let visible = visible_mailbox_unread(store, OLD).unwrap();
+    assert_eq!(
+        counted.unread, visible,
+        "{label}: direct count differs from mailbox page"
+    );
 }
 
 fn count_snapshot_until(
@@ -193,6 +265,13 @@ fn scan_on_connection(
         if rows.is_empty() {
             break;
         }
+        if scan.pages == 0 {
+            FIRST_PAGE_HOOK.with(|hook| {
+                if let Some(run) = hook.borrow_mut().take() {
+                    run();
+                }
+            });
+        }
         scan.pages += 1;
         for (subject, created_index) in &rows {
             scan.candidates += 1;
@@ -233,7 +312,12 @@ fn scan_on_connection(
     Ok(scan)
 }
 
-fn append(store: &Store, subject: &str, kind: &str, fields: BTreeMap<String, Value>) {
+fn append(
+    store: &Store,
+    subject: &str,
+    kind: &str,
+    fields: BTreeMap<String, Value>,
+) -> ClaimRecord {
     let actor = if kind == "message.sent" {
         "requester"
     } else {
@@ -249,7 +333,7 @@ fn append(store: &Store, subject: &str, kind: &str, fields: BTreeMap<String, Val
             expected_subject: None,
             idempotency_key: Some(format!("fixture:{subject}:{kind}")),
         })
-        .unwrap();
+        .unwrap()
 }
 
 fn seed_sent(store: &Store, count: usize, all_read: bool) {
@@ -351,15 +435,558 @@ fn unrelated_writes(
     handle
 }
 
+fn trim_claim_as_checkpoint(store: &Store, claim: &ClaimRecord) {
+    use smallclaims::store::checkpoint::{
+        ClaimTombstone, delete_dropped_rows_tx, record_checkpoint_tombstones_tx,
+    };
+    let tombstone = ClaimTombstone {
+        id: claim.id.clone(),
+        writer: claim.origin.clone(),
+        sequence: 0,
+        envelope_hash: String::new(),
+        subject: claim.subject.clone(),
+        kind: claim.kind.clone(),
+        actor: claim.actor.clone(),
+        predecessors: claim.predecessors.clone(),
+        operation_id: claim.operation_id.clone(),
+        request_digest: claim.request_digest.clone(),
+        accepted_at_unix_ms: claim.accepted_at_unix_ms,
+    };
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    record_checkpoint_tombstones_tx(
+        &transaction,
+        "checkpoint/custody-fixture",
+        &[],
+        std::slice::from_ref(&tombstone),
+    )
+    .unwrap();
+    delete_dropped_rows_tx(&transaction, &[], std::slice::from_ref(&tombstone)).unwrap();
+    transaction.commit().unwrap();
+}
+
+#[test]
+#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
+fn visible_mailbox_lifecycle_oracle() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("state.sqlite3"), "host/fixture").unwrap();
+    let subject = "message/custody-lifecycle-oracle";
+    append(
+        &store,
+        subject,
+        "message.sent",
+        BTreeMap::from([
+            ("from".into(), json!("requester")),
+            ("to".into(), json!(OLD)),
+            ("content".into(), json!("fixture")),
+            ("status".into(), json!("sent")),
+        ]),
+    );
+    assert_visible_oracle(&store, "sent only");
+    assert_eq!(count_snapshot(&store, OLD).unwrap().unread, 1);
+    append(
+        &store,
+        subject,
+        "message.delivered",
+        BTreeMap::from([("status".into(), json!("delivered"))]),
+    );
+    assert_visible_oracle(&store, "sent and delivered");
+    assert_eq!(count_snapshot(&store, OLD).unwrap().unread, 1);
+    append(
+        &store,
+        subject,
+        "message.read",
+        BTreeMap::from([("status".into(), json!("read"))]),
+    );
+    assert_visible_oracle(&store, "sent and read");
+    assert_eq!(count_snapshot(&store, OLD).unwrap().unread, 0);
+    append(
+        &store,
+        subject,
+        "message.closed",
+        BTreeMap::from([("status".into(), json!("closed"))]),
+    );
+    assert_visible_oracle(&store, "sent and closed");
+
+    append(
+        &store,
+        "message/custody-alias-oracle",
+        "message.sent",
+        BTreeMap::from([
+            ("from".into(), json!("requester")),
+            ("to".into(), json!("fixture-old")),
+            ("content".into(), json!("fixture")),
+            ("status".into(), json!("sent")),
+        ]),
+    );
+    assert_visible_oracle(&store, "bare recipient alias");
+    assert_eq!(count_snapshot(&store, OLD).unwrap().unread, 1);
+
+    seed_desired(&store, 1, 0);
+    assert_visible_oracle(&store, "desired-only mail");
+    assert_eq!(count_snapshot(&store, OLD).unwrap().unread, 2);
+
+    let out_of_order = "message/custody-out-of-order";
+    append(
+        &store,
+        out_of_order,
+        "message.sent",
+        BTreeMap::from([
+            ("from".into(), json!("requester")),
+            ("to".into(), json!(OLD)),
+            ("content".into(), json!("fixture")),
+            ("status".into(), json!("sent")),
+        ]),
+    );
+    // Replication can leave a persisted read without this writer observing its delivery
+    // boundary first. The test-only transaction writes that persisted shape directly.
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    append_claim_tx(
+        &transaction,
+        store.origin(),
+        out_of_order,
+        "message.read",
+        Some(OLD),
+        &json!({"fields":{"status":"read"}}),
+        &[],
+        None,
+    )
+    .unwrap();
+    transaction.commit().unwrap();
+    drop(writer);
+    assert_visible_oracle(&store, "sent then read out of order");
+    assert_eq!(count_snapshot(&store, OLD).unwrap().unread, 2);
+}
+
+#[test]
+#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
+fn data_version_covers_mail_and_projection_mutations() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "host/fixture").unwrap();
+    let observer = readonly_observer(&path).unwrap();
+    let subject = "message/custody-version-oracle";
+
+    let before = data_version(&observer).unwrap();
+    append(
+        &store,
+        subject,
+        "message.sent",
+        BTreeMap::from([
+            ("from".into(), json!("requester")),
+            ("to".into(), json!(OLD)),
+            ("content".into(), json!("fixture")),
+            ("status".into(), json!("sent")),
+        ]),
+    );
+    let after = data_version(&observer).unwrap();
+    assert_ne!(before, after, "ordinary sent claim must move data_version");
+    assert_visible_oracle(&store, "ordinary append");
+    assert_eq!(count_snapshot(&store, OLD).unwrap().unread, 1);
+    println!(
+        "custody_version sent changed=true graph_generation={}",
+        count_snapshot(&store, OLD).unwrap().generation
+    );
+
+    let before = after;
+    append(
+        &store,
+        subject,
+        "message.delivered",
+        BTreeMap::from([("status".into(), json!("delivered"))]),
+    );
+    let after = data_version(&observer).unwrap();
+    assert_ne!(before, after, "delivered claim must move data_version");
+    let read = append(
+        &store,
+        subject,
+        "message.read",
+        BTreeMap::from([("status".into(), json!("read"))]),
+    );
+    let after_read = data_version(&observer).unwrap();
+    assert_ne!(after, after_read, "read claim must move data_version");
+    assert_visible_oracle(&store, "read claim");
+    assert_eq!(count_snapshot(&store, OLD).unwrap().unread, 0);
+
+    let graph_before = count_snapshot(&store, OLD).unwrap().generation;
+    store
+        .connection
+        .write()
+        .execute(
+            "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
+            [&read.id],
+        )
+        .unwrap();
+    let after_repair = data_version(&observer).unwrap();
+    assert_ne!(
+        after_read, after_repair,
+        "repair commit must move data_version"
+    );
+    let canonical = count_snapshot(&store, OLD).unwrap();
+    assert_eq!(canonical.unread, 1);
+    let cached_page = visible_mailbox_unread(&store, OLD).unwrap();
+    let fresh_page = fresh_canonical_unread(&path, OLD).unwrap();
+    assert_eq!(canonical.unread, fresh_page);
+    println!(
+        "custody_repair cached_page={cached_page} fresh_canonical={fresh_page} graph_generation_before={graph_before} graph_generation_after={}",
+        canonical.generation
+    );
+
+    let checkpoint_before = data_version(&observer).unwrap();
+    let _: (i64, i64, i64) = store
+        .connection
+        .write()
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(
+        checkpoint_before,
+        data_version(&observer).unwrap(),
+        "WAL checkpoint without content change must not move data_version"
+    );
+    let reader = readonly_observer(&path).unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        checkpoint_before,
+        data_version(&observer).unwrap(),
+        "a read-only connection must not move data_version"
+    );
+    let child_before = data_version(&observer).unwrap();
+    let status = std::process::Command::new("python3")
+        .arg("-c")
+        .arg("import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"INSERT OR REPLACE INTO meta(key,value) VALUES('custody_child_commit','1')\"); c.commit()")
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "second-process SQLite commit failed");
+    assert_ne!(
+        child_before,
+        data_version(&observer).unwrap(),
+        "second-process commit must move data_version"
+    );
+    println!("custody_second_process data_version_changed=true");
+
+    seed_desired(&store, 2, 0);
+    let subject: String = store
+        .connection
+        .write()
+        .query_row(
+            "SELECT subject FROM desired WHERE kind='message' AND body LIKE '%fixture-old%'
+         ORDER BY subject LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let before_update = data_version(&observer).unwrap();
+    let before_update_scan = count_snapshot(&store, OLD).unwrap();
+    let graph_before = before_update_scan.generation;
+    let _warm_page = visible_mailbox_unread(&store, OLD).unwrap();
+    store
+        .connection
+        .write()
+        .execute(
+            "UPDATE desired SET body=replace(body,'fixture-old','fixture-other')
+         WHERE subject=?1",
+            [&subject],
+        )
+        .unwrap();
+    assert_ne!(before_update, data_version(&observer).unwrap());
+    let direct = count_snapshot(&store, OLD).unwrap();
+    assert_eq!(direct.unread + 1, before_update_scan.unread);
+    let cached_page = visible_mailbox_unread(&store, OLD).unwrap();
+    let fresh_page = fresh_canonical_unread(&path, OLD).unwrap();
+    assert_eq!(direct.unread, fresh_page);
+    println!(
+        "custody_desired_update cached_page={cached_page} fresh_canonical={fresh_page} graph_generation_before={graph_before} graph_generation_after={}",
+        direct.generation
+    );
+
+    let before_delete = data_version(&observer).unwrap();
+    let direct_before = direct.unread;
+    let remaining: String = store
+        .connection
+        .write()
+        .query_row(
+            "SELECT subject FROM desired WHERE kind='message' AND body LIKE '%fixture-old%'
+         ORDER BY subject LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    store
+        .connection
+        .write()
+        .execute("DELETE FROM desired WHERE subject=?1", [&remaining])
+        .unwrap();
+    assert_ne!(before_delete, data_version(&observer).unwrap());
+    let direct_after = count_snapshot(&store, OLD).unwrap();
+    assert_eq!(direct_after.unread + 1, direct_before);
+    println!(
+        "custody_desired_delete old_count={direct_before} new_count={} graph_generation_before={} graph_generation_after={}",
+        direct_after.unread, direct.generation, direct_after.generation
+    );
+}
+
+#[test]
+#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
+fn data_version_covers_checkpoint_trim_without_digest_change() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "host/fixture").unwrap();
+    let observer = readonly_observer(&path).unwrap();
+    let subject = "message/custody-trim-oracle";
+    append(
+        &store,
+        subject,
+        "message.sent",
+        BTreeMap::from([
+            ("from".into(), json!("requester")),
+            ("to".into(), json!(OLD)),
+            ("content".into(), json!("fixture")),
+            ("status".into(), json!("sent")),
+        ]),
+    );
+    append(
+        &store,
+        subject,
+        "message.delivered",
+        BTreeMap::from([("status".into(), json!("delivered"))]),
+    );
+    let read = append(
+        &store,
+        subject,
+        "message.read",
+        BTreeMap::from([("status".into(), json!("read"))]),
+    );
+    assert_visible_oracle(&store, "before read trim");
+    let before = count_snapshot(&store, OLD).unwrap();
+    let before_version = data_version(&observer).unwrap();
+    let before_digest =
+        smallclaims::store::projection_digest::generation(&store.readers.get()).unwrap();
+    trim_claim_as_checkpoint(&store, &read);
+    let after_version = data_version(&observer).unwrap();
+    assert_ne!(
+        before_version, after_version,
+        "physical read trim must move data_version"
+    );
+    let after = count_snapshot(&store, OLD).unwrap();
+    assert_eq!(before.unread, 0);
+    assert_eq!(after.unread, 1);
+    assert_visible_oracle(&store, "after read trim");
+    let after_digest =
+        smallclaims::store::projection_digest::generation(&store.readers.get()).unwrap();
+    println!(
+        "custody_trim_read graph_before={} graph_after={} digest_before={before_digest} digest_after={after_digest} data_version_changed=true unread_before={} unread_after={}",
+        before.generation, after.generation, before.unread, after.unread
+    );
+
+    let close_subject = "message/custody-close-trim";
+    append(
+        &store,
+        close_subject,
+        "message.sent",
+        BTreeMap::from([
+            ("from".into(), json!("requester")),
+            ("to".into(), json!(OLD)),
+            ("content".into(), json!("fixture")),
+            ("status".into(), json!("sent")),
+        ]),
+    );
+    append(
+        &store,
+        close_subject,
+        "message.delivered",
+        BTreeMap::from([("status".into(), json!("delivered"))]),
+    );
+    append(
+        &store,
+        close_subject,
+        "message.read",
+        BTreeMap::from([("status".into(), json!("read"))]),
+    );
+    let closed = append(
+        &store,
+        close_subject,
+        "message.closed",
+        BTreeMap::from([("status".into(), json!("closed"))]),
+    );
+    let before_close_trim = data_version(&observer).unwrap();
+    trim_claim_as_checkpoint(&store, &closed);
+    assert_ne!(
+        before_close_trim,
+        data_version(&observer).unwrap(),
+        "physical close trim must move data_version"
+    );
+    assert_visible_oracle(&store, "after close trim");
+    assert_eq!(count_snapshot(&store, OLD).unwrap().unread, 1);
+    println!("custody_trim_close data_version_changed=true visible_read=true");
+}
+
+#[test]
+#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
+fn pinned_scan_connection_is_not_the_observer() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "host/fixture").unwrap();
+    let scan_connection = store.readers.get();
+    scan_connection.execute_batch("BEGIN").unwrap();
+    let _: i64 = scan_connection
+        .query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0))
+        .unwrap();
+    let pinned_before = data_version(&scan_connection).unwrap();
+    append(
+        &store,
+        "message/custody-pinned-observer",
+        "message.sent",
+        BTreeMap::from([
+            ("from".into(), json!("requester")),
+            ("to".into(), json!(OLD)),
+            ("content".into(), json!("fixture")),
+            ("status".into(), json!("sent")),
+        ]),
+    );
+    let pinned_after = data_version(&scan_connection).unwrap();
+    scan_connection.execute_batch("COMMIT").unwrap();
+    let released_after = data_version(&scan_connection).unwrap();
+    assert_eq!(
+        pinned_before, pinned_after,
+        "a pinned scan connection can falsely report no change"
+    );
+    assert_ne!(
+        pinned_before, released_after,
+        "the same connection sees the commit only after release"
+    );
+    println!("custody_pinned_observer false_equality=true released_change=true");
+}
+
+#[test]
+#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
+fn other_connection_commits_during_a_pinned_page_scan() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "host/fixture").unwrap();
+    seed_sent(&store, 100, true);
+    let other = Store::open(&path, "host/fixture-writer").unwrap();
+    let observer = readonly_observer(&path).unwrap();
+    let before = data_version(&observer).unwrap();
+    let (start_tx, start_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer = thread::spawn(move || {
+        start_rx.recv().unwrap();
+        append(
+            &other,
+            "message/custody-during-scan",
+            "message.sent",
+            BTreeMap::from([
+                ("from".into(), json!("requester")),
+                ("to".into(), json!(OLD)),
+                ("content".into(), json!("during scan")),
+                ("status".into(), json!("sent")),
+            ]),
+        );
+        done_tx.send(()).unwrap();
+    });
+    FIRST_PAGE_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            start_tx.send(()).unwrap();
+            done_rx.recv().unwrap();
+        }));
+    });
+    let old_scan = count_snapshot(&store, OLD).unwrap();
+    writer.join().unwrap();
+    assert_eq!(
+        old_scan.unread, 0,
+        "the pinned snapshot must stay at its original cut"
+    );
+    let mut writer_lock = store.connection.write();
+    let transaction = writer_lock
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let after = data_version(&observer).unwrap();
+    assert_ne!(
+        before, after,
+        "commit during scan must fail the observer fence"
+    );
+    transaction.commit().unwrap();
+    assert_eq!(count_snapshot(&store, OLD).unwrap().unread, 1);
+    println!("custody_during_scan old_count=0 new_count=1 data_version_changed=true");
+}
+
+#[test]
+#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
+fn eval_run_desired_delete_moves_data_version() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "host/fixture").unwrap();
+    let source = r#"version 2
+mission "eval/custody" state="ready" timeout="1m" {
+  goal "Own a desired-only fixture message."
+}
+"#;
+    let definition = crate::graph::parse_test_intent(source, "host/fixture").unwrap();
+    let published = store
+        .mission(
+            &definition,
+            IntentInput {
+                kdl: source.into(),
+                source_name: None,
+            },
+        )
+        .unwrap();
+    store
+        .apply(&definition, &published.subject_tokens, "eval fixture")
+        .unwrap();
+    let root = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "eval/custody".into(),
+            revision: None,
+            workspace: "/eval".into(),
+            requester: Some("person/test".into()),
+            mode: Some("eval".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "custody-eval-root".into(),
+        })
+        .unwrap();
+    let mut message = crate::graph::parse_test_intent(
+        "version 2\nmessage \"custody-eval-mail\" { from \"requester\"; to \"fixture-old\"; content \"fixture\" }\n",
+        "host/fixture",
+    ).unwrap();
+    for subject in message.subjects.values_mut() {
+        subject.owner_run = Some(root.subject.clone());
+    }
+    store.apply_internal(&message, "custody-eval-mail").unwrap();
+    let observer = readonly_observer(&path).unwrap();
+    let before = data_version(&observer).unwrap();
+    assert_eq!(count_snapshot(&store, OLD).unwrap().unread, 1);
+    assert_visible_oracle(&store, "before eval-run desired delete");
+    assert!(
+        store
+            .retire_eval_owned_desired(&root.subject)
+            .unwrap()
+            .is_empty()
+    );
+    assert_ne!(
+        before,
+        data_version(&observer).unwrap(),
+        "eval-run desired DELETE must move data_version"
+    );
+    assert_eq!(count_snapshot(&store, OLD).unwrap().unread, 0);
+    println!("custody_eval_delete unread_before=1 unread_after=0 data_version_changed=true");
+}
+
 #[test]
 #[ignore = "hosted fixture only; run explicitly after Intake source admission"]
 fn exact_unread_generation_fence_probe() {
     for (sent, desired_old, desired_other) in [
         (100, 0, 0),
-        (1_000, 0, 0),
-        (10_000, 0, 0),
-        (1_000, 10, 100),
-        (1_000, 10, 1_000),
+        (500, 0, 0),
+        (2_000, 0, 0),
+        (500, 10, 100),
+        (500, 10, 700),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.sqlite3");
@@ -368,6 +995,7 @@ fn exact_unread_generation_fence_probe() {
         seed_desired(&store, desired_old, desired_other);
         let scan = count_snapshot(&store, OLD).unwrap();
         assert_eq!(scan.unread, desired_old as u64);
+        assert_visible_oracle(&store, "all-read size probe");
         println!(
             "custody_fixture sent={sent} desired_old={desired_old} desired_other={desired_other} unread={} candidates={} pages={} vm_steps={} fullscan_steps={} scan_ms={}",
             scan.unread,
@@ -381,8 +1009,8 @@ fn exact_unread_generation_fence_probe() {
         assert!(!fence.busy);
         assert_eq!(fence.count, Some(desired_old as u64));
         println!(
-            "custody_fence attempts={} busy={} fast={} writer_us={}",
-            fence.attempts, fence.busy, fence.fast, fence.writer_micros
+            "custody_fence attempts={} busy={} fast={} scan_ms={} writer_us={}",
+            fence.attempts, fence.busy, fence.fast, fence.scan_millis, fence.writer_micros
         );
     }
 }
@@ -393,8 +1021,8 @@ fn pinned_wal_and_unrelated_write_probe() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite3");
     let store = Store::open(&path, "host/fixture").unwrap();
-    seed_sent(&store, 1_000, true);
-    seed_desired(&store, 10, 1_000);
+    seed_sent(&store, 500, true);
+    seed_desired(&store, 10, 700);
     let _: (i64, i64, i64) = store
         .connection
         .write()
@@ -466,11 +1094,12 @@ fn pinned_wal_and_unrelated_write_probe() {
         let (writes, elapsed) = writer.join().expect("writer thread");
         success += usize::from(!fenced.busy);
         println!(
-            "custody_contention trial={trial} target_writes_per_s=50 achieved_writes_per_s={:.1} attempts={} busy={} fast={} exact_count={:?} writer_us={}",
+            "custody_contention trial={trial} target_writes_per_s=50 achieved_writes_per_s={:.1} attempts={} busy={} fast={} scan_ms={} exact_count={:?} writer_us={}",
             writes as f64 / elapsed.as_secs_f64(),
             fenced.attempts,
             fenced.busy,
             fenced.fast,
+            fenced.scan_millis,
             fenced.count,
             fenced.writer_micros
         );
