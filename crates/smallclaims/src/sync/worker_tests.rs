@@ -2934,6 +2934,86 @@ async fn a_peer_whose_probe_never_answers_keeps_its_backoff() {
     drop(listener);
 }
 
+/// Bound for the recovery edge: a probe that alternates between missing its 1 s timeout and
+/// answering is a new edge every few seconds, while the exchange behind it keeps failing. Waits
+/// that each end at their first honored edge must still be dialed no faster than the old 30 s cap,
+/// not once per edge.
+#[tokio::test(start_paused = true)]
+async fn a_flapping_probe_ends_waits_no_faster_than_the_thirty_second_cap() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let requests = Arc::new(AtomicUsize::new(0));
+    let count = requests.clone();
+    let app = Router::new().route(
+        EXCHANGE_PATH,
+        axum::routing::head(move || {
+            let nth = count.fetch_add(1, Ordering::Relaxed);
+            async move {
+                // Every other probe never answers within the client's 1 s probe timeout.
+                if nth % 2 == 0 {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+                StatusCode::OK
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    let keep_awake = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
+    let (_route_tx, mut routes) = watch::channel(vec![Route::Http(url.clone())]);
+    let mut inbound = fleet.inbound_changed.subscribe();
+    let mut activity = fleet.activity_changed.subscribe();
+    let mut connectivity = fleet.connectivity_changed.subscribe();
+    let http = replication_http_client();
+    let local = Local(Arc::new(plain_memory("birch").unwrap()));
+    let previous = (url, tokio::time::Instant::now());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted = attempts.clone();
+    // The worker loop as far as it matters here: wait, then "attempt" (the exchange fails), wait again.
+    let worker = async move {
+        loop {
+            wait_peer_retry(
+                &local,
+                crate::store::now_ms(),
+                Duration::from_secs(3600),
+                &mut routes,
+                &mut inbound,
+                &mut activity,
+                &mut connectivity,
+                &fleet,
+                "cedar",
+                tokio::time::Instant::now(),
+                Some(&previous),
+                &http,
+            )
+            .await;
+            counted.fetch_add(1, Ordering::Relaxed);
+        }
+    };
+    tokio::pin!(worker);
+    // Drive sockets without Tokio advancing time ahead of them.
+    for _ in 0..120 {
+        tokio::select! {
+            _ = &mut worker => unreachable!("the worker loop never ends"),
+            _ = async { for _ in 0..100 { tokio::task::yield_now().await; } } => {}
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+    let attempted = attempts.load(Ordering::Relaxed);
+    assert!(
+        (1..=5).contains(&attempted),
+        "120 s of a flapping probe: {attempted} attempts; the first edge must dial at once and \
+         then no more than one per 30 s (at most 5), where one per edge would be about 17"
+    );
+    keep_awake.abort();
+    server.abort();
+}
+
 #[tokio::test]
 async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

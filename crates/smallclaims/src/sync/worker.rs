@@ -67,6 +67,11 @@ const REPLICATION_WAKE_COALESCE: Duration = Duration::from_secs(1);
 const PEER_PROBE_INTERVAL: Duration = Duration::from_secs(3);
 const PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// A recovery edge (a probe that failed, then answered) ends a retry wait at most this often per
+/// peer, so a flapping link or an overloaded peer that sometimes misses the probe is dialed no
+/// faster than the 30 second cap allowed before.
+const PEER_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Recently working HTTP routes can return without any transport presence event. Probe
 /// briefly without exporting inventories or writing failures; long absences stay quiet.
 const PEER_PROBE_WINDOW: Duration = Duration::from_secs(5 * 60);
@@ -152,6 +157,8 @@ pub struct FleetContext {
     activity: Arc<std::sync::RwLock<BTreeMap<String, tokio::time::Instant>>>,
     activity_changed: watch::Sender<u64>,
     exchange_jobs: Arc<ExchangeJobs>,
+    /// When a recovery edge last ended a retry wait for each peer.
+    recovery_retries: Arc<std::sync::RwLock<BTreeMap<String, tokio::time::Instant>>>,
 }
 
 impl FleetContext {
@@ -179,6 +186,7 @@ impl FleetContext {
             activity: Arc::default(),
             activity_changed: watch::channel(0).0,
             exchange_jobs: Arc::default(),
+            recovery_retries: Arc::default(),
         }
     }
 
@@ -212,6 +220,7 @@ impl FleetContext {
             activity: Arc::default(),
             activity_changed: watch::channel(0).0,
             exchange_jobs: Arc::default(),
+            recovery_retries: Arc::default(),
         }
     }
 
@@ -246,6 +255,33 @@ impl FleetContext {
             .insert(name.to_owned(), tokio::time::Instant::now());
         self.activity_changed
             .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    /// Whether a recovery edge for `name` may end its retry wait now: true, and remembered, unless
+    /// one did, or a wait capped at 30 seconds ended, within `PEER_RECOVERY_RETRY_INTERVAL`.
+    fn take_recovery_retry(&self, name: &str) -> bool {
+        let mut taken = self
+            .recovery_retries
+            .write()
+            .expect("recovery retry lock poisoned");
+        let now = tokio::time::Instant::now();
+        if taken
+            .get(name)
+            .is_some_and(|at| now.duration_since(*at) < PEER_RECOVERY_RETRY_INTERVAL)
+        {
+            return false;
+        }
+        taken.insert(name.to_owned(), now);
+        true
+    }
+
+    /// A wait that the 30 second cap ended dialed `name` now: edges wait out the interval too, so
+    /// edge dials and cap dials do not stack.
+    fn note_capped_retry(&self, name: &str) {
+        self.recovery_retries
+            .write()
+            .expect("recovery retry lock poisoned")
+            .insert(name.to_owned(), tokio::time::Instant::now());
     }
 
     /// Record that a member refused this node for good, so it stops dialing and `st3 doctor`
@@ -492,6 +528,7 @@ pub async fn run<B: Backend>(
         activity: Arc::default(),
         activity_changed: watch::channel(0).0,
         exchange_jobs: Arc::default(),
+        recovery_retries: Arc::default(),
     };
     tokio::spawn(keep_connectivity_current(fleet.clone()));
     if let Some(fabric) = fabric.clone() {
@@ -1461,6 +1498,7 @@ async fn wait_peer_retry<B: Backend>(
     // A probe that failed during this wait says the transport was down; the next one that
     // answers is the link coming back, not a peer that answers cheaply and refuses real work.
     let mut transport_was_down = false;
+    let mut ended_by_cap = false;
     loop {
         // Check before sleeping as well as after notification: watch channels coalesce
         // events, and an accepted request can predate entry to this retry wait.
@@ -1503,7 +1541,12 @@ async fn wait_peer_retry<B: Backend>(
             })
             .map(|(url, _)| url);
         tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => return false,
+            _ = tokio::time::sleep_until(deadline) => {
+                if ended_by_cap {
+                    fleet.note_capped_retry(name);
+                }
+                return false;
+            }
             changed = routes.changed() => return changed.is_ok(),
             changed = connectivity.changed() => return changed.is_ok(),
             changed = inbound_changes.changed() => {
@@ -1523,13 +1566,15 @@ async fn wait_peer_retry<B: Backend>(
                 next_probe = tokio::time::Instant::now() + PEER_PROBE_INTERVAL;
                 if !alive {
                     transport_was_down = true;
-                } else if transport_was_down {
+                } else if transport_was_down && fleet.take_recovery_retry(name) {
                     // The backoff grew while the peer was unreachable, so it can outlast the
                     // outage by up to its whole length. Dead then alive is the recovery edge:
-                    // try now, and let the caller restart the backoff. Each edge needs a failed
-                    // probe and a later answered one, so a flapping link is dialed at most once
-                    // per two probe intervals; a peer that always answers the probe and refuses
-                    // the exchange never reaches this branch and keeps the 30 second cap below.
+                    // try now, and let the caller restart the backoff. A failed probe and a later
+                    // answered one are both needed, and an edge ends a wait at most once per
+                    // `PEER_RECOVERY_RETRY_INTERVAL`, so a flapping link or an overloaded peer that
+                    // sometimes misses the probe is dialed no faster than the cap below allows. A
+                    // peer that always answers the probe and refuses the exchange never has a
+                    // failed probe and keeps that cap.
                     return true;
                 } else {
                     // Transport is alive, but another expensive exchange has just failed.
@@ -1539,6 +1584,7 @@ async fn wait_peer_retry<B: Backend>(
                     let capped = started + Duration::from_secs(30);
                     if capped < deadline {
                         deadline = capped;
+                        ended_by_cap = true;
                         record_worker(backend, name, "backoff", last_attempt_unix_ms,
                             Some(deadline.saturating_duration_since(tokio::time::Instant::now()))).await;
                     }
