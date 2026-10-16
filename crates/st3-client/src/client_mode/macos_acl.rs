@@ -133,6 +133,9 @@ mod tests {
     unsafe extern "C" {
         fn st_client_mode_acl_check_export(bytes: *const u8, size: usize) -> u32;
         fn st_client_mode_acl_export_layout(out: *mut usize);
+        fn acl_copy_int_native(bytes: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn acl_set_fd_np(fd: i32, acl: *mut std::ffi::c_void, kind: i32) -> i32;
+        fn acl_free(acl: *mut std::ffi::c_void) -> i32;
         fn st_client_mode_acl_query_result(
             result: i32,
             error: i32,
@@ -148,7 +151,7 @@ mod tests {
 
     #[test]
     fn malformed_exported_buffers_fail_closed() {
-        let mut layout = [0usize; 7];
+        let mut layout = [0usize; 8];
         unsafe { st_client_mode_acl_export_layout(layout.as_mut_ptr()) };
         let mut valid = vec![0u8; layout[0]];
         let put = |bytes: &mut [u8], offset: usize, value: u32| {
@@ -272,6 +275,50 @@ mod tests {
                 AclDisposition::AllowGrant
             );
         }
+    }
+
+    #[test]
+    fn non_file_descriptor_is_explicitly_unsupported() {
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut out = NativeObservation::default();
+        unsafe { st_client_mode_acl_inspect(socket.as_raw_fd(), 0, &mut out) };
+        assert_eq!(out.reason, 3);
+    }
+
+    #[test]
+    fn unresolved_allow_qualifier_is_not_silently_accepted() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let root = fixture_root();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.path().join("unresolved-uuid"))
+            .unwrap();
+        let mut layout = [0usize; 8];
+        unsafe { st_client_mode_acl_export_layout(layout.as_mut_ptr()) };
+        let mut bytes = vec![0u8; layout[0]];
+        for (offset, value) in [
+            (layout[1], layout[6] as u32),
+            (layout[2], 1),
+            (layout[4], 1),
+            (layout[5], 1 << 1),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+        }
+        // Fixed synthetic UUID, not a queried account or credential. A surprising
+        // venue mapping must fail this fixture rather than be silently accepted.
+        bytes[layout[7]..layout[7] + 16].copy_from_slice(&[0xa5; 16]);
+        let acl = unsafe { acl_copy_int_native(bytes.as_ptr().cast()) };
+        assert!(!acl.is_null());
+        let assigned = unsafe { acl_set_fd_np(file.as_raw_fd(), acl, 0x100) };
+        unsafe { acl_free(acl) };
+        assert_eq!(assigned, 0);
+        assert_eq!(
+            inspect(&file, false).disposition,
+            AclDisposition::UnresolvedQualifier
+        );
     }
 
     #[test]

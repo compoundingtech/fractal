@@ -119,6 +119,7 @@ void st_client_mode_acl_export_layout(size_t *out) {
     out[4] = KAUTH_FILESEC_SIZE(0) + offsetof(struct kauth_ace, ace_flags);
     out[5] = KAUTH_FILESEC_SIZE(0) + offsetof(struct kauth_ace, ace_rights);
     out[6] = KAUTH_FILESEC_MAGIC;
+    out[7] = KAUTH_FILESEC_SIZE(0) + offsetof(struct kauth_ace, ace_applicable);
 }
 
 void st_client_mode_acl_inspect(int fd, int private_object,
@@ -147,6 +148,12 @@ void st_client_mode_acl_inspect(int fd, int private_object,
     if (!known_permission(ACL_READ_DATA) || !known_flag(ACL_ENTRY_INHERITED) ||
         acl_maximal_permset_mask_np(&maximum) != 0 ||
         ((out->observed_maximum = maximum), maximum != rights)) {
+        out->reason = 3; goto done;
+    }
+    int basic_query = fstat(fd, &metadata);
+    int basic_errno = errno;
+    if (st_client_mode_acl_query_result(basic_query, basic_errno, out) != 0) goto done;
+    if (!S_ISREG(metadata.st_mode) && !S_ISDIR(metadata.st_mode)) {
         out->reason = 3; goto done;
     }
     security = filesec_init();
