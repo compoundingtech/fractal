@@ -20,19 +20,17 @@ pub use smallclaims::replication::{
 
 pub const MAX_EVAL_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 
-/// The diagnostic code of a call Claude's auto mode classifier denied (`driver_hook`).
+/// The diagnostic code of a call Claude's auto mode classifier denied.
 pub(crate) const PERMISSION_DENIED_CODE: &str = "permission-denied";
-/// The claim an operator writes when a seat's former placement is gone (`placement`).
 pub const PLACEMENT_SOURCE_OFFLINE_KIND: &str = "agent.placement.source-offline";
-/// The former owners and declarations which can acknowledge a seat's latest departure
-/// (`placement`). Walk causal predecessors, never receiver-local indexes or receipt timestamps.
+/// The former owners and declarations which can acknowledge their latest departure.
+/// Walk causal predecessors, never receiver-local indexes or receipt timestamps.
 pub struct PlacementFence {
     pub token: String,
     pub destination: String,
     pub sources: BTreeMap<String, BTreeSet<String>>,
 }
 
-/// The first argument of the first child `name` of a canonical declaration value.
 pub(crate) fn canonical_child_string(value: &Value, name: &str) -> Option<String> {
     value
         .get("children")?
