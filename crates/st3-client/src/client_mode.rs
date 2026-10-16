@@ -194,7 +194,9 @@ impl Store {
             .path
             .parent()
             .context("Client-mode directory missing")?;
-        let directory = match self.read_directory(parent) {
+        let anchor = authority_directory(&self.coordination_root, false)
+            .context("Cannot open trusted client-mode account anchor")?;
+        let directory = match self.read_directory(parent, anchor) {
             Ok(directory) => directory,
             Err(error)
                 if error
@@ -258,7 +260,9 @@ impl Store {
             .path
             .parent()
             .context("Client-mode directory missing")?;
-        let directory = match self.read_directory(parent) {
+        let anchor = authority_directory(&self.coordination_root, false)
+            .context("Cannot open trusted client-mode account anchor")?;
+        let directory = match self.read_directory(parent, anchor) {
             Ok(directory) => directory,
             Err(error)
                 if error
@@ -292,8 +296,12 @@ impl Store {
         Ok(LocalLease { _lock: lock })
     }
 
-    fn read_directory(&self, parent: &Path) -> Result<File> {
-        let root = authority_directory(&self.authority_root, false)?;
+    fn read_directory(&self, parent: &Path, anchor: File) -> Result<File> {
+        let root = walk_directory(
+            anchor,
+            self.authority_root.strip_prefix(&self.coordination_root)?,
+            false,
+        )?;
         ensure!(
             root.metadata()?.permissions().mode() & 0o077 == 0,
             "Client-mode authority directory must be private (0700)"
@@ -411,6 +419,7 @@ fn reject_legacy_evidence(path: &Path) -> Result<()> {
 /// permit private account-owned children; sticky semantics prevent another UID replacing them.
 /// Same-UID deletion of every authority artifact is outside this inhibition's threat model.
 fn authority_directory(path: &Path, create: bool) -> Result<File> {
+    authority_platform_available()?;
     let mut path = path.to_path_buf();
     #[cfg(target_os = "macos")]
     {
@@ -500,6 +509,17 @@ fn walk_directory(mut directory: File, path: &Path, create: bool) -> Result<File
         directory.sync_all()?;
     }
     Ok(directory)
+}
+
+/// A POSIX mode check alone cannot exclude macOS allow ACLs. No Mac authority
+/// decision is available until opened-fd ACL validation is implemented and reviewed.
+fn authority_platform_available() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    anyhow::bail!(
+        "Client-mode authority is unavailable on macOS until ACL-aware validation is qualified; do not deploy this draft"
+    );
+    #[cfg(not(target_os = "macos"))]
+    Ok(())
 }
 
 /// Refuse filesystems without the local kernel flock semantics this design requires.
@@ -711,11 +731,10 @@ mod tests {
     #[test]
     fn absent_status_is_read_only_and_transition_survives_reopen() -> Result<()> {
         let root = private_tempdir()?;
-        let store = Store::at(root.path().join("new/mode.json"))?;
+        let mut store = Store::in_account_home(root.path().to_path_buf(), None)?;
+        store.account = false;
         assert_eq!(store.read()?, State::default());
-        assert!(!root.path().join("new").exists());
-        fs::create_dir(root.path().join("new"))?;
-        fs::set_permissions(root.path().join("new"), fs::Permissions::from_mode(0o700))?;
+        assert!(!store.authority_root.exists());
         let mut update = store.lock()?;
         update.publish(State::Transition {
             version: 1,
@@ -1017,6 +1036,17 @@ mod tests {
         fs::write(store.path().with_extension("recovery"), b"interrupted")?;
         assert!(store.read().is_err());
         assert!(store.local_start().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn absent_account_anchor_cannot_report_uninitialized_local() -> Result<()> {
+        let root = private_tempdir()?;
+        let store = Store::in_account_home(root.path().join("missing-home"), None)?;
+        assert!(store.read().is_err());
+        assert!(store.enrolled().is_err());
+        assert!(store.local_start().is_err());
+        assert!(!root.path().join("missing-home").exists());
         Ok(())
     }
 
