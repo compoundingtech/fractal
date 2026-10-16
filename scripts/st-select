@@ -24,6 +24,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -183,9 +184,11 @@ def sign(base, line, always, attempt, tree):
     facts = {'command': ['st-select', 'select', line['check']],
              'exit_code': 0 if line['decision'] == 'covered' and all(r['exit_code'] == 0 for r in always.values()) else 1,
              'output': {'decision': line, 'always': always},
-             'inputs': {'source_inputs': line['key'] or '', 'covered_by': line['proof'] or '',
+             # evidence-sign takes only nonempty values under names matching ^[a-z][a-z0-9_]{0,39}$.
+             'inputs': {'source_inputs': line['key'] or 'none', 'covered_by': line['proof'] or 'none',
                         'plugin': line['plugin'], 'inputs_sha256': line['inputs_sha256'],
-                        **{f'always.{n}': f'{r["exit_code"]}:{r["output_sha256"][:16]}' for n, r in always.items()}}}
+                        **{'always_' + re.sub(r'[^a-z0-9_]', '_', n.lower()): f'{r["exit_code"]}:{r["output_sha256"][:16]}'
+                           for n, r in always.items()}}}
     with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as facts_file:
         json.dump(facts, facts_file)
     tools = {n: tempfile.NamedTemporaryFile('wb', suffix=f'-{n}', delete=False) for n in ('evidence-wrap', 'evidence-sign')}
