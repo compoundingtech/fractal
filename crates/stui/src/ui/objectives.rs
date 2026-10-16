@@ -213,7 +213,7 @@ pub fn detail(world: &World, id: &str, hours: u64, width: usize) -> Doc {
 }
 
 fn period(hours: u64) -> String {
-    if hours % 24 == 0 && hours >= 48 {
+    if hours.is_multiple_of(24) && hours >= 48 {
         format!("{} days", hours / 24)
     } else {
         format!("{hours} hours")

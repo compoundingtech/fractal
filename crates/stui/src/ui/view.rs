@@ -7,18 +7,13 @@ pub use st3_ui_model::missions::{Mission, Step, StepState, Word};
 use std::collections::BTreeMap;
 
 /// Something that arrives later. `Loading` is never drawn as empty.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 #[serde(tag = "state", content = "value", rename_all = "snake_case")]
 pub enum Load<T> {
+    #[default]
     Loading,
     Ready(T),
     Failed(String),
-}
-
-impl<T> Default for Load<T> {
-    fn default() -> Self {
-        Load::Loading
-    }
 }
 
 impl<T> Load<T> {
