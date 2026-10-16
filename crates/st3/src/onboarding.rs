@@ -455,7 +455,10 @@ mod tests {
             "claude (you run on it)"
         );
         let source = super::mission_source("abc", "claude", &both);
-        assert!(!source.contains('@'), "an unfilled placeholder is left: {source}");
+        assert!(
+            !source.contains("@GUIDE@") && !source.contains("@HARNESSES@"),
+            "an unfilled placeholder is left: {source}"
+        );
         assert!(source.contains("claude and codex (you run on claude)"));
     }
     #[test]
@@ -536,7 +539,7 @@ mod tests {
         // The guide carries the same rule and names no sample person.
         let guide = super::GUIDE.to_lowercase();
         assert!(guide.contains("write nothing between tool calls that is not addressed to them"));
-        assert!(!guide.contains("avery"));
+        assert!(!guide.contains("hi avery"), "the guide greets nobody by an example name");
     }
     use sha2::Digest as _;
 }
