@@ -119,9 +119,24 @@ pub fn start_attention_list(state: &AppState) {
             // does not wait through it: each wake computes the selections waiting then.
             let pause = tokio::time::Instant::now() + started.elapsed().max(ATTENTION_LIST_REFRESH_PAUSE);
             let mut woken = false;
+            let mut roster_arrived = false;
             loop {
                 let summary_state = state.clone();
-                let refreshed = if store.summary_selection_waiting() {
+                let refreshed = if roster_arrived {
+                    // A complete roster arrived while no summary could be counted: count every
+                    // selection now, not after the pause.
+                    roster_arrived = false;
+                    tokio::task::spawn_blocking(move || {
+                        Some(crate::performance::task("summary/refresh", || {
+                            super::client_v0::summary::refresh_published(
+                                &summary_state,
+                                ATTENTION_LIST_IDLE.as_millis() as u64,
+                                false,
+                            )
+                        }))
+                    })
+                    .await
+                } else if store.summary_selection_waiting() {
                     tokio::task::spawn_blocking(move || refresh_waiting_summary(&summary_state, false)).await
                 } else {
                     Ok(None)
@@ -142,6 +157,15 @@ pub fn start_attention_list(state: &AppState) {
                 tokio::select! {
                     () = tokio::time::sleep_until(pause) => break,
                     () = wake.notified() => woken = true,
+                    // With no shared counts (as the daemon starts, or after views are
+                    // forgotten) every summary waits for the complete roster they count agents
+                    // from. Its publication is all they wait for, so it ends their wait.
+                    result = roster.changed(), if store.summary_shared().is_none() => {
+                        if result.is_err() {
+                            return;
+                        }
+                        roster_arrived = true;
+                    }
                 }
             }
             // A window asked during the pause: refresh again at once.
@@ -250,6 +274,7 @@ pub(crate) fn refresh_attention_list(store: &Store) -> anyhow::Result<()> {
         let changed = previous
             .as_ref()
             .is_none_or(|previous| !Arc::ptr_eq(&previous.rows, &rows));
+        let published_at_unix_ms = client_now_ms();
         store.publish_attention_list(
             generation,
             AttentionPublication {
@@ -258,11 +283,25 @@ pub(crate) fn refresh_attention_list(store: &Store) -> anyhow::Result<()> {
                 evaluated_at_unix_ms,
                 due_at_unix_ms,
                 future_after,
-                published_at_unix_ms: client_now_ms(),
+                published_at_unix_ms,
                 rows,
             },
             changed,
         );
+        // While windows read attention it publishes at least once a clock period. A previous
+        // publication older than two was from before the refresher followed commits again: its
+        // commits waited for a reader, not for a fold, and are not a freshness sample.
+        if let Some(previous) = previous.as_ref().filter(|previous| {
+            published_at_unix_ms.saturating_sub(previous.published_at_unix_ms) <= 2 * clock
+        }) {
+            super::record_publish_latency(
+                store,
+                "attention",
+                previous.cut,
+                index,
+                published_at_unix_ms,
+            );
+        }
         Ok(())
     })
 }

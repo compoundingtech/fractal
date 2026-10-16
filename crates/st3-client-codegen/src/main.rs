@@ -1,6 +1,5 @@
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -29,13 +28,13 @@ fn main() -> Result<()> {
         .as_object()
         .context("actions object")?;
     let reads = operations["reads"].as_array().context("reads array")?;
-    let digest = hex_digest(&[&schema_bytes, &operations_bytes]);
+    let constants = contract_constants(&operations)?;
     let rust = format_rust(&rust_contract(
-        &digest,
         actions.keys().map(String::as_str),
         reads,
+        &constants,
     )?)?;
-    let swift = swift_contract(actions.keys().map(String::as_str), reads)?;
+    let swift = swift_contract(actions.keys().map(String::as_str), reads, &constants)?;
     let rust_models = format_rust(&render_marker(
         RUST_MODELS_TEMPLATE,
         "    // @st3-codegen:rust-action-constructors",
@@ -56,7 +55,7 @@ fn main() -> Result<()> {
         "    // @st3-codegen:swift-operation-methods",
         &swift_operation_methods(reads, actions)?,
     )?;
-    let typescript_models = typescript_models(&schema, &operations)?;
+    let typescript_models = typescript_models(&schema, &operations, &constants)?;
     let typescript_schema = rich::models(&schema)?;
     let typescript_client = render_marker(
         TYPESCRIPT_CLIENT_TEMPLATE,
@@ -228,6 +227,13 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn clients_list(&self) -> Result<Envelope<ClientConnections>, ClientError> {{ self.get(\"/v1/client/clients\").await }}"
             )?;
+        } else if id == "slo.list" {
+            writeln!(out, "    pub async fn slo_list(&self) -> Result<Envelope<SloList>, ClientError> {{ self.get(\"/v1/client/slo\").await }}")?;
+        } else if id == "slo.history" {
+            writeln!(
+                out,
+                "    pub async fn slo_history(&self, id: &str, since_ms: Option<u64>, until_ms: Option<u64>, steps: Option<usize>) -> Result<Envelope<SloHistory>, ClientError> {{ let mut path = format!(\"/v1/client/slo/history?id={{}}\", percent_encode(id)); if let Some(since_ms) = since_ms {{ path.push_str(&format!(\"&since_ms={{since_ms}}\")); }} if let Some(until_ms) = until_ms {{ path.push_str(&format!(\"&until_ms={{until_ms}}\")); }} if let Some(steps) = steps {{ path.push_str(&format!(\"&steps={{steps}}\")); }} self.get(&path).await }}"
+            )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    pub async fn mail_backlog_summary(&self) -> Result<Envelope<MailBacklog>, ClientError> {{ self.get(\"/v1/client/mail-backlog\").await }}")?;
         } else if id == "usage.period" {
@@ -390,6 +396,13 @@ fn swift_operation_methods(
             writeln!(
                 out,
                 "    public func clientsList() async throws -> Envelope<ClientConnections> {{ try await get(\"v1/client/clients\") }}"
+            )?;
+        } else if id == "slo.list" {
+            writeln!(out, "    public func sloList() async throws -> Envelope<SloList> {{ try await get(\"v1/client/slo\") }}")?;
+        } else if id == "slo.history" {
+            writeln!(
+                out,
+                "    public func sloHistory(id: String, sinceMS: UInt64? = nil, untilMS: UInt64? = nil, steps: Int? = nil) async throws -> Envelope<SloHistory> {{ var query: [URLQueryItem] = [.init(name: \"id\", value: id)]; if let sinceMS {{ query.append(.init(name: \"since_ms\", value: String(sinceMS))) }}; if let untilMS {{ query.append(.init(name: \"until_ms\", value: String(untilMS))) }}; if let steps {{ query.append(.init(name: \"steps\", value: String(steps))) }}; return try await get(\"v1/client/slo/history\", query: query) }}"
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    public func mailBacklogSummary() async throws -> Envelope<MailBacklog> {{ try await get(\"v1/client/mail-backlog\") }}")?;
@@ -662,6 +675,9 @@ fn validate_surfaces(
         "AgentMessageEstimate",
         "AgentMessageDay",
         "MailBacklog",
+        "SloList",
+        "SloRow",
+        "SloHistory",
         "UsageRow",
         "UsagePricing",
         "UsagePricingRates",
@@ -702,6 +718,7 @@ fn validate_surfaces(
         "SubscriptionSpec",
         "SyncNotice",
         "SyncPeer",
+        "ExchangeTransport",
         "StructuredDiff",
         "Visualization",
         "VisualizationNode",
@@ -855,15 +872,6 @@ fn output(path: &Path, contents: &str, check: bool) -> Result<()> {
     Ok(())
 }
 
-fn hex_digest(parts: &[&[u8]]) -> String {
-    let mut hash = Sha256::new();
-    for part in parts {
-        hash.update(part);
-    }
-    let digest = hash.finalize();
-    format!("{digest:x}")
-}
-
 fn pascal(value: &str) -> String {
     value
         .split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -878,19 +886,47 @@ fn pascal(value: &str) -> String {
         .collect()
 }
 
+/// A named value every generated client exposes, from the manifest's `constants`.
+struct Constant {
+    /// The manifest key, in snake case.
+    name: String,
+    value: String,
+    about: String,
+}
+
+fn contract_constants(operations: &Value) -> Result<Vec<Constant>> {
+    let Some(constants) = operations.get("constants") else {
+        return Ok(Vec::new());
+    };
+    constants
+        .as_object()
+        .context("constants object")?
+        .iter()
+        .map(|(name, constant)| {
+            Ok(Constant {
+                name: name.clone(),
+                value: constant["value"]
+                    .as_str()
+                    .with_context(|| format!("constant `{name}` value"))?
+                    .to_owned(),
+                about: constant["about"]
+                    .as_str()
+                    .with_context(|| format!("constant `{name}` about"))?
+                    .to_owned(),
+            })
+        })
+        .collect()
+}
+
 fn rust_contract<'a>(
-    digest: &str,
     actions: impl Iterator<Item = &'a str>,
     reads: &[Value],
+    constants: &[Constant],
 ) -> Result<String> {
     let actions = actions.collect::<Vec<_>>();
-    // The contract digest lives here alone: every generated file carrying it made any two
-    // schema changes conflict in each of them (#977).
+    // No digest of the schema is committed here: one line that every schema change rewrites made any
+    // two of them conflict. `--check` already fails when any generated file differs from its source.
     let mut out = String::from("// @generated by st3-client-codegen; do not edit.\n\n");
-    writeln!(
-        out,
-        "#[rustfmt::skip]\npub const CONTRACT_SHA256: &str = \"{digest}\";"
-    )?;
     writeln!(
         out,
         "#[rustfmt::skip]\npub const ACTION_NAMES: &[&str] = &["
@@ -911,12 +947,22 @@ fn rust_contract<'a>(
         )?;
     }
     writeln!(out, "];")?;
+    for constant in constants {
+        writeln!(
+            out,
+            "/// {}\n#[rustfmt::skip]\npub const {}: &str = {:?};",
+            constant.about,
+            constant.name.to_ascii_uppercase(),
+            constant.value
+        )?;
+    }
     Ok(out)
 }
 
 fn swift_contract<'a>(
     actions: impl Iterator<Item = &'a str>,
     reads: &[Value],
+    constants: &[Constant],
 ) -> Result<String> {
     let actions = actions.collect::<Vec<_>>();
     let mut out = format!(
@@ -956,6 +1002,15 @@ fn swift_contract<'a>(
         )?;
     }
     writeln!(out, "]\n")?;
+    for constant in constants {
+        writeln!(
+            out,
+            "/// {}\npublic let st3{}: String = {:?}\n",
+            constant.about,
+            pascal(&constant.name),
+            constant.value
+        )?;
+    }
     Ok(out)
 }
 
@@ -1112,11 +1167,20 @@ fn ts_loose_json_fields(definition: &Value, fields: &[&str]) -> Value {
     loose
 }
 
-fn typescript_models(schema: &Value, operations: &Value) -> Result<String> {
+fn typescript_models(schema: &Value, operations: &Value, constants: &[Constant]) -> Result<String> {
     let defs = schema["$defs"].as_object().context("schema definitions")?;
     let mut out = format!(
         "// @generated by st3-client-codegen; do not edit.\n// Source: docs/st3/client-v0/schemas/client-v0.schema.json\n\nexport const API_VERSION = 'st3.client.v0' as const;\n\n"
     );
+    for constant in constants {
+        writeln!(
+            out,
+            "/** {} */\nexport const {} = {:?} as const;\n",
+            constant.about,
+            constant.name.to_ascii_uppercase(),
+            constant.value
+        )?;
+    }
     for (name, definition) in defs {
         if name == "ActionRequest" {
             continue;
@@ -1240,6 +1304,13 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}'); }}"
             )?;
+        } else if id == "slo.list" {
+            writeln!(out, "    async sloList(): Promise<EnvelopeOf<SloList>> {{ return this.get('/v1/client/slo'); }}")?;
+        } else if id == "slo.history" {
+            writeln!(
+                out,
+                "    async sloHistory(id: string, options: {{ since_ms?: number; until_ms?: number; steps?: number }} = {{}}): Promise<EnvelopeOf<SloHistory>> {{ return this.get('/v1/client/slo/history' + query({{ id, ...options }})); }}"
+            )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    async mailBacklogSummary(): Promise<EnvelopeOf<MailBacklog>> {{ return this.get('/v1/client/mail-backlog'); }}")?;
         } else if id == "usage.period" {
@@ -1352,11 +1423,7 @@ mod tests {
         let schema: Value = serde_json::from_str(include_str!(
             "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
         ))?;
-        let digest = hex_digest(&[
-            include_bytes!("../../../docs/st3/client-v0/schemas/client-v0.schema.json"),
-            include_bytes!("../../../docs/st3/client-v0/schemas/operations.json"),
-        ]);
-        let ts_models = typescript_models(&schema, &operations)?;
+        let ts_models = typescript_models(&schema, &operations, &contract_constants(&operations)?)?;
         let ts_schema = rich::models(&schema)?;
         let ts_client = render_marker(
             TYPESCRIPT_CLIENT_TEMPLATE,
@@ -1373,7 +1440,21 @@ mod tests {
             "    // @st3-codegen:rust-operation-methods",
             &rust_operation_methods(reads, actions)?,
         )?)?;
+        let contract = format_rust(&rust_contract(
+            actions.keys().map(String::as_str),
+            reads,
+            &contract_constants(&operations)?,
+        )?)?;
+        assert!(
+            !contract.contains("SHA256"),
+            "no digest line that every schema change would rewrite"
+        );
         let cases = [
+            (
+                "contract.rs",
+                contract.as_str(),
+                contract.replacen("\"message.send\",", "", 1),
+            ),
             (
                 "generated.rs",
                 models.as_str(),

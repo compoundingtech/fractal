@@ -22,6 +22,13 @@ test.each([
     fault: 'runtime exited',
     activity: 'errored',
   },
+  {
+    state: 'down',
+    harness_state: 'indeterminate',
+    blocked_on: null,
+    fault: null,
+    activity: 'errored',
+  },
 ] as const)(
   'observed harness activity respects human blocking and failure ($activity)',
   ({ activity, ...observation }) => {
@@ -212,7 +219,7 @@ test('subject identities follow only their row and attention membership', () => 
   expect(changed[0]).toBe(first[0])
   expect(changed[1]).toBe(first[1])
   expect(changed[2]).not.toBe(first[2])
-  const card = { ...fixtureAttention[0]!, source_id: row.id, state: 'open' as const }
+  const card = { ...fixtureAttention[0]!, source_id: row.id, state: 'open' as const, attention_kind: 'person-step', actions: ['work.done' as const] }
   const attentive = project.subjectList({ fleet, attention: [card] })
   expect(attentive[0]).toMatchObject({ attention: true })
   expect(attentive[1]).toBe(first[1])

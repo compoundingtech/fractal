@@ -45,12 +45,23 @@ struct Pending {
     effect: Effect,
     /// The exact request last sent; a retry repeats it so st can answer with the first result.
     sent: Arc<Mutex<Option<Sent>>>,
+
+    /// The conversation drew it, noted once for the quality counters.
+    echoed: bool,
     /// When it was last sent (or sent again): one st has not answered for a while is said to be
     /// unconfirmed, so it can be sent again or cleared rather than wait forever.
     since: Instant,
 }
 
+/// How often st is asked how long a message it takes, and how soon again after it did not answer.
+const MESSAGE_LIMIT_REREAD: Duration = Duration::from_secs(600);
+const MESSAGE_LIMIT_RETRY: Duration = Duration::from_secs(30);
+
 /// How long a message waits for st's answer before it says st has not confirmed it.
+/// A draw slower than this, or a whole turn of the main loop (everything it did before waiting for
+/// input) slower than that, is written to slow.log with what was on screen.
+const SLOW_DRAW: Duration = Duration::from_millis(120);
+const SLOW_TURN: Duration = Duration::from_millis(250);
 const UNANSWERED_AFTER: Duration = Duration::from_secs(30);
 
 /// A message request as sent: st keys its receipt on the whole request.
@@ -59,6 +70,9 @@ struct Sent {
     id: String,
     idempotency_key: String,
     snapshot_id: String,
+    /// What it said, as sent: rebuilt later, it could name the agent's newer session, and st
+    /// refuses a repeat that differs as a conflict.
+    parameters: MessageSendParameters,
 }
 
 /// Read evidence belongs to a presented frame, so navigation cannot cancel retries.
@@ -158,6 +172,8 @@ pub struct Context {
     pub(crate) open_timing: Option<super::open_timing::Trace>,
     pub(crate) process_started: Instant,
     pub initial_subject: Option<String>,
+    /// Where seats on this machine leave requests to show something; none for a paired device.
+    pub requests: Option<std::path::PathBuf>,
 }
 
 // Setup's initial destination waits for a live inventory, rather than cached agent data.
@@ -178,6 +194,40 @@ pub(super) fn focus_initial_subject(
         return;
     }
     ui.open(&id);
+}
+
+/// Open what seats asked for with `st ui open`, once the inventory is live: an agent a seat has
+/// only just made is waited for, and one that never appears is answered as not found.
+pub(super) fn answer_open_requests(
+    ui: &mut Ui,
+    inbox: &mut super::requests::Inbox,
+    ready: bool,
+) {
+    inbox.read();
+    if !ready || !matches!(ui.world.link, super::view::Link::Live) {
+        return;
+    }
+    let waiting = inbox
+        .waiting()
+        .map(|(request, since)| (request.clone(), since.elapsed()))
+        .collect::<Vec<_>>();
+    for (request, waited) in waiting {
+        let Ok(pane) = super::requests::pane_for(&request.subject) else {
+            inbox.answer(&request.id, &super::requests::Answer::NotFound);
+            continue;
+        };
+        if ui.inventory_has(&pane) {
+            let answer = ui.open_requested(
+                pane,
+                request.place,
+                request.keep_focus,
+                request.from.as_deref(),
+            );
+            inbox.answer(&request.id, &answer);
+        } else if waited >= super::requests::GRACE {
+            inbox.answer(&request.id, &super::requests::Answer::NotFound);
+        }
+    }
 }
 
 fn cancel_initial_subject(subject: &mut Option<String>, input: &Event) {
@@ -322,6 +372,8 @@ enum Fetched {
     /// A send finished: the pending token and st's message id, or why it failed and whether st's
     /// answer is unknown.
     Sent(String, Result<Option<String>, (String, bool)>),
+    /// The longest message st says it takes, in UTF-8 bytes; None when it does not say.
+    MessageLimit(Result<Option<usize>, ()>),
     /// st started an agent asked for here.
     /// st started a shell asked for here.
     TerminalStarted(String),
@@ -342,7 +394,8 @@ enum Fetched {
         reason: String,
     },
     /// st answered a glass write: the glass, the write's key, and the revision it accepted.
-    SidebarSaved { write: super::resource_sidebar::Write, outcome: Result<(), String> },
+    /// An error carries whether st refused it because the Sidebar was retired.
+    SidebarSaved { write: super::resource_sidebar::Write, outcome: Result<(), (String, bool)> },
     GlassSaved {
         id: String,
         key: String,
@@ -409,8 +462,11 @@ pub fn run(context: Context) -> Result<()> {
         mut open_timing,
         process_started,
         mut initial_subject,
+        requests,
     } = context;
     let (fetched_tx, fetched) = mpsc::channel::<Fetched>();
+    // What seats ask this terminal to show (`st ui open`); a paired device has no seats here.
+    let mut open_requests = super::requests::Inbox::new(requests);
     let mut model = cached.unwrap_or_default();
     let mut agents_live = false;
     // The feed announces a granted glasses window before sending any core window.
@@ -492,6 +548,10 @@ pub fn run(context: Context) -> Result<()> {
     terminal.hide_cursor()?;
     let started = Instant::now();
     let mut changed = true;
+    let mut offline_drawn = false;
+    // When st is next asked how long a message it takes: on connecting, then now and then, since
+    // a daemon that is upgraded changes it.
+    let mut limit_next = Instant::now();
     let stopping = super::stop_flag()?;
     let mut attached: Option<Following> = None;
     // The runtimes of the agent whose terminal view is open, to follow it again after a pause.
@@ -499,11 +559,8 @@ pub fn run(context: Context) -> Result<()> {
     let mut terminal_runtimes_by_agent: BTreeMap<String, Vec<String>> = BTreeMap::new();
     // The fleet host that owns each opened terminal, so a dropped stream attaches again directly.
     let mut terminal_owners: BTreeMap<String, String> = BTreeMap::new();
-    // Attaching a dropped terminal again: whether a try is out, and how many failed.
-    let mut reattaching = false;
     // When a terminal was asked for, while it connects: the wait is shown, and a long one named.
     let mut attach_started: Option<Instant> = None;
-    let mut reattach_tries = 0_u32;
     // The cursor shape last set, so it changes only when the attached terminal asks.
     let mut cursor_style: Option<crossterm::cursor::SetCursorStyle> = None;
     // The tab shown on the last pass: opening a tab loads what only it needs.
@@ -533,6 +590,11 @@ pub fn run(context: Context) -> Result<()> {
         && !stopping.load(std::sync::atomic::Ordering::Relaxed)
         && !crate::stdin_hung_up()
     {
+        let turn_started = Instant::now();
+        // A program written over on disk while it runs is told to the person at once, and noted.
+        if started.elapsed().as_secs().is_multiple_of(10) && super::lastrun::binary_replaced() {
+            ui.flash("st was updated on disk while this was running: restart it, the system may stop it");
+        }
         ui.tick = (started.elapsed().as_millis() / 100) as u64;
         if ui
             .flash
@@ -553,6 +615,19 @@ pub fn run(context: Context) -> Result<()> {
         {
             view.stale = Some(connecting_text(started.elapsed()));
         }
+        if extras.live && Instant::now() >= limit_next {
+            limit_next = Instant::now() + MESSAGE_LIMIT_RETRY;
+            let client = client.clone();
+            let tx = fetched_tx.clone();
+            runtime.spawn(async move {
+                let limit = client
+                    .capabilities()
+                    .await
+                    .map(|found| found.value.limits.max_message_bytes)
+                    .map_err(|_| ());
+                let _ = tx.send(Fetched::MessageLimit(limit));
+            });
+        }
         while let Ok(update) = incoming.try_recv() {
             match update {
                 feed::Update::GlassesVersion(version) => {
@@ -560,6 +635,7 @@ pub fn run(context: Context) -> Result<()> {
                     glasses_ready = ui.glasses.is_none();
                 }
                 feed::Update::Connected(member) => {
+                    limit_next = Instant::now();
                     ui.quality.live(false);
                     agents_live = false;
                     glasses_ready = true;
@@ -698,6 +774,7 @@ pub fn run(context: Context) -> Result<()> {
                     }
                     extras.live = true;
                     extras.offline = None;
+                    extras.offline_since = None;
                     extras.degraded = None;
                     model.last_connected =
                         Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
@@ -745,11 +822,16 @@ pub fn run(context: Context) -> Result<()> {
                         });
                     // A message sent from here is done once st shows it in the conversation.
                     pending.retain(|pending| {
-                        pending.message_id.as_ref().is_none_or(|id| {
-                            !timelines.values().flat_map(|timeline| &timeline.items).any(|entry| {
-                                matches!(&entry.body, TimelineBody::Message(message) if &message.message_id == id)
-                            })
-                        })
+                        let Some(id) = pending.message_id.as_ref() else {
+                            return true;
+                        };
+                        let shown = timelines.values().flat_map(|timeline| &timeline.items).any(|entry| {
+                            matches!(&entry.body, TimelineBody::Message(message) if &message.message_id == id)
+                        });
+                        if shown {
+                            super::slo::METRICS.observe("send_visible_ms", pending.since.elapsed());
+                        }
+                        !shown
                     });
                     changed = true;
                 }
@@ -804,6 +886,7 @@ pub fn run(context: Context) -> Result<()> {
                     // nothing on screen is cleared.
                     extras.live = false;
                     extras.offline = None;
+                    extras.offline_since = None;
                     ui.flash(format!(
                         "Live stream lost ({reason}); st answers, reconnecting"
                     ));
@@ -816,6 +899,7 @@ pub fn run(context: Context) -> Result<()> {
                     extras.live = false;
                     extras.degraded = None;
                     extras.offline = Some(error);
+                    extras.offline_since.get_or_insert_with(Instant::now);
                     attached = None;
                     save_cache(cache_path.as_deref(), &person, &model);
                     changed = true;
@@ -885,31 +969,82 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Read(id, result) => {
                     read_receipts.completed(id, result, Instant::now());
                 }
+                Fetched::MessageLimit(limit) => match limit {
+                    Ok(limit) => {
+                        ui.message_limit = limit;
+                        limit_next = Instant::now() + MESSAGE_LIMIT_REREAD;
+                    }
+                    // Asked again soon; the last answer stands meanwhile.
+                    Err(()) => limit_next = Instant::now() + MESSAGE_LIMIT_RETRY,
+                },
                 Fetched::Sent(token, outcome) => {
+                    let mut restored = false;
                     if let Some(entry) = pending.iter_mut().find(|entry| entry.token == token) {
                         match outcome {
                             Ok(id) => {
+                                super::slo::METRICS.observe("send_ack_ms", entry.since.elapsed());
                                 entry.message_id = id;
                                 entry.failed = None;
                                 entry.unconfirmed = false;
                             }
                             Err((error, unconfirmed)) => {
+                                // st said no, or never took it: the text goes back to the box
+                                // for the person to change, unless something newer is there. A
+                                // send whose answer was lost stays here as unconfirmed, so it is
+                                // never sent twice.
+                                if !unconfirmed
+                                    && let Effect::Send {
+                                        agent,
+                                        text,
+                                        in_reply_to,
+                                        tags,
+                                        images,
+                                    } = &entry.effect
+                                {
+                                    restored = ui.restore_refused(
+                                        agent,
+                                        text,
+                                        in_reply_to.clone(),
+                                        tags,
+                                        images,
+                                    );
+                                }
+                                if restored {
+                                    ui.flash_for(
+                                        format!("Not sent: {error}. Your message is back in the box"),
+                                        super::FLASH_REFUSAL,
+                                    );
+                                } else {
+                                    ui.flash_for(
+                                        format!("Not sent: {error}"),
+                                        super::FLASH_REFUSAL,
+                                    );
+                                }
                                 entry.failed = Some(error);
                                 entry.unconfirmed = unconfirmed;
                             }
                         }
                     }
+                    if restored {
+                        pending.retain(|entry| entry.token != token);
+                    }
                     // st took it. The copy here gives way once the conversation shows it, which
                     // may already have happened; with no id to look for, at once.
                     pending.retain(|entry| {
-                        entry.token != token
-                            || entry.failed.is_some()
-                            || entry.message_id.as_ref().is_some_and(|id| {
-                                !timelines
-                                    .values()
-                                    .flat_map(|timeline| &timeline.items)
-                                    .any(|item| matches!(&item.body, TimelineBody::Message(message) if &message.message_id == id))
-                            })
+                        if entry.token != token || entry.failed.is_some() {
+                            return true;
+                        }
+                        // Already in the conversation when st answered: visible as sent now.
+                        let waiting = entry.message_id.as_ref().is_some_and(|id| {
+                            !timelines
+                                .values()
+                                .flat_map(|timeline| &timeline.items)
+                                .any(|item| matches!(&item.body, TimelineBody::Message(message) if &message.message_id == id))
+                        });
+                        if !waiting {
+                            super::slo::METRICS.observe("send_visible_ms", entry.since.elapsed());
+                        }
+                        waiting
                     });
                 }
                 Fetched::Preview(id, preview) => {
@@ -942,7 +1077,15 @@ pub fn run(context: Context) -> Result<()> {
                 },
                 Fetched::SidebarSaved { write, outcome } => {
                     ui.resource_sidebar.saved(&write, outcome.is_ok());
-                    if let Err(error) = outcome { ui.flash(format!("Sidebar edit not done: {error}")); }
+                    match outcome {
+                        Ok(()) => {}
+                        // The reserved Sidebar is retired: never create it again.
+                        Err((_, true)) if write.creating => {
+                            ui.resource_sidebar.reserved_retired = true;
+                            ui.flash(super::resource_sidebar::SIDEBAR_RETIRED);
+                        }
+                        Err((error, _)) => ui.flash(format!("Sidebar edit not done: {error}")),
+                    }
                 }
                 Fetched::Observations { generation, outcome } => {
                     resources_reading = false;
@@ -1048,7 +1191,6 @@ pub fn run(context: Context) -> Result<()> {
                     ui.flash(format!("Attached · {route}"));
                 }
                 Fetched::Reattached { agent, outcome } => {
-                    reattaching = false;
                     if let Some(native) = ui
                         .terminal_view(&agent)
                         .and_then(|view| view.native.as_ref())
@@ -1057,7 +1199,7 @@ pub fn run(context: Context) -> Result<()> {
                             Ok(direct) => native.reconnect(direct.stream, &direct.name),
                             Err(reason) if reason.contains("restarted") => native.give_up(reason),
                             // Still unreachable: the next try waits longer.
-                            Err(_) => reattach_tries += 1,
+                            Err(reason) => native.retry_failed(reason),
                         }
                     }
                 }
@@ -1311,7 +1453,13 @@ pub fn run(context: Context) -> Result<()> {
                 } else {
                     let client = client.clone(); let tx = fetched_tx.clone(); let person = person.clone(); let model = model.clone();
                     runtime.spawn(async move {
-                        let outcome = perform_steadily(&client, &person, &model, effect, None).await.map(|_| ()).map_err(|error| plain(&error));
+                        let outcome = perform_steadily(&client, &person, &model, effect, None).await.map(|_| ()).map_err(|error| {
+                            let retired = error.chain().any(|cause| matches!(
+                                cause.downcast_ref::<st3_client::ClientError>(),
+                                Some(st3_client::ClientError::Api(st3_client::ErrorCode::ArrangementRetired, ..))
+                            ));
+                            (plain(&error), retired)
+                        });
                         let _ = tx.send(Fetched::SidebarSaved { write, outcome });
                     });
                 }
@@ -1570,6 +1718,7 @@ pub fn run(context: Context) -> Result<()> {
                         unconfirmed: false,
                         effect: effect.clone(),
                         sent: sent.clone(),
+                        echoed: false,
                         since: Instant::now(),
                     });
                     changed = true;
@@ -1586,6 +1735,7 @@ pub fn run(context: Context) -> Result<()> {
             let tx = fetched_tx.clone();
             let person = person.clone();
             let model = model.clone();
+            let sends_message = token.is_some();
             runtime.spawn(async move {
                 let outcome =
                     perform_steadily(&client, &person, &model, effect, sent.as_deref()).await;
@@ -1608,13 +1758,29 @@ pub fn run(context: Context) -> Result<()> {
                 if shell && let Ok((_, Some(terminal))) = &outcome {
                     let _ = tx.send(Fetched::TerminalStarted(terminal.clone()));
                 }
-                let _ = tx.send(Fetched::Notice(match outcome {
-                    Ok((notice, _)) => notice,
-                    Err(error) => format!("Not done: {}", plain(&error)),
-                }));
+                match outcome {
+                    Ok((notice, _)) => {
+                        let _ = tx.send(Fetched::Notice(notice));
+                    }
+                    // A message's refusal is said, and its text put back, where its answer is
+                    // handled (`Fetched::Sent`).
+                    Err(_) if sends_message => {}
+                    Err(error) => {
+                        let _ = tx.send(Fetched::Notice(format!("Not done: {}", plain(&error))));
+                    }
+                }
             });
         }
 
+        // The grace for a restart of st ends on its own clock: draw the link as offline then.
+        match extras.offline_since {
+            Some(since) if !offline_drawn && since.elapsed() >= adapt::offline_grace() => {
+                offline_drawn = true;
+                changed = true;
+            }
+            None => offline_drawn = false,
+            Some(_) => {}
+        }
         if changed {
             ui.content.index(&timelines);
             extras.conversations = conversations(&model, &person, &timelines, &failed, &conversing);
@@ -1641,7 +1807,7 @@ pub fn run(context: Context) -> Result<()> {
         }
         // The missions window is large, so it is followed only while a mission list or card is on
         // screen, and kept for a while after so flipping between tabs does not fetch it each time.
-        let wanted_now = ui.missions_wanted();
+        let wanted_now = ui.missions_wanted() || open_requests.wants_missions();
         if wanted_now {
             missions_until = Some(Instant::now() + MISSIONS_GRACE);
         }
@@ -1650,6 +1816,7 @@ pub fn run(context: Context) -> Result<()> {
             missions_sent = wanted;
             let _ = commands.send(Command::Missions { follow: wanted });
         }
+        answer_open_requests(&mut ui, &mut open_requests, agents_live && glasses_ready);
         ui.step_voice();
         ui.step_terminal_hold();
         ui.step_default_view();
@@ -1658,12 +1825,28 @@ pub fn run(context: Context) -> Result<()> {
         ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let mut links = Vec::new();
+        let draw_started = Instant::now();
         terminal.draw(|frame| {
             ui.render(frame);
             if hyperlinks {
                 links = ui.link_cells(frame.buffer_mut());
             }
         })?;
+        // A message just sent is on screen from this draw on: the time from pressing send to it.
+        for entry in pending.iter_mut().filter(|entry| !entry.echoed) {
+            entry.echoed = true;
+            super::slo::METRICS.observe("send_echo_ms", entry.since.elapsed());
+        }
+        // A slow draw, or a whole turn that took long before it waited for input, is written
+        // down with what was on screen, so that "it was slow" can be explained afterwards.
+        let (drew, turn) = (draw_started.elapsed(), turn_started.elapsed());
+        if drew >= SLOW_DRAW || turn >= SLOW_TURN {
+            super::lastrun::note_slow(
+                &format!("draw {} ms, turn {} ms", drew.as_millis(), turn.as_millis()),
+                &ui.slow_context(),
+                &crate::version::short(crate::version::now()),
+            );
+        }
         if hyperlinks && !links.is_empty() {
             super::hyperlinks::write_links(terminal.backend_mut(), &links)?;
         }
@@ -1754,25 +1937,12 @@ pub fn run(context: Context) -> Result<()> {
             });
         }
         // A stream that dropped while the program ran attaches again, to the same incarnation,
-        // after a wait that grows with each try.
-        if !reattaching
-            && extras.live
-            && let Some((view, native)) = ui
-                .terminal
-                .iter()
-                .chain(ui.parked.iter())
-                .filter_map(|view| view.native.as_ref().map(|native| (view, native)))
-                .find(|(_, native)| {
-                    native.dropped().is_some_and(|at| {
-                        at.elapsed() >= Duration::from_secs(2_u64.pow(reattach_tries.min(5)))
-                    })
-                })
+        // after a wait that grows with each try (`pty::retry_delay`).
+        if extras.live
+            && let Some((agent, expected)) = ui.reattach_due()
         {
-            reattaching = true;
             let client = client.clone();
             let tx = fetched_tx.clone();
-            let agent = view.agent.clone();
-            let expected = native.incarnation.clone();
             let runtime_ids = terminal_runtimes_by_agent
                 .get(&agent)
                 .cloned()
@@ -1792,14 +1962,6 @@ pub fn run(context: Context) -> Result<()> {
                 let _ = tx.send(Fetched::Reattached { agent, outcome });
             });
         }
-        if ui
-            .terminal
-            .iter()
-            .chain(ui.parked.iter())
-            .all(|view| view.native.is_none())
-        {
-            reattach_tries = 0;
-        }
         ui.terminal_requests();
         // While an attached terminal's output flows, or voice listens, draw it as it comes.
         let flowing = ui.voice.is_some()
@@ -1815,11 +1977,7 @@ pub fn run(context: Context) -> Result<()> {
             |input| {
                 cancel_initial_subject(&mut initial_subject, &input);
                 match input {
-                    Event::Key(key)
-                        if !extras.live
-                            && key.code == crossterm::event::KeyCode::Char('r')
-                            && !ui.editing =>
-                    {
+                    Event::Key(key) if reconnect_key(&key, extras.live) => {
                         let _ = commands.send(Command::Reconnect);
                         true
                     }
@@ -1828,6 +1986,13 @@ pub fn run(context: Context) -> Result<()> {
             },
         )?;
     }
+    super::lastrun::note_exit(if ui.quit {
+        "quit (Ctrl+Q)"
+    } else if stopping.load(std::sync::atomic::Ordering::Relaxed) {
+        "signal (INT, TERM or HUP)"
+    } else {
+        "terminal closed (stdin hung up)"
+    });
     // Leave no attachment behind.
     if let Some(current) = attached.take() {
         let _ = runtime.block_on(feed::detach(
@@ -1947,6 +2112,16 @@ const FILL_ROWS: usize = 200;
 const FILL_PAGES: usize = 7;
 
 /// A page st took this long to give is a sign it is busy: no more pages are read on their own.
+/// Ctrl+R asks to reconnect while there is no live link. A bare `r` is a letter like any other:
+/// it must reach the message box, link or no link (Nathan, 2026-10-14: a lowercase r could not be
+/// typed while the link was stale).
+fn reconnect_key(key: &crossterm::event::KeyEvent, live: bool) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    !live
+        && key.code == KeyCode::Char('r')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 const FILL_SLOW: Duration = Duration::from_millis(1500);
 
 fn slow_page(took: Duration) -> bool {
@@ -2657,13 +2832,13 @@ async fn send_message(
                 earlier.id,
                 earlier.idempotency_key,
                 fence,
-                parameters.clone(),
+                earlier.parameters,
             )
             .await
         {
             Ok(result) => return Ok(message_id(result)),
             // st checks a repeat before the fence: a stale fence means it never took it.
-            Err(error) if error.to_string().contains("StaleFence") => {}
+            Err(ClientError::Api(st3_client::ErrorCode::StaleFence, ..)) => {}
             Err(error) => return Err(error.into()),
         }
     }
@@ -2687,6 +2862,7 @@ async fn send_message(
                 id: id.clone(),
                 idempotency_key: idem.clone(),
                 snapshot_id: snapshot.clone(),
+                parameters: parameters.clone(),
             });
         }
         let fence = Fence {
@@ -2698,7 +2874,9 @@ async fn send_message(
             .await
         {
             Ok(result) => return Ok(message_id(result)),
-            Err(error) if error.to_string().contains("StaleFence") => last = Some(error),
+            Err(error @ ClientError::Api(st3_client::ErrorCode::StaleFence, ..)) => {
+                last = Some(error)
+            }
             Err(error) => return Err(error.into()),
         }
     }
@@ -2783,6 +2961,153 @@ mod tests {
             .outcome_unknown());
     }
 
+    /// st answers a send it could not confirm in time `message-send-unconfirmed`, `applied:
+    /// "unknown"`: it may still complete. Nothing here sends it again by itself, and the person's
+    /// resend repeats the exact request. st keys its receipt on the whole request but the fence,
+    /// so a repeat that differs in anything else (here, the agent moved to a new session in
+    /// between) would be refused as a conflict and the message could never be confirmed.
+    #[tokio::test]
+    async fn an_unconfirmed_send_waits_for_the_person_and_goes_again_unchanged() {
+        use axum::{body::Bytes, extract::State, http::StatusCode, routing};
+        #[derive(Default)]
+        struct Daemon {
+            posted: Vec<serde_json::Value>,
+            receipts: BTreeMap<String, serde_json::Value>,
+        }
+        type Shared = Arc<Mutex<Daemon>>;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("daemon.sock");
+        let capabilities: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/st3/client-v0/fixtures/capabilities.json"
+        ))
+        .unwrap();
+        let snapshot = capabilities["snapshot"].clone();
+        // The first request under a key is taken but not confirmed; the same request again gets
+        // its result; a different request under that key is a conflict, as st answers.
+        let action = move |State(daemon): State<Shared>, body: Bytes| {
+            let snapshot = snapshot.clone();
+            async move {
+                let action: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let mut daemon = daemon.lock().unwrap();
+                daemon.posted.push(action.clone());
+                let key = action["idempotency_key"].as_str().unwrap().to_owned();
+                let mut digest = action.clone();
+                digest.as_object_mut().unwrap().remove("fence");
+                let refusal = |code: &str, retryable: bool, details: serde_json::Value| {
+                    serde_json::json!({
+                        "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
+                        "request_id": "request/example", "code": code, "message": code,
+                        "retryable": retryable, "details": details,
+                    })
+                };
+                let (status, body) = match daemon.receipts.get(&key) {
+                    Some(seen) if *seen != digest => (
+                        StatusCode::CONFLICT,
+                        refusal("idempotency-conflict", false, serde_json::json!({})),
+                    ),
+                    Some(_) => (
+                        StatusCode::OK,
+                        serde_json::json!({
+                            "api_version": "st3.client.v0", "request_id": "request/example",
+                            "snapshot": snapshot,
+                            "value": {
+                                "kind": "action-result", "action_id": action["id"],
+                                "operation_id": "operation/example", "status": "completed",
+                                "affected_ids": ["message/example-tally"],
+                                "snapshot_id": snapshot["id"],
+                            },
+                        }),
+                    ),
+                    None => {
+                        daemon.receipts.insert(key.clone(), digest);
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            refusal(
+                                "message-send-unconfirmed",
+                                false,
+                                serde_json::json!({
+                                    "applied": "unknown", "action_id": action["id"],
+                                    "idempotency_key": key,
+                                }),
+                            ),
+                        )
+                    }
+                };
+                (status, axum::Json(body))
+            }
+        };
+        let daemon = Shared::default();
+        let router = axum::Router::new()
+            .route(
+                "/v1/client/capabilities",
+                routing::get(move || std::future::ready(axum::Json(capabilities.clone()))),
+            )
+            .route("/v1/client/actions", routing::post(action))
+            .with_state(daemon.clone());
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::unix_as(&socket, "person/avery");
+        let in_session = |session: &str| {
+            let mut model = Model::default();
+            model.agents.items.push(
+                serde_json::from_value(serde_json::json!({
+                    "kind": "agent", "id": "agent/example/harbor/keeper", "revision": "a",
+                    "updated_at": "2026-10-03T08:28:00Z", "name": "Keeper", "state": "running",
+                    "reachability": "reachable", "current_session_id": session,
+                }))
+                .unwrap(),
+            );
+            model
+        };
+        let send = Effect::Send {
+            agent: "agent/example/harbor/keeper".into(),
+            text: "Count the harbor crates".into(),
+            in_reply_to: None,
+            tags: vec!["tally".into()],
+            images: Vec::new(),
+        };
+        // The live loop's own path: the same effect and the one `sent` slot for its pending copy.
+        let sent = Arc::new(Mutex::new(None));
+        let error = perform_steadily(
+            &client,
+            "person/avery",
+            &in_session("session/first"),
+            send.clone(),
+            Some(&*sent),
+        )
+        .await
+        .unwrap_err();
+        // What `Fetched::Sent` marks the pending copy with: unconfirmed, so it stays and offers
+        // a resend, not a plain failure.
+        assert!(error
+            .downcast_ref::<ClientError>()
+            .is_some_and(ClientError::outcome_unknown));
+        assert!(!not_applied(&error, &send));
+        assert_eq!(
+            super::plain(&error),
+            "st may have taken it and has not confirmed it yet; sending it again is safe"
+        );
+        assert_eq!(daemon.lock().unwrap().posted.len(), 1, "not sent again by itself");
+        // The agent moved to a new session before the person sent it again.
+        let (_, message) = perform_steadily(
+            &client,
+            "person/avery",
+            &in_session("session/second"),
+            send,
+            Some(&*sent),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.as_deref(), Some("message/example-tally"));
+        let posted = std::mem::take(&mut daemon.lock().unwrap().posted);
+        assert_eq!(posted.len(), 2);
+        for field in ["id", "type", "idempotency_key", "parameters"] {
+            assert_eq!(posted[1][field], posted[0][field], "{field} differs on the resend");
+        }
+        assert_eq!(posted[0]["parameters"]["session_id"], "session/first");
+        server.abort();
+    }
+
     #[test]
     fn a_slow_page_stops_the_first_screen_reading_on() {
         assert!(!super::slow_page(Duration::from_millis(400)));
@@ -2823,12 +3148,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn open_requests_wait_for_a_live_inventory_and_answer_each_seat_once() {
+        use super::super::requests::{self, Answer, Inbox, Place};
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("requests");
+        let mut world = super::super::demo::world();
+        world.link = super::super::view::Link::Live;
+        let known = world.agents.items()[1].id.clone();
+        let mut ui = Ui::new(world);
+        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        ui.show_focused();
+        let mut inbox = Inbox::new(Some(dir.clone()));
+        let early = requests::enqueue(&dir, &known, Place::Right, false, None).unwrap();
+        assert!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o077 == 0);
+
+        // Cached inventory is not a reason to open anything.
+        answer_open_requests(&mut ui, &mut inbox, false);
+        assert_eq!(ui.live_conversations().iter().filter(|id| **id == known).count(), 0);
+        assert!(dir.join(format!("{early}.json")).exists());
+
+        answer_open_requests(&mut ui, &mut inbox, true);
+        assert_eq!(ui.focus(), (1, Some(known.clone())));
+        assert!(!dir.join(format!("{early}.json")).exists());
+        let answer = std::fs::read(dir.join(format!("{early}.answer"))).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Answer>(&answer).unwrap(),
+            Answer::Opened { focused: true }
+        );
+
+        // An agent that is not in the inventory yet waits, and is not found once the grace ends.
+        let later = requests::enqueue(&dir, "agent/garden/not-yet", Place::Tab, false, None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        answer_open_requests(&mut ui, &mut inbox, true);
+        assert!(dir.join(format!("{later}.json")).exists(), "still waiting for st to know it");
+        assert_eq!(inbox.waiting().count(), 1);
+        inbox.waiting_since_for_test(&later, requests::GRACE);
+        answer_open_requests(&mut ui, &mut inbox, true);
+        let answer = std::fs::read(dir.join(format!("{later}.answer"))).unwrap();
+        assert_eq!(serde_json::from_slice::<Answer>(&answer).unwrap(), Answer::NotFound);
+        assert_eq!(inbox.waiting().count(), 0);
+    }
+
+    #[test]
+    fn a_request_the_layout_cannot_show_without_moving_focus_is_not_called_opened() {
+        use super::super::pane::Pane;
+        use super::super::requests::{Answer, Place};
+        let mut world = super::super::demo::world();
+        world.link = super::super::view::Link::Live;
+        let known = world.agents.items()[1].id.clone();
+        let mut ui = Ui::new(world);
+        ui.glasses = None;
+        let pane = || Pane::Agent(Some(known.clone()));
+        // The classic layout has no tabs or splits: only the list can show it, which moves focus.
+        let kept = ui.open_requested(pane(), Place::Tab, true, None);
+        assert_eq!(kept, Answer::NotShown);
+        let moved = ui.open_requested(pane(), Place::Tab, false, None);
+        assert_eq!(moved, Answer::Opened { focused: true });
+        // A name another process wrote cannot put control characters in the flash.
+        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        ui.show_focused();
+        ui.open_requested(pane(), Place::Right, false, Some("agent/x/bad\x1b[2Jname\n"));
+        let (shown, _) = ui.flash.clone().unwrap();
+        assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
+        assert!(shown.contains("bad[2Jname"), "{shown:?}");
+    }
+
+    #[test]
+    fn only_ctrl_r_reconnects_and_never_a_letter() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        let ctrl_r = key(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        let plain_r = key(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(reconnect_key(&ctrl_r, false), "Ctrl+R retries a link that is down");
+        assert!(!reconnect_key(&ctrl_r, true), "Ctrl+R is left to the conversation when live");
+        assert!(!reconnect_key(&plain_r, false), "a lowercase r is typed, never taken");
+        assert!(!reconnect_key(&key(KeyCode::Char('R'), KeyModifiers::SHIFT), false));
+    }
+
+    #[test]
     fn initial_subject_waits_for_live_inventory_and_opens_only_once() {
         for spaces in [false, true] {
             let mut world = super::super::demo::world();
-            let mut expert = world.agents.items()[0].clone();
-            expert.id = "agent/st/expert".into();
-            expert.name = "Expert".into();
+            let mut assistant = world.agents.items()[0].clone();
+            assistant.id = "agent/st/assistant".into();
+            assistant.name = "Smalltalk Assistant".into();
             let other = world.agents.items()[0].id.clone();
             let mut ui = Ui::new(world.clone());
             if spaces {
@@ -2837,14 +3241,14 @@ mod tests {
                 ui.open_home();
             }
             let before = ui.focus();
-            let mut requested = Some(expert.id.clone());
+            let mut requested = Some(assistant.id.clone());
             focus_initial_subject(&mut ui, &mut requested, false, true);
             assert_eq!(
                 ui.focus(), before,
                 "waiting inventory must not open another agent"
             );
             assert!(requested.is_some());
-            world.agents = Load::Ready(vec![world.agents.items()[0].clone(), expert.clone()]);
+            world.agents = Load::Ready(vec![world.agents.items()[0].clone(), assistant.clone()]);
             ui.set_world(world.clone());
             let before = ui.focus();
             focus_initial_subject(&mut ui, &mut requested, false, true);
@@ -2853,8 +3257,8 @@ mod tests {
                 "cached inventory must not consume the request"
             );
             focus_initial_subject(&mut ui, &mut requested, true, true);
-            assert_eq!(ui.focus(), (1, Some(expert.id.clone())));
-            assert_eq!(ui.live_conversations()[0], expert.id);
+            assert_eq!(ui.focus(), (1, Some(assistant.id.clone())));
+            assert_eq!(ui.live_conversations()[0], assistant.id);
             assert!(!ui.home_open());
             assert!(requested.is_none());
             ui.open(&other);
@@ -2870,7 +3274,7 @@ mod tests {
     #[test]
     fn initial_subject_is_cancelled_by_navigation_or_a_missing_live_agent() {
         let mut ui = Ui::new(super::super::demo::world());
-        let mut missing = Some("agent/st/expert".to_owned());
+        let mut missing = Some("agent/st/assistant".to_owned());
         let before = ui.focus();
         focus_initial_subject(&mut ui, &mut missing, true, true);
         assert!(missing.is_none());
@@ -3814,6 +4218,7 @@ mod tests {
                 images: Vec::new(),
             },
             sent: Arc::new(Mutex::new(None)),
+            echoed: false,
             since,
         };
         let mut fresh = [pending(Instant::now())];

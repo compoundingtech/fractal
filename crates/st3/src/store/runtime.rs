@@ -11,6 +11,7 @@ pub struct SmalltalkRuntime {
     /// Committed launch-source invalidation, independent of append frontiers.
     pub(crate) publication_cache_epoch: Mutex<Option<(i64, bool)>>,
     pub(crate) publication_cache_observer: Mutex<Option<smallclaims::sqlite::CommitObserver>>,
+    pub(crate) git_change_registry: std::sync::OnceLock<Arc<crate::changes::service::Registry>>,
     /// One registry per graph. Registration alone does not certify source coverage.
     pub(crate) ivm_views: Option<Arc<smallclaims::ivm::Views>>,
     /// Receipt waits and collection sockets share this one commit observer. Publisher
@@ -73,6 +74,9 @@ pub struct SmalltalkRuntime {
     pub(crate) arrangement_list: super::owner_lists::OwnerList,
     /// Each selected person's summary row, published by the same refresher.
     pub(crate) summary_list: super::summary_list::SummaryList,
+    /// Open projection divergence faults at the last divergence check; `None` until a check
+    /// runs, so the SLO reads no claims for it and shows nothing on a daemon that never checks.
+    pub(crate) open_divergences: Mutex<Option<u64>>,
     /// The current missions list, while a refresher keeps it published.
     pub(crate) published_missions: published_list::PublishedList<mission_list::MissionRows>,
     /// The current work list, while a refresher keeps it published.
@@ -118,7 +122,10 @@ pub(crate) struct AgentResourcesEntry {
 
 impl SmalltalkRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
+        runtime_starts::create_schema(connection)?;
+        migrate_mission_run_deadlines(connection)?;
         connection.execute_batch(git_changes::SCHEMA)?;
+        retirements::create_selection_triggers(connection)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
         backfill_message_index(connection)?;
@@ -136,6 +143,7 @@ impl SmalltalkRuntime {
         custom::create_schema(connection)?;
         agent_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
+        stop_deferral::create_schema(connection)?;
         publication_facts::create_schema(connection)?;
         glass_heads::create_schema(connection)?;
         directive_notes::create_schema(connection)?;
@@ -326,7 +334,18 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn schema_digest(&self) -> String {
+        // Older peers cannot compare individual definition versions. Their existing
+        // registry comparison suppresses graph heals, while signed log admission continues.
+        canonical_hash(&(self.projection_registry_digest(), self.projection_versions()))
+            .expect("projection definition identity serializes")
+    }
+
+    fn projection_registry_digest(&self) -> String {
         compatibility_digest(&self.claim_registry().digest())
+    }
+
+    fn projection_versions(&self) -> BTreeMap<String, u64> {
+        BTreeMap::from([("mission_run_deadlines".into(), 3)])
     }
 
     fn classify_replicated_claim(
@@ -336,6 +355,15 @@ impl Runtime for SmalltalkRuntime {
         claim: &ClaimRecord,
     ) -> Result<ReplicatedClaimAdmission, St3Error> {
         classify_replicated_claim_with_registry(claim, self.claim_registry())
+    }
+
+    fn classify_replicated_claim_unbound(
+        &self,
+        _batch: &ReplicaBatch,
+        claim: &ClaimRecord,
+    ) -> Option<Result<ReplicatedClaimAdmission, St3Error>> {
+        // The registry is this build's schema, fixed for the process.
+        Some(classify_replicated_claim_with_registry(claim, self.claim_registry()))
     }
 
     fn append_claim(
@@ -416,6 +444,8 @@ impl Runtime for SmalltalkRuntime {
             .unwrap_or_else(PoisonError::into_inner);
         cache.views.clear();
         cache.statuses.clear();
+        cache.summary_statuses.clear();
+        cache.runtime_statuses.clear();
         cache.card_statuses.clear();
         drop(cache);
         let mut owners = self.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner);
@@ -477,6 +507,20 @@ impl Runtime for SmalltalkRuntime {
         checkpoint_rules::plan_drops(sealed)
     }
 
+    fn checkpoint_claim_facts(
+        &self,
+        claim: &ClaimRecord,
+    ) -> smallclaims::store::checkpoint_staging::CheckpointClaimFacts {
+        checkpoint_rules::claim_facts(claim)
+    }
+
+    fn plan_staged_checkpoint_drops(
+        &self,
+        planner: &smallclaims::store::checkpoint_staging::StagedPlanner<'_>,
+    ) -> Result<()> {
+        checkpoint_rules::plan_staged(planner)
+    }
+
     fn clear_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
         checkpoint_rules::clear_projections(transaction)
     }
@@ -514,7 +558,8 @@ impl Runtime for SmalltalkRuntime {
 /// at once rather than on the next read.
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
-const SHARED_PROJECTION_LAYOUT: &str = "st3.shared-projections.person-directive-notes.v1";
+const SHARED_PROJECTION_LAYOUT: &str =
+    "st3.shared-projections.person-directive-notes.forward-compat.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub(crate) fn compatibility_digest(registry_digest: &str) -> String {
@@ -528,11 +573,13 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.execute_batch(SCHEMA)?;
         transaction.execute_batch(&RUNTIME_ID_INDEX)?;
         transaction.execute_batch(arrangements::SCHEMA)?;
+        transaction.execute_batch(retirements::SCHEMA)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(SCHEMA)?;
         connection.execute_batch(&RUNTIME_ID_INDEX)?;
         connection.execute_batch(arrangements::SCHEMA)?;
+        connection.execute_batch(retirements::SCHEMA)?;
     }
     Ok(())
 }
@@ -858,7 +905,7 @@ mod schema_install_tests {
                 reader
                     .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                     .unwrap(),
-                18
+                st3_schema::STORAGE_VERSION
             );
             assert_eq!(
                 recovered

@@ -7,6 +7,248 @@ use std::time::Duration;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 
+static EXPORT_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Like the profiler's default, retain only batches whose wall time reaches 250 ms.
+pub(super) const SLOW_BATCH: Duration = Duration::from_millis(250);
+
+/// Arm writer roots only after the process trace provider is installed.
+pub fn init(export_enabled: bool) {
+    EXPORT_ENABLED.store(
+        export_enabled && std::env::var("ST3_STORAGE_PHASE_SPANS").as_deref() == Ok("1"),
+        Ordering::Relaxed,
+    );
+}
+
+pub fn phase_spans_enabled() -> bool {
+    EXPORT_ENABLED.load(Ordering::Relaxed)
+}
+
+#[derive(Clone)]
+pub struct Origin(OriginLabel);
+
+static TASK_ORIGINS: [&str; 11] = [
+    "other", "task checkpoint", "task migrate-event-payloads", "task expire-completed-responses",
+    "task coordination-counts-catch-up", "task account-limits-catch-up",
+    "task enforce-account-limits", "task trim-local-observations", "task mailbox-wake-dispatch",
+    "task reconcile-pass", "task reconcile-deadline",
+];
+
+#[derive(Clone)]
+enum OriginLabel {
+    // One pointer into the bounded table keeps queued jobs compact without allocating task labels.
+    Static(&'static &'static str),
+    Route(Arc<String>),
+}
+
+impl Origin {
+    pub(crate) fn other() -> Self { Self(OriginLabel::Static(&TASK_ORIGINS[0])) }
+
+    fn attribute(&self, key: &'static str) -> KeyValue {
+        match &self.0 {
+            OriginLabel::Static(label) => KeyValue::new(key, **label),
+            OriginLabel::Route(label) => KeyValue::new(key, label.to_string()),
+        }
+    }
+}
+
+/// `route` must come from the router's normalized MatchedPath, never the request URI.
+pub fn route_origin(method: &str, route: &str) -> Option<Origin> {
+    if !phase_spans_enabled() { return None; }
+    if !matches!(method, "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS" | "CONNECT" | "TRACE") {
+        return Some(Origin::other());
+    }
+    Some(Origin(OriginLabel::Route(Arc::new(format!("{method} {route}")))))
+}
+
+fn task_origin(label: &'static str) -> Origin {
+    let label = TASK_ORIGINS.iter().find(|bounded| **bounded == label).unwrap_or(&TASK_ORIGINS[0]);
+    Origin(OriginLabel::Static(label))
+}
+
+thread_local! {
+    static ORIGIN: RefCell<Option<Origin>> = const { RefCell::new(None) };
+}
+
+pub struct OriginScope(Option<Origin>);
+
+pub fn enter_origin(origin: Option<Origin>) -> Option<OriginScope> {
+    if !phase_spans_enabled() { return None; }
+    Some(OriginScope(ORIGIN.with(|slot| slot.replace(origin))))
+}
+
+pub(crate) fn enter_task_origin(label: &'static str) -> Option<OriginScope> {
+    if !phase_spans_enabled() || ORIGIN.with(|slot| slot.borrow().is_some())
+        || REQUEST.with(|slot| slot.borrow().as_ref().is_some_and(|request| request.origin.is_some())) {
+        return None;
+    }
+    enter_origin(Some(task_origin(label)))
+}
+
+pub(crate) fn current_origin() -> Option<Origin> {
+    if !phase_spans_enabled() { return None; }
+    Some(ORIGIN.with(|slot| slot.borrow().clone())
+        .or_else(|| REQUEST.with(|slot| slot.borrow().as_ref().and_then(|request| request.origin.clone())))
+        .unwrap_or_else(Origin::other))
+}
+
+impl Drop for OriginScope {
+    fn drop(&mut self) {
+        ORIGIN.with(|slot| slot.replace(self.0.take()));
+    }
+}
+
+pub(super) struct Writer {
+    holder: std::sync::Mutex<Option<Origin>>,
+    checkpoint: std::sync::Mutex<Checkpoint>,
+}
+
+#[derive(Default)]
+struct Checkpoint {
+    active: usize,
+    since: Option<std::time::Instant>,
+    elapsed: Duration,
+}
+
+impl Checkpoint {
+    fn sample(&mut self) -> Duration {
+        let now = std::time::Instant::now();
+        if self.active > 0 && let Some(since) = self.since {
+            self.elapsed += now.duration_since(since);
+        }
+        self.since = Some(now);
+        self.elapsed
+    }
+}
+
+static WRITERS: LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<Writer>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+impl Writer {
+    pub(super) fn new(connection: &rusqlite::Connection) -> Option<Arc<Self>> {
+        if !phase_spans_enabled() { return None; }
+        let writer = Arc::new(Self {
+            holder: std::sync::Mutex::new(None),
+            checkpoint: std::sync::Mutex::new(Checkpoint::default()),
+        });
+        if let Some(path) = connection.path().filter(|path| !path.is_empty()) {
+            let mut writers = WRITERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            writers.retain(|_, writer| writer.strong_count() > 0);
+            writers.insert(path.to_owned(), Arc::downgrade(&writer));
+        }
+        Some(writer)
+    }
+
+    pub(super) fn holder(&self) -> Option<Origin> {
+        self.holder.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    pub(super) fn holding(&self, origin: Option<Origin>) -> Holding<'_> {
+        self.set_holder(origin);
+        Holding(self)
+    }
+
+    pub(super) fn set_holder(&self, origin: Option<Origin>) {
+        *self.holder.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(origin.unwrap_or_else(Origin::other));
+    }
+
+    fn checkpoint_time(&self) -> Duration {
+        self.checkpoint.lock().unwrap_or_else(std::sync::PoisonError::into_inner).sample()
+    }
+}
+
+pub(super) struct Holding<'a>(&'a Writer);
+impl Drop for Holding<'_> {
+    fn drop(&mut self) {
+        *self.0.holder.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+pub(super) struct CheckpointGuard(Arc<Writer>);
+impl CheckpointGuard {
+    pub(super) fn start(connection: &rusqlite::Connection) -> Option<Self> {
+        if !phase_spans_enabled() { return None; }
+        let writer = WRITERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(connection.path()?).and_then(std::sync::Weak::upgrade)?;
+        {
+            let mut checkpoint = writer.checkpoint.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            checkpoint.sample();
+            checkpoint.active += 1;
+        }
+        Some(Self(writer))
+    }
+}
+
+impl Drop for CheckpointGuard {
+    fn drop(&mut self) {
+        let mut checkpoint = self.0.checkpoint.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        checkpoint.sample();
+        checkpoint.active -= 1;
+    }
+}
+
+pub(super) struct Batch<'a> {
+    started: std::time::SystemTime,
+    writer: &'a Writer,
+    checkpoint_started: Duration,
+    pub wait: Duration,
+    pub holder: Option<Origin>,
+    pub begin: Duration,
+    pub operations: Duration,
+    pub commit: Duration,
+    pub finalizers: Duration,
+    pub slowest: Duration,
+    pub origin: Origin,
+}
+
+impl<'a> Batch<'a> {
+    pub(super) fn start(writer: &'a Writer) -> Self {
+        Self {
+            started: std::time::SystemTime::now(),
+            writer,
+            checkpoint_started: writer.checkpoint_time(),
+            wait: Duration::ZERO,
+            holder: None,
+            begin: Duration::ZERO,
+            operations: Duration::ZERO,
+            commit: Duration::ZERO,
+            finalizers: Duration::ZERO,
+            slowest: Duration::ZERO,
+            origin: Origin::other(),
+        }
+    }
+
+    pub(super) fn finish(self, elapsed: Duration, post_commit: Duration, count: usize) {
+        use opentelemetry::trace::{Span as _, Tracer as _};
+        if elapsed < SLOW_BATCH && self.wait < SLOW_BATCH {
+            return;
+        }
+        let tracer = opentelemetry::global::tracer("smallclaims.sqlite");
+        let mut span = tracer.span_builder("st.db.writer.batch")
+            .with_start_time(self.started)
+            .with_attributes([
+                KeyValue::new("span.label", "writer batch"),
+                KeyValue::new("db.system.name", "sqlite"),
+                KeyValue::new("st.writer.wait_ms", self.wait.as_secs_f64() * 1000.),
+                self.holder.as_ref().map_or_else(|| KeyValue::new("st.writer.holder", "none"),
+                    |holder| holder.attribute("st.writer.holder")),
+                // Overlap is not additive: a dedicated checkpoint can run during any phase.
+                KeyValue::new("st.db.writer.batch.checkpoint_overlap_ms",
+                    self.writer.checkpoint_time().saturating_sub(self.checkpoint_started).as_secs_f64() * 1000.),
+                KeyValue::new("st.db.writer.batch.begin_ms", self.begin.as_secs_f64() * 1000.),
+                KeyValue::new("st.db.writer.batch.operations_ms", self.operations.as_secs_f64() * 1000.),
+                KeyValue::new("st.db.writer.batch.commit_ms", self.commit.as_secs_f64() * 1000.),
+                KeyValue::new("st.db.writer.batch.finalizers_ms", self.finalizers.as_secs_f64() * 1000.),
+                KeyValue::new("st.db.writer.batch.post_commit_ms", post_commit.as_secs_f64() * 1000.),
+                KeyValue::new("st.db.writer.batch.ops", i64::try_from(count).unwrap_or(i64::MAX)),
+                KeyValue::new("st.db.writer.batch.slowest_op_ms", self.slowest.as_secs_f64() * 1000.),
+                self.origin.attribute("st.db.writer.batch.slowest_op_origin"),
+            ])
+            .start_with_context(&tracer, &opentelemetry::Context::new());
+        span.end();
+    }
+}
+
 pub(super) static SQLITE: LazyLock<[KeyValue; 1]> =
     LazyLock::new(|| [KeyValue::new("db.system.name", "sqlite")]);
 static BATCHED: LazyLock<[KeyValue; 2]> = LazyLock::new(|| {
@@ -119,9 +361,14 @@ pub fn checkpoint_finished(elapsed: Duration) {
 pub struct WriterWait {
     nanos: AtomicU64,
     ops: AtomicU64,
+    origin: Option<Origin>,
 }
 
 impl WriterWait {
+    pub fn with_origin(origin: Option<Origin>) -> Self {
+        Self { origin, ..Self::default() }
+    }
+
     pub fn totals(&self) -> (f64, u64) {
         (
             self.nanos.load(Ordering::Relaxed) as f64 / 1_000_000.,
@@ -235,6 +482,36 @@ mod tests {
     use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 
+    #[test]
+    fn trace_only_origin_follows_request_scopes() {
+        if isolated("trace_only_origin_follows_request_scopes") { return; }
+        init(true);
+        assert!(!crate::profile::enabled());
+        crate::profile::task("task checkpoint", || {
+            assert_eq!(current_origin().unwrap().attribute("origin").value,
+                opentelemetry::Value::from("task checkpoint"));
+        });
+        let request = Arc::new(WriterWait::with_origin(route_origin("POST", "/v1/mailbox/receipts")));
+        std::thread::spawn(move || {
+            let _scope = enter_request(Some(request));
+            crate::profile::task("task checkpoint", || {
+                assert_eq!(current_origin().unwrap().attribute("origin").value,
+                    opentelemetry::Value::from("POST /v1/mailbox/receipts"));
+            });
+        }).join().unwrap();
+        assert_eq!(current_origin().unwrap().attribute("origin").value,
+            opentelemetry::Value::from("other"));
+        for label in [
+            "task checkpoint", "task migrate-event-payloads", "task expire-completed-responses",
+            "task coordination-counts-catch-up", "task account-limits-catch-up",
+            "task enforce-account-limits", "task trim-local-observations",
+            "task mailbox-wake-dispatch", "task reconcile-pass", "task reconcile-deadline",
+        ] {
+            assert_eq!(task_origin(label).attribute("origin").value, opentelemetry::Value::from(label));
+        }
+        assert_eq!(task_origin("unknown").attribute("origin").value, opentelemetry::Value::from("other"));
+    }
+
     // Global instruments initialize once. A separate test process keeps provider ordering
     // deterministic without serializing or changing providers underneath other store tests.
     fn isolated(name: &str) -> bool {
@@ -248,6 +525,7 @@ mod tests {
                 "--nocapture",
             ])
             .env("SMALLCLAIMS_TELEMETRY_TEST", name)
+            .env("ST3_STORAGE_PHASE_SPANS", "1")
             .status()
             .unwrap();
         assert!(status.success());
@@ -432,6 +710,57 @@ mod tests {
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].value(), 0);
         drop(pool);
+        provider.shutdown().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wal_gauge_uses_the_opened_target_not_a_file_alias_sidecar() {
+        if isolated("wal_gauge_uses_the_opened_target_not_a_file_alias_sidecar") {
+            return;
+        }
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.sqlite3");
+        let writer = rusqlite::Connection::open(&target).unwrap();
+        writer.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE wal_path_fixture(value INTEGER);
+             INSERT INTO wal_path_fixture VALUES(1);",
+        ).unwrap();
+        let alias = root.path().join("alias.sqlite3");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let mut alias_wal = alias.as_os_str().to_os_string();
+        alias_wal.push("-wal");
+        std::fs::write(&alias_wal, b"alias decoy").unwrap();
+        let mut target_wal = target.as_os_str().to_os_string();
+        target_wal.push("-wal");
+        let expected = std::fs::metadata(&target_wal).unwrap().len();
+        assert!(expected > 11);
+        let pool = super::super::ReadPool::new(&alias, false).unwrap();
+        assert_eq!(pool.path, std::fs::canonicalize(&target).unwrap());
+        let value: i64 = pool.get().query_row("SELECT value FROM wal_path_fixture", [], |row| row.get(0)).unwrap();
+        assert_eq!(value, 1);
+        provider.force_flush().unwrap();
+        let finished = exporter.get_finished_metrics().unwrap();
+        let gauge = finished.iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == "st.db.wal.size")
+            .expect("the WAL gauge exports");
+        let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = gauge.data() else {
+            panic!("the WAL gauge is a u64 gauge");
+        };
+        let points: Vec<_> = gauge.data_points().collect();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].value(), expected);
+        assert_eq!(std::fs::read(alias_wal).unwrap(), b"alias decoy");
+        drop(pool);
+        drop(writer);
         provider.shutdown().unwrap();
     }
 

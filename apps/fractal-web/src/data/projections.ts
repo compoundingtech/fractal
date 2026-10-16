@@ -3,8 +3,8 @@
  *
  * Sources supply generated `St3.Agent` / `St3.Mission` / `St3.Attention` rows only; the fleet,
  * mission views and workbench subjects are projected here, so fixtures and live cannot derive
- * them differently. Open attention rows are the one inbox authority: a subject needs the user
- * exactly when an open attention row names it (`source_id`, `requester_id` or `mission_id`).
+ * them differently. Native actionable asks are the needs-you authority: a subject needs an
+ * answer when an answerable attention row names it (`source_id`, `requester_id` or `mission_id`).
  */
 import * as St3 from '@smalltalk/st3-client/schema'
 import * as DateTime from 'effect/DateTime'
@@ -13,6 +13,7 @@ import * as Schema from 'effect/Schema'
 
 import type { MissionView, ProposedMissionFields } from '../missions/model.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
+import { isWaitingForAnswer } from './attention.ts'
 import type { Agent, Fleet, Host, Known } from './source.ts'
 
 const isAgentId = Schema.is(St3.AgentId)
@@ -37,7 +38,7 @@ const isConnected = (agent: St3.Agent) =>
   agent.reachability === 'reachable'
 
 const activityOf = (agent: St3.Agent): Agent['activity'] => {
-  if (agent.state === 'failed' || Option.isSome(agent.fault)) return 'errored'
+  if (agent.state === 'failed' || agent.state === 'down' || Option.isSome(agent.fault)) return 'errored'
   if (agent.state === 'waiting' || Option.getOrUndefined(agent.blocked_on) === 'human')
     return 'waiting'
   const harnessState = Option.getOrUndefined(agent.harness_state)
@@ -52,6 +53,9 @@ const statusOf = (agent: St3.Agent): string => {
   const title = work === undefined ? undefined : Option.getOrUndefined(work.title)
   return (
     Option.getOrUndefined(agent.fault) ??
+    (agent.state === 'down'
+      ? `down · no session since ${Option.getOrUndefined(agent.down_since) ?? 'unknown'}`
+      : undefined) ??
     (Option.getOrUndefined(agent.blocked_on) === 'human'
       ? `waiting for you${Option.match(agent.ask, { onNone: () => '', onSome: (ask) => ` (${ask})` })}`
       : undefined) ??
@@ -143,7 +147,7 @@ export const missionViews = ({
     proposed: proposed?.[mission.id],
   }))
 
-/** Refs an open attention row is about: what raised it, who asked and the mission it serves. */
+/** Open-card linkage for unread ownership, including informational/non-answerable cards. */
 export const attentionRefs = (attention: readonly St3.Attention[]): ReadonlySet<string> =>
   new Set(
     attention
@@ -196,7 +200,7 @@ export const subjectList = ({
   readonly missions?: readonly St3.Mission[]
   readonly attention?: readonly St3.Attention[]
 }): SubjectSummary[] => {
-  const needsYou = attention === undefined ? undefined : attentionRefs(attention)
+  const needsYou = attention === undefined ? undefined : attentionRefs(attention.filter(isWaitingForAnswer))
   return [
     ...(fleet?.agents.flatMap((agent) =>
       agentSubjectPair({ agent, needsYou: needsYou?.has(agent.ref) === true }),
@@ -216,7 +220,7 @@ export const subjectList = ({
         title: item.title,
         detail: `${item.attention_kind} · ${item.state}`,
         icon: 'attention',
-        ...(item.state === 'open' ? { attention: true } : {}),
+        ...(isWaitingForAnswer(item) ? { attention: true } : {}),
       }),
     ) ?? []),
   ]
@@ -342,7 +346,7 @@ export const createProjections = (): {
       return previousViews
     },
     subjectList: ({ fleet, missions, attention }) => {
-      const needsYou = attention === undefined ? undefined : attentionRefs(attention)
+      const needsYou = attention === undefined ? undefined : attentionRefs(attention.filter(isWaitingForAnswer))
       const next: SubjectSummary[] = []
       for (const agent of fleet?.agents ?? []) {
         let subjects = agentSubjects.get(agent)
@@ -378,7 +382,7 @@ export const createProjections = (): {
             title: item.title,
             detail: `${item.attention_kind} · ${item.state}`,
             icon: 'attention',
-            ...(item.state === 'open' ? { attention: true } : {}),
+            ...(isWaitingForAnswer(item) ? { attention: true } : {}),
           }
           attentionSubjects.set(item, subject)
         }

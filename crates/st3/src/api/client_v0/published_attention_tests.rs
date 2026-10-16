@@ -288,6 +288,136 @@ async fn the_first_summary_window_of_any_selection_is_served_at_once() {
     state.store.stop_attention_list_refresher();
 }
 
+/// The shared counts read the complete agents roster. As the daemon starts it may not be
+/// published yet; a window then waits for that publication, not for the refresher's pause.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_summary_waiting_for_the_roster_is_served_once_it_publishes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "summary-roster");
+    custom(&state, "custom/garden/review/v1/ada", "person/ada");
+    // A roster refresher that has published nothing yet: no summary can be counted.
+    let _roster = state.store.start_agent_roster_refresher().unwrap();
+    crate::api::start_attention_list(&state);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while state.store.newest_attention_list().1.is_none() {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for attention");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let ada = ClientSession::local(Some("person/ada")).unwrap();
+    assert_eq!(summary_window(&state, &ada).await.unwrap_err().code, "summary-not-ready");
+    // Well inside the refresher's pause of at least a second after its first refresh.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(state.store.summary_shared().is_none());
+    assert!(state.store.summary_shared_starting(), "nothing was counted yet");
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || crate::api::refresh_agent_roster(&store, false))
+        .await
+        .unwrap()
+        .unwrap();
+    let published = std::time::Instant::now();
+    let items = loop {
+        if let Ok((snapshot, items, _)) = summary_window(&state, &ada).await {
+            assert!(snapshot.published_at.is_some());
+            break items;
+        }
+        assert!(
+            published.elapsed() < Duration::from_millis(500),
+            "the summary waited past the roster's publication"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(!state.store.summary_shared_starting());
+    let computed = computed_summary(&state, &ada);
+    for field in ["person_id", "needs_you", "working_agents", "active_missions", "machines", "revision"] {
+        assert_eq!(items[0][field], computed[field], "{field}");
+    }
+    state.store.stop_attention_list_refresher();
+}
+
+/// Drive the startup interleaving explicitly: a failed shared-count pass runs after a window
+/// registers, then the roster arrives while the summary refresher has not run again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn startup_summary_stays_pending_between_roster_and_summary_publication() {
+    use crate::store::summary_list::PublishedSummary;
+
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "summary-startup-pending");
+    custom(&state, "custom/garden/review/v1/ada", "person/ada");
+    let _roster = state.store.start_agent_roster_refresher().unwrap();
+    // Mark serving active, but run each publication ourselves: no background task or sleep
+    // can repair the failed selection before the window observes it.
+    state.store.start_attention_list_refresher().unwrap();
+    crate::api::refresh_attention_list(&state.store).unwrap();
+    let ada = ClientSession::local(Some("person/ada")).unwrap();
+    assert_eq!(summary_window(&state, &ada).await.unwrap_err().code, "summary-not-ready");
+
+    for waiting_only in [false, true] {
+        assert!(!summary::refresh_published(&state, 60_000, waiting_only).unwrap());
+        assert!(state.store.summary_shared_starting());
+        assert!(state.store.summary_shared().is_none());
+        assert!(matches!(
+            state.store.published_summary(Some("person/ada")),
+            PublishedSummary::Pending
+        ));
+        assert!(state.store.summary_selection_waiting());
+    }
+
+    crate::api::refresh_agent_roster(&state.store, false).unwrap();
+    // The roster alone cannot serve a summary with publication provenance. Without the
+    // startup guard, this request succeeds via the unpublished native fallback instead.
+    assert_eq!(summary_window(&state, &ada).await.unwrap_err().code, "summary-not-ready");
+    assert!(summary::refresh_published(&state, 60_000, true).unwrap());
+    assert!(!state.store.summary_shared_starting());
+    assert!(!state.store.summary_selection_waiting());
+    let (snapshot, items, _) = summary_window(&state, &ada).await.unwrap();
+    assert!(snapshot.published_at.is_some());
+    let computed = computed_summary(&state, &ada);
+    for field in ["person_id", "needs_you", "working_agents", "active_missions", "machines", "revision"] {
+        assert_eq!(items[0][field], computed[field], "{field}");
+    }
+    state.store.stop_attention_list_refresher();
+}
+
+/// A real read failure before the first successful summary must not be mistaken for the
+/// expected initial roster dependency. Use the real read-budget cancellation path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn startup_summary_read_failure_preserves_native_fallback() {
+    use crate::store::summary_list::PublishedSummary;
+    use smallclaims::read_budget::{self, ReadBudget};
+
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "summary-startup-error");
+    custom(&state, "custom/garden/review/v1/ada", "person/ada");
+    let _roster = state.store.start_agent_roster_refresher().unwrap();
+    state.store.start_attention_list_refresher().unwrap();
+    crate::api::refresh_attention_list(&state.store).unwrap();
+    let ada = ClientSession::local(Some("person/ada")).unwrap();
+    assert_eq!(summary_window(&state, &ada).await.unwrap_err().code, "summary-not-ready");
+    assert!(!summary::refresh_published(&state, 60_000, false).unwrap());
+    assert!(state.store.summary_selection_waiting(), "the initial roster wait is pending");
+    crate::api::refresh_agent_roster(&state.store, false).unwrap();
+
+    let changed = read_budget::with(
+        Some(ReadBudget::new("/summary-startup-control", Duration::ZERO)),
+        || summary::refresh_published(&state, 60_000, false).unwrap(),
+    );
+    assert!(changed, "a real cancelled read must resolve the selection to fallback");
+    assert!(state.store.summary_shared_starting(), "no shared counts have succeeded");
+    assert!(state.store.summary_shared().is_none());
+    assert!(matches!(
+        state.store.published_summary(Some("person/ada")),
+        PublishedSummary::Unserved
+    ));
+    assert!(!state.store.summary_selection_waiting());
+    let (snapshot, items, _) = summary_window(&state, &ada).await.unwrap();
+    assert!(snapshot.published_at.is_none(), "a genuine failure permits native reads");
+    assert_eq!(items[0]["needs_you"], 1);
+    assert!(summary::refresh_published(&state, 60_000, false).unwrap());
+    let (snapshot, _, _) = summary_window(&state, &ada).await.unwrap();
+    assert!(snapshot.published_at.is_some(), "a later success repairs fallback");
+    state.store.stop_attention_list_refresher();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn odd_and_surplus_summary_selections_never_stop_the_others() {
     let root = tempfile::tempdir().unwrap();

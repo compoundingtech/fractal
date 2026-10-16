@@ -10,6 +10,11 @@ struct Runtime {
     stops: Mutex<Vec<String>>,
 }
 impl RuntimeControl for Runtime {
+    fn start_operation(&self, id: &str, _: bool, incarnation: &str) -> Result<Option<String>> {
+        Ok(self.starts.lock().unwrap().iter().enumerate()
+            .find(|(index, member)| member.runtime_id == id && incarnation == format!("replacement-{}", index + 1))
+            .and_then(|(_, member)| member.tags.get(start_jobs::OPERATION_TAG).cloned()))
+    }
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
         Ok(self
             .observation

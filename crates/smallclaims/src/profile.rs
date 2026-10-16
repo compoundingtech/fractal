@@ -701,6 +701,7 @@ pub fn enter(op: Option<&Op>) -> Option<Entered> {
 
 /// Run `work` as its own operation, unless this thread already works for one.
 pub fn task<T>(label: &'static str, work: impl FnOnce() -> T) -> T {
+    let _origin = crate::sqlite::telemetry::enter_task_origin(label);
     crate::performance::task(label, || profiled_task(label, work))
 }
 
@@ -851,6 +852,13 @@ pub fn sql(statement: &str, duration: Duration) {
 pub struct WriterWait {
     started: Instant,
     holder: Option<Arc<str>>,
+    // Keep queued jobs small beside always-on holders; allocate only for opt-in phase traces.
+    trace: Option<Box<WriterTrace>>,
+}
+
+struct WriterTrace {
+    holder: Option<crate::sqlite::telemetry::Origin>,
+    origin: crate::sqlite::telemetry::Origin,
 }
 
 pub fn writer_waiting() -> Option<WriterWait> {
@@ -862,7 +870,34 @@ pub fn writer_waiting() -> Option<WriterWait> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone(),
+        trace: None,
     })
+}
+
+pub(crate) fn writer_waiting_for(
+    wait: Option<WriterWait>,
+    trace_holder: Option<crate::sqlite::telemetry::Origin>,
+    trace_origin: crate::sqlite::telemetry::Origin,
+) -> WriterWait {
+    let mut wait = wait.unwrap_or_else(|| WriterWait {
+        started: Instant::now(), holder: None, trace: None,
+    });
+    wait.trace = Some(Box::new(WriterTrace { holder: trace_holder, origin: trace_origin }));
+    wait
+}
+
+impl WriterWait {
+    pub(crate) fn trace_holder(&self) -> Option<crate::sqlite::telemetry::Origin> {
+        self.trace.as_ref().and_then(|trace| trace.holder.clone())
+    }
+
+    pub(crate) fn trace_origin(&self) -> Option<&crate::sqlite::telemetry::Origin> {
+        self.trace.as_ref().map(|trace| &trace.origin)
+    }
+
+    pub(crate) fn take_trace_origin(&mut self) -> crate::sqlite::telemetry::Origin {
+        self.trace.take().map_or_else(crate::sqlite::telemetry::Origin::other, |trace| trace.origin)
+    }
 }
 
 /// The writer is this thread's now. Returns when it was taken, for `writer_released`.
@@ -1412,9 +1447,9 @@ mod tests {
             acquired.send(()).unwrap();
             released.recv().unwrap();
             {
-                let _replay = span("projection/heal-replay");
+                let _replay = span("projection/full-replay");
                 sql("SELECT invented", Duration::from_millis(3));
-                note("projection: full replay for a heal");
+                note("projection: full replay");
             }
             writer_released(writer);
             // The entered guard must account for CPU/I/O before the worker's last Op drops.
@@ -1445,8 +1480,8 @@ mod tests {
             assert_eq!(recorded.count, 1);
             assert_eq!(recorded.acc.writer_hold.count, 1);
             assert_eq!(recorded.acc.sql.count, 1);
-            assert_eq!(recorded.acc.spans["projection/heal-replay"].count, 1);
-            assert_eq!(recorded.acc.spans["projection/heal-replay"].sql_count, 1);
+            assert_eq!(recorded.acc.spans["projection/full-replay"].count, 1);
+            assert_eq!(recorded.acc.spans["projection/full-replay"].sql_count, 1);
             assert!(recorded.acc.cpu_ns > 0);
         }
         let lines = fs::read_to_string(state.dir.join("slow.jsonl")).unwrap();
@@ -1460,7 +1495,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|span| span["name"] == "projection/heal-replay")
+            .find(|span| span["name"] == "projection/full-replay")
             .unwrap();
         assert_eq!(replay["sql_count"], 1);
 

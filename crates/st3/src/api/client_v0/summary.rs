@@ -1,8 +1,19 @@
 //! Tiny current summary on the existing protocol. Native reads are authorized in
 //! one snapshot; the contract stays the same when the shared IVM source takes over.
 use super::*;
-use crate::store::summary_list::{SummaryInputs, SummaryShared};
+use crate::store::summary_list::{SummaryInputs, SummaryMachines, SummaryShared};
 use st3_ui_model::missions::Display;
+
+#[derive(Debug)]
+struct RosterNotPublished;
+
+impl std::fmt::Display for RosterNotPublished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the agents roster is still being prepared; retry shortly")
+    }
+}
+
+impl std::error::Error for RosterNotPublished {}
 
 pub(super) fn working(agent: &Value) -> bool {
     agent["state"] == "running"
@@ -30,12 +41,14 @@ pub(super) fn native(
     let attention = state.store.attention_snapshot(person.as_deref(), now)?;
     // What needs the person is what waits on their answer: an update asks nothing.
     let alerts = attention.iter().filter(|item| item.is_alert()).count();
-    let shared = shared(state, session, request, snapshot, now, windows, commits)?;
+    let shared = shared(state, session, request, snapshot, now, windows, commits, None)?;
     Ok(vec![row(person.as_deref(), alerts, &shared)?])
 }
 
 /// What every selection's summary shares at `snapshot`: each mission and whether it is active,
-/// the working agents and the machine counts. No count here depends on the selected person.
+/// the working agents and the machine counts, of `machines` when they were read at `snapshot`.
+/// No count here depends on the selected person.
+#[allow(clippy::too_many_arguments)]
 fn shared(
     state: &AppState,
     session: &ClientSession,
@@ -44,6 +57,7 @@ fn shared(
     now: u128,
     windows: Option<&collection_windows::Windows>,
     commits: Option<u64>,
+    machines: Option<Arc<Vec<Value>>>,
 ) -> anyhow::Result<SummaryShared> {
     let store = &state.store;
     let compute = || {
@@ -68,6 +82,7 @@ fn shared(
                 .collect::<Vec<_>>()}),
             ],
             false,
+            deadline,
         ))
     };
     // Mission active membership cannot depend on which agent owns a ready queue: a step that
@@ -114,7 +129,7 @@ fn shared(
         let Some((cut, cards, published_at)) = store.published_agent_roster(snapshot.store_index, false)
         else {
             store.request_agent_roster_refresh();
-            anyhow::bail!("the agents roster is still being prepared; retry shortly");
+            return Err(RosterNotPublished.into());
         };
         if cut < snapshot.store_index {
             store.request_agent_roster_refresh();
@@ -126,7 +141,10 @@ fn shared(
     };
     overlay_agent_resources(store, &mut agents, &client_timestamp(now))?;
     let working_agents = agents.iter().filter(|agent| working(agent)).count();
-    let machines = machine_summary_resources(state, snapshot, session)?;
+    let machines = match machines {
+        Some(machines) => machines,
+        None => Arc::new(machine_summary_resources(state, snapshot, session)?),
+    };
     let machines = machine_counts(&machines, &agents, &client_host_id(&state.node), now);
     Ok(SummaryShared {
         cut: snapshot.store_index,
@@ -243,11 +261,13 @@ const PUBLISHED_PERIOD_MS: u128 = 30_000;
 /// person changes are computed once for all of them, in one short snapshot, and again only when
 /// their inputs (cut, roster, clock period) change; each selection then counts what needs its
 /// person from the newest attention publication, in memory. As the daemon starts the shared
-/// counts are computed once with no selection, so the first window is served at once. If they
-/// cannot be computed the previous ones stay published; with none, every selection is not
-/// published and its windows read for themselves. With `waiting_only`, only the selections a
-/// window waits for, and the shared counts only if there are none yet. Returns whether any
-/// selection's counts changed.
+/// counts are computed with no selection until they first succeed (the complete roster they
+/// count agents from may come later), so the first window is served at once. If they
+/// cannot be computed the previous ones stay published. Before the first successful computation,
+/// selections stay pending only while the agent roster has not published; other failures let
+/// their windows read for themselves.
+/// With `waiting_only`, only the selections a window waits for, and the shared counts only if
+/// there are none yet. Returns whether any selection's counts changed.
 pub(in crate::api) fn refresh_published(
     state: &AppState,
     idle_ms: u64,
@@ -255,7 +275,7 @@ pub(in crate::api) fn refresh_published(
 ) -> anyhow::Result<bool> {
     let store = &state.store;
     let (generation, selections) = store.summary_selections(idle_ms, waiting_only);
-    let starting = store.start_summary_shared();
+    let starting = store.summary_shared_starting();
     if selections.is_empty() && !starting {
         return Ok(false);
     }
@@ -280,22 +300,61 @@ pub(in crate::api) fn refresh_published(
             "kind":"subscribe", "id":"summary", "collection":"summary", "limit":1,
         }))?;
         let snapshot = client_snapshot_at(state, index);
-        Ok(Some((shared(state, &session, &request, &snapshot, now, None, None)?, inputs)))
+        let machines = published_machines(state, generation, &session, &snapshot, inputs.period)?;
+        Ok(Some((shared(state, &session, &request, &snapshot, now, None, None, Some(machines))?, inputs)))
     });
+    let mut waiting_for_roster = false;
     let shared = match computed {
         Ok(None) => before.map(|(shared, _)| shared),
         Ok(Some((shared, inputs))) => {
             let shared = Arc::new(shared);
             store.publish_summary_shared(generation, shared.clone(), inputs);
+            store.start_summary_shared();
+            store.note_summary_shared_failed(false);
+            if starting {
+                tracing::debug!(
+                    event = "summary.startup",
+                    outcome = "published",
+                    selections = selections.len(),
+                    cut = shared.cut,
+                    "summary startup shared counts published"
+                );
+            }
             Some(shared)
         }
         Err(error) => {
-            eprintln!("st3: the summary's shared counts failed: {error:#}");
+            waiting_for_roster = starting && error.is::<RosterNotPublished>();
+            // Expected dependency waits do not hide a later real error in the same startup.
+            if waiting_for_roster {
+                store.note_summary_shared_failed(false);
+                tracing::debug!(
+                    event = "summary.shared_counts_failed",
+                    outcome = "pending",
+                    reason = "roster_not_published",
+                    selections = selections.len(),
+                    %error,
+                    "summary waiting for initial roster publication"
+                );
+            } else if store.note_summary_shared_failed(true) {
+                tracing::warn!(
+                    event = "summary.shared_counts_failed",
+                    outcome = "previous_or_fallback",
+                    reason = "computation_error",
+                    selections = selections.len(),
+                    %error,
+                    "summary shared counts unavailable"
+                );
+            }
             before.map(|(shared, _)| shared)
         }
     };
     let mut changed = false;
     let Some(shared) = shared else {
+        // Only the expected initial roster dependency is a wait. Other errors must preserve
+        // the native fallback even if no shared computation has succeeded yet.
+        if waiting_for_roster {
+            return Ok(false);
+        }
         // Nothing to count from: every selection's windows read for themselves until there is.
         for person in &selections {
             changed |= store.publish_summary_row(generation, person, None);
@@ -323,6 +382,70 @@ pub(in crate::api) fn refresh_published(
         store.publish_collection_view("summary");
     }
     Ok(changed)
+}
+
+/// The machines the shared counts count at `snapshot`: the ones read before while they still
+/// hold (`Store::summary_machines_hold`), else read again. A runtime with claims since is reduced
+/// again alone: the machines hold while the current runtimes run on the same hosts as before,
+/// whichever runtimes those are. They are read again each clock `period` too, since a peer's replication
+/// successes change them with no claim, as do a new conflicting operation and the fleet's
+/// membership, compared each time.
+pub(in crate::api) fn published_machines(
+    state: &AppState,
+    generation: u64,
+    session: &ClientSession,
+    snapshot: &ClientSnapshot,
+    period: u128,
+) -> anyhow::Result<Arc<Vec<Value>>> {
+    let store = &state.store;
+    let index = snapshot.store_index;
+    let conflicts = store.conflicting_operations()?;
+    let fleet = store.fleet_view_for_client()?;
+    let held = store.summary_machines().filter(|held| {
+        held.period == period && held.conflicts == conflicts && held.fleet == fleet
+    });
+    let kept = match held {
+        Some(held) => match store.summary_machines_hold(held.cut, index)? {
+            Some(changed) if changed.is_empty() => Some((held.machines, held.runtimes)),
+            Some(changed) => {
+                let status = store.status_for_subject_names_at(changed.clone(), index, false, crate::store::ClaimsReduction::Runtime)?;
+                let hosts = runtime_resources_from_status(state, snapshot, session, status)?
+                    .into_iter()
+                    .filter_map(|runtime| {
+                        Some((
+                            runtime["owner_id"].as_str()?.to_owned(),
+                            runtime["owner_host_id"].as_str()?.to_owned(),
+                        ))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let mut runtimes = (*held.runtimes).clone();
+                for runtime in changed {
+                    match hosts.get(&runtime) {
+                        Some(host) => runtimes.insert(runtime, host.clone()),
+                        None => runtimes.remove(&runtime),
+                    };
+                }
+                // The machines are the same hosts while the runtimes' hosts are.
+                (held.runtimes.values().collect::<BTreeSet<_>>()
+                    == runtimes.values().collect::<BTreeSet<_>>())
+                .then(|| (held.machines, Arc::new(runtimes)))
+            }
+            None => None,
+        },
+        None => None,
+    };
+    let (machines, runtimes) = match kept {
+        Some(kept) => kept,
+        None => {
+            let (machines, runtimes) = machine_summary_resources_and_hosts(state, snapshot, session)?;
+            (Arc::new(machines), Arc::new(runtimes))
+        }
+    };
+    store.keep_summary_machines(
+        generation,
+        SummaryMachines { cut: index, period, conflicts, fleet, machines: machines.clone(), runtimes },
+    );
+    Ok(machines)
 }
 
 #[cfg(test)]
