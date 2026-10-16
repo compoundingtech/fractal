@@ -80,7 +80,14 @@ fn unavailable(error: anyhow::Error) -> anyhow::Error {
 pub fn failure_kind(error: &anyhow::Error) -> Option<FailureKind> {
     // anyhow's own downcast traverses typed context; std::error::Error::source
     // does not expose the context value itself as a downcastable Failure.
-    error.downcast_ref::<Failure>().map(|failure| failure.kind)
+    error
+        .downcast_ref::<Failure>()
+        .map(|failure| failure.kind)
+        .or_else(|| {
+            error.chain().find_map(|cause| {
+                cause.downcast_ref::<Failure>().map(|failure| failure.kind)
+            })
+        })
 }
 pub fn diagnostic(error: &anyhow::Error) -> &'static str {
     match failure_kind(error) {

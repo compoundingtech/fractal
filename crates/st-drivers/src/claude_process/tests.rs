@@ -892,3 +892,31 @@ fn kernel_orphan_zombie_wrapper_exit_and_reexec_keep_generation_fences() {
         "real provider exit closes retained ownership after exec"
     );
 }
+
+#[test]
+fn typed_context_and_standard_sources_preserve_failure_classification() {
+    #[derive(Debug)]
+    struct Source(Failure);
+    impl std::fmt::Display for Source {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("fixture source wrapper")
+        }
+    }
+    impl std::error::Error for Source {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+    for kind in [FailureKind::Refused, FailureKind::Unavailable] {
+        let context = anyhow::Error::new(std::io::Error::from(
+            std::io::ErrorKind::Interrupted,
+        ))
+        .context(Failure { kind, reason: "fixture typed context" });
+        assert_eq!(failure_kind(&context), Some(kind));
+        let source = anyhow::Error::new(Source(Failure {
+            kind,
+            reason: "fixture standard source",
+        }));
+        assert_eq!(failure_kind(&source), Some(kind));
+    }
+}
