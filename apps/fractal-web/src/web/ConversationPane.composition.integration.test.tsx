@@ -440,7 +440,7 @@ describe('ConversationPane composition activation', () => {
     expect(text()).not.toContain('credential_pin')
     expect(text()).not.toContain('title_change')
 
-    // Native HasOlder owns the single quiet in-lane history row.
+    // Native bounded history owns the single quiet in-lane history row.
     const boundary = container.querySelector('[data-testid="history-boundary"]')!
     expect(boundary.textContent).toContain('Earlier messages not loaded')
     expect(text()).not.toContain('sequences')

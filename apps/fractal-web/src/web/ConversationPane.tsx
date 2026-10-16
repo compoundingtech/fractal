@@ -7,6 +7,7 @@ import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/com
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNow } from '../data/react.tsx'
 import { createConversationTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
+import { conversationHistory } from './conversationHistory.ts'
 import { composerSendBinding, type SendRefusal } from './composerSend.ts'
 import { spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
@@ -113,6 +114,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     refusal, onRefused: setRefusal,
   })
   const retryConversation = source.retryConversation
+  const loadEarlierConversation = source.loadEarlierConversation
   const renderInlineReference = React.useMemo(() => onOpenDocument === undefined ? undefined : documentReferences(onOpenDocument), [onOpenDocument])
   // A Markdown link to a `doc/…` opens it in a tab instead of following a relative URL.
   const followDocumentLinks = (event: React.MouseEvent) => {
@@ -122,7 +124,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     event.stopPropagation()
     onOpenDocument(href)
   }
-  return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: state._tag === 'Observed' && state.isRunning }}>
+  return <EmbraceRuntimeProvider key={agentRef} virtualizeMessages options={{ ...binding.runtime, isRunning: state._tag === 'Observed' && state.isRunning }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
     <Transcript
@@ -147,7 +149,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
         // Preserve the follow-retry policy; the unavailable body owns its single recovery action.
         ...(retryConversation === undefined ? {} : { action: { label: 'Try again', onPress: () => retryConversation(agentRef) } }),
       } } : {})}
-      {...(state._tag === 'Observed' && state.history._tag === 'HasOlder' ? { history: state.history } : {})}
+      history={conversationHistory(feed, loadEarlierConversation === undefined ? undefined : () => loadEarlierConversation(agentRef))}
       {...(state._tag === 'Observed' && state.emptyState !== undefined ? { emptyState: state.emptyState } : {})}
     />
     </div>

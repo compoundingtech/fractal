@@ -1,0 +1,253 @@
+import * as React from 'react'
+import * as stylex from '@stylexjs/stylex'
+import { renderToString } from 'react-dom/server'
+import { hydrateRoot } from 'react-dom/client'
+import { useAuiState } from '@assistant-ui/react'
+import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
+import { Transcript, type TranscriptHandle, type TranscriptHistory, type TranscriptTurn } from './assistant-ui/composition/Transcript'
+import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
+import type { TextItem } from './assistant-ui/embrace-data/model'
+import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
+import { baselineTheme } from './assistant-ui/neutral-theme'
+import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
+import { surfaceVars, textVars, typeVars } from './assistant-ui/composition-tokens.stylex'
+
+const at = '2026-01-15T12:00:00Z'
+const now = Date.parse(at)
+const turns: readonly TranscriptTurn[] = Array.from({ length: 2100 }, (_, index) => {
+  const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `paging/${index}/prompt`, role: 'user', text: `Review checkpoint ${index} and preserve the selected resource.`, attachments: [], streaming: false, at }
+  const answer: TextItem = { _tag: 'Text', id: `paging/${index}/answer`, role: 'assistant', text: `Checkpoint ${index}: the selected resource still matches the recorded input.\n\n${'Compare the visible output before changing the projection. '.repeat(1 + index % 5)}`, attachments: [], streaming: false, at }
+  return { id: `paging/${index}`, prompt, items: [answer], work: workLogTurnFromItems([answer], { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true }) }
+})
+const pending: TextItem & { role: 'user' } = { _tag: 'Text', id: 'paging/pending', role: 'user', text: 'Please verify the next checkpoint.', attachments: [], streaming: false, at, sendState: { _tag: 'Unconfirmed', detail: 'Sending it again is safe.' } }
+const pendingTurn: TranscriptTurn = { id: pending.id, prompt: pending, items: [], work: workLogTurnFromItems([], { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true }) }
+const styles = stylex.create({
+  root: { backgroundColor: surfaceVars.canvas, color: textVars.fg, fontFamily: typeVars.fontSans, padding: 16, minWidth: 0 },
+  frame: { height: 650, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
+  states: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 360px), 1fr))', gap: 16 },
+})
+type PagingState = 'more' | 'complete' | 'loading' | 'error'
+function RuntimeTranscript({ loaded, history }: { loaded: readonly TranscriptTurn[]; history: TranscriptHistory }) {
+  const messages = React.useMemo(() => loaded.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]), [loaded])
+  return <EmbraceRuntimeProvider virtualizeMessages options={{ messages, onNew: async () => {} }}><Transcript title="Checkpoint review" turns={loaded} history={history} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} onRetrySend={() => {}} /></EmbraceRuntimeProvider>
+}
+function Paging({ state = 'more', scheme = 'dark', embedded = false }: { state?: PagingState; scheme?: Scheme; embedded?: boolean }) {
+  const Root = embedded ? 'div' : 'main'
+  const root = React.useRef<HTMLDivElement>(null)
+  const frames = React.useRef({ phase: 'render' as 'render' | 'paging' | 'idle', last: typeof performance === 'undefined' ? 0 : performance.now(), remaining: 12, render: [] as number[], paging: [] as number[] })
+  React.useLayoutEffect(() => {
+    let frame = 0
+    const sample = () => {
+      const clock = performance.now()
+      const measurement = frames.current
+      if (measurement.phase !== 'idle') {
+        measurement[measurement.phase].push(clock - measurement.last)
+        const adopting = root.current?.querySelector('[data-embrace-collection-ready="false"]') !== null
+        if (measurement.phase === 'render' && adopting) measurement.remaining = 12
+        else if (--measurement.remaining === 0) measurement.phase = 'idle'
+        if (root.current !== null) root.current.dataset.performance = JSON.stringify({ render: measurement.render, paging: measurement.paging })
+      }
+      measurement.last = clock
+      frame = requestAnimationFrame(sample)
+    }
+    frame = requestAnimationFrame(sample)
+    return () => cancelAnimationFrame(frame)
+  }, [])
+  const [start, setStart] = React.useState(state === 'complete' ? 0 : 100)
+  const [page, setPage] = React.useState<PagingState>(state)
+  const [requests, setRequests] = React.useState(0)
+  const [failNext, setFailNext] = React.useState(false)
+  const finish = React.useRef<(() => void) | undefined>(undefined)
+  const loadOlder = () => new Promise<void>(resolve => {
+    frames.current.phase = 'paging'
+    frames.current.last = performance.now()
+    frames.current.remaining = 24
+    setRequests(value => value + 1)
+    setPage('loading')
+    finish.current = () => { setPage(failNext ? 'error' : 'complete'); if (!failNext) setStart(0); setFailNext(false); resolve() }
+  })
+  const history: TranscriptHistory = page === 'complete' ? { _tag: 'Complete' } : page === 'loading' ? { _tag: 'Loading' } : page === 'error' ? { _tag: 'Failed', retry: loadOlder, detail: 'The connection dropped. Loaded checkpoints are retained.' } : { _tag: 'More', loadOlder }
+  const loaded = React.useMemo(() => turns.slice(start), [start])
+  return <Root ref={root} data-scheme={scheme} data-page={page} data-requests={requests} data-loaded={loaded.length} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <button type="button" disabled={page !== 'loading'} onMouseDown={event => event.preventDefault()} onClick={() => finish.current?.()}>Deliver older page</button>
+    <button type="button" onClick={() => setFailNext(true)}>Fail next page</button>
+    <section aria-label={`Paged checkpoint review, ${state}`} {...stylex.props(styles.frame)}><RuntimeTranscript loaded={loaded} history={history} /></section>
+  </Root>
+}
+function Hydration({ scheme = 'dark' }: { scheme?: Scheme }) {
+  const host = React.useRef<HTMLDivElement>(null)
+  const element = <RuntimeTranscript loaded={[pendingTurn]} history={{ _tag: 'Complete' }} />
+  const [markup] = React.useState(() => renderToString(element))
+  React.useLayoutEffect(() => {
+    const node = host.current!
+    const root = hydrateRoot(node, element, { onRecoverableError: error => { node.dataset.hydrationError = String(error) } })
+    return () => root.unmount()
+  }, [])
+  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><section ref={host} data-testid="hydration-host" {...stylex.props(styles.frame)} dangerouslySetInnerHTML={{ __html: markup }} /></main>
+}
+function AdoptionJump({ scheme = 'dark' }: { scheme?: Scheme }) {
+  const ref = React.useRef<TranscriptHandle>(null)
+  const host = React.useRef<HTMLElement>(null)
+  const [requested, setRequested] = React.useState(false)
+  const loaded = React.useMemo(() => turns.slice(requested ? 98 : 100, 120), [requested])
+  const messages = React.useMemo(() => loaded.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]), [loaded])
+  const started = React.useRef(false)
+  const [beforeAdoption, setBeforeAdoption] = React.useState(false)
+  const [superseded, setSuperseded] = React.useState('')
+  const [anchored, setAnchored] = React.useState('')
+  const [missing, setMissing] = React.useState('')
+  React.useLayoutEffect(() => {
+    if (!requested || started.current) return
+    started.current = true
+    // Run in the snapshot's layout commit, before the runtime's passive adoption.
+    setBeforeAdoption(host.current?.querySelector('[data-item-id="paging/99"]') === null)
+    void ref.current!.jumpTo('paging/98').then(result => setSuperseded(result._tag))
+    void ref.current!.jumpTo('paging/99').then(result => setAnchored(result._tag))
+  }, [requested])
+  return <main ref={host} data-scheme={scheme} data-before-adoption={beforeAdoption} data-superseded={superseded} data-anchored={anchored} data-missing={missing} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <button type="button" disabled={requested} onClick={() => setRequested(true)}>Adopt page and jump</button>
+    <button type="button" onClick={() => { void ref.current!.jumpTo('paging/absent').then(result => setMissing(result._tag)) }}>Jump to absent turn</button>
+    <section aria-label="Jump during runtime adoption" {...stylex.props(styles.frame)}><EmbraceRuntimeProvider virtualizeMessages options={{ messages, onNew: async () => {} }}><Transcript ref={ref} title="Adoption jump" turns={loaded} history={{ _tag: 'Complete' }} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} /></EmbraceRuntimeProvider></section>
+  </main>
+}
+function RuntimeIds() {
+  const ids = useAuiState(state => state.thread.messages.map(message => message.id).join(' '))
+  return <output data-testid="runtime-ids">{ids}</output>
+}
+const sharedFirst = [turns[100]!]
+const sharedSecond = [turns[150]!]
+// The second answer is deliberately absent from the runtime source: a settled missing item.
+const sharedMessages = [sharedFirst[0]!.prompt!, ...sharedFirst[0]!.items, sharedSecond[0]!.prompt!]
+function SharedWindows({ scheme = 'dark' }: { scheme?: Scheme }) {
+  const [second, setSecond] = React.useState(true)
+  return <main {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <button type="button" onClick={() => setSecond(false)}>Close second viewport</button>
+    <EmbraceRuntimeProvider virtualizeMessages options={{ messages: sharedMessages, onNew: async () => {} }}>
+      <RuntimeIds />
+      <section aria-label="First window" {...stylex.props(styles.frame)}><Transcript title="First window" turns={sharedFirst} history={{ _tag: 'Complete' }} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} /></section>
+      {second && <section aria-label="Second window" {...stylex.props(styles.frame)}><Transcript title="Second window" turns={sharedSecond} history={{ _tag: 'Complete' }} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} /></section>}
+    </EmbraceRuntimeProvider>
+  </main>
+}
+const meta = { title: 'Fractal UI/Transcript paging', component: Paging, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', state: 'more' }, argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] }, state: { control: 'select', options: ['more', 'complete', 'loading', 'error'] } } } satisfies Meta<typeof Paging>
+export default meta
+type Story = StoryObj<typeof meta>
+const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+export const SharedRuntimeWindows: Story = { render: args => <SharedWindows scheme={args.scheme} />, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const ids = canvas.getByTestId('runtime-ids')
+  await waitFor(() => {
+    expect(ids).toHaveTextContent('paging/100/prompt')
+    expect(ids).toHaveTextContent('paging/100/answer')
+    expect(ids).toHaveTextContent('paging/150/prompt')
+    expect(canvasElement.querySelector('[data-testid="transcript-stranded"][data-item-id="paging/150/answer"]')).toHaveTextContent('Checkpoint 150')
+    expect(canvasElement.querySelector('[data-testid="agent-message"][data-item-id="paging/100/answer"]')).not.toBeNull()
+  })
+  await userEvent.click(canvas.getByRole('button', { name: 'Close second viewport' }))
+  await waitFor(() => {
+    expect(ids).not.toHaveTextContent('paging/150/prompt')
+    expect(ids).toHaveTextContent('paging/100/answer')
+    expect(canvasElement.querySelector('[data-testid="agent-message"][data-item-id="paging/100/answer"]')).not.toBeNull()
+  })
+} }
+export const JumpDuringAdoption: Story = { render: args => <AdoptionJump scheme={args.scheme} />, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const host = canvasElement.querySelector('[data-before-adoption]')!
+  await waitFor(() => expect(canvasElement.querySelectorAll('[data-testid="transcript-turn"]').length).toBeGreaterThan(0))
+  await userEvent.click(canvas.getByRole('button', { name: 'Adopt page and jump' }))
+  await waitFor(() => expect(host).toHaveAttribute('data-anchored', 'Anchored'))
+  expect(host).toHaveAttribute('data-before-adoption', 'true')
+  expect(host).toHaveAttribute('data-superseded', 'Superseded')
+  const lane = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]')!
+  await waitFor(() => {
+    const target = lane.querySelector<HTMLElement>('[data-embrace-entry-id="paging/99"]')
+    expect(target).not.toBeNull()
+    expect(Math.abs(target!.getBoundingClientRect().top - lane.getBoundingClientRect().top)).toBeLessThan(4)
+  })
+  await userEvent.click(canvas.getByRole('button', { name: 'Jump to absent turn' }))
+  await waitFor(() => expect(host).toHaveAttribute('data-missing', 'Missing'))
+} }
+export const LongThread: Story = { play: async ({ canvasElement }) => {
+  const lane = await waitFor(() => { const value = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); expect(value).not.toBeNull(); return value! })
+  await nextFrame()
+  await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(1000))
+  await waitFor(() => expect(lane).toHaveAttribute('data-embrace-collection-ready', 'true'), { timeout: 10000 })
+  for (let index = 0; index < 6; index++) await nextFrame()
+  expect(canvasElement.querySelectorAll('[data-testid="transcript-turn"]').length).toBeLessThan(100)
+  // Reader intent is required: programmatic scrolling alone must not fetch pages.
+  lane.dispatchEvent(new WheelEvent('wheel', { deltaY: -10000, bubbles: true }))
+  lane.scrollTop = 0
+  lane.dispatchEvent(new Event('scroll', { bubbles: true }))
+  const host = canvasElement.querySelector('[data-requests]')!
+  await waitFor(() => expect(host).toHaveAttribute('data-page', 'loading'))
+  await nextFrame()
+  const anchor = await waitFor(() => {
+    const viewport = lane.getBoundingClientRect()
+    const row = [...lane.querySelectorAll<HTMLElement>('[data-testid="transcript-turn"]')].find(row => row.getBoundingClientRect().bottom > viewport.top && row.getBoundingClientRect().top < viewport.bottom)
+    expect(row).toBeDefined()
+    return row!
+  })
+  await waitFor(() => expect(lane.querySelector('[data-testid="transcript-row-pending"]')).toBeNull())
+  await nextFrame()
+  const id = anchor!.getAttribute('data-item-id')!
+  const offset = anchor!.getBoundingClientRect().top - lane.getBoundingClientRect().top
+  const positions: (number | null)[] = []
+  let sampling = true
+  let frame = 0
+  const sample = () => {
+    if (!sampling) return
+    const row = [...lane.querySelectorAll<HTMLElement>('[data-testid="transcript-turn"]')].find(row => row.getAttribute('data-item-id') === id)
+    positions.push(row === undefined ? null : row.getBoundingClientRect().top - lane.getBoundingClientRect().top)
+    frame = requestAnimationFrame(sample)
+  }
+  frame = requestAnimationFrame(sample)
+  try {
+    await userEvent.click(within(canvasElement).getByRole('button', { name: 'Deliver older page' }))
+    await waitFor(() => expect(host).toHaveAttribute('data-loaded', '2100'))
+    for (let index = 0; index < 12; index++) await nextFrame()
+    expect(positions.length).toBeGreaterThan(2)
+    expect(positions.every(position => position !== null && Math.abs(position - offset) < 4), `No transient anchor jump: ${JSON.stringify(positions)}`).toBe(true)
+    expect(host).toHaveAttribute('data-requests', '1')
+    // Frame measurements are exported on the harness for the external production
+    // budget gate. Behavioral success does not imply that performance gate passed.
+  } finally {
+    sampling = false
+    cancelAnimationFrame(frame)
+  }
+} }
+export const FirstPageLoaded: Story = { args: { state: 'complete' }, play: async ({ canvasElement }) => {
+  const lane = await waitFor(() => { const value = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); expect(value).not.toBeNull(); return value! })
+  await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(1000))
+  lane.dispatchEvent(new WheelEvent('wheel', { deltaY: -10000, bubbles: true }))
+  lane.scrollTop = 0
+  lane.dispatchEvent(new Event('scroll', { bubbles: true }))
+  await waitFor(() => expect(canvasElement.querySelector('[data-testid="history-boundary"]')).toHaveTextContent('Start of conversation'))
+} }
+export const LoadingOlder: Story = { args: { state: 'loading' }, play: async ({ canvasElement }) => {
+  await waitFor(() => expect(canvasElement.querySelector('[data-page]')).toHaveAttribute('data-page', 'loading'))
+} }
+export const LoadError: Story = { args: { state: 'error' }, play: async ({ canvasElement }) => {
+  const lane = await waitFor(() => { const value = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); expect(value).not.toBeNull(); return value! })
+  await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(1000))
+  lane.dispatchEvent(new WheelEvent('wheel', { deltaY: -10000, bubbles: true }))
+  lane.scrollTop = 0
+  lane.dispatchEvent(new Event('scroll', { bubbles: true }))
+  const retry = await within(canvasElement).findByTestId('history-retry')
+  await waitFor(() => expect(getComputedStyle(lane.firstElementChild!).pointerEvents).not.toBe('none'))
+  await userEvent.click(retry)
+  await waitFor(() => expect(canvasElement.querySelector('[data-page]')).toHaveAttribute('data-page', 'loading'))
+} }
+export const PendingHydration: Story = { render: args => <Hydration scheme={args.scheme} />, play: async ({ canvasElement }) => {
+  const host = within(canvasElement).getByTestId('hydration-host')
+  await nextFrame()
+  const assertSingle = async () => { await expect(host.querySelectorAll('[data-testid="send-unconfirmed"]')).toHaveLength(1) }
+  await waitFor(assertSingle)
+  expect(host).not.toHaveAttribute('data-hydration-error')
+  // Negative control lives in the harness: the real assertion must reject a duplicated row.
+  const duplicate = host.querySelector('[data-testid="send-unconfirmed"]')!.cloneNode(true)
+  host.append(duplicate)
+  try { await expect(assertSingle()).rejects.toThrow() } finally { host.removeChild(duplicate) }
+  await assertSingle()
+} }
+export const AllStates: Story = { render: args => <main {...stylex.props(styles.states)}>{(['complete', 'more', 'loading', 'error'] as const).map(state => <section key={state} aria-label={`${state} paging state`}><h2>{state}</h2><Paging state={state} scheme={args.scheme} embedded /></section>)}</main> }

@@ -35,7 +35,7 @@ const columnSync = { _tag: 'Live', since: now - 5000 } as const
 function ColumnStory({ scheme, readingColumn }: { scheme: Scheme; readingColumn: boolean }) {
   const options = React.useMemo(() => ({ messages: columnMessages, isRunning: false, onNew: async () => {} }), [])
   return <Surface scheme={scheme}><EmbraceRuntimeProvider options={options}>
-    <div {...stylex.props(styles.transcript)}><Transcript title="Row projection" turns={columnTurns} sync={columnSync} now={now} observedAt={now - 8000} /></div>
+    <div {...stylex.props(styles.transcript)}><Transcript history={{ _tag: 'Complete' }} title="Row projection" turns={columnTurns} sync={columnSync} now={now} observedAt={now - 8000} /></div>
     <div data-testid="story-composer-dock" {...stylex.props(styles.dock)}><EmbraceComposer variant="C1" readingColumn={readingColumn} /></div>
   </EmbraceRuntimeProvider></Surface>
 }
@@ -111,7 +111,7 @@ function OwnSendStory({ scheme }: { scheme: Scheme }) {
   const options = React.useMemo(() => ({ messages, isRunning: false, onNew }), [messages, onNew])
   return <Surface scheme={scheme}><EmbraceRuntimeProvider options={options}>
     <div {...stylex.props(styles.toolbar)}><Button onPress={appendReply} {...stylex.props(styles.button)}>Append agent reply</Button></div>
-    <div {...stylex.props(styles.transcript)}><Transcript title="Row projection" turns={turns} sync={columnSync} now={now} observedAt={now - 8000} scrollToBottomKey={sendKey} /></div>
+    <div {...stylex.props(styles.transcript)}><Transcript history={{ _tag: 'Complete' }} title="Row projection" turns={turns} sync={columnSync} now={now} observedAt={now - 8000} scrollToBottomKey={sendKey} /></div>
     <div {...stylex.props(styles.dock)}><EmbraceComposer variant="C1" readingColumn /></div>
   </EmbraceRuntimeProvider></Surface>
 }

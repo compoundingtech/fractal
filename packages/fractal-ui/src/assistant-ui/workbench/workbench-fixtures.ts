@@ -36,7 +36,7 @@ const liveCall: ConversationItem = { _tag: 'ToolCall', id: 'worker-1-live-call',
 const liveTurn: TranscriptTurn = { id: 'worker-1-live', prompt: livePrompt, items: [liveCall], work: { calls: [{ id: liveCall.id, kind: 'read', title: 'Read sample/rows.ts', argsSummary: 'sample/rows.ts', status: 'running', startedAt: at, detail: 'Reading the observed fixture snapshot.' }], durationMs: undefined, running: true, failed: false, interrupted: false, startedAt: at, foldable: true } }
 const projectThread = (turns: readonly TranscriptTurn[], running: boolean, now = fixtureNow): FixtureThreadSnapshot => ({
   runtime: { messages: turns.flatMap(turn => [...(turn.prompt ? [turn.prompt] : []), ...turn.items]), isRunning: running },
-  transcript: { turns, sync: { _tag: 'Live', since: now - 30000 }, now, observedAt: now },
+  transcript: { turns, history: { _tag: 'Complete' }, sync: { _tag: 'Live', since: now - 30000 }, now, observedAt: now },
 })
 // Exact designItems('idle', 'sample') seed from the reviewed route; the host
 // supplies explicit idle runtime facts and turn boundaries rather than inferring them.

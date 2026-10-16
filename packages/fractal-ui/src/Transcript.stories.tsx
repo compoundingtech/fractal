@@ -19,7 +19,7 @@ const at = '2026-01-15T12:00:00Z'
 const source = 'export const visibleRows = rows.filter(row => row.visible)\nexport const count = visibleRows.length\nexport const labels = visibleRows.map(row => row.label)\nexport const selected = visibleRows.find(row => row.selected)\nexport const first = visibleRows[0]\nexport const last = visibleRows.at(-1)\n'
 const answer = 'The row projection now keeps **visible rows** together and preserves selection.\n\n```ts\nconst count = visibleRows.length\n```\n\nThe focused checks passed.'
 type State = 'settled' | 'expanded' | 'streaming' | 'failed' | 'interrupted' | 'unknown' | 'loading' | 'catching-up' | 'reconnecting' | 'sync-failed' | 'pending-send' | 'failed-send' | 'unconfirmed-send' | 'empty'
-interface TranscriptStoryData { readonly turns: readonly TranscriptTurn[]; readonly sync: SyncStatus; readonly availability?: TranscriptAvailability; readonly history?: TranscriptHistory; readonly emptyState?: React.ReactNode | TranscriptEmptyState }
+interface TranscriptStoryData { readonly turns: readonly TranscriptTurn[]; readonly sync: SyncStatus; readonly availability?: TranscriptAvailability; readonly history: TranscriptHistory; readonly emptyState?: React.ReactNode | TranscriptEmptyState }
 function fixture(state: State, prefix: string): TranscriptStoryData {
   const running = state === 'streaming', failed = state === 'failed', interrupted = state === 'interrupted'
   const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `${prefix}/prompt`, role: 'user', text: 'Keep the row projection readable and verify that selection survives the change.', attachments: [], streaming: false, at, sender: { kind: 'human', label: 'Operator' }, sendState: state === 'pending-send' ? { _tag: 'Pending' } : state === 'failed-send' ? { _tag: 'Failed', reason: { _tag: 'Failed' }, detail: 'The connection dropped while sending. Your draft is still saved; try again in a moment.' } : state === 'unconfirmed-send' ? { _tag: 'Unconfirmed', detail: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.' } : undefined }
@@ -37,16 +37,16 @@ function fixture(state: State, prefix: string): TranscriptStoryData {
     : state === 'reconnecting' ? { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 2, nextAt: now + 3000, issue: 'Connection interrupted' }, lastLiveAt: now - 10000 }
     : state === 'sync-failed' ? { _tag: 'Failed', cause: { _tag: 'Server', code: 'subscription-limit', message: 'Subscription unavailable' } }
     : { _tag: 'Live', since: now - 5000 }
-  return { turns: state === 'loading' || state === 'empty' ? [] : [{ id: prefix, prompt, items, work, senderCaptions: { [response.id]: 'Assistant' } }], sync }
+  return { turns: state === 'loading' || state === 'empty' ? [] : [{ id: prefix, prompt, items, work, senderCaptions: { [response.id]: 'Assistant' } }], sync, history: state === 'loading' || state === 'unknown' ? { _tag: 'Pending' } : { _tag: 'Complete' } }
 }
 const cases: Readonly<Record<State, TranscriptStoryData>> = {
   settled: fixture('settled', 'settled'), expanded: fixture('expanded', 'expanded'), streaming: fixture('streaming', 'streaming'), failed: fixture('failed', 'failed'), interrupted: fixture('interrupted', 'interrupted'), unknown: fixture('unknown', 'unknown'), loading: fixture('loading', 'loading'), 'catching-up': fixture('catching-up', 'catching-up'), reconnecting: fixture('reconnecting', 'reconnecting'), 'sync-failed': fixture('sync-failed', 'sync-failed'), 'pending-send': fixture('pending-send', 'pending-send'), 'failed-send': fixture('failed-send', 'failed-send'), 'unconfirmed-send': fixture('unconfirmed-send', 'unconfirmed-send'), empty: fixture('empty', 'empty'),
 }
 /** `drop` withholds ids from the runtime adapter, standing in for an adapter that never adopts them. */
-function RuntimeTranscript({ data, drop, onOpenTool, onRetry, onRetrySend, availability, history, emptyState }: { data: TranscriptStoryData; drop?: readonly string[]; onOpenTool?: (call: WorkLogCall) => void; onRetry: () => void; onRetrySend?: (itemId: string) => void; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState }) {
+function RuntimeTranscript({ data, drop, onOpenTool, onRetry, onRetrySend, availability, history, emptyState, virtualizeMessages }: { data: TranscriptStoryData; drop?: readonly string[]; onOpenTool?: (call: WorkLogCall) => void; onRetry: () => void; onRetrySend?: (itemId: string) => void; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState; virtualizeMessages?: boolean }) {
   const messages = React.useMemo(() => data.turns.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]).filter(item => !drop?.includes(item.id)), [data, drop])
   const options = React.useMemo(() => ({ messages, isRunning: data.turns.some(turn => turn.work.running), onNew: async () => {} }), [messages, data])
-  return <EmbraceRuntimeProvider options={options}><Transcript title="Row projection" turns={data.turns} sync={data.sync} now={now} observedAt={now - 8000} onOpenTool={onOpenTool} onRetryRun={onRetry} onRetrySync={onRetry} onRetrySend={onRetrySend} availability={availability} history={history} emptyState={emptyState} /></EmbraceRuntimeProvider>
+  return <EmbraceRuntimeProvider options={options} virtualizeMessages={virtualizeMessages}><Transcript title="Row projection" turns={data.turns} sync={data.sync} now={now} observedAt={now - 8000} onOpenTool={onOpenTool} onRetryRun={onRetry} onRetrySync={onRetry} onRetrySend={onRetrySend} availability={availability} history={history ?? data.history} emptyState={emptyState} /></EmbraceRuntimeProvider>
 }
 function TranscriptStory({ scheme = 'dark', state = 'settled', availability, history, emptyState }: { scheme?: Scheme; state?: State; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState }) {
   const [opened, setOpened] = React.useState<WorkLogCall | undefined>(undefined)
@@ -105,7 +105,7 @@ async function expectNoOutputWithControl(element: HTMLElement) {
 }
 const longCommand = 'pnpm --filter ./packages/rows exec vitest run src/rows.test.ts --reporter=verbose --coverage --coverage.include=src/rows.ts --testNamePattern "selection survives the projection change across visible and hidden rows"'
 const commandRowItems = ([['short', 'pnpm test rows'], ['long', longCommand]] as const).map(([key, command]): ConversationItem => ({ _tag: 'ToolCall', id: `rows/${key}`, callId: `rows/${key}`, name: 'run', input: { command }, status: 'success', result: { content: '✓ selection retained', mediaType: 'text/x-shellscript', isError: false, at: '2026-01-15T12:00:04Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' }))
-const commandRowData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'rows', items: commandRowItems, work: workLogTurnFromItems(commandRowItems, { kindFor: () => 'run', running: false, failed: false, interrupted: false, durationMs: 4000, startedAt: at, completeHistory: true }) }] }
+const commandRowData: TranscriptStoryData = { history: { _tag: 'Complete' }, sync: { _tag: 'Live', since: now }, turns: [{ id: 'rows', items: commandRowItems, work: workLogTurnFromItems(commandRowItems, { kindFor: () => 'run', running: false, failed: false, interrupted: false, durationMs: 4000, startedAt: at, completeHistory: true }) }] }
 /** A long command keeps its row to one line: ellipsis in place, full text in the title. */
 export const LongCommandRow: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={commandRowData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
@@ -214,7 +214,7 @@ const silentItems: readonly ConversationItem[] = [
   { _tag: 'ToolCall', id: 'silent/run', callId: 'silent/run', name: 'run', input: { command: 'pnpm test rows', note: `${rawMarker}:silent/run` }, status: 'error', callSeen: true, at },
 ]
 const liveItems: readonly ConversationItem[] = [{ _tag: 'ToolCall', id: 'live/run', callId: 'live/run', name: 'run', input: { command: 'pnpm build', note: `${rawMarker}:live/run` }, status: 'running', callSeen: true, at }]
-const withoutOutputData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [
+const withoutOutputData: TranscriptStoryData = { history: { _tag: 'Complete' }, sync: { _tag: 'Live', since: now }, turns: [
   { id: 'silent', items: silentItems, work: workLogTurnFromItems(silentItems, { kindFor: name => name === 'run' ? 'run' : 'read', running: false, failed: true, interrupted: false, startedAt: at, completeHistory: true, failureNote: 'The run stopped; your conversation and changes are retained.' }) },
   { id: 'live', items: liveItems, work: workLogTurnFromItems(liveItems, { kindFor: () => 'run', running: true, failed: false, interrupted: false, startedAt: at }) },
 ] }
@@ -330,7 +330,7 @@ export const AllStates: Story = { render: args => <main {...stylex.props(styles.
 export const AllStatesLight: Story = { ...AllStates, args: { scheme: 'light' } }
 const metadataCases = ['known', 'unknown', 'streaming'] as const
 function AnswerMetadataStory({ scheme = 'dark' }: { scheme?: Scheme }) {
-  const data = React.useMemo(() => ({ sync: { _tag: 'Live', since: now } as const, turns: metadataCases.map(kind => {
+  const data = React.useMemo(() => ({ history: { _tag: 'Complete' } as const, sync: { _tag: 'Live', since: now } as const, turns: metadataCases.map(kind => {
     const base = fixture('settled', `metadata-${kind}`).turns[0]!
     const response = base.items.find((item): item is TextItem => item._tag === 'Text' && item.role === 'assistant')!
     const updated = { ...response, at: kind === 'unknown' ? '' : response.at, streaming: kind === 'streaming' }
@@ -404,7 +404,7 @@ const noMessages = { messages: [], isRunning: false, onNew: async () => {} }
 /** The host's composer stays a sibling of the unavailable Transcript in the thread column. */
 function UnavailableComposerStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><EmbraceRuntimeProvider options={noMessages}><section aria-label="Conversation" {...stylex.props(styles.thread)}>
-    <Transcript title="Row projection" turns={[]} sync={cases['sync-failed'].sync} now={now} observedAt={now - 8000} availability={unavailable({ label: 'Try again', onPress: tryAgain })} />
+    <Transcript title="Row projection" turns={[]} history={{ _tag: 'Pending' }} sync={cases['sync-failed'].sync} now={now} observedAt={now - 8000} availability={unavailable({ label: 'Try again', onPress: tryAgain })} />
     <div data-testid="host-composer" {...stylex.props(styles.composerDock)}><EmbraceComposer variant="C1" /></div>
   </section></EmbraceRuntimeProvider></main>
 }
@@ -423,23 +423,28 @@ export const UnavailableWithComposer: Story = { render: args => <UnavailableComp
   await expect(input).toHaveValue('Still here')
 } }
 export const UnavailableWithComposerLight: Story = { ...UnavailableWithComposer, args: { scheme: 'light' } }
-const loadEarlier = fn()
-export const HasOlderWithLoad: Story = { args: { history: { _tag: 'HasOlder', onLoadEarlier: loadEarlier } }, play: async ({ canvasElement }) => {
+// The request stays in flight, so a second press joins it instead of paging twice.
+const loadOlder = fn(() => new Promise<void>(() => {}))
+export const MoreHistory: Story = { args: { history: { _tag: 'More', loadOlder } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  loadEarlier.mockClear()
+  loadOlder.mockClear()
   await canvas.findByRole('button', { name: /Worked for 24s/ })
-  await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
+  await waitFor(() => expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded'))
+  await expect(loadOlder, 'mounting never pages').not.toHaveBeenCalled()
   await userEvent.click(canvas.getByRole('button', { name: 'Load earlier messages' }))
-  await expect(loadEarlier).toHaveBeenCalledTimes(1)
+  await expect(loadOlder).toHaveBeenCalledTimes(1)
+  await userEvent.click(canvas.getByRole('button', { name: 'Load earlier messages' }))
+  await expect(loadOlder, 'one older-page request at a time').toHaveBeenCalledTimes(1)
 } }
-export const HasOlderWithLoadLight: Story = { ...HasOlderWithLoad, args: { ...HasOlderWithLoad.args, scheme: 'light' } }
-export const HasOlderWithoutLoad: Story = { args: { history: { _tag: 'HasOlder' } }, play: async ({ canvasElement }) => {
+export const MoreHistoryLight: Story = { ...MoreHistory, args: { ...MoreHistory.args, scheme: 'light' } }
+export const PendingHistory: Story = { args: { history: { _tag: 'Pending' } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await canvas.findByRole('button', { name: /Worked for 24s/ })
-  await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
+  await waitFor(() => expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded'))
   await expect(canvas.queryByRole('button', { name: 'Load earlier messages' })).toBeNull()
+  await expect(canvas.queryByTestId('history-start')).toBeNull()
 } }
-export const HasOlderLight: Story = { ...HasOlderWithoutLoad, args: { ...HasOlderWithoutLoad.args, scheme: 'light' } }
+export const PendingHistoryLight: Story = { ...PendingHistory, args: { ...PendingHistory.args, scheme: 'light' } }
 export const PendingSend: Story = { args: { state: 'pending-send' }, play: async ({ canvasElement }) => {
   const prompt = await within(canvasElement).findByTestId('user-message')
   await expect(prompt).toHaveAttribute('data-send-state', 'pending')
@@ -517,9 +522,9 @@ function AppendedItemsStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   const [count, setCount] = React.useState(0)
   const data = React.useMemo<TranscriptStoryData>(() => {
     const items = [...appendInitialItems, ...appendItems.slice(0, count)]
-    return { sync: appendBase.sync, turns: [{ ...appendTurn, items, work: workLogTurnFromItems(items, { kindFor: name => name === 'run' ? 'run' : 'read', running: true, failed: false, interrupted: false, startedAt: at, completeHistory: true }) }] }
+    return { history: appendBase.history, sync: appendBase.sync, turns: [{ ...appendTurn, items, work: workLogTurnFromItems(items, { kindFor: name => name === 'run' ? 'run' : 'read', running: true, failed: false, interrupted: false, startedAt: at, completeHistory: true }) }] }
   }, [count])
-  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><button type="button" disabled={count === appendItems.length} onClick={() => setCount(value => value + 1)}>Append {count === 0 ? 'tool' : count === 1 ? 'reasoning' : 'answer'}</button><div {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} /></div></main>
+  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><button type="button" disabled={count === appendItems.length} onClick={() => setCount(value => value + 1)}>Append {count === 0 ? 'tool' : count === 1 ? 'reasoning' : 'answer'}</button><div {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} virtualizeMessages /></div></main>
 }
 export const AppendedItems: Story = { render: args => <AppendedItemsStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
@@ -535,6 +540,8 @@ export const AppendedItems: Story = { render: args => <AppendedItemsStory scheme
   await userEvent.click(thinkingControl)
   await expect(thinkingControl).toHaveAttribute('aria-expanded', 'true')
   const lane = canvas.getByTestId('transcript-scroll')
+  // Establish reader intent, releasing the held disclosure anchor before scrolling.
+  lane.dispatchEvent(new WheelEvent('wheel', { deltaY: -48, bubbles: true }))
   lane.scrollTop = 48
   lane.dispatchEvent(new Event('scroll'))
   const scrollTop = lane.scrollTop
@@ -590,7 +597,7 @@ function StrandedItemStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   const [appended, setAppended] = React.useState(false)
   const data = React.useMemo<TranscriptStoryData>(() => {
     const items = appended ? [...strandedItems, ...strandedAppend] : strandedItems
-    return { sync: { _tag: 'Live', since: now }, turns: [
+    return { history: { _tag: 'Complete' }, sync: { _tag: 'Live', since: now }, turns: [
       { id: 'stranded', prompt: { ...strandedPrompt, role: 'user' }, items, work: settledWork(items) },
       { id: 'stranded-second', prompt: { ...strandedSecondPrompt, role: 'user' }, items: strandedSecondItems, work: settledWork(strandedSecondItems) },
     ] }
@@ -659,10 +666,11 @@ export const FailedRetry: Story = { name: 'Failed Retry', render: args => <Faile
 export const FailedRetryLight: Story = { ...FailedRetry, args: { scheme: 'light' } }
 
 const promptlessData: TranscriptStoryData = {
+  history: { _tag: 'Pending' },
   sync: { _tag: 'Live', since: now },
   turns: fixture('settled', 'promptless').turns.map(({ prompt, ...turn }) => turn),
 }
-export const MidTurnHistory: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={promptlessData} onOpenTool={() => {}} onRetry={() => {}} history={{ _tag: 'HasOlder' }} /></main>, play: async ({ canvasElement }) => {
+export const MidTurnHistory: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={promptlessData} onOpenTool={() => {}} onRetry={() => {}} history={{ _tag: 'Pending' }} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(await canvas.findByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
   await expect(await canvas.findByTestId('agent-message')).toHaveTextContent('The row projection now keeps')
@@ -694,7 +702,7 @@ export const ReadOnlyTools: Story = { render: args => <main {...stylex.props(sty
 } }
 export const ReadOnlyToolsLight: Story = { ...ReadOnlyTools, args: { scheme: 'light' } }
 const proseOnlyItems: readonly ConversationItem[] = [{ _tag: 'Text', id: 'prose/answer', role: 'assistant', text: 'A plain answer needs no work summary.', attachments: [], streaming: false, at }]
-const proseOnlyData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'prose', items: proseOnlyItems, work: workLogTurnFromItems(proseOnlyItems, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true }) }] }
+const proseOnlyData: TranscriptStoryData = { history: { _tag: 'Complete' }, sync: { _tag: 'Live', since: now }, turns: [{ id: 'prose', items: proseOnlyItems, work: workLogTurnFromItems(proseOnlyItems, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true }) }] }
 export const ProseOnly: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={proseOnlyData} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(await canvas.findByTestId('agent-message')).toHaveTextContent('A plain answer')
@@ -742,6 +750,7 @@ const semanticItems: readonly ConversationItem[] = [
   { _tag: 'Text', id: 'semantic/answer', role: 'assistant', text: 'Assistant content retained.\n\n```ts\nexport const retainedContent = "The transcript keeps the prompt, tool output, reasoning, semantic entries and the later answer visible in their original order.";\n```', attachments: [], streaming: false, at },
 ]
 const semanticData: TranscriptStoryData = {
+  history: { _tag: 'Complete' },
   sync: { _tag: 'Live', since: now },
   turns: [{
     id: 'semantic',
@@ -815,7 +824,7 @@ export const SettledAnswerMetaLight: Story = { ...SettledAnswerMeta, args: { sch
 
 const tokenAnswer = 'Quoted shell and diff tokens stay neutral.\n\n```bash\nprintf \'%s\\n\' "retained rows"\necho \'single quoted\' > "out file.txt"\n```\n\n```diff\n--- a/src/rows.ts\n+++ b/src/rows.ts\n@@ -1,2 +1,2 @@\n-const label = "old row"\n+const label = "new row"\n```'
 const tokenItems: readonly ConversationItem[] = cases.settled.turns[0]!.items.map(item => item._tag === 'ToolCall' && item.name === 'run' ? { ...item, input: { command: 'printf \'%s\\n\' "retained rows"' }, result: { content: 'printf \'%s\\n\' "retained rows"\n+inserted line', mediaType: 'text/x-diff', isError: false, at } } : item._tag === 'Text' && item.role === 'assistant' ? { ...item, id: 'tokens/answer', text: tokenAnswer } : item)
-const tokenData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ ...cases.settled.turns[0]!, id: 'tokens', items: tokenItems, work: workLogTurnFromItems([cases.settled.turns[0]!.prompt!, ...tokenItems], { kindFor: name => name === 'run' ? 'run' : 'read', running: false, failed: false, interrupted: false, durationMs: 24000, startedAt: at, completeHistory: true }) }] }
+const tokenData: TranscriptStoryData = { history: { _tag: 'Complete' }, sync: { _tag: 'Live', since: now }, turns: [{ ...cases.settled.turns[0]!, id: 'tokens', items: tokenItems, work: workLogTurnFromItems([cases.settled.turns[0]!.prompt!, ...tokenItems], { kindFor: name => name === 'run' ? 'run' : 'read', running: false, failed: false, interrupted: false, durationMs: 24000, startedAt: at, completeHistory: true }) }] }
 const noGreenData: readonly (readonly [string, TranscriptStoryData])[] = [['tokens', tokenData], ['semantic', semanticData], ...(Object.keys(cases) as State[]).map(state => [state, cases[state]] as const)]
 // Green is hue 90-170° with HSL saturation above 25%; any colour function the parser cannot read fails too.
 function greenFindings(root: Element): string[] {

@@ -321,7 +321,8 @@ export interface TimelineProjection {
  * projection's rule (the native page by `(timestamp, sequence)`, the stored fallback by
  * `sequence`), but a chunk names neither its projection nor where a delta entry merges into the
  * window, so the fold imposes no ordering of its own: deltas append, revisions stay in place,
- * and the next replace page is authoritative.
+ * and a replace page is authoritative within its owned window. `applyWindow` keeps only a
+ * prefix whose precedence is proven by the incoming window's first identity in the old order.
  */
 export class LiveTimeline {
   private readonly entries = new Map<string, Entry>()
@@ -355,18 +356,61 @@ export class LiveTimeline {
     return this.entries.size
   }
 
-  /** Applies one follow frame (CAG.CLI.WEB.CNV-R01/R02); returns whether anything changed. */
+  /** The native oldest identity fences a backward cursor walk against the followed window. */
+  get oldestEntryId(): string | undefined {
+    return this.ordered.find(entry => entry.type !== 'truncation')?.id
+  }
+
+  /** Native pages already carry authoritative order. Prepend without dropping live revisions,
+   * own-send aliases, or cached item identities; reindex joins across the page boundary. */
+  prepend(entries: readonly Entry[], hasOlder: boolean): void {
+    const earlier = entries.filter(entry => entry.type !== 'truncation' && !this.entries.has(entry.id))
+    this.ordered = [...earlier, ...this.ordered.filter(entry => entry.type !== 'truncation')]
+    for (const [id, entry] of this.entries) if (entry.type === 'truncation') this.entries.delete(id)
+    for (const entry of earlier) this.entries.set(entry.id, entry)
+    this.hasOlder = hasOlder
+    this.dirtyFrom = 0
+    this.reindex = true
+    if (earlier.length > 0) this.observation = { empty: false }
+  }
+
+  /** Replace a bounded window in the same session; return whether an older prefix was retained.
+   * No overlap or a complete incoming window proves no retainable prefix. Never order opaque ids. */
+  applyWindow(frame: FixtureConversationChunk): boolean {
+    const first = frame.entries.find(entry => entry.type !== 'truncation')
+    const bounded = frame.hasMore || frame.entries.some(entry => entry.type === 'truncation')
+    const prefix = frame.replace && bounded && first !== undefined
+      ? Math.max(0, this.ordered.findIndex(entry => entry.id === first.id))
+      : 0
+    this.applyFrame(frame, prefix)
+    return prefix > 0
+  }
+
+  /** Apply a complete replacement or delta (CAG.CLI.WEB.CNV-R01/R02). */
   apply(frame: FixtureConversationChunk): boolean {
+    return this.applyFrame(frame, 0)
+  }
+
+  private applyFrame(frame: FixtureConversationChunk, prefix: number): boolean {
     let changed = frame.replace
     let newCalls: Map<string, Array<number>> | undefined
     let newResults: Map<string, Map<string, PositionedResult>> | undefined
     if (frame.replace) {
-      this.entries.clear()
-      this.ordered = []
-      this.cache.clear()
+      if (prefix === 0) {
+        this.entries.clear()
+        this.ordered = []
+        this.cache.clear()
+      } else {
+        for (let index = prefix; index < this.ordered.length; index++) {
+          const id = this.ordered[index]!.id
+          this.entries.delete(id)
+          this.cache.delete(id)
+        }
+        this.ordered.length = prefix
+      }
       this.reindex = true
     }
-    if (frame.replace) {
+    if (frame.replace && prefix === 0) {
       this.hasOlder = frame.hasMore || frame.entries.some(entry => entry.type === 'truncation')
       this.observation = frame.observation
     } else if (

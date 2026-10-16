@@ -5,11 +5,11 @@ import {
   ButtonContext,
   GridList,
   GridListItem,
-  ListLayout,
   Virtualizer,
 } from 'react-aria-components'
 
 import { readScrollAnchor, saveScrollAnchor, ScrollController } from './embrace-virtual/ScrollController'
+import { AnchoredListLayout, measuredListLayoutOptions } from './composition/virtual-layout'
 import { accentTokens, tokens } from './embrace-tokens.stylex'
 
 export interface EmbraceVirtualConversationProps<T extends { readonly id: string }> {
@@ -42,12 +42,12 @@ function VirtualConversationBody<T extends { readonly id: string }>({
   renderItem,
   className,
   style,
-  estimatedRowHeight = 160,
+  estimatedRowHeight = measuredListLayoutOptions.estimatedRowHeight,
   anchorKey = 'story',
   persistAnchor = false,
 }: EmbraceVirtualConversationProps<T>) {
   // Keep the actual instance so the source controller reads public row geometry.
-  const [layout] = React.useState(() => new ListLayout())
+  const [layout] = React.useState(() => new AnchoredListLayout())
   const [unread, setUnread] = React.useState(false)
   const [scroll] = React.useState(() => new ScrollController({
     layout,
@@ -58,7 +58,7 @@ function VirtualConversationBody<T extends { readonly id: string }>({
     setUnread,
   }))
   React.useLayoutEffect(() => scroll.afterRowsChange(items), [scroll, items])
-  const layoutOptions = React.useMemo(() => ({ estimatedRowHeight }), [estimatedRowHeight])
+  const layoutOptions = React.useMemo(() => ({ ...measuredListLayoutOptions, estimatedRowHeight }), [estimatedRowHeight])
   const indexById = React.useMemo(() => {
     const indices = new Map<string, number>()
     items.forEach((item, index) => indices.set(item.id, index))
