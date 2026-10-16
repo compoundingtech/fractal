@@ -46,6 +46,8 @@ mod card_fold_tests;
 #[cfg(test)]
 mod roster_controls;
 #[cfg(test)]
+mod roster_fresh_proof_tests;
+#[cfg(test)]
 mod agents_window_deadline_tests;
 pub(crate) mod step_labels;
 mod operation_audit;
@@ -931,7 +933,7 @@ WHERE status NOT IN ('completed','failed','cancelled');
 CREATE TABLE IF NOT EXISTS mission_run_deadlines (
     run_id TEXT PRIMARY KEY REFERENCES mission_runs(id),
     timeout_ms INTEGER NOT NULL,
-    deadline_at_unix_ms TEXT NOT NULL
+    deadline_at_unix_ms TEXT
 );
 
 CREATE TABLE IF NOT EXISTS mission_run_after (
@@ -2220,6 +2222,103 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
             "ALTER TABLE planning_sessions ADD COLUMN planner_spec_json TEXT NOT NULL DEFAULT '{\"provider\":\"codex\"}';",
         )?;
     }
+    Ok(())
+}
+
+/// Older stores armed chained runs at creation. Preserve their budget, remove the clock
+/// for runs never admitted, and derive admitted clocks from the synthetic step's accepted
+/// completion claims. These are indexed reads for after-run steps, without a history replay.
+fn migrate_mission_run_deadlines(connection: &Connection) -> Result<()> {
+    let needs_migration: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('mission_run_deadlines')
+         WHERE name='deadline_at_unix_ms' AND \"notnull\"=1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !needs_migration {
+        return Ok(());
+    }
+    let transaction = connection.unchecked_transaction()?;
+    let triggers = transaction
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='mission_run_deadlines'")?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let deadlines = transaction
+        .prepare(
+            "SELECT deadlines.run_id, deadlines.timeout_ms, deadlines.deadline_at_unix_ms,
+                    mission_run_after.run_id IS NOT NULL
+             FROM mission_run_deadlines AS deadlines
+             LEFT JOIN mission_run_after ON mission_run_after.run_id=deadlines.run_id",
+        )?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut admitted = Vec::with_capacity(deadlines.len());
+    for (run, timeout, old_deadline, after) in deadlines {
+        let deadline = if after {
+            let stamps = transaction
+                .prepare_cached(
+                    "SELECT claims.accepted_at_unix_ms FROM step_runs INDEXED BY step_runs_run_index
+                     CROSS JOIN claims INDEXED BY claims_subject_kind_accepted_index
+                     WHERE step_runs.run_id=?1 AND step_runs.step_path=?2
+                       AND claims.subject=step_runs.subject AND claims.kind='step-run.state'
+                       AND json_extract(claims.body, '$.fields.status')='completed'",
+                )?
+                .query_map(params![run, crate::mission::AFTER_RUN_STEP], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            stamps
+                .into_iter()
+                .map(|stamp| stamp.parse::<u128>().map_err(|error| anyhow::anyhow!(
+                    "invalid accepted after-run completion timestamp for mission-run/{run}: {stamp:?}: {error}"
+                )))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .min()
+                .map(|admitted| admitted.saturating_add(u128::from(timeout)).to_string())
+        } else {
+            Some(old_deadline)
+        };
+        admitted.push((run, timeout, deadline));
+    }
+    transaction.execute_batch(
+        "DROP TABLE mission_run_deadlines;
+         CREATE TABLE mission_run_deadlines (
+             run_id TEXT PRIMARY KEY REFERENCES mission_runs(id),
+             timeout_ms INTEGER NOT NULL,
+             deadline_at_unix_ms TEXT
+         );",
+    )?;
+    // Restore this table's mutation/digest triggers before inserting its corrected rows.
+    // Keeping the registry intact avoids rehashing every unrelated projection on reopen.
+    if triggers
+        .iter()
+        .any(|(name, _)| name == "projection_digest_mission_run_deadlines_insert")
+    {
+        transaction.execute(
+            "UPDATE projection_digest_state SET row_count=0, accumulator=zeroblob(64)
+             WHERE table_name='mission_run_deadlines'",
+            [],
+        )?;
+    }
+    for (_, sql) in triggers {
+        transaction.execute_batch(&sql)?;
+    }
+    for (run, timeout, deadline) in admitted {
+        transaction.execute(
+            "INSERT INTO mission_run_deadlines(run_id, timeout_ms, deadline_at_unix_ms)
+             VALUES (?1, ?2, ?3)",
+            params![run, timeout, deadline],
+        )?;
+    }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -3745,6 +3844,61 @@ impl Store {
         Ok(match self.changed_agent_resources(cut, index, &items)? {
             AgentResourcesChange::Delta(delta) => delta.subjects.is_empty() && !delta.queues && !delta.membership,
             AgentResourcesChange::Invalidated { .. } => false,
+        })
+    }
+
+    /// The unchanged-card proof for the exact complete publication a response selected,
+    /// rather than the newest one when the proof happens to run. No fold or write occurs.
+    /// Keep the original wait predicate above unchanged: this is an additional observation
+    /// for the served rows, not a new freshness/refresh admission policy.
+    pub(crate) fn served_agent_roster_unchanged_through(
+        &self,
+        through: u64,
+        history: bool,
+        cut: u64,
+        published_at: u128,
+        cards: &Arc<Vec<Value>>,
+    ) -> Result<bool> {
+        if self.smalltalk.agent_roster_refresh.get().is_none()
+            || self.agent_roster_faults_pending(history)
+        {
+            return Ok(false);
+        }
+        self.read_snapshot(|physical| {
+            if cut > through || through > physical {
+                return Ok(false);
+            }
+            let Some((local, valid_until)) = self
+                .smalltalk
+                .agent_resources_cache
+                .lock()
+                .expect("agent resources cache poisoned")
+                .iter()
+                .find(|entry| {
+                    entry.history == history
+                        && entry.covered.is_none()
+                        && entry.index == cut
+                        && entry.published_at_unix_ms == published_at
+                        && Arc::ptr_eq(&entry.items, cards)
+                })
+                .map(|entry| (entry.local, entry.valid_until_unix_ms))
+            else {
+                return Ok(false);
+            };
+            if valid_until.is_some_and(|expiry| now_ms() >= expiry)
+                || roster_local_frontier(&self.readers.get(), through)? != local
+            {
+                return Ok(false);
+            }
+            if cut == through {
+                return Ok(true);
+            }
+            Ok(match self.changed_agent_resources(cut, through, cards)? {
+                AgentResourcesChange::Delta(delta) => {
+                    delta.subjects.is_empty() && !delta.queues && !delta.membership
+                }
+                AgentResourcesChange::Invalidated { .. } => false,
+            })
         })
     }
 
@@ -5313,7 +5467,7 @@ impl Store {
             )
             .map_err(internal)?;
         let deadline_at_unix_ms =
-            insert_mission_deadline_tx(&transaction, &run_id, mission.timeout_ms, now)?;
+            insert_mission_deadline_tx(&transaction, &run_id, mission.timeout_ms, Some(now))?;
         transaction
             .execute(
                 "INSERT INTO run_generations(id, run_id, revision, predecessor_id, status, actor, reason, created_at_unix_ms, updated_at_unix_ms)
@@ -7850,6 +8004,7 @@ impl Store {
              JOIN mission_runs ON mission_runs.id=mission_run_deadlines.run_id
              WHERE mission_runs.status IN ('running','standing','blocked')
                AND mission_runs.phase NOT LIKE 'cleanup-%'
+               AND mission_run_deadlines.deadline_at_unix_ms IS NOT NULL
                AND EXISTS (
                  SELECT 1 FROM claims
                  WHERE claims.subject='mission-run/' || mission_runs.id
@@ -9643,7 +9798,7 @@ impl Store {
                             readiness_epoch=?5, updated_at_unix_ms=?4 WHERE subject=?1",
                     params![subject, status, reason, now.to_string(), readiness_epoch])?;
                 let body = json!({"fields": {"status": status, "reason": reason, "readiness_epoch": readiness_epoch}});
-                append_claim_tx(
+                let claim = append_claim_tx(
                     transaction,
                     &self.origin,
                     &subject,
@@ -9653,6 +9808,9 @@ impl Store {
                     &[],
                     None,
                 )?;
+                if status == "completed" {
+                    arm_waiting_mission_deadline_tx(transaction, &subject, claim.accepted_at_unix_ms, false)?;
+                }
                 Ok(true)
             })
             .map_err(anyhow::Error::msg)?
@@ -19121,7 +19279,12 @@ fn create_declared_mission_run_tx(
         )
         .map_err(internal)?;
     let deadline_at_unix_ms =
-        insert_mission_deadline_tx(transaction, run_id, mission.timeout_ms, now)?;
+        insert_mission_deadline_tx(
+            transaction,
+            run_id,
+            mission.timeout_ms,
+            creation.after.is_none().then_some(now),
+        )?;
     if let Some(after) = &creation.after {
         transaction
             .execute(
@@ -26699,20 +26862,79 @@ fn insert_mission_deadline_tx(
     transaction: &Transaction<'_>,
     run_id: &str,
     timeout_ms: Option<u64>,
-    started_at_unix_ms: u128,
+    started_at_unix_ms: Option<u128>,
 ) -> Result<Option<u128>, St3Error> {
     let Some(timeout_ms) = timeout_ms else {
         return Ok(None);
     };
-    let deadline_at_unix_ms = started_at_unix_ms.saturating_add(u128::from(timeout_ms));
+    let deadline_at_unix_ms =
+        started_at_unix_ms.map(|started| started.saturating_add(u128::from(timeout_ms)));
     transaction
         .execute(
             "INSERT INTO mission_run_deadlines(run_id, timeout_ms, deadline_at_unix_ms)
              VALUES (?1, ?2, ?3)",
-            params![run_id, timeout_ms, deadline_at_unix_ms.to_string()],
+            params![
+                run_id,
+                timeout_ms,
+                deadline_at_unix_ms.map(|deadline| deadline.to_string())
+            ],
         )
         .map_err(internal)?;
-    Ok(Some(deadline_at_unix_ms))
+    Ok(deadline_at_unix_ms)
+}
+
+/// Admission is the first completion of the synthetic after-run step. The retained budget
+/// becomes one deadline in the same transaction, and later retries cannot restart its clock.
+fn arm_waiting_mission_deadline_tx(
+    transaction: &Transaction<'_>,
+    step: &str,
+    admitted_at_unix_ms: u128,
+    previously_completed: bool,
+) -> Result<(), St3Error> {
+    if step.rsplit('/').next() != Some(crate::mission::AFTER_RUN_STEP) || previously_completed {
+        return Ok(());
+    }
+    // The batched writer has its own clock. Keep this admission row on the accepted
+    // event timestamp too, so local activity and replay describe the same transition.
+    transaction
+        .execute(
+            "UPDATE step_runs SET updated_at_unix_ms=?3
+         WHERE subject=?1 AND step_path=?2
+           AND EXISTS(SELECT 1 FROM mission_run_after WHERE run_id=step_runs.run_id)",
+            params![
+                step,
+                crate::mission::AFTER_RUN_STEP,
+                admitted_at_unix_ms.to_string()
+            ],
+        )
+        .map_err(internal)?;
+    let waiting: Option<(String, u64)> = transaction
+        .query_row(
+            "SELECT deadlines.run_id, deadlines.timeout_ms
+             FROM step_runs
+             JOIN mission_run_after ON mission_run_after.run_id=step_runs.run_id
+             JOIN mission_run_deadlines AS deadlines ON deadlines.run_id=step_runs.run_id
+             WHERE step_runs.subject=?1 AND step_runs.step_path=?2
+               AND deadlines.deadline_at_unix_ms IS NULL
+               AND NOT EXISTS(SELECT 1 FROM step_runs AS earlier INDEXED BY step_runs_run_index
+                 WHERE earlier.run_id=step_runs.run_id AND earlier.step_path=?2
+                   AND earlier.status='completed' AND earlier.subject<>step_runs.subject)",
+            params![step, crate::mission::AFTER_RUN_STEP],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    if let Some((run, timeout_ms)) = waiting {
+        let deadline = admitted_at_unix_ms.saturating_add(u128::from(timeout_ms));
+        transaction
+            .execute(
+                "UPDATE mission_run_deadlines SET deadline_at_unix_ms=?2
+                 WHERE run_id=?1 AND deadline_at_unix_ms IS NULL",
+                params![run, deadline.to_string()],
+            )
+            .map_err(internal)?;
+    }
+    Ok(())
 }
 
 fn validate_mission_run_timeout(mission: &MissionSpec, mode: &str) -> Result<(), St3Error> {
@@ -31511,15 +31733,19 @@ fn project_mission_run_created(
             )
             .map_err(internal)?;
     }
-    if let (Some(timeout_ms), Some(deadline_at_unix_ms)) = (
-        fields.get("timeout_ms").and_then(Value::as_u64),
-        fields.get("deadline_at_unix_ms").and_then(Value::as_u64),
-    ) {
+    if let Some(timeout_ms) = fields.get("timeout_ms").and_then(Value::as_u64) {
+        // Older creation claims armed this while waiting. Admission, rather than that
+        // obsolete creation deadline, determines the clock on a rebuilt or joining node.
+        let deadline_at_unix_ms = if after.is_none() {
+            fields.get("deadline_at_unix_ms").and_then(Value::as_u64)
+        } else {
+            None
+        };
         transaction
             .execute(
                 "INSERT OR IGNORE INTO mission_run_deadlines(run_id, timeout_ms, deadline_at_unix_ms)
                  VALUES (?1, ?2, ?3)",
-                params![run_id, timeout_ms, deadline_at_unix_ms.to_string()],
+                params![run_id, timeout_ms, deadline_at_unix_ms.map(|deadline| deadline.to_string())],
             )
             .map_err(internal)?;
     }
@@ -31729,6 +31955,15 @@ fn project_mission_run_update(
         return Ok(());
     }
     if claim.kind == "step-run.state" {
+        // A retained completed projection can outlive its admission claim. A duplicate
+        // completion is not a new admission and must not manufacture a fresh budget.
+        let previously_completed = if status == "completed"
+            && claim.subject.rsplit('/').next() == Some(crate::mission::AFTER_RUN_STEP)
+        {
+            transaction.query_row("SELECT status='completed' FROM step_runs WHERE subject=?1",
+                [&claim.subject], |row| row.get::<_, bool>(0))
+                .optional().map_err(internal)?.unwrap_or(false)
+        } else { false };
         transaction
             .execute(
                 "UPDATE step_runs SET status=?2, blocked_reason=?3,
@@ -31741,6 +31976,9 @@ fn project_mission_run_update(
                 params![claim.subject, status, fields.get("reason").and_then(Value::as_str), claim.accepted_at_unix_ms.to_string(), fields.get("readiness_epoch").and_then(Value::as_u64)],
             )
             .map_err(internal)?;
+        if status == "completed" {
+            arm_waiting_mission_deadline_tx(transaction, &claim.subject, claim.accepted_at_unix_ms, previously_completed)?;
+        }
         return Ok(());
     }
     if claim.kind.starts_with("work.") {
@@ -35944,9 +36182,19 @@ mod tests {
 
     const TEST_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
 
+    mod mission_deadline_probe {
+        use super::*;
+        include!("store/mission_deadline_probe.rs");
+    }
+
     mod stopped_seat_declaration_controls {
         use super::*;
         include!("store/stopped_seat_declaration_controls.rs");
+    }
+
+    mod mission_deadline_tests {
+        use super::*;
+        include!("store/mission_deadline_tests.rs");
     }
 
     #[test]
@@ -44039,6 +44287,8 @@ version 2
         let mut exchange = exchange_from(&worker, &controller.replication_inventory().unwrap());
         assert_ne!(exchange.schema_digest, legacy);
         exchange.schema_digest = legacy.clone();
+        exchange.projection_registry_digest = None;
+        exchange.projection_versions.clear();
         controller
             .receive_replication_exchange_asking("worker", TEST_FLEET, &exchange, true)
             .unwrap();
@@ -44056,6 +44306,8 @@ version 2
         );
         let mut summary = worker.export_replication_summary(TEST_FLEET).unwrap();
         summary.schema_digest = legacy;
+        summary.projection_registry_digest = None;
+        summary.projection_versions.clear();
         summary.graph_digest = "invented-previous-layout-graph".into();
         summary
             .projection_digests
@@ -45904,6 +46156,8 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
             peer: "source".into(),
             fleet_id: TEST_FLEET.into(),
             schema_digest: runtime::compatibility_digest(&st3_schema::registry().digest()),
+            projection_registry_digest: None,
+            projection_versions: Default::default(),
             authority_digest: String::new(),
             graph_digest: String::new(),
             inventory: ReplicationInventory {
@@ -45975,6 +46229,8 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
             peer: "source".into(),
             fleet_id: TEST_FLEET.into(),
             schema_digest: runtime::compatibility_digest(&st3_schema::registry().digest()),
+            projection_registry_digest: None,
+            projection_versions: Default::default(),
             authority_digest: String::new(),
             graph_digest: String::new(),
             inventory: ReplicationInventory {
@@ -46023,6 +46279,8 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
             peer: peer.into(),
             fleet_id: TEST_FLEET.into(),
             schema_digest: runtime::compatibility_digest(&st3_schema::registry().digest()),
+            projection_registry_digest: None,
+            projection_versions: Default::default(),
             authority_digest: String::new(),
             graph_digest: String::new(),
             inventory: ReplicationInventory {
@@ -47092,6 +47350,8 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
                         peer: "source".into(),
                         fleet_id: FLEET.into(),
                         schema_digest: String::new(),
+                        projection_registry_digest: None,
+                        projection_versions: Default::default(),
                         authority_digest: String::new(),
                         graph_digest: String::new(),
                         inventory: ReplicationInventory::default(),
