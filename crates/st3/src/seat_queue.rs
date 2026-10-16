@@ -11,7 +11,6 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-
 pub const MOVED_CLAIM: &str = "agent.queue.moved";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

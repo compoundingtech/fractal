@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::future::Future;
 use std::io::Read as _;
+use std::os::unix::fs::MetadataExt as _;
 #[cfg(test)]
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
