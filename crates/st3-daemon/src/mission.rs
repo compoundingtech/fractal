@@ -13,12 +13,10 @@ use crate::model::{
     UsedMissionSpec, WorkSelector,
 };
 
-
 pub(crate) const LOOP_ROUND_INPUT: &str = "__st3_loop_round";
 pub(crate) const LOOP_FEEDBACK_INPUT: &str = "__st3_loop_feedback";
 pub(crate) const LOOP_ITEM_INPUT: &str = "__st3_loop_item";
 pub(crate) const CANDIDATE_INDEX_INPUT: &str = "__st3_candidate_index";
-
 
 pub(crate) fn validate_mission_id(value: &str) -> Result<(), St3Error> {
     validate_id(value, "mission")

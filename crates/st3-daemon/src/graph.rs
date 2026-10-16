@@ -38,7 +38,6 @@ const ROOT_NODES: &[&str] = &[
     "stop",
 ];
 
-
 struct ParseContext {
     default_host: String,
     subjects: BTreeMap<String, DesiredSubject>,
@@ -1941,15 +1940,6 @@ fn rewrite_owned_references(subjects: &mut BTreeMap<String, DesiredSubject>, run
     }
 }
 
-
-/// The built-in gate kinds that run as exec gates; see `crate::gate_kinds`.
-
-
-
-
-
-
-
 #[allow(clippy::too_many_arguments)]
 fn driver_member(
     driver: &KdlNode,
@@ -2183,7 +2173,6 @@ fn parse_restart_type(value: Option<String>) -> Result<RestartType, St3Error> {
         )),
     }
 }
-
 
 fn parse_restart_intensity(document: &KdlDocument) -> Result<RestartIntensity, St3Error> {
     let nodes = document
@@ -2970,7 +2959,6 @@ fn validate_observer(node: &KdlNode) -> Result<(), St3Error> {
     Ok(())
 }
 
-
 fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
     ensure_no_properties(node)?;
     one_string_with_children(node)?;
@@ -3638,10 +3626,6 @@ fn validate_subscription_mission_reference(reference: &str) -> Result<(), St3Err
     }
 }
 
-
-
-
-
 fn validate_tags(node: &KdlNode) -> Result<(), St3Error> {
     reject_type(node)?;
     ensure_no_children(node)?;
@@ -3664,7 +3648,6 @@ fn validate_tags(node: &KdlNode) -> Result<(), St3Error> {
     }
     Ok(())
 }
-
 
 fn parse_utc_time(value: &str) -> Result<i64, St3Error> {
     if !value.ends_with('Z') {
@@ -4219,7 +4202,6 @@ fn collect_document_refs(node: &KdlNode, output: &mut BTreeSet<String>) -> Resul
     Ok(())
 }
 
-
 fn insert_subject(context: &mut ParseContext, subject: DesiredSubject) -> Result<(), St3Error> {
     let name = subject.subject.clone();
     if context.subjects.insert(name.clone(), subject).is_some() {
@@ -4387,21 +4369,6 @@ fn hash_json(value: &Value) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 fn parse_workspace(document: &KdlDocument) -> Result<Option<(String, bool)>, St3Error> {
     let Some(node) = unique_child(document, "workspace")? else {
         return Ok(None);
@@ -4412,8 +4379,6 @@ fn parse_workspace(document: &KdlDocument) -> Result<Option<(String, bool)>, St3
     Ok(Some((workspace, create)))
 }
 
-
-
 fn repeated_child_strings(document: &KdlDocument, name: &str) -> Result<Vec<String>, St3Error> {
     document
         .nodes()
@@ -4423,18 +4388,12 @@ fn repeated_child_strings(document: &KdlDocument, name: &str) -> Result<Vec<Stri
         .collect()
 }
 
-
-
 fn has_block_child(document: &KdlDocument, name: &str) -> bool {
     document
         .nodes()
         .iter()
         .any(|node| node.name().value() == name && node.children().is_some())
 }
-
-
-
-
 
 fn namespaced(namespace: &str, value: &str) -> String {
     if value.starts_with(&format!("{namespace}/")) {
@@ -4458,7 +4417,6 @@ fn bounded_runtime_id(candidate: &str) -> String {
     let prefix_bytes = MAX_BYTES - DIGEST_BYTES - 1;
     format!("{}.{}", &candidate[..prefix_bytes], &digest[..DIGEST_BYTES])
 }
-
 
 #[cfg(test)]
 mod tests {
