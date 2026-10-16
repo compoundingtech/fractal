@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Proofs for st3-test-memory-compare: which rows it flags, and that noise and retries are not."""
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+sys.dont_write_bytecode = True
+HERE = Path(__file__).resolve().parent
+loader = SourceFileLoader("compare", str(HERE / "st3-test-memory-compare"))
+compare = module_from_spec(spec_from_loader(loader.name, loader))
+loader.exec_module(compare)
+MIB = 1024
+
+
+def line(test, processes):
+    return json.dumps({"test": test, "exit": 0, "wall_s": 1.0, "processes": [
+        {"pid": 1, "name": name, "argv": [], "at_s": 0.0, "peak_kb": mib * MIB} for name, mib in processes.items()]})
+
+
+class CompareTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="memory-compare-")
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    def report(self, name, *lines):
+        path = self.root / name
+        path.write_text("\n".join(lines) + "\n")
+        return str(path)
+
+    def run_compare(self, *args):
+        return compare.main(list(args))
+
+    def test_growth_needs_both_the_ratio_and_the_floor(self):
+        base = self.report("base.jsonl", line("t::a", {"st3 up": 1000, "test": 40}), line("t::b", {"st3 up": 500}))
+        self.run_compare(base, "--write-baseline", str(self.root / "base.json"))
+        baseline = compare.load_baseline(str(self.root / "base.json"))
+        # +30% and +300 MiB flags; +10% does not; 40 -> 90 MiB is +125% but under the floor.
+        now = compare.peaks(self.report("now.jsonl", line("t::a", {"st3 up": 1300, "test": 90}), line("t::b", {"st3 up": 550})))
+        self.assertEqual(compare.flagged(now, baseline, 0.25, 100),
+                         [("t::a", "st3 up", 1000.0, 1300.0)])
+
+    def test_a_new_large_process_is_flagged_and_a_new_small_one_is_not(self):
+        baseline = {("t::a", "test"): 40 * MIB}
+        now = {("t::a", "test"): 40 * MIB, ("t::a", "st3 up"): 600 * MIB, ("t::a", "pty"): 30 * MIB}
+        self.assertEqual(compare.flagged(now, baseline, 0.25, 100), [("t::a", "st3 up", None, 600.0)])
+
+    def test_a_retry_counts_as_its_largest_peak(self):
+        path = self.report("retry.jsonl", line("t::a", {"st3 up": 200}), line("t::a", {"st3 up": 700}), line("t::a", {"st3 up": 300}))
+        self.assertEqual(compare.peaks(path), {("t::a", "st3 up"): 700 * MIB})
+
+    def test_fail_sets_the_exit_status_only_when_asked(self):
+        base = self.report("base.jsonl", line("t::a", {"st3 up": 1000}))
+        self.run_compare(base, "--write-baseline", str(self.root / "base.json"))
+        grown = self.report("grown.jsonl", line("t::a", {"st3 up": 2000}))
+        args = [grown, "--baseline", str(self.root / "base.json")]
+        self.assertEqual(self.run_compare(*args), 0)
+        self.assertEqual(self.run_compare(*args, "--fail"), 1)
+        self.assertEqual(self.run_compare(base, "--baseline", str(self.root / "base.json"), "--fail"), 0)
+
+    def test_a_line_that_is_not_a_report_is_named(self):
+        path = self.report("bad.jsonl", line("t::a", {"st3 up": 1}), "not json")
+        with self.assertRaisesRegex(SystemExit, r"bad.jsonl:2: not a memory report line"):
+            compare.peaks(path)
+
+
+if __name__ == "__main__":
+    unittest.main()
