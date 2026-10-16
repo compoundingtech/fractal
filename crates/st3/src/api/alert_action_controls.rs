@@ -498,9 +498,63 @@ async fn attention_history_omits_wide_and_malformed_rows_and_advances_to_retaine
         })
         .unwrap();
     let app = router(state.clone());
-    for body in [
-        json!({"fields":{"reason":"x".repeat(1_048_577)}}).to_string(),
-        "{malformed".into(),
+    let before_refusal = state.store.index().unwrap();
+    state
+        .store
+        .connection
+        .batched(|tx| -> anyhow::Result<()> {
+            let row = || -> rusqlite::Result<(String, String, i64)> {
+                tx.query_row(
+                    "SELECT body,predecessors,store_index FROM claims WHERE id=?1",
+                    [&filler.id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            };
+            let indexed = || -> rusqlite::Result<String> {
+                tx.query_row(
+                    "SELECT id FROM claims INDEXED BY claims_operation_index
+                     WHERE json_extract(body, '$._operation.id') IS NOT NULL
+                       AND json_extract(body, '$._operation.id')=?1",
+                    [filler.body["_operation"]["id"].as_str().unwrap()],
+                    |row| row.get(0),
+                )
+            };
+            let original = row()?;
+            assert_eq!(indexed()?, filler.id);
+            // The native expression index rejects this state. Never drop it to
+            // claim malformed-BODY admission or malformed-JSON history coverage.
+            let error = tx
+                .execute("UPDATE claims SET body='{malformed' WHERE id=?1", [&filler.id])
+                .unwrap_err();
+            assert!(error.to_string().contains("malformed JSON"), "{error}");
+            assert_eq!(row()?, original);
+            assert_eq!(indexed()?, filler.id);
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.store.index().unwrap(), before_refusal);
+    let (status, baseline) = owner_get(
+        app.clone(),
+        "/v1/client/attention?history=true&limit=32",
+        "person/avery",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{baseline}");
+    assert_eq!(baseline["page"]["has_more"], false);
+    let expected = baseline["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].clone())
+        .collect::<Vec<_>>();
+    assert!(!expected.is_empty());
+    for (body, predecessors) in [
+        (json!({"fields":{"reason":"x".repeat(1_048_577)}}).to_string(), "[]".to_owned()),
+        // Valid JSON reaches storage, but predecessors must be an array. This
+        // exercises malformed-row omission, not malformed-BODY admission.
+        (json!({"fields":{"code":"native-prompt-answered","status":"dismiss",
+            "acted_for":"person/avery","driver":"claude"}}).to_string(), "{}".to_owned()),
     ] {
         // Private SQL corruption fixture, never a source claim or a live database.
         state
@@ -508,8 +562,8 @@ async fn attention_history_omits_wide_and_malformed_rows_and_advances_to_retaine
             .connection
             .batched(|tx| -> anyhow::Result<()> {
                 tx.execute(
-                    "UPDATE claims SET body=?1 WHERE id=?2",
-                    rusqlite::params![body, filler.id],
+                    "UPDATE claims SET body=?1,predecessors=?2 WHERE id=?3",
+                    rusqlite::params![body, predecessors, filler.id],
                 )?;
                 Ok(())
             })
@@ -529,6 +583,7 @@ async fn attention_history_omits_wide_and_malformed_rows_and_advances_to_retaine
         assert_eq!(page["items"], json!([]));
         assert_eq!(page["page"]["has_more"], true);
         let mut found = false;
+        let mut retained = Vec::new();
         for _ in 0..10 {
             if !page["page"]["has_more"].as_bool().unwrap() {
                 break;
@@ -550,6 +605,9 @@ async fn attention_history_omits_wide_and_malformed_rows_and_advances_to_retaine
                 .unwrap()
                 .iter()
                 .any(|item| item["episode"] == denial.id);
+            retained.extend(
+                next["items"].as_array().unwrap().iter().map(|item| item["id"].clone()),
+            );
             page = next;
         }
         assert!(
@@ -557,6 +615,7 @@ async fn attention_history_omits_wide_and_malformed_rows_and_advances_to_retaine
             "readable retained history remains reachable after the omitted row"
         );
         assert_eq!(page["page"]["has_more"], false);
+        assert_eq!(retained, expected, "retained neighbours keep their original positions");
         assert_eq!(state.store.index().unwrap(), index);
     }
 }

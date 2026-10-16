@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "none",
-    "detail": "Existing policy/source writer fences, actor/person/proof matching, answer guards and one-sent-claim cardinality are unchanged. The ordinary person writer and all answer readers are unchanged."
+    "detail": "Existing policy and source writer fences, acting agent, represented person and exact proof matching, answer guards and one-sent-claim cardinality are unchanged. The ordinary person writer and all answer readers are unchanged."
   },
   "compatibility": {
     "status": "changed",
