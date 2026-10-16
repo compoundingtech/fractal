@@ -8,6 +8,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+// The exported ACE namespace must match each public entry enumerator we use.
+_Static_assert(ACL_EXTENDED_ALLOW == KAUTH_ACE_PERMIT, "allow tag namespace");
+_Static_assert(ACL_EXTENDED_DENY == KAUTH_ACE_DENY, "deny tag namespace");
+_Static_assert(ACL_ENTRY_INHERITED == KAUTH_ACE_INHERITED, "inherited flag namespace");
+_Static_assert(ACL_ENTRY_FILE_INHERIT == KAUTH_ACE_FILE_INHERIT, "file inherit namespace");
+_Static_assert(ACL_ENTRY_DIRECTORY_INHERIT == KAUTH_ACE_DIRECTORY_INHERIT, "directory inherit namespace");
+_Static_assert(ACL_ENTRY_LIMIT_INHERIT == KAUTH_ACE_LIMIT_INHERIT, "limit inherit namespace");
+_Static_assert(ACL_ENTRY_ONLY_INHERIT == KAUTH_ACE_ONLY_INHERIT, "inherit-only namespace");
+_Static_assert(ACL_FLAG_NO_INHERIT == KAUTH_ACL_NO_INHERIT, "no inherit namespace");
+
 struct st_acl_observation {
     uint32_t reason; // 0 accepted, 1 query, 2 representation, 3 unknown, 4 allow, 5 qualifier
     int32_t os_error;
@@ -53,8 +63,8 @@ uint32_t st_client_mode_acl_check_export(const void *bytes, size_t size) {
         ACL_DELETE | ACL_APPEND_DATA | ACL_DELETE_CHILD | ACL_READ_ATTRIBUTES |
         ACL_WRITE_ATTRIBUTES | ACL_READ_EXTATTRIBUTES | ACL_WRITE_EXTATTRIBUTES |
         ACL_READ_SECURITY | ACL_WRITE_SECURITY | ACL_CHANGE_OWNER | ACL_SYNCHRONIZE;
-    const uint32_t known_flags = ACL_ENTRY_INHERITED | ACL_ENTRY_FILE_INHERIT |
-        ACL_ENTRY_DIRECTORY_INHERIT | ACL_ENTRY_LIMIT_INHERIT | ACL_ENTRY_ONLY_INHERIT;
+    const uint32_t known_flags = KAUTH_ACE_INHERITED | KAUTH_ACE_FILE_INHERIT |
+        KAUTH_ACE_DIRECTORY_INHERIT | KAUTH_ACE_LIMIT_INHERIT | KAUTH_ACE_ONLY_INHERIT;
     if (bytes == NULL || !KAUTH_FILESEC_VALID(size) ||
         size > KAUTH_FILESEC_SIZE(ACL_MAX_ENTRIES)) return 2;
     memcpy(&header, bytes, size < sizeof(header) ? size : sizeof(header));
@@ -105,8 +115,8 @@ void st_client_mode_acl_inspect(int fd, int private_object,
     const uint64_t mutation = ACL_WRITE_DATA | ACL_DELETE | ACL_APPEND_DATA |
         ACL_DELETE_CHILD | ACL_WRITE_ATTRIBUTES | ACL_WRITE_EXTATTRIBUTES |
         ACL_WRITE_SECURITY | ACL_CHANGE_OWNER;
-    const uint32_t entry_flags = ACL_ENTRY_INHERITED | ACL_ENTRY_FILE_INHERIT |
-        ACL_ENTRY_DIRECTORY_INHERIT | ACL_ENTRY_LIMIT_INHERIT | ACL_ENTRY_ONLY_INHERIT;
+    const uint32_t entry_flags = KAUTH_ACE_INHERITED | KAUTH_ACE_FILE_INHERIT |
+        KAUTH_ACE_DIRECTORY_INHERIT | KAUTH_ACE_LIMIT_INHERIT | KAUTH_ACE_ONLY_INHERIT;
     // Raw exported flags use KAUTH, not the public acl_flag_t namespace.
     // Deferred inheritance could change the ACL at rename; explicitly unsupported.
     const uint32_t acl_flags = KAUTH_ACL_NO_INHERIT;

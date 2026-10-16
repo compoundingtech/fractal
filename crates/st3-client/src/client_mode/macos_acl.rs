@@ -95,6 +95,9 @@ mod tests {
         let check =
             |bytes: &[u8]| unsafe { st_client_mode_acl_check_export(bytes.as_ptr(), bytes.len()) };
         assert_eq!(check(&valid), 0);
+        let mut no_inherit = valid.clone();
+        put(&mut no_inherit, layout[3], 1 << 17);
+        assert_eq!(check(&no_inherit), 0, "known raw no-inherit flag");
         for (name, offset, value, reason) in [
             ("unknown-acl-flag", layout[3], 1 << 31, 3),
             ("reserved-raw-low-bit", layout[3], 1, 3),
