@@ -580,11 +580,15 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_task_that_will_not_stop_delays_the_withdrawal_by_the_bound_only() {
-        // A blocking task ignores abort, so it stands for a serving task that never ends.
+        // A blocking task that has started ignores abort, so it stands for a serving task that
+        // never ends. One that has not started yet is cancelled by abort, so wait for it.
         let (release, stuck) = std::sync::mpsc::channel::<()>();
+        let (started, running) = std::sync::mpsc::channel::<()>();
         let task = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
             let _ = stuck.recv();
         });
+        running.recv().unwrap();
         // The paused clock moves on by itself once every task is waiting, so the time the
         // withdrawal took is read on that clock, not from where this test happens to be.
         let withdrawal = tokio::spawn(async move {
@@ -593,10 +597,11 @@ mod tests {
             withdraw_changed(&mut serving, &BTreeMap::new(), WITHDRAW_WAIT).await;
             (began.elapsed(), serving.is_empty())
         });
-        let (elapsed, emptied) = withdrawal.await.unwrap();
-        assert_eq!(elapsed, WITHDRAW_WAIT, "the wait is exactly the bound");
-        assert!(emptied, "the stuck tile is dropped from the supervisor");
+        let result = withdrawal.await.unwrap();
+        // Free the blocked thread before asserting, so a failure cannot hang the runtime's shutdown.
         drop(release);
+        assert_eq!(result.0, WITHDRAW_WAIT, "the wait is exactly the bound");
+        assert!(result.1, "the stuck tile is dropped from the supervisor");
     }
 
     #[tokio::test(start_paused = true)]
