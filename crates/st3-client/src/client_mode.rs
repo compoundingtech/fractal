@@ -204,6 +204,16 @@ impl Store {
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
             .open(parent)?;
+        // Persist newly created ancestor links too. Syncing only the leaf directory could
+        // lose its newly created parent after power loss and incorrectly reopen as Local.
+        directory.sync_all()?;
+        for ancestor in parent.ancestors().skip(1) {
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                .open(ancestor)?
+                .sync_all()?;
+        }
         let metadata = directory.metadata()?;
         ensure!(
             metadata.uid() == unsafe { libc::geteuid() }
