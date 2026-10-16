@@ -500,6 +500,11 @@ pub fn run(context: Context) -> Result<()> {
     let mut pending: Vec<Pending> = Vec::new();
     let mut ui = Ui::new(adapt::world(&model, &person, &extras));
     ui.load_prefs();
+    // A demo's agents are scripted stand-ins whose terminals stay empty: they open on their
+    // conversation, without changing this device's choice.
+    if playback.is_some() {
+        ui.conversation_first = Some(true);
+    }
     ui.drafts_path = super::drafts_store::path();
     let (_run, earlier) = super::lastrun::begin(&crate::version::short(crate::version::now()));
     ui.load_drafts();
