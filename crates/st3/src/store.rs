@@ -70,6 +70,10 @@ mod roster_fresh_proof_tests;
 mod agents_window_deadline_tests;
 pub(crate) mod step_labels;
 mod operation_audit;
+mod mission_provenance;
+pub(crate) mod agent_queue_values;
+pub mod backup_format;
+pub mod message_bodies;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[cfg(test)]
@@ -4340,13 +4344,13 @@ impl Store {
                     let names = previous.items.iter().filter_map(|item| item["id"].as_str().map(str::to_owned))
                         .chain(changed.iter().cloned()).collect::<BTreeSet<_>>();
                     let metadata = crate::performance::task("roster/queue-diff",
-                        || crate::api::agent_queue_metadata(self, &names))?;
+                        || agent_queue_values::agent_queue_metadata(self, &names))?;
                     let by_id = metadata.iter().map(|item| (item["id"].as_str().unwrap_or_default(), item))
                         .collect::<BTreeMap<_, _>>();
                     for old in previous.items.iter() {
                         let name = old["id"].as_str().unwrap_or_default();
                         if let Some(new) = by_id.get(name)
-                            && crate::api::AGENT_QUEUE_FIELDS.iter().any(|field| old[*field] != new[*field]) {
+                            && agent_queue_values::AGENT_QUEUE_FIELDS.iter().any(|field| old[*field] != new[*field]) {
                             changed.insert(name.to_owned());
                         }
                     }
@@ -11189,7 +11193,7 @@ impl Store {
                     let mut body = serde_json::to_value(mission).map_err(internal)?;
                     if let Some(plan) = &owned_plan { body["owned_set"] = json!(plan.preview.set); }
                     if let Some(provenance) = intent.mission_provenance.get(&mission.id)
-                        && let Some(claim) = crate::provenance::record(transaction, &self.origin, mission, provenance, actor, &batch_id)? {
+                        && let Some(claim) = mission_provenance::record(transaction, &self.origin, mission, provenance, actor, &batch_id)? {
                         claim_ids.push(claim.id);
                     }
                     if !receipt_attached {
