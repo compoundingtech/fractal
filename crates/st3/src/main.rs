@@ -65,6 +65,7 @@ mod change_cli;
 mod directive_note;
 mod completion;
 mod doctor_cli;
+mod fractal;
 #[cfg(test)]
 mod follow_tests;
 mod presentation;
@@ -5283,7 +5284,10 @@ fn cli_main() -> ExitCode {
     if let Some(program) = st3::recorder::invoked_program() {
         st3::recorder::run(program);
     }
-    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    if fractal::dispatch(&mut arguments) == fractal::Dispatch::Web {
+        return fractal::web(&arguments);
+    }
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
             println!("{}", read_contract_inventory_json());
