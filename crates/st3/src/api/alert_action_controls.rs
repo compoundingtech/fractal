@@ -284,7 +284,7 @@ async fn attention_history_sparse_pages_keep_the_cut_and_reject_cursor_tampering
         .unwrap();
     for number in 0..4 {
         state.store.append_claim(&ClaimInput {subject:denial.subject.clone(),kind:"harness.diagnostic".into(),actor:Some(denial.subject.clone()),
-            fields:serde_json::from_value(json!({"code":"history-fixture","reason":format!("irrelevant {number}"),"severity":"info"})).unwrap(),
+            fields:serde_json::from_value(json!({"code":"history-fixture","reason":format!("irrelevant {number}"),"severity":"warning"})).unwrap(),
             evidence:vec![],expected_subject:None,idempotency_key:Some(format!("irrelevant-{number}"))}).unwrap();
     }
     let app = router(state.clone());
@@ -490,7 +490,7 @@ async fn attention_history_omits_wide_and_malformed_rows_and_advances_to_retaine
             subject: denial.subject.clone(),
             kind: "harness.diagnostic".into(),
             actor: Some(denial.subject.clone()),
-            fields: serde_json::from_value(json!({"code":"history-fixture","severity":"info"}))
+            fields: serde_json::from_value(json!({"code":"history-fixture","severity":"warning"}))
                 .unwrap(),
             evidence: vec![],
             expected_subject: None,

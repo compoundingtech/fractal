@@ -17,7 +17,7 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
             SEAT,
             "harness.diagnostic",
             SEAT,
-            json!({"code":"history-fixture","reason":format!("candidate {number}"),"severity":"info"}),
+            json!({"code":"history-fixture","reason":format!("candidate {number}"),"severity":"warning"}),
             &format!("history-candidate-{number}"),
         );
     }
@@ -136,6 +136,24 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
 
 #[test]
 fn history_query_plan_bounds_each_kind_scan_before_sorting_a_large_fixture() {
+    fn episode_seek(detail: &str) -> bool {
+        matches!(detail,
+            "SEARCH e USING INDEX sqlite_autoindex_claims_1 (id=?)"
+            | "SEARCH e USING INDEX sqlite_autoindex_claims_1 (id=? AND rowid<?)"
+            | "SEARCH e USING INDEX sqlite_autoindex_claims_1 (id=? AND store_index<?)")
+    }
+    // The existing cut has been in the episode join since e1236bec. SQLite can
+    // expose that extra range on the same index; scans and non-equality seeks
+    // must still fail this assertion rather than being accepted by a substring.
+    for refused in [
+        "SCAN claims",
+        "SCAN e",
+        "SEARCH e USING INDEX another_index (id=?)",
+        "SEARCH e USING INDEX sqlite_autoindex_claims_1 (rowid<?)",
+        "SEARCH e USING INDEX sqlite_autoindex_claims_1 (id>?)",
+    ] {
+        assert!(!episode_seek(refused), "unexpected accepted plan: {refused}");
+    }
     let (store, denial, _) = denial_fixture(&["close-item"]);
     // Authored claims-table fixture only, not signed/native evidence. One transaction
     // creates a busy kind without turning the control into 10,000 source actions.
@@ -191,8 +209,7 @@ fn history_query_plan_bounds_each_kind_scan_before_sorting_a_large_fixture() {
             );
             assert!(
                 plan.iter()
-                    .any(|(_, _, detail)| detail.contains("SEARCH e USING INDEX")
-                        && detail.contains("(id=?)")),
+                    .any(|(_, _, detail)| episode_seek(detail)),
                 "{plan:?}"
             );
             let rows = store.attention_history_candidates(cut, i64::MAX as u64, 32, None)?;
