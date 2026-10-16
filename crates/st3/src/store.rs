@@ -32,6 +32,9 @@ mod owned_sets_tests;
 #[cfg(test)]
 mod usage_fold_tests;
 mod resources;
+mod resource_preparation;
+#[cfg(test)]
+mod resource_preparation_fence_tests;
 mod github_workflow_failures;
 pub mod git_changes;
 pub(crate) mod message_subscriptions;
@@ -4068,6 +4071,25 @@ impl Store {
         Some((cut, refs, head.0, head.1))
     }
 
+    /// When this node committed its first claim after store index `after`, through `through`,
+    /// in Unix ms; `None` when every claim between came from another node, or there is none.
+    pub(crate) fn first_local_commit_after(
+        &self,
+        after: u64,
+        through: u64,
+    ) -> Result<Option<u128>> {
+        let accepted: Option<String> = self
+            .readers
+            .get()
+            .prepare_cached(
+                "SELECT accepted_at_unix_ms FROM claims WHERE store_index>?1 AND store_index<=?2
+                 AND origin=?3 ORDER BY store_index LIMIT 1",
+            )?
+            .query_row(params![after as i64, through as i64, self.origin()], |row| row.get(0))
+            .optional()?;
+        Ok(accepted.and_then(|accepted| accepted.parse().ok()))
+    }
+
     /// Follows the revision of complete current roster publications: it rises with every one,
     /// including a replacement at the same graph index after local activity or a deadline.
     pub(crate) fn subscribe_agent_roster(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -5477,6 +5499,7 @@ impl Store {
             .map_err(internal)?;
         let mut flat = Vec::new();
         flatten_steps(&mission, default_selector.clone(), &[], &mut flat);
+        let parents = crate::mission::parent_step_index(&mission);
         for (step, selector, constraints) in flat {
             let (assignee, available_to, agentless) = interpolate_selector(&selector, &variables)?;
             let step_subject = format!("step-run/{generation_id}/{}", step.path);
@@ -5487,7 +5510,10 @@ impl Store {
             step_variables.insert("ST_ASSIGNEE".into(), assignee.clone().unwrap_or_default());
             step_variables.insert(
                 "ST_PARENT_STEP_RUN".into(),
-                crate::mission::parent_step_path(&mission, &step.path)
+                parents
+                    .get(step.path.as_str())
+                    .copied()
+                    .flatten()
                     .map(|path| format!("step-run/{generation_id}/{path}"))
                     .or_else(|| parent_step_run.clone())
                     .unwrap_or_default(),
@@ -8774,6 +8800,7 @@ impl Store {
             })?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
         let mut visible = Vec::with_capacity(views.len());
+        let mut definitions = PinnedDefinitions::default();
         for mut view in views {
             if actor.is_some() && !detailed {
                 // A pending available-to step or a draining run can become visible
@@ -8784,9 +8811,14 @@ impl Store {
                 smallclaims::touched::note_read(|| view.generation.clone());
             }
             if detailed {
-                enrich_step_queue_at(&connection, &mut view, snapshot_unix_ms)?;
+                enrich_step_queue_cached(&connection, &mut view, snapshot_unix_ms, &mut definitions)?;
             } else {
-                enrich_step_queue_for_reconcile_at(&connection, &mut view, snapshot_unix_ms)?;
+                enrich_step_queue_for_reconcile_cached(
+                    &connection,
+                    &mut view,
+                    snapshot_unix_ms,
+                    &mut definitions,
+                )?;
             }
             view.carried_claimant = carried_claimants.get(&view.subject).cloned();
             if run_phases
@@ -8900,6 +8932,7 @@ impl Store {
             step_run_from_row,
         )?;
         let (mut skipped, mut page) = (0, Vec::new());
+        let mut definitions = PinnedDefinitions::default();
         for row in rows {
             let mut view = row?;
             if !visible(&view)? {
@@ -8912,7 +8945,7 @@ impl Store {
             if page.len() == limit {
                 return Ok((page, true));
             }
-            enrich_step_queue_at(&connection, &mut view, snapshot_unix_ms)?;
+            enrich_step_queue_cached(&connection, &mut view, snapshot_unix_ms, &mut definitions)?;
             page.push(view);
         }
         Ok((page, false))
@@ -8969,9 +9002,10 @@ impl Store {
             step_run_from_row,
         )?;
         let mut visible = Vec::new();
+        let mut definitions = PinnedDefinitions::default();
         for row in rows {
             let mut view = row?;
-            enrich_step_queue_at(&connection, &mut view, snapshot_unix_ms)?;
+            enrich_step_queue_cached(&connection, &mut view, snapshot_unix_ms, &mut definitions)?;
             let visible_to_actor = actor.as_ref().is_none_or(|actor| {
                 view.assigned_to.as_deref() == Some(actor.as_str())
                     || view.claimant.as_deref() == Some(actor.as_str())
@@ -8990,7 +9024,7 @@ impl Store {
             .query_row(
                 "SELECT mission_runs.status, mission_runs.current_generation_id,
                         mission_runs.mode, run_generations.status,
-                        root_runs.status, root_runs.phase
+                        root_runs.status, root_runs.phase, mission_runs.phase
                  FROM mission_runs
                  JOIN run_generations ON run_generations.id=?2
                  JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
@@ -9007,6 +9041,7 @@ impl Store {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
@@ -9027,7 +9062,7 @@ impl Store {
         let mut statement = connection.prepare(
             "SELECT mission_runs.id, run_generations.id, mission_runs.status,
                     mission_runs.current_generation_id, mission_runs.mode,
-                    run_generations.status, root_runs.status, root_runs.phase
+                    run_generations.status, root_runs.status, root_runs.phase, mission_runs.phase
              FROM mission_runs
              JOIN run_generations ON run_generations.run_id=mission_runs.id
              JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
@@ -9044,6 +9079,7 @@ impl Store {
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
                     ),
                 ))
             })?
@@ -9066,7 +9102,7 @@ impl Store {
 
     fn work_annotation_with_owner(
         work: &StepRunView,
-        owner: Option<(String, String, String, String, String, String)>,
+        owner: Option<(String, String, String, String, String, String, String)>,
     ) -> OperationalAnnotation {
         let mut reasons: Vec<String> = Vec::new();
         if let Some((
@@ -9076,6 +9112,7 @@ impl Store {
             generation_status,
             root_status,
             root_phase,
+            run_phase,
         )) = owner
         {
             if is_terminal_run_state(&run_status) {
@@ -9091,6 +9128,16 @@ impl Store {
             }
             if is_terminal_run_state(&root_status) || root_phase == "terminal" {
                 reasons.push("terminal-root-owner".into());
+            }
+            if work.status == "pending"
+                && reasons.is_empty()
+                && run_phase != "terminal"
+                && !run_phase.starts_with("cleanup-")
+                && !root_phase.starts_with("cleanup-")
+            {
+                // Pending work belongs to the runtime's readiness evaluator. This names
+                // that owner without claiming its dependency predicates have been checked.
+                reasons.push("waiting for daemon/runtime to evaluate readiness".into());
             }
         }
         if work
@@ -15691,6 +15738,77 @@ impl Store {
         subscriptions: &[(String, SubscriptionSpec)],
         current: Option<&(dyn Fn() -> bool + Sync)>,
     ) -> Result<ResourceObservationOutcome, St3Error> {
+        let fence = resource_preparation::Fence::new(self);
+        for pass in 0..2 {
+            let prepared = fence.prepare(self, |connection| {
+                resource_preparation::inputs(
+                    connection,
+                    observer,
+                    desired_revision,
+                    attempt,
+                    resource,
+                    &canonical_json_value(facts),
+                    subscriptions,
+                )
+            });
+            #[cfg(test)]
+            resource_preparation::before_validate(self, pass);
+            #[cfg(not(test))]
+            let _ = pass;
+            let outcome = self.record_resource_observation_attempt(
+                observer,
+                desired_revision,
+                attempt,
+                resource,
+                cursor,
+                facts,
+                next_check_unix_ms,
+                subscriptions,
+                current,
+                Some((&fence, prepared)),
+            )?;
+            if let Some(outcome) = outcome {
+                return Ok(outcome);
+            }
+            #[cfg(test)]
+            resource_preparation::COUNTS.with(|counts| counts.borrow_mut().invalidated += 1);
+        }
+        // Exactly two unusable/stale preparations, then ONE invocation of the existing
+        // canonical writer path. This preserves API progress, not a writer-hold cap.
+        #[cfg(test)]
+        resource_preparation::COUNTS.with(|counts| counts.borrow_mut().fallback += 1);
+        self.record_resource_observation_attempt(
+            observer,
+            desired_revision,
+            attempt,
+            resource,
+            cursor,
+            facts,
+            next_check_unix_ms,
+            subscriptions,
+            current,
+            None,
+        )?
+        .ok_or_else(|| St3Error::new("internal", "canonical observation returned no outcome"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_resource_observation_attempt(
+        &self,
+        observer: &str,
+        desired_revision: &str,
+        attempt: Option<&str>,
+        resource: &str,
+        cursor: Option<&str>,
+        facts: &Value,
+        next_check_unix_ms: u128,
+        subscriptions: &[(String, SubscriptionSpec)],
+        current: Option<&(dyn Fn() -> bool + Sync)>,
+        preparation: Option<(
+            &resource_preparation::Fence,
+            resource_preparation::Prepared<Result<resource_preparation::Inputs, St3Error>>,
+        )>,
+    ) -> Result<Option<ResourceObservationOutcome>, St3Error> {
         let facts = canonical_json_value(facts);
         let operation_hash = canonical_hash(&(
             observer,
@@ -15702,191 +15820,54 @@ impl Store {
         ))
         .map_err(internal)?;
         let idempotency_key = format!("resource-observation:{operation_hash}");
-        self.connection
-            .batched(|transaction| -> Result<ResourceObservationOutcome, St3Error> {
+        #[cfg(test)]
+        let measurement = Mutex::new(None);
+        #[cfg(test)]
+        let pending = Mutex::new(None);
+        #[cfg(test)]
+        let enqueued = std::time::Instant::now();
+        #[cfg(test)]
+        let canonical = preparation.is_none();
+        #[cfg(test)]
+        let cached = std::sync::atomic::AtomicBool::new(false);
+        let result = self.connection
+            .batched(|transaction| -> Result<Option<ResourceObservationOutcome>, St3Error> {
+                #[cfg(test)]
+                let _measurement = resource_preparation::WriterMeasure::new(&measurement);
+                #[cfg(test)]
+                { *pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(enqueued.elapsed()); }
                 check_observer_completion(transaction, observer, desired_revision, current)?;
                 let outcome = (|| {
                 if let Some(response) = smallclaims::store::idempotency::cached_response(transaction, &idempotency_key)?
                 {
-                    return serde_json::from_str(&response).map_err(internal);
+                    #[cfg(test)]
+                    cached.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return serde_json::from_str(&response).map(Some).map_err(internal);
                 }
-                let mut active_subscriptions = Vec::new();
-                for (subject, expected) in subscriptions {
-                    let Some(desired) = current_desired_row_tx(transaction, subject).map_err(internal)?
-                    else {
-                        continue;
-                    };
-                    if desired.kind != "subscription" {
-                        continue;
+                let resource_preparation::Inputs { active_subscriptions, normalized_observation, previous, baseline, repository_facts, legacy_collections, changed_fields, repository_changed_fields, recorded_items, discovered, observer_health_is_current, subscription_states, changed, should_record } = match preparation {
+                    Some((fence, mut prepared)) => {
+                        if !fence.current(self, transaction, &prepared) {
+                            return Ok(None);
+                        }
+                        prepared.value.take().expect("validated preparation has a value")?
                     }
-                    let value = serde_json::from_str(&desired.body).map_err(internal)?;
-                    if crate::graph::subscription_spec(&value).as_ref() == Some(expected)
-                        && !expected.stopped
-                    {
-                        active_subscriptions.push((subject.clone(), expected.clone()));
-                    }
-                }
-                let normalized_observation = normalize_resource_observation(
-                    transaction,
-                    &ClaimInput {
-                        subject: resource.into(),
-                        kind: "resource.observed".into(),
-                        actor: None,
-                        fields: BTreeMap::from([("facts".into(), facts.clone())]),
-                        evidence: Vec::new(),
-                        expected_subject: None,
-                        idempotency_key: None,
-                    },
-                )?
-                .expect("a resource observation is normalized");
-                let resource_kind = normalized_observation
-                    .get("kind")
-                    .cloned()
-                    .expect("a normalized resource observation has a kind");
-                let facts = normalized_observation
-                    .get("facts")
-                    .expect("a normalized resource observation has facts");
-                let previous = latest_actual(transaction, resource)
-                    .map_err(internal)?
-                    .and_then(|actual| actual.get("facts").cloned());
-                let baseline = previous.is_none();
-                let previous_object = previous.as_ref().and_then(Value::as_object);
-                let current_object = facts.as_object().ok_or_else(|| {
-                    St3Error::new(
-                        "invalid-resource-observation",
-                        "resource observation facts must be an object",
-                    )
-                })?;
-                // A repository's collections name the items an observation saw. Each item is its
-                // own resource, so the repository resource keeps only its own facts and a change
-                // to one item records only that item.
-                let collection = |field: &str| {
-                    REPOSITORY_COLLECTIONS
-                        .iter()
-                        .any(|(name, _, _)| *name == field)
+                    None => resource_preparation::inputs(transaction, observer, desired_revision,
+                        attempt, resource, &facts, subscriptions)?,
                 };
-                let repository_facts = Value::Object(
-                    current_object
-                        .iter()
-                        .filter(|(field, _)| !collection(field))
-                        .map(|(field, value)| (field.clone(), value.clone()))
-                        .collect(),
-                );
-                let legacy_collections = previous_object
-                    .is_some_and(|previous| previous.keys().any(|field| collection(field)));
-                let mut changed_fields = BTreeSet::new();
-                for field in current_object
-                    .keys()
-                    .chain(previous_object.into_iter().flat_map(serde_json::Map::keys))
-                    .filter(|field| !collection(field))
-                {
-                    if previous_object.and_then(|object| object.get(field)) != current_object.get(field) {
-                        changed_fields.insert(field.clone());
-                    }
-                }
-                let repository_changed_fields = changed_fields.iter().cloned().collect::<Vec<_>>();
-                let mut recorded_items = HashMap::new();
-                for (field, segment, _) in REPOSITORY_COLLECTIONS {
-                    for number in current_object
-                        .get(field)
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|item| item.get("number").and_then(Value::as_u64))
-                    {
-                        let subject = format!("{resource}/{segment}/{number}");
-                        let recorded = latest_actual(transaction, &subject)
-                            .map_err(internal)?
-                            .and_then(|actual| actual.get("facts").cloned());
-                        let observed_at = transaction
-                            .query_row(
-                                &canonical_sql(
-                                    "SELECT accepted_at_unix_ms FROM claims
-                                     WHERE subject=?1 AND kind='resource.observed'
-                                     ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1",
-                                ),
-                                [&subject],
-                                |row| row.get::<_, String>(0),
-                            )
-                            .optional()
-                            .map_err(internal)?
-                            .and_then(|at| at.parse::<u128>().ok())
-                            .unwrap_or_default();
-                        recorded_items.insert(subject, recorded.map(|facts| (facts, observed_at)));
-                    }
-                }
-                let mut discovered = Vec::new();
-                for (field, _, _) in REPOSITORY_COLLECTIONS {
-                    let items = discovered_collection_items(
-                        resource,
-                        field,
-                        previous.as_ref(),
-                        &facts,
-                        &mut |subject| {
-                            recorded_items
-                                .get(subject)
-                                .cloned()
-                                .flatten()
-                                .map(|(facts, _)| facts)
-                        },
-                    );
-                    changed_fields.extend(items.iter().flat_map(|item| item.data_types.iter().cloned()));
-                    discovered.extend(items.into_iter().map(|item| (field, item)));
-                }
-                let changed_fields = changed_fields.into_iter().collect::<Vec<_>>();
-                let observer_health_is_current = latest_actual(transaction, observer)
-                    .map_err(internal)?
-                    .is_some_and(|actual| {
-                        actual.get("state").and_then(Value::as_str) == Some("healthy")
-                            && actual.get("revision").and_then(Value::as_str) == Some(desired_revision)
-                            && actual.get("reason").is_none()
-                    });
-                let mut subscription_states = BTreeMap::new();
-                for (subscription_subject, subscription) in &active_subscriptions {
-                    let target_exists = if subscription.delivery == "message" {
-                        transaction
-                            .query_row(
-                                "SELECT 1 FROM desired WHERE subject=?1 AND kind='agent'",
-                                [&subscription.to],
-                                |_| Ok(()),
-                            )
-                            .optional()
-                            .map_err(internal)?
-                            .is_some()
-                    } else {
-                        true
-                    };
-                    let status = if target_exists { "active" } else { "pending" };
-                    let current_status = latest_actual(transaction, subscription_subject)
-                        .map_err(internal)?
-                        .and_then(|actual| {
-                            actual
-                                .get("state")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned)
-                        });
-                    subscription_states.insert(
-                        subscription_subject.clone(),
-                        (
-                            target_exists,
-                            status,
-                            current_status.as_deref() != Some(status),
-                        ),
-                    );
-                }
-                let changed = baseline || !changed_fields.is_empty() || !discovered.is_empty();
-                let should_record = changed
-                    || legacy_collections
-                    || attempt.is_some()
-                    || !observer_health_is_current
-                    || subscription_states.values().any(|(_, _, changed)| *changed);
+                let resource_kind = normalized_observation.get("kind").cloned()
+                    .expect("a normalized resource observation has a kind");
+                let facts = normalized_observation.get("facts")
+                    .expect("a normalized resource observation has facts");
+                let previous_object = previous.as_ref().and_then(Value::as_object);
+                let current_object = facts.as_object()
+                    .expect("prepared resource facts are an object");
                 if !should_record {
-                    return Ok(ResourceObservationOutcome {
+                    return Ok(Some(ResourceObservationOutcome {
                         baseline,
                         changed_fields,
                         observation_claim: None,
                         message_subjects: Vec::new(),
-                    });
+                    }));
                 }
                 let now = write_time(transaction, &self.origin).map_err(internal)?;
                 let sequence = next_replica_sequence(transaction, &self.origin).map_err(internal)?;
@@ -16685,12 +16666,34 @@ impl Store {
                         ],
                     )
                     .map_err(internal)?;
-                Ok(outcome)
+                Ok(Some(outcome))
                 })()?;
                 check_observer_completion(transaction, observer, desired_revision, current)?;
                 Ok(outcome)
             })
-            .map_err(|error| St3Error::new("internal", error))?
+            .map_err(|error| St3Error::new("internal", error));
+        #[cfg(test)]
+        if let Some((elapsed, work)) = measurement
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            resource_preparation::COUNTS
+                .with(|counts| counts.borrow_mut().writer.push((canonical, elapsed, work)));
+        }
+        #[cfg(test)]
+        resource_preparation::COUNTS.with(|counts| {
+            let mut counts = counts.borrow_mut();
+            if cached.load(std::sync::atomic::Ordering::Relaxed) {
+                counts.cached += 1;
+            } else if !canonical && matches!(&result, Ok(Ok(Some(_)))) {
+                counts.fast += 1;
+            }
+            counts.acknowledged.push(enqueued.elapsed());
+            counts
+                .until_callback
+                .push(pending.into_inner().unwrap_or_else(PoisonError::into_inner));
+        });
+        result?
     }
 
     /// Every mission request that a subscription recorded, oldest first, with its disposition.
@@ -20668,7 +20671,7 @@ fn select_desired_row(rows: Vec<(String, String, String)>) -> Result<Option<Desi
 }
 
 fn current_desired_row_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<Option<DesiredRow>> {
     transaction
@@ -20984,7 +20987,7 @@ fn validate_claim_cardinality(
 }
 
 fn normalize_resource_observation(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     input: &ClaimInput,
 ) -> Result<Option<BTreeMap<String, Value>>, St3Error> {
     if input.kind != "resource.observed" {
@@ -21103,7 +21106,7 @@ fn resource_facts(fields: &BTreeMap<String, Value>) -> Result<BTreeMap<String, V
 }
 
 fn latest_resource_kind(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<Option<String>, St3Error> {
     let bodies = {
@@ -28010,6 +28013,28 @@ mission "garden" state="ready" {
             .unwrap()
     }
 
+    /// A publication's freshness is timed from this node's own commits: a claim another node
+    /// wrote, with that node's clock, is not one.
+    #[test]
+    fn the_first_local_commit_after_a_cut_skips_claims_another_node_wrote() {
+        let member = key();
+        let (_, a, stores) = fleet(&[("b", &member)]);
+        let b = &stores[0];
+        let before = b.index().unwrap();
+        note(&a, "written on a");
+        sync(&a, b);
+        let replicated = b.index().unwrap();
+        assert!(replicated > before, "a's claim reached b");
+        assert_eq!(b.first_local_commit_after(before, replicated).unwrap(), None);
+        let local = note(b, "written on b");
+        let through = b.index().unwrap();
+        assert_eq!(
+            b.first_local_commit_after(before, through).unwrap(),
+            Some(local.accepted_at_unix_ms)
+        );
+        assert_eq!(b.first_local_commit_after(through, through).unwrap(), None);
+    }
+
     /// The anchor `a` founds the fleet and admits each named member.
     fn fleet(members: &[(&str, &Arc<MemberKey>)]) -> (Arc<MemberKey>, Store, Vec<Store>) {
         let anchor = key();
@@ -28786,6 +28811,8 @@ thread_local! {
     static STATUS_AFTER_DESIRED_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Steps whose queue, timing and wake a read enriched, so a test can see a read's work.
     pub(crate) static STEPS_ENRICHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Pinned mission definitions a read parsed, so a test can see one parse serve a whole run.
+    pub(crate) static DEFINITIONS_PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The SQLite work each work action did inside its writer job, by idempotency key, so a test
@@ -29541,7 +29568,7 @@ fn classify_replicated_claim_with_registry(
             ),
         )
     })?;
-    if let Err(error) = registry.validate_claim(&claim.subject, &claim.kind, &fields) {
+    if let Err(error) = registry.validate_replicated_claim(&claim.subject, &claim.kind, &fields) {
         // A peer may already publish a field introduced by a newer schema. Keep
         // that authenticated record retryable so an upgrade can admit the
         // original claim without replacing or rewriting it.
@@ -33863,6 +33890,17 @@ fn enrich_step_queue_at(
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
 ) -> rusqlite::Result<()> {
+    enrich_step_queue_cached(connection, view, snapshot_unix_ms, &mut PinnedDefinitions::default())
+}
+
+/// [`enrich_step_queue_at`] for the steps of one read: the pinned definitions already parsed for
+/// an earlier step of it are reused, not parsed again for each step.
+fn enrich_step_queue_cached(
+    connection: &Connection,
+    view: &mut StepRunView,
+    snapshot_unix_ms: u128,
+    definitions: &mut PinnedDefinitions,
+) -> rusqlite::Result<()> {
     #[cfg(test)]
     STEPS_ENRICHED.with(|enriched| enriched.set(enriched.get() + 1));
     apply_effective_step_state(connection, view, snapshot_unix_ms)?;
@@ -33882,7 +33920,7 @@ fn enrich_step_queue_at(
     enrich_step_summaries_at(connection, view, snapshot_unix_ms)?;
     enrich_step_nudge_at(connection, view, snapshot_unix_ms)?;
     enrich_step_wake_at(connection, view, snapshot_unix_ms)?;
-    enrich_step_definition(connection, view)?;
+    enrich_step_definition_cached(connection, view, definitions)?;
     adhoc_work::enrich_handoff(connection, view, snapshot_unix_ms)?;
     person_work::enrich_responses(connection, view)
 }
@@ -34002,13 +34040,28 @@ fn enrich_step_summaries_at(
     Ok(())
 }
 
+#[cfg(test)]
 fn enrich_step_queue_for_reconcile_at(
     connection: &Connection,
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
 ) -> rusqlite::Result<()> {
+    enrich_step_queue_for_reconcile_cached(
+        connection,
+        view,
+        snapshot_unix_ms,
+        &mut PinnedDefinitions::default(),
+    )
+}
+
+fn enrich_step_queue_for_reconcile_cached(
+    connection: &Connection,
+    view: &mut StepRunView,
+    snapshot_unix_ms: u128,
+    definitions: &mut PinnedDefinitions,
+) -> rusqlite::Result<()> {
     apply_effective_step_state(connection, view, snapshot_unix_ms)?;
-    enrich_step_definition(connection, view)?;
+    enrich_step_definition_cached(connection, view, definitions)?;
     adhoc_work::enrich_handoff(connection, view, snapshot_unix_ms)?;
     person_work::enrich_responses(connection, view)
 }
@@ -34043,8 +34096,38 @@ fn pinned_generation_mission_tx(
 }
 
 fn enrich_step_definition(connection: &Connection, view: &mut StepRunView) -> rusqlite::Result<()> {
-    if let Some(mission) = pinned_generation_mission_tx(connection, &view.generation)? {
-        apply_step_definition(view, &mission);
+    enrich_step_definition_cached(connection, view, &mut PinnedDefinitions::default())
+}
+
+/// The pinned definitions one read has parsed, by generation. A generation's definition is the
+/// whole mission, so parsing it again for each of the run's steps costs the square of the run's
+/// size (4,200 steps: 170 s in a debug build).
+#[derive(Default)]
+struct PinnedDefinitions(BTreeMap<String, Option<MissionSpec>>);
+
+impl PinnedDefinitions {
+    fn of(
+        &mut self,
+        connection: &Connection,
+        generation: &str,
+    ) -> rusqlite::Result<Option<&MissionSpec>> {
+        if !self.0.contains_key(generation) {
+            #[cfg(test)]
+            DEFINITIONS_PARSED.with(|parsed| parsed.set(parsed.get() + 1));
+            let mission = pinned_generation_mission_tx(connection, generation)?;
+            self.0.insert(generation.to_owned(), mission);
+        }
+        Ok(self.0[generation].as_ref())
+    }
+}
+
+fn enrich_step_definition_cached(
+    connection: &Connection,
+    view: &mut StepRunView,
+    definitions: &mut PinnedDefinitions,
+) -> rusqlite::Result<()> {
+    if let Some(mission) = definitions.of(connection, &view.generation)? {
+        apply_step_definition(view, mission);
     }
     Ok(())
 }
@@ -35763,9 +35846,10 @@ fn mission_run_view_and_definition_tx(
     } else {
         pinned_generation_mission_tx(connection, &view.generation)?
     };
+    let mut definitions = PinnedDefinitions::default();
     for step in &mut view.steps {
         if presentation {
-            enrich_step_queue(connection, step)?;
+            enrich_step_queue_cached(connection, step, now_ms(), &mut definitions)?;
         } else {
             let snapshot_unix_ms = now_ms();
             apply_effective_step_state(connection, step, snapshot_unix_ms)?;
@@ -36117,8 +36201,9 @@ fn run_generation_view_tx(
     view.steps = statement
         .query_map([generation_id], step_run_from_row)?
         .collect::<Result<Vec<_>, _>>()?;
+    let mut definitions = PinnedDefinitions::default();
     for step in &mut view.steps {
-        enrich_step_queue(connection, step)?;
+        enrich_step_queue_cached(connection, step, now_ms(), &mut definitions)?;
     }
     Ok(view)
 }
@@ -46361,6 +46446,100 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
             unresolved[0].error_code.as_deref(),
             Some("unknown-claim-field")
         );
+    }
+
+    #[test]
+    fn future_arrangement_vocabulary_waits_on_replication_but_is_refused_locally() {
+        let subject = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
+        for (operation, code) in [
+            (json!({"op":"future.rename","name":"new"}), "invalid-arrangement-operations"),
+            (json!({"op":"subject.place","subject":"future/item","folder":null,"key":"a0"}), "invalid-subject-reference"),
+        ] {
+            let source = Store::open_memory("source").unwrap();
+            let mut input = ClaimInput {
+                subject: subject.into(), kind: "arrangement.edited".into(),
+                actor: Some("person/ada".into()),
+                fields: BTreeMap::from([
+                    ("owner".into(), json!("person/ada")),
+                    ("operations".into(), json!([{"op":"create","name":"original"}])),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            };
+            source.append_claim(&input).unwrap();
+            input.fields.insert("operations".into(), json!([operation.clone()]));
+            assert_eq!(source.append_claim(&input).unwrap_err().code, code);
+            let mut exchange = exchange_from(&source, &ReplicationInventory::default());
+            let candidate = rewrite_envelope(&exchange.envelopes[0], |payload| {
+                let claim = &mut payload.batch.claims[0];
+                claim.body["fields"]["operations"] = json!([operation]);
+                claim.id = claim_hash(&claim.batch_id, &claim.subject, &claim.kind,
+                    &claim.origin, claim.actor.as_deref(), &claim.body, &claim.predecessors).unwrap();
+            });
+            exchange.envelopes = vec![candidate.clone()];
+            exchange.inventory.envelopes = vec![ReplicaEnvelopeId {
+                writer: candidate.writer.clone(), sequence: candidate.sequence, hash: candidate.hash.clone(),
+            }];
+            let target = Store::open_memory("target").unwrap();
+            let admission = receive_and_project(&target, "source", &exchange);
+            assert_eq!((admission.valid, admission.unknown, admission.invalid), (0, 1, 0));
+            let records = target.replica_records(true).unwrap();
+            assert_eq!(records[0].state, "unknown");
+            assert_eq!(records[0].error_code.as_deref(), Some("unknown-claim-field"));
+            assert!(target.latest_claim(subject, None).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn arrangement_vocabulary_upgrade_applies_the_original_waiting_claim() {
+        let subject = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
+        for operation in [
+            json!({"op":"rename","name":"upgraded"}),
+            json!({"op":"subject.place","subject":"mission/future","folder":null,"key":"a0"}),
+        ] {
+            let source = Store::open_memory("source").unwrap();
+            let mut input = ClaimInput {
+                subject: subject.into(), kind: "arrangement.edited".into(), actor: Some("person/ada".into()),
+                fields: BTreeMap::from([("owner".into(), json!("person/ada")),
+                    ("operations".into(), json!([{"op":"create","name":"original"}]))]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            };
+            source.append_claim(&input).unwrap();
+            input.fields.insert("operations".into(), json!([operation.clone()]));
+            let claim = source.append_claim(&input).unwrap();
+            let exchange = exchange_from(&source, &ReplicationInventory::default());
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("claims.sqlite3");
+            let older = Store::open(&path, "target").unwrap();
+            let mut registry = st3_schema::registry().clone();
+            if operation["op"] == "rename" {
+                registry.arrangement_operations.retain(|tag| tag != "rename");
+            } else {
+                registry.subjects.remove("mission").unwrap();
+            }
+            older.set_claim_registry(registry);
+            let admission = receive_and_project(&older, "source", &exchange);
+            assert_eq!((admission.valid, admission.unknown, admission.invalid), (1, 1, 0));
+            let records = older.replica_records(true).unwrap();
+            assert_eq!(records[0].state, "unknown");
+            assert_eq!(records[0].claim_id.as_deref(), Some(claim.id.as_str()));
+            assert_eq!(records[0].error_code.as_deref(), Some("unknown-claim-field"));
+            drop(older);
+
+            let upgraded = Store::open(&path, "target").unwrap();
+            let admission = upgraded.validate_replication_backlog().unwrap();
+            assert_eq!(admission.invalid, 0);
+            assert!(upgraded.replica_records(true).unwrap().is_empty());
+            upgraded.rebuild_claim_projections().unwrap();
+            let resource = upgraded.arrangement(subject, upgraded.index().unwrap()).unwrap().unwrap();
+            if operation["op"] == "rename" {
+                assert_eq!(resource["body"]["name"]["value"], "upgraded");
+                assert_eq!(resource["body"]["name"]["revision"], claim.id);
+            } else {
+                assert_eq!(resource["body"]["placements"]["mission/future"]["value"]["key"], "a0");
+                assert_eq!(resource["body"]["placements"]["mission/future"]["revision"], claim.id);
+            }
+            assert_eq!(upgraded.latest_claim(subject, None).unwrap().unwrap().id, claim.id);
+        }
     }
 
     #[test]

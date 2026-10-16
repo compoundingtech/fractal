@@ -386,12 +386,12 @@ export const PersonStepParameters = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonStepParameters = typeof PersonStepParameters.Type
 export type PersonStepParametersEncoded = typeof PersonStepParameters.Encoded
 
-/** A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers (allow or deny). */
+/** A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as a JSON object of each question's text to its chosen label (several comma-separated for a multi-select) in place of answer; a screen prompt's own answer (use, use-all, skip, trust, exit, quit). */
 export const PromptRespondParameters = /*#__PURE__*/ (() => Schema.Struct({
-  "answer": Schema.Literals(["allow","deny"]),
+  "answer": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(16384)),
   "episode": Schema.String,
   "target_id": Id
-}).annotate({ identifier: "PromptRespondParameters", description: "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers (allow or deny)." }))()
+}).annotate({ identifier: "PromptRespondParameters", description: "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as a JSON object of each question's text to its chosen label (several comma-separated for a multi-select) in place of answer; a screen prompt's own answer (use, use-all, skip, trust, exit, quit)." }))()
 export type PromptRespondParameters = typeof PromptRespondParameters.Type
 export type PromptRespondParametersEncoded = typeof PromptRespondParameters.Encoded
 
@@ -2499,6 +2499,20 @@ export const TimelineViewModelChange = /*#__PURE__*/ (() => Schema.Struct({
 export type TimelineViewModelChange = typeof TimelineViewModelChange.Type
 export type TimelineViewModelChangeEncoded = typeof TimelineViewModelChange.Encoded
 
+/** A view on a visible OMP custom_message with no more specific view (its block keeps its shape), and on the `status` blocks of the administrative records model_usage, session_init and ttsr_injection. `kind` is the native customType (or record type); attribution, content and details are the native values, each present only when the record carries it, so attribution is never inferred. Content and details are bounded separately to the native-value limit, an over-limit one becoming marked JSON text; the complete record stays in the raw payload. */
+export const TimelineViewOmpEvent = /*#__PURE__*/ (() => Schema.Struct({
+  /** Native attribution, any JSON */
+  "attribution": optionalKey(Schema.Unknown).annotate({ description: "Native attribution, any JSON" }),
+  /** Native content, any JSON */
+  "content": optionalKey(Schema.Unknown).annotate({ description: "Native content, any JSON" }),
+  /** Native details, any JSON */
+  "details": optionalKey(Schema.Unknown).annotate({ description: "Native details, any JSON" }),
+  "kind": Schema.String,
+  "type": Schema.Literal("omp_event")
+}).annotate({ identifier: "TimelineViewOmpEvent", description: "A view on a visible OMP custom_message with no more specific view (its block keeps its shape), and on the `status` blocks of the administrative records model_usage, session_init and ttsr_injection. `kind` is the native customType (or record type); attribution, content and details are the native values, each present only when the record carries it, so attribution is never inferred. Content and details are bounded separately to the native-value limit, an over-limit one becoming marked JSON text; the complete record stays in the raw payload." }))()
+export type TimelineViewOmpEvent = typeof TimelineViewOmpEvent.Type
+export type TimelineViewOmpEventEncoded = typeof TimelineViewOmpEvent.Encoded
+
 export const TimelineViewRead = /*#__PURE__*/ (() => Schema.Struct({
   "intent": optionalKey(Schema.String),
   "path": Schema.String,
@@ -2679,7 +2693,8 @@ export const TimelineView = /*#__PURE__*/ (() => Schema.Union([
   TimelineViewToolStart,
   TimelineViewResetBoundary,
   TimelineViewCredentialPin,
-  Schema.Struct({ "type": unknownCase(["bash","edit","write","read","search","todo","ask","task","hub","eval","generic","irc","job","skill","compaction","assistant_error","model_change","thinking_level","title","session_exit","tool_start","reset_boundary","credential_pin"]) })
+  TimelineViewOmpEvent,
+  Schema.Struct({ "type": unknownCase(["bash","edit","write","read","search","todo","ask","task","hub","eval","generic","irc","job","skill","compaction","assistant_error","model_change","thinking_level","title","session_exit","tool_start","reset_boundary","credential_pin","omp_event"]) })
 ], { mode: "oneOf" }).annotate({ identifier: "TimelineView", description: "Parsed typed projection of a block, discriminated by type. Known types are closed; future types keep JSON through the fallback." }))()
 export type TimelineView = typeof TimelineView.Type
 export type TimelineViewEncoded = typeof TimelineView.Encoded
