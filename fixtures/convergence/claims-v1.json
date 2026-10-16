@@ -8000,43 +8000,6 @@
     "projection": "work",
     "wakes_reconciler": true
   },
-  "work.wait-ended": {
-    "kind": "work.wait-ended",
-    "subjects": [
-      "step-run"
-    ],
-    "fields": {
-      "attempt": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "message": {
-        "value_type": "subject-reference",
-        "required": false,
-        "immutable": false,
-        "reference": true
-      },
-      "reason": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
-  },
   "workspace.observed": {
     "kind": "workspace.observed",
     "subjects": [
