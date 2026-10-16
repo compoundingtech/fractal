@@ -435,7 +435,8 @@ impl Store {
                 self.origin(),
                 peers,
                 &self.smalltalk.schema_digest(),
-            )
+            )?;
+            validate_claim_input(&input)
         };
         append_claim_with_commit_context(
             &self.graph,
@@ -561,17 +562,53 @@ mod tests {
     fn successor_must_exist_and_retry_cannot_change_it() {
         let store = Store::open_memory("orchid").unwrap();
         let (token, _) = declare_custody_pair(&store);
-        for successor in [SUBJECT, "agent/example/missing", "person/avery"] {
+        for successor in [SUBJECT, "agent/example/missing", "person/avery", "agent/"] {
             let error = store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token, None,
                 successor, &[], Some(successor)).unwrap_err();
             assert_eq!(error.code,"invalid-custody-successor");
             assert_eq!(error.details["applied"],"none");
+            assert!(store.agent_retirement(SUBJECT).unwrap().is_none());
         }
-        store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token, None,
+        let (first, appended) = store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token, None,
             "stable-retirement", &[], Some("agent/example/successor")).unwrap();
+        assert!(appended);
+        let (repeat, appended) = store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token, None,
+            "stable-retirement", &[], Some("agent/example/successor")).unwrap();
+        assert!(!appended);
+        assert_eq!(repeat.id, first.id);
         let error = store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token, None,
             "stable-retirement", &[], Some("agent/example/missing")).unwrap_err();
         assert_eq!(error.code,"idempotency-mismatch");
+    }
+
+    #[test]
+    fn retirement_writer_still_validates_non_successor_fields_before_append() {
+        let store = Store::open_memory("orchid").unwrap();
+        let (token, _) = declare_custody_pair(&store);
+        let input = ClaimInput {
+            subject: SUBJECT.into(), kind: KIND.into(), actor: Some(ACTOR.into()),
+            fields: BTreeMap::from([
+                ("reason".into(), json!("Work finished")),
+                ("retired_by".into(), json!(42)),
+                ("declaration".into(), json!(token)),
+                ("owner_host".into(), json!("orchid")),
+                ("successor".into(), json!("agent/example/successor")),
+            ]), evidence: vec![], expected_subject: None,
+            idempotency_key: Some("invalid-retirement-field".into()),
+        };
+        // Mirror the production successor-then-registry admission order; this exercises
+        // the shared append seam, not the public retirement wrapper's own closure.
+        let admission = |connection: &Connection| {
+            check_successor(connection, SUBJECT, "agent/example/successor")?;
+            validate_claim_input(&input)
+        };
+        let error = append_claim_with_commit_context(
+            &store.graph, &input, None, None, None, None,
+            ClaimCommitContext { admission: Some(&admission), retirement_writer: true, ..Default::default() },
+        ).unwrap_err();
+        assert_eq!(error.code, "invalid-claim-field");
+        assert!(store.agent_retirement(SUBJECT).unwrap().is_none());
+        assert!(store.operation_claim("invalid-retirement-field").unwrap().is_none());
     }
 
 

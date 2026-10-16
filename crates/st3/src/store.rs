@@ -61163,7 +61163,12 @@ fn append_claim_with_commit_context(
         retirements::admit_mail_claim(connection, input)?;
         Ok(())
     };
-    validate_claim_input(input)?;
+    // Retirement alone validates in its serialized admission after the operation replay
+    // check. Its successor eligibility refusal must win over a generic field-reference
+    // error, while a changed idempotency key must still report a mismatch first.
+    if !context.retirement_writer {
+        validate_claim_input(input)?;
+    }
     if local_retention(&input.kind)
         || (input.actor.is_none() && system_local_retention(&input.kind))
     {
