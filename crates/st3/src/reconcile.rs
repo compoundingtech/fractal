@@ -23057,6 +23057,51 @@ agent "good" { workspace "/tmp"; command "true" }
     }
 
     #[test]
+    fn headless_root_settles_when_its_pty_ends_between_incremental_passes() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"app\" {\n  workspace \"/tmp\"\n  restart \"always\"\n  pty \"shell\" { command \"sleep infinity\" }\n}\n",
+            "headless-root-pty",
+        );
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        )
+        .skipping_unneeded(true);
+        reconciler.reconcile_once().unwrap();
+        let runtime_id = runtime
+            .started_members
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|member| member.terminal)
+            .map(|member| member.runtime_id.clone())
+            .expect("the pty task launches");
+        let running = RuntimeObservation {
+            runtime_id: runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("shell-one".into()),
+        };
+        runtime.ptys.lock().unwrap().push(running.clone());
+        reconciler.reconcile_once().unwrap();
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        // Only the pty's own state changes: the root's stop item must be needed again.
+        runtime.ptys.lock().unwrap().clear();
+        for _ in 0..3 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
     fn headless_root_retries_after_its_exec_could_not_be_observed() {
         let (store, runtime, reconciler) = headless_root_with_running_execs(&["web"]);
         runtime
@@ -23071,6 +23116,52 @@ agent "good" { workspace "/tmp"; command "true" }
         end_exec(&runtime, "exec.node.app.web", "stopped");
         reconciler.reconcile_once().unwrap();
         assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn a_later_fault_or_decision_claim_does_not_unobserve_a_running_root() {
+        // Negative control for the settle-absent filter: a root observed running keeps that
+        // status across a later claim that carries none, so its stop still reaches the runtime
+        // and the root is not settled absent.
+        let (store, runtime, reconciler) = headless_root_with_running_execs(&["web"]);
+        end_exec(&runtime, "exec.node.app.web", "stopped");
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: "pty.node.app".into(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("app-one".into()),
+        });
+        reconciler
+            .record_once(
+                "agent/node.app",
+                "runtime.observed",
+                BTreeMap::from([
+                    ("status".into(), Value::String("running".into())),
+                    ("runtime_id".into(), Value::String("pty.node.app".into())),
+                    ("reachability".into(), Value::String("reachable".into())),
+                ]),
+            )
+            .unwrap();
+        reconciler
+            .record_once(
+                "agent/node.app",
+                "runtime.reconcile-decision",
+                BTreeMap::from([
+                    ("decision".into(), Value::String("member-fault".into())),
+                    ("reason".into(), Value::String("a later fault".into())),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("running"));
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        assert!(
+            runtime.stops.lock().unwrap().iter().any(|id| id == "pty.node.app"),
+            "stops: {:?}",
+            runtime.stops.lock().unwrap()
+        );
     }
 
     #[test]
