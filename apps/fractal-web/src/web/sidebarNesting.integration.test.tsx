@@ -6,7 +6,7 @@ import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
-import { nestingFolderId, nestingFolderSource, nestingSource } from './sidebarNesting.fixture.ts'
+import { nestingFolderSource, nestingSource } from './sidebarNesting.fixture.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 it('mounts authoritative nested folders in the live route and opens the real agent row', async () => {
@@ -26,16 +26,16 @@ it('mounts authoritative nested folders in the live route and opens the real age
     await act(async () => root.render(<DataSourceProvider source={nestingSource} registry={registry}><LiveAgentWorkspace folderSource={nestingFolderSource} /></DataSourceProvider>))
     const tree = host.querySelector('[aria-label="Agents and folders"]')!
     expect(tree).not.toBeNull()
-    const row = tree.querySelector(`[data-key="folder:${nestingFolderId('a')}"]`)!
+    const row = tree.querySelector('[data-key="folder:00000000-0000-7000-8000-00000000000a"]')!
     const expand = async (id: string) => {
       const button = tree.querySelector<HTMLButtonElement>(`[data-key="${id}"] button[slot="chevron"]`)!
       expect(button).not.toBeNull()
       await act(async () => button.click())
     }
     expect(row.getAttribute('aria-level')).toBe('1')
-    await expand(`folder:${nestingFolderId('a')}`)
-    expect(tree.querySelector(`[data-key="folder:${nestingFolderId('b')}"]`)!.getAttribute('aria-level')).toBe('2')
-    await expand(`folder:${nestingFolderId('b')}`)
+    await expand('folder:00000000-0000-7000-8000-00000000000a')
+    expect(tree.querySelector('[data-key="folder:00000000-0000-7000-8000-00000000000b"]')!.getAttribute('aria-level')).toBe('2')
+    await expand('folder:00000000-0000-7000-8000-00000000000b')
     const agent = tree.querySelector<HTMLElement>('[data-key="agent/test/one"]')!
     expect(agent.getAttribute('aria-level')).toBe('3')
     expect(agent.querySelector('[data-testid="taste-agent-row"]')).not.toBeNull()

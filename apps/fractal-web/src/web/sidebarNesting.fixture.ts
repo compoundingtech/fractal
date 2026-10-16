@@ -1,13 +1,19 @@
-import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { Agent, Arrangement, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import type { Arrangement as ArrangementModel } from '@smalltalk/st3-client'
+import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import vectors from '../../../../fixtures/clients/sidebar-v2.json'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { arrangementSidebarDoc, type FolderState } from '../folders/client.ts'
-import { canonicalSidebarVector } from '../folders/sidebarV2.fixture.ts'
 import type { EditOutcome } from '../folders/edit.ts'
 
 const vector = vectors.cases[1]!
-export const { arrangement, folderId: nestingFolderId } = canonicalSidebarVector(vector)
+const decoded = Schema.decodeUnknownSync(Schema.toEncoded(Arrangement))(vector.arrangement)
+const arrangement: ArrangementModel = {
+  id: decoded.id, kind: decoded.kind, owner: decoded.owner, body: decoded.body,
+  deleted: decoded.deleted, revision: decoded.revision, updated_at: decoded.updated_at,
+  ...(decoded.resolved == null ? {} : { resolved: decoded.resolved }),
+}
 export const nestingFolderSource = Atom.make<FolderState>({
   arrangement, doc: arrangementSidebarDoc(arrangement), phase: 'fixture', readOnly: true,
   edit: async (): Promise<EditOutcome> => ({ _tag: 'Refused', reason: { _tag: 'Unknown' }, detail: 'Read-only fixture.', targets: [] }),
