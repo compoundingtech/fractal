@@ -9,10 +9,15 @@ export async function strictStoryGuard(page, base) {
   originalOn('pageerror', error => errors.push({ kind: 'page', message: error.message }))
   await page.addInitScript(() => {
     window.__dt10StrictEvents = []
+    // Timing only: when Storybook reports each render phase, never read by the strict checks.
+    window.__dt10StoryMarks = []
     const timer = setInterval(() => {
       const channel = window.__STORYBOOK_ADDONS_CHANNEL__
       if (!channel) return
       clearInterval(timer)
+      window.__dt10StoryMarks.push(['channelReady', performance.now()])
+      channel.on('storyRenderPhaseChanged', payload => window.__dt10StoryMarks.push([String(payload?.newPhase), performance.now()]))
+      channel.on('storyFinished', () => window.__dt10StoryMarks.push(['storyFinished', performance.now()]))
       for (const name of ['storyFinished', 'playFunctionThrewException', 'storyThrewException', 'storyErrored']) channel.on(name, payload => window.__dt10StrictEvents.push({ name, payload: name === 'storyFinished' ? { storyId: payload?.storyId, status: payload?.status, reporters: payload?.reporters?.map(({ type, status }) => ({ type, status })) } : { message: typeof payload === 'string' ? payload : payload?.message, stack: payload?.stack } }))
     }, 5)
   })

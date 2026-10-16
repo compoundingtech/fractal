@@ -6,6 +6,7 @@ import { strictStoryGuard } from './details-strict-story-guard.mjs'
 import { availableParallelism } from 'node:os'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
+import { phaseTimings } from './kit-play-phases.mjs'
 
 // Own an ephemeral localhost server: missing assets remain real, standard 404s.
 const [buildDirectory, outputDirectory] = process.argv.slice(2)
@@ -104,6 +105,8 @@ try {
         throw new Error('storyFinished evidence belongs to a different story')
       }
       row.timings.assertionsMilliseconds = performance.now() - storyReady
+      // Where the wait for storyFinished went, from the page's own clock; a failed read leaves it out.
+      Object.assign(row.timings, phaseTimings(await page.evaluate(() => window.__dt10StoryMarks ?? []).catch(() => [])))
       row.pass = true
     } catch (error) {
       row.error = String(error)
