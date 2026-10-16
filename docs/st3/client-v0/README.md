@@ -59,11 +59,13 @@ Pairing determines the device, person and grant. A single durable transaction wr
 the sanitized node-local `client.launch`, `client.js-error`, `client.native-crash` or
 `client.hang` observations and retry receipts. Only then does the envelope return
 `acknowledged_event_ids`; repeated device/event IDs are acknowledged without another
-observation, even across payload kinds. Receipts remain for 30 days independently of
-observation trimming. Admission allows 256 new events per device per minute; retries
-do not consume that allowance. These observations never replicate desired state.
-Their Local retention is declared in `crates/st3-schema/retention.toml`, alongside
-the other node-local observations; schema registration reads that shared policy.
+observation, even across payload kinds. Diagnostics observations have a 7-day local
+retention window; server retry/deduplication receipts remain for 30 days independently
+of observation trimming. Admission allows 256 new events per device per minute;
+retries do not consume that allowance. These observations never replicate desired
+state. Their Local retention is declared in `crates/st3-schema/retention.toml`,
+alongside the other node-local observations; schema registration reads that shared
+policy. This distinction does not change either retention window or runtime behavior.
 
 The receipt table and its indexes are installed idempotently on every store open,
 including an existing storage-version-19 database. This is backward-compatible
