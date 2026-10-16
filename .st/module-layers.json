@@ -7,7 +7,6 @@
     ["peer", "api"],
     ["rollout", "store"],
     ["rollout", "suspension"],
-    ["suspension", "store"],
-    ["tiles", "sekrets"]
+    ["suspension", "store"]
   ]
 }
