@@ -241,7 +241,7 @@ fn spawn<R: Send + Sync + 'static>(
             list(&store).note_fold();
             let reader = store.clone();
             let folded = tokio::task::spawn_blocking(move || {
-                crate::task_cpu::blocking(label, || {
+                crate::task_cpu::profiled_blocking(label, || {
                     let list = list(&reader);
                     let (base, generation) = list.base();
                     let folded = fold(&reader, base.as_deref());

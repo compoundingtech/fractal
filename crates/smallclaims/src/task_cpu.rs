@@ -156,7 +156,25 @@ async fn measured<F: Future>(name: &'static str, future: F, metrics: &Instrument
 /// Measure one blocking invocation, and label any writer work it performs.
 pub fn blocking<T>(name: &'static str, work: impl FnOnce() -> T) -> T {
     if !ENABLED.load(Ordering::Relaxed) {
+        return work();
+    }
+    let _scope = enabled_blocking_scope(name);
+    work()
+}
+
+/// Add metrics while retaining an existing synchronous profile/performance scope.
+pub fn profiled_blocking<T>(name: &'static str, work: impl FnOnce() -> T) -> T {
+    if !ENABLED.load(Ordering::Relaxed) {
         return crate::profile::task(name, work);
+    }
+    let _scope = enabled_blocking_scope(name);
+    work()
+}
+
+/// Add metrics while retaining a pre-existing performance-only callback scope.
+pub fn performance_blocking<T>(name: &'static str, work: impl FnOnce() -> T) -> T {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return crate::performance::task(name, work);
     }
     let _scope = enabled_blocking_scope(name);
     work()
@@ -234,8 +252,16 @@ mod tests {
         }).await;
         blocking("test.disabled.blocking", || {
             assert!(!MEASURING.with(Cell::get));
-            // Existing /performance attribution is independent of OTel export.
-            assert_eq!(crate::performance::current().unwrap().kind(), "test.disabled.blocking");
+            assert!(crate::performance::current().is_none());
+            assert!(crate::profile::current().is_none());
+        });
+        profiled_blocking("test.baseline.profile", || {
+            assert!(!MEASURING.with(Cell::get));
+            assert_eq!(crate::performance::current().unwrap().kind(), "test.baseline.profile");
+        });
+        performance_blocking("test.baseline.performance", || {
+            assert!(!MEASURING.with(Cell::get));
+            assert_eq!(crate::performance::current().unwrap().kind(), "test.baseline.performance");
         });
         {
             let scope = blocking_scope("test.disabled.lexical");

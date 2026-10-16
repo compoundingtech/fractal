@@ -25959,7 +25959,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: st3::config::Li
         };
         let pass = store.clone();
         match pass.connection.write_workers().spawn_blocking(move || {
-            st3::task_cpu::blocking("account_limits.enforce", || {
+            st3::task_cpu::profiled_blocking("account_limits.enforce", || {
                 let now = now_ms();
                 let check = pass.account_limits_check(now, policy.fresh_ms)?;
                 let outcome = pass.enforce_account_limits(&policy, now)?;
@@ -26066,7 +26066,7 @@ fn retry_projection_contention_observed(
             // Only this task schedules these attempts. The existing projection mutex also
             // serializes them with receive/wake passes. Store ownership ends at attempt return.
             let result = store.connection.write_workers().spawn_blocking(move || {
-                st3::task_cpu::blocking("replication.retry_projection", || {
+                st3::task_cpu::profiled_blocking("replication.retry_projection", || {
                 let result = store.project_replication_backlog_unless_catching_up();
                 (result, store.projection_contention_generation(), store.replication_projection_deferred())
                 })
@@ -26614,7 +26614,7 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
     loop {
         let page_store = store.clone();
         let result = page_store.connection.write_workers().spawn_blocking(move || {
-            st3::task_cpu::blocking("maintenance.coordination_counts", || {
+            st3::task_cpu::profiled_blocking("maintenance.coordination_counts", || {
                 page_store.advance_coordination_counts()
             })
         }).await;
@@ -26635,7 +26635,7 @@ async fn copy_stop_deferral_history(store: Arc<Store>) {
     loop {
         let scan_store = store.clone();
         let result = tokio::task::spawn_blocking(move || {
-            st3::task_cpu::blocking("maintenance.stop_deferral_history", || {
+            st3::task_cpu::profiled_blocking("maintenance.stop_deferral_history", || {
                 scan_store.backfill_stop_deferral_history(|| {
                     std::thread::sleep(Duration::from_millis(10))
                 })
@@ -26817,7 +26817,7 @@ async fn expire_completed_responses(
         clock_deferred = false;
         let clean_store = store.clone();
         match clean_store.connection.write_workers().spawn_blocking(move || {
-            st3::task_cpu::blocking("maintenance.response_expiry", || {
+            st3::task_cpu::profiled_blocking("maintenance.response_expiry", || {
                 clean_store.cleanup_idempotency(now)
             })
         })
@@ -27122,7 +27122,7 @@ async fn catch_up_account_limits(store: Arc<Store>, notify: Arc<Notify>) {
     loop {
         let page_store = store.clone();
         let more = page_store.connection.write_workers().spawn_blocking(move || {
-            st3::task_cpu::blocking("account_limits.catch_up", || {
+            st3::task_cpu::profiled_blocking("account_limits.catch_up", || {
                 page_store.catch_up_account_limits(st3::store::LIMITS_CATCH_UP_PAGE)
             })
         })
@@ -27179,7 +27179,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         let observation_store = store.clone();
         let max_per_subject_kind = observations.max_per_subject_kind;
         let trimmed = observation_store.connection.write_workers().spawn_blocking(move || {
-            st3::task_cpu::blocking("observations.trim", || {
+            st3::task_cpu::profiled_blocking("observations.trim", || {
                 observation_store.trim_local_observations(
                     now_ms().saturating_sub(u128::from(retention_ms)),
                     max_per_subject_kind,
@@ -27236,7 +27236,7 @@ async fn run_checkpoints(store: Arc<Store>, context: st3::store::CheckpointConte
             ..context.clone()
         };
         match store.connection.write_workers().spawn_blocking(move || {
-            st3::task_cpu::blocking("maintenance.checkpoint", || store.checkpoint_step(&context))
+            st3::task_cpu::profiled_blocking("maintenance.checkpoint", || store.checkpoint_step(&context))
         })
         .await
         {

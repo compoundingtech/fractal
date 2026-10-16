@@ -315,7 +315,7 @@ async fn dispatch(
             };
             let at = cursor.expect("cursor acquired before dispatch");
             let result = tokio::task::spawn_blocking(move || {
-                crate::task_cpu::blocking("mailbox.wake_dispatch", || {
+                crate::task_cpu::profiled_blocking("mailbox.wake_dispatch", || {
                     store.mailbox_wake_batch(at)
                 })
             })

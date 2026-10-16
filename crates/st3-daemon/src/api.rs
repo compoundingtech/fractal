@@ -7104,7 +7104,7 @@ pub fn start_agent_roster(state: &AppState) {
                 let submitted = crate::otel::export_enabled().then(Instant::now);
                 match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
                     roster_worker(true, submitted, None, || {
-                        let result = crate::task_cpu::blocking("startup.warmup", || warm_agent_roster(&reader));
+                        let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
                         (result, crate::otel::take_roster_attributes())
                     })
                 })).await {
@@ -7124,7 +7124,7 @@ pub fn start_agent_roster(state: &AppState) {
                 _admission.enter_worker();
                 // The first fold publishes only what windows and first pages show; the rest
                 // follows at once.
-                crate::task_cpu::blocking("published_list.agents", || if first {
+                crate::task_cpu::performance_blocking("published_list.agents", || if first {
                     reader.answer_agent_roster_requests(|| {
                         reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
                     })
