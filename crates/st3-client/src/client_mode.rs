@@ -1292,6 +1292,9 @@ mod tests {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()?;
+        // Child::wait closes Child.stdin. Own the pipe independently so killing
+        // and reaping the holder cannot also release the surviving exec child.
+        let input = holder.stdin.take().context("holder input")?;
         let mut output = BufReader::new(holder.stdout.take().context("holder output")?);
         let outcome = (|| -> Result<()> {
             let mut ready = false;
@@ -1322,7 +1325,7 @@ mod tests {
         })();
         let _ = holder.kill();
         let _ = holder.wait();
-        drop(holder.stdin.take()); // releases the surviving child's read, without polling
+        drop(input); // releases the surviving child's read, without polling
         let mut remaining = String::new();
         output.read_to_string(&mut remaining)?; // EOF also proves the child closed its output
         outcome
