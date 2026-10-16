@@ -51,34 +51,58 @@ For an offline device build, run `pnpm run export:ios` and build Release with lo
 `scripts/release_delivery.py` reconciles a tracked Git ref to the daily device
 app (`com.compoundingtech.smalltalk`), without Metro, EAS, or OTA. The tracked
 ref must support `APP_VARIANT=daily`; a ref without that variant is refused
-rather than replacing the separate Debug app. Run it every five minutes with
-a local scheduler while the Mac is awake and on the phone's LAN:
+rather than replacing the separate Debug app. First prepare a signed artifact
+without phone access:
 
 ```sh
 python3 apps/ios/scripts/release_delivery.py \
   --repo "$SOURCE_REPO" --state "$DELIVERY_STATE" \
+  --expected-origin "$TRUSTED_ORIGIN_URL" --trusted-commit "$REVIEWED_FULL_SHA" \
   --device "$ST_IOS_DEVICE" --team "$ST_IOS_TEAM" \
-  --developer-dir "$DEVELOPER_DIR"
+  --developer-dir "$DEVELOPER_DIR" --build-only
 ```
 
 The script starts nothing by itself: delivery runs only when a separately
 configured host scheduler invokes it, and this repository ships no scheduler.
 
-The default ref is `origin/main`. Set `--ref` or `ST_IOS_REF` to another
-`origin/<branch>` (including an integration branch for unmerged app changes),
-or to a local branch in the source repository. Remote branches are fetched
-directly from the source repository's `origin`; the source checkout is never
+The default ref is protected `origin/main`. The device owner must approve
+the tracked branch and its protection before scheduling delivery; repository
+maintainers own branch protection. Supply the exact approved origin URL with
+`--expected-origin` / `ST_IOS_EXPECTED_ORIGIN`, and an independently reviewed
+full 40-character bootstrap commit with `--trusted-commit` /
+`ST_IOS_TRUSTED_COMMIT`. These must come from trusted operator configuration,
+not the fetched ref. The script refuses an origin mismatch before fetching,
+and refuses any fetched commit not descended from its persisted `trusted_head`
+(initially the bootstrap commit), before inspecting manifests or running code.
+Accepted fetches atomically advance that head even if a later build fails.
+The trust configuration is bound to the state directory; changing it requires
+explicit reprovisioning, not silently reusing another trust boundary.
+
+This deliberately refuses historical ref rewinds and divergent branch
+switches. Rollback must be a new reviewed revert commit descended from the
+last trusted head. There is no signature check; the origin pin and ancestry
+boundary do not make a malicious maintainer-approved fast-forward safe.
+Do not point the script at a contributor branch. `--ref` / `ST_IOS_REF`
+accepts a valid branch (`origin/<branch>` or local) or a full commit SHA,
+subject to that same ancestry boundary. Remote branches are fetched directly
+from the source repository's approved `origin`; the source checkout is never
 changed. A private dedicated clone, signed artifacts, and retry state live
 under `--state`. Use a separate state directory for each device/team.
-The tracked ref must be a branch only trusted maintainers can push, such as
-protected `origin/main`: its own code runs on the signing Mac by design (the
-Expo configuration and plugins, `export:ios`, Metro, CocoaPods, and Xcode
-build phases). The workspace install passes `--ignore-scripts`, so dependency
-lifecycle scripts never run there, even if the ref drops the workspace's
-`ignoreScripts` setting.
+
+The tracked ref's code runs with the signing identity, login keychain, and
+inherited environment: Expo configuration/plugins, Metro configuration,
+podspec Ruby, `export:ios`, and Xcode build phases. The workspace install passes
+`--ignore-scripts`, disabling dependency lifecycle scripts even if the ref
+drops the workspace setting; it does not sandbox tracked `.pnpmfile.cjs`,
+`.npmrc`, or explicitly invoked build scripts. Persistent `node_modules`,
+native inputs, and DerivedData can be poisoned by an untrusted ref; clear
+those caches before resuming trusted builds after such exposure.
 Use `--build-only` or `ST_IOS_BUILD_ONLY=1` to prepare a signed artifact while
-phone access is held; remove the hold to install the same artifact without
-rebuilding. Before signing, the generated app's `Info.plist` receives the full
+phone access is held. Installation and launch require the caller to supply
+`AGENT_ACTION_APPROVAL=deploy`; without it, the signed artifact is retained
+and no phone command runs. Remove `--build-only` and supply that approval
+only after the device owner authorizes delivery; the retained artifact is
+reused without rebuilding. Before signing, the generated app's `Info.plist` receives the full
 Git revision as `StBuildCommit` and the revision's commit count as
 `CFBundleVersion`. The artifact's `success.json` records both. Compare its
 `build_version` with `devicectl device info apps --bundle-id
@@ -100,7 +124,7 @@ One root `pnpm install --frozen-lockfile` installs the workspace. Delivery follo
 the app's recursive `workspace:` and `file:` runtime dependencies (currently
 `clients/typescript/st3-views` and `clients/typescript/st3-client`). Changes under
 that closure or `apps/ios`, or to root `package.json`, `pnpm-lock.yaml`,
-`pnpm-workspace.yaml`, or `.npmrc`, cause a build; server-only changes do not.
+`pnpm-workspace.yaml`, `.npmrc`, or `.pnpmfile.cjs`, cause a build; server-only changes do not.
 
 The dedicated checkout retains pnpm installations and generated native inputs.
 `build-cache/` stores their input identities and shared Xcode DerivedData,
@@ -146,7 +170,7 @@ when no retained artifact or installed app has that key; a revert to retained
 content reuses its artifact if that does not lower the installed version.
 `CFBundleVersion` comes from a persisted counter, the larger of the commit
 count and the last assigned version plus one, so it never decreases across
-reverts, earlier refs, or branch switches. Every install checks it against the
+reviewed revert commits and forward branch switches. Every install checks it against the
 installed version; an artifact with a lower version is rebuilt instead.
 A pending artifact for other content is dropped, never installed.
 An unsuccessful build cannot be installed. A failed content key is retried
@@ -157,8 +181,17 @@ until installation and launch both succeed; an unreachable or locked phone
 is retried on the next tick without rebuilding. While the ref cannot be
 fetched, the last observed head is used, never an older revision, and is
 rebuilt from the local checkout if needed (deferred if it is missing there).
-Installation and launch set
-`AGENT_ACTION_APPROVAL=deploy`. Neither pairing nor the Debug bundle is touched.
+An origin mismatch is not an offline condition and never uses a cached target.
+Offline delivery requires an existing observed commit equal to the persisted
+trusted head; a fresh state cannot bless a cached ref when fetch fails.
+The script never grants itself deployment approval. An operator supplies
+`AGENT_ACTION_APPROVAL=deploy` for an approved invocation, or the separately
+approved host scheduler sets it deliberately in its job environment. Enabling
+that scheduler is standing deployment authorization for its configured device
+and tracked branch and requires the device owner's explicit approval; it
+remains held separately from this script PR and any outage hold must be lifted
+by its owner. Run an approved scheduler every five minutes while the Mac is
+awake and on the phone's LAN. Neither pairing nor the Debug bundle is touched.
 Xcode 27's process listing exposes executable paths and PIDs, not foreground
 state: the scheduler conservatively treats a running daily app as active and
 defers installation until 40 minutes after observing the change. After that,
@@ -177,6 +210,25 @@ temporary file, fsynced, and renamed over the old one. An unreadable
 `state.json` is never replaced with fresh state, which could lower
 `CFBundleVersion`: the tick records `state_corrupt`, exits nonzero, and neither
 builds nor touches the phone until an operator restores or repairs the file.
+Legacy state without a trust anchor is also refused; do not delete it to
+silently reset the authoritative version floor. Reprovisioning is an operator
+action that must preserve the installed/assigned build-version floor and set
+the independently reviewed trust configuration.
+
+Before installation the script persists an independent `install_attempt`
+artifact record, retained even when a build-only tick supersedes its pending
+artifact. If interrupted between device installation and saving success,
+the next approved tick queries `devicectl device info apps` into a private JSON file
+and removes the receipt after parsing. An exact daily bundle ID and numeric
+`bundleVersion` (not the marketing version) establish whether installation
+already completed, so launch can resume without a second install. A higher
+device version raises the version floor and refuses the older artifact.
+Query failure, malformed JSON, duplicate daily entries, or invalid versions
+defer delivery without assuming success or mutating the phone. An absent
+daily app permits retry; any previously persisted version floor is retained.
+A readback contradicting the cached installed version also invalidates the
+cached installed-content identity, while retaining the monotonic version floor.
+No device query runs under `--build-only` or without caller deploy approval.
 Optionally set both `--notify-from` and `--notify-to` (or
 `ST_IOS_NOTIFY_FROM`/`ST_IOS_NOTIFY_TO`) to send state changes with
 `st conversations send`: each newly installed commit, a new build failure,

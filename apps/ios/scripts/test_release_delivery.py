@@ -38,6 +38,7 @@ control = json.loads((root / "control.json").read_text())
 with (root / "commands.jsonl").open("a") as log:
     log.write(json.dumps({"command": name, "args": args, "cwd": os.getcwd(),
                           "developer_dir": os.environ.get("DEVELOPER_DIR"),
+                          "deploy_approval": os.environ.get("AGENT_ACTION_APPROVAL"),
                           "native_env": {key: os.environ.get(key) for key in (
                               "APP_VARIANT", "ST3_FABRIC_PROOF", "ST3_FABRIC_OFFLINE_DEBUG")}}) + "\n")
 
@@ -124,12 +125,24 @@ if name == "xcrun":
     assert args[0] == "devicectl", args
     result = {}
     status = 0
-    if "processes" in args:
+    if "apps" in args:
+        installed = root / "device-apps.json"
+        result = {"apps": control.get("apps", json.loads(installed.read_text()) if installed.exists() else [])}
+        status = control.get("apps_exit", 0)
+    elif "processes" in args:
         result = {"runningProcesses": control.get("processes", [])}
         status = control.get("process_exit", 0)
     elif "install" in args:
         assert "app" in args, args
         status = control.get("install_exit", 0)
+        if status == 0:
+            app = Path(next(arg for arg in args if arg.endswith(".app")))
+            with (app / "Info.plist").open("rb") as file:
+                bundle = plistlib.load(file)
+            (root / "device-apps.json").write_text(json.dumps([{
+                "bundleIdentifier": bundle["CFBundleIdentifier"],
+                "bundleVersion": bundle["CFBundleVersion"],
+            }]))
     elif "launch" in args:
         assert "com.compoundingtech.smalltalk" in args, args
         status = control.get("launch_exit", 0)
@@ -138,7 +151,8 @@ if name == "xcrun":
     if "--json-output" in args:
         target = Path(args[args.index("--json-output") + 1])
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps({"result": result}))
+        target.write_text(json.dumps({"info": {"outcome": control.get("apps_outcome", "success")},
+                                     "result": result}))
     if status:
         print("fixture device operation unavailable", file=sys.stderr)
     sys.exit(status)
@@ -174,6 +188,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
             "ST_IOS_NOTIFY_TO": "",
             "ST_IOS_MAX_DEFERRAL": "2400",
             "ST_IOS_BUILD_ONLY": "0",
+            "AGENT_ACTION_APPROVAL": "deploy",
             # Most tests exercise retries directly; backoff has its own test.
             "ST_IOS_BUILD_BACKOFF": "0",
         })
@@ -231,6 +246,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         return subprocess.run([
             sys.executable, str(SCRIPT), "--repo", str(self.source), "--ref", "origin/main",
             "--state", str(self.state), "--device", "TEST-DEVICE", "--team", "TESTTEAM",
+            "--expected-origin", str(self.origin), "--trusted-commit", self.initial_commit,
             "--developer-dir", str(self.root / "Xcode.app" / "Contents" / "Developer"), *extra,
         ], cwd=self.root, env=self.env, text=True, capture_output=True, timeout=60)
 
@@ -537,13 +553,240 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.assertIn(str(artifact), self.device_commands("install")[0]["args"])
         self.assertEqual(len(self.device_commands("launch")), 1)
 
+    def test_missing_or_wrong_deploy_approval_holds_phone_and_retains_build(self):
+        for approval in (None, "build"):
+            with self.subTest(approval=approval):
+                if approval is None:
+                    self.env.pop("AGENT_ACTION_APPROVAL", None)
+                else:
+                    self.env["AGENT_ACTION_APPROVAL"] = approval
+                self.reconcile()
+                pending = self.saved_state()["pending"]
+                self.assertFalse(pending["installed"])
+                self.assertTrue((Path(pending["app"]) / "Info.plist").is_file())
+                self.assertEqual(self.outcomes()[-1], "install_held")
+                self.assertEqual(self.commands("xcrun"), [])
+                self.assertFalse(self.saved_state().get("installed"))
+        self.env["AGENT_ACTION_APPROVAL"] = "deploy"
+        self.reconcile()
+        self.assert_installed(self.initial_commit)
+        self.assertEqual(len(self.commands("xcodebuild")), 1)
+        for action in ("install", "launch"):
+            self.assertEqual(len(self.device_commands(action)), 1)
+            self.assertEqual(self.device_commands(action)[0]["deploy_approval"], "deploy")
+
+    def test_withdrawn_deploy_approval_holds_pending_launch(self):
+        self.configure(launch_exit=1)
+        self.reconcile()
+        self.assertTrue(self.saved_state()["pending"]["installed"])
+        self.assertEqual(len(self.device_commands("launch")), 1)
+        self.env.pop("AGENT_ACTION_APPROVAL")
+        self.configure(launch_exit=0)
+        self.reconcile()
+        self.assertEqual(self.outcomes()[-1], "install_held")
+        self.assertEqual(len(self.device_commands("launch")), 1)
+        self.assertEqual(len(self.device_commands("install")), 1)
+        self.env["AGENT_ACTION_APPROVAL"] = "deploy"
+        self.reconcile()
+        self.assert_installed(self.initial_commit)
+        self.assertEqual(len(self.device_commands("launch")), 2)
+        self.assertEqual(len(self.device_commands("install")), 1)
+        self.assertEqual(len(self.commands("xcodebuild")), 1)
+
+    def test_wrong_origin_is_refused_without_build_or_phone_commands(self):
+        secret_origin = "https://user:private-token@example.invalid/repo.git"
+        self.git("remote", "set-url", "origin", secret_origin)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("does not match", result.stdout)
+        self.assertNotIn(secret_origin, result.stdout + result.stderr)
+        self.assertEqual(self.commands(), [])
+        self.assertFalse((self.state / "checkout").exists())
+        self.assertEqual(self.saved_state(), {})
+
+    def test_bootstrap_rejects_revision_not_descended_from_trusted_commit(self):
+        self.change_js("reviewed-baseline")
+        trusted = self.git("rev-parse", "HEAD")
+        result = self.invoke("--ref", self.initial_commit, "--trusted-commit", trusted)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not a descendant", result.stdout)
+        self.assertEqual(self.commands(), [])
+        self.assertEqual(self.saved_state(), {})
+
+    def test_fast_forward_advances_trust_even_when_build_fails(self):
+        self.reconcile("--build-only")
+        newer = self.change_js("failed-but-observed")
+        self.configure(build_exit=65)
+        self.invoke()
+        self.assertEqual(self.saved_state()["trusted_head"], newer)
+        self.assertEqual(self.saved_state()["observed"]["commit"], newer)
+        self.assertEqual(self.outcomes()[-1], "build_failed")
+
+    def test_legacy_state_requires_explicit_reprovisioning(self):
+        self.state.mkdir()
+        legacy = b'{"installed_version":"123"}'
+        (self.state / "state.json").write_bytes(legacy)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Legacy state has no trust anchor", result.stdout)
+        self.assertEqual((self.state / "state.json").read_bytes(), legacy)
+        self.assertEqual(self.commands(), [])
+
+    def test_invalid_ref_and_missing_trust_config_fail_before_work(self):
+        for args in (("--ref", "-malicious"), ("--ref", "main..bad"),
+                     ("--trusted-commit", ""), ("--expected-origin", "")):
+            with self.subTest(args=args):
+                result = self.invoke(*args)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(self.commands(), [])
+                self.assertFalse(self.state.exists())
+
+    def test_offline_bootstrap_has_no_implicitly_trusted_fallback(self):
+        self.origin.rename(self.root / "offline-origin.git")
+        result = self.invoke()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no previously trusted observation", result.stdout)
+        self.assertNotIn(str(self.origin), result.stdout + result.stderr)
+        self.assertEqual(self.saved_state(), {})
+        self.assertEqual(self.commands(), [])
+
+    def test_dependency_resolving_to_parent_itself_is_rejected(self):
+        manifest = json.loads((self.source / "apps/ios/package.json").read_text())
+        manifest["dependencies"]["escape"] = "file:../../.."
+        self.write_source("apps/ios/package.json", json.dumps(manifest))
+        self.commit("Reject parent dependency")
+        result = self.invoke()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Local dependency escapes", result.stdout)
+        self.assertEqual(self.commands(), [])
+
+    def test_interrupted_state_write_preserves_atomic_trust_baseline(self):
+        self.reconcile("--build-only")
+        baseline = (self.state / "state.json").read_bytes()
+        child = """
+import importlib.util, resource, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("delivery", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10000})
+"""
+        result = subprocess.run([sys.executable, "-c", child, str(SCRIPT),
+                                 str(self.state / "state.json")], capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.state / "state.json").read_bytes(), baseline)
+        self.reconcile("--build-only")
+        self.assertEqual(self.saved_state()["trusted_head"], self.initial_commit)
+        self.assertEqual(len(self.commands("xcodebuild")), 1)
+
+    def test_interrupted_install_reads_back_success_without_reinstalling(self):
+        self.configure(launch_exit=1)
+        self.reconcile()
+        data = self.saved_state()
+        data["pending"]["installed"] = False
+        data["install_attempt"] = dict(data["pending"])
+        (self.state / "state.json").write_text(json.dumps(data))
+        self.configure(launch_exit=0)
+        self.reconcile()
+        self.assert_installed(self.initial_commit)
+        self.assertEqual(len(self.device_commands("install")), 1)
+        self.assertEqual(len(self.device_commands("apps")), 1)
+        self.assertEqual(len(self.device_commands("launch")), 2)
+        self.assertFalse((self.state / "installed-apps.json").exists())
+
+    def test_uncertain_install_query_failures_never_mutate_phone(self):
+        self.configure(install_exit=1)
+        self.reconcile()
+        for control in (
+            {"apps_exit": 1},
+            {"apps_exit": 0, "apps_outcome": "failure"},
+            {"apps_outcome": "success", "apps": [{"bundleIdentifier": BUNDLE_ID, "bundleVersion": 1}]},
+            {"apps": [{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "unknown"}]},
+            {"apps": [{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "1"}] * 2},
+            {"apps": [None]},
+        ):
+            with self.subTest(control=control):
+                self.configure(**control)
+                self.reconcile()
+                self.assertEqual(self.outcomes()[-1], "install_deferred")
+                self.assertEqual(len(self.device_commands("install")), 1)
+                self.assertEqual(self.device_commands("launch"), [])
+                self.assertIn("install_attempt", self.saved_state())
+                self.assertFalse(self.saved_state().get("installed_version"))
+                self.assertFalse((self.state / "installed-apps.json").exists())
+
+    def test_recovered_higher_device_version_forces_new_monotonic_build(self):
+        self.configure(install_exit=1)
+        self.reconcile()
+        self.configure(install_exit=0, apps=[{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "99"}])
+        self.reconcile()
+        self.assertEqual(self.outcomes()[-1], "install_refused")
+        self.assertEqual(self.saved_state()["installed_version"], "99")
+        self.assertEqual(len(self.device_commands("install")), 1)
+        self.reconcile()
+        self.assert_installed(self.initial_commit)
+        self.assertEqual(self.installed_build_version(), 100)
+        self.assertEqual(len(self.device_commands("install")), 2)
+
+    def test_contradictory_readback_reinstalls_reverted_content(self):
+        for apps, minimum_version in (([], 1), ([{
+                "bundleIdentifier": BUNDLE_ID, "bundleVersion": "99"}], 100)):
+            with self.subTest(apps=apps):
+                self.reset_delivery()
+                self.reconcile()
+                original = self.saved_state()["installed_key"]
+                self.change_js("uncertain-release")
+                self.configure(install_exit=1)
+                self.reconcile()
+                self.assertIn("install_attempt", self.saved_state())
+                revert = self.revert_head()
+                self.configure(install_exit=0, apps=apps)
+                self.reconcile()
+                if apps:
+                    self.assertEqual(self.outcomes()[-1], "install_refused")
+                    self.assertNotIn("installed_key", self.saved_state())
+                    self.assertEqual(self.saved_state()["installed_version"], "99")
+                    self.reconcile()
+                self.assertEqual(self.saved_state()["observed"]["commit"], revert)
+                self.assertEqual(self.saved_state()["installed_key"], original)
+                self.assertEqual(self.outcomes()[-1], "launched")
+                self.assertEqual(len(self.device_commands("install")), 3)
+                self.assertGreaterEqual(self.installed_build_version(), minimum_version)
+                self.assertNotIn("install_attempt", self.saved_state())
+
+    def test_readback_of_old_version_does_not_confirm_newer_same_content_artifact(self):
+        self.configure(launch_exit=1)
+        self.reconcile()
+        data = self.saved_state()
+        data["pending"]["installed"] = False
+        data["install_attempt"] = dict(data["pending"])
+        (self.state / "state.json").write_text(json.dumps(data))
+        self.configure(launch_exit=0)
+        self.env["EXPO_PUBLIC_FIXTURE_ENDPOINT"] = "temporary-other-inputs"
+        self.reconcile("--build-only")
+        self.env.pop("EXPO_PUBLIC_FIXTURE_ENDPOINT")
+        self.reconcile("--build-only")
+        self.assertEqual(self.saved_state()["pending"]["build_version"], "3")
+        self.assertEqual(self.saved_state()["install_attempt"]["build_version"], "1")
+        self.assertEqual(len(self.device_commands("install")), 1)
+        self.reconcile()
+        self.assertEqual(len(self.device_commands("install")), 2)
+        self.assertEqual(self.installed_build_version(), 3)
+        self.assertEqual(self.saved_state()["installed_version"], "3")
+        device = json.loads((self.root / "device-apps.json").read_text())
+        self.assertEqual(device[0]["bundleVersion"], "3")
+        self.assertNotIn("install_attempt", self.saved_state())
+
+
+
     def test_fetch_failure_does_not_block_retrying_successful_pending_artifact(self):
         self.configure(install_exit=1)
         self.invoke()
         pending = self.saved_state()["pending"]
         artifact = pending["app"]
         self.assertEqual(pending["commit"], self.initial_commit)
-        self.git("remote", "set-url", "origin", str(self.root / "unreachable.git"))
+        self.origin.rename(self.root / "offline-origin.git")
         self.configure(install_exit=0)
         self.reconcile()
         self.assertIn("fetch_failed", self.outcomes())
@@ -565,7 +808,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.assertEqual(self.outcomes()[-1], "build_failed")
         self.assertEqual(self.saved_state()["observed"]["commit"], newer)
         self.assertIn("pending_discarded", self.outcomes())
-        self.git("remote", "set-url", "origin", str(self.root / "unreachable.git"))
+        self.origin.rename(self.root / "offline-origin.git")
         # Offline, the last observed revision is retried from the local
         # checkout; while it keeps failing the superseded artifact is never installed.
         self.configure(install_exit=0)
@@ -590,7 +833,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.configure(build_exit=65)
         self.invoke()
         self.assertEqual(self.saved_state()["observed"]["commit"], newer)
-        self.git("remote", "set-url", "origin", str(self.root / "unreachable.git"))
+        self.origin.rename(self.root / "offline-origin.git")
         self.env["EXPO_PUBLIC_FIXTURE_ENDPOINT"] = "changed-offline"
         self.configure(install_exit=0, build_exit=0)
         self.reconcile()
@@ -614,7 +857,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.assertEqual(self.outcomes()[-1], "unchanged")
         # Offline ticks keep the revert as the observed head: the failed
         # revision is never rebuilt or installed.
-        self.git("remote", "set-url", "origin", str(self.root / "unreachable.git"))
+        self.origin.rename(self.root / "offline-origin.git")
         self.configure(build_exit=0)
         self.reconcile()
         self.assertEqual(self.outcomes()[-2:], ["fetch_failed", "unchanged"])
@@ -665,29 +908,25 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.assertTrue(any(f"artifacts/{retained}/" in arg
                             for arg in self.device_commands("install")[-1]["args"]))
 
-    def test_branch_switch_to_older_revision_never_lowers_build_version(self):
+    def test_branch_rewind_is_refused_and_revert_commit_preserves_version_floor(self):
         self.reconcile()
         second = self.change_js("two-commit-release")
         self.reconcile()
-        self.assert_installed(second)
-        installed_version = self.installed_build_version()
-        self.assertEqual(installed_version, 2)
-        # A supported local branch at the initial app revision: its retained
-        # artifact (version 1) is skipped, and its rebuild must not reuse the
-        # lower commit count either.
+        baseline = (self.state / "state.json").read_bytes()
+        commands = len(self.commands())
         self.git("branch", "older-app", self.initial_commit)
-        self.reconcile("--ref", "older-app")
-        self.assertIn("reuse_skipped", self.outcomes())
-        self.assert_installed(self.initial_commit)
-        self.assertEqual(len(self.commands("xcodebuild")), 3)
-        self.assertEqual(self.installed_build_version(), 3)
-        self.assertEqual(self.saved_state()["installed_version"], "3")
-        receipt = json.loads((self.state / "artifacts" / self.initial_commit / "success.json").read_text())
-        self.assertEqual(receipt["build_version"], "3")
-        # Switching back advances again instead of reusing version 2.
-        self.reconcile()
+        result = self.invoke("--ref", "older-app")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not a descendant", result.stdout)
+        self.assertEqual((self.state / "state.json").read_bytes(), baseline)
+        self.assertEqual(self.commands()[commands:], [])
         self.assert_installed(second)
-        self.assertEqual(self.installed_build_version(), 4)
+        revert = self.revert_head()
+        self.reconcile()
+        self.assert_installed(revert)
+        self.assertEqual(self.installed_build_version(), 3)
+        self.assertEqual(self.saved_state()["trusted_head"], revert)
+        self.assertEqual(len(self.commands("xcodebuild")), 3)
 
     def test_inherited_native_environment_is_pinned_to_daily_release_values(self):
         self.env.update(ST3_FABRIC_PROOF="1", ST3_FABRIC_OFFLINE_DEBUG="1", APP_VARIANT="dev")
@@ -721,6 +960,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         shutil.rmtree(self.state, ignore_errors=True)
         self.control_path.write_text("{}")
         self.command_log.unlink(missing_ok=True)
+        (self.root / "device-apps.json").unlink(missing_ok=True)
 
     def test_random_sequences_install_only_last_observed_content(self):
         """Randomized fault sequences; replay a failure with its printed seed."""
@@ -751,10 +991,11 @@ class ReleaseDeliveryTests(unittest.TestCase):
                               "launch_exit": 0 if rng.random() < 0.8 else 1}
                     self.configure(**faults)
                     if not fetch_ok:
-                        self.git("remote", "set-url", "origin", str(self.root / "unreachable.git"))
+                        self.origin.rename(self.root / "offline-origin.git")
                     installs = len(self.device_commands("install"))
                     self.invoke()
-                    self.git("remote", "set-url", "origin", str(self.origin))
+                    if not fetch_ok:
+                        (self.root / "offline-origin.git").rename(self.origin)
                     if fetch_ok:
                         observed = self.git("rev-parse", "HEAD")
                     expected = (self.app_trees(observed),
@@ -1022,6 +1263,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
             ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n# updated\n"),
             ("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n# updated\n"),
             ("package.json", (self.source / "package.json").read_text().replace("12.7.0", "12.7.1")),
+            (".pnpmfile.cjs", "module.exports = { hooks: {} };\n"),
         )
         for count, (relative, contents) in enumerate(changes, start=1):
             with self.subTest(path=relative):

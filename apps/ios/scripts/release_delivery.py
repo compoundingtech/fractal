@@ -43,7 +43,7 @@ def local_packages(repo, commit):
         for name, dependency in manifest.get("dependencies", {}).items():
             if dependency.startswith("file:"):
                 resolved = os.path.normpath(f"{package}/{dependency[5:]}")
-                if resolved.startswith("../") or os.path.isabs(resolved):
+                if resolved == ".." or resolved.startswith("../") or os.path.isabs(resolved):
                     raise ValueError("Local dependency escapes the repository")
                 visit(resolved)
             elif dependency.startswith("workspace:"):
@@ -60,7 +60,7 @@ def content_key(repo, commit, identity):
     trees = {package: git(repo, "rev-parse", f"{commit}:{package}")
              for package in local_packages(repo, commit)}
     workspace = git(repo, "ls-tree", commit, "--", "package.json",
-                    "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc")
+                    "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", ".pnpmfile.cjs")
     return hashlib.sha256(json.dumps({"trees": trees, "workspace": workspace,
                                      "inputs": identity}, sort_keys=True).encode()).hexdigest()
 
@@ -159,7 +159,7 @@ def build_release(args):
     manifest_paths = ["package.json", *[f"{package}/package.json"
         for package in sorted(set(root["workspaces"]) | set(local_packages(repo, args.commit)))]]
     identity = hashlib.sha256((git(repo, "ls-tree", args.commit, "--",
-        *manifest_paths, "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc")
+        *manifest_paths, "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", ".pnpmfile.cjs")
         + str(shutil.which("node")) + str(shutil.which("pnpm"))).encode()).hexdigest()
     identities = {"workspace": identity}
     if (inputs.get("packages") != identities
@@ -300,40 +300,97 @@ class Delivery:
     def device(self, *argv):
         return run(["xcrun", "devicectl", *argv], env=self.env)
 
+    def recover_install(self, pending):
+        """Read back an interrupted install; never infer success from an attempt."""
+        receipt = self.state / "installed-apps.json"
+        try:
+            receipt.unlink(missing_ok=True)
+            self.device("device", "info", "apps", "--device", self.args.device,
+                        "--timeout", "15", "--json-output", str(receipt))
+            result = json.loads(receipt.read_text())
+            if result["info"]["outcome"] != "success" or not isinstance(result["result"]["apps"], list):
+                raise ValueError("Invalid installed-app query result")
+            apps = result["result"]["apps"]
+            if any(not isinstance(app, dict) or not isinstance(app.get("bundleIdentifier"), str)
+                   for app in apps):
+                raise ValueError("Invalid installed-app entry")
+            matches = [app for app in apps if app["bundleIdentifier"] == BUNDLE_ID]
+            if len(matches) > 1:
+                raise ValueError("Ambiguous installed daily app")
+            version = matches[0].get("bundleVersion") if matches else None
+            if matches and (not isinstance(version, str) or not version.isascii() or not version.isdigit()):
+                raise ValueError("Invalid installed daily build version")
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            self.record("install_deferred", commit=pending["commit"], reason="install_readback_unavailable")
+            return False
+        finally:
+            receipt.unlink(missing_ok=True)
+        known_version = self.data.get("installed_version")
+        if version is None or known_version is None or int(version) != int(known_version):
+            # A contradictory device observation invalidates cached content,
+            # not the authoritative monotonic version floor.
+            self.data.pop("installed", None)
+            self.data.pop("installed_key", None)
+        self.data.pop("install_attempt", None)
+        if version is not None:
+            floor = max(int(known_version or 0), int(version))
+            self.data["installed_version"] = str(floor)
+            if int(pending["build_version"]) < floor:
+                self.persist()
+                self.record("install_refused", commit=pending["commit"], reason="downgrade",
+                            build_version=pending["build_version"])
+                return False
+            if int(version) == int(pending["build_version"]):
+                self.mark_installed(pending)
+                current = self.data.get("pending")
+                if (current and all(current[field] == pending[field]
+                                    for field in ("commit", "key", "build_version", "app"))):
+                    current["installed"] = True
+        self.persist()
+        return True
+
     def reconcile(self):
-        config = {"device": self.args.device, "team": self.args.team}
+        config = {"device": self.args.device, "team": self.args.team,
+                  "expected_origin": self.args.expected_origin,
+                  "trusted_commit": self.args.trusted_commit}
+        if self.data and not self.data.get("trusted_head"):
+            raise ValueError("Legacy state has no trust anchor; provision a separate state directory "
+                             "with an explicitly reviewed --trusted-commit and --expected-origin")
         if self.data.get("config", config) != config:
-            raise ValueError("Device/team changed: use a separate state directory")
-        self.data["config"] = config
+            raise ValueError("Device/team or trust configuration changed: use a separate state directory")
+        if git(self.args.repo, "remote", "get-url", "origin") != self.args.expected_origin:
+            raise ValueError("Source origin does not match --expected-origin")
         repo = self.state / "checkout"
         if not repo.exists():
             run(["git", "clone", "--no-checkout", str(self.args.repo), str(repo)])
-        # Fetch the source repo's origin directly, not its possibly stale tracking
-        # refs. Local scratch refs also work, without pushing proof commits.
         if self.args.ref.startswith("origin/"):
-            remote = git(self.args.repo, "remote", "get-url", "origin")
+            remote = self.args.expected_origin
             ref = "refs/heads/" + self.args.ref[len("origin/"):]
         else:
             remote, ref = str(self.args.repo), self.args.ref
-        # `observed` is the tracked head from the last successful fetch. Every
-        # decision compares content keys against it, so reverts, app-irrelevant
-        # commits, and changed build inputs need no separate bookkeeping.
         observed = self.data.get("observed")
+        trusted_head = self.data.get("trusted_head", self.args.trusted_commit)
         try:
-            git(repo, "fetch", "--no-tags", remote, ref)
+            # Capture stderr: Git fetch diagnostics can contain credential-bearing URLs.
+            subprocess.run(["git", "-C", str(repo), "fetch", "--no-tags", remote, ref],
+                           check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=60)
             head = git(repo, "rev-parse", "FETCH_HEAD^{commit}")
-        except subprocess.SubprocessError as error:
-            if not observed:
-                raise
-            # An internet outage must not block delivering the last observed
-            # head to a reachable LAN phone. Never fall back to an older revision.
-            self.record("fetch_failed", reason=str(error))
-            head = observed["commit"]
-            try:
-                git(repo, "cat-file", "-e", head + "^{commit}")
-            except subprocess.SubprocessError:
-                self.record("deferred", commit=head, reason="observed_unavailable")
-                return
+        except subprocess.SubprocessError:
+            if not observed or observed["commit"] != trusted_head:
+                raise ValueError("Fetch failed; no previously trusted observation is available") from None
+            self.record("fetch_failed", reason="remote_unavailable")
+            head = trusted_head
+        # Only trusted local configuration supplies the bootstrap anchor. Never
+        # inspect fetched manifests or run build code before validating ancestry.
+        try:
+            git(repo, "merge-base", "--is-ancestor", trusted_head, head)
+        except subprocess.SubprocessError:
+            raise ValueError("Fetched revision is not a descendant of the trusted head; "
+                             "rollback requires a new revert commit") from None
+        self.data["config"] = config
+        self.data["trusted_head"] = head
+        self.persist()
         identity = build_identity(self.args)
         key = content_key(repo, head, identity)
         if not observed or observed["key"] != key:
@@ -345,6 +402,10 @@ class Delivery:
             observed = {**observed, "commit": head}
         self.data["observed"] = observed
         self.persist()
+        attempt = self.data.get("install_attempt")
+        if attempt and not self.args.build_only and self.env.get("AGENT_ACTION_APPROVAL") == "deploy":
+            if not self.recover_install(attempt):
+                return
         pending = self.data.get("pending")
         reason = None
         if pending and pending["key"] != key:
@@ -363,22 +424,22 @@ class Delivery:
             pending = None
         if not pending:
             if self.data.get("installed_key") == key:
-                self.record("unchanged", commit=head)
+                if self.data.get("install_attempt"):
+                    self.record("install_held", commit=head, reason="install_readback_required")
+                else:
+                    self.record("unchanged", commit=head)
                 return
             success = self.retained_artifact(key) or self.build(repo, head, key)
             if not success:
-                return
-            if self.downgrades(success):
-                # Unreachable while versions come from the monotonic counter;
-                # kept so no install path can bypass the version check.
-                self.record("install_refused", commit=success["commit"], reason="downgrade",
-                            build_version=success["build_version"])
                 return
             pending = {**success, "since": observed["since"], "installed": False}
             self.data["pending"] = pending
             self.persist()
         if self.args.build_only:
             self.record("install_held", commit=pending["commit"], reason="build_only")
+            return
+        if self.env.get("AGENT_ACTION_APPROVAL") != "deploy":
+            self.record("install_held", commit=pending["commit"], reason="deploy_approval_required")
             return
         if not pending["installed"]:
             process_json = self.state / "processes.json"
@@ -400,14 +461,18 @@ class Delivery:
                 self.record("install_deferred", commit=pending["commit"], reason="daily_app_running")
                 return
             try:
-                install_env = {**self.env, "AGENT_ACTION_APPROVAL": "deploy"}
+                # Durable intent precedes device mutation. If interrupted after
+                # installation, the next tick reads back instead of reinstalling.
+                self.data["install_attempt"] = dict(pending)
+                self.persist()
                 run(["xcrun", "devicectl", "device", "install", "app", "--device", self.args.device,
                      pending["app"], "--timeout", "90", "--json-output", str(self.state / "install.json")],
-                    env=install_env)
+                    env=self.env)
             except (OSError, subprocess.SubprocessError) as error:
                 self.record("install_failed", commit=pending["commit"], reason=str(error))
                 return
             pending["installed"] = True
+            self.data.pop("install_attempt", None)
             for key in ("unavailable_since", "notified_unavailable", "unavailable_operation"):
                 self.data.pop(key, None)
             self.persist()
@@ -415,7 +480,7 @@ class Delivery:
         try:
             run(["xcrun", "devicectl", "device", "process", "launch", "--device", self.args.device,
                  BUNDLE_ID, "--timeout", "30"],
-                env={**self.env, "AGENT_ACTION_APPROVAL": "deploy"})
+                env=self.env)
         except (OSError, subprocess.SubprocessError) as error:
             self.record("launch_failed", commit=pending["commit"], reason=str(error))
             return
@@ -508,6 +573,10 @@ def main():
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--ref", default=os.environ.get("ST_IOS_REF", "origin/main"))
     parser.add_argument("--state", type=Path)
+    parser.add_argument("--expected-origin", default=os.environ.get("ST_IOS_EXPECTED_ORIGIN"),
+                        help="Exact trusted origin URL, supplied by the operator")
+    parser.add_argument("--trusted-commit", default=os.environ.get("ST_IOS_TRUSTED_COMMIT"),
+                        help="Reviewed full commit SHA used to bootstrap the ancestry boundary")
     parser.add_argument("--device", default=os.environ.get("ST_IOS_DEVICE"))
     parser.add_argument("--team", default=os.environ.get("ST_IOS_TEAM"))
     parser.add_argument("--developer-dir", default=os.environ.get("DEVELOPER_DIR"))
@@ -535,6 +604,17 @@ def main():
         return
     if not args.device or not args.state:
         parser.error("--device/ST_IOS_DEVICE and --state are required")
+    if not args.expected_origin or not args.trusted_commit:
+        parser.error("--expected-origin and --trusted-commit are required trusted configuration")
+    if len(args.trusted_commit) != 40 or any(c not in "0123456789abcdef" for c in args.trusted_commit):
+        parser.error("--trusted-commit must be a full lowercase 40-character commit SHA")
+    ref = args.ref.removeprefix("origin/")
+    is_commit = len(ref) == 40 and all(c in "0123456789abcdef" for c in ref)
+    if not is_commit:
+        validation = subprocess.run(["git", "check-ref-format", "refs/heads/" + ref],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if validation.returncode or ref.startswith("-"):
+            parser.error("--ref must be a valid branch name or full commit SHA")
     args.state = args.state.expanduser().resolve()
     delivery = Delivery(args)
     with (args.state / "delivery.lock").open("a") as lock:
