@@ -68,7 +68,67 @@ pub fn inspect(file: &File, private_object: bool) -> AclObservation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{os::unix::fs::PermissionsExt, process::Command};
+    use std::{
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::fs::{MetadataExt, PermissionsExt},
+        },
+        process::Command,
+    };
+
+    fn fixture_root() -> tempfile::TempDir {
+        // Fixed root-owned APFS temp venue, not caller-selected TMPDIR. Inspect
+        // retained ancestors before creating anything; only /private/tmp may be
+        // other-writable, with root-owned sticky semantics and no mutating ACL.
+        let mut parent = File::open("/").unwrap();
+        for (name, sticky_tmp) in [("", false), ("private", false), ("tmp", true)] {
+            if !name.is_empty() {
+                let name = std::ffi::CString::new(name).unwrap();
+                let fd = unsafe {
+                    libc::openat(
+                        parent.as_raw_fd(),
+                        name.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
+                };
+                assert!(fd >= 0);
+                parent = unsafe { File::from_raw_fd(fd) };
+            }
+            let metadata = parent.metadata().unwrap();
+            assert_eq!(metadata.uid(), 0);
+            assert!(metadata.mode() & 0o022 == 0 || (sticky_tmp && metadata.mode() & 0o1000 != 0));
+            assert_eq!(
+                inspect(&parent, false).disposition,
+                AclDisposition::Accepted
+            );
+        }
+        let root = tempfile::Builder::new()
+            .prefix("st-client-acl-fixture-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let name =
+            std::ffi::CString::new(root.path().file_name().unwrap().as_encoded_bytes()).unwrap();
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        assert!(fd >= 0);
+        let retained = unsafe { File::from_raw_fd(fd) };
+        let metadata = retained.metadata().unwrap();
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        // Refuse inherited allow/deferred/unknown ACLs. Do not try to repair them
+        // with path chmod before custody of the fixture root is established.
+        assert_eq!(
+            inspect(&retained, true).disposition,
+            AclDisposition::Accepted
+        );
+        root
+    }
 
     unsafe extern "C" {
         fn st_client_mode_acl_check_export(bytes: *const u8, size: usize) -> u32;
@@ -127,10 +187,15 @@ mod tests {
     }
 
     fn inspect_fixture(name: &str, ace: Option<&str>, private: bool) -> AclDisposition {
-        let root = tempfile::tempdir().unwrap();
+        let root = fixture_root();
         let path = root.path().join(name);
-        std::fs::create_dir(&path).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .unwrap();
+        }
         // Only the fresh, owned fixture directory is modified. No account-home
         // path, production authority, Keychain or credential operation is used.
         assert!(
@@ -230,7 +295,7 @@ mod tests {
 
     #[test]
     fn replaced_path_cannot_redirect_retained_descriptor_inspection() {
-        let root = tempfile::tempdir().unwrap();
+        let root = fixture_root();
         let path = root.path().join("authority");
         std::fs::create_dir(&path).unwrap();
         assert!(
