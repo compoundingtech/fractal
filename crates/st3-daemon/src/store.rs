@@ -81,6 +81,9 @@ mod mission_provenance;
 pub(crate) mod agent_queue_values;
 pub mod backup_format;
 pub mod message_bodies;
+mod projectors;
+#[cfg(test)]
+mod projectors_tests;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[cfg(test)]
@@ -3000,11 +3003,7 @@ impl Store {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         rebuild_operations_tx(&transaction)?;
-        rebuild_planning_tx(&transaction)?;
-        resources::rebuild(&transaction)?;
-        glass_heads::rebuild(&transaction)?;
-        directive_notes::rebuild(&transaction)?;
-        arrangements::rebuild(&transaction)?;
+        projectors::run_hooks(projectors::REBUILD, &transaction)?;
         transaction.commit()?;
         Ok(())
     }
@@ -10165,28 +10164,7 @@ fn append_admitted_claim_tx(
         forced_batch,
     )?;
     insert_event(transaction, record.store_index, kind, subject, body)?;
-    custom::flush(transaction)?;
-    if kind == "resource.observed" {
-        resources::refresh(transaction, subject)?;
-    }
-    if matches!(kind, "glass.upserted" | "glass.deleted") {
-        glass_heads::flush(transaction)?;
-    }
-    if kind == retirements::KIND {
-        retirements::project_subject(transaction, subject).map_err(anyhow::Error::new)?;
-    }
-    if kind == st3_schema::directive_notes::KIND {
-        directive_notes::flush(transaction)?;
-    }
-    if kind == "message.sent" {
-        agent_messages::flush(transaction)?;
-    }
-    if kind == "harness.limits" {
-        limits::flush_limits(transaction)?;
-    }
-    if kind == "arrangement.edited" {
-        arrangements::project(transaction, &record)?;
-    }
+    projectors::project_claim(projectors::APPEND, transaction, &record)?;
     normalize_local_projection_timestamps_tx(
         transaction,
         subject,
@@ -17368,9 +17346,9 @@ fn try_project_simple_replication_tx(
         .map_err(|error| incremental_claim_error(internal(error), claim, "event-insert"))?;
     }
     for claim in &claims {
-        if claim.kind == "arrangement.edited" {
-            arrangements::project(transaction, claim).map_err(|error| {
-                incremental_claim_error(internal(error), claim, "arrangement-project")
+        for projector in projectors::REPLICATED.iter().filter(|p| p.takes.takes(&claim.kind)) {
+            (projector.project)(transaction, claim).map_err(|error| {
+                incremental_claim_error(internal(error), claim, projector.name)
             })?;
         }
     }
@@ -17547,20 +17525,10 @@ fn replay_graph_from_nothing_with_progress_tx(
     };
     stage("full-replay/mission-runs");
     project_replicated_mission_runs(transaction)?;
-    stage("full-replay/planning");
-    rebuild_planning_tx(transaction).map_err(internal)?;
-    stage("full-replay/resources");
-    resources::rebuild(transaction).map_err(internal)?;
-    stage("full-replay/glass-heads");
-    glass_heads::rebuild(transaction).map_err(internal)?;
-    stage("full-replay/directive-notes");
-    directive_notes::rebuild(transaction).map_err(internal)?;
-    stage("full-replay/custom");
-    custom::rebuild(transaction).map_err(internal)?;
-    stage("full-replay/arrangements");
-    arrangements::rebuild(transaction).map_err(internal)?;
-    stage("full-replay/flush");
-    publication_facts::reset(transaction).map_err(internal)?;
+    for replay in projectors::GRAPH_REPLAY {
+        stage(replay.phase);
+        (replay.run)(transaction).map_err(internal)?;
+    }
     Ok(())
 }
 
