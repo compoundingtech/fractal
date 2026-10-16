@@ -92,6 +92,13 @@ pub(crate) fn valid_word(word: &str) -> bool {
 /// The fault scope of the scheduler's first-readiness fault (`reconcile`).
 pub(crate) const FIRST_READINESS_FAULT_SCOPE: &str = "scheduler/first-readiness";
 
+/// The endpoints a replication worker publishes for its member (`api`, `peer`).
+#[derive(Deserialize, Serialize)]
+pub struct FleetEndpointsRequest {
+    pub mode: String,
+    pub endpoints: Vec<Value>,
+}
+
 /// The error code of a send or reply addressed to a person.
 pub const PERSON_HAS_NO_INBOX_CODE: &str = "person-has-no-inbox";
 

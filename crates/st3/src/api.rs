@@ -111,10 +111,15 @@ pub use published_lists::start_published_lists;
 mod changes;
 
 pub(crate) use client_v0::raw_terminal::splice as raw_terminal_splice;
-pub(crate) use client_v0::raw_terminal::{
-    Lease as RawTerminalLease, LeaseBinding as RawTerminalLeaseBinding,
-    ORIGIN_HEADER as RAW_ORIGIN_HEADER,
-};
+
+/// The owner side of a peer raw terminal route: the plain byte splice, with no lease or control
+/// channel. The daemon passes it to `peer::run_worker` as its `RawSplice`.
+pub fn raw_terminal_owner_splice(
+    socket: axum::extract::ws::WebSocket,
+    transport: tokio::net::UnixStream,
+) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
+    Box::pin(raw_terminal_splice(socket, transport, None, None, None, None, None))
+}
 
 pub(crate) use crate::delivery_presence::claude_channel_attached;
 
@@ -1473,25 +1478,7 @@ pub(crate) fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
 
-tokio::task_local! {
-    /// Set while a request is handled; a read relayed from another machine's owner marks it.
-    static SERVED_REMOTE: Arc<std::sync::atomic::AtomicBool>;
-}
-
-/// Run a request's handler with its remote-read flag in scope. The flag follows the handler's
-/// own task. A relay awaited inside a `tokio::spawn` would lose it, so such a spawn must pass
-/// its own flag, as the collections socket does for the conversation follower.
-pub(crate) async fn track_remote_reads<F: Future>(
-    flag: Arc<std::sync::atomic::AtomicBool>,
-    handler: F,
-) -> F::Output {
-    SERVED_REMOTE.scope(flag, handler).await
-}
-
-/// The request being handled read from another machine, so its target is the remote one.
-pub(crate) fn note_remote_read() {
-    let _ = SERVED_REMOTE.try_with(|remote| remote.store(true, std::sync::atomic::Ordering::Relaxed));
-}
+pub(crate) use crate::peer::{note_remote_read, track_remote_reads};
 
 /// A query that asks the daemon to wait for a change makes the request a long poll.
 fn asks_to_wait(query: &str) -> bool {
@@ -9875,11 +9862,7 @@ async fn replication_peer_failure(
     Ok(Json(json!({ "recorded": true, "changed": changed })))
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct FleetEndpointsRequest {
-    pub mode: String,
-    pub endpoints: Vec<Value>,
-}
+pub use crate::model::FleetEndpointsRequest;
 
 async fn fleet_publish_endpoints(
     State(state): State<AppState>,
