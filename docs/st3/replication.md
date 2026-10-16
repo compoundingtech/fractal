@@ -786,8 +786,9 @@ drop the estimate can still be too short.
 A window in which the number did not shrink, or nothing arrived, leaves no forecast, and the status
 says `not catching up`; the next window then starts from its own rate rather than half of it. A gap
 of more than five minutes between measurements forgets both rates, and so does a change in what
-the count is compared against: the peer's or this node's checkpoint, or a switch between range and
-full inventories. A peer on an older build advertises no checkpoint, and a narrowing within range
+the count is compared against: the peer's advertised checkpoint, a change to this node's own
+inventory below its tail (which its checkpoints make), or a switch between range and full
+inventories. A peer on an older build advertises no checkpoint, and a narrowing within range
 comparison changes neither, so only the arrival cap guards those; a peer that starts advertising a
 checkpoint resets the window once. A measurement no exchange has renewed for 35 seconds is shown
 as stale, with its counts and time but no rates or estimate. Zero envelopes missing means nothing

@@ -1213,8 +1213,12 @@ pub struct PeerSyncProgress {
 pub struct InventoryBasis {
     /// The peer's newest stable checkpoint, `None` from a peer that advertises none.
     pub peer_checkpoint: Option<String>,
-    /// This node's newest stable checkpoint.
-    pub local_checkpoint: Option<String>,
+    /// This node's inventory generation at the measurement's snapshot
+    /// (`ReplicationSnapshot::inventory_generation`). Trimming or adopting a checkpoint deletes
+    /// envelopes and changes checkpoint tombstones, which moves it; so does any other change
+    /// below the inventory's tail. Read from the snapshot the difference was measured against,
+    /// so it is cut-consistent with it and costs no read.
+    pub local_generation: i64,
     /// Whether the peer sent a compact inventory, compared range by range.
     pub compact: bool,
 }
@@ -1226,7 +1230,7 @@ impl InventoryBasis {
     /// peer that starts advertising one changes the basis, so an upgrade resets the window
     /// once.
     fn changed_to(&self, next: &InventoryBasis) -> bool {
-        self.local_checkpoint != next.local_checkpoint
+        self.local_generation != next.local_generation
             || self.compact != next.compact
             || (next.peer_checkpoint.is_some() && self.peer_checkpoint != next.peer_checkpoint)
     }
@@ -4918,7 +4922,7 @@ pub fn sync_progress_forecasts_nothing_from_an_unknown_arrival_rate() {
 pub fn sync_progress_measures_no_rate_across_a_change_of_inventory_basis() {
     let basis = |peer: Option<&str>, compact: bool| InventoryBasis {
         peer_checkpoint: peer.map(str::to_owned),
-        local_checkpoint: Some("checkpoint/local".into()),
+        local_generation: 7,
         compact,
     };
     let window = REPLICATION_SYNC_WINDOW_MS;
@@ -4927,6 +4931,15 @@ pub fn sync_progress_measures_no_rate_across_a_change_of_inventory_basis() {
         ("checkpoint moved", basis(Some("checkpoint/b"), true), None),
         // The comparison switched from ranges to a full listing.
         ("comparison changed", basis(Some("checkpoint/a"), false), None),
+        // This node trimmed or adopted a checkpoint: its own inventory generation moved.
+        (
+            "local inventory changed",
+            InventoryBasis {
+                local_generation: 8,
+                ..basis(Some("checkpoint/a"), true)
+            },
+            None,
+        ),
         // An older peer advertises no checkpoint: the window stays, bounded by arrivals.
         ("older peer", basis(None, true), Some(1.0 / SYNC_WINDOW_SECONDS)),
         ("unchanged", basis(Some("checkpoint/a"), true), Some(1.0 / SYNC_WINDOW_SECONDS)),
@@ -6477,7 +6490,7 @@ impl Store {
         let progress = sync.entry(relay.to_owned()).or_default();
         let basis = InventoryBasis {
             peer_checkpoint: input.inventory.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
-            local_checkpoint: snapshot.inventory.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
+            local_generation: snapshot.inventory_generation,
             compact: !input.inventory.buckets.is_empty(),
         };
         progress.observe_on(received, difference, basis, now);

@@ -439,9 +439,10 @@ impl ReplicationPeerSync {
     /// counts as progress; zero while the gap is not closing or nothing arrives.
     ///
     /// The cap is a guard, not a proof. The gap can also shrink without a receipt, when a
-    /// checkpoint drops envelopes or the comparison narrows. A window that spans a change of
-    /// either node's advertised checkpoint, or between range and full comparison, measures no
-    /// rate, but a peer that advertises no checkpoint and a narrowing within range comparison
+    /// checkpoint drops envelopes or the comparison narrows. A window that spans a change of the
+    /// peer's advertised checkpoint, of this node's inventory below its tail (which its own
+    /// checkpoints move), or between range and full comparison measures no rate, but a peer
+    /// that advertises no checkpoint and a narrowing within range comparison
     /// are not seen: when receipts coincide with such a drop, the forecast can still be too
     /// short. It measures arrival only, not admission, projection or visibility.
     pub fn closing_rate_per_second(&self) -> Option<f64> {
