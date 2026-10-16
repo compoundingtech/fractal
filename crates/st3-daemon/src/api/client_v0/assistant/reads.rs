@@ -47,9 +47,9 @@ pub(super) async fn project(
             summary(state).await
         }
         "attention" => page(state, snapshot, "assistant.attention", parameters, max_bytes, attention_rows).await,
-        "attention-rich" => page(state, snapshot, "assistant.attention", parameters, max_bytes, attention_rich_rows).await,
-        "missions-rich" => page(state, snapshot, "assistant.missions", parameters, max_bytes, mission_rich_rows).await,
-        "agents-rich" => page(state, snapshot, "assistant.agents", parameters, max_bytes, agent_rich_rows).await,
+        "attention-rich" => page(state, snapshot, "assistant.attention-rich", parameters, max_bytes, attention_rich_rows).await,
+        "missions-rich" => page(state, snapshot, "assistant.missions-rich", parameters, max_bytes, mission_rich_rows).await,
+        "agents-rich" => page(state, snapshot, "assistant.agents-rich", parameters, max_bytes, agent_rich_rows).await,
         "attention-content" => {
             allow(parameters, &["alert_id","max_response_bytes"], max_bytes)?;
             let id = required(parameters, "alert_id")?;
@@ -152,6 +152,8 @@ type Rows = fn(&AppState, &str, u64, u128) -> anyhow::Result<Vec<Value>>;
 
 /// One page in the existing snapshot/page envelope. A cursor continues its first page's
 /// cached rows and re-reads nothing; the page never grows past one limit to fit a budget.
+/// The collection names the exact projector/content class: both the cursor and its cached
+/// rows bind it, so a rich cursor cannot be continued by a metadata-only authorization.
 async fn page(
     state: &AppState,
     snapshot: &ClientSnapshot,

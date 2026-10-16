@@ -277,10 +277,34 @@ async fn existing_agent_outside_recipient_allowlist_succeeds_and_person_scope_re
     let subject = first["value"]["affected_ids"].as_array().unwrap().iter()
         .filter_map(Value::as_str).find(|id| id.starts_with("message/")).unwrap();
     let claim = h.state.store.latest_claim(subject, Some("message.sent")).unwrap().unwrap();
+    assert_eq!(claim.actor.as_deref(), Some("assistant/chatgpt"));
+    assert_eq!(claim.body["fields"]["from"], "assistant/chatgpt");
+    assert_eq!(claim.body["fields"]["assistant_owner"], OWNER);
+    assert_eq!(claim.body["fields"]["assistant_session_actor"], paired.session_actor);
     assert_eq!(claim.body["fields"]["sender_class"], "external-assistant");
     assert_eq!(claim.body["fields"]["assistant_grant_id"], paired.grant.id);
     let projected = h.state.store.messages(Some(AGENT), true).unwrap().pop().unwrap();
+    assert_eq!(projected.from, "assistant/chatgpt");
+    let metadata = projected.assistant_metadata().unwrap();
+    let notification = st_drivers::ding::st3_notification_with_metadata(
+        &projected.subject, &projected.from, &projected.to, projected.title.as_deref(),
+        &projected.content, &"0".repeat(64),
+        st_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
+    );
+    assert!(notification.contains("from=\"assistant/chatgpt\""));
+    assert!(notification.contains(&format!("assistant_grant_id=\"{}\"", paired.grant.id)));
+    assert!(notification.contains(st_drivers::ding::EXTERNAL_ASSISTANT_WARNING));
+    assert!(!notification.contains(st_drivers::ding::PERSON_REPLY_INSTRUCTION));
+    let audit = h.state.store.claims_page(None, None, 0, None, false, 1000).unwrap().claims
+        .into_iter().find(|claim| claim.kind == "custom.client.assistant.v1.audit"
+            && claim.body["fields"]["operation"] == "grant-authorized-write").unwrap();
+    assert_eq!(audit.actor.as_deref(), Some(paired.session_actor.as_str()));
+    assert_eq!(audit.body["fields"]["actor"], paired.session_actor);
+    assert_eq!(audit.body["fields"]["principal"], "assistant/chatgpt");
+    assert_eq!(audit.body["fields"]["issuer"], OWNER);
+    assert_eq!(audit.body["fields"]["grant_id"], paired.grant.id);
     let projected = serde_json::to_value(projected).unwrap();
+    assert_eq!(projected["from"], "assistant/chatgpt");
     assert_eq!(projected["sender_class"], "external-assistant");
     assert_eq!(projected["assistant_grant_id"], paired.grant.id);
     let forbidden = h.message(OWNER, "person-recipient-denied").await;
@@ -409,6 +433,8 @@ async fn assistant_provenance_generic_and_native_forgery_is_refused() {
         (OWNER, json!({"from":"assistant/chatgpt"})),
         (OWNER, json!({"sender_class":"external-assistant"})),
         (OWNER, json!({"assistant_grant_id":paired.grant.id})),
+        (OWNER, json!({"assistant_owner":OWNER})),
+        (OWNER, json!({"assistant_session_actor":paired.session_actor})),
     ].into_iter().enumerate() {
         let mut fields = json!({"from":OWNER,"to":AGENT,"content":"forged","status":"sent"});
         fields.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
@@ -420,7 +446,7 @@ async fn assistant_provenance_generic_and_native_forgery_is_refused() {
     let (status, _) = request(&h.local, "POST", "/v1/messages", None, Some(OWNER),
         &json!({"idempotency_key":"assistant-native-forged","from":"assistant/chatgpt","to":AGENT,"content":"forged"})).await;
     assert!(!status.is_success());
-    for field in ["from", "actor", "sender_class", "assistant_grant_id"] {
+    for field in ["from", "actor", "sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"] {
         let mut message = serde_json::to_value(h.message(AGENT, field).await).unwrap();
         message["parameters"][field] = json!("forged");
         let (status, _) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;

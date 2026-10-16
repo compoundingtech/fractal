@@ -445,3 +445,110 @@ async fn assistant_signed_terminal_binds_live_screen_revision_and_refuses_replay
         assert!(!value.to_string().contains("SECRET-sk-live-0123456789"));
     }
 }
+
+async fn projection_read_mode(fixture: &mut Fixture, mode: &str) {
+    let policy=serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"scopes":SCOPES,
+        "expires_in_seconds":3600,"disclosure_consent":true,"consent_evidence":"projection-isolation",
+        "minimal_read_mode":mode})).unwrap();
+    let Json(grant)=super::super::update_policy(State(fixture.state.clone()),
+        Extension(ClientSession::local(Some(OWNER)).unwrap()),AxumPath(fixture.grant.clone()),Json(policy)).await.unwrap();
+    fixture.revision=grant["policy_revision"].as_u64().unwrap();
+}
+
+async fn projection_cursor_isolation(change_mode: bool) {
+    let mut fixture=fixture(SCOPES,true).await;
+    let source=r#"version 2
+agent "projection-one" { workspace "/tmp"; command "true"; restart always; }
+agent "projection-two" { workspace "/tmp"; command "true"; restart always; }
+mission "projection-one" state="ready" { goal "PRIVATE mission one"; }
+mission "projection-two" state="ready" { goal "PRIVATE mission two"; }
+"#;
+    let intent=crate::graph::parse_internal_intent(source,"projection-isolation").unwrap();
+    fixture.state.store.apply_internal(&intent,"projection-isolation").unwrap();
+    for id in ["one","two"] {
+        fixture.state.store.ask_person(&serde_json::from_value(json!({
+            "person":OWNER,"actor":format!("agent/projection-isolation.projection-{id}"),
+            "title":format!("PRIVATE attention {id}"),"reason":"PRIVATE attention detail",
+            "new_run":format!("projection-{id}"),"idempotency_key":format!("projection-{id}")
+        })).unwrap()).unwrap();
+    }
+    projection_read_mode(&mut fixture,"caller-bound-allow").await;
+    let mut cursors=Vec::new();
+    for projection in ["missions","attention","agents"] {
+        let (status,value,_)=fixture.request(
+            &format!("/v1/client/assistant/{projection}-rich?limit=1&max_response_bytes=16384"),None).await;
+        assert_eq!(status,StatusCode::OK,"{projection}: {value}");
+        assert!(value["value"]["items"][0]["title"].is_string(),"{value}");
+        if projection=="attention" {
+            assert!(value["value"]["items"][0]["title"].as_str().unwrap().contains("PRIVATE attention"));
+        }
+        let cursor=value["value"]["page"]["next_cursor"].as_str().expect("two source rows").to_owned();
+        // Same-class continuation still serves its original rich snapshot.
+        let (status,continued,_)=fixture.request(&format!(
+            "/v1/client/assistant/{projection}-rich?cursor={}&max_response_bytes=16384",
+            urlencoding::encode(&cursor)),None).await;
+        assert_eq!(status,StatusCode::OK,"{continued}");
+        assert!(continued["value"]["items"][0]["title"].is_string(),"{continued}");
+        cursors.push((projection,cursor));
+    }
+    if change_mode {
+        projection_read_mode(&mut fixture,"approval-once").await;
+    } else {
+        // A second independently paired grant shares the daemon/cache, but not approval.
+        let request=serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
+            "device_name":"metadata-only","assistant_id":PRINCIPAL,"scopes":SCOPES,
+            "disclosure_consent":true,"consent_evidence":"projection-isolation"})).unwrap();
+        let Json(challenge)=begin(fixture.state.clone(),ClientSession::local(Some(OWNER)).unwrap(),request).await.unwrap();
+        let device_key=signing_key();
+        let request=serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"code":challenge["code"],
+            "device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(device_key.public_key().as_ref())})).unwrap();
+        let id=challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
+        let Json(paired)=complete(&fixture.state,id,&request,"fabric-loopback").await.unwrap().unwrap();
+        fixture.credential=paired["credential"].as_str().unwrap().into();
+        fixture.grant=paired["grant"]["id"].as_str().unwrap().into();
+        let Json(grant)=pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
+            AxumPath(fixture.grant.clone()),Json(fixture.trust_request())).await.unwrap();
+        fixture.revision=grant["policy_revision"].as_u64().unwrap();
+    }
+    for (projection,cursor) in cursors {
+        // Also rewrite the untrusted cursor's collection: cache isolation must deny this,
+        // independently of the outer collection mismatch check.
+        let mut forged=decode_client_cursor(&cursor).unwrap();
+        forged.collection=format!("assistant.{projection}");
+        for cursor in [cursor,encode_client_cursor(&forged).unwrap()] {
+            let query=format!("?cursor={}&max_response_bytes=16384",urlencoding::encode(&cursor));
+            let payload=fixture.payload(projection,&query);
+            let header=fixture.header(&payload,&fixture.attestor);
+            let (status,value,_)=fixture.request(&format!("/v1/client/assistant/{projection}{query}"),Some(&header)).await;
+            assert_eq!(status,StatusCode::GONE,"{projection}: {value}");
+            assert!(value.get("value").is_none(),"{value}");
+            assert!(!value.to_string().contains("PRIVATE"),"{value}");
+        }
+        // A fresh metadata approval still works, and its own cursor remains usable.
+        let query="?limit=1&max_response_bytes=16384";
+        let payload=fixture.payload(projection,query);
+        let header=fixture.header(&payload,&fixture.attestor);
+        let (status,value,_)=fixture.request(&format!("/v1/client/assistant/{projection}{query}"),Some(&header)).await;
+        assert_eq!(status,StatusCode::OK,"{value}");
+        assert!(value["value"]["items"][0].get("title").is_none(),"{value}");
+        assert!(!value.to_string().contains("PRIVATE"),"{value}");
+        let cursor=value["value"]["page"]["next_cursor"].as_str().unwrap();
+        let query=format!("?cursor={}&max_response_bytes=16384",urlencoding::encode(cursor));
+        let payload=fixture.payload(projection,&query);
+        let header=fixture.header(&payload,&fixture.attestor);
+        let (status,value,_)=fixture.request(&format!("/v1/client/assistant/{projection}{query}"),Some(&header)).await;
+        assert_eq!(status,StatusCode::OK,"{value}");
+        assert!(value["value"]["items"][0].get("title").is_none(),"{value}");
+        assert!(!value.to_string().contains("PRIVATE"),"{value}");
+    }
+}
+
+#[tokio::test]
+async fn assistant_rich_cursors_cannot_disclose_content_through_another_grants_metadata_proof() {
+    projection_cursor_isolation(false).await;
+}
+
+#[tokio::test]
+async fn assistant_rich_cursors_cannot_disclose_content_after_read_mode_change() {
+    projection_cursor_isolation(true).await;
+}

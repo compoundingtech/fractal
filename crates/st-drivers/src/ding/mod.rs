@@ -244,7 +244,7 @@ pub fn st3_notification_with_metadata(
     metadata: NotificationMetadata<'_>,
 ) -> String {
     let NotificationMetadata { attachments, assistant } = metadata;
-    let person_message = from.starts_with("person/");
+    let person_message = assistant.is_none() && from.starts_with("person/");
     let graph = normalize_field(Some(reference), "message/unknown", ADDRESS_MAX_CHARS);
     let id = graph.strip_prefix("message/").unwrap_or(&graph);
     let from = normalize_field(Some(from), "unknown", ADDRESS_MAX_CHARS);

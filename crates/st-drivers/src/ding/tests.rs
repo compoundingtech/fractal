@@ -3191,6 +3191,19 @@ fn an_external_assistant_send_carries_the_exact_warning_from_trusted_metadata() 
 }
 
 #[test]
+fn assistant_metadata_never_grants_person_reply_treatment() {
+    for from in ["assistant/chatgpt", "person/ada"] {
+        let metadata = AssistantMessageMetadata { assistant_grant_id: Some("assistant-grant/one") };
+        let envelope = st3_notification_with_metadata(
+            "message/assistant", from, "agent/seat", None, "request", &"0".repeat(64),
+            NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
+        );
+        assert!(envelope.contains(EXTERNAL_ASSISTANT_WARNING));
+        assert!(!envelope.contains(PERSON_REPLY_INSTRUCTION));
+    }
+}
+
+#[test]
 fn the_external_assistant_warning_survives_body_truncation() {
     let full = "x".repeat(ST3_BODY_MAX_CHARS + 1);
     let envelope = st3_notification_with_metadata(

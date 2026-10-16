@@ -673,11 +673,12 @@ fn assistant_provenance_stamps_authenticated_grant_and_preserves_replica_admissi
         "assistant-recipient").unwrap();
     let grant_subject = "custom/client/assistant-v1-native-fixture";
     let grant_id = "assistant-grant/native-fixture";
+    let session_actor = format!("assistant/chatgpt/session/{grant_id}");
     store.append_claim(&ClaimInput {
         subject: grant_subject.into(), kind: "custom.client.assistant.v1.granted".into(),
         actor: Some("person/eval".into()),
         fields: serde_json::from_value(json!({
-            "principal":"assistant/chatgpt", "session_actor":"assistant/chatgpt/session/native-fixture",
+            "principal":"assistant/chatgpt", "session_actor":session_actor,
             "issuer":"person/eval", "disclosure_consent":true, "policy_revision":1,
             "expires_at_unix_ms":now_ms() as u64 + 60_000,
             "scopes":["write.assistant.messages"], "recipient_allowlist":["agent/eval.recipient"],
@@ -686,15 +687,21 @@ fn assistant_provenance_stamps_authenticated_grant_and_preserves_replica_admissi
         evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
     let authorization = assistant_write::AssistantWriteAuthorization {
-        grant_subject: grant_subject.into(), actor: "assistant/chatgpt/session/native-fixture".into(),
+        grant_subject: grant_subject.into(), actor: session_actor.clone(),
         owner: "person/eval".into(), policy_revision: 1, scope: "write.assistant.messages".into(),
         recipient: Some("agent/eval.recipient".into()),
     };
     let mut input = request();
+    input.actor = Some("assistant/chatgpt".into());
+    input.fields.insert("from".into(), json!("assistant/chatgpt"));
     input.fields.insert("sender_class".into(), json!("external-assistant"));
     input.fields.insert("assistant_grant_id".into(), json!("assistant-grant/caller-forged"));
     let (claim, appended) = store.append_assistant_claim_outcome(&input, &authorization).unwrap();
     assert!(appended);
+    assert_eq!(claim.actor.as_deref(), Some("assistant/chatgpt"));
+    assert_eq!(claim.body["fields"]["from"], "assistant/chatgpt");
+    assert_eq!(claim.body["fields"]["assistant_owner"], "person/eval");
+    assert_eq!(claim.body["fields"]["assistant_session_actor"], session_actor);
     assert_eq!(claim.body["fields"]["sender_class"], "external-assistant");
     assert_eq!(claim.body["fields"]["assistant_grant_id"], grant_id);
     assert_eq!(store.append_assistant_claim_outcome(&input, &authorization).unwrap().0.id, claim.id);
