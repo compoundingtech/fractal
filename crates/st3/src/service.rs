@@ -203,6 +203,7 @@ pub fn install(config: Config) -> Result<()> {
 }
 
 pub fn install_from_config_path(mut config: Config, config_path: Option<&Path>) -> Result<()> {
+    st3_client::client_mode::require_local()?;
     crate::node_identity::resolve(&mut config)?;
     #[cfg(target_os = "linux")]
     anyhow::ensure!(
@@ -331,6 +332,7 @@ A launchd property list cannot grant these approvals.\n",
 }
 
 pub fn restart(mut config: Config) -> Result<()> {
+    st3_client::client_mode::require_local()?;
     let current = env::current_dir().context("resolve the service restart directory")?;
     config.state_dir = absolute_from(&current, &config.state_dir);
     config.socket = absolute_from(&current, &config.socket);
@@ -343,6 +345,7 @@ pub fn restart(mut config: Config) -> Result<()> {
 }
 
 pub fn reset(mut config: Config) -> Result<()> {
+    st3_client::client_mode::require_local()?;
     let current = env::current_dir().context("resolve the service reset directory")?;
     config.state_dir = absolute_from(&current, &config.state_dir);
     config.socket = absolute_from(&current, &config.socket);

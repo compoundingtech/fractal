@@ -46,3 +46,6 @@ st3 = { path = "../st3", features = ["test-support"] }
 tempfile = "3"
 opentelemetry_sdk = "0.30"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
+
+[build-dependencies]
+cc = "1"
