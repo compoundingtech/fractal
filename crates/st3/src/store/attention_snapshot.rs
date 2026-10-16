@@ -953,7 +953,7 @@ impl Store {
                 priority: "high".into(), kind: "fault".into(), review_mode: None,
                 subject: run.subject.clone(), person: run.requester.clone(),
                 requester_id: None, launch_id: None, variant_id: None, message_id: None,
-                answers: Vec::new(), conversation: None,
+                prompt_call: None, answers: Vec::new(), conversation: None,
                 title: "Run admission time unavailable".into(),
                 detail: "This run was admitted, but its timeout cannot be reconstructed because the accepted admission history is unavailable. Its timeout is not armed. Restore the original admission history from a trusted copy and rebuild the projection, or cancel the run. A retry or duplicate completion cannot start a fresh timeout budget.".into(),
                 mission: Some(run.mission.clone()), mission_run: Some(run.subject.clone()),
