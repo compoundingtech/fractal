@@ -6946,7 +6946,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
-    st3::fleet::prepare(&store, &config)?;
+    if let Some(file) = &config.fleet {
+        smallclaims::fleet::prepare(&store, &config.state_dir, file)?;
+    }
     // Every claim this node writes is signed; keys are made here the first time, silently.
     let keys = st3::fleet::join::key_directory(&config.state_dir);
     if config.fleet.is_none() {
@@ -26422,8 +26424,10 @@ fn retry_projection_contention_observed(
             // Only this task schedules these attempts. The existing projection mutex also
             // serializes them with receive/wake passes. Store ownership ends at attempt return.
             let result = store.connection.write_workers().spawn_blocking(move || {
-                let result = store.project_replication_backlog_unless_catching_up();
-                (result, store.projection_contention_generation(), store.replication_projection_deferred())
+                st3::profile::task("task replication-projection-retry", || {
+                    let result = store.project_replication_backlog_unless_catching_up();
+                    (result, store.projection_contention_generation(), store.replication_projection_deferred())
+                })
             })
             .await;
             let still_deferred = match &result {
@@ -29918,7 +29922,7 @@ mod tests {
             );
         }
 
-        let server_source = include_str!("api.rs");
+        let server_source = include_str!("../../st3-daemon/src/api.rs");
         for handler in [
             "watch_resource",
             "unwatch_resource",
