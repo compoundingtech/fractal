@@ -1666,7 +1666,7 @@ mod tests {
                 |row| row.get::<_, u32>(0)).unwrap(), 0);
             let transaction = connection.transaction().unwrap();
             deferred_claim(&transaction, "message/interleaved", "message.sent",
-                json!({"from":"agent/sender","to":"person/reader","content":"x".repeat(32_768),"status":"sent"}), None);
+                json!({"from":"agent/sender","to":"person/robin","content":"x".repeat(32_768),"status":"sent"}), None);
             transaction.commit().unwrap();
         }
         assert_eq!(policy(), 0, "foreground COMMIT must not inherit an automatic backfill checkpoint");

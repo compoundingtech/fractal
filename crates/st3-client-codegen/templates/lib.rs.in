@@ -888,6 +888,7 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         | ErrorCode::RecipientRetired
         | ErrorCode::LifecycleUnavailable
         | ErrorCode::RetirementUpgradeRequired
+        | ErrorCode::MessageSelectorsNotReady
         | ErrorCode::Unknown => message.to_owned(),
     }
 }
