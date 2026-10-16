@@ -10,3 +10,4 @@ export * from './conversationContent.ts';
 export * from './slo.ts';
 export * from './inventoryView.ts';
 export * from './sidebarView.ts';
+export * from './syncNotice.ts';
