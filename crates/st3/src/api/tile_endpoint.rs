@@ -589,18 +589,26 @@ mod tests {
             let _ = stuck.recv();
         });
         running.recv().unwrap();
-        // The paused clock moves on by itself once every task is waiting, so the time the
-        // withdrawal took is read on that clock, not from where this test happens to be.
+        // A running blocking task keeps the paused clock from moving by itself, so step it a
+        // second at a time until the withdrawal gives up; the time it took is read on that clock.
         let withdrawal = tokio::spawn(async move {
             let mut serving = BTreeMap::from([("atlas", (1, task))]);
             let began = tokio::time::Instant::now();
             withdraw_changed(&mut serving, &BTreeMap::new(), WITHDRAW_WAIT).await;
             (began.elapsed(), serving.is_empty())
         });
+        while !withdrawal.is_finished() {
+            tokio::task::yield_now().await;
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        }
         let result = withdrawal.await.unwrap();
         // Free the blocked thread before asserting, so a failure cannot hang the runtime's shutdown.
         drop(release);
-        assert_eq!(result.0, WITHDRAW_WAIT, "the wait is exactly the bound");
+        assert!(
+            result.0 >= WITHDRAW_WAIT && result.0 < WITHDRAW_WAIT * 2,
+            "the wait is the bound, not shorter or unbounded: {:?}",
+            result.0
+        );
         assert!(result.1, "the stuck tile is dropped from the supervisor");
     }
 
