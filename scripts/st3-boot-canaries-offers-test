@@ -12,8 +12,8 @@ import unittest
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))
-loader = importlib.machinery.SourceFileLoader("boot_canaries_run", str(HERE / "run"))
+sys.path.insert(0, str(HERE))
+loader = importlib.machinery.SourceFileLoader("boot_canaries_run", str(HERE / "st3-boot-canaries/run"))
 spec = importlib.util.spec_from_loader("boot_canaries_run", loader)
 canary = importlib.util.module_from_spec(spec)
 loader.exec_module(canary)
