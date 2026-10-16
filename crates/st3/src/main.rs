@@ -19569,6 +19569,7 @@ async fn run_st2_native_driver(
     #[cfg(unix)]
     if matches!(driver, "pi" | "omp")
         && let Err(skip) = st3::native_resume::pi_family_link_transcript(
+            driver,
             &argv,
             &paths.session_dir.join("provider-sessions"),
         )

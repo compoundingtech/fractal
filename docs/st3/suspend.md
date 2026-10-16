@@ -82,7 +82,9 @@ path, a missing, unreadable or mismatched transcript, an inventory entry that is
 (`transcript-ambiguous`), a second or conflicting selection flag, or any other harness is refused
 before the harness starts, as `authored-session-selection`, `resume-path-relative`,
 `transcript-missing`, `transcript-unreadable`, `authored-session-mismatch` or
-`transcript-ambiguous`. Suspend itself still refuses a declaration that selects a session.
+`transcript-ambiguous`. Suspend itself still refuses a declaration that selects a session, so this
+path serves only seats that an older daemon suspended; a seat declared this way cannot be suspended
+again until suspend accepts the same declaration (smalltalk#3139).
 
 If resume reports `authored-session-selection`, the exit is to stop the seat and then start it:
 

@@ -21511,6 +21511,7 @@ mission "example/zero-run" state="ready" {
             std::fs::create_dir_all(&managed).unwrap();
             assert!(
                 crate::native_resume::pi_family_link_transcript(
+                    driver,
                     &[
                         driver.into(),
                         "--resume".into(),

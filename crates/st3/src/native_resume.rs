@@ -335,9 +335,15 @@ pub fn pi_family_transcript(sessions: &Path, id: &str) -> Option<PathBuf> {
 }
 
 /// Make an authored pi/omp resume visible to the managed transcript inventory, without copying
-/// a file the provider will keep appending to. `Ok(false)` means no link was needed.
+/// a file the provider will keep appending to. `Ok(false)` means no link was needed. omp reads
+/// `--resume X`, `--resume=X` and `-r X`; pi reads `--resume X` and `--resume=X` as before, and
+/// `--session X` and `--session=X`, its documented transcript selector.
 #[cfg(unix)]
-pub fn pi_family_link_transcript(argv: &[String], sessions: &Path) -> Result<bool, Refusal> {
+pub fn pi_family_link_transcript(
+    driver: &str,
+    argv: &[String],
+    sessions: &Path,
+) -> Result<bool, Refusal> {
     use std::os::unix::fs::{MetadataExt as _, symlink};
 
     let mut arguments = argv
@@ -346,14 +352,15 @@ pub fn pi_family_link_transcript(argv: &[String], sessions: &Path) -> Result<boo
         .take_while(|argument| argument.as_str() != "--");
     let mut selected = None;
     while let Some(argument) = arguments.next() {
-        if argument == "--resume" || argument == "--session" {
+        let separate = argument == "--resume"
+            || if driver == "omp" { argument == "-r" } else { argument == "--session" };
+        if separate {
             selected = arguments.next().map(String::as_str);
             break;
         }
-        if let Some(path) = argument
-            .strip_prefix("--resume=")
-            .or_else(|| argument.strip_prefix("--session="))
-        {
+        let inline = argument.strip_prefix("--resume=");
+        let inline = if driver == "omp" { inline } else { inline.or_else(|| argument.strip_prefix("--session=")) };
+        if let Some(path) = inline {
             selected = Some(path);
             break;
         }
@@ -790,8 +797,8 @@ mod tests {
         let original_arguments = arguments.clone();
         let managed = root.path().join("provider-sessions");
         // Absent, then already linked. Appending remains visible through both paths.
-        assert!(pi_family_link_transcript(&arguments, &managed).unwrap());
-        assert!(!pi_family_link_transcript(&arguments, &managed).unwrap());
+        assert!(pi_family_link_transcript("omp", &arguments, &managed).unwrap());
+        assert!(!pi_family_link_transcript("omp", &arguments, &managed).unwrap());
         assert!(!fs::symlink_metadata(&managed).unwrap().file_type().is_symlink());
         fs::OpenOptions::new()
             .append(true)
@@ -809,6 +816,7 @@ mod tests {
         fs::create_dir(&managed).unwrap();
         assert!(
             pi_family_link_transcript(
+"omp",
                 &argv(&["pi", &format!("--resume={}", transcript.display())]),
                 &managed
             )
@@ -818,11 +826,11 @@ mod tests {
         // An existing inventory with the same inode is left as a directory.
         fs::create_dir(&managed).unwrap();
         fs::hard_link(&transcript, managed.join(transcript.file_name().unwrap())).unwrap();
-        assert!(pi_family_link_transcript(&arguments, &managed).unwrap());
+        assert!(pi_family_link_transcript("omp", &arguments, &managed).unwrap());
         let alternate = managed.join(format!("earlier_{id}.jsonl"));
         fs::hard_link(&transcript, &alternate).unwrap();
         fs::remove_file(managed.join(transcript.file_name().unwrap())).unwrap();
-        assert!(!pi_family_link_transcript(&arguments, &managed).unwrap());
+        assert!(!pi_family_link_transcript("omp", &arguments, &managed).unwrap());
         assert!(
             !fs::symlink_metadata(&managed)
                 .unwrap()
@@ -833,7 +841,7 @@ mod tests {
         fs::remove_file(managed.join(transcript.file_stem().unwrap())).unwrap();
         fs::write(managed.join("other.jsonl"), "preserve me").unwrap();
         assert_eq!(
-            pi_family_link_transcript(&arguments, &managed)
+            pi_family_link_transcript("omp", &arguments, &managed)
                 .unwrap_err()
                 .code,
             "managed-directory-not-empty"
@@ -848,7 +856,7 @@ mod tests {
         for target in [root.path().to_path_buf(), root.path().join("missing")] {
             symlink(&target, &managed).unwrap();
             assert_eq!(
-                pi_family_link_transcript(&arguments, &managed)
+                pi_family_link_transcript("omp", &arguments, &managed)
                     .unwrap_err()
                     .code,
                 "managed-directory-foreign-link"
@@ -858,7 +866,7 @@ mod tests {
         }
         // Invalid authored paths never prepare an inventory.
         assert_eq!(
-            pi_family_link_transcript(&argv(&["omp", "--resume", "relative.jsonl"]), &managed)
+            pi_family_link_transcript("omp", &argv(&["omp", "--resume", "relative.jsonl"]), &managed)
                 .unwrap_err()
                 .code,
             "resume-path-relative"
@@ -866,6 +874,7 @@ mod tests {
         let missing = legacy.join("missing.jsonl");
         assert_eq!(
             pi_family_link_transcript(
+"omp",
                 &argv(&["omp", "--resume", missing.to_str().unwrap()]),
                 &managed
             )
@@ -877,6 +886,7 @@ mod tests {
         fs::write(&bad_name, "{}\n").unwrap();
         assert_eq!(
             pi_family_link_transcript(
+"omp",
                 &argv(&["omp", "--resume", bad_name.to_str().unwrap()]),
                 &managed
             )
@@ -886,15 +896,15 @@ mod tests {
         );
         fs::write(&transcript, "{\"type\":\"session\",\"id\":\"other\"}\n").unwrap();
         assert_eq!(
-            pi_family_link_transcript(&arguments, &managed)
+            pi_family_link_transcript("omp", &arguments, &managed)
                 .unwrap_err()
                 .code,
             "transcript-header-mismatch"
         );
         assert!(!managed.exists());
-        assert!(!pi_family_link_transcript(&argv(&["omp"]), &managed).unwrap());
+        assert!(!pi_family_link_transcript("omp", &argv(&["omp"]), &managed).unwrap());
         assert!(
-            !pi_family_link_transcript(&argv(&["omp", "--", "--resume", "relative"]), &managed)
+            !pi_family_link_transcript("omp", &argv(&["omp", "--", "--resume", "relative"]), &managed)
                 .unwrap()
         );
         // A title can precede the matching header; multi-session directories remain intact.
@@ -906,14 +916,14 @@ mod tests {
         fs::write(legacy.join("another.jsonl"), "another session").unwrap();
         fs::write(&managed, "not a directory").unwrap();
         assert_eq!(
-            pi_family_link_transcript(&arguments, &managed)
+            pi_family_link_transcript("omp", &arguments, &managed)
                 .unwrap_err()
                 .code,
             "managed-directory-not-directory"
         );
         assert_eq!(fs::read_to_string(&managed).unwrap(), "not a directory");
         fs::remove_file(&managed).unwrap();
-        assert!(pi_family_link_transcript(&arguments, &managed).unwrap());
+        assert!(pi_family_link_transcript("omp", &arguments, &managed).unwrap());
         assert_eq!(
             pi_family_transcript(&managed, id).unwrap(),
             managed.join(transcript.file_name().unwrap())
@@ -944,7 +954,7 @@ mod tests {
                 .map(|_| {
                     scope.spawn(|| {
                         barrier.wait();
-                        pi_family_link_transcript(&arguments, &managed)
+                        pi_family_link_transcript("omp", &arguments, &managed)
                     })
                 })
                 .collect();
@@ -984,29 +994,29 @@ mod tests {
         fs::write(&transcript, format!("{{\"type\":\"session\",\"id\":\"{id}\"}}\n")).unwrap();
         let arguments = argv(&["omp", "--resume", transcript.to_str().unwrap()]);
         let managed = root.path().join("managed");
-        assert!(pi_family_link_transcript(&arguments, &managed).unwrap());
+        assert!(pi_family_link_transcript("omp", &arguments, &managed).unwrap());
         let companion = managed.join(transcript.file_stem().unwrap());
         assert_eq!(fs::read_link(&companion).unwrap(), transcript.with_extension(""));
         assert!(companion.is_dir());
-        assert!(!pi_family_link_transcript(&arguments, &managed).unwrap());
+        assert!(!pi_family_link_transcript("omp", &arguments, &managed).unwrap());
         // ArtifactManager recursively creates this directory before its first write.
         fs::create_dir_all(&companion).unwrap();
         fs::write(companion.join("artifact"), "lazy artifact").unwrap();
         assert_eq!(fs::read_to_string(transcript.with_extension("").join("artifact")).unwrap(), "lazy artifact");
-        assert!(!pi_family_link_transcript(&arguments, &managed).unwrap());
+        assert!(!pi_family_link_transcript("omp", &arguments, &managed).unwrap());
         assert_eq!(fs::read_to_string(companion.join("artifact")).unwrap(), "lazy artifact");
         // Repair an inventory created by the previous version without replacing it.
         fs::remove_file(&companion).unwrap();
         fs::write(managed.join("preserve"), "keep").unwrap();
-        assert!(pi_family_link_transcript(&arguments, &managed).unwrap());
+        assert!(pi_family_link_transcript("omp", &arguments, &managed).unwrap());
         assert_eq!(fs::read_to_string(companion.join("artifact")).unwrap(), "lazy artifact");
         assert_eq!(fs::read_to_string(managed.join("preserve")).unwrap(), "keep");
-        assert!(!pi_family_link_transcript(&arguments, &managed).unwrap());
+        assert!(!pi_family_link_transcript("omp", &arguments, &managed).unwrap());
         // Repair a dangling companion from the earlier implementation too.
         fs::remove_file(companion.join("artifact")).unwrap();
         fs::remove_dir(transcript.with_extension("")).unwrap();
         assert!(!companion.exists());
-        assert!(!pi_family_link_transcript(&arguments, &managed).unwrap());
+        assert!(!pi_family_link_transcript("omp", &arguments, &managed).unwrap());
         fs::create_dir_all(&companion).unwrap();
         fs::write(companion.join("artifact"), "repaired target").unwrap();
         assert_eq!(fs::read_to_string(transcript.with_extension("").join("artifact")).unwrap(), "repaired target");
@@ -1033,8 +1043,8 @@ mod tests {
             let managed = root.path().join(format!("inventory-{migrate}-{index}"));
             if migrate { symlink(&shared, &managed).unwrap(); }
             let arguments = argv(&["omp", "--resume", transcripts[index].to_str().unwrap()]);
-            assert!(pi_family_link_transcript(&arguments, &managed).unwrap());
-            assert!(!pi_family_link_transcript(&arguments, &managed).unwrap());
+            assert!(pi_family_link_transcript("omp", &arguments, &managed).unwrap());
+            assert!(!pi_family_link_transcript("omp", &arguments, &managed).unwrap());
             assert!(!fs::symlink_metadata(&managed).unwrap().file_type().is_symlink());
             assert_eq!(fs::read_dir(&managed).unwrap().count(), 2);
             assert!(pi_family_transcript(&managed, ids[index]).is_some());
@@ -1200,6 +1210,7 @@ sed -n '1s/.*"id":"\([^"]*\)".*/\1/p' "$file"
         let sessions = root.path().join("provider-sessions");
         assert!(
             pi_family_link_transcript(
+"omp",
                 &argv(&["omp", "--resume", transcript.to_str().unwrap()]),
                 &sessions,
             )
@@ -1265,7 +1276,7 @@ sed -n '1s/.*"id":"\([^"]*\)".*/\1/p' "$file"
             fs::write(&transcript, format!("{{\"type\":\"session\",\"id\":\"{id}\"}}\n")).unwrap();
             let sessions = root.path().join("provider-sessions");
             let seat = Self { root, id, transcript, sessions };
-            assert!(pi_family_link_transcript(&seat.launch(&["--resume", seat.transcript.to_str().unwrap()]), &seat.sessions).unwrap());
+            assert!(pi_family_link_transcript("omp", &seat.launch(&["--resume", seat.transcript.to_str().unwrap()]), &seat.sessions).unwrap());
             seat
         }
 
@@ -1353,9 +1364,34 @@ sed -n '1s/.*"id":"\([^"]*\)".*/\1/p' "$file"
         let seat = AuthoredSeat::new();
         fs::remove_dir_all(&seat.sessions).unwrap();
         let transcript = seat.transcript.to_str().unwrap();
-        assert!(pi_family_link_transcript(&seat.launch(&["--session", transcript]), &seat.sessions).unwrap());
+        assert!(pi_family_link_transcript("pi", &seat.launch(&["--session", transcript]), &seat.sessions).unwrap());
         let resumed = pi_family_argv("pi", seat.launch(&["--session", transcript]), &seat.sessions, &seat.id).unwrap();
         assert_eq!(resumed, argv(&["omp", "--session", &seat.staged().to_string_lossy()]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_reads_each_drivers_own_transcript_selector() {
+        let seat = AuthoredSeat::new();
+        let transcript = seat.transcript.to_str().unwrap();
+        let staged = |driver: &str, arguments: &[&str]| {
+            let _ = fs::remove_dir_all(&seat.sessions);
+            let linked = pi_family_link_transcript(driver, &seat.launch(arguments), &seat.sessions).unwrap();
+            assert_eq!(linked, seat.sessions.exists(), "{driver} {arguments:?}");
+            linked
+        };
+        // omp: --resume, --resume=, -r stage; its --session is not read here.
+        let inline = format!("--resume={transcript}");
+        assert!(staged("omp", &["--resume", transcript]));
+        assert!(staged("omp", &[&inline]));
+        assert!(staged("omp", &["-r", transcript]));
+        assert!(!staged("omp", &["--session", transcript]));
+        assert!(!staged("omp", &[&format!("--session={transcript}")]));
+        // pi: --session stages, and --resume keeps staging as before.
+        assert!(staged("pi", &["--session", transcript]));
+        assert!(staged("pi", &[&format!("--session={transcript}")]));
+        assert!(staged("pi", &["--resume", transcript]));
+        assert!(!staged("pi", &["-r", transcript]));
     }
 
     #[cfg(unix)]
