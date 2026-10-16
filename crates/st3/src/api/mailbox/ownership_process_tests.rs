@@ -123,14 +123,19 @@ async fn helper(role: &str) {
         // live wrapper must publish provider state before exercising native admission,
         // just as the real wrapper does; a graph harness claim alone is not authority.
         use st_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
-        Writer::new(&dir, "ownership-real-peer", "claude", None)
-            .with_ownership(SESSION, seq)
-            .observe(Observation::new(
-                Activity::Active,
-                BlockedOn::None,
-                InputBuffer::Empty,
-            ))
-            .unwrap();
+        Writer::new(
+            &dir,
+            "ownership-real-peer",
+            "claude",
+            Some(setup["pty_session"].as_str().unwrap().to_owned()),
+        )
+        .with_ownership(SESSION, seq)
+        .observe(Observation::new(
+            Activity::Active,
+            BlockedOn::None,
+            InputBuffer::Empty,
+        ))
+        .unwrap();
         let wrapper = st_drivers::claude_process::process(std::process::id()).unwrap();
         fs::OpenOptions::new()
             .write(true)
@@ -445,7 +450,11 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
             );
             let (role, mut wrapper, wrapper_pid) = accept(&listener).await;
             assert_eq!(role, "wrapper");
-            write(&mut wrapper, json!({"dir":dir,"incarnation":incarnation})).await;
+            write(
+                &mut wrapper,
+                json!({"dir":dir,"incarnation":incarnation,"pty_session":name}),
+            )
+            .await;
             assert_eq!(read(&mut wrapper).await["ready"], true);
             let (role, mut provider, _) = accept(&listener).await;
             assert_eq!(role, "provider");
