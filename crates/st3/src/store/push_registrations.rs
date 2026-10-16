@@ -66,14 +66,15 @@ impl PushRegistrationStatus {
 
 impl Store {
     /// Resolve device identity and recheck the exact grant under the same writer transaction
-    /// as the mutation. A concurrent revocation cannot leave a newly registered secret behind.
+    /// as the mutation, sampling the clock only after writer admission. A concurrent
+    /// revocation or expiry cannot leave a newly registered secret behind.
     pub(crate) fn update_push_registration(
         &self,
         grant: &str,
         person: &str,
         actor: &str,
         registration: Option<&PushRegistration>,
-        now: u64,
+        now: impl FnOnce() -> u64 + Send,
     ) -> Result<Option<PushRegistrationStatus>> {
         self.connection.batched(|tx| -> Result<Option<PushRegistrationStatus>> {
             let pairing: Option<(u64, String, u64)> = tx.prepare_cached(
@@ -93,7 +94,7 @@ impl Store {
                  AND kind IN ('custom.client.pairing-completed','custom.client.pairing-revoked') AND store_index>?2)",
                 params![grant, index], |row| row.get(0),
             )?;
-            if revoked || expiry <= now || device.is_empty() {
+            if revoked || expiry <= now() || device.is_empty() {
                 tx.execute("DELETE FROM local_push_registrations WHERE pairing_grant=?1", [grant])?;
                 return Ok(None);
             }

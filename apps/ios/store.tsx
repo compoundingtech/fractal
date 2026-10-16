@@ -283,25 +283,45 @@ function useAppStore(proof?: FabricProfile) {
   if (!pushRef.current) pushRef.current = new PushRegistrationLifecycle(nativePushPorts({
     readEnabled: async () => (await AsyncStorage.getItem(PUSH_KEY)) === '1',
     writeEnabled: enabled => AsyncStorage.setItem(PUSH_KEY, enabled ? '1' : '0'),
-  }));
+  }), {
+    read: async () => {
+      const raw = await AsyncStorage.getItem('st3.push.owners');
+      if (!raw) return [];
+      const owners: unknown = JSON.parse(raw);
+      if (!Array.isArray(owners) || !owners.every(owner => typeof owner === 'string' && (owner === PROFILE_KEY || /^st3\.fabric\.profile\.[a-f0-9]{64}\.[a-f0-9]+$/.test(owner)))) throw new Error('Push cleanup ownership could not be read.');
+      return owners;
+    },
+    write: owners => AsyncStorage.setItem('st3.push.owners', JSON.stringify(owners)),
+  });
   const push = pushRef.current;
   const pushGranted = !proof && capsClient.current === client && !!caps?.capabilities.some(capability => capability.id === 'push-registration' && capability.version >= 1 && capability.state === 'granted');
-  const pushRemote = useMemo<PushRemote | undefined>(() => {
-    if (!connectUrl) return;
-    // Bind one write's abort signal through response decoding; it cannot abort the next write.
-    const remote = (signal: AbortSignal) => new St3Client({ baseUrl: connectUrl, credential: () => clientCredential ?? undefined, fetchImpl: gatewayFetch((input, init) => fetch(input, { ...init, signal })), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) });
-    return {
-      register: request => pushWrite(async signal => (await remote(signal).pushRegister(request)).value),
-      unregister: () => pushWrite(async signal => (await remote(signal).pushUnregister()).value),
+  const pushIssuer = selected.route.kind === 'fabric' && fabricMember && !fabricMember.device ? memberProfileKey(fabricMember) : PROFILE_KEY;
+  const pushIssuers = useMemo(() => {
+    const remotes = new Map<string, PushRemote | undefined>();
+    const remoteFor = (baseUrl: string, bearer: string): PushRemote => {
+      // Capture each issuer's own credential, never a mutable selected-route credential.
+      const remote = (signal: AbortSignal) => new St3Client({ baseUrl, credential: () => bearer, fetchImpl: gatewayFetch((input, init) => fetch(input, { ...init, signal })), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) });
+      return {
+        register: request => pushWrite(async signal => (await remote(signal).pushRegister(request)).value),
+        unregister: () => pushWrite(async signal => (await remote(signal).pushUnregister()).value),
+      };
     };
-  }, [connectUrl, clientCredential]);
+    if (!proof && credential) remotes.set(PROFILE_KEY, url && !isFabricGatewayId(url) ? remoteFor(url, credential) : undefined);
+    if (!proof) for (const [key, profile] of ownProfiles) {
+      remotes.set(key, !isFabricGatewayId(profile.url) ? remoteFor(profile.url, profile.credential) : undefined);
+    }
+    // Fabric's loopback route is valid only for the current member and connection.
+    if (!proof && status === 'online' && pushGranted && connectUrl && clientCredential) remotes.set(pushIssuer, remoteFor(connectUrl, clientCredential));
+    return remotes;
+  }, [proof, credential, url, ownProfiles, status, pushGranted, connectUrl, clientCredential, pushIssuer]);
+  const pushRemote = pushGranted && status === 'online' ? pushIssuers.get(pushIssuer) : undefined;
   const subscribePush = useCallback((changed: () => void) => {
     const unsubscribe = push.subscribe(changed);
-    push.configure({ paired: !proof && !!clientCredential, granted: pushGranted, remote: status === 'online' ? pushRemote : undefined });
+    push.configure({ paired: !proof && !!clientCredential, granted: pushGranted, issuer: pushIssuer, issuers: pushIssuers, remote: pushRemote });
     if (!proof) void push.start();
     const leaveForeground = foreground.current.subscribe(active => { if (active && !proof) void push.refresh(); });
     return () => { unsubscribe(); leaveForeground(); push.stop(); };
-  }, [push, proof, clientCredential, pushGranted, pushRemote, status]);
+  }, [push, proof, clientCredential, pushGranted, pushRemote, pushIssuer, pushIssuers]);
   const pushState = useSyncExternalStore(subscribePush, push.snapshot);
   // Image bytes go up through Expo's fetch: React Native's cannot send a byte array as a body.
   useEffect(() => {
@@ -655,6 +675,7 @@ function useAppStore(proof?: FabricProfile) {
     let consumed = false;
     let deviceId = '';
     try {
+      if (old && !await push.forgetIssuer(profileKey)) throw new Error('Notification cleanup is incomplete. Reconnect to the paired member before replacing its pairing.');
       const gatewayClient = new St3Client({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) });
       const result = await gatewayClient.completePairing(id, { api_version: API_VERSION, code, device_public_key: made.key, key_storage: made.storage });
       consumed = true; deviceId = result.value.device_id;
@@ -692,16 +713,23 @@ function useAppStore(proof?: FabricProfile) {
         throw new Error(`${errorText(error)} The code was consumed; inspect and revoke ${safeId} on the trusted member before pairing again. The previous profile was retained.`);
       }
       throw error;
+    } finally {
+      push.releaseIssuer(profileKey);
     }
   }
 
   /** Forget this phone's own pairing with one member: its Keychain entry and its signing key. */
-  async function forgetMemberProfile(member: FabricMember): Promise<void> {
+  async function forgetMemberProfile(member: FabricMember): Promise<boolean> {
     const key = memberProfileKey(member);
     const profile = ownProfiles.get(key);
+    if (!await push.forgetIssuer(key)) {
+      setError('Notification cleanup is incomplete. Reconnect to this member and try again; its pairing was kept.');
+      return false;
+    }
     await SecureStore.deleteItemAsync(key).catch(() => {});
     if (profile?.signing?.handle) await removeDeviceKey(profile.signing.handle).catch(() => {});
     setOwnProfiles(held => { const next = new Map(held); next.delete(key); return next; });
+    return true;
   }
   /** Save the fabric members in the person's order: the list under its key, the device's member under the old key. */
   async function saveFabricMembers(next: FabricMember[]): Promise<void> {
@@ -763,7 +791,7 @@ function useAppStore(proof?: FabricProfile) {
     async removeFabricMember(index: number) {
       const member = fabricMemberList[index];
       if (!member) return;
-      if (!member.device) await forgetMemberProfile(member);
+      if (!member.device && !await forgetMemberProfile(member)) return;
       if (pairingMember && sameFabricTarget(pairingMember, member)) setPairingMember(null);
       await saveFabricMembers(fabricMemberList.filter((_, i) => i !== index));
     },
@@ -812,7 +840,10 @@ function useAppStore(proof?: FabricProfile) {
     async refreshFabricPath() { setFabricPath(await fabricPathInUse()); },
     async forget() {
       if (proof) { proof.close(); return; }
-      await push.forget();
+      if (!await push.forget()) {
+        setError('Notification cleanup is incomplete. Reconnect to the paired members and try Forget again; pairings were kept.');
+        return;
+      }
       const saved = await SecureStore.getItemAsync(PROFILE_KEY);
       const profile: PhoneProfile | undefined = saved ? JSON.parse(saved) : undefined;
       await SecureStore.deleteItemAsync(PROFILE_KEY);

@@ -112,15 +112,20 @@ development-signed Release build can still use the development environment. Miss
 unknown environment and the simulator fail closed. The native bundle identifier and application
 version accompany the token.
 
-Turning the switch off unregisters while connected; an offline opt-out stays saved and unregisters
-on the next capable connection. Forgetting this device fences native work and attempts unregister
-before deleting pairing credentials, even if that request fails. Pending native permission/token
-callbacks are canceled locally on opt-out or forget; push HTTP requests have an eight-second abort
-deadline so a stalled connection cannot keep Forget waiting indefinitely. The token is held only for native
-acquisition and the paired registration request: it is never persisted in phone preferences,
-projection caches, claims, observations, logs or displayed errors. Fleet device rows show only the
-member's safe registered/environment summary. Revocation or expiry also removes the registration
-on the paired member.
+Turning the switch off unregisters from every issuer this phone may have registered with,
+including earlier members after switching connections. Before sending any registration, the phone
+durably records only its pairing-profile key as cleanup ownership—not a token or credential.
+That ownership survives restart and is cleared only after confirmed unregistration. An offline
+or failed opt-out stays visibly pending/failed until its issuer can be reached again.
+Forgetting this device or removing an independently paired member fences native work and
+requires confirmed cleanup before deleting the affected pairing credentials. If cleanup cannot
+be confirmed, the credentials remain and the phone shows a safe reconnect/retry message.
+Never-enabled phones with no cleanup ownership can still forget while offline.
+Pending native permission/token callbacks are canceled locally on opt-out or forget; push HTTP
+requests have an eight-second abort deadline. The token is held only for native acquisition and
+the paired registration request: it is never persisted in phone preferences, projection caches,
+claims, observations, logs or displayed errors. Fleet device rows show only the member's safe
+registered/environment summary. Revocation or expiry also removes the registration on its issuer.
 
 ## Fabric, an opt-in carrier
 

@@ -39,7 +39,7 @@ fn register(state: &AppState) {
             PERSON,
             ACTOR,
             Some(&registration),
-            client_now_ms() as u64,
+            || client_now_ms() as u64,
         )
         .unwrap()
         .unwrap();

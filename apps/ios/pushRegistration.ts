@@ -23,11 +23,19 @@ export type PushRemote = {
   register(request: PushRegistration): Promise<PushRegistrationStatus>;
   unregister(): Promise<PushRegistrationStatus>;
 };
-export type PushContext = { paired: boolean; granted: boolean; remote?: PushRemote };
+export type PushContext = {
+  paired: boolean;
+  granted: boolean;
+  issuer?: string;
+  remote?: PushRemote;
+  /** Saved paired profile identities, with only routes currently safe for their own credentials. */
+  issuers: ReadonlyMap<string, PushRemote | undefined>;
+};
 export type PushState = {
   enabled: boolean;
   loaded: boolean;
   environment?: PushEnvironment;
+  cleanup: 'none' | 'pending' | 'failed' | 'complete';
   status: 'idle' | 'working' | 'registered' | 'unregistered' | 'permission-denied' | 'failed';
 };
 export type PushPorts = {
@@ -45,10 +53,12 @@ export type PushPorts = {
  * Native acquisition is generation-fenced; failed transport writes reconcile on the next connection.
  */
 export class PushRegistrationLifecycle {
-  private state: PushState = { enabled: false, loaded: false, status: 'idle' };
-  private context: PushContext = { paired: false, granted: false };
+  private state: PushState = { enabled: false, loaded: false, status: 'idle', cleanup: 'none' };
+  private context: PushContext = { paired: false, granted: false, issuers: new Map() };
   private listeners = new Set<() => void>();
-  private lastRemote?: PushRemote;
+  private owners = new Set<string>();
+  private ownershipReady = false;
+  private retiring = new Set<string>();
   private stopTokens?: () => void;
   private loading?: Promise<void>;
   private queue: Promise<void> = Promise.resolve();
@@ -57,7 +67,10 @@ export class PushRegistrationLifecycle {
   private forgetting = false;
   private disposed = false;
 
-  constructor(private readonly ports: PushPorts) {}
+  constructor(private readonly ports: PushPorts, private readonly ownership: {
+    read(): Promise<readonly string[]>;
+    write(issuers: readonly string[]): Promise<void>;
+  }) {}
 
   private invalidate(): void {
     this.generation++;
@@ -85,12 +98,12 @@ export class PushRegistrationLifecycle {
   }
   private enqueue(job: () => Promise<void>): Promise<void> {
     this.queue = this.queue.then(job).catch(() => {
-      if (!this.disposed && !this.forgetting) this.publish({ status: 'failed' });
+      if (!this.disposed) this.publish({ status: 'failed', cleanup: this.forgetting || !this.state.enabled ? 'failed' : this.state.cleanup });
     });
     return this.queue;
   }
   private eligible(): boolean {
-    return !this.disposed && !this.forgetting && this.state.loaded && this.context.paired && this.context.granted && !!this.context.remote;
+    return !this.disposed && !this.forgetting && this.ownershipReady && !this.retiring.has(this.context.issuer ?? '') && this.state.loaded && this.context.paired && this.context.granted && !!this.context.remote;
   }
   private listen(): void {
     this.stopTokens?.(); this.stopTokens = undefined;
@@ -103,9 +116,11 @@ export class PushRegistrationLifecycle {
   start(): Promise<void> {
     this.disposed = false;
     if (!this.loading) this.loading = (async () => {
-      const [enabled, environment] = await Promise.all([this.ports.readEnabled(), this.ports.environment()]);
+      const [enabled, environment, owners] = await Promise.all([this.ports.readEnabled(), this.ports.environment(), this.ownership.read()]);
+      this.owners = new Set(owners);
+      this.ownershipReady = true;
       this.publish({ enabled, environment, loaded: true });
-    })().catch(() => { this.publish({ loaded: true, status: 'failed' }); });
+    })().catch(() => { this.loading = undefined; this.publish({ loaded: true, status: 'failed', cleanup: 'failed' }); });
     return this.loading.then(() => {
       if (this.disposed) return;
       this.listen();
@@ -114,9 +129,8 @@ export class PushRegistrationLifecycle {
   }
   configure(context: PushContext): void {
     this.invalidate();
-    if (context.paired && context.granted && context.remote) this.lastRemote = context.remote;
-    if (!context.paired) this.lastRemote = undefined;
     this.context = context;
+    for (const issuer of this.retiring) if (!context.issuers.has(issuer)) this.retiring.delete(issuer);
     this.listen();
     if (this.state.loaded) void this.refresh();
   }
@@ -140,6 +154,10 @@ export class PushRegistrationLifecycle {
     });
   }
   private async reconcile(requestPermission: boolean, changedToken?: unknown): Promise<void> {
+    if (!this.state.enabled) {
+      if (!this.disposed) await this.cleanup();
+      return;
+    }
     const remote = this.context.remote;
     if (!this.eligible() || !remote) return;
     const generation = this.generation;
@@ -149,29 +167,76 @@ export class PushRegistrationLifecycle {
     if (!current()) return;
     const decision = pushDecision({ paired: this.context.paired, granted: this.context.granted, enabled: this.state.enabled, available: !!this.state.environment, permission: permission === true });
     if (decision === 'unregister') {
-      await remote.unregister();
-      if (current()) this.publish({ status: this.state.enabled ? 'permission-denied' : 'unregistered' });
+      await this.cleanup();
+      if (current() && this.state.cleanup === 'complete') this.publish({ status: 'permission-denied' });
       return;
     }
     if (decision !== 'register' || !this.state.environment) return;
+    if (!this.context.issuer) return;
+    // Journal only the safe profile identity BEFORE sending: a lost response may still register.
+    const issuer = this.context.issuer;
+    this.owners.add(issuer);
+    await this.ownership.write([...this.owners]);
+    if (!current()) return;
     const token = changedToken ?? await this.readNative(() => this.ports.token(), generation);
     if (!current()) return;
     const request = pushRequest(token, this.state.environment, this.ports.bundleId, this.ports.version);
     if (!request) { this.publish({ status: 'failed' }); return; }
+    this.publish({ cleanup: 'none' });
     const result = await remote.register(request);
     if (current()) this.publish({ status: result.registered ? 'registered' : 'unregistered' });
   }
 
-  /** Fence native work immediately, then unregister after any already-sent registration settles. */
-  forget(): Promise<void> {
-    const remote = this.lastRemote;
+  /** Persisted profile identities own cleanup; tokens and credentials never enter the journal. */
+  private async cleanup(only?: string): Promise<boolean> {
+    await this.loading;
+    if (!this.ownershipReady) { this.publish({ cleanup: 'failed', status: 'failed' }); return false; }
+    let failed = false;
+    let pending = false;
+    this.publish({ cleanup: 'pending', status: 'working' });
+    for (const issuer of [...this.owners]) {
+      if (only !== undefined && issuer !== only) continue;
+      const remote = this.context.issuers.get(issuer);
+      if (!remote) { pending = true; continue; }
+      try {
+        const result = await remote.unregister();
+        if (result.registered) { failed = true; continue; }
+        const remaining = [...this.owners].filter(owner => owner !== issuer);
+        await this.ownership.write(remaining);
+        this.owners.delete(issuer);
+      } catch { failed = true; }
+    }
+    const complete = !failed && !pending;
+    const outstanding = pending || (!this.state.enabled && this.owners.size > 0);
+    this.publish({ cleanup: failed ? 'failed' : outstanding ? 'pending' : 'complete', status: complete && !outstanding ? 'unregistered' : 'failed' });
+    return complete;
+  }
+
+  /** Fence native work, then clean all issuers after already-sent registrations settle.
+   * Failure retains pairing credentials so reconnect + retry can finish remote opt-out.
+   */
+  async forget(): Promise<boolean> {
     this.forgetting = true; this.invalidate();
     this.stopTokens?.(); this.stopTokens = undefined;
-    return this.enqueue(async () => {
-      await this.ports.writeEnabled(false).catch(() => {});
-      if (remote) await remote.unregister().catch(() => {});
-      this.publish({ enabled: false, status: 'unregistered' });
+    let complete = false;
+    await this.enqueue(async () => {
+      await this.ports.writeEnabled(false);
+      this.publish({ enabled: false });
+      complete = await this.cleanup();
     });
+    if (!complete) this.forgetting = false;
+    return complete;
   }
+
+  /** Removing an independent member must finish cleanup before its credential can be deleted. */
+  async forgetIssuer(issuer: string): Promise<boolean> {
+    this.invalidate();
+    this.retiring.add(issuer);
+    let complete = false;
+    await this.enqueue(async () => { complete = await this.cleanup(issuer); });
+    if (!complete) { this.retiring.delete(issuer); this.listen(); }
+    return complete;
+  }
+  releaseIssuer(issuer: string): void { this.retiring.delete(issuer); }
   resume(): void { this.forgetting = false; }
 }

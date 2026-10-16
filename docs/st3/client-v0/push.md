@@ -70,8 +70,13 @@ Registration eligibility never outlives its pairing:
 - Expiry immediately prevents registration and hides the registered summary. Independent
   cleanup deletes expired rows on daemon startup and within 30 seconds while running, without
   needing an attention reader or a device window.
-- "Forget this device" on the phone unregisters first, best effort, before deleting its
-  credentials.
+  Mutation authorization samples the clock after admission to the writer transaction, so
+  waiting in the writer queue never extends a pairing's authority.
+- The phone retains durable cleanup ownership for every issuer it may have registered with,
+  even after switching members or restarting. This journal contains only pairing-profile keys.
+- "Forget this device" and independent-member removal clean affected registrations before
+  deleting pairing credentials. Offline/failed cleanup stays explicit and retains credentials
+  for retry; turning the switch off never claims successful remote opt-out while it is pending.
 
 ## The token is a secret
 

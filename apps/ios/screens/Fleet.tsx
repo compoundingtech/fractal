@@ -124,6 +124,8 @@ export function FleetScreen() {
 function NotificationsSetting() {
   const { pushInfo, actions, status } = useStore();
   const detail = !pushInfo.loaded ? 'Checking notification support…'
+    : pushInfo.cleanup === 'pending' ? 'Remote opt-out is pending. Reconnect to previously registered members before forgetting this phone.'
+    : pushInfo.cleanup === 'failed' ? 'Could not confirm remote opt-out. Pairing credentials are kept; reconnect and retry.'
     : !pushInfo.environment ? 'Requires a push-enabled build on a physical iPhone.'
     : status !== 'online' ? 'Connect to your paired member to register. Turning off is saved on this phone.'
     : !pushInfo.granted ? 'Push registration is unavailable on this paired member.'

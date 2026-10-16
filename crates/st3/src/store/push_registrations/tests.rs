@@ -74,7 +74,7 @@ fn push_registration_replaces_one_key_isolates_people_and_devices_and_unregister
     let initial = registration(TOKEN, PushEnvironment::Development);
     assert_eq!(
         store
-            .update_push_registration(GRANT, PERSON, ACTOR, Some(&initial), 1000)
+            .update_push_registration(GRANT, PERSON, ACTOR, Some(&initial), || 1000)
             .unwrap()
             .unwrap(),
         PushRegistrationStatus {
@@ -84,7 +84,7 @@ fn push_registration_replaces_one_key_isolates_people_and_devices_and_unregister
     );
     let replacement = registration("aabbccdd", PushEnvironment::Production);
     store
-        .update_push_registration(GRANT, PERSON, ACTOR, Some(&replacement), 1000)
+        .update_push_registration(GRANT, PERSON, ACTOR, Some(&replacement), || 1000)
         .unwrap()
         .unwrap();
     assert_eq!(count(&store), 1);
@@ -104,7 +104,7 @@ fn push_registration_replaces_one_key_isolates_people_and_devices_and_unregister
             PERSON,
             "client/second",
             Some(&initial),
-            1000,
+            || 1000,
         )
         .unwrap()
         .unwrap();
@@ -114,7 +114,7 @@ fn push_registration_replaces_one_key_isolates_people_and_devices_and_unregister
             "person/other",
             "client/other",
             Some(&initial),
-            1000,
+            || 1000,
         )
         .unwrap()
         .unwrap();
@@ -129,7 +129,7 @@ fn push_registration_replaces_one_key_isolates_people_and_devices_and_unregister
     for _ in 0..2 {
         assert_eq!(
             store
-                .update_push_registration(GRANT, PERSON, ACTOR, None, 1000)
+                .update_push_registration(GRANT, PERSON, ACTOR, None, || 1000)
                 .unwrap()
                 .unwrap(),
             PushRegistrationStatus::unregistered()
@@ -155,28 +155,86 @@ fn push_exact_session_identity_and_expiry_are_rechecked_inside_writer_transactio
     ] {
         assert!(
             store
-                .update_push_registration(subject, person, actor, Some(&input), 1000)
+                .update_push_registration(subject, person, actor, Some(&input), || 1000)
                 .unwrap()
                 .is_none()
         );
     }
     store
-        .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), 1000)
+        .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 1000)
         .unwrap()
         .unwrap();
     assert!(
         store
-            .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), 2000)
+            .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 2000)
             .unwrap()
             .is_none()
     );
     assert_eq!(count(&store), 0);
     assert!(
         store
-            .update_push_registration(GRANT, PERSON, ACTOR, None, 2001)
+            .update_push_registration(GRANT, PERSON, ACTOR, None, || 2001)
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn push_post_and_delete_reject_grant_expiry_while_queued_for_writer() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    for register in [true, false] {
+        let store = Arc::new(Store::open_memory("push-owner").unwrap());
+        grant(&store, GRANT, PERSON, ACTOR, "device/phone", 2000);
+        if !register {
+            let input = registration(TOKEN, PushEnvironment::Development);
+            store
+                .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 1000)
+                .unwrap()
+                .unwrap();
+        }
+        let clock = Arc::new(AtomicU64::new(1000));
+        let samples = Arc::new(AtomicUsize::new(0));
+        let held = store.connection.write();
+        // Observe actual queue admission, not merely the worker thread starting.
+        // This is the writer_queue tests' public jobs-channel interception convention.
+        let (proxy, incoming) = mpsc::channel();
+        let original = store.connection.jobs.lock().unwrap().replace(proxy).unwrap();
+        let worker_store = store.clone();
+        let worker_clock = clock.clone();
+        let worker_samples = samples.clone();
+        let worker = std::thread::spawn(move || {
+            let input = registration(TOKEN, PushEnvironment::Development);
+            worker_store.update_push_registration(
+                GRANT,
+                PERSON,
+                ACTOR,
+                register.then_some(&input),
+                || {
+                    worker_samples.fetch_add(1, Ordering::SeqCst);
+                    worker_clock.load(Ordering::SeqCst)
+                },
+            )
+        });
+        let job = incoming
+            .recv_timeout(Duration::from_secs(10))
+            .expect("push mutation must enqueue before the clock advances");
+        assert!(matches!(&job, smallclaims::sqlite::WriterJob::Batched { .. }));
+        original.send(job).unwrap();
+        *store.connection.jobs.lock().unwrap() = Some(original);
+        assert_eq!(clock.load(Ordering::SeqCst), 1000);
+        assert_eq!(samples.load(Ordering::SeqCst), 0, "clock must wait for writer admission");
+        clock.store(2001, Ordering::SeqCst);
+        drop(held);
+        assert!(
+            worker.join().unwrap().unwrap().is_none(),
+            "both POST and DELETE must reject an expired grant"
+        );
+        assert_eq!(samples.load(Ordering::SeqCst), 1);
+        assert_eq!(count(&store), 0, "rejection must leave no registration row");
+    }
 }
 
 #[test]
@@ -185,7 +243,7 @@ fn push_revoke_and_grant_replacement_delete_secrets_without_attention_reads() {
     grant(&store, GRANT, PERSON, ACTOR, "device/phone", 2000);
     let input = registration(TOKEN, PushEnvironment::Development);
     store
-        .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), 1000)
+        .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 1000)
         .unwrap()
         .unwrap();
     claim(&store, GRANT, "custom.client.pairing-revoked", json!({}));
@@ -196,13 +254,13 @@ fn push_revoke_and_grant_replacement_delete_secrets_without_attention_reads() {
     );
     assert!(
         store
-            .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), 1000)
+            .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 1000)
             .unwrap()
             .is_none()
     );
     grant(&store, GRANT, PERSON, ACTOR, "device/phone", 3000);
     store
-        .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), 1000)
+        .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 1000)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -238,7 +296,7 @@ fn push_replicated_revocation_removes_registration_without_a_read_and_exports_no
     grant(&owner, GRANT, PERSON, ACTOR, "device/phone", 2000);
     let input = registration(TOKEN, PushEnvironment::Development);
     owner
-        .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), 1000)
+        .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 1000)
         .unwrap()
         .unwrap();
     let wire = replicate(&owner, &peer);
@@ -250,7 +308,7 @@ fn push_replicated_revocation_removes_registration_without_a_read_and_exports_no
             .contains(TOKEN)
     );
     assert!(
-        peer.update_push_registration(GRANT, PERSON, ACTOR, Some(&input), 1000)
+        peer.update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 1000)
             .unwrap()
             .is_none(),
         "only the pairing issuer stores a registration"
@@ -281,7 +339,7 @@ fn push_local_schema_upgrades_old_store_and_registration_survives_restart_then_e
         grant(&store, GRANT, PERSON, ACTOR, "device/phone", 2000);
         let input = registration(TOKEN, PushEnvironment::Development);
         store
-            .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), 1000)
+            .update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 1000)
             .unwrap()
             .unwrap();
     }

@@ -132,7 +132,7 @@ async fn update(
     let status: PushRegistrationStatus = tokio::task::spawn_blocking(move || {
         store.update_push_registration(
             session.pairing_grant.as_deref().expect("paired session checked"),
-            &session.authority_actor, &session.actor, registration.as_ref(), client_now_ms() as u64,
+            &session.authority_actor, &session.actor, registration.as_ref(), || client_now_ms() as u64,
         ).map_err(|_| unavailable())?.ok_or_else(|| ApiError {
             status: StatusCode::FORBIDDEN, code: "forbidden".into(),
             message: "push registration requires a current authenticated paired session issued by this member".into(),
