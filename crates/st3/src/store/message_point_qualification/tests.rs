@@ -805,6 +805,8 @@ fn same_snapshot_survives_a_wal_commit_but_is_not_an_owner_lifetime_certificate(
                         // This isolated fixture has no competing writer. Unexpected
                         // SQLite lock contention must fail immediately, not wait for
                         // the pinned reader that deliberately stays open until join.
+                        // ZERO remains on this fixture's physical writer connection;
+                        // this test performs no later writes that expect the default.
                         db.busy_timeout(Duration::ZERO).unwrap();
                         let changed = db
                             .execute(
