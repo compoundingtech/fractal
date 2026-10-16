@@ -277,7 +277,7 @@ separate nextest process, runs `scripts/messaging-compat-binary`. The script bui
 baseline commit under a lock and caches the path in `${XDG_CACHE_HOME:-~/.cache}/st3`
 (`ST3_MESSAGING_COMPAT_CACHE` moves it), so the other cases read the cached path instead of each
 queuing its own `nix build`; a cached path that is no longer executable is rebuilt, and a caller
-that cannot get the lock within `ST3_MESSAGING_COMPAT_LOCK_WAIT` seconds (default 600) fails with
+that cannot get the lock within `ST3_MESSAGING_COMPAT_LOCK_WAIT` seconds (default 540, below the callers' 10 minute `timeout`) fails with
 the way out (set `ST3_MESSAGING_COMPAT_BIN`). `scripts/messaging-compat-binary-test` runs it against a fake `nix`.
 Each run isolates test `HOME` and XDG state. The summary records the tested SHA,
 each stage's elapsed time, result and exit code; each stage job uploads `<job>-logs` with its log and `.time` file.

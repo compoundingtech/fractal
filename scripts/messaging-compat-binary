@@ -30,7 +30,9 @@ if cached_binary; then exit 0; fi
 
 if [[ $use_cache == 1 ]] && command -v flock >/dev/null 2>&1; then
   exec 9>"$cached.lock"
-  wait=${ST3_MESSAGING_COMPAT_LOCK_WAIT:-600}
+  # Callers wrap this script in `timeout 10m` (600 s): the default stays below it, so a waiter
+  # prints its error before the timeout kills it silently.
+  wait=${ST3_MESSAGING_COMPAT_LOCK_WAIT:-540}
   if ! flock -w "$wait" 9; then
     echo "messaging-compat-binary: another process has been building the pinned historical channel for ${wait}s; set ST3_MESSAGING_COMPAT_BIN to a built st3 to skip this build" >&2
     exit 1

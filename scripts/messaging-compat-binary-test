@@ -17,6 +17,11 @@ script = root / 'scripts/messaging-compat-binary'
 commit = json.loads((root / '.github/messaging-compat-baseline.json').read_text())['commit']
 have_flock = shutil.which('flock') is not None
 
+# The callers wrap the script in `timeout 10m`; a default wait at or above that never prints its error.
+import re
+default_wait = int(re.search(r'ST3_MESSAGING_COMPAT_LOCK_WAIT:-(\d+)', script.read_text()).group(1))
+assert default_wait < 600, f'lock wait default {default_wait} s must be below the 600 s caller timeout'
+
 
 def executable(path, text):
     path.write_text(text)
