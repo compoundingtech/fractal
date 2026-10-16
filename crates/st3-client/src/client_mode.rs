@@ -3,10 +3,10 @@
 use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read as _, Write as _},
     os::fd::{AsRawFd as _, FromRawFd as _},
-    os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _},
+    os::unix::fs::{MetadataExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
 };
 
@@ -194,8 +194,8 @@ impl Store {
             .path
             .parent()
             .context("Client-mode directory missing")?;
-        match self.read_directory(parent) {
-            Ok(_) => {}
+        let directory = match self.read_directory(parent) {
+            Ok(directory) => directory,
             Err(error)
                 if error
                     .downcast_ref::<std::io::Error>()
@@ -204,16 +204,25 @@ impl Store {
                 return Ok(State::default());
             }
             Err(error) => return Err(error),
+        };
+        self.read_state_in(&directory, first_enrollment)
+    }
+
+    fn read_state_in(&self, directory: &File, first_enrollment: bool) -> Result<State> {
+        match open_in(
+            directory,
+            &self.path.with_extension("recovery"),
+            libc::O_RDONLY,
+        ) {
+            Ok(_) => anyhow::bail!("Client-mode recovery evidence requires explicit recovery"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("Inspect client-mode recovery evidence"),
         }
-        let file = match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(&self.path)
-        {
+        let file = match open_in(directory, &self.path, libc::O_RDONLY) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 ensure!(
-                    first_enrollment || !self.enrolled()?,
+                    first_enrollment || !self.enrolled_in(directory)?,
                     "Enrolled client-mode state is missing; recovery required"
                 );
                 return Ok(State::default());
@@ -222,7 +231,7 @@ impl Store {
         };
         private_regular(&file)?;
         ensure!(
-            self.enrolled()?,
+            self.enrolled_in(directory)?,
             "Client-mode enrollment is missing; recovery required"
         );
         ensure!(
@@ -245,11 +254,26 @@ impl Store {
     /// The persistent private lock is also enrollment evidence. A missing state after it
     /// exists is an interrupted/corrupt authority, never an implicit return to local mode.
     pub fn enrolled(&self) -> Result<bool> {
-        match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(self.path.with_extension("lock"))
-        {
+        let parent = self
+            .path
+            .parent()
+            .context("Client-mode directory missing")?;
+        let directory = match self.read_directory(parent) {
+            Ok(directory) => directory,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        self.enrolled_in(&directory)
+    }
+
+    fn enrolled_in(&self, directory: &File) -> Result<bool> {
+        match open_in(directory, &self.path.with_extension("lock"), libc::O_RDONLY) {
             Ok(file) => {
                 private_regular(&file)?;
                 Ok(true)
@@ -274,7 +298,7 @@ impl Store {
             root.metadata()?.permissions().mode() & 0o077 == 0,
             "Client-mode authority directory must be private (0700)"
         );
-        let directory = authority_directory(parent, false)?;
+        let directory = walk_directory(root, parent.strip_prefix(&self.authority_root)?, false)?;
         ensure!(
             directory.metadata()?.permissions().mode() & 0o077 == 0,
             "Client-mode namespace directory must be private (0700)"
@@ -326,27 +350,20 @@ impl Store {
             root.metadata()?.permissions().mode() & 0o077 == 0,
             "Client-mode authority directory must be private (0700)"
         );
-        let directory = authority_directory(parent, true)?;
+        let directory = walk_directory(root, parent.strip_prefix(&self.authority_root)?, true)?;
         ensure!(
             directory.metadata()?.permissions().mode() & 0o077 == 0,
             "Client-mode namespace directory must be private (0700)"
         );
-        let options = || {
-            let mut options = OpenOptions::new();
-            options
-                .read(true)
-                .write(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
-            options
-        };
-        let (lock, first_enrollment) = match options()
-            .create_new(true)
-            .open(self.path.with_extension("lock"))
-        {
+        let marker = self.path.with_extension("lock");
+        let (lock, first_enrollment) = match open_in(
+            &directory,
+            &marker,
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+        ) {
             Ok(file) => (file, true),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                (options().open(self.path.with_extension("lock"))?, false)
+                (open_in(&directory, &marker, libc::O_RDWR)?, false)
             }
             Err(error) => return Err(error).context("Open client-mode enrollment lock"),
         };
@@ -355,7 +372,7 @@ impl Store {
             .context("Another process is changing client mode")?;
         lock.sync_all()?;
         directory.sync_all()?;
-        let current = self.read_state(first_enrollment)?;
+        let current = self.read_state_in(&directory, first_enrollment)?;
         Ok(Update {
             store: self,
             directory,
@@ -394,7 +411,6 @@ fn reject_legacy_evidence(path: &Path) -> Result<()> {
 /// permit private account-owned children; sticky semantics prevent another UID replacing them.
 /// Same-UID deletion of every authority artifact is outside this inhibition's threat model.
 fn authority_directory(path: &Path, create: bool) -> Result<File> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
     let mut path = path.to_path_buf();
     #[cfg(target_os = "macos")]
     {
@@ -415,7 +431,18 @@ fn authority_directory(path: &Path, create: bool) -> Result<File> {
     }
     #[cfg(not(target_os = "macos"))]
     let _ = &mut path;
-    let mut directory = File::open("/")?;
+    let root = unsafe {
+        libc::open(
+            c"/".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    ensure_fd(root)?;
+    walk_directory(unsafe { File::from_raw_fd(root) }, &path, create)
+}
+
+fn walk_directory(mut directory: File, path: &Path, create: bool) -> Result<File> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
     for component in path.components() {
         let std::path::Component::Normal(component) = component else {
             ensure!(
@@ -497,6 +524,30 @@ fn local_lock_filesystem(file: &File) -> Result<()> {
         "Unsupported filesystem for client-mode coordination; refusing startup/enrollment"
     );
     Ok(())
+}
+
+fn component_name(path: &Path) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    std::ffi::CString::new(name.as_bytes()).map_err(|_| std::io::ErrorKind::InvalidInput.into())
+}
+
+fn open_in(directory: &File, path: &Path, flags: libc::c_int) -> std::io::Result<File> {
+    let name = component_name(path)?;
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 fn ensure_fd(fd: libc::c_int) -> Result<()> {
@@ -583,25 +634,49 @@ impl Update<'_> {
             "Client-mode generation must advance by one"
         );
         ensure!(
-            self.store.read_state(self.first_enrollment)? == self.current,
+            self.store
+                .read_state_in(&self.directory, self.first_enrollment)?
+                == self.current,
             "Client-mode state changed outside its lock"
         );
-        let parent = self
-            .store
-            .path
-            .parent()
-            .context("Client-mode directory missing")?;
-        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-        temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(0o600))?;
-        serde_json::to_writer(&mut temporary, &next)?;
-        temporary.write_all(b"\n")?;
-        temporary.as_file().sync_all()?;
-        temporary
-            .persist(&self.store.path)
-            .map_err(|error| error.error)
-            .context("Publish client-mode state")?;
+        static NEXT_TEMPORARY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT_TEMPORARY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ensure!(
+            serial < u64::MAX,
+            "Client-mode temporary identity exhausted"
+        );
+        let temporary_name =
+            PathBuf::from(format!(".client-mode-{}-{serial}.tmp", std::process::id()));
+        let mut temporary = open_in(
+            &self.directory,
+            &temporary_name,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .context("Create private client-mode publication (stale temporary requires recovery)")?;
+        let result = (|| -> Result<()> {
+            serde_json::to_writer(&mut temporary, &next)?;
+            temporary.write_all(b"\n")?;
+            temporary.sync_all()?;
+            let old = component_name(&temporary_name)?;
+            let new = component_name(&self.store.path)?;
+            if unsafe {
+                libc::renameat(
+                    self.directory.as_raw_fd(),
+                    old.as_ptr(),
+                    self.directory.as_raw_fd(),
+                    new.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error()).context("Publish client-mode state");
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let name = component_name(&temporary_name)?;
+            unsafe { libc::unlinkat(self.directory.as_raw_fd(), name.as_ptr(), 0) };
+        }
+        result?;
         self.directory.sync_all()?;
         self.current = next;
         self.first_enrollment = false;
@@ -905,6 +980,44 @@ mod tests {
         let mut remaining = String::new();
         output.read_to_string(&mut remaining)?; // EOF also proves the child closed its output
         outcome
+    }
+
+    #[test]
+    fn publication_stays_on_opened_directory_after_path_substitution() -> Result<()> {
+        let root = private_tempdir()?;
+        let authority = root.path().join("authority");
+        fs::create_dir(&authority)?;
+        fs::set_permissions(&authority, fs::Permissions::from_mode(0o700))?;
+        let target = private_tempdir()?;
+        let store = Store::at(authority.join("mode.json"))?;
+        let mut update = store.lock()?;
+        update.publish(State::Local {
+            version: 1,
+            generation: 1,
+        })?;
+        let retained = root.path().join("retained");
+        fs::rename(&authority, &retained)?;
+        symlink(target.path(), &authority)?;
+        update.publish(State::Transition {
+            version: 1,
+            generation: 2,
+            operation: "enter/one".into(),
+        })?;
+        assert!(!target.path().join("mode.json").exists());
+        assert!(store.read().is_err());
+        let retained_state: State = serde_json::from_slice(&fs::read(retained.join("mode.json"))?)?;
+        assert!(retained_state.require_local().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_artifact_without_marker_is_never_legacy() -> Result<()> {
+        let root = private_tempdir()?;
+        let store = Store::at(root.path().join("mode.json"))?;
+        fs::write(store.path().with_extension("recovery"), b"interrupted")?;
+        assert!(store.read().is_err());
+        assert!(store.local_start().is_err());
+        Ok(())
     }
 
     #[test]
