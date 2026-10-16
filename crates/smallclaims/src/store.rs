@@ -3747,6 +3747,9 @@ pub const REPLICATION_EXCHANGE_BODY_BUDGET: usize = crate::sync::MAX_EXCHANGE_BY
 /// bytes, everything else in it included. The ones dropped stay missing at the peer, so a later
 /// exchange chooses them again. An envelope too large to send even alone is a typed error rather
 /// than an exchange that silently carries nothing.
+///
+/// A page whose upper bound already fits is kept without measuring; otherwise each envelope is
+/// measured as serde writes it, counting bytes without keeping them.
 pub fn fit_exchange_body(exchange: &mut ReplicationExchange, budget: usize) -> Result<()> {
     if exchange.envelopes.is_empty() {
         return Ok(());
@@ -3754,10 +3757,19 @@ pub fn fit_exchange_body(exchange: &mut ReplicationExchange, budget: usize) -> R
     let envelopes = std::mem::take(&mut exchange.envelopes);
     // The body without envelopes includes their empty brackets; each kept envelope adds its own
     // serialized bytes and, after the first, one separating comma.
-    let mut size = serde_json::to_vec(&*exchange)?.len();
+    let base = serialized_len(&*exchange)?;
+    let bound = envelopes
+        .iter()
+        .map(|envelope| envelope_size_bound(envelope) + 1)
+        .sum::<usize>();
+    if base + bound <= budget {
+        exchange.envelopes = envelopes;
+        return Ok(());
+    }
+    let mut size = base;
     let mut kept = 0;
     for envelope in &envelopes {
-        let added = serde_json::to_vec(envelope)?.len() + usize::from(kept > 0);
+        let added = serialized_len(envelope)? + usize::from(kept > 0);
         if size + added > budget {
             break;
         }
@@ -3778,6 +3790,47 @@ pub fn fit_exchange_body(exchange: &mut ReplicationExchange, budget: usize) -> R
     exchange.envelopes = envelopes;
     exchange.envelopes.truncate(kept);
     Ok(())
+}
+
+/// An upper bound on one envelope's serialized length: JSON escapes a byte of a string as at
+/// most six, the payload goes as base64, and the field names, numbers, nulls and punctuation
+/// take under 256 bytes.
+fn envelope_size_bound(envelope: &ReplicaEnvelope) -> usize {
+    let strings = envelope.writer.len()
+        + envelope.hash.len()
+        + envelope.previous_hash.as_ref().map_or(0, String::len)
+        + envelope.member_key.as_ref().map_or(0, String::len)
+        + envelope.signature.as_ref().map_or(0, String::len);
+    6 * strings + envelope.payload.wire_len_bound() + 256
+}
+
+/// How many bytes serde writes for `value`, without keeping them.
+fn serialized_len<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize> {
+    struct Counting(usize);
+    impl std::io::Write for Counting {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counting = Counting(0);
+    serde_json::to_writer(&mut counting, value)?;
+    Ok(counting.0)
+}
+
+#[cfg(test)]
+thread_local! {static EXCHANGE_BODY_BUDGET: std::cell::Cell<Option<usize>> = const {std::cell::Cell::new(None)};}
+
+/// The exchange body budget, or a test's smaller one on this thread.
+fn exchange_body_budget() -> usize {
+    #[cfg(test)]
+    if let Some(budget) = EXCHANGE_BODY_BUDGET.get() {
+        return budget;
+    }
+    REPLICATION_EXCHANGE_BODY_BUDGET
 }
 
 pub const REPLICATION_PAGE_LIMIT: u32 = 4_096;
@@ -5811,7 +5864,7 @@ impl Store {
         let _timing = time_stage(&self.replication_timers.export);
         exchange.signatures = self.replication_signatures_for(signature_requests)?;
         exchange.signature_requests = self.replication_signature_requests()?;
-        fit_exchange_body(&mut exchange, REPLICATION_EXCHANGE_BODY_BUDGET)?;
+        fit_exchange_body(&mut exchange, exchange_body_budget())?;
         Ok(exchange)
     }
 

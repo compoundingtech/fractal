@@ -160,3 +160,101 @@ fn an_exchange_without_envelopes_is_left_alone() {
     assert!(empty.envelopes.is_empty());
     assert!(REPLICATION_EXCHANGE_BODY_BUDGET < crate::sync::MAX_EXCHANGE_BYTES);
 }
+
+#[test]
+fn the_cheap_bound_is_never_below_the_measured_size() {
+    let mut invalid = envelope("agent/plain", 7, Vec::new());
+    invalid.payload = "not base64 \"\\\u{1}\u{e9}".into();
+    invalid.member_key = Some("invented-key".into());
+    invalid.signature = Some("invented-signature".into());
+    for envelope in assorted().iter().chain([&invalid]) {
+        let measured = serialized_len(envelope).unwrap();
+        assert_eq!(measured, serde_json::to_vec(envelope).unwrap().len());
+        assert!(
+            envelope_size_bound(envelope) >= measured,
+            "{} {}",
+            envelope.writer,
+            envelope.sequence
+        );
+    }
+}
+
+#[test]
+fn a_cut_exchange_leaves_the_rest_for_the_next_one_with_nothing_lost_or_repeated() {
+    const FLEET: &str = "invented-fleet";
+    let node = |name: &str| Store::open_memory(name, Arc::new(super::runtime::Plain)).unwrap();
+    let source = node("alder");
+    let target = node("birch");
+    source.bind_fleet(FLEET).unwrap();
+    target.bind_fleet(FLEET).unwrap();
+    for index in 0..24 {
+        source
+            .append_claim(&ClaimInput {
+                subject: format!("note/{index}"),
+                kind: "example.note".into(),
+                actor: None,
+                fields: BTreeMap::from([("text".into(), json!("x".repeat(2_000)))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    // What the target answers the source with: its inventory, listing the ranges that differ.
+    let answer = || {
+        let summary = source.export_replication_summary(FLEET).unwrap();
+        target
+            .export_replication_exchange(FLEET, &summary.inventory)
+            .unwrap()
+            .inventory
+    };
+    let full = source
+        .export_replication_exchange(FLEET, &answer())
+        .unwrap();
+    let all = full
+        .envelopes
+        .iter()
+        .map(|envelope| (envelope.writer.clone(), envelope.sequence))
+        .collect::<Vec<_>>();
+    assert!(all.len() >= 4, "{} envelopes", all.len());
+    let empty = ReplicationExchange {
+        envelopes: Vec::new(),
+        ..full.clone()
+    };
+    let budget = serialized_len(&empty).unwrap() + serialized_len(&full.envelopes).unwrap() / 2;
+    EXCHANGE_BODY_BUDGET.set(Some(budget));
+    let mut received = Vec::new();
+    let mut rounds = 0;
+    loop {
+        let exchange = source
+            .export_replication_exchange(FLEET, &answer())
+            .unwrap();
+        if exchange.envelopes.is_empty() {
+            break;
+        }
+        assert!(
+            serialized_len(&exchange).unwrap() <= budget,
+            "round {rounds}"
+        );
+        received.extend(
+            exchange
+                .envelopes
+                .iter()
+                .map(|envelope| (envelope.writer.clone(), envelope.sequence)),
+        );
+        target
+            .receive_replication_exchange("alder", FLEET, &exchange)
+            .unwrap();
+        rounds += 1;
+        assert!(rounds < 50, "the backlog keeps moving");
+    }
+    EXCHANGE_BODY_BUDGET.set(None);
+    assert!(rounds >= 2, "the budget cut the first exchange");
+    let mut unique = received.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), received.len(), "no envelope was sent twice");
+    let mut expected = all.clone();
+    expected.sort();
+    assert_eq!(unique, expected, "every envelope arrived");
+}
