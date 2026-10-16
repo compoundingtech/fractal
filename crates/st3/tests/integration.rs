@@ -65,6 +65,7 @@ mod daemon_load;
 mod load_hog;
 mod daemon_environment;
 mod daemon_restart;
+mod daemon_soak;
 mod driver_incarnation;
 mod delivery_probe;
 mod examples;
