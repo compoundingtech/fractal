@@ -2056,7 +2056,7 @@ Eligibility reads register the absent binding as a dependency. Its later publica
 
 ### Revision controls
 
-`cargo test -p st3 --lib revision_seat_tests -- --test-threads=4` covers completed four-seat declarations, repeated cutover, current agent-card ownership, explicit stops, changed/removed declarations, both revision writers, transactional rollback after canonical carry, quiet writer-queue controls, dynamic declaration refusal, failed reopen refusal, replication, dependency waits, retry backoff, stale-generation fencing, recurring readiness episodes, fault deduplication and event-driven recovery.
+`cargo test -p st3-daemon --lib revision_seat_tests -- --test-threads=4` covers completed four-seat declarations, repeated cutover, current agent-card ownership, explicit stops, changed/removed declarations, both revision writers, transactional rollback after canonical carry, quiet writer-queue controls, dynamic declaration refusal, failed reopen refusal, replication, dependency waits, retry backoff, stale-generation fencing, recurring readiness episodes, fault deduplication and event-driven recovery.
 
 `scripts/st3-revision-seat-eval/run ST3_FIXTURE_BINARY OUTPUT_DIR` runs actual CLI controls on a private daemon and real PTYs, using invented garden seats and `sleep` commands. It checks four builders across repeated revisions, explicit stop, removal and intentional cancellation with finally cleanup. It also removes a mission-owned binding after its declaring step completes, checks the missing-agent fault delivered to the requester, restores eligibility and cancels the control. All sockets, HOME/XDG directories and terminal roots are isolated. It writes `result.json` and tears down its own runtimes.
 
@@ -2239,3 +2239,17 @@ active-deadline read fails with `Invalid column type Null`. Recover forward, or 
 Operations plan that accounts for claims accepted after the pre-upgrade backup.
 
 An admitted run whose retained after-run completion history is unavailable keeps its admission time unknown and raises a `Run admission time unavailable` fault: its timeout is not armed. Restore its original admission history and rebuild the projection, or cancel the run; duplicate completions and retries cannot restart that budget. Corrupt accepted timestamps stop opening with run-specific context and leave the previous deadline table intact.
+
+Current pending work names `daemon/runtime` as the owner of readiness evaluation in its
+operational reasons, including runs that have already completed other steps. This waiter
+is visible from read-only work detail and history reads even while the store writer is busy.
+It does not claim dependency predicates have been evaluated. Existing blockers remain
+visible. The waiter disappears on promotion and is excluded for terminal, superseded and
+cleanup owners. Readiness priority is unchanged.
+
+
+A cancellation releases the run's admission capacity as soon as its cancellation phase is
+accepted. Final work and cleanup proceed under their original ownership while a replacement
+run can be admitted. `final-cancelled` and `cleanup-cancelled` runs no longer consume the
+mission's active-run limit or constrain it with a cancelled revision's limit. Live uncancelled
+runs still enforce the strictest limit among their revisions.
