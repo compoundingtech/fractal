@@ -18,7 +18,7 @@ fs.rmSync(temporary, { recursive: true, force: true });
 
 const snapshot = { id: 'snapshot/test', host_id: 'host/test', store_index: 1, projection_version: 'client-projection.v0', created_at: '2026-09-20T00:00:00Z' };
 function envelope(value) { return { api_version: 'st3.client.v0', request_id: 'request/test', snapshot, value }; }
-function response(value, status = 200) { return { ok: status < 400, status, json: async () => value }; }
+function response(value, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }); }
 const capabilityFixture = require('../../../docs/st3/client-v0/fixtures/capabilities.json');
 const cursorGapFixture = require('../../../docs/st3/client-v0/fixtures/cursor-gap-error.json');
 const capabilities = { ...capabilityFixture.value, limits: { ...capabilityFixture.value.limits, max_page_items: 2, max_event_items: 3, max_wait_ms: 10 } };
