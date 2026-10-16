@@ -310,7 +310,17 @@ mod tests {
         // Fixed synthetic UUID, not a queried account or credential. A surprising
         // venue mapping must fail this fixture rather than be silently accepted.
         bytes[layout[7]..layout[7] + 16].copy_from_slice(&[0xa5; 16]);
-        let acl = unsafe { acl_copy_int_native(bytes.as_ptr().cast()) };
+        // The OS importer may access its public struct directly: provide aligned
+        // storage, unlike our own parser which explicitly supports unaligned bytes.
+        let mut aligned = vec![0u64; bytes.len().div_ceil(8)];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                aligned.as_mut_ptr().cast::<u8>(),
+                bytes.len(),
+            )
+        };
+        let acl = unsafe { acl_copy_int_native(aligned.as_ptr().cast()) };
         assert!(!acl.is_null());
         let assigned = unsafe { acl_set_fd_np(file.as_raw_fd(), acl, 0x100) };
         unsafe { acl_free(acl) };
