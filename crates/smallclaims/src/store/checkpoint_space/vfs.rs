@@ -68,12 +68,12 @@ struct Data {
 unsafe impl Send for Data {}
 unsafe impl Sync for Data {}
 
-pub(super) struct ProofVfs {
+pub(in crate::store) struct ProofVfs {
     data: Option<Box<Data>>,
 }
 
 impl ProofVfs {
-    pub(super) fn register(guard: &SpaceGuard) -> Result<Self> {
+    pub(in crate::store) fn register(guard: &SpaceGuard) -> Result<Self> {
         // SAFETY: SQLite keeps the default VFS registered for the process lifetime.
         let base = unsafe { ffi::sqlite3_vfs_find(ptr::null()) };
         if base.is_null() {
@@ -145,7 +145,7 @@ impl ProofVfs {
         Ok(Self { data: Some(data) })
     }
 
-    pub(super) fn name(&self) -> &str {
+    pub(in crate::store) fn name(&self) -> &str {
         self.data
             .as_ref()
             .expect("registered VFS")
@@ -154,7 +154,7 @@ impl ProofVfs {
             .expect("ASCII VFS name")
     }
 
-    pub(super) fn check_closed(&self) -> Result<()> {
+    pub(in crate::store) fn check_closed(&self) -> Result<()> {
         let data = self.data.as_ref().expect("registered VFS");
         let files = data.files.load(Ordering::Acquire);
         if files != 0 {
@@ -185,7 +185,7 @@ impl ProofVfs {
 
     /// A proof never trusts a VFS that silently delegates its allocation writes. Deliberately
     /// reject a tiny SQLite commit before opening the source or destination copy.
-    pub(super) fn self_test(&self, owner: &ProofOwnership, path: &Path) -> Result<()> {
+    pub(in crate::store) fn self_test(&self, owner: &ProofOwnership, path: &Path) -> Result<()> {
         let data = self.data.as_ref().expect("registered VFS");
         owner.mark(path)?;
         data.self_test_refuse.store(true, Ordering::Release);
@@ -470,7 +470,7 @@ unsafe extern "C" fn open(
     let align = align_of::<libc::max_align_t>();
     let inner_addr = (file as usize + size_of::<WrappedFile>() + align - 1) & !(align - 1);
     let inner = inner_addr as *mut ffi::sqlite3_file;
-    let base = unsafe { data.base };
+    let base = data.base;
     let Some(base_open) = (unsafe { (*base).xOpen }) else {
         return ffi::SQLITE_CANTOPEN;
     };
