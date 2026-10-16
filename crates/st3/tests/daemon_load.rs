@@ -1209,15 +1209,16 @@ fn targets_come_from_the_targets_file_and_describe_without_gating() {
     ] {
         assert_eq!(descriptive_target(name), None, "{name}");
     }
-    // Every path over its descriptive target but within its budget fails nothing.
+    // Include the existing measured fresh read: its 1000 ms budget is independent
+    // of its 300 ms target. A descriptive miss within that budget fails nothing.
     let mut report = Report {
         daemon_cores: cpu_budget(),
         long_poll_seats: SEATS,
         roster_subscribers: ROSTER_SUBSCRIBERS,
         ..Report::default()
     };
-    for (name, budget, count) in MIX
-        .iter()
+    for (name, budget, count) in mix(Conditions { measured: true, ..Conditions::default() })
+        .into_iter()
         .map(|load| (load.name, load.budget, 100))
         .chain([
             (ROSTER_SNAPSHOT, ROSTER_BUDGET, ROSTER_SUBSCRIBERS),
