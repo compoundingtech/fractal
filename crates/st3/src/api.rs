@@ -1544,10 +1544,31 @@ pub(crate) fn record_stream_latency(collection: &str, elapsed: Duration, remote:
         .time(Instant::now(), timed, elapsed);
 }
 
+/// The most claims between two publications that one freshness sample reads.
+pub(crate) const PUBLISH_SAMPLE_CLAIMS: u64 = 10_000;
+
+/// Whether a publication at `cut` after one at `previous` is a freshness sample: it advanced,
+/// by at most [`PUBLISH_SAMPLE_CLAIMS`] claims.
+fn publish_sampled(previous: u64, cut: u64) -> bool {
+    cut > previous && cut - previous <= PUBLISH_SAMPLE_CLAIMS
+}
+
+#[cfg(test)]
+#[test]
+fn a_publication_far_behind_its_previous_one_is_not_a_freshness_sample() {
+    assert!(!publish_sampled(7, 7), "an unchanged cut");
+    assert!(publish_sampled(7, 8));
+    assert!(publish_sampled(7, 7 + PUBLISH_SAMPLE_CLAIMS));
+    assert!(!publish_sampled(7, 8 + PUBLISH_SAMPLE_CLAIMS), "after a catch-up");
+}
+
 /// A refresher published `collection` at `cut`, after a publication at `previous`: time it
 /// from the first claim this node committed after `previous` to the new publication, as the
 /// `publish COLLECTION` path of `projection-fresh`. A publication with no newer local commit
-/// (only replicated claims, or none) is not a sample.
+/// (only replicated claims, or none) is not a sample, nor is one more than
+/// [`PUBLISH_SAMPLE_CLAIMS`] claims after the previous: finding its first local commit would scan
+/// them on the refresher's path, and a publication that far behind follows a catch-up, not a
+/// commit a person waits on.
 pub(crate) fn record_publish_latency(
     store: &Store,
     collection: &str,
@@ -1555,7 +1576,7 @@ pub(crate) fn record_publish_latency(
     cut: u64,
     published_at_unix_ms: u128,
 ) {
-    if cut <= previous {
+    if !publish_sampled(previous, cut) {
         return;
     }
     let committed = match store.first_local_commit_after(previous, cut) {
@@ -12713,6 +12734,8 @@ struct NativeSessionReport {
     session_id: String,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    desired_token: Option<String>,
 }
 
 /// A seat's driver reports the native session its harness bound for one incarnation. Only the
@@ -12752,6 +12775,9 @@ async fn report_native_session(
     }
     if let Some(account) = request.account_ref.filter(|name| !name.is_empty()) {
         fields.insert("account_ref".into(), Value::String(account));
+    }
+    if let Some(token) = request.desired_token.filter(|token| !token.is_empty()) {
+        fields.insert("desired_token".into(), Value::String(token));
     }
     let claim = state
         .store
