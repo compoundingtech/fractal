@@ -469,10 +469,9 @@ impl WriterConnection {
                     queue,
                     &index,
                     &counted,
-                    (&observed, &finalized, mutations.as_ref(), writer_telemetry.as_deref()),
+                    (&observed, &finalized, mutations.as_ref(), writer_telemetry.as_deref(), writer_health.as_ref()),
                     background_queue,
                     &observed_fifo,
-                    writer_health,
                 )
             })
             .expect("the writer thread starts");
@@ -791,6 +790,14 @@ impl Drop for WriterConnection {
     }
 }
 
+type WriterCallbacks<'a> = (
+    &'a CommitObservers,
+    &'a TransactionFinalizers,
+    Option<&'a Arc<writer_observer::MutationState>>,
+    Option<&'a telemetry::Writer>,
+    Option<&'a Arc<crate::windows::StoreHealth>>,
+);
+
 /// The writer thread: run each batched write with the others queued behind it in one
 /// transaction, and lend the connection to each lending write in its turn.
 fn write_queue(
@@ -798,10 +805,9 @@ fn write_queue(
     queue: std::sync::mpsc::Receiver<WriterJob>,
     committed_index: &AtomicU64,
     batches: &(AtomicU64, AtomicU64),
-    callbacks: (&CommitObservers, &TransactionFinalizers, Option<&Arc<writer_observer::MutationState>>, Option<&telemetry::Writer>),
+    callbacks: WriterCallbacks<'_>,
     background: Arc<writer_queue::BackgroundAdmission>,
     fifo: &Arc<crate::fifo::Queue>,
-    health: Option<Arc<crate::windows::StoreHealth>>,
 ) {
     let mut admission = fifo.receiver(writer_queue::Admission::new(queue, background));
     while let Some(job) = admission.next() {
@@ -810,8 +816,8 @@ fn write_queue(
             | WriterJob::FenceLend { lent, returned, holder, enqueued, origin, .. } => {
                 fifo.dequeued_at(enqueued);
                 telemetry::METRICS.queue.record(enqueued.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
-                let _hold = match &health {
-                    Some(health) => crate::windows::holds::WriterHold::start_in(crate::windows::holds::HoldKind::Lend, &holder, health.clone()),
+                let _hold = match callbacks.4 {
+                    Some(health) => crate::windows::holds::WriterHold::start_in(crate::windows::holds::HoldKind::Lend, &holder, Arc::clone(health)),
                     None => crate::windows::holds::WriterHold::start(crate::windows::holds::HoldKind::Lend, &holder),
                 };
                 let _holder = callbacks.3.map(|writer| writer.holding(origin));
@@ -834,7 +840,6 @@ fn write_queue(
                     batches,
                     callbacks,
                     fifo,
-                    health.clone(),
                 );
                 admission.put_back(next);
             }
@@ -852,16 +857,10 @@ fn run_write_batch(
     queue: &std::sync::mpsc::Receiver<WriterJob>,
     committed_index: &AtomicU64,
     batches: &(AtomicU64, AtomicU64),
-    callbacks: (
-        &CommitObservers,
-        &TransactionFinalizers,
-        Option<&Arc<writer_observer::MutationState>>,
-        Option<&telemetry::Writer>,
-    ),
+    callbacks: WriterCallbacks<'_>,
     fifo: &crate::fifo::Queue,
-    health: Option<Arc<crate::windows::StoreHealth>>,
 ) -> Option<WriterJob> {
-    let (observers, finalizers, mutation_observer, writer_telemetry) = callbacks;
+    let (observers, finalizers, mutation_observer, writer_telemetry, health) = callbacks;
     let first_origin = match &first {
         WriterJob::Batched { wait, .. } => wait.as_ref().and_then(crate::profile::WriterWait::trace_origin),
         _ => None,
@@ -878,12 +877,12 @@ fn run_write_batch(
         WriterJob::Batched { holder, .. } => holder.clone(),
         _ => crate::windows::holds::Holder::current(),
     };
-    let mut hold = match &health {
-        Some(health) => crate::windows::holds::WriterHold::start_in(crate::windows::holds::HoldKind::Batch, &first_holder, health.clone()),
+    let mut hold = match health {
+        Some(health) => crate::windows::holds::WriterHold::start_in(crate::windows::holds::HoldKind::Batch, &first_holder, Arc::clone(health)),
         None => crate::windows::holds::WriterHold::start(crate::windows::holds::HoldKind::Batch, &first_holder),
     };
-    let transaction_timer = match &health {
-        Some(health) => crate::windows::Timer::start_in(crate::windows::StoreWork::WriteTransaction, health.clone()),
+    let transaction_timer = match health {
+        Some(health) => crate::windows::Timer::start_in(crate::windows::StoreWork::WriteTransaction, Arc::clone(health)),
         None => crate::windows::Timer::start(crate::windows::StoreWork::WriteTransaction),
     };
     let mut answers = Vec::new();
@@ -2283,8 +2282,8 @@ mod tests {
         let thread = std::thread::spawn(move || {
             write_queue(writer, receiver, &AtomicU64::new(0),
                 &(AtomicU64::new(0), AtomicU64::new(0)),
-                (&CommitObservers::default(), &TransactionFinalizers::default(), None, None),
-                Arc::new(writer_queue::BackgroundAdmission::default()), &observed, None);
+                (&CommitObservers::default(), &TransactionFinalizers::default(), None, None, None),
+                Arc::new(writer_queue::BackgroundAdmission::default()), &observed);
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while fifo.depth_for_test() == 2 && std::time::Instant::now() < deadline {
