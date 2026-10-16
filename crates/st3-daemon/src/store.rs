@@ -10591,14 +10591,38 @@ fn latest_actual(connection: &Connection, subject: &str) -> Result<Option<Value>
     latest_actual_at(connection, subject, None)
 }
 
+// The production implementation borrows SQL unchanged. The offline test-support probe can
+// remove index hints while exercising exactly the same ownership fold and source selection.
+trait OwnerQuery {
+    fn sql<'a>(&self, sql: &'a str) -> std::borrow::Cow<'a, str>;
+}
+
+struct IndexedOwnerQuery;
+
+impl OwnerQuery for IndexedOwnerQuery {
+    fn sql<'a>(&self, sql: &'a str) -> std::borrow::Cow<'a, str> {
+        std::borrow::Cow::Borrowed(sql)
+    }
+}
+
 /// Select one canonical runtime observation per origin, not every actual-state event.
 /// Genuine rivals retain the existing desired-host and checkpoint-aware causal proof.
+#[cfg(test)]
 fn identity_actual_source_at(
     connection: &Connection,
     subject: &str,
     through: u64,
 ) -> Result<(Option<String>, Option<String>, bool)> {
-    let mut statement = connection.prepare_cached(&format!(
+    identity_actual_source_at_using(connection, subject, through, &IndexedOwnerQuery)
+}
+
+fn identity_actual_source_at_using(
+    connection: &Connection,
+    subject: &str,
+    through: u64,
+    query: &impl OwnerQuery,
+) -> Result<(Option<String>, Option<String>, bool)> {
+    let mut statement = connection.prepare_cached(&query.sql(&format!(
         "WITH RECURSIVE origins(origin) AS (
             SELECT (SELECT origin FROM claims INDEXED BY claims_runtime_origin_accepted_index
                     WHERE subject=?1 AND kind='runtime.observed' ORDER BY origin LIMIT 1)
@@ -10619,7 +10643,7 @@ fn identity_actual_source_at(
                      ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1)
              FROM origins WHERE origin IS NOT NULL
          ) ORDER BY {CANONICAL_ORDER}"
-    ))?;
+    )))?;
     let parsed = statement.query_map(params![subject, through], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
             row.get::<_, String>(2)?, row.get::<_, String>(3)?))
@@ -10627,13 +10651,13 @@ fn identity_actual_source_at(
         .map(|(id, kind, origin, body)| Ok((id, kind, origin, serde_json::from_str::<Value>(&body)?)))
         .collect::<Result<Vec<_>>>()?;
     if parsed.is_empty() {
-        return Ok(connection.prepare_cached(&format!(
+        return Ok(connection.prepare_cached(&query.sql(&format!(
             "SELECT claims.id, claims.origin FROM claims INDEXED BY claims_actual_accepted_index
              JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND +claims.store_index<=?2
                AND {ACTUAL_STATE_CLAIM} AND {UNREPAIRED_CLAIM}
              ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1"
-        ))?.query_row(params![subject, through], |row| {
+        )))?.query_row(params![subject, through], |row| {
             Ok((Some(row.get(0)?), Some(row.get(1)?), false))
         }).optional()?.unwrap_or((None, None, false)));
     }

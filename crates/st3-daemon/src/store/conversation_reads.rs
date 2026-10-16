@@ -73,20 +73,29 @@ fn conversation_owner_from_connection(
     subject: &str,
     through: u64,
 ) -> Result<Option<Owner>> {
+    conversation_owner_using(connection, subject, through, &IndexedOwnerQuery)
+}
+
+fn conversation_owner_using(
+    connection: &Connection,
+    subject: &str,
+    through: u64,
+    query: &impl OwnerQuery,
+) -> Result<Option<Owner>> {
     let exists: bool = connection.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND store_index<=?2)",
     )?.query_row(params![subject, through], |row| row.get(0))?;
     if !exists {
         return Ok(None);
     }
-    let read = |query: &str| -> Result<Option<String>> {
-        Ok(connection.prepare_cached(query)?
+    let read = |query_text: &str| -> Result<Option<String>> {
+        Ok(connection.prepare_cached(&query.sql(query_text))?
             .query_row(params![subject, through], |row| row.get::<_, Option<String>>(0))
             .optional()?.flatten())
     };
     let runtime = read(&IDENTITY_FIELD_READS[0])?;
     let incarnation = read(&IDENTITY_FIELD_READS[1])?;
-    let (_, origin, _) = identity_actual_source_at(connection, subject, through)?;
+    let (_, origin, _) = identity_actual_source_at_using(connection, subject, through, query)?;
     Ok(Some(Owner {
         subject: subject.into(),
         incarnation,
@@ -96,6 +105,72 @@ fn conversation_owner_from_connection(
 }
 
 impl Store {
+    /// Offline cost probe only; no production caller enables this feature or uses this API.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn first_open_index_definitions() -> Vec<(String, String)> {
+        RUNTIME_ID_INDEX.split(';').filter_map(|sql| {
+            let sql = sql.trim();
+            let name = sql.strip_prefix("CREATE INDEX IF NOT EXISTS ")?
+                .split_whitespace().next()?;
+            Some((name.to_owned(), sql.to_owned()))
+        }).collect()
+    }
+
+    /// Exercise the real owner read; the baseline changes only the new INDEXED BY hints.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn first_open_owner_cost(
+        connection: &Connection, subject: &str, through: u64, indexed: bool,
+    ) -> Result<Value> {
+        struct ProbeQuery {
+            indexed: bool,
+            capture: bool,
+            hints: Vec<String>,
+            queries: std::cell::RefCell<Vec<String>>,
+        }
+        impl OwnerQuery for ProbeQuery {
+            fn sql<'a>(&self, sql: &'a str) -> std::borrow::Cow<'a, str> {
+                let mut sql = sql.to_owned();
+                if !self.indexed {
+                    for hint in &self.hints {
+                        sql = sql.replace(hint, "");
+                    }
+                }
+                if self.capture {
+                    self.queries.borrow_mut().push(sql.clone());
+                }
+                std::borrow::Cow::Owned(sql)
+            }
+        }
+        let mut query = ProbeQuery {
+            indexed, capture: true,
+            hints: Self::first_open_index_definitions().into_iter()
+                .map(|(name, _)| format!(" INDEXED BY {name}")).collect(),
+            queries: std::cell::RefCell::new(Vec::new()),
+        };
+        // Capture the actual branch's statements outside the measured read.
+        let _ = conversation_owner_using(connection, subject, through, &query)?;
+        query.capture = false;
+        connection.flush_prepared_statement_cache();
+        let started = std::time::Instant::now();
+        let owner = conversation_owner_using(connection, subject, through, &query)?;
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let plans = query.queries.into_inner().into_iter().map(|sql| -> Result<Value> {
+            let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+            let rows = statement.query_map(params![subject, through], |row| {
+                Ok(serde_json::json!({
+                    "id": row.get::<_, i64>(0)?, "parent": row.get::<_, i64>(1)?,
+                    "detail": row.get::<_, String>(3)?,
+                }))
+            })?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(serde_json::json!({"sql": sql, "plan": rows}))
+        }).collect::<Result<Vec<_>>>()?;
+        Ok(serde_json::json!({
+            "elapsed_ms": elapsed_ms, "owner_found": owner.is_some(), "plans": plans,
+        }))
+    }
+
     pub(crate) fn conversation_local_position(&self) -> Result<u64> {
         Ok(self.readers.get().prepare_cached(
             "SELECT COALESCE(MAX(id),0) FROM local_observations",
