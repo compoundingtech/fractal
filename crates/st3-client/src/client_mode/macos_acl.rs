@@ -20,6 +20,8 @@ pub struct AclObservation {
     pub entries: u32,
     // OS errors contain no file contents, credential bytes, or account names.
     pub os_error: Option<i32>,
+    pub observed_maximum: u64,
+    pub expected_maximum: u64,
 }
 
 #[repr(C)]
@@ -28,6 +30,8 @@ struct NativeObservation {
     reason: u32,
     os_error: i32,
     entries: u32,
+    observed_maximum: u64,
+    expected_maximum: u64,
 }
 
 unsafe extern "C" {
@@ -55,6 +59,8 @@ pub fn inspect(file: &File, private_object: bool) -> AclObservation {
     AclObservation {
         disposition,
         entries: native.entries,
+        observed_maximum: native.observed_maximum,
+        expected_maximum: native.expected_maximum,
         os_error: (native.os_error != 0).then_some(native.os_error),
     }
 }
@@ -63,6 +69,52 @@ pub fn inspect(file: &File, private_object: bool) -> AclObservation {
 mod tests {
     use super::*;
     use std::{os::unix::fs::PermissionsExt, process::Command};
+
+    unsafe extern "C" {
+        fn st_client_mode_acl_check_export(bytes: *const u8, size: usize) -> u32;
+        fn st_client_mode_acl_export_layout(out: *mut usize);
+        fn st_client_mode_acl_check_entry(
+            flags: u32,
+            rights: u64,
+            tag: i32,
+            accessor_rights: u64,
+        ) -> u32;
+    }
+
+    #[test]
+    fn malformed_exported_buffers_fail_closed() {
+        let mut layout = [0usize; 7];
+        unsafe { st_client_mode_acl_export_layout(layout.as_mut_ptr()) };
+        let mut valid = vec![0u8; layout[0]];
+        let put = |bytes: &mut [u8], offset: usize, value: u32| {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+        };
+        put(&mut valid, layout[1], layout[6] as u32);
+        put(&mut valid, layout[2], 1);
+        put(&mut valid, layout[4], 2); // SDK ACL_EXTENDED_DENY
+        let check =
+            |bytes: &[u8]| unsafe { st_client_mode_acl_check_export(bytes.as_ptr(), bytes.len()) };
+        assert_eq!(check(&valid), 0);
+        for (name, offset, value, reason) in [
+            ("unknown-acl-flag", layout[3], 1 << 31, 3),
+            ("unknown-entry-flag", layout[4], 2 | (1 << 31), 3),
+            ("unknown-tag", layout[4], 15, 3),
+            ("unknown-right", layout[5], 1 << 31, 3),
+            ("wrong-count", layout[2], 2, 2),
+            ("wrong-magic", layout[1], 0, 2),
+        ] {
+            let mut bytes = valid.clone();
+            put(&mut bytes, offset, value);
+            assert_eq!(check(&bytes), reason, "{name}");
+        }
+        assert_eq!(check(&valid[..valid.len() - 1]), 2);
+        let mut unaligned = vec![0];
+        unaligned.extend_from_slice(&valid);
+        assert_eq!(check(&unaligned[1..]), 0);
+        assert_eq!(unsafe { st_client_mode_acl_check_entry(2, 0, 2, 0) }, 0);
+        assert_eq!(unsafe { st_client_mode_acl_check_entry(2, 2, 2, 0) }, 3);
+        assert_eq!(unsafe { st_client_mode_acl_check_entry(2, 0, 1, 0) }, 3);
+    }
 
     fn inspect_fixture(name: &str, ace: Option<&str>, private: bool) -> AclDisposition {
         let root = tempfile::tempdir().unwrap();

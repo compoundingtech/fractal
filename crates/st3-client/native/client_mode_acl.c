@@ -4,6 +4,7 @@
 #include <membership.h>
 #include <errno.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -11,6 +12,8 @@ struct st_acl_observation {
     uint32_t reason; // 0 accepted, 1 query, 2 representation, 3 unknown, 4 allow, 5 qualifier
     int32_t os_error;
     uint32_t entries;
+    uint64_t observed_maximum;
+    uint64_t expected_maximum;
 };
 
 // -Werror=switch-enum makes an SDK enum extension a build failure. Aliases have
@@ -42,6 +45,56 @@ static int known_tag(acl_tag_t t) {
     return 0;
 }
 
+// Pure validation of the public exported representation. Arbitrary alignment is
+// supported; tests pass mutated byte buffers through this same production parser.
+uint32_t st_client_mode_acl_check_export(const void *bytes, size_t size) {
+    struct kauth_filesec header = {0};
+    const uint32_t known_rights = ACL_READ_DATA | ACL_WRITE_DATA | ACL_EXECUTE |
+        ACL_DELETE | ACL_APPEND_DATA | ACL_DELETE_CHILD | ACL_READ_ATTRIBUTES |
+        ACL_WRITE_ATTRIBUTES | ACL_READ_EXTATTRIBUTES | ACL_WRITE_EXTATTRIBUTES |
+        ACL_READ_SECURITY | ACL_WRITE_SECURITY | ACL_CHANGE_OWNER | ACL_SYNCHRONIZE;
+    const uint32_t known_flags = ACL_ENTRY_INHERITED | ACL_ENTRY_FILE_INHERIT |
+        ACL_ENTRY_DIRECTORY_INHERIT | ACL_ENTRY_LIMIT_INHERIT | ACL_ENTRY_ONLY_INHERIT;
+    if (bytes == NULL || !KAUTH_FILESEC_VALID(size) ||
+        size > KAUTH_FILESEC_SIZE(ACL_MAX_ENTRIES)) return 2;
+    memcpy(&header, bytes, size < sizeof(header) ? size : sizeof(header));
+    if (header.fsec_magic != KAUTH_FILESEC_MAGIC ||
+        header.fsec_entrycount > ACL_MAX_ENTRIES ||
+        KAUTH_FILESEC_SIZE(header.fsec_entrycount) != size) return 2;
+    if ((header.fsec_flags & ~(ACL_FLAG_DEFER_INHERIT | ACL_FLAG_NO_INHERIT)) != 0) return 3;
+    for (uint32_t i = 0; i < header.fsec_entrycount; ++i) {
+        struct kauth_ace entry;
+        memcpy(&entry, (const unsigned char *)bytes + KAUTH_FILESEC_SIZE(i), sizeof(entry));
+        uint32_t tag = entry.ace_flags & KAUTH_ACE_KINDMASK;
+        if ((tag != ACL_EXTENDED_ALLOW && tag != ACL_EXTENDED_DENY) ||
+            (entry.ace_flags & ~(KAUTH_ACE_KINDMASK | known_flags)) != 0 ||
+            (entry.ace_rights & ~known_rights) != 0) return 3;
+    }
+    return 0;
+}
+
+// Independent of OS queries: tests can inject accessor/export disagreement.
+uint32_t st_client_mode_acl_check_entry(uint32_t exported_flags,
+                                      uint64_t exported_rights,
+                                      int accessor_tag, uint64_t accessor_rights) {
+    if (!known_tag((acl_tag_t)accessor_tag) ||
+        (exported_flags & KAUTH_ACE_KINDMASK) != (uint32_t)accessor_tag ||
+        exported_rights != accessor_rights) return 3;
+    return 0;
+}
+
+// Read-only SDK layout facts for test construction, not a production override.
+// Rust declares this symbol only under cfg(test).
+void st_client_mode_acl_export_layout(size_t *out) {
+    out[0] = KAUTH_FILESEC_SIZE(1);
+    out[1] = offsetof(struct kauth_filesec, fsec_magic);
+    out[2] = offsetof(struct kauth_filesec, fsec_acl.acl_entrycount);
+    out[3] = offsetof(struct kauth_filesec, fsec_acl.acl_flags);
+    out[4] = KAUTH_FILESEC_SIZE(0) + offsetof(struct kauth_ace, ace_flags);
+    out[5] = KAUTH_FILESEC_SIZE(0) + offsetof(struct kauth_ace, ace_rights);
+    out[6] = KAUTH_FILESEC_MAGIC;
+}
+
 void st_client_mode_acl_inspect(int fd, int private_object,
                                struct st_acl_observation *out) {
     const uint64_t rights = ACL_READ_DATA | ACL_WRITE_DATA | ACL_EXECUTE |
@@ -58,9 +111,11 @@ void st_client_mode_acl_inspect(int fd, int private_object,
     struct kauth_filesec *external = NULL;
     uint64_t maximum = 0;
     memset(out, 0, sizeof(*out));
+    out->expected_maximum = rights;
     // Exercise the exhaustive functions, and check the runtime library's full mask.
     if (!known_permission(ACL_READ_DATA) || !known_flag(ACL_ENTRY_INHERITED) ||
-        acl_maximal_permset_mask_np(&maximum) != 0 || maximum != rights) {
+        acl_maximal_permset_mask_np(&maximum) != 0 ||
+        ((out->observed_maximum = maximum), maximum != rights)) {
         out->reason = 3; goto done;
     }
     errno = 0;
@@ -83,6 +138,8 @@ void st_client_mode_acl_inspect(int fd, int private_object,
         KAUTH_FILESEC_SIZE(external->fsec_entrycount) != (size_t)size) {
         out->reason = 2; goto done;
     }
+    uint32_t parsed = st_client_mode_acl_check_export(external, (size_t)size);
+    if (parsed != 0) { out->reason = parsed; goto done; }
     if ((external->fsec_flags & ~acl_flags) != 0) { out->reason = 3; goto done; }
     out->entries = external->fsec_entrycount;
     for (uint32_t i = 0; i < out->entries; ++i) {
@@ -97,7 +154,8 @@ void st_client_mode_acl_inspect(int fd, int private_object,
             out->reason = 1; out->os_error = errno; goto done;
         }
         struct kauth_ace *raw = &external->fsec_ace[i];
-        if (!known_tag(tag) || (mask & ~rights) != 0 ||
+        if (st_client_mode_acl_check_entry(raw->ace_flags, raw->ace_rights, tag, mask) != 0 ||
+            (mask & ~rights) != 0 ||
             (raw->ace_flags & ~(KAUTH_ACE_KINDMASK | entry_flags)) != 0 ||
             (raw->ace_flags & KAUTH_ACE_KINDMASK) != (uint32_t)tag ||
             raw->ace_rights != mask) { out->reason = 3; goto done; }
