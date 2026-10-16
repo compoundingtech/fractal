@@ -528,6 +528,18 @@ fn authority_error_codes_are_typed_and_round_trip() {
 }
 
 #[test]
+fn runtime_publication_errors_are_typed_and_round_trip() {
+    for (raw, expected) in [
+        ("runtime-list-not-ready", ErrorCode::RuntimeListNotReady),
+        ("runtime-list-ended", ErrorCode::RuntimeListEnded),
+    ] {
+        let decoded: ErrorCode = serde_json::from_str(&format!("\"{raw}\"")).unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), format!("\"{raw}\""));
+    }
+}
+
+#[test]
 fn creation_actions_round_trip_typed_parameters() {
     for name in ["agent-create.json", "terminal-create.json", "terminal-end.json"] {
         let action: ActionRequest = decode(name);
