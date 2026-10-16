@@ -9560,7 +9560,29 @@ async fn replication_export(
     blocking_store(move || {
         let exchange = if request.summary_only {
             record_replication_summary(request.authority_guard, || {
-                store.export_replication_summary(&request.fleet_id)
+                if request.authority_only {
+                    anyhow::ensure!(request.authority_guard,
+                        "authority-only response is reserved for the local guard");
+                    // Only MainBackend::authority_digest consumes this partial envelope.
+                    // It must never become an exchange sent to a peer. Keep the response type
+                    // so an old local daemon can ignore the flag and return its full summary.
+                    Ok(smallclaims::replication::ReplicationExchange {
+                        peer: store.origin.clone(),
+                        fleet_id: request.fleet_id.clone(),
+                        schema_digest: String::new(),
+                        projection_registry_digest: None,
+                        projection_versions: Default::default(),
+                        authority_digest: store.replication_authority_digest()?,
+                        graph_digest: String::new(),
+                        projection_digests: Default::default(),
+                        inventory: Default::default(),
+                        envelopes: Vec::new(),
+                        signature_requests: Vec::new(),
+                        signatures: Vec::new(),
+                    })
+                } else {
+                    store.export_replication_summary(&request.fleet_id)
+                }
             })?
         } else {
             store.export_replication_exchange_answering(

@@ -1510,16 +1510,17 @@ impl Backend for MainBackend {
                     inventory: inventory.clone(),
                     summary_only,
                     authority_guard: false,
+                    authority_only: false,
                     signature_requests: signature_requests.to_vec(),
                 },
             )
             .await
     }
 
-    async fn guard_summary(&self, fleet_id: &str) -> Result<ReplicationExportResponse> {
+    async fn authority_digest(&self, fleet_id: &str) -> Result<String> {
         // This marker goes only to our local daemon, never into a signed peer exchange.
         // Old daemons ignore it and return the same complete summary.
-        self.client
+        let response: ReplicationExportResponse = self.client
             .post(
                 "/v1/internal/replication/export",
                 &ReplicationExportRequest {
@@ -1527,10 +1528,15 @@ impl Backend for MainBackend {
                     inventory: ReplicationInventory::default(),
                     summary_only: true,
                     authority_guard: true,
+                    authority_only: true,
                     signature_requests: Vec::new(),
                 },
             )
-            .await
+            .await?;
+        let digest = response.exchange.authority_digest;
+        anyhow::ensure!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid authority digest");
+        Ok(digest)
     }
 
     async fn receive(
