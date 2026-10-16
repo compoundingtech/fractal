@@ -199,9 +199,30 @@ struct World {
     sabotage: Sabotage,
 }
 
+/// A scratch directory for one world's stores. They are real files, and every commit of a
+/// WAL-mode SQLite store syncs to disk: for four seeds 160 s of wall time on a disk against
+/// 48 s on tmpfs, with the same 51 s of CPU. Nothing here tests durability (the crashes are
+/// injected faults, not power loss), so a Linux tmpfs is used where there is one. A failure
+/// fixture kept with `CONVERGENCE_SAVE_FAILURE` stays on the ordinary temporary directory.
+fn scratch_dir() -> tempfile::TempDir {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("CONVERGENCE_SAVE_FAILURE").is_none()
+        && !REAL_DISK.with(std::cell::Cell::get)
+        && let Ok(directory) = tempfile::tempdir_in("/dev/shm")
+    {
+        return directory;
+    }
+    tempfile::tempdir().unwrap()
+}
+
+thread_local! {
+    /// Set by the one test that keeps its stores on the ordinary temporary directory.
+    static REAL_DISK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl World {
     fn new(seed: u64, sabotage: Sabotage) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = scratch_dir();
         let oracle = Store::open(&root.path().join("oracle.sqlite3"), "oracle").unwrap();
         oracle.bind_fleet(FLEET).unwrap();
         let mut world = Self {
@@ -1509,30 +1530,69 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Every fourth fixed seed from `first`. The seeds run as four tests so the test runner
-/// spreads them over its threads.
-fn every_fourth_seed(first: usize) {
-    run_seeds(SEEDS.iter().skip(first).step_by(4).copied());
+/// Checkpoints trim in most runs, or the suite is worth little. Seed 1597 is the one fixed seed
+/// whose schedule never reaches a trim; every other fixed seed must.
+const NEVER_TRIMS: &[u64] = &[1597];
+
+/// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
+fn seed_converges(seed: u64) {
+    let outcome = run(seed, Sabotage::None);
+    if let Some(failure) = &outcome.failure {
+        panic!("seed {seed} failed\n{failure}");
+    }
+    assert_eq!(
+        outcome.trimmed,
+        !NEVER_TRIMS.contains(&seed),
+        "seed {seed}: checkpoints trimmed in only the runs that reach a trim; NEVER_TRIMS is {NEVER_TRIMS:?}"
+    );
+}
+
+/// The seeds are independent, so each is its own test and the test runner spreads them over its
+/// threads. `every_fixed_seed_has_a_test` keeps this list the same as `SEEDS`.
+macro_rules! seed_tests {
+    ($($name:ident: $seed:literal),* $(,)?) => {
+        const TESTED_SEEDS: &[u64] = &[$($seed),*];
+        $(
+            #[test]
+            fn $name() {
+                seed_converges($seed);
+            }
+        )*
+    };
+}
+
+seed_tests! {
+    seed_1_converges: 1,
+    seed_2_converges: 2,
+    seed_3_converges: 3,
+    seed_5_converges: 5,
+    seed_8_converges: 8,
+    seed_13_converges: 13,
+    seed_17_converges: 17,
+    seed_21_converges: 21,
+    seed_34_converges: 34,
+    seed_55_converges: 55,
+    seed_89_converges: 89,
+    seed_144_converges: 144,
+    seed_233_converges: 233,
+    seed_377_converges: 377,
+    seed_610_converges: 610,
+    seed_987_converges: 987,
+    seed_1597_converges: 1597,
 }
 
 #[test]
-fn every_seed_converges_0() {
-    every_fourth_seed(0);
+fn every_fixed_seed_has_a_test() {
+    assert_eq!(TESTED_SEEDS, SEEDS);
 }
 
+/// The stores of every other test here are on tmpfs (see `scratch_dir`). This one seed runs on
+/// the ordinary temporary directory, so a store reopened after an injected crash, every WAL
+/// commit and every checkpoint trim still go through a real fsync once.
 #[test]
-fn every_seed_converges_1() {
-    every_fourth_seed(1);
-}
-
-#[test]
-fn every_seed_converges_2() {
-    every_fourth_seed(2);
-}
-
-#[test]
-fn every_seed_converges_3() {
-    every_fourth_seed(3);
+fn seed_1_converges_on_a_real_disk() {
+    REAL_DISK.with(|real| real.set(true));
+    seed_converges(1);
 }
 
 /// The deliberate bug must fail the first runs it happens in, not just some run. Seeds run four
