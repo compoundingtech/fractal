@@ -130,7 +130,7 @@ where
                         sequence += 1;
                         let nonce = challenge.borrow().clone().expect("watch requires challenge");
                         let Ok(issued) = now_ms() else { break; };
-                        let Ok(proof) = signed(auth,node,&lease.binding(),&lease.binding().gateway_epoch,sequence,&nonce,issued) else { break; };
+                        let Ok(proof) = signed(auth,node,lease.binding(),&lease.binding().gateway_epoch,sequence,&nonce,issued) else { break; };
                         if sink.send(Message::Text(proof.into())).await.is_err() { break; }
                         proof_sent = true;
                     }
@@ -157,7 +157,7 @@ where
                             break;
                         };
                         let Ok((proof, sender)) =
-                            verify(auth, &text, &owner, &lease.binding(), member_key.as_deref())
+                            verify(auth, &text, &owner, lease.binding(), member_key.as_deref())
                         else {
                             break;
                         };
