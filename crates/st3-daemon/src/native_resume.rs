@@ -29,8 +29,7 @@ impl Refusal {
 
 /// The native session this launch must resume, if the daemon named one.
 pub fn requested() -> Option<String> {
-    std::env::var(crate::suspension::RESUME_ENV)
-        .ok()
+    st_drivers::contracts::env(crate::suspension::RESUME_ENV)
         .filter(|id| !id.trim().is_empty())
 }
 
@@ -40,12 +39,9 @@ pub fn continued() -> Option<(String, Option<PathBuf>)> {
     if requested().is_some() {
         return None;
     }
-    let session = std::env::var(crate::suspension::CONTINUE_ENV)
-        .ok()
+    let session = st_drivers::contracts::env(crate::suspension::CONTINUE_ENV)
         .filter(|id| !id.trim().is_empty())?;
-    let path = std::env::var_os(crate::suspension::CONTINUE_PATH_ENV)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from);
+    let path = st_drivers::contracts::env(crate::suspension::CONTINUE_PATH_ENV).map(PathBuf::from);
     Some((session, path))
 }
 

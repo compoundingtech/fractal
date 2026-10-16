@@ -4142,8 +4142,7 @@ fn cli_main() -> ExitCode {
         None => {}
     }
     // An instance changes where every path resolves, so it comes before anything reads one.
-    let instance_name = st3::instance::requested(&arguments)
-        .or_else(|| st_drivers::contracts::env(st3::instance::ENV).filter(|name| !name.is_empty()));
+    let instance_name = st3::instance::requested(&arguments);
     if let Some(name) = instance_name {
         // SAFETY: no other thread exists yet; the async runtime starts after this returns.
         if let Err(error) = unsafe { st3::instance::activate(&name) } {
