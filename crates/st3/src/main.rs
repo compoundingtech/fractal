@@ -5324,7 +5324,7 @@ fn cli_main() -> ExitCode {
         st3::recorder::run(program);
     }
     let mut arguments = std::env::args_os().collect::<Vec<_>>();
-    if fractal::dispatch(&mut arguments) == fractal::Dispatch::Web {
+    if fractal::dispatch(arguments.as_mut_slice()) == fractal::Dispatch::Web {
         return fractal::web(&arguments);
     }
     match read_contract_inventory_request(&arguments) {

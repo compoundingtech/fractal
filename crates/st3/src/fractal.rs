@@ -10,7 +10,7 @@ pub enum Dispatch {
 }
 
 /// Rewrite only the new program's UI spelling. All legacy invocations pass through untouched.
-pub fn dispatch(arguments: &mut Vec<OsString>) -> Dispatch {
+pub fn dispatch(arguments: &mut [OsString]) -> Dispatch {
     let fractal = arguments
         .first()
         .and_then(|program| Path::new(program).file_name())
@@ -102,8 +102,8 @@ mod tests {
     use super::*;
 
     fn route(input: &[&str]) -> (Dispatch, Vec<OsString>) {
-        let mut arguments = input.iter().map(OsString::from).collect();
-        (dispatch(&mut arguments), arguments)
+        let mut arguments = input.iter().map(OsString::from).collect::<Vec<_>>();
+        (dispatch(arguments.as_mut_slice()), arguments)
     }
 
     #[test]
