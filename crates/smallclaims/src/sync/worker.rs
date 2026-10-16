@@ -2478,9 +2478,6 @@ async fn post_signed<B: Backend>(
     .into())
 }
 
-/// Send one signed request to a peer path and return the peer's verified answer, as
-/// `post_signed` does for an exchange.
-#[allow(clippy::too_many_arguments)]
 /// What an unsigned refusal from `peer` says: its status and, only for the bodies this protocol's
 /// own unsigned refusals carry or for a size refusal, a fixed reason. Any other body is counted,
 /// never quoted, since nothing vouches for what it contains.
@@ -2511,6 +2508,9 @@ fn unsigned_refusal(peer: &str, status: StatusCode, body: &[u8]) -> String {
     }
 }
 
+/// Send one signed request to a peer path and return the peer's verified answer, as
+/// `post_signed` does for an exchange.
+#[allow(clippy::too_many_arguments)]
 async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     http: &reqwest::Client,
     peer: &PeerConfig,
