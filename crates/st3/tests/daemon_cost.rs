@@ -80,8 +80,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/attention", 18.0),
     // Checkpoint status walks the sealed set (9.8x).
     ("GET /v1/checkpoint/status", 15.0),
-    // Runtimes read every runtime observation (3.8x for the list, 9.0x for one runtime).
-    ("GET /v1/client/runtimes", 6.0),
     // Doctor checks the whole store, as it must (11.4x full-scan steps).
     ("GET /v1/doctor", 17.0),
     // Fleet and replication status count every replica record (9.7x).
