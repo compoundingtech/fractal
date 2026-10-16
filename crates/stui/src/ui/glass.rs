@@ -599,7 +599,7 @@ enum Action {
     /// Every conversation simplified, or in full again (Ctrl+P).
     ToggleSimple,
     /// Agents open on their terminal, or on their conversation.
-    ToggleTerminalFirst,
+    ToggleConversationFirst,
     ToggleTerminalFallback,
     /// Ask for a name, for a glass to rename, make or copy.
     Name(Naming),
@@ -969,14 +969,14 @@ impl Ui {
             Action::ToggleSimple,
         ));
         choices.push(start(
-            if self.terminal_first() {
-                "Open agents on their conversation".into()
+            if self.conversation_first() {
+                "Conversation first: off (attach terminals)".into()
             } else {
-                "Open agents on their terminal".into()
+                "Conversation first: on".into()
             },
-            "this device; the conversation is the default",
-            "terminal conversation default view open agents attach tui".into(),
-            Action::ToggleTerminalFirst,
+            "this device; opening an agent attaches its terminal unless this is on",
+            "conversation first terminal default view open agents attach tui setting".into(),
+            Action::ToggleConversationFirst,
         ));
         choices.push(start(
             if self.terminal_fallback {
@@ -2013,6 +2013,10 @@ impl Ui {
             }
             // A usage tab names its group whatever the list groups by, so it draws from its key.
             Some(pane @ Pane::Usage(_)) => self.draw_pane(buf, content, &pane),
+            // A session has no sidebar agent selection: render the tab's subject directly.
+            Some(Pane::Agent(Some(id))) if id.starts_with("session/") => {
+                self.draw_pane(buf, content, &Pane::Agent(Some(id)))
+            }
             // A terminal tab that is not the attached one says so, rather than drawing whatever
             // stui's own tab has selected.
             Some(Pane::Terminal(id))
@@ -2089,6 +2093,8 @@ impl Ui {
     /// A pane whose subject st no longer lists. Unknown while its list is still loading.
     fn subject_gone(&self, pane: &Pane) -> bool {
         match pane {
+            // Saved and child sessions are not members of the agent inventory.
+            Pane::Agent(Some(id)) if id.starts_with("session/") => false,
             Pane::Terminal(id) if id.starts_with("terminal/") => false,
             Pane::Agent(Some(id)) | Pane::Terminal(id) => self
                 .world
@@ -2792,9 +2798,15 @@ impl Ui {
             // Ctrl+R tries again: it sends a message st never had again. Speaking into the box is
             // Ctrl+Y, with the box open or not (Nathan, 2026-10-05: it did nothing until a letter
             // had opened the box; 2026-10-14: Ctrl+R means retry, so voice moved off it).
-            KeyCode::Char('r') if control && conversation.is_some() && self.live => {
-                if let Some(entry) = self.undelivered() {
-                    self.effects.push(Effect::Resend { entry });
+            KeyCode::Char('r') if control && quiet && !sidebar_keys && self.live => {
+                // A failed open owns retry before resend, including read-only child sessions.
+                if !self.retry_conversation() {
+                    if conversation.is_none() {
+                        return false;
+                    }
+                    if let Some(entry) = self.undelivered() {
+                        self.effects.push(Effect::Resend { entry });
+                    }
                 }
             }
             KeyCode::Char('y') if control && conversation.is_some() && self.live => self.start_voice(),
@@ -3018,7 +3030,7 @@ impl Ui {
             Action::NewTerminal => self.open_new_terminal(),
             Action::NewMission => self.open_new_mission(),
             Action::ToggleSimple => self.toggle_simple(),
-            Action::ToggleTerminalFirst => self.toggle_terminal_first(),
+            Action::ToggleConversationFirst => self.toggle_conversation_first(),
             Action::ToggleTerminalFallback => self.toggle_terminal_fallback(),
             Action::Said { agent, query } => {
                 self.open_in_glass(Pane::Agent(Some(agent.clone())), how);
@@ -3085,9 +3097,105 @@ impl Ui {
         }
     }
 
+    /// Whether st's inventory holds what `pane` shows. A seat can ask for an agent it has only
+    /// just made, so a request waits for this rather than opening an empty pane.
+    pub(crate) fn inventory_has(&self, pane: &Pane) -> bool {
+        match pane {
+            Pane::Agent(Some(id)) => self.world.agents.items().iter().any(|a| &a.id == id),
+            Pane::Mission(Some(id)) => self.world.missions.items().iter().any(|m| &m.id == id),
+            Pane::Machine(Some(id)) => {
+                let name = id.trim_start_matches("machine/");
+                self.world.machines.items().iter().any(|m| m.name == name)
+            }
+            _ => false,
+        }
+    }
+
+    /// Show what a seat asked for with `st ui open`. The pane opens in a tab or a split and takes
+    /// the focus, unless the request keeps it or the person is typing a message: a pane never
+    /// pulls the cursor out from under a draft. A pane that is already open is not opened again.
+    pub(crate) fn open_requested(
+        &mut self,
+        pane: Pane,
+        place: requests::Place,
+        keep_focus: bool,
+        from: Option<&str>,
+    ) -> requests::Answer {
+        let title = self.pane_title(&pane);
+        let keep = keep_focus || self.editing;
+        let how = match place {
+            requests::Place::Tab => Open::Tab,
+            requests::Place::Right => Open::Right,
+            requests::Place::Below => Open::Below,
+        };
+        if self.glasses.is_none() {
+            // The classic layout has no tabs or splits: the list selects it, which moves focus.
+            match &pane {
+                Pane::Agent(Some(id)) | Pane::Mission(Some(id)) | Pane::Machine(Some(id))
+                    if !keep =>
+                {
+                    let id = id.clone();
+                    self.open(&id);
+                }
+                _ => return requests::Answer::NotShown,
+            }
+        } else if !keep {
+            self.open_in_glass(pane, how);
+        } else if let Some(glasses) = self.glasses.as_mut() {
+            let key = pane.key();
+            let glass = glasses.glass_mut();
+            if glass.find(&key).is_none() {
+                let focus = glass.focus;
+                match how {
+                    Open::Right | Open::Below => {
+                        let side = if how == Open::Right { Side::Right } else { Side::Below };
+                        glass.layout.split(focus, side, Group::of(Tab::pane(&key)));
+                    }
+                    _ => {
+                        if let Some(group) = glass.layout.group_mut(focus) {
+                            group.tabs.push(Tab::pane(&key));
+                        }
+                    }
+                }
+                let id = glass.id.clone();
+                self.glass_changed(&id);
+            }
+        }
+        let who = from
+            .map(|from| {
+
+                self.world
+                    .agents
+                    .items()
+                    .iter()
+                    .find(|agent| agent.id == from)
+                    .map(|agent| agent.name.clone())
+                    .unwrap_or_else(|| from.rsplit('/').next().unwrap_or(from).to_owned())
+            })
+            .unwrap_or_else(|| "A seat".into());
+        // The name came from a file another process wrote: no control characters in the flash.
+        let who: String = who.chars().filter(|c| !c.is_control()).take(80).collect();
+        self.flash(format!("{who} opened {title}"));
+        requests::Answer::Opened { focused: !keep }
+    }
+
     /// Show `pane` in this glass: where it already shows, else as `how` says. Home stays Home,
     /// so what opens from Home gets its own tab, and a Home item opens on Home itself.
     pub(crate) fn open_in_glass(&mut self, pane: Pane, how: Open) {
+        self.open_in_glass_inner(pane.clone(), how);
+        // Opening an agent attaches its terminal once its tab has stayed in front a moment,
+        // unless this device chose its conversation. Only opening does: moving the focus to a
+        // tab or split already open only focuses it.
+        if !self.conversation_first()
+            && let Pane::Agent(Some(id)) = &pane
+            && id.starts_with("agent/")
+            && self.focused_pane().as_ref() == Some(&pane)
+        {
+            self.attach_when = Some((id.clone(), Instant::now()));
+        }
+    }
+
+    fn open_in_glass_inner(&mut self, pane: Pane, how: Open) {
         if let Some(glasses) = self.glasses.as_mut() {
             glasses.home = false;
         }
@@ -3959,12 +4067,6 @@ impl Ui {
         // A message box belongs to the pane it was opened in: once another pane or tab has the
         // focus, typing must not go on into a draft nobody can see (Nathan, 2026-10-07).
         if before != (self.tab, self.selected_id()) {
-            if self.terminal_first
-                && let Some(Pane::Agent(Some(id))) = self.focused_pane()
-                && id.starts_with("agent/")
-            {
-                self.attach_when = Some((id, Instant::now()));
-            }
             self.editing = false;
             self.chat = None;
             self.answering = None;
@@ -4648,14 +4750,12 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_first_device_attaches_an_agent_after_the_tab_stays_in_front() {
-        // Nathan, 2026-10-07: a setting for the terminal as the default view; the conversation
-        // stays the default, and flicking through tabs attaches nothing.
+    fn opening_an_agent_attaches_its_terminal_unless_this_device_chose_conversation_first() {
+        // 2026-10-15: attaching is the default and conversation first the setting; flicking
+        // through tabs attaches nothing.
         let mut ui = glass();
         ui.live = true;
-        assert!(!ui.terminal_first(), "the conversation is the default");
-        ui.toggle_terminal_first();
-        assert!(ui.terminal_first());
+        assert!(!ui.conversation_first(), "attaching is the default");
         ui.open_in_glass(
             Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
             Open::Tab,
@@ -4665,23 +4765,70 @@ mod tests {
             Open::Tab,
         );
         ui.effects.clear();
-        // Passing through the agent's tab: nothing attaches.
-        ui.show_tab(0);
-        ui.show_tab(1);
+        // Opened and passed by at once: nothing attaches.
+        std::thread::sleep(ATTACH_DWELL + std::time::Duration::from_millis(50));
         ui.step_default_view();
         assert!(ui.effects.is_empty(), "{:?}", ui.effects);
-        // Staying on it does.
+        // Moving the focus back to its tab only focuses it.
         ui.show_tab(0);
-        std::thread::sleep(std::time::Duration::from_millis(350));
+        std::thread::sleep(ATTACH_DWELL + std::time::Duration::from_millis(50));
+        ui.step_default_view();
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        // Opening it, and staying, attaches, and the tab is the terminal now.
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
+            Open::Tab,
+        );
+        std::thread::sleep(ATTACH_DWELL + std::time::Duration::from_millis(50));
         ui.step_default_view();
         assert!(
             ui.effects.iter().any(|effect| matches!(effect, Effect::OpenTerminal { agent } if agent == "agent/example/atlas/builder")),
             "{:?}",
             ui.effects
         );
-        // Switched back, the conversation is the default again.
-        ui.toggle_terminal_first();
-        assert!(!ui.terminal_first());
+        assert_eq!(
+            ui.focused_pane(),
+            Some(Pane::Terminal("agent/example/atlas/builder".into()))
+        );
+        // Conversation first: the same agent opens on its conversation.
+        let mut ui = glass();
+        ui.live = true;
+        ui.toggle_conversation_first();
+        assert!(ui.conversation_first());
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
+            Open::Tab,
+        );
+        ui.effects.clear();
+        std::thread::sleep(ATTACH_DWELL + std::time::Duration::from_millis(50));
+        ui.step_default_view();
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        assert_eq!(
+            ui.focused_pane(),
+            Some(Pane::Agent(Some("agent/example/atlas/builder".into())))
+        );
+    }
+
+    #[test]
+    fn an_agent_without_a_terminal_opens_its_conversation_and_says_nothing() {
+        let mut ui = glass();
+        ui.live = true;
+        let id = ui
+            .world
+            .agents
+            .items()
+            .iter()
+            .find(|agent| !agent.terminal || agent.unmanaged)
+            .map(|agent| agent.id.clone())
+            .expect("the demo has an agent without a terminal");
+        ui.open_in_glass(Pane::Agent(Some(id.clone())), Open::Tab);
+        ui.effects.clear();
+        ui.flash = None;
+        std::thread::sleep(ATTACH_DWELL + std::time::Duration::from_millis(50));
+        ui.step_default_view();
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        assert!(ui.flash.is_none(), "{:?}", ui.flash);
+        assert_eq!(ui.focused_pane(), Some(Pane::Agent(Some(id))));
     }
 
     #[test]
@@ -5925,6 +6072,37 @@ mod tests {
             ui.conversation_state.drafts["agent/example/atlas/builder"],
             "hello"
         );
+        ui.editing = false;
+        ui.world.conversations.insert(
+            "agent/example/atlas/builder".into(),
+            Load::Failed("access refused".into()),
+        );
+        ctrl(&mut ui, 'r');
+        assert_eq!(
+            ui.effects,
+            [Effect::RetryConversation {
+                target: "agent/example/atlas/builder".into(),
+            }],
+            "a failed-open card retries only its subscription, never message resend"
+        );
+        assert_eq!(
+            ui.conversation_state.drafts["agent/example/atlas/builder"],
+            "hello"
+        );
+        ui.effects.clear();
+        ui.world.conversations.insert(
+            "agent/example/atlas/builder".into(),
+            Load::Failed("access refused".into()),
+        );
+        let sidebar = &mut ui.glasses.as_mut().unwrap().sidebar;
+        sidebar.shown = true;
+        sidebar.focused = true;
+        ctrl(&mut ui, 'r');
+        assert!(ui.effects.is_empty(), "sidebar focus must not retry the conversation behind it");
+        assert!(matches!(
+            ui.world.conversations["agent/example/atlas/builder"],
+            Load::Failed(_)
+        ));
     }
 
     #[test]
@@ -7473,6 +7651,100 @@ mod tests {
         assert!(!ui.editing);
         assert!(ui.terminal.is_none());
         assert!(subject.is_none());
+    }
+
+    fn others(ui: &Ui) -> (String, String) {
+        let agents = ui.world.agents.items();
+        (agents[1].id.clone(), agents[2].id.clone())
+    }
+
+    #[test]
+    fn a_seat_opens_an_agent_in_a_split_and_the_person_follows_it() {
+        let mut ui = glass();
+        let (one, _) = others(&ui);
+        let before = tabs(&ui);
+        let answer = ui.open_requested(
+            Pane::Agent(Some(one.clone())),
+            requests::Place::Right,
+            false,
+            Some("agent/st/assistant"),
+        );
+        assert_eq!(answer, requests::Answer::Opened { focused: true });
+        let after = tabs(&ui);
+        assert_eq!(after.2.len(), before.2.len() + 1);
+        assert_eq!(after.2.last().unwrap(), &vec![format!("agent:{one}")]);
+        assert_eq!(after.0, after.2.len() - 1, "the new split has the focus");
+        assert_eq!(ui.focus(), (1, Some(one.clone())));
+        assert_eq!(ui.live_conversations()[0], one);
+        assert!(ui.flash.as_ref().unwrap().0.contains("assistant opened"));
+    }
+
+    #[test]
+    fn keeping_focus_shows_the_pane_and_leaves_the_person_where_they_were() {
+        let mut ui = glass();
+        let (one, two) = others(&ui);
+        ui.open_in_glass(Pane::Agent(Some(one.clone())), Open::Tab);
+        let focused = (tabs(&ui).0, tabs(&ui).1, ui.focus());
+        let mission = Pane::Mission(Some("mission/fleet/release/weekly".into()));
+        for (pane, place) in [
+            (mission.clone(), requests::Place::Below),
+            (Pane::Agent(Some(two.clone())), requests::Place::Tab),
+        ] {
+            let answer = ui.open_requested(pane, place, true, None);
+            assert_eq!(answer, requests::Answer::Opened { focused: false });
+            assert_eq!((tabs(&ui).0, tabs(&ui).1, ui.focus()), focused, "focus did not move");
+        }
+        let panes = tabs(&ui).2;
+        assert!(panes.iter().any(|group| group == &vec![WEEKLY.to_owned()]), "{panes:?}");
+        assert!(panes[0].contains(&format!("agent:{two}")), "the tab joined the focused split");
+        assert!(ui.flash.as_ref().unwrap().0.starts_with("A seat opened"));
+    }
+
+    #[test]
+    fn a_pane_never_takes_the_cursor_from_a_message_being_typed() {
+        let mut ui = glass();
+        let (one, _) = others(&ui);
+        ui.open_in_glass(Pane::Agent(Some(one)), Open::Tab);
+        ui.editing = true;
+        let focus = tabs(&ui).0;
+        let answer = ui.open_requested(
+            Pane::Mission(Some("mission/fleet/release/weekly".into())),
+            requests::Place::Right,
+            false,
+            None,
+        );
+        assert_eq!(answer, requests::Answer::Opened { focused: false });
+        assert_eq!(tabs(&ui).0, focus);
+        assert!(ui.editing, "the draft is still being typed");
+    }
+
+    #[test]
+    fn asking_again_shows_the_open_pane_instead_of_opening_it_twice() {
+        let mut ui = glass();
+        let mission = Pane::Mission(Some("mission/fleet/release/weekly".into()));
+        let (one, _) = others(&ui);
+        ui.open_requested(mission.clone(), requests::Place::Right, false, None);
+        ui.open_requested(Pane::Agent(Some(one)), requests::Place::Right, false, None);
+        let count = tabs(&ui).2.iter().flatten().filter(|pane| *pane == WEEKLY).count();
+        assert_eq!(count, 1);
+        // The mission stays open in its split while the person works in the other.
+        let groups = tabs(&ui).2.len();
+        ui.open_requested(mission.clone(), requests::Place::Tab, false, None);
+        let (focus, _, panes) = tabs(&ui);
+        assert_eq!(panes.len(), groups);
+        assert_eq!(panes[focus], vec![WEEKLY.to_owned()], "asking again focuses it");
+        assert_eq!(panes.iter().flatten().filter(|pane| *pane == WEEKLY).count(), 1);
+    }
+
+    #[test]
+    fn the_inventory_decides_whether_a_subject_exists() {
+        let ui = glass();
+        let (one, _) = others(&ui);
+        assert!(ui.inventory_has(&Pane::Agent(Some(one))));
+        assert!(ui.inventory_has(&Pane::Mission(Some("mission/fleet/release/weekly".into()))));
+        assert!(!ui.inventory_has(&Pane::Agent(Some("agent/garden/not-yet".into()))));
+        assert!(!ui.inventory_has(&Pane::Mission(Some("mission/garden/gone".into()))));
+        assert!(!ui.inventory_has(&Pane::Home(None)));
     }
 
     #[test]
