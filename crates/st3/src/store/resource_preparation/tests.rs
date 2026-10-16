@@ -314,20 +314,106 @@ fn a_reopened_store_cannot_reuse_the_old_handles_token() {
     assert_eq!(file_backed.preparation.len(), 1);
     assert_eq!(file_backed.writer.len(), 1);
     assert!(!file_backed.writer[0].0);
+    let assert_unchanged_fallback = || {
+        take_counts();
+        let before = current_index(&store.readers.get()).unwrap();
+        assert!(observe(&store, &revision, 3).observation_claim.is_none());
+        let rejected = take_counts();
+        assert_eq!(
+            (rejected.fast, rejected.invalidated, rejected.fallback),
+            (0, 2, 1)
+        );
+        assert_eq!(
+            current_index(&store.readers.get()).unwrap(),
+            before,
+            "unchanged fallback must append no stale effect"
+        );
+    };
     store
         .connection
         .write()
         .execute_batch("CREATE TEMP TABLE invented_shadow(value TEXT)")
         .unwrap();
     assert!(fence.prepare(&store, |_| ()).value.is_none());
+    assert_unchanged_fallback();
+    store
+        .connection
+        .write()
+        .execute_batch(
+            "DROP TABLE temp.invented_shadow;
+         CREATE TEMP VIEW claims AS SELECT * FROM main.claims;",
+        )
+        .unwrap();
+    assert!(
+        fence.prepare(&store, |_| ()).value.is_none(),
+        "a TEMP view shadowing an actual input is refused"
+    );
     store.connection.write().execute_batch(
-        "DROP TABLE temp.invented_shadow;
+        "DROP VIEW temp.claims;
          CREATE TEMP TRIGGER invented_replay_trigger AFTER INSERT ON heal_replay_base_order BEGIN SELECT 1; END;",
     ).unwrap();
     assert!(
         fence.prepare(&store, |_| ()).value.is_none(),
         "a TEMP trigger on an admitted scratch table is still refused"
     );
+    assert_unchanged_fallback();
+    store
+        .connection
+        .write()
+        .execute_batch(
+            "DROP TRIGGER temp.invented_replay_trigger;
+         INSERT INTO temp.heal_replay_base_order(claim_id) VALUES ('invented-pending-replay');",
+        )
+        .unwrap();
+    assert!(
+        fence.prepare(&store, |_| ()).value.is_none(),
+        "nonempty replay scratch is ineligible"
+    );
+    assert_unchanged_fallback();
+    store
+        .connection
+        .write()
+        .execute_batch("DELETE FROM temp.heal_replay_base_order")
+        .unwrap();
+    assert!(fence.prepare(&store, |_| ()).value.is_some());
+    for definition in [
+        "CREATE TEMP TABLE heal_replay_base_order(ordinal TEXT PRIMARY KEY, claim_id TEXT NOT NULL)",
+        "CREATE TEMP TABLE heal_replay_base_order(ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL, extra TEXT)",
+        "CREATE TEMP VIEW heal_replay_base_order AS SELECT 1 AS ordinal, 'invented' AS claim_id",
+    ] {
+        store
+            .connection
+            .write()
+            .execute_batch("DROP TABLE temp.heal_replay_base_order")
+            .unwrap();
+        store.connection.write().execute_batch(definition).unwrap();
+        assert!(
+            fence.prepare(&store, |_| ()).value.is_none(),
+            "mismatched TEMP definition was admitted: {definition}"
+        );
+        assert_unchanged_fallback();
+        if definition.starts_with("CREATE TEMP VIEW") {
+            store
+                .connection
+                .write()
+                .execute_batch("DROP VIEW temp.heal_replay_base_order")
+                .unwrap();
+        } else {
+            store
+                .connection
+                .write()
+                .execute_batch("DROP TABLE temp.heal_replay_base_order")
+                .unwrap();
+        }
+        store
+            .connection
+            .write()
+            .execute_batch(
+                "CREATE TEMP TABLE heal_replay_base_order(
+             ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL)",
+            )
+            .unwrap();
+    }
     drop(store);
     let reopened = Store::open(&path, "prepared-reopen").unwrap();
     let reopened_fence = Fence::new(&reopened);

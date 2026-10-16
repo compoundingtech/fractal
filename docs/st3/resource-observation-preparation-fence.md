@@ -123,10 +123,17 @@ on the writer and reader; the private path permits only the write_clock table
 and the retained heal_replay_base_order table used by canonical replay. Neither
 name shadows a preparation dependency. File-backed initial open runs that replay
 and retains its empty scratch table; rejecting it would disable the optimization.
-Every other TEMP object, including triggers and views, selects the old path.
-The TEMP catalog check is additional SQL cost, not free metadata; later schema
-changes still invalidate the native cut. The file-backed/reopen control requires
-actual fast observation without weakening the unknown-TEMP rejection.
+Eligibility compares the stored CREATE definitions with the two actual source
+schemas after collapsing whitespace, not names alone. The replay table must also
+be empty. Mismatched columns, extra columns, views, triggers, indexes, unknown
+names or retained replay rows select the old path. The [SQLite schema table](https://www.sqlite.org/schematab.html)
+describes stored CREATE text; the pinned bundled sqlite3EndTable implementation
+constructs it from the object-name token, omitting TEMP and IF NOT EXISTS.
+The catalog check and conditional scratch-emptiness query are additional SQL
+cost, not free metadata; later schema changes still invalidate the native cut.
+The file-backed/reopen control requires an actual fast observation, rejects each
+unexpected TEMP shape/state, and proves unchanged canonical fallback appends no
+claim. It does not weaken the original reopen/store-incarnation refusal.
 
 The actual production call is reconcile's async observer completion, after the
 provider await and prior reader guards have ended. It holds no writer loan,
@@ -152,7 +159,9 @@ path. None of this authorizes a restore or tests a running member.
 A quiet success adds one seed loan, one reader preparation, and one validation
 job. At worst there are TWO seed loans, TWO preparations, TWO stale validation
 jobs and ONE canonical fallback. Each native seed/validation reads five SQL
-statements: TEMP catalog and four PRAGMAs, plus native getters. Preparation has
+statements: TEMP catalog and four PRAGMAs, plus native getters. A retained replay
+scratch table adds one emptiness statement at seed and validation; corrected
+hosted work reports must include it. Preparation has
 its own snapshot/catalog checks and canonical history work. Existing observer
 checks, idempotency reads, transaction/savepoint/finalizer/COMMIT/observer work
 are still real costs. Canonicalizing facts and computing the operation hash also

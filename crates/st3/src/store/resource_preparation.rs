@@ -43,15 +43,50 @@ impl NativeCut {
 }
 
 fn temporary_schema_safe(connection: &Connection) -> bool {
-    // The writer clock and the canonical replay's retained ID-order scratch table do not
-    // shadow any preparation input. File-backed open can leave the latter empty after replay.
-    // Admit only these table names, never TEMP views, indexes or triggers. Every other TEMP
-    // object still selects the unchanged path; native schema cookies fence later changes.
-    // This is catalog work, explicitly included in seed/validation accounting, not history.
-    connection.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM temp.sqlite_schema WHERE name NOT IN ('write_clock','heal_replay_base_order') OR type!='table')",
-        [], |row| row.get::<_, bool>(0),
-    ).unwrap_or(false)
+    // Compare the actual catalog definitions, not trusted names. SQLite stores the CREATE
+    // text beginning at the object name (TEMP / IF NOT EXISTS are not retained); normalize
+    // whitespace only. A changed definition, trigger, view or index is ineligible.
+    // https://www.sqlite.org/schematab.html and bundled sqlite3.c sqlite3EndTable.
+    let check = || -> rusqlite::Result<bool> {
+        let mut statement = connection.prepare("SELECT name, type, sql FROM temp.sqlite_schema")?;
+        let mut rows = statement.query([])?;
+        let mut replay = false;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(0)?;
+            let kind: String = row.get(1)?;
+            let sql: Option<String> = row.get(2)?;
+            let expected = match name.as_str() {
+                "write_clock" => {
+                    "CREATE TABLE write_clock(offset_ms INTEGER NOT NULL, at_ms INTEGER)"
+                }
+                "heal_replay_base_order" => {
+                    replay = true;
+                    "CREATE TABLE heal_replay_base_order( ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL)"
+                }
+                _ => return Ok(false),
+            };
+            if kind != "table"
+                || sql
+                    .as_deref()
+                    .map(|sql| sql.split_ascii_whitespace().collect::<Vec<_>>().join(" "))
+                    .as_deref()
+                    != Some(expected)
+            {
+                return Ok(false);
+            }
+        }
+        // Replay empties its private ID-order table before returning. Never read resource
+        // inputs while an unexpected retained scratch state is present.
+        if replay {
+            return connection.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM temp.heal_replay_base_order LIMIT 1)",
+                [],
+                |row| row.get(0),
+            );
+        }
+        Ok(true)
+    };
+    check().unwrap_or(false)
 }
 
 pub(super) struct Fence {
