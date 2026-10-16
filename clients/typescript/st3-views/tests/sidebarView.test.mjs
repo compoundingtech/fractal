@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { build, nodeKey, canPlace, planMove, rollup } from '@smalltalk/st3-views/sidebarView';
 import { build as publicBuild } from '@smalltalk/st3-views';
 import { project } from '../../../../apps/fractal-web/src/folders/core.mts';
+import * as Schema from '@smalltalk/st3-client/schema';
 
 const fixtures = JSON.parse(readFileSync(new URL('../../../../fixtures/clients/sidebar-v2.json', import.meta.url), 'utf8'));
 const folder = id => ({ _tag: 'Folder', id });
@@ -26,6 +27,9 @@ const addFolder = (arrangement, id, parent = null, key = 'a0') => {
 
 assert.equal(fixtures.scope, 'folder-only-v1');
 for (const fixture of fixtures.cases) {
+  test(`shared sidebar strict Arrangement schema: ${fixture.name}`, () => {
+    assert.doesNotThrow(() => Schema.decodeUnknownSync(Schema.Arrangement, 'strict')(fixture.arrangement));
+  });
   test(`shared sidebar: ${fixture.name}`, () => {
     const tree = built(fixture.arrangement, fixture.inventory);
     assert.deepEqual({ ...tree, nodes: Object.fromEntries(tree.nodes) }, fixture.expected);

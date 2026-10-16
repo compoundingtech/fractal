@@ -63,6 +63,9 @@ copy and widgets remain consumer-owned.
 Shared Rust/TypeScript vectors live in `fixtures/clients/sidebar-v2.json`; the
 filename reserves the sidebar contract's vector family, while its
 `scope: "folder-only-v1"` explicitly identifies today's arrangement data.
+Folder identities are fixed UUIDv7 literals, ordered like the original symbolic
+identities so ID tie-breaks stay deterministic. The TypeScript twin tests decode
+every arrangement with the strict generated schema before checking projection.
 This seam changes no storage, schema or wire format. Mixed parents, declared
 defaults/reset, availability, optimistic application and revision/cycle-cut
 settlement belong to format-v2 work, not this API.
