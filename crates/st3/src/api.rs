@@ -26961,7 +26961,9 @@ mission "wake" state="ready" {
         summary("no card changed", &mut unrelated);
         let performance = smallclaims::performance::snapshot();
         for row in performance["requests"].as_array().into_iter().flatten()
-            .filter(|row| row["kind"].as_str().is_some_and(|kind| kind.starts_with("roster/")))
+            .filter(|row| row["kind"].as_str().is_some_and(|kind| {
+                kind.starts_with("roster/") || matches!(kind, "published_list.agents" | "startup.warmup")
+            }))
         {
             println!("roster fold task {}: n={} total_ms={} max_ms={}",
                 row["kind"], row["count"], row["total_ms"], row["max_ms"]);
@@ -27028,7 +27030,8 @@ mission "wake" state="ready" {
             let performance = smallclaims::performance::snapshot();
             performance["requests"].as_array().into_iter().flatten()
                 .filter_map(|row| Some((row["kind"].as_str()?.to_owned(), row["total_ms"].as_f64()?)))
-                .filter(|(kind, _)| kind.starts_with("roster/"))
+                .filter(|(kind, _)| kind.starts_with("roster/")
+                    || matches!(kind.as_str(), "published_list.agents" | "startup.warmup"))
                 .collect::<BTreeMap<_, _>>()
         };
         let append = |subject: &str, kind: &str, actor: Option<&str>, fields: &Value| {
@@ -27047,7 +27050,7 @@ mission "wake" state="ready" {
             let after = task_ms();
             let tasks = after.iter().filter_map(|(kind, total)| {
                 let spent = total - before.1.get(kind).copied().unwrap_or(0.0);
-                (spent >= 1.0).then(|| format!("{}={spent:.0}", kind.trim_start_matches("roster/")))
+                (spent >= 1.0).then(|| format!("{kind}={spent:.0}"))
             }).collect::<Vec<_>>().join(" ");
             println!("roster kind {label}: {ms:.1} ms; cards refolded {}; {tasks}; vm_steps={}",
                 store.agent_resources_refolded_cards_for_test() - before.2,

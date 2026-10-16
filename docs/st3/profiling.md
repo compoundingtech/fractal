@@ -61,6 +61,12 @@ second while polling and once when it completes or is dropped. A parked task's
 remaining sample is flushed when it next polls or is dropped; there is no timer
 task per wrapper. Nested wrappers on the same thread count their polls but leave
 CPU to the outermost wrapper, so adding their rates does not count that CPU twice.
+Blocking invocations flush on return (or unwind), not once per second. An
+outermost invocation reads the thread CPU clock twice; each invocation adds its
+poll count and nonzero CPU to OTel and records a performance task (including the
+shared meter lock).
+The CPU counter measures the wrapped work, not the full cost of publishing its
+own sample; process CPU is needed to measure instrumentation overhead.
 
 For a Prometheus translation that replaces dots with underscores and appends the
 counter suffix, CPU usage in cores is:
@@ -83,10 +89,29 @@ child processes is not included in the parent's thread CPU.
 
 The same static task scopes label background writer submissions when file
 profiling is enabled. Each batched savepoint runs under its own submitter's
-operation. Shared transaction setup and finalizers/commit run under dedicated
-`writer.batch.setup` and `writer.batch.commit` scopes rather than charging other
-submitters to the first job. All accounting scopes finish before completed jobs
-are acknowledged, so their caller cannot finish profiling before samples arrive.
+profile operation. `writer.batch.job` includes SAVEPOINT, the callback and
+RELEASE or ROLLBACK TO/RELEASE, including unsuccessful callbacks. Its `st.task`
+CPU is an aggregate across writer jobs, not attribution to an individual request
+or original background task. Nested wrappers count invocations but leave CPU to
+this outer job scope. Shared setup uses `writer.batch.setup`; finalizers, COMMIT
+(or failed-batch resolution) and postcommit observers use one nonoverlapping
+`writer.batch.commit` invocation. Thus a batch with N executed jobs has N job
+invocations and one setup and one commit invocation; nested callbacks can add
+their own poll counts, but not duplicate CPU. A job skipped after batch failure
+has no executed-job sample. Individual submitters retain their profile CPU,
+I/O and SQL attribution. All accounting scopes finish before acknowledgements,
+so callers cannot snapshot their completed operations before samples arrive.
+
+The batch `WriterHold` and telemetry `Holding` guard also drop before the first
+ACK is sent, after postcommit callbacks and sample publication. Previously they
+dropped when the batch function returned, after sending every ACK. The holds
+window now removes the in-progress batch and records its held duration before
+ACK delivery; holder totals/maxima, long-hold durations and over-target counts
+exclude ACK-channel blocking/delivery time. The OTel writer holder is cleared
+before ACKs, so a waiter during ACK delivery no longer sees the preceding job as
+the holder. This does not mean the writer has started its next batch: ACK
+backpressure can still delay that. It does not change COMMIT durability or
+move observers after acknowledgements.
 
 
 ## Targets and live windows
@@ -204,8 +229,8 @@ load.
 | `ST3_PROFILE_SLOW_MS` | Writes a line for each operation slower than this. The default is 250. |
 | `ST3_PROFILE_PTRACER` | Linux only. Lets any process of the same user trace the daemon, so a stack sampler such as `eu-stack` can attach on hosts that allow tracing only a process's own children. |
 
-The daemon records each request route (`GET /v1/messages/page`) and each background pass (`task
-reconcile-pass`, `startup open-store`) as one operation. For each operation it records:
+The daemon records each request route (`GET /v1/messages/page`) and each background pass
+(`reconcile`, `startup.open_store`) as one operation. For each operation it records:
 
 - Its wall time and how long it queued before a thread began it.
 - How long it waited for the store's writer, how long it held the writer, and which operation held
@@ -486,7 +511,7 @@ checks. A full safety read every thirty seconds with a randomized per-binding ph
 dependencies, missed notifications and ownership changes. Initial dispatcher-cursor failures never replay from zero: they retry at
 the current head and resync subscribers once. Batch failures retain their cursor and retry every
 five seconds. A warning log and the `mailbox-wake-dispatcher` doctor check expose failures since
-startup and whether routing is currently degraded. There is no debounce. `task mailbox-wake-dispatch`,
+startup and whether routing is currently degraded. There is no debounce. `mailbox.wake_dispatch`,
 `task mailbox-change-check` and `task mailbox-snapshot` expose the routing, checking and full-read
 costs separately in doctor and profiling counters. Run the isolated many-stream comparison with
 `cargo test --release -p st3 --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;

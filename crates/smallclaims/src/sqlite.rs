@@ -921,7 +921,10 @@ fn run_write_batch(
                 let acquired = crate::profile::writer_acquired(wait);
                 let running = std::time::Instant::now();
                 hold.running(&holder);
-                let savepoint = (|| {
+                // Include SQLite savepoint bookkeeping, not only the submitted callback.
+                // The captured profile remains current; nested CPU wrappers leave their CPU
+                // to this bounded aggregate job scope rather than counting it twice.
+                let savepoint = crate::task_cpu::blocking("writer.batch.job", || {
                     transaction.execute_batch("SAVEPOINT batched_write")?;
                     if run(transaction) {
                         transaction.execute_batch("RELEASE batched_write")
@@ -929,7 +932,7 @@ fn run_write_batch(
                         transaction
                             .execute_batch("ROLLBACK TO batched_write; RELEASE batched_write")
                     }
-                })();
+                });
                 crate::profile::writer_released(acquired);
                 hold.ran(&holder, running.elapsed());
                 failure = savepoint.err().map(anyhow::Error::from);
@@ -959,7 +962,7 @@ fn run_write_batch(
     // Shared transaction work has its own operation, never the first submitter's. Do not
     // keep this scope entered while running jobs: Op::enter preserves an existing origin.
     let committed = crate::task_cpu::blocking("writer.batch.commit", || {
-        match (transaction, failure) {
+        let committed = match (transaction, failure) {
             (Some(transaction), None) => {
                 let finalize_started = attribution.as_ref().map(|_| std::time::Instant::now());
                 let finalized = finalizers.run(&transaction);
@@ -982,9 +985,7 @@ fn run_write_batch(
             // Dropping the transaction rolls back every write in the batch.
             (_, Some(error)) => Err(error),
             (None, None) => unreachable!("a batch without a transaction failed to begin"),
-        }
-    });
-    let committed = crate::task_cpu::blocking("writer.batch.commit", || {
+        };
         let post_commit_started = attribution.as_ref().map(|_| std::time::Instant::now());
         drop(transaction_timer);
         // Observe COMMIT before post-commit callbacks can unwind; no changed-row or ACK claim.
@@ -1007,8 +1008,8 @@ fn run_write_batch(
         }
         committed.map_err(|error| format!("{error:#}"))
     });
-    // The task CPU sample and profile Entered guard must finish before callers can
-    // record their completed operations. Op::finish snapshots its counters only once.
+    // Finish samples before callers snapshot their operations. End holds before ACK
+    // delivery too: channel backpressure is no longer counted as writer-held time.
     drop(hold);
     drop(_holder);
     for done in answers {
@@ -2252,17 +2253,27 @@ mod tests {
                 .env(CHILD, "1")
                 .env("ST3_PROFILE_DIR", directory.path())
                 .env("ST3_PROFILE_SLOW_MS", "0")
+                .env("ST3_STORAGE_PHASE_SPANS", "1")
                 .status()
                 .unwrap();
             assert!(status.success(), "isolated writer origin regression failed");
             return;
         }
 
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        opentelemetry::global::set_meter_provider(provider.clone());
         crate::profile::init_from_env();
+        telemetry::init(true);
         let directory = tempfile::tempdir().unwrap();
         let mut connection = Connection::open_in_memory().unwrap();
         connection.execute_batch("CREATE TABLE claims(store_index INTEGER PRIMARY KEY)").unwrap();
         observe(&mut connection);
+        let writer_telemetry = telemetry::Writer::new(&connection).unwrap();
+        let writer_for_batch = Arc::clone(&writer_telemetry);
         let fifo = crate::fifo::Queue::enabled_for_test();
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut callers = Vec::new();
@@ -2284,8 +2295,11 @@ mod tests {
                     std::hint::black_box(value);
                     std::fs::write(&path, [b'x'; 256 * 1024]).unwrap();
                     assert_eq!(std::fs::read(&path).unwrap().len(), 256 * 1024);
-                    transaction.execute("INSERT INTO claims VALUES (?1)", [index as i64]).unwrap();
-                    true
+                    // Nested instrumentation must not charge this callback's CPU twice.
+                    crate::task_cpu::blocking("mailbox.write", || {
+                        transaction.execute("INSERT INTO claims VALUES (?1)", [index as i64]).unwrap();
+                    });
+                    index == 0 // The second job rolls back only its own savepoint.
                 }),
                 profile: Some(operation.clone()),
                 wait: None,
@@ -2301,16 +2315,20 @@ mod tests {
             let batches = (AtomicU64::new(0), AtomicU64::new(0));
             assert!(run_write_batch(
                 &mut connection, first, &receiver, &AtomicU64::new(0), &batches,
-                (&CommitObservers::default(), &TransactionFinalizers::default(), None, None),
+                (&CommitObservers::default(), &TransactionFinalizers::default(), None, Some(&writer_for_batch)),
                 &fifo,
             ).is_none());
             assert_eq!(batches.0.load(Ordering::Relaxed), 1);
             assert_eq!(batches.1.load(Ordering::Relaxed), 2, "both origins must share one batch");
+            assert_eq!(connection.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
         });
         let slow = std::path::PathBuf::from(std::env::var_os("ST3_PROFILE_DIR").unwrap())
             .join("slow.jsonl");
         for (label, operation, answer) in callers {
             answer.recv().unwrap().unwrap();
+            // The writer may still be blocked sending the other rendezvous ACK.
+            assert!(writer_telemetry.holder().is_none(), "holder must clear before ACK delivery");
+            assert!(crate::windows::holds::report()["in_progress"].as_array().unwrap().is_empty());
             operation.finish();
             let records = std::fs::read_to_string(&slow).unwrap();
             let records = records.lines()
@@ -2320,12 +2338,42 @@ mod tests {
             assert!(own["cpu_ms"].as_f64().unwrap() > 0.0, "{label} lost CPU before ACK");
             assert!(own["io_read_mb"].as_f64().unwrap() >= 0.2, "{label} lost read I/O");
             assert!(own["io_written_mb"].as_f64().unwrap() >= 0.2, "{label} lost write I/O");
+            assert_eq!(own["sql_count"], if label == "batch-origin-one" { 3 } else { 4 },
+                "each origin must retain SAVEPOINT and RELEASE/ROLLBACK bookkeeping");
             let spans = own["spans"].as_array().unwrap();
             assert_eq!(spans.len(), 1, "a caller must not receive another origin's span");
             assert_eq!(spans[0]["name"], label);
             assert_eq!(spans[0]["sql_count"], 1);
         }
         thread.join().unwrap();
+        provider.force_flush().unwrap();
+        let exported = exporter.get_finished_metrics().unwrap();
+        let mut polls = std::collections::BTreeMap::new();
+        let mut cpu = std::collections::BTreeMap::new();
+        for metric in exported.iter().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics()) {
+            match metric.data() {
+                AggregatedMetrics::U64(MetricData::Sum(sum)) if metric.name() == "st.task.polls" => {
+                    for point in sum.data_points() {
+                        let task = point.attributes().find(|attribute| attribute.key.as_str() == "st.task").unwrap();
+                        *polls.entry(task.value.to_string()).or_insert(0) += point.value();
+                    }
+                }
+                AggregatedMetrics::F64(MetricData::Sum(sum)) if metric.name() == "st.task.cpu_time" => {
+                    for point in sum.data_points() {
+                        let task = point.attributes().find(|attribute| attribute.key.as_str() == "st.task").unwrap();
+                        *cpu.entry(task.value.to_string()).or_insert(0.0) += point.value();
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(polls["writer.batch.setup"], 1);
+        assert_eq!(polls["writer.batch.job"], 2, "successful and rolled-back savepoints both count");
+        assert_eq!(polls["writer.batch.commit"], 1, "commit and postcommit form one invocation");
+        assert_eq!(polls["mailbox.write"], 2, "nested invocations count, not nested CPU");
+        assert!(cpu["writer.batch.job"] > 0.0);
+        assert_eq!(cpu.get("mailbox.write").copied().unwrap_or(0.0), 0.0);
     }
 
     #[test]
