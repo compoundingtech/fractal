@@ -736,6 +736,7 @@ struct FixtureDirtyGate {
     allowed: std::sync::atomic::AtomicBool,
     notifications: std::sync::atomic::AtomicUsize,
     replay_proofs: std::sync::atomic::AtomicUsize,
+    attachment_evaluations: std::sync::atomic::AtomicUsize,
 }
 
 async fn stream_with_timers_inner<F, S, H>(
@@ -950,6 +951,11 @@ async fn stream_with_timers_inner<F, S, H>(
         }
         if attachment_push && attachment_due {
             attachment_due = false;
+            #[cfg(test)]
+            if let Some(gate) = &control.dirty_gate {
+                gate.attachment_evaluations
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             let store = state.store.clone();
             let binding = fence.clone();
             let evaluated = crate::api::read_deadline::spawn_blocking(move || {
@@ -984,7 +990,12 @@ async fn stream_with_timers_inner<F, S, H>(
                         attachment_sent = Some(value);
                     }
                 }
-                Ok(None) => dirty = true,
+                Ok(None) => {
+                    // A stale binding is left to the next durable pass. Disarm the deadline, or a
+                    // past instant would make every loop re-evaluate until that pass ends us.
+                    attachment_deadline = None;
+                    dirty = true;
+                }
                 Err(_) => return,
             }
         }
@@ -1438,33 +1449,73 @@ mod tests {
     }
 
     // Planned T3: a channel that stops reporting is pushed unattached at its own deadline.
-    // The beat is refreshed past one full window first, so the first deadline finds it
-    // refreshed and must arm again. No tick is sent: only the deadline can push the expiry.
+    // The beat is refreshed past several windows first, so each deadline finds it refreshed
+    // and must arm again. No tick is sent: only the deadline can push the expiry. The window
+    // is shortened to one second for this recipient (a controlled stream's real socket and
+    // blocking reads rule out tokio's paused clock); the poll and the deadline still share it.
     #[tokio::test]
     async fn a_silent_channel_is_pushed_unattached_at_its_deadline() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::state(root.path());
         let subject = "agent/attachment-push-deadline";
+        let window = Duration::from_secs(1);
+        delivery_presence::shorten_window(subject, window);
         let (title, delivery) = attachment_seat(&state, subject);
         let mut stream =
             controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
         delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
         report_title(&mut stream, true).await;
         assert!(next_attachment(&mut stream).await.0);
-        for _ in 0..12 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+        for _ in 0..15 {
+            tokio::time::sleep(window / 5).await;
             delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
         }
         let last = std::time::Instant::now();
-        let expired = tokio::time::timeout(Duration::from_secs(15), next_attachment(&mut stream))
+        let expired = tokio::time::timeout(window * 5, next_attachment(&mut stream))
             .await
             .expect("the deadline pushes the expiry");
         let waited = last.elapsed();
         assert_eq!(expired, (false, None));
         assert!(
-            waited >= Duration::from_millis(9_900),
+            waited >= window - Duration::from_millis(50),
             "pushed before the window ended: {waited:?}"
         );
+    }
+
+    // A stale title binding found by a deadline evaluation sends nothing and must disarm the
+    // past deadline: one evaluation, then the durable pass ends the stream.
+    #[tokio::test]
+    async fn a_stale_title_binding_is_evaluated_once_then_fenced() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(root.path());
+        let subject = "agent/attachment-push-stale-title";
+        delivery_presence::shorten_window(subject, Duration::from_millis(300));
+        let (title, delivery) = attachment_seat(&state, subject);
+        let mut stream =
+            controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
+        delivery_presence::record_fenced(&delivery, &channel_report(true, 0));
+        report_title(&mut stream, true).await;
+        assert!(next_attachment(&mut stream).await.0);
+        // Hold durable passes so only the deadline can evaluate, then supersede the title.
+        stream.dirty_gate.allowed.store(false, SeqCst);
+        let before = stream.dirty_gate.attachment_evaluations.load(SeqCst);
+        state
+            .store
+            .bind_mailbox(&Fence::new(subject, "current", "title"))
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let evaluations = stream.dirty_gate.attachment_evaluations.load(SeqCst) - before;
+        assert_eq!(
+            evaluations, 1,
+            "a past deadline must not re-run the evaluation"
+        );
+        stream.dirty_gate.allowed.store(true, SeqCst);
+        stream.heartbeat.send(()).unwrap();
+        assert!(matches!(
+            next(&mut stream.socket).await,
+            Frame::Fenced { .. }
+        ));
     }
 
     // Planned T5: a new delivery binding is a durable owner change, not a claim. It must wake
@@ -3108,6 +3159,7 @@ mod tests {
             allowed: std::sync::atomic::AtomicBool::new(true),
             notifications: std::sync::atomic::AtomicUsize::new(0),
             replay_proofs: std::sync::atomic::AtomicUsize::new(0),
+            attachment_evaluations: std::sync::atomic::AtomicUsize::new(0),
         });
         let fixture_gate = dirty_gate.clone();
         let app = Router::new()

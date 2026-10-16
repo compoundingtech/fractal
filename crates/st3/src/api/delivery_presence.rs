@@ -156,7 +156,35 @@ fn window<'a>(
                 .age_ms
                 .is_some_and(|age| age <= CHANNEL_STALE_AFTER_MS)
         }))
-    .then(|| (fence, beat.at + CHANNEL_STALE_AFTER))
+    .then(|| (fence, beat.at + stale_after(&fence.subject)))
+}
+
+/// How long a beat proves attachment. Always the constant in production; a test may shorten it
+/// for its own recipient, and the poll and the deadline still read the same window.
+fn stale_after(recipient: &str) -> Duration {
+    #[cfg(test)]
+    if let Some(window) = WINDOW_OVERRIDES
+        .lock()
+        .ok()
+        .and_then(|overrides| overrides.get(recipient).copied())
+    {
+        return window;
+    }
+    let _ = recipient;
+    CHANNEL_STALE_AFTER
+}
+
+#[cfg(test)]
+static WINDOW_OVERRIDES: std::sync::LazyLock<Mutex<HashMap<String, Duration>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Shorten the proof window for one test recipient, so a stream test need not wait ten seconds.
+#[cfg(test)]
+pub(super) fn shorten_window(recipient: &str, window: Duration) {
+    WINDOW_OVERRIDES
+        .lock()
+        .unwrap()
+        .insert(recipient.to_owned(), window);
 }
 
 /// The proving delivery binding for `incarnation` and when it lapses, whether or not it has.
