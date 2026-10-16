@@ -71,8 +71,13 @@ pub struct Receipt {
     pub action_id: String,
 }
 
-/// The subject of the question `native_id` that `agent` asked in `session`. Each part is length
-/// prefixed, so no two triples share a subject.
+/// A text-free native identity. Always hash before storing, even when the native id looks safe.
+pub fn native_id_digest(native_id: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(native_id.as_bytes())))
+}
+
+/// The subject of the question whose hashed `native_id` `agent` asked in `session`.
+/// Each part is length prefixed, so no two triples share a subject.
 pub fn subject(agent: &str, session: &str, native_id: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(b"st3-harness-question-v1\0");
@@ -99,6 +104,20 @@ fn bounded_id(value: &str) -> bool {
         && !value.chars().any(|character| character.is_control() || character.is_whitespace())
 }
 
+fn hashed_id(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn question_id(value: &str) -> bool {
+    hashed_id(value) || value.strip_prefix('q').is_some_and(|position| {
+        position.parse::<usize>().is_ok_and(|index| {
+            index < MAX_QUESTIONS && position.len() == if index < 10 { 1 } else { 2 }
+        })
+    })
+}
+
 fn invalid(message: impl Into<String>) -> ValidationError {
     error("invalid-harness-question", message)
 }
@@ -108,7 +127,7 @@ fn decode<T: for<'de> Deserialize<'de>>(name: &str, value: Option<&Value>) -> Re
         .map_err(|_| invalid(format!("`{name}` does not have the harness question shape")))
 }
 
-/// The questions of an observation, checked: bounded ids, unique ids, bounded option counts.
+/// The questions of an observation: unique positional or hashed ids and bounded option counts.
 pub fn questions(fields: &BTreeMap<String, Value>) -> Result<Vec<Question>, ValidationError> {
     let questions: Vec<Question> = decode("questions", fields.get("questions"))?;
     if questions.is_empty() || questions.len() > MAX_QUESTIONS {
@@ -116,8 +135,8 @@ pub fn questions(fields: &BTreeMap<String, Value>) -> Result<Vec<Question>, Vali
     }
     let mut ids = BTreeSet::new();
     for question in &questions {
-        if !bounded_id(&question.id) || !ids.insert(question.id.as_str()) {
-            return Err(invalid("each question needs a unique bounded id"));
+        if !question_id(&question.id) || !ids.insert(question.id.as_str()) {
+            return Err(invalid("each question needs a unique positional or hashed native id"));
         }
         if question.options > MAX_OPTIONS {
             return Err(invalid(format!("a question has at most {MAX_OPTIONS} options")));
@@ -126,8 +145,8 @@ pub fn questions(fields: &BTreeMap<String, Value>) -> Result<Vec<Question>, Vali
     Ok(questions)
 }
 
-/// The answers of a resolution, checked: bounded question ids and unique positions below the
-/// option limit. Which positions a question allows is checked against its observation.
+/// The answers of a resolution: positional or hashed question ids and unique native option
+/// positions. Which positions a question allows is checked against its observation.
 pub fn answers(fields: &BTreeMap<String, Value>) -> Result<BTreeMap<String, Answer>, ValidationError> {
     let answers: BTreeMap<String, Answer> = decode("answers", fields.get("answers"))?;
     if answers.len() > MAX_QUESTIONS {
@@ -135,11 +154,11 @@ pub fn answers(fields: &BTreeMap<String, Value>) -> Result<BTreeMap<String, Answ
     }
     for (id, answer) in &answers {
         let unique = answer.positions.iter().collect::<BTreeSet<_>>();
-        if !bounded_id(id)
+        if !question_id(id)
             || unique.len() != answer.positions.len()
             || answer.positions.iter().any(|position| *position >= MAX_OPTIONS)
         {
-            return Err(invalid("each answer needs a bounded question id and unique positions"));
+            return Err(invalid("each answer needs a positional or hashed question id and unique positions"));
         }
     }
     Ok(answers)
@@ -148,10 +167,13 @@ pub fn answers(fields: &BTreeMap<String, Value>) -> Result<BTreeMap<String, Answ
 pub(crate) fn validate(kind: &str, fields: &BTreeMap<String, Value>) -> Result<(), ValidationError> {
     match kind {
         OBSERVED => {
-            for name in ["session", "native_id", "runtime_incarnation"] {
+            for name in ["session", "runtime_incarnation"] {
                 if !fields.get(name).and_then(Value::as_str).is_some_and(bounded_id) {
                     return Err(invalid(format!("`{name}` must be a bounded id")));
                 }
+            }
+            if !fields.get("native_id").and_then(Value::as_str).is_some_and(hashed_id) {
+                return Err(invalid("`native_id` must be a SHA-256 digest, never native text"));
             }
             questions(fields).map(|_| ())
         }
@@ -197,7 +219,7 @@ mod tests {
 
     #[test]
     fn an_observation_holds_ids_and_counts_only() {
-        let valid = json!({"agent": "agent/run/ada", "session": "tester", "native_id": "call-1",
+        let valid = json!({"agent": "agent/run/ada", "session": "tester", "native_id": native_id_digest("call-1"),
             "runtime_incarnation": "inc-1",
             "questions": [{"id": "q0", "options": 3, "multi": false, "required": true}]});
         assert!(validate(OBSERVED, &fields(valid.clone())).is_ok());
@@ -207,10 +229,33 @@ mod tests {
             json!([{"id": "q0", "options": 65, "multi": false, "required": true}]),
             json!([{"id": "q0", "options": 1, "multi": false, "required": true},
                    {"id": "q0", "options": 1, "multi": false, "required": true}]),
+            json!([{"id": "/home/ada/secret.txt", "options": 1, "multi": false, "required": true}]),
+            json!([{"id": "cmd --token=x", "options": 1, "multi": false, "required": true}]),
         ] {
             let mut invalid = valid.clone();
             invalid["questions"] = questions;
             assert_eq!(validate(OBSERVED, &fields(invalid)).unwrap_err().code, "invalid-harness-question");
+        }
+    }
+
+    #[test]
+    fn native_text_is_rejected_and_question_ids_are_positional_or_hashed() {
+        for native in ["/home/ada/secret.txt", "cmd --token=x"] {
+            let mut observation = fields(json!({
+                "session": "tester", "native_id": native,
+                "runtime_incarnation": "inc-1",
+                "questions": [{"id": "q0", "options": 2, "multi": false, "required": true}],
+            }));
+            assert!(validate(OBSERVED, &observation).is_err());
+            observation.insert("native_id".into(), json!(native_id_digest(native)));
+            assert!(validate(OBSERVED, &observation).is_ok());
+            observation.get_mut("questions").unwrap()[0]["id"] = json!(native_id_digest(native));
+            assert!(validate(OBSERVED, &observation).is_ok());
+        }
+        for id in ["q00", "q16", "free-form", "/home/ada/secret.txt", "cmd --token=x"] {
+            assert!(answers(&fields(json!({
+                "answers": {(id): {"positions": [0], "timed_out": false}},
+            }))).is_err());
         }
     }
 

@@ -12,6 +12,7 @@ use st3_schema::harness_questions::{
 pub struct QuestionObservation {
     pub agent: String,
     pub session: String,
+    /// Raw native call identity, hashed by the store before persistence or subject derivation.
     pub native_id: String,
     pub runtime_incarnation: String,
     pub questions: Vec<Question>,
@@ -37,6 +38,7 @@ pub struct HarnessQuestion {
     pub revision: String,
     pub agent: String,
     pub session: String,
+    /// Canonical `sha256:` digest, never the raw native call identity.
     pub native_id: String,
     pub runtime_incarnation: String,
     pub questions: Vec<Question>,
@@ -129,7 +131,8 @@ impl Store {
         observation: &QuestionObservation,
         after_read: impl FnOnce(),
     ) -> Result<HarnessQuestion, St3Error> {
-        let subject = subject(&observation.agent, &observation.session, &observation.native_id);
+        let native_id = st3_schema::harness_questions::native_id_digest(&observation.native_id);
+        let subject = subject(&observation.agent, &observation.session, &native_id);
         let current = self.harness_question_held(&subject)?;
         // Fence the observation we inspected, not a head that may already contain a
         // concurrent resolution or replacement observation.
@@ -156,7 +159,7 @@ impl Store {
             fields: json_fields(json!({
                 "agent": observation.agent,
                 "session": observation.session,
-                "native_id": observation.native_id,
+                "native_id": native_id,
                 "runtime_incarnation": observation.runtime_incarnation,
                 "questions": observation.questions,
             })),
@@ -257,6 +260,22 @@ mod tests {
 
     fn answer(position: u8) -> BTreeMap<String, Answer> {
         BTreeMap::from([("q0".into(), Answer { positions: vec![position], timed_out: false })])
+    }
+
+    #[test]
+    fn native_path_and_command_ids_are_hashed_before_storage() {
+        let store = Store::open_memory("operator").unwrap();
+        for native in ["/home/ada/secret.txt", "cmd --token=x"] {
+            let mut observed = observation();
+            observed.native_id = native.into();
+            let question = store.observe_harness_question(&observed).unwrap();
+            assert_eq!(question.native_id, st3_schema::harness_questions::native_id_digest(native));
+            assert_eq!(question.id, subject(&observed.agent, &observed.session, &question.native_id));
+            for claim in store.claims_for(&question.id, None).unwrap() {
+                assert!(!claim.body.to_string().contains(native));
+            }
+            assert_eq!(store.observe_harness_question(&observed).unwrap(), question);
+        }
     }
 
     #[test]
