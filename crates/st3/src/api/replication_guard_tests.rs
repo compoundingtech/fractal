@@ -316,7 +316,7 @@ fn compact_digest_survives_smalltalk_planned_trim_and_reopen() {
     drop(store);
     let store = crate::store::Store::open(&path, "alder").unwrap();
     assert_eq!(parity(&store), before);
-    store.set_write_clock_at(400).unwrap();
+    store.set_write_clock_at(cut + 100).unwrap();
     observed(&store, "guard-after-reopen");
     assert_ne!(parity(&store), before);
 }
