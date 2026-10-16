@@ -33,19 +33,34 @@ fn paired(session: &ClientSession) -> Result<&str, ApiError> {
 fn validate(registration: &PushRegistration) -> Result<(), ApiError> {
     if !(2..=512).contains(&registration.token.len())
         || registration.token.len() % 2 != 0
-        || !registration.token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !registration
+            .token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
     {
-        return Err(invalid("token must contain 2 to 512 hexadecimal characters in byte pairs"));
+        return Err(invalid(
+            "token must contain 2 to 512 hexadecimal characters in byte pairs",
+        ));
     }
     if !(1..=255).contains(&registration.bundle_id.len())
-        || !registration.bundle_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+        || !registration
+            .bundle_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
     {
-        return Err(invalid("bundle_id must contain 1 to 255 ASCII letters, digits, dots or hyphens"));
+        return Err(invalid(
+            "bundle_id must contain 1 to 255 ASCII letters, digits, dots or hyphens",
+        ));
     }
     if !(1..=64).contains(&registration.app_version.len())
-        || !registration.app_version.bytes().all(|byte| matches!(byte, b' '..=b'~'))
+        || !registration
+            .app_version
+            .bytes()
+            .all(|byte| matches!(byte, b' '..=b'~'))
     {
-        return Err(invalid("app_version must contain 1 to 64 printable ASCII characters"));
+        return Err(invalid(
+            "app_version must contain 1 to 64 printable ASCII characters",
+        ));
     }
     Ok(())
 }
@@ -58,26 +73,32 @@ pub(super) async fn register(
 ) -> Result<Json<Value>, ApiError> {
     paired(&session)?;
     let body = body.map_err(|error| ApiError {
-        status: error.status(), code: "validation-failed".into(),
-        message: "invalid or oversized push registration".into(), details: Box::default(),
+        status: error.status(),
+        code: "validation-failed".into(),
+        message: "invalid or oversized push registration".into(),
+        details: Box::default(),
     })?;
-    let json_content_type = headers.get(axum::http::header::CONTENT_TYPE)
+    let json_content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
         .is_some_and(|value| {
             let value = value.trim();
-            value == "application/json" || value.starts_with("application/") && value.ends_with("+json")
+            value == "application/json"
+                || value.starts_with("application/") && value.ends_with("+json")
         });
     if !json_content_type {
         return Err(ApiError {
-            status: StatusCode::UNSUPPORTED_MEDIA_TYPE, code: "validation-failed".into(),
-            message: "push registration requires a JSON content type".into(), details: Box::default(),
+            status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            code: "validation-failed".into(),
+            message: "push registration requires a JSON content type".into(),
+            details: Box::default(),
         });
     }
     // JsonRejection can log serde's error before a handler catches it, including a secret
     // unknown-field name or enum value. Decode bytes directly and never format that error.
-    let mut registration: PushRegistration = serde_json::from_slice(&body)
-        .map_err(|_| invalid("invalid push registration"))?;
+    let mut registration: PushRegistration =
+        serde_json::from_slice(&body).map_err(|_| invalid("invalid push registration"))?;
     validate(&registration)?;
     registration.token.make_ascii_lowercase();
     update(state, session, Some(registration)).await
@@ -90,14 +111,22 @@ pub(super) async fn unregister(
 ) -> Result<Json<Value>, ApiError> {
     paired(&session)?;
     let body = body.map_err(|error| ApiError {
-        status: error.status(), code: "validation-failed".into(),
-        message: "invalid or oversized push unregistration".into(), details: Box::default(),
+        status: error.status(),
+        code: "validation-failed".into(),
+        message: "invalid or oversized push unregistration".into(),
+        details: Box::default(),
     })?;
-    if !body.is_empty() { return Err(invalid("push unregistration does not accept a body")); }
+    if !body.is_empty() {
+        return Err(invalid("push unregistration does not accept a body"));
+    }
     update(state, session, None).await
 }
 
-async fn update(state: AppState, session: ClientSession, registration: Option<PushRegistration>) -> Result<Json<Value>, ApiError> {
+async fn update(
+    state: AppState,
+    session: ClientSession,
+    registration: Option<PushRegistration>,
+) -> Result<Json<Value>, ApiError> {
     paired(&session)?;
     let store = state.store.clone();
     let status: PushRegistrationStatus = tokio::task::spawn_blocking(move || {
@@ -124,7 +153,11 @@ pub fn start_push_registration_cleanup(state: &AppState) {
         loop {
             clock.tick().await;
             let store = store.clone();
-            match tokio::task::spawn_blocking(move || store.sweep_push_registrations(client_now_ms() as u64)).await {
+            match tokio::task::spawn_blocking(move || {
+                store.sweep_push_registrations(client_now_ms() as u64)
+            })
+            .await
+            {
                 Ok(Ok(_)) => {}
                 // Never format a database or task error: registration inputs are secret.
                 _ => eprintln!("st3: local push registration cleanup is unavailable"),

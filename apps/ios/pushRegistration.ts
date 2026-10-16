@@ -1,6 +1,6 @@
 import type { PushRegistration, PushRegistrationStatus } from '../../clients/typescript/st3-client';
 
-export type PushEnvironment = NonNullable<PushRegistrationStatus['environment']>;
+export type PushEnvironment = PushRegistration['environment'];
 export type PushDecision = 'none' | 'register' | 'unregister';
 export type PushEligibility = { paired: boolean; granted: boolean; enabled: boolean; available: boolean; permission: boolean };
 

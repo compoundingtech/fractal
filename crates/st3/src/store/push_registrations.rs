@@ -57,7 +57,10 @@ pub(crate) struct PushRegistrationStatus {
 
 impl PushRegistrationStatus {
     pub(crate) fn unregistered() -> Self {
-        Self { registered: false, environment: None }
+        Self {
+            registered: false,
+            environment: None,
+        }
     }
 }
 
@@ -113,7 +116,6 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("local push registration update failed"))
     }
 
-
     /// Startup and clock-driven cleanup, independent of attention/window reads. The trigger
     /// handles local and replicated grant changes atomically with claim admission.
     pub(crate) fn sweep_push_registrations(&self, now: u64) -> Result<usize> {
@@ -130,21 +132,33 @@ impl Store {
     }
 
     /// Select only nonsecret fields: resource/debug/error paths never load a token.
-    pub(crate) fn push_registration_statuses(&self, person: &str, now: u64) -> Result<BTreeMap<String, PushRegistrationStatus>> {
+    pub(crate) fn push_registration_statuses(
+        &self,
+        person: &str,
+        now: u64,
+    ) -> Result<BTreeMap<String, PushRegistrationStatus>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT device_id,environment FROM local_push_registrations WHERE person=?1 AND expires_at>?2
              AND NOT EXISTS(SELECT 1 FROM claims WHERE subject=pairing_grant AND store_index>pairing_index
                  AND kind IN ('custom.client.pairing-completed','custom.client.pairing-revoked'))",
         )?;
-        Ok(statement.query_map(params![person, now], |row| {
-            let environment = match row.get_ref(1)?.as_str()? {
-                "development" => PushEnvironment::Development,
-                "production" => PushEnvironment::Production,
-                _ => return Err(rusqlite::Error::InvalidQuery),
-            };
-            Ok((row.get(0)?, PushRegistrationStatus { registered: true, environment: Some(environment) }))
-        })?.collect::<rusqlite::Result<_>>()?)
+        Ok(statement
+            .query_map(params![person, now], |row| {
+                let environment = match row.get_ref(1)?.as_str()? {
+                    "development" => PushEnvironment::Development,
+                    "production" => PushEnvironment::Production,
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                };
+                Ok((
+                    row.get(0)?,
+                    PushRegistrationStatus {
+                        registered: true,
+                        environment: Some(environment),
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?)
     }
 }
 

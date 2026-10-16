@@ -1116,16 +1116,18 @@ async fn devices_inventory_follows_local_push_changes_without_a_graph_claim() {
     assert_eq!(snapshot["items"][0]["push"], json!({"registered": false}), "{snapshot}");
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
-    super::super::client_push::register(State(state.clone()), Extension(session.clone()), headers,
+    let response = super::super::client_push::register(State(state.clone()), Extension(session.clone()), headers,
         Ok(axum::body::Bytes::from_static(br#"{"token":"aabbccdd","environment":"development","bundle_id":"example.push","app_version":"1"}"#)))
         .await.unwrap();
+    assert_eq!(response.0, json!({"registered": true, "environment": "development"}));
     let registered = fixture.frame().await;
     assert_eq!(registered["kind"], "changes", "{registered}");
     assert_eq!(registered["upserts"][0]["push"], json!({"registered": true, "environment": "development"}));
     assert_eq!(registered["snapshot"]["store_index"], snapshot["snapshot"]["store_index"]);
     assert!(!registered.to_string().contains("aabbccdd"));
-    super::super::client_push::unregister(State(state), Extension(session), Ok(axum::body::Bytes::new()))
+    let response = super::super::client_push::unregister(State(state), Extension(session), Ok(axum::body::Bytes::new()))
         .await.unwrap();
+    assert_eq!(response.0, json!({"registered": false}));
     let removed = fixture.frame().await;
     assert_eq!(removed["upserts"][0]["push"], json!({"registered": false}), "{removed}");
     assert_eq!(removed["snapshot"]["store_index"], snapshot["snapshot"]["store_index"]);
