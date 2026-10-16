@@ -96,11 +96,14 @@ impl Window {
             .saturating_duration_since(self.start.at)
             .as_secs_f64();
         let per_minute = |number: f64| (seconds > 0.0).then(|| number * 60.0 / seconds);
-        let reconcile = minute.ops.get("reconcile");
+        // Metrics-on owns the pass in the outer task; file-profile-only owns it in
+        // the inner task. task_scope never starts an operation inside another one,
+        // and each trigger span records into that single current operation.
+        let reconcile = || ["reconcile", "task reconcile-pass"]
+            .into_iter().filter_map(|name| minute.ops.get(name));
         let count = |name: &str| {
-            reconcile
-                .and_then(|op| op.acc.spans.get(name))
-                .map_or(0, |span| span.count)
+            reconcile().filter_map(|op| op.acc.spans.get(name))
+                .fold(0_u64, |sum, span| sum.saturating_add(span.count))
         };
         // Use the original map, before totals_json truncates top spans for disk output.
         let startup = count("trigger/startup");
@@ -112,11 +115,10 @@ impl Window {
             .and_then(|n| n.checked_add(deadline))
             .and_then(|n| n.checked_add(repeat));
         let passes = classified;
-        let sql = reconcile.map_or(0, |op| {
+        let sql = reconcile().flat_map(|op| {
             ["trigger/startup", "trigger/notification", "trigger/deadline", "trigger/changed-repeat"]
-                .iter().filter_map(|name| op.acc.spans.get(*name))
-                .fold(0_u64, |sum, span| sum.saturating_add(span.sql_count))
-        });
+                .into_iter().filter_map(move |name| op.acc.spans.get(name))
+        }).fold(0_u64, |sum, span| sum.saturating_add(span.sql_count));
         let commits = end.managed_commits.checked_sub(self.start.managed_commits);
         let cpu = self
             .start
@@ -378,15 +380,18 @@ mod tests {
     async fn trigger_population_counts_real_wrapped_pass_sql_only() {
         const CHILD: &str = "SMALLCLAIMS_RECONCILE_TRIGGER_CHILD";
         if std::env::var_os(CHILD).is_none() {
-            let directory = tempfile::tempdir().unwrap();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "profile::cost_counters::tests::trigger_population_counts_real_wrapped_pass_sql_only"])
-                .env(CHILD, "1").env("ST3_PROFILE_DIR", directory.path()).status().unwrap();
-            assert!(status.success());
+            for mode in ["on", "off"] {
+                let directory = tempfile::tempdir().unwrap();
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "profile::cost_counters::tests::trigger_population_counts_real_wrapped_pass_sql_only"])
+                    .env(CHILD, mode).env("ST3_PROFILE_DIR", directory.path()).status().unwrap();
+                assert!(status.success(), "metrics {mode}");
+            }
             return;
         }
         crate::profile::init_from_env();
-        crate::task_cpu::init(true);
+        let metrics_on = std::env::var(CHILD).unwrap() == "on";
+        crate::task_cpu::init(metrics_on);
         let snapshot = || {
             let minute = STATE.get().unwrap().minute.lock().unwrap_or_else(PoisonError::into_inner);
             let mut window = Window::new();
@@ -394,7 +399,9 @@ mod tests {
             window.completed.unwrap()
         };
         crate::task_cpu::blocking("reconcile", || {
-            crate::profile::sql("SELECT deadline", Duration::ZERO);
+            crate::profile::task("task reconcile-deadline", || {
+                crate::profile::sql("SELECT deadline", Duration::ZERO);
+            });
         });
         let deadline_only = snapshot();
         assert_eq!(deadline_only["reconcile"]["passes"], 0);
@@ -404,13 +411,22 @@ mod tests {
         assert_eq!(poll_without_trigger["reconcile"]["passes"], 0);
         assert_eq!(poll_without_trigger["reconcile"]["sql_count"], 0);
         crate::task_cpu::blocking("reconcile", || {
-            let _trigger = crate::profile::span("trigger/startup");
-            crate::profile::sql("SELECT pass", Duration::ZERO);
+            crate::profile::task("task reconcile-pass", || {
+                let _trigger = crate::profile::span("trigger/startup");
+                crate::profile::sql("SELECT pass", Duration::ZERO);
+            });
         });
         let data = snapshot();
         assert_eq!(data["reconcile"]["passes"], 1);
         assert_eq!(data["reconcile"]["sql_count"], 1);
         assert_eq!(data["reconcile"]["by_trigger"]["startup"], 1);
         assert!(data["reconcile"]["by_trigger"].get("direct_or_unknown").is_none());
+        let minute = STATE.get().unwrap().minute.lock().unwrap_or_else(PoisonError::into_inner);
+        let owner = if metrics_on { "reconcile" } else { "task reconcile-pass" };
+        let other = if metrics_on { "task reconcile-pass" } else { "reconcile" };
+        assert_eq!(minute.ops[owner].acc.spans["trigger/startup"].count, 1);
+        assert_eq!(minute.ops[owner].acc.spans["trigger/startup"].sql_count, 1);
+        assert!(minute.ops.get(other).is_none_or(|op| !op.acc.spans.contains_key("trigger/startup")),
+            "one pass must never populate both operation buckets");
     }
 }

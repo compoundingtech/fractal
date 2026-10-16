@@ -65,9 +65,12 @@ Callbacks that already had synchronous attribution use explicit profile-preservi
 or performance-only adapters; their existing shared performance-meter lock and
 attribution remain independent of metrics export and are not claimed to be zero-cost.
 The reconcile cost-counter metric covers classified background passes only:
-completed startup, notification, deadline and changed-repeat trigger spans within
-`reconcile` operations, with only SQL recorded inside those same spans. Direct and
-unclassified passes, next-deadline callbacks and async polls are excluded.
+completed startup, notification, deadline and changed-repeat trigger spans, with
+only SQL recorded inside those same spans. It reads both operation buckets:
+`reconcile` owns a pass with task metrics on; `task reconcile-pass` owns it with
+file profiling on and task metrics off. The inner task never starts a second
+operation while the outer one is current, so each pass contributes only once.
+Direct and unclassified passes, next-deadline callbacks and async polls are excluded.
 The direct/unclassified remainder is not measured and is not exported as zero.
 Process CPU remains a whole-process measurement, not classified-pass CPU.
 Each future keeps CPU and poll totals locally, flushing to OTel at most once a
