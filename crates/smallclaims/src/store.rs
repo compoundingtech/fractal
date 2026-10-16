@@ -6619,7 +6619,9 @@ impl Store {
         let mut processed = 0_u64;
         loop {
             // Each chunk's loan records where its hold went. The scope ends when the loan does,
-            // so the tail verdict pass after it is its own hold. Every caller sink below runs
+            // so the tail verdict pass after it is its own hold. No other writer loan is asked
+            // for on this thread inside the scope: none comes before `write()`, and a second one
+            // while this loan is held would wait on itself. Every caller sink below runs
             // through `progress_staged` or `log_staged`, charged to `callbacks`.
             let stages = crate::windows::holds::Stages::begin();
             let mut progress_staged =
