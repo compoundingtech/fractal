@@ -1,10 +1,10 @@
 //! Offline index rollout probe. Input MUST be a checkpointed, quiescent, mode-0600 COPY.
-//! Usage: cargo run --release --locked -p st3 --features test-support 
-//!   --example first_open_index_cost -- COPY [N=1000] [K=20]
-//! Never point this at a live store. Only private temporary copies are modified.
+//! Usage: cargo run --release --locked -p st3 --features test-support
+//!   --example first_open_index_cost -- --in-place-scratch COPY [N=1000] [K=20]
+//! Never point this at a live store. Explicitly mutates the supplied disposable scratch copy.
 
-use std::fs::{self, OpenOptions};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
@@ -32,12 +32,25 @@ fn sizes(path: &Path) -> Result<Value> {
     Ok(json!({"main_bytes": bytes(path)?, "wal_bytes": bytes(&sidecar(path, "-wal"))?}))
 }
 
-fn private_copy(source: &Path, target: &Path) -> Result<()> {
-    let mut input = fs::File::open(source)?;
-    let mut output = OpenOptions::new().write(true).create_new(true).mode(0o600).open(target)?;
-    std::io::copy(&mut input, &mut output)?;
-    output.sync_all()?;
-    Ok(())
+fn with_wal_peak<T>(path: &Path, work: impl FnOnce() -> Result<T>) -> Result<(T, f64, u64)> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let observer_stop = Arc::clone(&stop);
+    let wal = sidecar(path, "-wal");
+    let initial = bytes(&wal)?;
+    let observer = std::thread::spawn(move || -> Result<u64> {
+        let mut peak = initial;
+        while !observer_stop.load(Ordering::Relaxed) {
+            peak = peak.max(bytes(&wal)?);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Ok(peak.max(bytes(&wal)?))
+    });
+    let started = Instant::now();
+    let result = work();
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    stop.store(true, Ordering::Relaxed);
+    let peak = observer.join().map_err(|_| anyhow::anyhow!("WAL observer panicked"))??;
+    Ok((result?, elapsed_ms, peak))
 }
 
 fn configured(path: &Path) -> Result<Connection> {
@@ -103,29 +116,32 @@ fn owners(connection: &Connection, subjects: &[String], through: u64, indexed: b
 
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
-    let source = PathBuf::from(args.next().context("checkpointed offline COPY is required")?);
+    ensure!(args.next().as_deref() == Some(std::ffi::OsStr::new("--in-place-scratch")),
+        "explicit --in-place-scratch consent is required; never use a live store");
+    let path = PathBuf::from(args.next().context("checkpointed offline scratch COPY is required")?);
     let n = args.next().map(|v| v.to_string_lossy().parse::<usize>()).transpose()?.unwrap_or(1000);
     let k = args.next().map(|v| v.to_string_lossy().parse::<usize>()).transpose()?.unwrap_or(20);
-    ensure!(args.next().is_none() && n > 0 && k > 0, "usage: COPY [N>0] [K>0]");
-    let metadata = fs::symlink_metadata(&source)?;
+    ensure!(args.next().is_none() && n > 0 && k > 0,
+        "usage: --in-place-scratch COPY [N>0] [K>0]");
+    let metadata = fs::symlink_metadata(&path)?;
     ensure!(metadata.is_file() && metadata.permissions().mode() & 0o777 == 0o600,
         "COPY must be a regular, non-symlink, mode-0600 offline file");
-    ensure!(bytes(&sidecar(&source, "-wal"))? == 0 && !sidecar(&source, "-shm").exists(),
+    ensure!(bytes(&sidecar(&path, "-wal"))? == 0 && !sidecar(&path, "-shm").exists(),
         "COPY must be checkpointed and closed, with no SHM or nonempty WAL; never use a live store");
-    let directory = tempfile::tempdir()?;
-    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
-    let path = directory.path().join("measurement.sqlite3");
-    private_copy(&source, &path)?;
-    let connection = configured(&path)?;
     let definitions = Store::first_open_index_definitions();
     ensure!(definitions.len() == 5, "expected the five owner-read indexes");
+    // Refuse before configuring a writer or modifying schema. Never silently normalize an
+    // already-indexed input: actual Store::open must install all five indexes for this run.
+    let preflight = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     for (name, _) in &definitions {
-        connection.execute_batch(&format!("DROP INDEX IF EXISTS {name}"))?;
+        let exists: bool = preflight.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name=?1)",
+            [name], |row| row.get(0),
+        )?;
+        ensure!(!exists, "scratch already contains {name}; supply a fresh pre-index copy");
     }
-    checkpoint(&connection, "TRUNCATE")?;
-    // Identical pre-index image for timing the actual Store::open, not a sum of DDL times.
-    let open_path = directory.path().join("open.sqlite3");
-    private_copy(&path, &open_path)?;
+    drop(preflight);
+    let connection = configured(&path)?;
     let through = smallclaims::store::current_index(&connection)?;
     let subjects = connection.prepare(
         "SELECT DISTINCT subject FROM claims WHERE subject>='agent/' AND subject<'agent0'
@@ -133,69 +149,76 @@ fn main() -> Result<()> {
     )?.query_map(params![through, i64::try_from(k)?], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     ensure!(!subjects.is_empty(), "copy has no agent subjects");
+    // 1. Baseline, with all five indexes absent and no persistent synthetic claims.
     let before_owners = owners(&connection, &subjects, through, false)?;
     let before_inserts = inserts(&connection, n)?;
     checkpoint(&connection, "TRUNCATE")?;
+    drop(connection);
+    // 2. The real combined installation in Store::open; no per-index checkpoints inserted.
+    let open_before = sizes(&path)?;
+    let (store, open_store_ms, open_peak_wal_bytes) =
+        with_wal_peak(&path, || Store::open(&path, "tester"))?;
+    let open_after = sizes(&path)?;
+    let connection = configured(&path)?;
+    let open_checkpoint = checkpoint(&connection, "PASSIVE")?;
+    let open_after_checkpoint = sizes(&path)?;
+    drop(store);
+    // 3. Indexed owner/read-insert comparisons before any index is dropped.
+    let after_owners = owners(&connection, &subjects, through, true)?;
+    let after_inserts = inserts(&connection, n)?;
+    checkpoint(&connection, "TRUNCATE")?;
     let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
     let autocheckpoint: u64 = connection.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))?;
-    let mut builds = Vec::new();
-    for (name, sql) in &definitions {
-        let before = sizes(&path)?;
-        let pages_before: u64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let observer_stop = Arc::clone(&stop);
-        let wal = sidecar(&path, "-wal");
-        let observer = std::thread::spawn(move || -> Result<u64> {
-            let mut peak = bytes(&wal)?;
-            while !observer_stop.load(Ordering::Relaxed) {
-                peak = peak.max(bytes(&wal)?);
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            Ok(peak.max(bytes(&wal)?))
-        });
-        let started = Instant::now();
-        let result = connection.execute_batch(sql);
-        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-        stop.store(true, Ordering::Relaxed);
-        let peak_wal_bytes = observer.join().map_err(|_| anyhow::anyhow!("WAL observer panicked"))??;
-        result?;
-        let after_create = sizes(&path)?;
-        let pages_after: u64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
-        let index_bytes = match connection.query_row(
+    // 4. Allocation of each index from the actual initial Store::open installation.
+    let mut allocations = definitions.iter().map(|(name, _)| {
+        let allocation = connection.query_row(
             "SELECT COALESCE(SUM(pgsize),0) FROM dbstat WHERE name=?1", [name],
             |row| row.get::<_, u64>(0),
-        ) {
-            Ok(bytes) => json!({"method": "dbstat", "bytes": bytes}),
-            Err(_) => json!({"method": "page_count_delta", "bytes": pages_after.saturating_sub(pages_before) * page_size,
-                "caveat": "net database growth only; free-page reuse can undercount the index"}),
-        };
+        ).ok();
+        json!({"index": name, "method": if allocation.is_some() { "dbstat" }
+            else { "page_count_delta_on_rebuild" }, "bytes": allocation})
+    }).collect::<Vec<_>>();
+    // 5. Rebuild ONE index at a time. This is not first-install timing: DROP frees pages
+    // for reuse and other four indexes remain present. Do not VACUUM or make more DB copies.
+    let mut builds = Vec::new();
+    for (ordinal, (name, sql)) in definitions.iter().enumerate() {
+        connection.flush_prepared_statement_cache();
+        connection.execute_batch(&format!("DROP INDEX {name}"))?;
+        checkpoint(&connection, "TRUNCATE")?;
+        let before = sizes(&path)?;
+        let pages_before: u64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let (_, elapsed_ms, peak_wal_bytes) =
+            with_wal_peak(&path, || { connection.execute_batch(sql)?; Ok(()) })?;
+        let after_create = sizes(&path)?;
+        let pages_after: u64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        if allocations[ordinal]["bytes"].is_null() {
+            allocations[ordinal]["bytes"] = json!(pages_after.saturating_sub(pages_before) * page_size);
+            allocations[ordinal]["caveat"] = json!("net database growth on rebuild only; free-page reuse can undercount or yield zero");
+        }
         let checkpoint = checkpoint(&connection, "PASSIVE")?;
-        builds.push(json!({"index": name, "create_ms": elapsed_ms, "index_bytes": index_bytes,
+        builds.push(json!({"index": name, "rebuild_create_ms": elapsed_ms,
             "before": before, "after_create": after_create, "after_checkpoint": sizes(&path)?,
             "peak_wal_bytes_sampled": peak_wal_bytes, "checkpoint_passive": checkpoint}));
     }
-    let after_inserts = inserts(&connection, n)?;
-    let after_owners = owners(&connection, &subjects, through, true)?;
-    let started = Instant::now();
-    let store = Store::open(&open_path, "tester")?;
-    let open_store_ms = started.elapsed().as_secs_f64() * 1000.0;
-    drop(store);
     println!("{}", serde_json::to_string_pretty(&json!({
-        "method": "offline private copies; deterministic subject order and claim selection; no source mutation; no subjects or bodies emitted",
+        "method": "in-place disposable offline scratch; no additional database copies; deterministic subject order and claim selection; no subjects or bodies emitted",
         "source_bytes": metadata.len(), "n": n, "requested_k": k, "sample_k": subjects.len(),
         "page_size": page_size, "wal_autocheckpoint_pages": autocheckpoint,
-        "builds": builds, "open_store_ms": open_store_ms,
+        "open_store_ms": open_store_ms, "open_before": open_before, "open_after": open_after,
+        "open_peak_wal_bytes_sampled": open_peak_wal_bytes,
+        "open_checkpoint_passive": open_checkpoint, "open_after_checkpoint": open_after_checkpoint,
+        "index_allocations": allocations, "per_index_rebuilds": builds,
         "claim_insert_before": before_inserts, "claim_insert_after": after_inserts,
         "owner_read_before": before_owners, "owner_read_after": after_owners,
         "caveats": [
-            "Open-store is the synchronous Store::open startup-unavailability component on a separate pre-index copy; not full daemon restart/socket readiness, judge/replay, or other startup phases.",
-            "Owner timings reuse the real first-page owner reader, not a rendered conversation page or main's old owner path; baseline removes only new INDEXED BY hints. EXPLAIN plans cover the identity and source queries actually taken, not auxiliary rival-source queries.",
-            "Owner probe captures branch queries before timing, flushes statement cache but not SQLite/OS page caches; timings are warm data-cache, fresh statement-cache reads. Before/after order is fixed, not randomized. Probe-only SQL copying/hint transformation is included in owner time; production borrows the original SQL unchanged.",
-            "Claims-table inserts use one rolled-back transaction and are not durable end-to-end claim ingestion. They exclude commit/fsync, signatures, envelopes, projection and replication; repeated same-subject runtime claims are a workload sample, not a fleet mix.",
-            "Per-index CREATE is autocommit with production writer pragmas and default auto-checkpoint. Explicit PASSIVE checkpoints between builds differ from uninterrupted startup; use open_store_ms for the real combined startup installation.",
-            "WAL peak is file length sampled every 2ms (a lower bound), not cumulative bytes written. Reused WAL allocation may exceed live frames. Checkpoint results are offline without concurrent writers/readers; they do not prove live checkpoint keep-up under daemon traffic.",
-            "Existing index pages are dropped on the working copies without VACUUM; freelist reuse preserves production-copy layout but can reduce net file growth. dbstat is index allocation; page_count fallback is only net growth.",
-            "Caller must supply a coherent, quiescent, checkpointed offline production-size copy. File mode/sidecar checks cannot prove that provenance. Temp copies are removed on exit."
+            "Input is modified in place and kept on exit with the five indexes installed. Reruns refuse this indexed input. Caller must supply a coherent, quiescent, checkpointed, disposable offline production-size copy; checks cannot prove provenance.",
+            "Open-store is the actual synchronous Store::open startup-unavailability component, not full daemon restart/socket readiness, judge/replay, or other startup phases. Baseline probes precede it and warm caches.",
+            "Owner timings reuse the real first-page owner reader, not a rendered conversation page or main's old owner path; baseline removes only new INDEXED BY hints. EXPLAIN plans cover identity/source queries actually taken, not auxiliary rival-source queries.",
+            "Owner probe captures branch queries before timing, flushes statement cache but not SQLite/OS page caches; timings are warm data-cache, fresh statement-cache reads. Before/after order is fixed. Probe SQL copying/hint transformation is included; production borrows SQL unchanged.",
+            "Claims-table inserts use one rolled-back transaction, not durable end-to-end ingestion: no commit/fsync, signatures, envelopes, projection or replication cost. Repeated same-subject runtime claims are a sample, not a fleet mix.",
+            "Per-index times are DROP/CREATE rebuilds after the actual combined install. Other four indexes remain present; DROP frees pages for reuse, and no VACUUM is run. These times are not original first-install per-index costs. dbstat allocations are captured before any DROP; fallback page_count deltas reflect rebuild net growth only and may be zero.",
+            "Per-index rebuilds use production writer pragmas, default auto-checkpoint and explicit PASSIVE checkpoints between builds. Use open_store_ms and its WAL measurements for the uninterrupted initial installation.",
+            "WAL peaks are file lengths sampled every 2ms (lower bounds), not cumulative write volume. WAL allocation can exceed live frames. Offline checkpoints without concurrent traffic cannot prove live checkpoint keep-up."
         ]
     }))?);
     Ok(())
