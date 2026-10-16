@@ -1,5 +1,8 @@
 //! Nonsecret mode state shared by st and stui. Before enrollment the existing local mode applies;
 //! missing enrolled, invalid or interrupted state refuses local access, including overrides.
+#[cfg(target_os = "macos")]
+pub mod macos_acl;
+
 use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{

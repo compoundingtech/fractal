@@ -4669,6 +4669,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "cc",
  "ciborium",
  "crossterm",
  "futures-util",

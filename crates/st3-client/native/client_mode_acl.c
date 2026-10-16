@@ -1,0 +1,120 @@
+// FD-only macOS authority inspection. Kept behind the Mac-unavailable guard until
+// the exact native fixture matrix is qualified. No ACLs or permissions are changed.
+#include <sys/acl.h>
+#include <membership.h>
+#include <errno.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+struct st_acl_observation {
+    uint32_t reason; // 0 accepted, 1 query, 2 representation, 3 unknown, 4 allow, 5 qualifier
+    int32_t os_error;
+    uint32_t entries;
+};
+
+// -Werror=switch-enum makes an SDK enum extension a build failure. Aliases have
+// identical values and are covered by their file-right counterparts.
+static int known_permission(acl_perm_t p) {
+    switch (p) {
+    case ACL_READ_DATA: case ACL_WRITE_DATA: case ACL_EXECUTE: case ACL_DELETE:
+    case ACL_APPEND_DATA: case ACL_DELETE_CHILD: case ACL_READ_ATTRIBUTES:
+    case ACL_WRITE_ATTRIBUTES: case ACL_READ_EXTATTRIBUTES:
+    case ACL_WRITE_EXTATTRIBUTES: case ACL_READ_SECURITY: case ACL_WRITE_SECURITY:
+    case ACL_CHANGE_OWNER: case ACL_SYNCHRONIZE: return 1;
+    }
+    return 0;
+}
+static int known_flag(acl_flag_t f) {
+    switch (f) {
+    case ACL_FLAG_DEFER_INHERIT: case ACL_FLAG_NO_INHERIT:
+    case ACL_ENTRY_INHERITED: case ACL_ENTRY_FILE_INHERIT:
+    case ACL_ENTRY_DIRECTORY_INHERIT: case ACL_ENTRY_LIMIT_INHERIT:
+    case ACL_ENTRY_ONLY_INHERIT: return 1;
+    }
+    return 0;
+}
+static int known_tag(acl_tag_t t) {
+    switch (t) {
+    case ACL_UNDEFINED_TAG: return 0;
+    case ACL_EXTENDED_ALLOW: case ACL_EXTENDED_DENY: return 1;
+    }
+    return 0;
+}
+
+void st_client_mode_acl_inspect(int fd, int private_object,
+                               struct st_acl_observation *out) {
+    const uint64_t rights = ACL_READ_DATA | ACL_WRITE_DATA | ACL_EXECUTE |
+        ACL_DELETE | ACL_APPEND_DATA | ACL_DELETE_CHILD | ACL_READ_ATTRIBUTES |
+        ACL_WRITE_ATTRIBUTES | ACL_READ_EXTATTRIBUTES | ACL_WRITE_EXTATTRIBUTES |
+        ACL_READ_SECURITY | ACL_WRITE_SECURITY | ACL_CHANGE_OWNER | ACL_SYNCHRONIZE;
+    const uint64_t mutation = ACL_WRITE_DATA | ACL_DELETE | ACL_APPEND_DATA |
+        ACL_DELETE_CHILD | ACL_WRITE_ATTRIBUTES | ACL_WRITE_EXTATTRIBUTES |
+        ACL_WRITE_SECURITY | ACL_CHANGE_OWNER;
+    const uint32_t entry_flags = ACL_ENTRY_INHERITED | ACL_ENTRY_FILE_INHERIT |
+        ACL_ENTRY_DIRECTORY_INHERIT | ACL_ENTRY_LIMIT_INHERIT | ACL_ENTRY_ONLY_INHERIT;
+    const uint32_t acl_flags = ACL_FLAG_DEFER_INHERIT | ACL_FLAG_NO_INHERIT;
+    acl_t acl = NULL;
+    struct kauth_filesec *external = NULL;
+    uint64_t maximum = 0;
+    memset(out, 0, sizeof(*out));
+    // Exercise the exhaustive functions, and check the runtime library's full mask.
+    if (!known_permission(ACL_READ_DATA) || !known_flag(ACL_ENTRY_INHERITED) ||
+        acl_maximal_permset_mask_np(&maximum) != 0 || maximum != rights) {
+        out->reason = 3; goto done;
+    }
+    errno = 0;
+    acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
+    if (acl == NULL) {
+        // Only the library's explicit missing-property result means no ACL.
+        if (errno != ENOENT) { out->reason = 1; out->os_error = errno; }
+        goto done;
+    }
+    ssize_t size = acl_size(acl);
+    if (size < 0 || !KAUTH_FILESEC_VALID((size_t)size) ||
+        (size_t)size > KAUTH_FILESEC_SIZE(ACL_MAX_ENTRIES)) {
+        out->reason = 2; goto done;
+    }
+    external = malloc((size_t)size);
+    if (external == NULL) { out->reason = 1; out->os_error = ENOMEM; goto done; }
+    if (acl_copy_ext_native(external, acl, size) != size ||
+        external->fsec_magic != KAUTH_FILESEC_MAGIC ||
+        external->fsec_entrycount > ACL_MAX_ENTRIES ||
+        KAUTH_FILESEC_SIZE(external->fsec_entrycount) != (size_t)size) {
+        out->reason = 2; goto done;
+    }
+    if ((external->fsec_flags & ~acl_flags) != 0) { out->reason = 3; goto done; }
+    out->entries = external->fsec_entrycount;
+    for (uint32_t i = 0; i < out->entries; ++i) {
+        acl_entry_t entry;
+        acl_tag_t tag;
+        acl_permset_mask_t mask;
+        // Darwin returns 0 on success, not POSIX 1. The copied, SDK-defined
+        // entry count distinguishes end-of-list from a query error.
+        if (acl_get_entry(acl, i == 0 ? ACL_FIRST_ENTRY : ACL_NEXT_ENTRY, &entry) != 0 ||
+            acl_get_tag_type(entry, &tag) != 0 ||
+            acl_get_permset_mask_np(entry, &mask) != 0) {
+            out->reason = 1; out->os_error = errno; goto done;
+        }
+        struct kauth_ace *raw = &external->fsec_ace[i];
+        if (!known_tag(tag) || (mask & ~rights) != 0 ||
+            (raw->ace_flags & ~(KAUTH_ACE_KINDMASK | entry_flags)) != 0 ||
+            (raw->ace_flags & KAUTH_ACE_KINDMASK) != (uint32_t)tag ||
+            raw->ace_rights != mask) { out->reason = 3; goto done; }
+        if (tag == ACL_EXTENDED_ALLOW) {
+            void *qualifier = acl_get_qualifier(entry);
+            id_t id;
+            int id_type;
+            if (qualifier == NULL) { out->reason = 5; out->os_error = errno; goto done; }
+            int resolved = mbr_uuid_to_id(qualifier, &id, &id_type);
+            acl_free(qualifier);
+            if (resolved != 0) { out->reason = 5; out->os_error = resolved; goto done; }
+            // Never infer effective access by ordering deny and allow entries.
+            // Inherit-only and inherited grants receive the same refusal.
+            if (private_object || (mask & mutation) != 0) { out->reason = 4; goto done; }
+        }
+    }
+done:
+    free(external);
+    if (acl != NULL) acl_free(acl);
+}
