@@ -5,7 +5,7 @@ import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
 import { resendMessage, sendMessage, type SendOutcome } from './messageSend';
-import { API_VERSION, ClientError, St3Client, isTransient, notApplied, plainError, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
+import { API_VERSION, ClientError, St3Client, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@smalltalk/st3-views';
 import app from './app.json';
 import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/st-device-key';
@@ -20,7 +20,7 @@ import { quality, localDrafts } from './qualityNative';
 import { nativeCollectionSocket } from './modules/st-collections';
 import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, toObservationReport, type Context } from './observations';
-import { buildFabricDefault, credentialFor, defaultMemberName, fabricGatewayId, fabricMembers, fabricTargetFromText, isFabricGatewayId, MAX_FABRIC_MEMBERS, memberName, memberPairing, memberProfileKey, readFabricMembers, sameFabricTarget, sameName, storedFabricMembers, walkableMembers, type FabricMember } from './fabricTarget';
+import { buildFabricDefault, builtFabricMembers, credentialFor, defaultMemberName, fabricGatewayId, fabricMembers, fabricTargetFromText, isFabricGatewayId, MAX_FABRIC_MEMBERS, memberName, memberPairing, memberProfileKey, readFabricMembers, sameFabricTarget, sameName, storedFabricMembers, walkableMembers, type FabricMember } from './fabricTarget';
 import { fabricAvailable, fabricIdentity, fabricPathInUse, nativeCarrierPorts } from './fabricBridge';
 import { ForegroundGate } from './foreground';
 import type { FabricProfile } from './fabricProof';
@@ -317,7 +317,7 @@ function useAppStore(proof?: FabricProfile) {
       const built = buildFabricDefault();
       setFabricBuilt(available);
       const saved = readFabricMembers(storedList, stored);
-      setFabricMemberList(saved.length ? saved : built ? [{ ...built, name: defaultMemberName(0) }] : []);
+      setFabricMemberList(saved.length ? saved : builtFabricMembers(built));
       setCarrierChoice(choice === 'fabric' || choice === 'tailscale' ? choice : available && built ? 'fabric' : 'tailscale');
       setFallbackOn(fallback !== '0');
     })();
@@ -586,11 +586,14 @@ function useAppStore(proof?: FabricProfile) {
     const capability = await client.capabilities();
     return { snapshot_id: capability.snapshot.id, subject_revisions: revisions };
   }
-  /** Run an action, trying again (with a fresh fence each time) while st refused it only because it raced a busy store. */
-  async function runAction(action: () => Promise<unknown>, reload: readonly OnDemand[] = []): Promise<boolean> {
+  /**
+   * Run an action, trying again (with a fresh fence each time) while st refused it only because it
+   * raced a busy store, as `retryable` says.
+   */
+  async function runAction(action: () => Promise<unknown>, reload: readonly OnDemand[] = [], retryable: (error: unknown) => boolean = notApplied): Promise<boolean> {
     if (status !== 'online' || (proof && !proof.ready)) { setError('Still connecting; try again in a moment.'); return false; }
     setBusy(true);
-    try { await retryTransient(8, action, notApplied); setError(''); await loadLists(reload); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
+    try { await retryTransient(8, action, retryable); setError(''); await loadLists(reload); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
   }
 
   /**
@@ -849,14 +852,18 @@ function useAppStore(proof?: FabricProfile) {
       acted.current.add(item.id);
       return runAction(async () => { const id = actionId(); return client.messageRead({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: item.source_id } }); });
     },
-    /** Answer a Claude permission prompt from its alert. Only the prompt still waiting is answered, once; an answer in the terminal wins. */
-    async respondPrompt(item: Attention, answer: 'allow' | 'deny') {
+    /**
+     * Answer a native prompt from its alert with one of the answers it offers: a question's
+     * `answer` sends `sent`, its choices (see `questionAnswer`). Only the prompt still waiting is
+     * answered, once; an answer in the terminal wins, and a prompt st says is gone is not sent again.
+     */
+    async respondPrompt(item: Attention, answer: string, sent: string = answer) {
       if (!client) return false;
       const prompt = promptAnswers(item);
       if (!prompt || !prompt.answers.includes(answer)) { setError('This prompt cannot be answered here. Answer it in the terminal.'); return false; }
       acted.current.add(item.id);
       const qualityToken = proof ? 0 : quality.answerSent(item.id);
-      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer } }); });
+      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer: sent } }); }, [], error => notApplied(error) && !promptGone(error));
       if (qualityToken) quality.answerConfirmed(item.id, qualityToken, accepted);
       return accepted;
     },
