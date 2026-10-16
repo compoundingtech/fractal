@@ -75,7 +75,7 @@ pub mod otel_client_class;
 pub mod otlp;
 pub mod peer;
 pub mod placement;
-pub use st3_kernel::person_request;
+pub mod person_request;
 pub use st3_kernel::pricing;
 pub use smallclaims::{performance, profile};
 pub use st3_kernel::projection;

@@ -24,7 +24,6 @@ pub mod lane;
 pub mod memory;
 pub mod read_cache;
 pub mod model;
-pub mod person_request;
 pub mod pricing;
 pub mod projection;
 pub mod rules;
