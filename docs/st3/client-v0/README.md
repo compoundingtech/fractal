@@ -557,6 +557,41 @@ retention decision for native per-request records remain later work.
 The Rust method is `Client::usage_period(since_ms, until_ms)`;
 Swift has `usagePeriod(sinceMS:untilMS:)` and TypeScript `usagePeriod({ since_ms, until_ms })`.
 
+### Objectives and budgets
+
+`GET /v1/client/slo` lists every objective and budget, the rows `st slo ls` prints. It requires
+`read.projections`. The value is `SloList { as_of_unix_ms, rows }`. An objective is a target with
+windows and an error budget (the daemon's latency, store, CPU and database targets and a paired
+phone's live-share target); a budget is an allowance that resets (each account's weekly and 5-hour
+limit, from the readings `usage.period` reports in `limits`). Every `SloRow` has `id`, `kind`
+(`objective` or `budget`), `about`, `target`, `current`, `window`, `remaining_percent` (what is
+left of the error budget or allowance; null when nothing was measured), `status` (`met`, `missed`,
+`no-data` or `stale`, the last meaning the newest reading is not recent) and `explain`, the row in
+plain words. A budget adds `account`, `resets_at_unix_ms` and `measured_at_unix_ms`. The list is
+computed on each read from live windows and readings; it writes nothing.
+
+`GET /v1/client/slo/history?id=…&since_ms=…&until_ms=…&steps=…` reads what was left of one row
+across a period, from the daemon's local observation log (one reading a minute, kept seven days;
+it is not in the graph and does not replicate). The period defaults to the 24 hours ending now,
+spans at most seven days and answers in `steps` equal steps (default 120, 1 to 1000); a period
+that ends before it starts, is longer than seven days or asks for another number of steps is
+`validation-failed` (HTTP 422). The value is `SloHistory { id, since_ms, until_ms, samples, steps }`: each
+step holds its lowest reading, and a step with no reading is null, so a gap means "not measured",
+never "spent". A daemon that has run for less than the period has fewer readings than steps. An
+id the daemon has no rows for answers with no readings (`samples` 0 and every step null), not an
+error: a client that remembers an id should check it against the list.
+
+The objectives are this daemon's own: each member reports the targets and limits it measures, and
+nothing replicates between members. The wording in `about`, `target`, `current`, `window` and
+`explain` is display text built by the daemon for a person to read; it may change between builds,
+so a client shows it and does not parse it. The pair of reads is experimental while the TUI,
+the phone and the web app settle on what they need. The `slo` capability (version 1) is granted to
+a session with `read.projections`; an older daemon does not list it and answers both paths with 404.
+
+The Rust methods are `Client::slo_list()` and `Client::slo_history(id, since_ms, until_ms, steps)`;
+Swift has `sloList()` and `sloHistory(id:sinceMS:untilMS:steps:)`, and TypeScript `sloList()` and
+`sloHistory(id, { since_ms, until_ms, steps })`.
+
 ### Clients connected now
 
 A client may name itself and its build in an `x-st3-client` header on every request and stream,
@@ -759,6 +794,38 @@ the normalized `tool_output` block's optional open `metadata`, preserving `wallT
 `tool_result` body metadata field; the complete native record remains unchanged in its
 `source_record` block. Legacy tool-result blocks inside message content remain supported and
 use the same block metadata shape.
+
+When a native user turn retains an exact delivery identity, the graph message and its content
+remain the canonical timeline entries; the native echo and its parts are suppressed. The graph
+entries keep their IDs, sequences, and `message_id` across pages, stream updates, and reconnects.
+The conversation cursor still advances past suppressed native entries. Correlation uses the
+existing delivery marker at the beginning of a user prompt, or a persisted native client ID
+bound to the exact thread and recipient. No content-text, adjacency, or queue-order matching is
+used. Extension-based harnesses retain both entries: exact correlation requires their delivery
+API to propagate a delivery token to the native user-message event.
+
+A transcript without a supported delivery identity retains both entries. This does not alter
+timeline ordering or sequence allocation, and no client idempotency-key field is exposed. If
+the native read sees a send beyond its graph snapshot, its echo is withheld until the next graph
+delta supplies the canonical rows. Post-snapshot client-ID reconciliation reads at most 256
+indexed conversation rows; if that window is exhausted without establishing correlation, the
+torn read requests a full conversation resync rather than guessing.
+Native keyset pages refill bounded batches after suppressing exact echoes, retaining their
+authenticated ordering boundary and source-generation fence. OPEN and change replay carry
+the suppressed native high-water without exposing the private correlation hint.
+A page examines at most 4096 native entries (the scan budget) while omitting echoes. Past the
+budget with visible entries it is a short page: fewer than `limit` items with `has_more: true`
+and its last visible entry as the boundary, so the next page reads on with a fresh budget. When
+that many consecutive entries are all suppressed echoes and none is visible, the read answers
+`page-cursor-expired` (HTTP 410, no `full_resync`) on a continuation, on the header's head read
+and on change replay; it is not `cursor-gap`, because reloading the newest page would meet the
+same prefix. OPEN keeps its established stored-timeline fallback in that case, and a following
+stream waits 1.5 s before it re-opens after such a refusal. While 4096 or more echoes sit at the head, each
+change to the conversation therefore costs one refused replay and one stored-timeline re-OPEN per
+1.5 s at most, until a visible entry is appended. A transcript with
+more than 4096 consecutive correlated delivery echoes therefore cannot be paged past by cursor,
+and while its newest 4096 entries are all echoes its native entries cannot be shown; this is an
+accepted, known limit.
 
 Native block `view` and `metadata` (including assistant text/reasoning metadata) use
 the same bounded open-value display convention on full reads and native keyset pages:

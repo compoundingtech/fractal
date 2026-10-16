@@ -553,6 +553,52 @@ export const AgentLifecycle = /*#__PURE__*/ (() => openEnum(["standing","owner",
 export type AgentLifecycle = typeof AgentLifecycle.Type
 export type AgentLifecycleEncoded = typeof AgentLifecycle.Encoded
 
+export const StepRunId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:step-run)/[^\\s]+$", "u"), "step-run").annotate({ identifier: "StepRunId" }))()
+export type StepRunId = typeof StepRunId.Type
+export type StepRunIdEncoded = typeof StepRunId.Encoded
+
+export const AgentPresentationNow = /*#__PURE__*/ (() => Schema.Struct({
+  "goal": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "holder_down_since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  /** mission › path, with the mission named without its mission/ prefix. */
+  "label": Schema.String.annotate({ description: "mission › path, with the mission named without its mission/ prefix." }),
+  "mission": Id,
+  "path": Schema.String,
+  /** When it took the step. */
+  "since": Timestamp,
+  "step": StepRunId,
+  "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE)
+}).annotate({ identifier: "AgentPresentationNow" }))()
+export type AgentPresentationNow = typeof AgentPresentationNow.Type
+export type AgentPresentationNowEncoded = typeof AgentPresentationNow.Encoded
+
+export const AgentPresentationWork = /*#__PURE__*/ (() => Schema.Struct({
+  /** mission › path, with the mission named without its mission/ prefix. */
+  "label": Schema.String.annotate({ description: "mission › path, with the mission named without its mission/ prefix." }),
+  "mission": Id,
+  "path": Schema.String,
+  "step": StepRunId,
+  "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE)
+}).annotate({ identifier: "AgentPresentationWork" }))()
+export type AgentPresentationWork = typeof AgentPresentationWork.Type
+export type AgentPresentationWorkEncoded = typeof AgentPresentationWork.Encoded
+
+export const AgentPresentation = /*#__PURE__*/ (() => Schema.Struct({
+  /** Why it needs someone, in plain words, for the fault, needs_you, needs_login and down states. */
+  "because": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Why it needs someone, in plain words, for the fault, needs_you, needs_login and down states." }),
+  /** The agents list group. Sessions st found running but did not start are not agent rows. */
+  "group": Schema.Literals(["needs_you","needs_login","fault","working","idle","stopped","retired"]).annotate({ description: "The agents list group. Sessions st found running but did not start are not agent rows." }),
+  /** Up to five queued steps, next first. */
+  "next": Schema.Array(AgentPresentationWork).check(Schema.isMaxLength(5)).annotate({ description: "Up to five queued steps, next first." }),
+  "now": Schema.OptionFromNullOr(AgentPresentationNow),
+  /** How many steps are queued in all. */
+  "queued": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "How many steps are queued in all." }),
+  /** The agent state word, by its fixtures/clients/words.json id. */
+  "state": Schema.Literals(["needs_you","needs_login","fault","working","compacting","idle","starting","down","stopped","retired","unknown"]).annotate({ description: "The agent state word, by its fixtures/clients/words.json id." })
+}).annotate({ identifier: "AgentPresentation" }))()
+export type AgentPresentation = typeof AgentPresentation.Type
+export type AgentPresentationEncoded = typeof AgentPresentation.Encoded
+
 /** Whether the daemon can currently reach the agent runtime. */
 export const AgentReachability = /*#__PURE__*/ (() => openEnum(["local","remote","unreachable","unknown","reachable","indeterminate"]).annotate({ identifier: "AgentReachability", description: "Whether the daemon can currently reach the agent runtime." }))()
 export type AgentReachability = typeof AgentReachability.Type
@@ -681,10 +727,6 @@ export const RuntimeId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:runtime
 export type RuntimeId = typeof RuntimeId.Type
 export type RuntimeIdEncoded = typeof RuntimeId.Encoded
 
-export const StepRunId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:step-run)/[^\\s]+$", "u"), "step-run").annotate({ identifier: "StepRunId" }))()
-export type StepRunId = typeof StepRunId.Type
-export type StepRunIdEncoded = typeof StepRunId.Encoded
-
 export const UsageContext = /*#__PURE__*/ (() => Schema.Struct({
   "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))),
@@ -777,6 +819,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "observation": optionalKey(Schema.Literals(["current","stale","missing"])).annotate({ description: "Stale after 90 seconds without a new observation; missing when this runtime has no observation." }),
   "operational": optionalKey(Operational),
   "owner_run_id": Schema.OptionFromOptionalNullOr(MissionRunId, NULL_NONE),
+  /** st's presentation of this agent: its state word, list group, why it needs someone, and what it holds and has queued. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Agent). Absent on older daemons. */
+  "presentation": optionalKey(AgentPresentation),
   "queued_work_count": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "reachability": AgentReachability,
   /** Diagnostic harness reason, not a machine-readable verdict. */
@@ -1692,6 +1736,8 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "constraints": optionalKey(Schema.Array(Schema.String)),
   "goals": optionalKey(Schema.Array(Schema.String)),
   "id": Id,
+  /** st's own step that holds its run open while the mission watches, not work: declared with `keep-open`, or (for revisions published before the flag) a step named keep-watch, retire, steward-intake, standing, keep-open or *-retirement. Absent on older daemons. */
+  "keep_open": optionalKey(Schema.Boolean).annotate({ description: "st's own step that holds its run open while the mission watches, not work: declared with `keep-open`, or (for revisions published before the flag) a step named keep-watch, retire, steward-intake, standing, keep-open or *-retirement. Absent on older daemons." }),
   "last_progress": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "loop_max_rounds": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
   "loop_reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
@@ -1762,6 +1808,8 @@ export const Mission = /*#__PURE__*/ (() => Schema.Struct({
   "runs": Schema.Array(MissionRunId),
   "runs_truncated": optionalKey(Schema.Boolean),
   "state": MissionState,
+  /** st's own plumbing or a standing observer, which clients fold away until a person asks: declared with `system`, or st's own `mission/__st3/` missions, or (for revisions published before the flag) a `ci` path segment. Absent on older daemons. */
+  "system": optionalKey(Schema.Boolean).annotate({ description: "st's own plumbing or a standing observer, which clients fold away until a person asks: declared with `system`, or st's own `mission/__st3/` missions, or (for revisions published before the flag) a `ci` path segment. Absent on older daemons." }),
   "title": Schema.String,
   "total_runs": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "updated_at": Timestamp,
@@ -2985,6 +3033,44 @@ export const ResourcesPage = /*#__PURE__*/ (() => Schema.Struct({
 export type ResourcesPage = typeof ResourcesPage.Type
 export type ResourcesPageEncoded = typeof ResourcesPage.Encoded
 
+/** What was left of one objective or budget across a period, in equal steps; a step holds its lowest reading and is null when nothing was read. */
+export const SloHistory = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Schema.String,
+  "samples": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "since_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "steps": Schema.Array(Schema.NullOr(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(100)))),
+  "until_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "SloHistory", description: "What was left of one objective or budget across a period, in equal steps; a step holds its lowest reading and is null when nothing was read." }))()
+export type SloHistory = typeof SloHistory.Type
+export type SloHistoryEncoded = typeof SloHistory.Encoded
+
+/** One objective (a target with windows and an error budget) or one budget (an allowance that resets), as this daemon measures it. about, target, current, window and explain are display text for a person, not a contract; the pair of slo reads is experimental. */
+export const SloRow = /*#__PURE__*/ (() => Schema.Struct({
+  "about": Schema.String,
+  /** A budget's declared account. */
+  "account": optionalKey(Schema.String).annotate({ description: "A budget's declared account." }),
+  "current": Schema.String,
+  "explain": Schema.String,
+  "id": Schema.String,
+  "kind": Schema.Literals(["objective","budget"]),
+  "measured_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  /** What is left of the error budget or allowance; null when nothing was measured. */
+  "remaining_percent": Schema.OptionFromNullOr(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(100))).annotate({ description: "What is left of the error budget or allowance; null when nothing was measured." }),
+  "resets_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
+  "status": Schema.Literals(["met","missed","no-data","stale"]),
+  "target": Schema.String,
+  "window": Schema.String
+}).annotate({ identifier: "SloRow", description: "One objective (a target with windows and an error budget) or one budget (an allowance that resets), as this daemon measures it. about, target, current, window and explain are display text for a person, not a contract; the pair of slo reads is experimental." }))()
+export type SloRow = typeof SloRow.Type
+export type SloRowEncoded = typeof SloRow.Encoded
+
+export const SloList = /*#__PURE__*/ (() => Schema.Struct({
+  "as_of_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "rows": Schema.Array(SloRow)
+}).annotate({ identifier: "SloList" }))()
+export type SloList = typeof SloList.Type
+export type SloListEncoded = typeof SloList.Encoded
+
 export const StatusTransition = /*#__PURE__*/ (() => Schema.Struct({
   "observed_at": Timestamp,
   /** An incarnation starts here. A runtime reset without a harness observation has a null state. */
@@ -3033,7 +3119,7 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog], { mode: "oneOf" })
+  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
