@@ -138,10 +138,14 @@ impl Subscription {
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let (report_tx, mut report_rx) = tokio::sync::watch::channel(report);
         let task = tokio::spawn(async move {
-            let mut retry = crate::client::DriverRetry::default();
+            let mut retry = crate::client::MailboxRetry::default();
             loop {
+                retry.begin_attempt();
                 let result: Result<()> = async {
                     let mut socket = client.open_mailbox(&fence).await?;
+                    // open_mailbox returns only after HTTP 101, before the first snapshot.
+                    // A completed upgrade does not clear the retained open-failure count.
+                    retry.upgraded();
                     let report = serde_json::to_string(&*report_rx.borrow_and_update())?;
                     socket.send(tokio_tungstenite::tungstenite::Message::Text(report.into())).await?;
                     loop {
@@ -150,7 +154,7 @@ impl Subscription {
                                 match message.context("mailbox disconnected")?? {
                                     tokio_tungstenite::tungstenite::Message::Text(text) => {
                                         let frame: Frame = serde_json::from_str(&text)?;
-                                        retry.succeeded();
+                                        retry.received_frame();
                                         let fenced = matches!(frame, Frame::Fenced { .. });
                                         sender.send(frame).await.context("mailbox receiver ended")?;
                                         if fenced { return Ok(()); }

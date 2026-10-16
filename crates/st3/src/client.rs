@@ -1343,6 +1343,37 @@ impl DriverRetry {
     }
 }
 
+/// A completed WebSocket upgrade is transport establishment, not a successful mailbox read.
+/// Preserve the established stream's original recovery cadence without resetting open failures.
+#[derive(Default)]
+pub(crate) struct MailboxRetry {
+    opening: DriverRetry,
+    upgraded: bool,
+}
+
+impl MailboxRetry {
+    pub(crate) fn begin_attempt(&mut self) {
+        self.upgraded = false;
+    }
+
+    pub(crate) fn upgraded(&mut self) {
+        self.upgraded = true;
+    }
+
+    pub(crate) fn received_frame(&mut self) {
+        self.opening.succeeded();
+    }
+
+    pub(crate) fn failed(&mut self, error: &anyhow::Error) -> Duration {
+        if self.upgraded {
+            // A peer that accepts and drops every stream retains this fixed cadence forever.
+            jittered(Duration::from_secs(1))
+        } else {
+            self.opening.failed(error)
+        }
+    }
+}
+
 /// Half to one and a half times `pause`. Every seat and command waiting out one daemon restart
 /// retries on the same doubling schedule; without a random share they would all reach the daemon
 /// in the same instant it starts to listen.
@@ -2116,6 +2147,90 @@ mod tests {
             assert!((base / 2..=(base * 3 / 2).min(Duration::from_secs(30))).contains(&pause));
             assert_eq!(retry.failures, failures as u32 + 1);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mailbox_retry_three_upgraded_stream_failures_keep_the_original_curve() {
+        let mut retry = MailboxRetry::default();
+        let started = tokio::time::Instant::now();
+        for _ in 0..3 {
+            retry.begin_attempt();
+            retry.upgraded();
+            // A snapshot error can close the accepted connection before its first frame.
+            let pause = retry.failed(&anyhow::anyhow!("stream ended before its first frame"));
+            assert!((Duration::from_millis(500)..=Duration::from_millis(1500)).contains(&pause));
+            assert_eq!(retry.opening.failures, 0);
+            tokio::time::advance(pause).await;
+        }
+        assert!(started.elapsed() <= Duration::from_millis(4500));
+    }
+
+    #[test]
+    fn mailbox_retry_open_and_handshake_failures_keep_the_exponential_and_refusal_curves() {
+        let failures = [
+            deadline_error("fixture", "mailbox handshake", Duration::from_secs(15)),
+            api_error(503, br#"{"code":"internal","message":"handshake refused","details":{}}"#),
+        ];
+        for error in failures {
+            let mut retry = MailboxRetry::default();
+            for (count, seconds) in [1, 2, 4, 8, 16, 30].into_iter().enumerate() {
+                retry.begin_attempt();
+                let base = Duration::from_secs(seconds);
+                let pause = retry.failed(&error);
+                assert!((base / 2..=(base * 3 / 2).min(Duration::from_secs(30))).contains(&pause));
+                assert_eq!(retry.opening.failures, count as u32 + 1);
+            }
+            for errno in [libc::ECONNREFUSED, libc::ENOENT] {
+                retry.begin_attempt();
+                let refused = DaemonUnreachable::connect_io(
+                    "fixture",
+                    &std::io::Error::from_raw_os_error(errno),
+                );
+                let pause = retry.failed(&refused.into());
+                assert!((Duration::from_millis(500)..=Duration::from_secs(1)).contains(&pause));
+                assert_eq!(retry.opening.failures, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn mailbox_retry_upgrade_then_error_preserves_the_next_reopen_base() {
+        let mut retry = MailboxRetry::default();
+        let error = anyhow::anyhow!("handshake did not answer");
+        for _ in 0..2 {
+            retry.begin_attempt();
+            retry.failed(&error);
+        }
+        retry.begin_attempt();
+        retry.upgraded();
+        assert_eq!(retry.opening.failures, 2, "HTTP 101 is not a decoded frame");
+        let pause = retry.failed(&anyhow::anyhow!("initial report write failed"));
+        assert!((Duration::from_millis(500)..=Duration::from_millis(1500)).contains(&pause));
+        assert_eq!(retry.opening.failures, 2);
+        retry.begin_attempt();
+        let pause = retry.failed(&error);
+        assert!((Duration::from_secs(2)..=Duration::from_secs(6)).contains(&pause));
+        assert_eq!(retry.opening.failures, 3, "the next open failure used base four");
+    }
+
+    #[test]
+    fn mailbox_retry_decoded_frame_resets_the_next_reopen_base() {
+        let mut retry = MailboxRetry::default();
+        let error = anyhow::anyhow!("handshake did not answer");
+        for _ in 0..2 {
+            retry.begin_attempt();
+            retry.failed(&error);
+        }
+        retry.begin_attempt();
+        retry.upgraded();
+        retry.received_frame();
+        assert_eq!(retry.opening.failures, 0);
+        let pause = retry.failed(&anyhow::anyhow!("stream ended after its snapshot"));
+        assert!((Duration::from_millis(500)..=Duration::from_millis(1500)).contains(&pause));
+        retry.begin_attempt();
+        let pause = retry.failed(&error);
+        assert!((Duration::from_millis(500)..=Duration::from_millis(1500)).contains(&pause));
+        assert_eq!(retry.opening.failures, 1, "the next open failure used base one");
     }
 
     #[test]

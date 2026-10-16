@@ -87,11 +87,21 @@ session already knows what it describes.
 ## Driver retries during a daemon outage
 
 The native driver keeps the provider alive when the daemon cannot answer. Mailbox binding,
-mailbox reconnects, startup calls, periodic control reports and work renewal keep separate retry
+mailbox opening, startup calls, periodic control reports and work renewal keep separate retry
 state. Repeated failures use base waits of 1, 2, 4, 8, 16 and then 30 seconds. The random share
 is between half and one and a half of the base, with a hard 30-second cap. The first successful
 operation clears its failure count. A valid mailbox frame counts as a successful reconnect,
 not just opening a socket.
+
+Mailbox transport establishment means `Client::open_mailbox` returned after the WebSocket HTTP 101
+upgrade, before any application frame. Open and handshake failures use the exponential curve;
+after an accepted upgrade, report-write errors, EOF and stream errors retain the original fixed
+one-second base with 0.5–1.5-second jitter. The upgrade does not reset the open-failure count:
+after two open failures, an upgraded stream that fails before a decoded frame leaves the next
+open failure at base four seconds. Reading a decoded application frame resets it, making the
+next open failure start at base one. A server that accepts the upgrade and then drops every
+connection is therefore retried at the fixed jittered one-second cadence forever, as before
+this change. The exponential policy does not protect or repair that case.
 
 A refused connection or a missing socket stays at the one-second restart base instead of
 growing. Its random wait is 0.5 to 1 second, so the retry wait itself does not delay discovery
