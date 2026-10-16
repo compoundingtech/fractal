@@ -20,7 +20,7 @@ import { quality, localDrafts } from './qualityNative';
 import { nativeCollectionSocket } from './modules/st-collections';
 import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, toObservationReport, type Context } from './observations';
-import { buildFabricDefault, credentialFor, defaultMemberName, fabricGatewayId, fabricMembers, fabricTargetFromText, isFabricGatewayId, MAX_FABRIC_MEMBERS, memberName, memberPairing, memberProfileKey, readFabricMembers, sameFabricTarget, sameName, storedFabricMembers, walkableMembers, type FabricMember } from './fabricTarget';
+import { buildFabricDefault, builtFabricMembers, credentialFor, defaultMemberName, fabricGatewayId, fabricMembers, fabricTargetFromText, isFabricGatewayId, MAX_FABRIC_MEMBERS, memberName, memberPairing, memberProfileKey, readFabricMembers, sameFabricTarget, sameName, storedFabricMembers, walkableMembers, type FabricMember } from './fabricTarget';
 import { fabricAvailable, fabricIdentity, fabricPathInUse, nativeCarrierPorts } from './fabricBridge';
 import { ForegroundGate } from './foreground';
 import type { FabricProfile } from './fabricProof';
@@ -29,7 +29,7 @@ import { normalizeGatewayUrl } from './gatewayUrl';
 import { tabOrder, type Tab } from './tabs';
 import type { SidebarResource } from './sidebarView';
 import { readSidebarResources } from './sidebarResources';
-import { sidebarArrangement, sidebarSubject } from './sidebarEdits';
+import { SIDEBAR_RETIRED, sidebarArrangement, sidebarRetired, sidebarSubject } from './sidebarEdits';
 import { fetch as expoFetch } from 'expo/fetch';
 import { decodeBase64, encodeBase64, type Picked } from './images';
 
@@ -147,6 +147,7 @@ function useAppStore(proof?: FabricProfile) {
   const [sidebarResources, setSidebarResources] = useState<ResourceObservation[]>([]), [sidebarResourcesIssue, setSidebarResourcesIssue] = useState('');
   const sidebarResourcesRead = useRef<{ focused?: string; promise: Promise<void> } | null>(null);
   const sidebarCreation = useRef<{ subject: string; created: boolean } | null>(null);
+  const sidebarRemoved = useRef(false);
   const sidebarWriting = useRef(false);
   const sidebarSeen = useRef(new Map<string, SidebarResource>());
   const cachedActor = useRef(''), cacheSavedAt = useRef(0), cacheGeneration = useRef(0);
@@ -279,16 +280,22 @@ function useAppStore(proof?: FabricProfile) {
     const state = reporting.current;
     state.send = () => {
       if (state.busy || Date.now() - state.last < 30_000) return;
-      const batch = observations.nextReport();
-      if (!batch) return;
-      const report = toObservationReport(batch);
-      if (!report.samples.length) { observations.accepted(batch.report_id); return; }
+      // Preparing a batch can synchronously notify ready while it closes a minute.
       state.busy = true;
-      state.last = Date.now();
-      void client.observationsReport(report as never).then(
-        () => observations.accepted(batch.report_id),
-        () => { /* the identical batch is sent again at the next measurement; an older member just refuses */ },
-      ).finally(() => { state.busy = false; });
+      try {
+        const batch = observations.nextReport();
+        if (!batch) { state.busy = false; return; }
+        const report = toObservationReport(batch);
+        if (!report.samples.length) { observations.accepted(batch.report_id); state.busy = false; return; }
+        state.last = Date.now();
+        void client.observationsReport(report as never).then(
+          () => observations.accepted(batch.report_id),
+          () => { /* the identical batch is sent again at the next measurement; an older member just refuses */ },
+        ).finally(() => { state.busy = false; });
+      } catch (error) {
+        state.busy = false;
+        throw error;
+      }
     };
     observations.ready = state.send;
     return () => { if (observations.ready === state.send) observations.ready = undefined; };
@@ -310,7 +317,7 @@ function useAppStore(proof?: FabricProfile) {
       const built = buildFabricDefault();
       setFabricBuilt(available);
       const saved = readFabricMembers(storedList, stored);
-      setFabricMemberList(saved.length ? saved : built ? [{ ...built, name: defaultMemberName(0) }] : []);
+      setFabricMemberList(saved.length ? saved : builtFabricMembers(built));
       setCarrierChoice(choice === 'fabric' || choice === 'tailscale' ? choice : available && built ? 'fabric' : 'tailscale');
       setFallbackOn(fallback !== '0');
     })();
@@ -362,7 +369,7 @@ function useAppStore(proof?: FabricProfile) {
   }, [proof?.url, proof?.credential]);
 
   function clearCaches() {
-    sidebarSeen.current.clear(); sidebarCreation.current = null;
+    sidebarSeen.current.clear(); sidebarCreation.current = null; sidebarRemoved.current = false;
     cachedActor.current = ''; cacheSavedAt.current = 0;
     conversationCache.current.clear(); draftCache.current.clear(); missionDetailCache.current.clear();
     draftsOwner.current = '';
@@ -789,6 +796,8 @@ function useAppStore(proof?: FabricProfile) {
     async editSidebar(operations: ArrangementOperation[]): Promise<boolean> {
       if (!client || status !== 'online' || !arrangementPerson || !arrangementsGranted || sidebarWriting.current) return false;
       const existing = sidebarArrangement(arrangements);
+      // A retired Sidebar is never created again.
+      if (!existing && sidebarRemoved.current) { setError(SIDEBAR_RETIRED); return false; }
       const draft = sidebarCreation.current ?? { subject: sidebarSubject(arrangementPerson), created: false };
       if (!existing) sidebarCreation.current = draft;
       const creating = !existing && !draft.created;
@@ -796,8 +805,11 @@ function useAppStore(proof?: FabricProfile) {
       const id = actionId();
       sidebarWriting.current = true;
       try {
-        const done = await runAction(async () => client.arrangementEdit({ id, idempotency_key: id, fence: await fence(), parameters }));
+        const done = await runAction(async () => {
+          try { return await client.arrangementEdit({ id, idempotency_key: id, fence: await fence(), parameters }); } catch (e) { if (creating && sidebarRetired(e)) sidebarRemoved.current = true; throw e; }
+        });
         if (done && creating) draft.created = true;
+        if (!done && sidebarRemoved.current) setError(SIDEBAR_RETIRED);
         return done;
       } finally { sidebarWriting.current = false; }
     },
