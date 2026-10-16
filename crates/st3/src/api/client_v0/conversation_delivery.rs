@@ -261,12 +261,8 @@ mod tests {
         let fixture = AnnotatedPage::new(root.path(), "delivery-byte-bound-order");
         fixture.receipt("message/byte-oldest", "native-000");
         fixture.receipt("message/byte-newest", "native-099");
-        let size = |items: &[Value]| {
-            items
-                .iter()
-                .map(|item| serde_json::to_vec(item).unwrap().len())
-                .sum::<usize>()
-        };
+        // Match the real page bound, including JSON array delimiters and separators.
+        let size = |items: &[Value]| serde_json::to_vec(items).unwrap().len();
         // One hundred native turns give exactly 200 entries, newer than the graph rows.
         // Calibrate ordinary text below its per-value cap so the unannotated page fits
         // by one byte: moving annotation after the real byte bound must fail this control.
