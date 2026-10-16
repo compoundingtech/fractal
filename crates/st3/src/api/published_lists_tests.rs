@@ -638,9 +638,9 @@ fn a_forgotten_list_keeps_its_rows_until_refolded_and_withdraws_its_view_too() {
     store.publish_collection_view("missions");
     assert!(store.collection_view_published("missions"));
     list.forget();
-    assert!(store.published_missions().is_some(), "readers keep the rows until the refold");
+    assert!(list.newest().is_some(), "readers keep the rows until the refold");
     // A fold under way when the projections were replaced publishes nothing.
-    let (stale, _) = fold_missions(&store, store.published_missions().as_deref()).unwrap().unwrap_or_else(|| {
+    let (stale, _) = fold_missions(&store, list.newest().as_deref()).unwrap().unwrap_or_else(|| {
         fold_missions(&store, None).unwrap().unwrap()
     });
     assert_eq!(list.publish(stale, generation), None);
@@ -648,10 +648,10 @@ fn a_forgotten_list_keeps_its_rows_until_refolded_and_withdraws_its_view_too() {
     assert!(list.withdraw());
     withdraw(&store, |store| store.published_missions_list(), "missions");
     assert!(!store.collection_view_published("missions"));
-    assert!(store.published_missions().is_none());
+    assert!(list.newest().is_none());
     // Its next fold, from nothing, serves the list again.
     fold(&store);
-    assert!(store.published_missions().is_some());
+    assert!(list.newest().is_some());
 }
 
 #[test]
@@ -663,7 +663,7 @@ fn a_refresher_that_ends_withdraws_its_list_and_view() {
     store.publish_collection_view("missions");
     let guard = Withdraw { store: Arc::clone(&store), list: |store| store.published_missions_list(), name: "missions" };
     drop(guard);
-    assert!(store.published_missions().is_none());
+    assert!(store.published_missions_list().newest().is_none());
     assert!(!store.collection_view_published("missions"));
 }
 

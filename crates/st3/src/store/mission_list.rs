@@ -389,11 +389,6 @@ impl Store {
         Ok(missions)
     }
 
-    /// The published missions list, while a refresher keeps one.
-    pub(crate) fn published_missions(&self) -> Option<Arc<published_list::Publication<MissionRows>>> {
-        self.smalltalk.published_missions.newest()
-    }
-
     pub(crate) fn published_missions_list(&self) -> &published_list::PublishedList<MissionRows> {
         &self.smalltalk.published_missions
     }
