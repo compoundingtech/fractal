@@ -140,11 +140,14 @@ pub(crate) async fn run_client_message_selectors_observed(
         on_turn(true);
         let result = tokio::task::spawn_blocking(move || {
             let _loan = SelectorLoan::enter();
+            let pending = current.client_message_selectors_pending()?;
+            // The checkpoint-policy probe itself borrows the writer. Keep a clean
+            // startup read-only; only pending work can need a new backfill guard.
             let mut guard = match checkpoint_guard {
                 Some(guard) => Some(guard),
-                None => current.client_message_backfill_checkpoint_guard()?,
+                None if pending => current.client_message_backfill_checkpoint_guard()?,
+                None => None,
             };
-            let pending = current.client_message_selectors_pending()?;
             let more = current.maintain_client_message_selectors()?;
             let remaining = current.client_message_selectors_pending()?;
             if !remaining { drop(guard.take()); }

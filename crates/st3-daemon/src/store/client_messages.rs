@@ -865,6 +865,16 @@ pub(super) fn open(connection: &mut Connection) -> Result<()> {
         }
         transaction.commit()?;
     }
+    // Startup runs before the managed writer installs its COMMIT finalizer.
+    // Recover one bounded allowance for an existing cut, including reminder
+    // eligibility invalidated by offline claim edits/deletes. Initial backfill
+    // remains owned by the post-serving worker.
+    if initialized && !backfill_incomplete(connection)?
+        && (has_pending(connection)? || fold_incomplete(connection)?) {
+        let transaction = connection.transaction()?;
+        finalize_commit(&transaction)?;
+        transaction.commit()?;
+    }
     Ok(())
 }
 
@@ -1607,16 +1617,55 @@ mod tests {
     }
 
     #[test]
+    fn initialized_reopen_recovers_only_one_bounded_pending_allowance() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bounded-reopen.sqlite");
+        let count = BACKFILL_SUBJECTS * 3;
+        {
+            let store = Store::open(&path, "node").unwrap();
+            seed_backfill(&store, count);
+            while store.maintain_client_message_selectors().unwrap() {}
+        }
+        {
+            // Offline authority edits have source capture but no managed COMMIT
+            // callback. Startup must recover without draining the whole queue.
+            let connection = Connection::open(&path).unwrap();
+            connection.execute(
+                "UPDATE claims SET body=json_set(body,'$.fields.from','agent/reopened') WHERE subject LIKE 'message/backfill-%'",
+                [],
+            ).unwrap();
+            assert_eq!(connection.query_row(
+                "SELECT COUNT(*) FROM local_client_message_selectors_v1 WHERE born_index=-1",
+                [], |row| row.get::<_, usize>(0),
+            ).unwrap(), count);
+        }
+        let store = Store::open(&path, "node").unwrap();
+        let recovered = || store.readers.get().query_row(
+            "SELECT COUNT(*) FROM local_client_message_selectors_v1 WHERE born_index>=0 AND retired_index IS NULL AND sender='agent/reopened'",
+            [], |row| row.get::<_, usize>(0),
+        ).unwrap();
+        assert!(recovered() <= BACKFILL_SUBJECTS, "startup must not drain an unbounded backlog");
+        assert!(store.client_message_selectors_pending().unwrap());
+        while store.maintain_client_message_selectors().unwrap() {}
+        assert_eq!(recovered(), count);
+    }
+
+    #[test]
     fn metadata_only_append_between_initial_pending_loans_refolds_without_published_cut() {
         let store = Store::open_memory("node").unwrap();
         seed_backfill(&store, BACKFILL_SUBJECTS * 3);
         backfill_chunk(&mut store.connection.write(), true).unwrap();
         let subject = loop {
             let mut connection = store.connection.write();
-            let header: Option<String> = connection.query_row(
-                "SELECT subject FROM local_client_message_selectors_v1 WHERE born_index>=0 LIMIT 1",
-                [], |row| row.get(0),
-            ).optional().unwrap();
+            // The bounded clear phase can still contain headers from the old
+            // published cut. Only a pending-phase header was folded by this
+            // initial backfill and can exercise the unpublished-base regression.
+            let header: Option<String> = if matches!(backfill_progress(&connection).phase, BackfillPhase::Pending) {
+                connection.query_row(
+                    "SELECT subject FROM local_client_message_selectors_v1 WHERE born_index>=0 LIMIT 1",
+                    [], |row| row.get(0),
+                ).optional().unwrap()
+            } else { None };
             if let Some(subject) = header {
                 assert!(has_pending(&connection).unwrap());
                 assert!(backfill_incomplete(&connection).unwrap());
