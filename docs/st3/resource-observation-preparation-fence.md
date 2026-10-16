@@ -163,9 +163,12 @@ includes return work, enqueue-to-callback includes prior batch work, and callbac
 SQL excludes finalizers/COMMIT/observers. These are not independent measurements
 of exact native queue/hold/commit phases. Seed accounting includes the return
 path on its caller thread; other-thread native work is not counted there. All
-records are cfg(test); no reporting contract is expanded. Passing nextest output
-may not retain the printed work report, so a later qualification must retain it
-through an admitted existing artifact route before making numerical claims.
+records are cfg(test); no product reporting contract is expanded. A source-only
+nextest override retains success output for exactly the quiet/busy, history-width
+and differential replay controls in ordinary hosted consumer logs. It changes
+neither selection, retries nor budgets. This follows the already installed
+roster-control output mechanism; the exact configuration delta requires Intake
+review before publication. No numeric result is available before that cohort.
 
 The 17 new complete control bodies live in
 `crates/st3/src/store/resource_preparation/tests.rs`; the four original negative
@@ -186,3 +189,13 @@ Intake must read the exact complete private delta and bodies before any compiler
 or publication decision. #2930's sqlite/telemetry seams and #3082's productive
 head/cohort are untouched. This source does not close the fleet incident, accept
 Silber's failed gate, release Bluey's disk hold or grant rollout/activation.
+
+
+Composition note: the private successor merges exact GitHub main
+`d8d80829c1742002472206e0ec1011407991d98a`, read once for this composition.
+Incoming fleet cache/generation triggers, test-only transport module, dependency
+optimization profiles and the targeted roster-output override belong to main.
+Native writer/reader dispatcher files, Store constructors/read_snapshot and this
+observation's dependency/helper bodies have no incoming mutation-seam change.
+The main merge was clean. This is static interaction review, not runtime result
+transfer; the first compile and all 21 controls remain UNRUN.

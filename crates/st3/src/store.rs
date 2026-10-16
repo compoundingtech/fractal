@@ -15748,7 +15748,7 @@ impl Store {
             #[cfg(test)]
             resource_preparation::COUNTS.with(|counts| counts.borrow_mut().invalidated += 1);
         }
-        // Root33b0: exactly two unusable/stale preparations, then ONE invocation of today's
+        // Exactly two unusable/stale preparations, then ONE invocation of the existing
         // canonical writer path. This preserves API progress, not a writer-hold cap.
         #[cfg(test)]
         resource_preparation::COUNTS.with(|counts| counts.borrow_mut().fallback += 1);

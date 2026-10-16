@@ -471,6 +471,7 @@ fn changed_and_attempt_outcomes_match_the_canonical_path_and_retry_receipts() {
             ),
             (0, 1, 0, 0)
         );
+        eprintln!("idempotent replay interval {index}: {replay:?}");
     }
 }
 
