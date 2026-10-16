@@ -109,8 +109,7 @@ pub(crate) enum Rule {
     UsageSeries,
     UsageCumulative,
     AccountLimits,
-    /// Every claim of a harness question while it is pending; none once it was resolved at
-    /// least `RESOLVED_RETENTION_MS` before the cut.
+    /// Keep pending history; after a day keep the newest observation indefinitely.
     QuestionLifecycle,
 }
 
@@ -122,8 +121,7 @@ pub(crate) fn question_kind(kind: &str) -> bool {
     )
 }
 
-/// The questions whose resolution, among `resolutions` (subject and acceptance time), was
-/// accepted at least `RESOLVED_RETENTION_MS` before `cut`. Readers treat them as gone.
+/// Questions whose redundant observation history may expire. Their compact records stay.
 pub(crate) fn expired_questions<'a>(
     resolutions: impl Iterator<Item = (&'a str, u128)>,
     cut: u128,
@@ -134,7 +132,7 @@ pub(crate) fn expired_questions<'a>(
         .collect()
 }
 
-/// Whether a question resolved at `resolved_at` is gone at `at`.
+/// Whether redundant observation history may expire at `at`.
 pub(crate) fn question_expired(resolved_at: u128, at: u128) -> bool {
     resolved_at.saturating_add(st3_schema::harness_questions::RESOLVED_RETENTION_MS) <= at
 }
@@ -180,7 +178,7 @@ fn planner_rule(rule: &st3_schema::retention::RulePolicy) -> Option<Rule> {
         "newest,newest-reading,every-reading-within-1h-of-its-account-group-newest-measured_at" => {
             Rule::AccountLimits
         }
-        "all-while-pending,none-once-resolved-1d-before-cut" => Rule::QuestionLifecycle,
+        "all-while-pending,newest-once-resolved-1d-before-cut" => Rule::QuestionLifecycle,
         _ if rule.kind == "seat.status-history" => return None,
         other => panic!("retention.toml: no planner keeps `{other}` for {}", rule.kind),
     };
@@ -516,8 +514,8 @@ impl Rule {
         )
     }
 
-    /// Whether the newest claim carrying each field stays. A question goes whole, and a loop
-    /// state keeps its own runs.
+    /// Whether the newest claim carrying each field stays. Question observations have a
+    /// fixed shape, and a loop state keeps its own runs.
     pub(crate) fn keeps_field_carriers(self) -> bool {
         !matches!(self, Rule::LoopState | Rule::QuestionLifecycle)
     }
@@ -590,7 +588,7 @@ pub(crate) fn rule_keep(
         Rule::LoopState => loop_keep(claims),
         Rule::Deferral if closed => newest,
         Rule::Deferral => (0..len).collect(),
-        Rule::QuestionLifecycle if closed => BTreeSet::new(),
+        Rule::QuestionLifecycle if closed => newest,
         Rule::QuestionLifecycle => (0..len).collect(),
     }
 }
@@ -826,7 +824,6 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
     // more, so the loop ends, and every witness is a kept claim.
     let mut operations: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     let mut envelope_claims: BTreeMap<&EnvelopeKey, Vec<usize>> = BTreeMap::new();
-    let mut questions: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (index, sealed_claim) in claims.iter().enumerate() {
         if let Some(operation) = sealed_claim.claim.operation_id.as_deref() {
             operations.entry(operation).or_default().push(index);
@@ -835,9 +832,6 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
             .entry(&sealed_claim.envelope)
             .or_default()
             .push(index);
-        if question_kind(&sealed_claim.claim.kind) {
-            questions.entry(&sealed_claim.claim.subject).or_default().push(index);
-        }
     }
     let records = sealed
         .envelopes
@@ -870,9 +864,8 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
                 }
             }
         }
-        // A question goes whole or stays whole: a kept resolution without its observation, or an
-        // observation without its resolution, would read differently.
-        for members in operations.values().chain(envelope_claims.values()).chain(questions.values()) {
+        // Operations and envelopes remain atomic; question history is independently compacted.
+        for members in operations.values().chain(envelope_claims.values()) {
             if members.iter().any(|index| dropped[*index])
                 && members.iter().any(|index| !dropped[*index])
             {
@@ -1081,14 +1074,8 @@ fn subject_answers_inner(connection: &Connection, subject: &str, cut: u128, sour
         json!(selected_actual_source_at(connection, subject, None, None)?),
     );
     if subject.starts_with("harness-question/") {
-        // A question resolved a day before the cut is gone whether or not its claims are. Its
-        // subject's generic actual state is no reader contract (`docs/st3/harness-questions.md`);
-        // once the question is gone it answers nothing.
+        // Compact ended records remain visible forever, including after history compaction.
         let question = super::harness_questions::question_at(connection, subject, Some(cut))?;
-        if question.is_none() {
-            answers.remove("actual");
-            answers.remove("source");
-        }
         answers.insert("harness_question".into(), json!(question));
     }
     let kinds = connection

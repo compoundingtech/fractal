@@ -96,7 +96,6 @@ fn the_corpus_includes_every_registry_kind() {
 /// Kinds a checkpoint rule may drop. Every other kind is kept on every node.
 const RULE_KINDS: &[&str] = &[
     "harness-question.observed",
-    "harness-question.resolved",
     "harness.observed",
     "harness.timeline",
     "loop.state",

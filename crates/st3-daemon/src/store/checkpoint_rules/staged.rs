@@ -190,7 +190,7 @@ pub(crate) fn plan_staged(planner: &StagedPlanner<'_>) -> Result<()> {
         // Newest first, so a claim kept back here can witness the ones before it.
         let mut keep = staging.prepare_cached("UPDATE claims SET dropped=0 WHERE pos=?1")?;
         for_each_group(staging, "slot", |slot_text| {
-            // A question goes whole, so no claim of it witnesses another.
+            // Fixed-shape observations are witnessed by the newest observation.
             if slot_from_text(slot_text).is_some_and(|(rule, _)| rule == Rule::QuestionLifecycle) {
                 return Ok(());
             }
@@ -236,16 +236,6 @@ pub(crate) fn plan_staged(planner: &StagedPlanner<'_>) -> Result<()> {
                          WHERE other.writer=claims.writer AND other.sequence=claims.sequence
                            AND other.envelope_hash=claims.envelope_hash)",
                 [],
-            )?;
-        // A question goes whole or stays whole.
-        let kept = kept
-            + staging.execute(
-                "UPDATE claims SET dropped=0 WHERE dropped=1 AND kind IN (?1, ?2)
-                   AND subject IN (SELECT subject FROM claims WHERE dropped=0 AND kind IN (?1, ?2))",
-                [
-                    st3_schema::harness_questions::OBSERVED,
-                    st3_schema::harness_questions::RESOLVED,
-                ],
             )?;
         if !changed && kept == 0 {
             return Ok(());

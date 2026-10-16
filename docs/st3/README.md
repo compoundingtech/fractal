@@ -61,7 +61,7 @@ Use these documents for implementation details:
 - [Subagents](subagents.md) explains how st records the subagents a seat's harness runs as claims
   on the seat, with a lease, and ends them when their harness, session or seat goes away.
 - [Harness questions](harness-questions.md) explains how st records the questions a seat's harness
-  asks natively, as ids and option positions without text, and drops each a day after it ends.
+  asks natively, as ids and option positions without text, retaining compact ended records forever.
 - [Model accounts](accounts.md) explains how a person declares several Claude and Codex accounts, how a
   seat binds one or a pool, and how a pooled seat at its limit restarts on another account.
 - [Instances](instances.md) explains `--instance NAME`: a second, fully separate st on one machine

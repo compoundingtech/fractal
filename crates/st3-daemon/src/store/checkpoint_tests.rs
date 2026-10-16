@@ -2946,9 +2946,9 @@ witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
 carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
-fn the_policy_renders_the_rules_description_changed_since_14_only_by_limits_and_questions() {
+fn the_policy_renders_the_rules_description_with_review_and_question_history_compaction() {
     assert_eq!(super::checkpoint_rules::RULES_VERSION, 17);
-    let questions = "keep=all-while-pending,none-once-resolved-1d-before-cut";
+    let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
         RULES_V14_DESCRIPTION
@@ -2961,8 +2961,7 @@ fn the_policy_renders_the_rules_description_changed_since_14_only_by_limits_and_
                 "sekret.changed slot=subject keep=newest min-age-before-cut=5d\n",
                 &format!(
                     "sekret.changed slot=subject keep=newest min-age-before-cut=5d\n\
-                     harness-question.observed slot=subject {questions}\n\
-                     harness-question.resolved slot=subject {questions}\n"
+                     harness-question.observed slot=subject {questions}\n"
                 ),
             )
             .replace(
@@ -3440,10 +3439,11 @@ fn reconcile_decisions_keep_the_newest_of_each_key() {
 }
 
 #[test]
-fn a_harness_question_goes_whole_a_day_after_its_resolution() {
+fn compact_harness_questions_survive_indefinitely_while_redundant_history_expires() {
     use st3_schema::harness_questions::{Question, Status};
     use super::harness_questions::QuestionObservation;
-    let store = Store::open_memory("alder").unwrap();
+    const AGENT: &str = "agent/ada";
+    let store = Store::open_memory("operator").unwrap();
     let ask = |native_id: &str, at: u128| {
         store.set_write_clock_at(at).unwrap();
         let question = store
@@ -3467,32 +3467,53 @@ fn a_harness_question_goes_whole_a_day_after_its_resolution() {
     };
     let cut = 3 * DAY_MS;
     let pending = ask("pending", 100);
-    let old = ask("old", 200);
+    let obsolete = ask("old", 200);
+    store.set_write_clock_at(201).unwrap();
+    let old = store.observe_harness_question(&QuestionObservation {
+        agent: AGENT.into(),
+        session: "tester".into(),
+        native_id: "old".into(),
+        runtime_incarnation: "inc-2".into(),
+        questions: vec![Question { id: "q0".into(), options: 3, multi: false, required: true }],
+    }).unwrap();
+    store.seal_local_batches().unwrap();
     resolve(&old, 300);
     let recent = ask("recent", 400);
     resolve(&recent, cut - DAY_MS + 1);
     store.set_write_clock_at(cut + 1).unwrap();
-    store.append_claim(&input("daemon/alder", "daemon.diagnostic", None,
+    store.append_claim(&input("daemon/operator", "daemon.diagnostic", None,
         json!({"severity": "warning", "code": "slow-request", "reason": "last"}), "question-last")).unwrap();
     store.seal_local_batches().unwrap();
     let claims_of = |subject: &str| {
         store.claims_for(subject, None).unwrap().into_iter().map(|claim| claim.id).collect::<Vec<_>>()
     };
     let (old_claims, kept) = (claims_of(&old.id), [claims_of(&pending.id), claims_of(&recent.id)].concat());
-    assert_eq!(old_claims.len(), 2);
+    assert_eq!(old_claims.len(), 3);
     let scratch = tempfile::tempdir().unwrap();
     let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
     assert!(proof.passed, "{proof:?}");
     let gone = dropped(&plan);
-    for id in &old_claims {
-        assert!(gone.contains(id), "a question resolved a day before the cut goes whole");
+    assert!(gone.contains(&obsolete.revision), "redundant observation history expires");
+    for id in old_claims.iter().filter(|id| **id != obsolete.revision) {
+        assert!(!gone.contains(id), "compact observation and resolution stay forever");
     }
     for id in &kept {
         assert!(!gone.contains(id), "a pending or recently resolved question stays");
     }
     store.apply_checkpoint_drop("checkpoint/1970-01-04", &plan.envelopes, &plan.claims).unwrap();
-    assert!(store.harness_question(&old.id, cut).unwrap().is_none());
-    assert!(store.latest_claim(&old.id, None).unwrap().is_none());
+    let compact = store.harness_question(&old.id, u128::MAX).unwrap().unwrap();
+    assert_eq!(compact.revision, old.revision);
+    assert_eq!(compact.resolution.as_ref().unwrap().status, Status::Cancelled);
+    assert!(store.latest_claim(&old.id, None).unwrap().is_some());
+    let error = store.observe_harness_question(&QuestionObservation {
+        agent: AGENT.into(),
+        session: "tester".into(),
+        native_id: "old".into(),
+        runtime_incarnation: "inc-3".into(),
+        questions: vec![Question { id: "q0".into(), options: 2, multi: false, required: true }],
+    }).unwrap_err();
+    assert_eq!(error.code, "harness-question-resolved");
+    assert_eq!(store.harness_question(&old.id, u128::MAX).unwrap().unwrap(), compact);
     assert!(store.harness_question(&pending.id, cut).unwrap().is_some());
     assert!(store.harness_question(&recent.id, cut).unwrap().unwrap().resolution.is_some());
 }

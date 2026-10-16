@@ -23,8 +23,8 @@ pub const MAX_QUESTIONS: usize = 16;
 pub const MAX_OPTIONS: u8 = 64;
 /// The longest question id, native id or session id st keeps.
 pub const MAX_ID_BYTES: usize = 128;
-/// How long a resolved question and its answer receipt stay after the resolution, in
-/// milliseconds. A checkpoint drops both once its cut is at least this long after the resolution.
+/// How long redundant observation history stays after resolution, in milliseconds.
+/// The newest observation, resolution, answer positions and receipt stay indefinitely.
 pub const RESOLVED_RETENTION_MS: u128 = 24 * 60 * 60 * 1000;
 
 /// One question of a native call. `options` is the number of choices, so an answer names

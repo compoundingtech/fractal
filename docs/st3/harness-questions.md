@@ -42,19 +42,22 @@ takes no new observation.
 
 ## Retention
 
-A pending question is kept whole until it ends. Once it is resolved, it and its answer receipt
-stay for a day (`RESOLVED_RETENTION_MS`, 24 hours) after the resolution was accepted:
+A pending question is kept whole until it ends. The owner's compact record — question id,
+status, answer positions and receipt — is retained indefinitely and never hidden by age.
+The newest observation (identity and option shape) and the resolution stay in the claim log
+and in `Store::harness_question` forever.
 
-- readers treat a question resolved at least a day ago as gone (`Store::harness_question` with
-  the read time);
-- the checkpoint rule `all-while-pending,none-once-resolved-1d-before-cut` (rules version 16)
-  drops every claim of a question whose resolution was accepted at least a day before the cut.
-  The proof compares each question as of the cut, before and after the drop.
+Only redundant observation history may expire: a checkpoint whose cut is at least one day
+after resolution (`RESOLVED_RETENTION_MS`) keeps the newest observation and drops older
+observations, subject to the ordinary checkpoint guards. No text or bulky harness timeline
+data is stored in these claims. Independently derived bulky data may expire, but never the
+compact owner record.
 
-A resolved question is therefore gone to readers a day after it ended and its claims leave the
-store at the first stable checkpoint whose cut is a day past the resolution, which can be later.
-There are no tombstones for answer keys: once a question is gone, a request naming it finds no
-question.
+The rule `all-while-pending,newest-once-resolved-1d-before-cut` uses rules version 17,
+after main's review-reader version 16. The proof compares the same compact question before
+and after compaction. Resolved questions never become pending again: re-observation of the
+same native call is refused even after history expiry or checkpoint trimming, including when
+the resolution status is `expired`. Its original resolution and receipt remain authoritative.
 
 A question stays pending until the harness writes its end. The harness adapter writes `expired`
 or `cancelled` when the harness gives up on or withdraws a question; st does not end a pending

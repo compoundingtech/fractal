@@ -50,9 +50,11 @@ claim of the kind, so a later claim does not replace an earlier one. A test fail
 class allows dropping and it has neither a rule nor a `pending` reason, and when a durable kind has
 a rule.
 
-The harness question rule drops whole questions rather than witnessed claims: every claim of a
-question goes once its resolution was accepted at least a day before the cut, and none goes while
-it is pending. See [Harness questions](harness-questions.md).
+Harness questions retain their compact owner record indefinitely: id, status, answer positions
+and receipt are never deleted or hidden by age. Pending history stays whole; one day after
+resolution only redundant older observations may be trimmed, preserving the newest observation
+and resolution forever. Derived bulky data may expire independently, never the compact record.
+See [Harness questions](harness-questions.md).
 
 Each rule has:
 

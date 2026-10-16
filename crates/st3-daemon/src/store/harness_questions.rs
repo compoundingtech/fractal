@@ -1,5 +1,5 @@
 //! Questions a seat's harness asked natively: what st records of each (ids, option counts and
-//! answer positions, never text), how it ended, and the one-day life of a resolved question.
+//! answer positions, never text), and the indefinitely retained compact record of how it ended.
 //! `docs/st3/harness-questions.md` is the contract.
 use super::*;
 use smallclaims::store::checkpoint::claims_of_kind_in_order;
@@ -58,21 +58,17 @@ fn field<T: for<'de> serde::Deserialize<'de>>(claim: &ClaimRecord, name: &str) -
 }
 
 /// The question `subject`: its newest observation and its first resolution in canonical order.
-/// With `at`, a question resolved at least a day before it is gone, as it is once a checkpoint
-/// drops it.
+/// The compact record stays visible indefinitely; only redundant observation history expires.
 pub(crate) fn question_at(
     connection: &Connection,
     subject: &str,
-    at: Option<u128>,
+    _at: Option<u128>,
 ) -> Result<Option<HarnessQuestion>> {
     let Some(observed) = claims_of_kind_in_order(connection, subject, OBSERVED)?.pop() else {
         return Ok(None);
     };
     let resolution = match claims_of_kind_in_order(connection, subject, RESOLVED)?.first() {
         Some(claim) => {
-            if at.is_some_and(|at| checkpoint_rules::question_expired(claim.accepted_at_unix_ms, at)) {
-                return Ok(None);
-            }
             let fields = claim.body["fields"].as_object().cloned().unwrap_or_default();
             Some(QuestionResolution {
                 status: field(claim, "status")?,
@@ -108,13 +104,12 @@ fn json_fields(value: Value) -> BTreeMap<String, Value> {
 }
 
 impl Store {
-    /// The question `subject` as of `at`, or `None` when st holds no such question or it was
-    /// resolved at least a day before `at`.
+    /// The question `subject`, including its indefinitely retained resolution when it ended.
     pub fn harness_question(&self, subject: &str, at: u128) -> Result<Option<HarnessQuestion>> {
         question_at(&self.readers.get(), subject, Some(at))
     }
 
-    /// The question `subject` as long as st holds its claims, resolved a day ago or not.
+    /// The question `subject` as long as st holds its claims.
     fn harness_question_held(&self, subject: &str) -> Result<Option<HarnessQuestion>, St3Error> {
         question_at(&self.readers.get(), subject, None).map_err(internal)
     }
@@ -153,10 +148,6 @@ impl Store {
             {
                 return Ok(current);
             }
-        } else if self.latest_claim(&subject, None).map_err(internal)?.is_some() {
-            // Only a question resolved and dropped leaves nothing to fold; it stays ended.
-            return Err(St3Error::new("harness-question-resolved", "the question already ended")
-                .with_detail("question", subject));
         }
         self.append_claim(&ClaimInput {
             subject: subject.clone(),
@@ -357,16 +348,22 @@ mod tests {
     }
 
     #[test]
-    fn a_resolved_question_is_gone_a_day_after_its_resolution() {
-        let store = Store::open_memory("alder").unwrap();
+    fn an_expired_question_keeps_its_answer_and_receipt_forever_and_cannot_resurrect() {
+        let store = Store::open_memory("operator").unwrap();
         store.set_write_clock_at(10 * DAY).unwrap();
         let question = store.observe_harness_question(&observation()).unwrap();
+        let receipt = Receipt {
+            actor_key: actor_key("person/alex", "request-1"),
+            request_digest: "a".repeat(64),
+            action_id: "action/tester".into(),
+        };
         let (resolved, _) = store
-            .resolve_harness_question(&question.id, Status::Expired, &question.revision, &BTreeMap::new(), None)
+            .resolve_harness_question(&question.id, Status::Expired, &question.revision, &answer(1), Some(&receipt))
             .unwrap();
-        let at = resolved.resolution.as_ref().unwrap().resolved_at_unix_ms;
-        assert!(store.harness_question(&question.id, at + DAY - 1).unwrap().is_some());
-        assert!(store.harness_question(&question.id, at + DAY).unwrap().is_none());
+        assert_eq!(store.harness_question(&question.id, u128::MAX).unwrap(), Some(resolved.clone()));
+        assert_eq!(resolved.resolution.as_ref().unwrap().answers, answer(1));
+        assert_eq!(resolved.settled_by("person/alex", "request-1"), Some(&receipt));
+        assert_eq!(store.observe_harness_question(&observation()).unwrap_err().code, "harness-question-resolved");
         // A pending question has no end of life.
         let mut other = observation();
         other.native_id = "call-2".into();
