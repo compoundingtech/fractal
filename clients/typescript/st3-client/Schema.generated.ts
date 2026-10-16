@@ -386,12 +386,12 @@ export const PersonStepParameters = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonStepParameters = typeof PersonStepParameters.Type
 export type PersonStepParametersEncoded = typeof PersonStepParameters.Encoded
 
-/** A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as a JSON object of each question's text to its chosen label (several comma-separated for a multi-select) in place of answer; a screen prompt's own answer (use, use-all, skip, trust, exit, quit). */
+/** A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {"0":[1],"1":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit). */
 export const PromptRespondParameters = /*#__PURE__*/ (() => Schema.Struct({
   "answer": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(16384)),
   "episode": Schema.String,
   "target_id": Id
-}).annotate({ identifier: "PromptRespondParameters", description: "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as a JSON object of each question's text to its chosen label (several comma-separated for a multi-select) in place of answer; a screen prompt's own answer (use, use-all, skip, trust, exit, quit)." }))()
+}).annotate({ identifier: "PromptRespondParameters", description: "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {\"0\":[1],\"1\":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit)." }))()
 export type PromptRespondParameters = typeof PromptRespondParameters.Type
 export type PromptRespondParametersEncoded = typeof PromptRespondParameters.Encoded
 
@@ -1698,6 +1698,82 @@ export const Message = /*#__PURE__*/ (() => Schema.Struct({
 export type Message = typeof Message.Type
 export type MessageEncoded = typeof Message.Encoded
 
+export const MissionActionOffer = /*#__PURE__*/ (() => Schema.Struct({
+  /** The client-v0 action that does it. */
+  "action": Schema.String.annotate({ description: "The client-v0 action that does it." }),
+  /** Binding: ask for a second tap first. */
+  "confirm": Schema.Boolean.annotate({ description: "Binding: ask for a second tap first." }),
+  "id": Schema.Literals(["retry-step","restart-agent","cancel-run","chat"]),
+  "target": Id
+}).annotate({ identifier: "MissionActionOffer" }))()
+export type MissionActionOffer = typeof MissionActionOffer.Type
+export type MissionActionOfferEncoded = typeof MissionActionOffer.Encoded
+
+export const MissionQueuedBehind = /*#__PURE__*/ (() => Schema.Struct({
+  "agent": AgentId,
+  "busy_with": Schema.OptionFromOptionalNullOr(Schema.Struct({ "label": Schema.String, "mission": Id, "path": Schema.String }), NULL_NONE),
+  "label": Schema.String,
+  "state": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE)
+}).annotate({ identifier: "MissionQueuedBehind" }))()
+export type MissionQueuedBehind = typeof MissionQueuedBehind.Type
+export type MissionQueuedBehindEncoded = typeof MissionQueuedBehind.Encoded
+
+/** A person (a client says 'you' when it is the reader), an agent, st's own agentless work, or nobody. */
+export const PresentationActor = /*#__PURE__*/ (() => Schema.Struct({
+  "agent": optionalKey(AgentId),
+  "kind": Schema.Literals(["person","agent","st","nobody"]),
+  "label": optionalKey(Schema.String),
+  "person": optionalKey(Id)
+}).annotate({ identifier: "PresentationActor", description: "A person (a client says 'you' when it is the reader), an agent, st's own agentless work, or nobody." }))()
+export type PresentationActor = typeof PresentationActor.Type
+export type PresentationActorEncoded = typeof PresentationActor.Encoded
+
+export const MissionStepPresentation = /*#__PURE__*/ (() => Schema.Struct({
+  "attempts": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "blockers": Schema.Array(Schema.String),
+  "id": StepRunId,
+  "keep_open": Schema.Boolean,
+  /** The queue it waits in, or st's reason while it waits. */
+  "note": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The queue it waits in, or st's reason while it waits." }),
+  "owner": PresentationActor,
+  "path": Schema.String,
+  "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "word": Schema.Literals(["needs_you","done","working","ready","waiting","cancelled","failed","pending"])
+}).annotate({ identifier: "MissionStepPresentation" }))()
+export type MissionStepPresentation = typeof MissionStepPresentation.Type
+export type MissionStepPresentationEncoded = typeof MissionStepPresentation.Encoded
+
+export const MissionStuck = /*#__PURE__*/ (() => Schema.Struct({
+  /** The step's seat: its claimant, else its assignee, else the agent queuing it. */
+  "agent": Schema.OptionFromOptionalNullOr(Schema.Struct({ "id": AgentId, "label": Schema.String, "state": Schema.String }), NULL_NONE).annotate({ description: "The step's seat: its claimant, else its assignee, else the agent queuing it." }),
+  "attempts": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "blockers": Schema.Array(Schema.String),
+  "step": StepRunId,
+  "word": Schema.Literals(["needs_you","done","working","ready","waiting","cancelled","failed","pending"])
+}).annotate({ identifier: "MissionStuck" }))()
+export type MissionStuck = typeof MissionStuck.Type
+export type MissionStuckEncoded = typeof MissionStuck.Encoded
+
+export const MissionPresentation = /*#__PURE__*/ (() => Schema.Struct({
+  "actions": Schema.Array(MissionActionOffer),
+  "card": Schema.OptionFromNullOr(Schema.Literals(["what-you-can-do","nothing-to-do"])),
+  "last_progress": Schema.OptionFromNullOr(Schema.String),
+  "progress": Schema.Struct({ "done": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "total": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
+  "queued_behind": Schema.OptionFromNullOr(MissionQueuedBehind),
+  /** When it completed, failed or was cancelled. */
+  "settled_at": Schema.OptionFromNullOr(Timestamp).annotate({ description: "When it completed, failed or was cancelled." }),
+  /** The steps of the open runs, or of the latest run, in display order. */
+  "steps": Schema.Array(MissionStepPresentation).annotate({ description: "The steps of the open runs, or of the latest run, in display order." }),
+  "stuck": Schema.OptionFromNullOr(MissionStuck),
+  "system": Schema.Boolean,
+  /** Who must act now. */
+  "who": PresentationActor,
+  /** The mission word, by its fixtures/clients/words.json id. */
+  "word": Schema.Literals(["decision","stalled","unstaffed","unclaimed","queued","working","watching","held","idle","done","failed","cancelled","not_started"]).annotate({ description: "The mission word, by its fixtures/clients/words.json id." })
+}).annotate({ identifier: "MissionPresentation" }))()
+export type MissionPresentation = typeof MissionPresentation.Type
+export type MissionPresentationEncoded = typeof MissionPresentation.Encoded
+
 /** Terminal outcome of a finished run. */
 export const RunOutcomeStatus = /*#__PURE__*/ (() => openEnum(["completed","failed","cancelled"]).annotate({ identifier: "RunOutcomeStatus", description: "Terminal outcome of a finished run." }))()
 export type RunOutcomeStatus = typeof RunOutcomeStatus.Type
@@ -1801,6 +1877,8 @@ export const Mission = /*#__PURE__*/ (() => Schema.Struct({
   "mission_revision": Revision,
   "must_act": optionalKey(MustAct),
   "operational": optionalKey(Operational),
+  /** st's presentation of this mission: its word, who must act, each step, the stuck step and what a person can do (docs/clients/ui-contract.md, Mission). Absent on older daemons and until st has a published agents roster. */
+  "presentation": optionalKey(MissionPresentation),
   "revision": Revision,
   "run_counts": optionalKey(Schema.Record(Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))),
   "run_details": optionalKey(Schema.Array(MissionRunSummary)),
