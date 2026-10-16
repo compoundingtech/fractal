@@ -717,22 +717,57 @@ mod tests {
     /// inherited fd only at exec, not at fork. The outer runner owns no leases.
     fn isolated_case(name: &str) -> Result<bool> {
         // Deliberate red control for the descriptor-table regression below only.
-        if std::env::var_os("ST_CLIENT_MODE_DISABLE_TEST_ISOLATION").is_some() {
+        if let Some(control) = std::env::var_os("ST_CLIENT_MODE_DISABLE_TEST_ISOLATION") {
+            ensure!(
+                control == "1"
+                    && matches!(
+                        name,
+                        "parallel_case_descriptor_isolation_prevents_cross_test_fork_leaks"
+                            | "lease_cross_case_a"
+                            | "lease_cross_case_b"
+                    ),
+                "Isolation-disable control is forbidden outside its dedicated regression"
+            );
             return Ok(false);
         }
         if std::env::var("ST_CLIENT_MODE_TEST_CASE").ok().as_deref() == Some(name) {
             return Ok(false);
         }
-        let status = std::process::Command::new(std::env::current_exe()?)
+        let output = std::process::Command::new(std::env::current_exe()?)
             .args([
                 "--exact",
                 &format!("client_mode::tests::{name}"),
                 "--nocapture",
             ])
             .env("ST_CLIENT_MODE_TEST_CASE", name)
-            .status()?;
-        ensure!(status.success(), "Isolated client-mode case failed: {name}");
+            .output()?;
+        std::io::stdout().write_all(&output.stdout)?;
+        std::io::stderr().write_all(&output.stderr)?;
+        ensure!(
+            output.status.success(),
+            "Isolated client-mode case failed: {name}"
+        );
+        // The last summary belongs to the selected outer case; a dedicated
+        // negative control may itself print a nested zero-test summary.
+        let stdout = std::str::from_utf8(&output.stdout)?;
+        let summary = stdout
+            .lines()
+            .filter(|line| line.starts_with("test result:"))
+            .last();
+        ensure!(
+            summary.is_some_and(|line| line.starts_with("test result: ok. 1 passed;")),
+            "Isolated exact selector did not run one case: {name}"
+        );
         Ok(true)
+    }
+
+    #[test]
+    fn isolated_case_refuses_an_unknown_exact_name() -> Result<()> {
+        if isolated_case("isolated_case_refuses_an_unknown_exact_name")? {
+            return Ok(());
+        }
+        assert!(isolated_case("__missing_client_mode_case_control__").is_err());
+        Ok(())
     }
 
     fn private_tempdir() -> Result<tempfile::TempDir> {
