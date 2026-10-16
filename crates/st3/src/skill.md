@@ -25,8 +25,10 @@ A wake message is a direct connection: it wakes the recipient agent for a full t
 Ordinary `st agents ls` and `st agents tree` read the latest published roster without
 requesting a refresh. Immediately after starting or changing an agent they can show the
 earlier roster; after daemon startup the roster may still be being prepared. When you need
-to see your own write, pass its same-host receipt `store_index` as `min_cut` to the agents
-client read and check the served snapshot index. This is not a replicated or cross-host cut.
+to see your own write, send `GET /v1/client/agents?min_cut=N` to the same host, using the
+write receipt's `store_index` as N, and require the returned `snapshot.store_index >= N`.
+The CLI has no `min_cut` flag. HTTP `fresh=true` retains its legacy refresh behavior, which
+is not a strict named-cut guarantee. A receipt is not a replicated or cross-host cut.
 
 `"$ST3_BIN" work ls --as "$ST_AGENT"` lists the steps available to this seat, and `work claim STEP --as "$ST_AGENT"` takes one and prints its goals, its constraints, and this machine's host facts.
 

@@ -156,7 +156,9 @@ class Evaluation(rig.Run):
   # This cleanup has no write receipt from the provider conversation. Preserve its
   # explicit legacy refresh, rather than depend on an implicit wait in ordinary CLI ls.
   seats=self.api("/v1/client/agents?fresh=true&limit=200","Fixture seats before stopping")
-  for seat in (seats or {}).get("items",[]):
+  if not isinstance(seats,dict) or not isinstance(seats.get("items"),list):
+   raise RuntimeError("cannot list fixture provider seats for cleanup; their IDs are unknown; stopped before stopping seats or cancelling runs")
+  for seat in seats["items"]:
    subject=seat.get("id") or seat.get("subject")
    if subject: self.cli("Stop fixture provider seat","agents","stop",subject,"--as","person/ada",timeout=15)
   runs=self.api("/v1/mission-runs?root=mission-run%2Fst%2Fonboarding","Fixture runs before cancellation")
