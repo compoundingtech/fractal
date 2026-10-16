@@ -790,21 +790,39 @@ fn same_snapshot_survives_a_wal_commit_but_is_not_an_owner_lifetime_certificate(
             "10",
         );
     }
+    let mut committed = false;
     let point = capture_with(&store, "message/selected", |stage| {
         if stage == Stage::AfterOwnHeaders {
             // Physical WAL control, not ordinary signed immutable-claim mutation.
-            store
-                .connection
-                .write()
-                .execute(
-                    "UPDATE claims SET body=?1 WHERE id='sent'",
-                    [sent("worker", "new", &[]).to_string()],
-                )
-                .unwrap();
+            // The reader pin stays on this thread; the independent writer thread
+            // borrows the distinct physical writer connection. Join its autocommit
+            // outcome before capture continues, without bypassing the pin guard.
+            assert!(!committed);
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let db = store.connection.write();
+                        // This isolated fixture has no competing writer. Unexpected
+                        // SQLite lock contention must fail immediately, not wait for
+                        // the pinned reader that deliberately stays open until join.
+                        db.busy_timeout(Duration::ZERO).unwrap();
+                        let changed = db
+                            .execute(
+                                "UPDATE claims SET body=?1 WHERE id='sent'",
+                                [sent("worker", "new", &[]).to_string()],
+                            )
+                            .expect("the independent WAL write must not wait for the reader");
+                        assert_eq!(changed, 1);
+                    })
+                    .join()
+                    .unwrap();
+            });
+            committed = true;
         }
     })
     .unwrap()
     .unwrap();
+    assert!(committed, "the write must occur after header admission");
     let next = capture_point(&store, "message/selected").unwrap().unwrap();
     assert_eq!(point.core.message.content, "old");
     assert_eq!(next.core.message.content, "new");
