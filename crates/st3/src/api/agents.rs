@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Deserialize)]
-struct AgentRolloutRequest {
+pub(super) struct AgentRolloutRequest {
     subject: String,
     actor: String,
     expected_desired: String,
@@ -10,7 +10,7 @@ struct AgentRolloutRequest {
     idempotency_key: String,
 }
 
-async fn rollout_agent(
+pub(super) async fn rollout_agent(
     State(state): State<AppState>,
     Json(request): Json<AgentRolloutRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -52,7 +52,7 @@ async fn rollout_agent(
 }
 
 #[derive(Deserialize)]
-struct AgentRestartRequest {
+pub(super) struct AgentRestartRequest {
     subject: String,
     actor: String,
     idempotency_key: String,
@@ -61,7 +61,7 @@ struct AgentRestartRequest {
     now: bool,
 }
 
-async fn restart_agent(
+pub(super) async fn restart_agent(
     State(state): State<AppState>,
     Json(request): Json<AgentRestartRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -190,7 +190,7 @@ async fn restart_agent(
 }
 
 #[derive(Deserialize)]
-struct MissionSeatStartRequest {
+pub(super) struct MissionSeatStartRequest {
     subject: String,
     actor: String,
     /// The selected stop the caller read, when it read one.
@@ -200,7 +200,7 @@ struct MissionSeatStartRequest {
 }
 
 /// Record an operator's source-offline exception for one exact placement.
-async fn override_placement_source(
+pub(super) async fn override_placement_source(
     State(state): State<AppState>,
     Json(mut request): Json<crate::placement::SourceOfflineRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -216,7 +216,7 @@ async fn override_placement_source(
 }
 
 /// Start a stopped mission seat on the declaration its run gave it, as `st agents start` does.
-async fn start_mission_seat(
+pub(super) async fn start_mission_seat(
     State(state): State<AppState>,
     Json(request): Json<MissionSeatStartRequest>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
@@ -238,7 +238,7 @@ async fn start_mission_seat(
 /// Ask the seat's owner to suspend it. The seat must be running and quiet now: its driver reports
 /// the harness quiescent, it holds no claimed step and runs no subagent, and its driver has bound
 /// a native session to resume. The owner checks again before it stops anything.
-async fn suspend_agent(
+pub(super) async fn suspend_agent(
     State(state): State<AppState>,
     Json(request): Json<AgentSuspensionRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -254,7 +254,7 @@ pub(crate) struct SnapshotReadRequest {
     pub offset: u64,
 }
 
-async fn seat_snapshot_chunk(
+pub(super) async fn seat_snapshot_chunk(
     State(state): State<AppState>,
     Json(request): Json<SnapshotReadRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -303,7 +303,7 @@ async fn seat_snapshot_chunk(
 }
 
 /// Ask the seat's owner to resume a suspended seat on the native session it suspended.
-async fn resume_agent(
+pub(super) async fn resume_agent(
     State(state): State<AppState>,
     Json(request): Json<AgentSuspensionRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -311,7 +311,7 @@ async fn resume_agent(
 }
 
 #[derive(Deserialize)]
-struct NativeSessionReport {
+pub(super) struct NativeSessionReport {
     #[serde(default)]
     account_ref: Option<String>,
     subject: String,
@@ -327,7 +327,7 @@ struct NativeSessionReport {
 
 /// A seat's driver reports the native session its harness bound for one incarnation. Only the
 /// seat itself reports its own session.
-async fn report_native_session(
+pub(super) async fn report_native_session(
     State(state): State<AppState>,
     Json(request): Json<NativeSessionReport>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -386,14 +386,14 @@ async fn report_native_session(
 }
 
 #[derive(Deserialize)]
-struct AgentRenameRequest {
+pub(super) struct AgentRenameRequest {
     subject: String,
     name: Option<String>,
     actor: String,
     idempotency_key: String,
 }
 
-async fn rename_agent(
+pub(super) async fn rename_agent(
     State(state): State<AppState>,
     Json(request): Json<AgentRenameRequest>,
 ) -> Result<Json<ApplyResponse>, ApiError> {

@@ -1,6 +1,6 @@
 use super::*;
 
-async fn fleet_publish_endpoints(
+pub(super) async fn fleet_publish_endpoints(
     State(state): State<AppState>,
     Json(request): Json<FleetEndpointsRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -15,7 +15,7 @@ async fn fleet_publish_endpoints(
     Ok(Json(json!({ "published": written })))
 }
 
-async fn fleet_status(State(state): State<AppState>) -> Result<Json<FleetStatus>, ApiError> {
+pub(super) async fn fleet_status(State(state): State<AppState>) -> Result<Json<FleetStatus>, ApiError> {
     let peers = replication_peer_names(&state);
     let store = state.store.clone();
     let node = state.node.clone();
@@ -52,12 +52,12 @@ async fn fleet_status(State(state): State<AppState>) -> Result<Json<FleetStatus>
 }
 
 #[derive(Deserialize)]
-struct FleetInviteListQuery {
+pub(super) struct FleetInviteListQuery {
     #[serde(default)]
     all: bool,
 }
 
-async fn fleet_invite_list(
+pub(super) async fn fleet_invite_list(
     State(state): State<AppState>,
     Query(query): Query<FleetInviteListQuery>,
 ) -> Result<Json<Vec<crate::store::FleetInviteView>>, ApiError> {
@@ -67,7 +67,7 @@ async fn fleet_invite_list(
         .map(Json)
 }
 
-async fn fleet_invite_create(
+pub(super) async fn fleet_invite_create(
     State(state): State<AppState>,
     Json(request): Json<FleetInviteRequest>,
 ) -> Result<Json<FleetInviteCreated>, ApiError> {
@@ -105,7 +105,7 @@ async fn fleet_invite_create(
     Ok(Json(created))
 }
 
-async fn fleet_invite_revoke(
+pub(super) async fn fleet_invite_revoke(
     State(state): State<AppState>,
     Json(request): Json<FleetInviteRevokeRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -124,7 +124,7 @@ async fn fleet_invite_revoke(
     Ok(Json(json!({ "revoked": true })))
 }
 
-async fn fleet_redeem(
+pub(super) async fn fleet_redeem(
     State(state): State<AppState>,
     Json(request): Json<crate::fleet::handshake::JoinRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -171,7 +171,7 @@ async fn fleet_redeem(
     Ok(Json(answer))
 }
 
-async fn fleet_remove(
+pub(super) async fn fleet_remove(
     State(state): State<AppState>,
     Json(request): Json<FleetRemoveRequest>,
 ) -> Result<Json<crate::store::FleetRemoval>, ApiError> {
@@ -185,7 +185,7 @@ async fn fleet_remove(
     Ok(Json(removal))
 }
 
-async fn fleet_leave_begin(
+pub(super) async fn fleet_leave_begin(
     State(state): State<AppState>,
     Json(request): Json<FleetPersonRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -196,7 +196,7 @@ async fn fleet_leave_begin(
 }
 
 /// The body is read and ignored, so the answer never races a client still sending it.
-async fn fleet_leave_cancel(
+pub(super) async fn fleet_leave_cancel(
     State(state): State<AppState>,
     _body: axum::body::Bytes,
 ) -> Result<Json<Value>, ApiError> {
@@ -205,7 +205,7 @@ async fn fleet_leave_cancel(
     Ok(Json(json!({ "leaving": false })))
 }
 
-async fn fleet_leave_claim(
+pub(super) async fn fleet_leave_claim(
     State(state): State<AppState>,
     Json(request): Json<FleetPersonRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -216,7 +216,7 @@ async fn fleet_leave_claim(
     Ok(Json(claim))
 }
 
-async fn fleet_membership_view(
+pub(super) async fn fleet_membership_view(
     State(state): State<AppState>,
 ) -> Result<Json<crate::fleet::FleetView>, ApiError> {
     let store = state.store.clone();
@@ -227,7 +227,7 @@ async fn fleet_membership_view(
 
 /// What doctor's fleet-admission check reports as admitted before this node knew better, for
 /// `st fleet wait` to refuse on.
-async fn fleet_admission_residue(
+pub(super) async fn fleet_admission_residue(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<smallclaims::store::FleetAdmissionResidue>>, ApiError> {
     let store = state.store.clone();

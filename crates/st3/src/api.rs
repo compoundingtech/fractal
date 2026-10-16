@@ -104,6 +104,44 @@ pub use tile_endpoint::{
 pub use published_lists::start_published_lists;
 mod changes;
 
+// Route families: each file holds the handlers of one group of routes; the router below names
+// them as family::handler.
+mod agents;
+mod client_reads;
+mod fleet;
+mod launches;
+mod messages;
+mod operations;
+mod records;
+mod replication;
+mod runs;
+mod sessions;
+mod work;
+// Other api code calls these handlers directly.
+use launches::{
+    approve_planning_session, cancel_planning_session, mission, preview_named_planning_candidate,
+    revise_planning_session, start_planning_session,
+};
+use messages::post_message_claim;
+use operations::{get_slo, get_slo_history};
+use records::post_review;
+use sessions::clear_context;
+use work::retry_work;
+// The tests call these handlers directly.
+#[cfg(test)]
+use client_reads::{
+    client_agents, client_agents_detail, client_history, client_history_detail,
+    client_launches_detail, client_work,
+};
+#[cfg(test)]
+use messages::list_messages;
+#[cfg(test)]
+use operations::{doctor, events};
+#[cfg(test)]
+use records::post_claim;
+#[cfg(test)]
+use replication::{replication_export, replication_receive, replication_wake};
+
 pub(crate) use client_v0::raw_terminal::splice as raw_terminal_splice;
 pub(crate) use client_v0::raw_terminal::{
     Lease as RawTerminalLease, LeaseBinding as RawTerminalLeaseBinding,
@@ -521,7 +559,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
-        .route("/v1/harnesses", get(available_harnesses))
+        .route("/v1/harnesses", get(operations::available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
         .route("/v1/client/notes", get(directive_notes::read))
         .route("/v1/notes", axum::routing::put(directive_notes::write))
@@ -560,48 +598,48 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/client/machines", get(client_v0::machines))
         .route("/v1/client/hosts/{*id}", get(client_v0::host_repositories))
         .route("/v1/client/devices", get(client_v0::devices))
-        .route("/v1/client/attention", get(client_attention))
-        .route("/v1/client/attention/{*id}", get(client_attention_detail))
+        .route("/v1/client/attention", get(client_reads::client_attention))
+        .route("/v1/client/attention/{*id}", get(client_reads::client_attention_detail))
         // The same rows under the name a person reads.
-        .route("/v1/client/alerts", get(client_attention))
-        .route("/v1/client/alerts/{*id}", get(client_attention_detail))
-        .route("/v1/client/messages", get(client_messages))
-        .route("/v1/client/messages/{*id}", get(client_messages_detail))
+        .route("/v1/client/alerts", get(client_reads::client_attention))
+        .route("/v1/client/alerts/{*id}", get(client_reads::client_attention_detail))
+        .route("/v1/client/messages", get(client_reads::client_messages))
+        .route("/v1/client/messages/{*id}", get(client_reads::client_messages_detail))
         .route("/v1/client/message-bodies/{*id}", get(message_bodies::client_body))
-        .route("/v1/client/launches", get(client_launches))
+        .route("/v1/client/launches", get(client_reads::client_launches))
         .route(
             "/v1/client/launches/{id}/variants",
-            get(client_launch_variants),
+            get(client_reads::client_launch_variants),
         )
         .route(
             "/v1/client/launches/{id}/variants/{variant}",
-            get(client_launch_variant_detail),
+            get(client_reads::client_launch_variant_detail),
         )
         .route(
             "/v1/client/launches/{id}/decisions",
-            get(client_launch_decisions),
+            get(client_reads::client_launch_decisions),
         )
         .route(
             "/v1/client/launches/{id}/decisions/{decision}",
-            get(client_launch_decision_detail),
+            get(client_reads::client_launch_decision_detail),
         )
         .route(
             "/v1/client/launches/{id}/approvals",
-            get(client_launch_approvals),
+            get(client_reads::client_launch_approvals),
         )
         .route(
             "/v1/client/launches/{id}/approvals/{approval}",
-            get(client_launch_approval_detail),
+            get(client_reads::client_launch_approval_detail),
         )
-        .route("/v1/client/launches/{id}", get(client_launches_detail))
-        .route("/v1/client/work", get(client_work))
+        .route("/v1/client/launches/{id}", get(client_reads::client_launches_detail))
+        .route("/v1/client/work", get(client_reads::client_work))
         .route("/v1/client/changes", get(changes::list))
         .route("/v1/client/changes/sync", post(changes::sync))
         .route("/v1/client/change", get(changes::show))
-        .route("/v1/client/work/{*id}", get(client_work_detail))
-        .route("/v1/client/agents", get(client_agents))
+        .route("/v1/client/work/{*id}", get(client_reads::client_work_detail))
+        .route("/v1/client/agents", get(client_reads::client_agents))
         .route("/v1/client/resources", get(client_v0::resources::list))
-        .route("/v1/client/agents/{*id}", get(client_agents_detail))
+        .route("/v1/client/agents/{*id}", get(client_reads::client_agents_detail))
         .route(
             "/v1/client/agent-workspaces/{*id}",
             get(client_v0::agent_workspace),
@@ -614,8 +652,8 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/client/status-history/{*id}", get(client_v0::status_history))
         .route("/v1/client/lanes", get(client_v0::lanes))
         .route("/v1/client/lanes/{*id}", get(client_v0::lane_detail))
-        .route("/v1/client/history", get(client_history))
-        .route("/v1/client/history/{*id}", get(client_history_detail))
+        .route("/v1/client/history", get(client_reads::client_history))
+        .route("/v1/client/history/{*id}", get(client_reads::client_history_detail))
         .route(
             "/v1/client/conversations/search",
             get(client_v0::search::search),
@@ -624,8 +662,8 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
             "/v1/client/conversations/{id}/content/{reference}/chunk",
             get(client_v0::conversation_blocks::chunk),
         )
-        .route("/v1/client/sessions", get(client_sessions))
-        .route("/v1/client/sessions/{*id}", get(client_sessions_detail))
+        .route("/v1/client/sessions", get(client_reads::client_sessions))
+        .route("/v1/client/sessions/{*id}", get(client_reads::client_sessions_detail))
         .route(
             "/v1/client/conversations/{id}/changes",
             get(client_v0::conversation_changes),
@@ -699,91 +737,91 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/custom/basis", get(custom::basis))
         .route("/v1/client/custom-subjects", get(custom::list))
         .route("/v1/client/custom-subjects/{*id}", get(custom::read))
-        .route("/v1/intent/mission", post(mission))
-        .route("/v1/gate-checks", post(start_gate_check))
-        .route("/v1/gate-checks/{id}", get(read_gate_check))
+        .route("/v1/intent/mission", post(launches::mission))
+        .route("/v1/gate-checks", post(runs::start_gate_check))
+        .route("/v1/gate-checks/{id}", get(runs::read_gate_check))
         .route("/v1/sets/preview", post(owned_sets::preview))
         .route("/v1/sets/apply", post(owned_sets::apply))
-        .route("/v1/intent/apply", post(apply_with_bound))
-        .route("/v1/agents/rename", post(rename_agent))
-        .route("/v1/agents/restart", post(restart_agent))
-        .route("/v1/agents/rollout", post(rollout_agent))
-        .route("/v1/agents/start", post(start_mission_seat))
-        .route("/v1/agents/source-offline", post(override_placement_source))
-        .route("/v1/agents/suspend", post(suspend_agent))
-        .route("/v1/agents/resume", post(resume_agent))
-        .route("/v1/internal/seat-snapshot", post(seat_snapshot_chunk))
-        .route("/v1/agents/native-session", post(report_native_session))
-        .route("/v1/missions/{id}", get(get_mission))
-        .route("/v1/missions/{id}/retire", post(retire_mission))
-        .route("/v1/launches/{id}", get(get_planning_session))
-        .route("/v1/launches/{id}/submit", post(submit_planning_candidate))
+        .route("/v1/intent/apply", post(launches::apply_with_bound))
+        .route("/v1/agents/rename", post(agents::rename_agent))
+        .route("/v1/agents/restart", post(agents::restart_agent))
+        .route("/v1/agents/rollout", post(agents::rollout_agent))
+        .route("/v1/agents/start", post(agents::start_mission_seat))
+        .route("/v1/agents/source-offline", post(agents::override_placement_source))
+        .route("/v1/agents/suspend", post(agents::suspend_agent))
+        .route("/v1/agents/resume", post(agents::resume_agent))
+        .route("/v1/internal/seat-snapshot", post(agents::seat_snapshot_chunk))
+        .route("/v1/agents/native-session", post(agents::report_native_session))
+        .route("/v1/missions/{id}", get(launches::get_mission))
+        .route("/v1/missions/{id}/retire", post(launches::retire_mission))
+        .route("/v1/launches/{id}", get(launches::get_planning_session))
+        .route("/v1/launches/{id}/submit", post(launches::submit_planning_candidate))
         .route(
             "/v1/launches/{id}/variants/{variant}/submit",
-            post(submit_named_planning_candidate),
+            post(launches::submit_named_planning_candidate),
         )
         .route(
             "/v1/launches/{id}/preview",
-            post(preview_planning_candidate),
+            post(launches::preview_planning_candidate),
         )
         .route(
             "/v1/launches/{id}/variants/{variant}/preview",
-            post(preview_named_planning_candidate),
+            post(launches::preview_named_planning_candidate),
         )
         .route(
             "/v1/launches/{id}/variants/{left}/compare/{right}",
-            get(compare_planning_variants),
+            get(launches::compare_planning_variants),
         )
         .route(
             "/v1/launches/{id}/variants/{variant}/propose",
-            post(propose_planning_variant),
+            post(launches::propose_planning_variant),
         )
-        .route("/v1/launches/{id}/approve", post(approve_planning_session))
+        .route("/v1/launches/{id}/approve", post(launches::approve_planning_session))
         .route(
             "/v1/launches/{id}/approve-and-launch",
-            post(approve_and_start_launch),
+            post(launches::approve_and_start_launch),
         )
-        .route("/v1/launches/{id}/start", post(start_approved_launch))
-        .route("/v1/launches/{id}/decisions", post(request_launch_decision))
+        .route("/v1/launches/{id}/start", post(launches::start_approved_launch))
+        .route("/v1/launches/{id}/decisions", post(launches::request_launch_decision))
         .route(
             "/v1/launches/{id}/decisions/{decision}/answer",
-            post(answer_launch_decision),
+            post(launches::answer_launch_decision),
         )
-        .route("/v1/launches", post(start_planning_session))
-        .route("/v1/launches/{id}/revise", post(revise_planning_session))
-        .route("/v1/launches/{id}/cancel", post(cancel_planning_session))
-        .route("/v1/documents", get(list_documents).post(put_document))
-        .route("/v1/rules", get(list_rules))
-        .route("/v1/rules/audit", get(list_rule_audits))
-        .route("/v1/rules/set", post(set_rule))
-        .route("/v1/documents/content", get(get_document))
-        .route("/v1/diagnostics/harness", post(post_harness_diagnostic))
+        .route("/v1/launches", post(launches::start_planning_session))
+        .route("/v1/launches/{id}/revise", post(launches::revise_planning_session))
+        .route("/v1/launches/{id}/cancel", post(launches::cancel_planning_session))
+        .route("/v1/documents", get(records::list_documents).post(records::put_document))
+        .route("/v1/rules", get(records::list_rules))
+        .route("/v1/rules/audit", get(records::list_rule_audits))
+        .route("/v1/rules/set", post(records::set_rule))
+        .route("/v1/documents/content", get(records::get_document))
+        .route("/v1/diagnostics/harness", post(operations::post_harness_diagnostic))
         .route(
             "/v1/delivery/hold",
             get(get_delivery_hold).post(post_delivery_hold),
         )
-        .route("/v1/claims", get(list_claims).post(post_claim))
-        .route("/v1/usage", get(get_usage))
-        .route("/v1/slo", get(get_slo))
-        .route("/v1/slo/history", get(get_slo_history))
-        .route("/v1/usage/messages", get(get_coordination_counts))
-        .route("/v1/claims/by-id/{id}", get(get_claim))
-        .route("/v1/reviews", get(list_reviews))
-        .route("/v1/reviews/{*subject}", post(post_review))
+        .route("/v1/claims", get(records::list_claims).post(records::post_claim))
+        .route("/v1/usage", get(operations::get_usage))
+        .route("/v1/slo", get(operations::get_slo))
+        .route("/v1/slo/history", get(operations::get_slo_history))
+        .route("/v1/usage/messages", get(operations::get_coordination_counts))
+        .route("/v1/claims/by-id/{id}", get(records::get_claim))
+        .route("/v1/reviews", get(records::list_reviews))
+        .route("/v1/reviews/{*subject}", post(records::post_review))
         .route("/v1/work/delegation", post(set_delegation_policy))
-        .route("/v1/attention", get(list_attention).post(request_attention))
-        .route("/v1/attention/resolve/{*subject}", post(resolve_attention))
-        .route("/v1/subscription-requests", get(list_subscription_requests))
+        .route("/v1/attention", get(records::list_attention).post(records::request_attention))
+        .route("/v1/attention/resolve/{*subject}", post(records::resolve_attention))
+        .route("/v1/subscription-requests", get(messages::list_subscription_requests))
         .route(
             "/v1/subscription-requests/{decision}/{request}",
-            post(decide_subscription_request),
+            post(messages::decide_subscription_request),
         )
         .route(
             "/v1/attention/withdraw/{*subject}",
-            post(withdraw_attention),
+            post(records::withdraw_attention),
         )
-        .route("/v1/messages", get(list_messages).post(send_message))
-        .route("/v1/messages/page", get(list_messages_page))
+        .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
+        .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
         .route("/v1/mailbox", get(mailbox::subscribe))
         .route("/v1/harness-events", post(harness_events::publish))
@@ -792,38 +830,38 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/mailbox/bind", post(mailbox::bind))
         .route("/v1/mailbox/attachment", get(mailbox::attachment))
         .route("/v1/mailbox/receipts", post(mailbox::receipt))
-        .route("/v1/messages/{message_id}/claims", post(post_message_claim))
-        .route("/v1/messages/read/{*subject}", get(read_message))
+        .route("/v1/messages/{message_id}/claims", post(messages::post_message_claim))
+        .route("/v1/messages/read/{*subject}", get(messages::read_message))
         .route("/v1/messages/body/{*subject}", get(message_bodies::body))
-        .route("/v1/messages/delivery/{*subject}", get(message_delivery))
-        .route("/v1/messages/by-key", get(message_by_key))
-        .route("/v1/status", get(status))
-        .route("/v1/desired/{*subject}", get(get_desired))
-        .route("/v1/events", get(events))
+        .route("/v1/messages/delivery/{*subject}", get(messages::message_delivery))
+        .route("/v1/messages/by-key", get(messages::message_by_key))
+        .route("/v1/status", get(operations::status))
+        .route("/v1/desired/{*subject}", get(operations::get_desired))
+        .route("/v1/events", get(operations::events))
         .route("/v1/events/page", get(events_page))
-        .route("/v1/doctor", get(doctor))
-        .route("/v1/repair", get(operational_repair_plan))
-        .route("/v1/repair/apply", post(apply_operational_repair))
-        .route("/v1/backup", get(backup_export))
-        .route("/v1/replication/status", get(replication_status))
-        .route("/v1/replication/records", get(replication_records))
-        .route("/v1/replication/records/{*record}", get(replication_record))
-        .route("/v1/replication/repair", post(repair_replication_record))
-        .route("/v1/checkpoint/plan", post(checkpoint_plan))
-        .route("/v1/checkpoint/status", get(checkpoint_status))
-        .route("/v1/checkpoint/excuse", post(checkpoint_excuse))
-        .route("/v1/checkpoint/resume", post(checkpoint_resume))
+        .route("/v1/doctor", get(operations::doctor))
+        .route("/v1/repair", get(operations::operational_repair_plan))
+        .route("/v1/repair/apply", post(operations::apply_operational_repair))
+        .route("/v1/backup", get(operations::backup_export))
+        .route("/v1/replication/status", get(replication::replication_status))
+        .route("/v1/replication/records", get(replication::replication_records))
+        .route("/v1/replication/records/{*record}", get(replication::replication_record))
+        .route("/v1/replication/repair", post(replication::repair_replication_record))
+        .route("/v1/checkpoint/plan", post(replication::checkpoint_plan))
+        .route("/v1/checkpoint/status", get(replication::checkpoint_status))
+        .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
+        .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
         .route(
             "/v1/internal/replication/export",
-            post(replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
+            post(replication::replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
         )
         .route(
             "/v1/internal/replication/receive",
-            post(replication_receive).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
+            post(replication::replication_receive).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
         )
         .route(
             "/v1/internal/replication/peer-failure",
-            post(replication_peer_failure),
+            post(replication::replication_peer_failure),
         )
         .route(
             "/v1/internal/replication/worker-status",
@@ -831,71 +869,71 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         )
         .route(
             "/v1/internal/replication/checkpoint",
-            post(replication_checkpoint_manifest),
+            post(replication::replication_checkpoint_manifest),
         )
         .route(
             "/v1/internal/replication/checkpoint-need",
-            post(replication_checkpoint_need),
+            post(replication::replication_checkpoint_need),
         )
         .route(
             "/v1/internal/replication/checkpoint-adopt",
-            post(replication_checkpoint_adopt)
+            post(replication::replication_checkpoint_adopt)
                 .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
         )
-        .route("/v1/internal/fleet/membership", get(fleet_membership_view))
+        .route("/v1/internal/fleet/membership", get(fleet::fleet_membership_view))
         .route(
             "/v1/internal/fleet/admission-residue",
-            get(fleet_admission_residue),
+            get(fleet::fleet_admission_residue),
         )
-        .route("/v1/internal/fleet/status", get(fleet_status))
+        .route("/v1/internal/fleet/status", get(fleet::fleet_status))
         .route(
             "/v1/internal/fleet/invites",
-            get(fleet_invite_list).post(fleet_invite_create),
+            get(fleet::fleet_invite_list).post(fleet::fleet_invite_create),
         )
         .route(
             "/v1/internal/fleet/invites/revoke",
-            post(fleet_invite_revoke),
+            post(fleet::fleet_invite_revoke),
         )
-        .route("/v1/internal/fleet/redeem", post(fleet_redeem))
-        .route("/v1/internal/fleet/remove", post(fleet_remove))
-        .route("/v1/internal/fleet/leave/begin", post(fleet_leave_begin))
-        .route("/v1/internal/fleet/leave/cancel", post(fleet_leave_cancel))
-        .route("/v1/internal/fleet/leave/claim", post(fleet_leave_claim))
+        .route("/v1/internal/fleet/redeem", post(fleet::fleet_redeem))
+        .route("/v1/internal/fleet/remove", post(fleet::fleet_remove))
+        .route("/v1/internal/fleet/leave/begin", post(fleet::fleet_leave_begin))
+        .route("/v1/internal/fleet/leave/cancel", post(fleet::fleet_leave_cancel))
+        .route("/v1/internal/fleet/leave/claim", post(fleet::fleet_leave_claim))
         .route(
             "/v1/internal/fleet/endpoints",
-            post(fleet_publish_endpoints),
+            post(fleet::fleet_publish_endpoints),
         )
-        .route("/v1/internal/replication-wake", post(replication_wake))
+        .route("/v1/internal/replication-wake", post(replication::replication_wake))
         .route(
             crate::peer::CLIENT_READ_FORWARD_PATH,
             post(forward_client_read).layer(DefaultBodyLimit::max(16_384)),
         )
-        .route("/v1/evals", post(start_eval))
-        .route("/v1/evals/{*run}", get(get_eval))
-        .route("/v1/mission-runs", get(list_mission_runs))
-        .route("/v1/mission-runs/tree", get(list_mission_run_tree))
-        .route("/v1/mission-overview", get(mission_overview))
-        .route("/v1/outcome-history", get(outcome_history))
-        .route("/v1/performance", get(performance_report))
+        .route("/v1/evals", post(runs::start_eval))
+        .route("/v1/evals/{*run}", get(runs::get_eval))
+        .route("/v1/mission-runs", get(runs::list_mission_runs))
+        .route("/v1/mission-runs/tree", get(runs::list_mission_run_tree))
+        .route("/v1/mission-overview", get(runs::mission_overview))
+        .route("/v1/outcome-history", get(runs::outcome_history))
+        .route("/v1/performance", get(runs::performance_report))
         .route(
             "/v1/mission-runs/{run}/generations",
-            get(list_run_generations),
+            get(runs::list_run_generations),
         )
         .route(
             "/v1/mission-runs/{run}/revision-proposal",
-            get(get_run_revision_proposal),
+            get(runs::get_run_revision_proposal),
         )
-        .route("/v1/mission-runs/{run}/revision", post(revise_mission_run))
+        .route("/v1/mission-runs/{run}/revision", post(runs::revise_mission_run))
         .route(
             "/v1/mission-runs/{run}/outcome",
-            post(set_mission_run_outcome),
+            post(runs::set_mission_run_outcome),
         )
         .route(
             "/v1/mission-runs/{run}/report-to",
-            post(set_mission_run_report),
+            post(runs::set_mission_run_report),
         )
-        .route("/v1/mission-runs/{run}", get(get_mission_run))
-        .route("/v1/run-generations/{generation}", get(get_run_generation))
+        .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
+        .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
         .route(
             "/v1/revision-proposals/{proposal}",
             get(get_revision_proposal),
@@ -908,44 +946,44 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
             "/v1/revision-proposals/{proposal}/cancel",
             post(cancel_revision_proposal),
         )
-        .route("/v1/work/ask", post(ask_person))
-        .route("/v1/work/start", post(start_work))
-        .route("/v1/work/handoff/{*subject}", post(handoff_work))
-        .route("/v1/work/acknowledge/{*subject}", post(acknowledge_work))
+        .route("/v1/work/ask", post(work::ask_person))
+        .route("/v1/work/start", post(work::start_work))
+        .route("/v1/work/handoff/{*subject}", post(work::handoff_work))
+        .route("/v1/work/acknowledge/{*subject}", post(work::acknowledge_work))
         .route("/v1/github/watch", post(github_watch::watch))
         .route("/v1/github/unwatch", post(github_watch::unwatch))
         .route("/v1/github/watches", get(github_watch::watches))
         .route("/v1/github/comment", post(github_watch::comment))
         .route("/v1/github/own", post(github_watch::own))
-        .route("/v1/work/done", post(done_person_step))
-        .route("/v1/work/cancel-ask", post(cancel_person_ask))
-        .route("/v1/work", get(list_work))
-        .route("/v1/work-items/{*subject}", get(get_work))
-        .route("/v1/work/mission/{*subject}", post(publish_work_mission))
-        .route("/v1/work/wake/{*subject}", post(wake_work))
-        .route("/v1/work/retry/{*subject}", post(retry_work))
-        .route("/v1/work/extend/{*subject}", post(extend_work))
-        .route("/v1/work/{action}/{*subject}", post(post_work_action))
-        .route("/v1/gate-results", post(post_gate_result))
-        .route("/v1/agent-queue-moves", post(move_agent_queue))
-        .route("/v1/sekrets/node", get(sekrets_node))
-        .route("/v1/sekrets/attest", post(sekrets_attest))
-        .route("/v1/lanes", get(list_lanes))
-        .route("/v1/lanes/{*lane}", get(get_lane))
-        .route("/v1/lane-changes", post(change_lane))
-        .route("/v1/sessions", get(list_sessions))
-        .route("/v1/sessions/{subject}/context/clear", post(clear_context))
-        .route("/v1/sessions/{subject}/signal", post(signal_session))
-        .route("/v1/sessions/input/{*subject}", post(input_session))
-        .route("/v1/sessions/logs/{*subject}", get(logs_session))
-        .route("/v1/sessions/screen/{*subject}", get(screen_session))
-        .route("/v1/sessions/attach/{*subject}", post(attach_session))
-        .route("/v1/sessions/{subject}/attach", post(attach_session))
+        .route("/v1/work/done", post(work::done_person_step))
+        .route("/v1/work/cancel-ask", post(work::cancel_person_ask))
+        .route("/v1/work", get(work::list_work))
+        .route("/v1/work-items/{*subject}", get(work::get_work))
+        .route("/v1/work/mission/{*subject}", post(work::publish_work_mission))
+        .route("/v1/work/wake/{*subject}", post(work::wake_work))
+        .route("/v1/work/retry/{*subject}", post(work::retry_work))
+        .route("/v1/work/extend/{*subject}", post(work::extend_work))
+        .route("/v1/work/{action}/{*subject}", post(work::post_work_action))
+        .route("/v1/gate-results", post(work::post_gate_result))
+        .route("/v1/agent-queue-moves", post(work::move_agent_queue))
+        .route("/v1/sekrets/node", get(records::sekrets_node))
+        .route("/v1/sekrets/attest", post(records::sekrets_attest))
+        .route("/v1/lanes", get(records::list_lanes))
+        .route("/v1/lanes/{*lane}", get(records::get_lane))
+        .route("/v1/lane-changes", post(records::change_lane))
+        .route("/v1/sessions", get(sessions::list_sessions))
+        .route("/v1/sessions/{subject}/context/clear", post(sessions::clear_context))
+        .route("/v1/sessions/{subject}/signal", post(sessions::signal_session))
+        .route("/v1/sessions/input/{*subject}", post(sessions::input_session))
+        .route("/v1/sessions/logs/{*subject}", get(sessions::logs_session))
+        .route("/v1/sessions/screen/{*subject}", get(sessions::screen_session))
+        .route("/v1/sessions/attach/{*subject}", post(sessions::attach_session))
+        .route("/v1/sessions/{subject}/attach", post(sessions::attach_session))
         .route(
             "/v1/sessions/local-terminal/{*subject}",
-            get(local_terminal),
+            get(sessions::local_terminal),
         )
-        .route("/v1/sessions/terminal/{*subject}", get(terminal_session))
+        .route("/v1/sessions/terminal/{*subject}", get(sessions::terminal_session))
         .route(
             "/v1/hosts/{host}/agent-workspace",
             get(host_agent_workspace),

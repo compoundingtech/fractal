@@ -1,6 +1,6 @@
 use super::*;
 
-async fn put_document(
+pub(super) async fn put_document(
     State(state): State<AppState>,
     bound: Option<axum::Extension<BoundAgent>>,
     Json(request): Json<DocumentPutRequest>,
@@ -30,7 +30,7 @@ async fn put_document(
     Ok(Json(response))
 }
 
-async fn list_rules(
+pub(super) async fn list_rules(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<smallclaims::rules::NamedRule>>, ApiError> {
     let store = state.store.clone();
@@ -40,12 +40,12 @@ async fn list_rules(
 }
 
 #[derive(Deserialize)]
-struct RuleAuditQuery {
+pub(super) struct RuleAuditQuery {
     rule: Option<String>,
     limit: Option<usize>,
 }
 
-async fn list_rule_audits(
+pub(super) async fn list_rule_audits(
     State(state): State<AppState>,
     Query(query): Query<RuleAuditQuery>,
 ) -> Result<Json<Vec<RuleAudit>>, ApiError> {
@@ -81,7 +81,7 @@ async fn list_rule_audits(
     .map(Json)
 }
 
-async fn set_rule(
+pub(super) async fn set_rule(
     State(state): State<AppState>,
     Json(request): Json<RuleSetRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -95,7 +95,7 @@ async fn set_rule(
 }
 
 #[derive(Deserialize)]
-struct DocumentQuery {
+pub(super) struct DocumentQuery {
     name: Option<String>,
     prefix: Option<String>,
     cursor: Option<String>,
@@ -113,7 +113,7 @@ struct DocumentCursor {
     history: bool,
 }
 
-async fn list_documents(
+pub(super) async fn list_documents(
     State(state): State<AppState>,
     Query(query): Query<DocumentQuery>,
 ) -> Result<Json<DocumentListResponse>, ApiError> {
@@ -193,17 +193,17 @@ async fn list_documents(
 }
 
 #[derive(Deserialize)]
-struct DocumentContentQuery {
+pub(super) struct DocumentContentQuery {
     reference: String,
 }
 
 #[derive(Serialize)]
-struct DocumentContent {
+pub(super) struct DocumentContent {
     reference: String,
     bytes: Vec<u8>,
 }
 
-async fn get_document(
+pub(super) async fn get_document(
     State(state): State<AppState>,
     Query(query): Query<DocumentContentQuery>,
 ) -> Result<Json<DocumentContent>, ApiError> {
@@ -227,7 +227,7 @@ async fn get_document(
     }))
 }
 
-async fn post_claim(
+pub(super) async fn post_claim(
     State(state): State<AppState>,
     Json(request): Json<ClaimInput>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -240,7 +240,7 @@ async fn post_claim(
     finish_claim_publication(&state, &kind, response, appended, None).await
 }
 
-async fn get_claim(
+pub(super) async fn get_claim(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -254,7 +254,7 @@ async fn get_claim(
 }
 
 #[derive(Deserialize)]
-struct ClaimsQuery {
+pub(super) struct ClaimsQuery {
     subject: Option<String>,
     owner_run: Option<String>,
     #[serde(default, alias = "after")]
@@ -275,7 +275,7 @@ enum ClaimsOrder {
     Desc,
 }
 
-async fn list_claims(
+pub(super) async fn list_claims(
     State(state): State<AppState>,
     Query(query): Query<ClaimsQuery>,
 ) -> Result<Json<ClaimsPage>, ApiError> {
@@ -301,11 +301,11 @@ async fn list_claims(
 }
 
 #[derive(Default, Deserialize)]
-struct ReviewsQuery {
+pub(super) struct ReviewsQuery {
     reviewer: Option<String>,
 }
 
-async fn list_reviews(
+pub(super) async fn list_reviews(
     State(state): State<AppState>,
     Query(query): Query<ReviewsQuery>,
 ) -> Result<Json<Vec<HumanReviewView>>, ApiError> {
@@ -316,11 +316,11 @@ async fn list_reviews(
 }
 
 #[derive(Default, Deserialize)]
-struct AttentionQuery {
+pub(super) struct AttentionQuery {
     person: Option<String>,
 }
 
-async fn list_attention(
+pub(super) async fn list_attention(
     State(state): State<AppState>,
     Query(query): Query<AttentionQuery>,
 ) -> Result<Json<Vec<AttentionItemView>>, ApiError> {
@@ -346,7 +346,7 @@ async fn list_attention(
         .map(Json)
 }
 
-async fn request_attention(
+pub(super) async fn request_attention(
     State(_state): State<AppState>,
     Json(_post): Json<crate::model::AttentionRequestPost>,
 ) -> Result<Json<AttentionRequestView>, ApiError> {
@@ -356,7 +356,7 @@ async fn request_attention(
     )))
 }
 
-async fn resolve_attention(
+pub(super) async fn resolve_attention(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
     Json(request): Json<AttentionResolveRequest>,
@@ -442,7 +442,7 @@ async fn resolve_attention(
     )))
 }
 
-async fn withdraw_attention(
+pub(super) async fn withdraw_attention(
     State(_state): State<AppState>,
     AxumPath(_subject): AxumPath<String>,
     Json(_request): Json<AttentionWithdrawRequest>,
@@ -544,7 +544,7 @@ fn review_owner(state: &AppState, target: &str) -> Result<String, ApiError> {
     )))
 }
 
-async fn post_review(
+pub(super) async fn post_review(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
     Json(request): Json<ReviewRequest>,
@@ -745,7 +745,7 @@ async fn post_review(
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct LaneListQuery {
+pub(super) struct LaneListQuery {
     #[serde(default)]
     all: bool,
     #[serde(default)]
@@ -753,7 +753,7 @@ struct LaneListQuery {
 }
 
 /// This node's key for sekrets attestations, for `st sekrets enable` to register.
-async fn sekrets_node(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+pub(super) async fn sekrets_node(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let (node, key) =
         crate::sekrets::daemon::node_key(&state.store, &state.node).map_err(ApiError::bad)?;
     Ok(Json(json!({
@@ -764,13 +764,13 @@ async fn sekrets_node(State(state): State<AppState>) -> Result<Json<Value>, ApiE
 }
 
 #[derive(Deserialize)]
-struct SekretsAttestRequest {
+pub(super) struct SekretsAttestRequest {
     nonce: String,
 }
 
 /// Sign which seat the calling process is, for the sekrets gateway. Only over the local socket,
 /// where the kernel names the caller.
-async fn sekrets_attest(
+pub(super) async fn sekrets_attest(
     State(state): State<AppState>,
     peer: Option<axum::Extension<LocalPeer>>,
     Json(request): Json<SekretsAttestRequest>,
@@ -796,7 +796,7 @@ async fn sekrets_attest(
     .map_err(ApiError::bad)
 }
 
-async fn list_lanes(
+pub(super) async fn list_lanes(
     State(state): State<AppState>,
     Query(query): Query<LaneListQuery>,
 ) -> Result<Json<Vec<crate::model::LaneView>>, ApiError> {
@@ -810,7 +810,7 @@ async fn list_lanes(
 }
 
 /// One lane by subject, `RUN/NAME`, run, mission, or unique name.
-async fn get_lane(
+pub(super) async fn get_lane(
     State(state): State<AppState>,
     AxumPath(lane): AxumPath<String>,
 ) -> Result<Json<crate::model::LaneView>, ApiError> {
@@ -828,7 +828,7 @@ async fn get_lane(
 
 /// Join, leave, move, mark, or approve one lane entry as a person or an agent. A harness can
 /// only act as its own seat; `guard_bound_request` checks that before this runs.
-async fn change_lane(
+pub(super) async fn change_lane(
     State(state): State<AppState>,
     Json(mut request): Json<crate::model::LaneChangeRequest>,
 ) -> Result<Json<crate::model::LaneChangeResponse>, ApiError> {
