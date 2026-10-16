@@ -1770,7 +1770,12 @@ impl Store {
         let vfs = space.as_ref().map(super::checkpoint_space::ProofVfs::register).transpose()?;
         if let Some(vfs) = &vfs {
             let probe = scratch.join(format!("proof-vfs-test-{}.sqlite3", Uuid::now_v7().simple()));
-            vfs.self_test(&ownership, &probe)?;
+            let tested = vfs.self_test(&ownership, &probe);
+            if let Err(close) = vfs.check_closed() {
+                std::mem::forget(ownership);
+                return Err(close.context("checkpoint VFS self-test left an open scratch file; owner lock retained until process exit"));
+            }
+            tested?;
         }
         let copy = scratch.join(format!("proof-{}.sqlite3", Uuid::now_v7().simple()));
         ownership.mark(&copy)?;
@@ -1779,12 +1784,18 @@ impl Store {
             self.copy_store_to_guarded(&copy, vfs.as_ref())?;
             prove_on_scratch_copy(&*self.runtime, &copy, input, vfs.as_ref())
         })();
-        let result = match (result, vfs.as_ref().map(|vfs| vfs.check_closed()).transpose()) {
-            (Ok(proof), Ok(())) => Ok(proof),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
-            (Err(error), Err(close)) => Err(error.context(format!("also {close}"))),
-        };
+        if let Some(vfs) = &vfs {
+            if let Err(close) = vfs.check_closed() {
+                // A live SQLite file could still write after unlink. Keep the owner lock and
+                // marker instead of deleting an open scratch file; only process exit releases
+                // the lock for the next startup sweep.
+                let prior = result.err().map(|error| format!("; also {error}")).unwrap_or_default();
+                std::mem::forget(ownership);
+                return Err(close.context(format!(
+                    "checkpoint proof scratch remains owned until process exit{prior}"
+                )));
+            }
+        }
         let result = match space.as_ref() { Some(space) => space.explain(result), None => result };
         let cleanup = ownership.finish(&copy);
         match (result, cleanup) {

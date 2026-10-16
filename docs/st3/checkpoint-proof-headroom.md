@@ -48,7 +48,9 @@ One proof holds `proof.lock` in its scratch directory. It creates and syncs an o
 the proof file, removes the copy and its journal, WAL and SHM sidecars with checked errors, then
 removes the marker. Daemon startup and the next checkpoint pass sweep marked orphans only while holding the lock;
 unknown unmarked proof files require inspection. Any removal error names the path and refuses the
-next proof until the files are cleared. Resumable capture staging has a separate lifetime.
+next proof until the files are cleared. If an unexpected SQLite file handle remains open, the
+process keeps the owner lock until exit so an open file is never unlinked by the sweep. Resumable
+capture staging has a separate lifetime.
 
 ## Read-only host census before merge
 
