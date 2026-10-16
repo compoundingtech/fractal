@@ -840,6 +840,7 @@ fn run_write_batch(
     fifo: &crate::fifo::Queue,
 ) -> Option<WriterJob> {
     let (observers, finalizers, mutation_observer, writer_telemetry) = callbacks;
+    let finalizers = finalizers.snapshot();
     let first_origin = match &first {
         WriterJob::Batched { wait, .. } => wait.as_ref().and_then(crate::profile::WriterWait::trace_origin),
         _ => None,
@@ -1005,8 +1006,12 @@ impl WriterGuard<'_> {
     /// accepting &Transaction can use the wrapper through dereference; commit finalizes
     /// before COMMIT. Prepare failure rolls back and retains its original error cause.
     pub fn transaction(&mut self) -> Result<WriterTransaction<'_>> {
-        let finalizers = self.finalizers.clone();
-        let transaction = self.deref_mut().transaction()?;
+        let finalizers = self.finalizers.snapshot();
+        let connection = self
+            .connection
+            .as_mut()
+            .context("writer guard has no connection")?;
+        let transaction = connection.transaction()?;
         finalizers.prepare(&transaction)?;
         Ok(WriterTransaction::new(transaction, finalizers))
     }
@@ -1015,8 +1020,12 @@ impl WriterGuard<'_> {
         &mut self,
         behavior: rusqlite::TransactionBehavior,
     ) -> Result<WriterTransaction<'_>> {
-        let finalizers = self.finalizers.clone();
-        let transaction = self.deref_mut().transaction_with_behavior(behavior)?;
+        let finalizers = self.finalizers.snapshot();
+        let connection = self
+            .connection
+            .as_mut()
+            .context("writer guard has no connection")?;
+        let transaction = connection.transaction_with_behavior(behavior)?;
         finalizers.prepare(&transaction)?;
         Ok(WriterTransaction::new(transaction, finalizers))
     }

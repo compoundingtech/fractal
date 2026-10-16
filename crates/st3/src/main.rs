@@ -6835,9 +6835,33 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup_phases.install_hooks_ms = phase_elapsed_ms();
     startup.phase("open-store");
     startup_telemetry.phase("open-store");
-    let store = Arc::new(startup_telemetry.task("startup open-store", || {
-        Store::open(&config.state_dir.join("claims.sqlite3"), &config.node)
-    })?);
+    let store = startup_telemetry.task("startup open-store", || {
+        let path=config.state_dir.join("claims.sqlite3");
+        if std::env::var("ST3_AGENT_COLLECTION_IVM").as_deref()==Ok("1") {
+            Store::open_with_agent_collections(&path,&config.node)
+        } else {
+            Store::open(&path,&config.node).map(Arc::new)
+        }
+    })?;
+    if store.has_agent_collection_source() {
+        let source_store=Arc::downgrade(&store);
+        tokio::spawn(async move {
+            let mut timer=tokio::time::interval(Duration::from_millis(100));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last_error=std::time::Instant::now()-Duration::from_secs(8);
+            let mut more=false;
+            loop {
+                if more {tokio::task::yield_now().await;} else {timer.tick().await;}
+                let Some(store)=source_store.upgrade() else {break};
+                let outcome=tokio::task::spawn_blocking(move ||store.maintain_agent_collections()).await;
+                let error=match outcome {Ok(Ok(pending))=> {more=pending;None},Ok(Err(error))=> {more=false;Some(error.to_string())},Err(error)=> {more=false;Some(error.to_string())}};
+                if let Some(error)=error && last_error.elapsed()>=Duration::from_secs(8) {
+                    eprintln!("st3: native agent collection source remains unavailable: {error}");
+                    last_error=std::time::Instant::now();
+                }
+            }
+        });
+    }
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
     }
