@@ -399,7 +399,7 @@ export type DelegationProofEncoded = typeof DelegationProof.Encoded
 /** A native prompt answer; an authenticated agent may only dismiss an auto-denial under an exact current close-item delegation proof. Parameters never select the actor. */
 export const PromptRespondParameters = /*#__PURE__*/ (() => Schema.Struct({
   "answer": Schema.Literals(["allow","deny","dismiss"]),
-  "delegation": Schema.optionalKey(DelegationProof),
+  "delegation": optionalKey(DelegationProof),
   "episode": Schema.String,
   "target_id": Id
 }).annotate({ identifier: "PromptRespondParameters", description: "A native prompt answer; an authenticated agent may only dismiss an auto-denial under an exact current close-item delegation proof. Parameters never select the actor." }))()
