@@ -107,6 +107,19 @@ async fn lock_fleet_admission(
 }
 
 pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool) -> Result<()> {
+    let manages_services = match &command {
+        FleetCommand::Create(args) => !args.no_service,
+        FleetCommand::Join(args) => !args.no_service,
+        FleetCommand::Leave(args) => !args.no_service,
+        FleetCommand::Mode(args) => !args.no_service,
+        FleetCommand::Migrate(args) => !args.no_service,
+        FleetCommand::Transports { command } => match command {
+            FleetTransportsCommand::Add { no_service, .. }
+            | FleetTransportsCommand::Remove { no_service, .. } => !*no_service,
+        },
+        _ => false,
+    };
+    st3::service::preflight(manages_services)?;
     let mut config = Config::load_unvalidated(None)?;
     // Explicit admissions can repair a pin after their prior attempt saved membership.
     // Other controls must use the daemon's resolved identity, including leave's runtime check.

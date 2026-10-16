@@ -853,6 +853,7 @@ async fn start_daemon(
     service: bool,
     linger: bool,
 ) -> Result<()> {
+    st3::service::preflight(service)?;
     if daemon_ready(config).await {
         return Ok(());
     }

@@ -4,7 +4,7 @@
   "replay": { "status": "none", "detail": "No claim replay or projection changes." },
   "schema": { "status": "none", "detail": "No persisted schema changes." },
   "rules": { "status": "none", "detail": "No checkpoint or sync changes." },
-  "compatibility": { "status": "changed", "detail": "CLI status, restart, stop, reset and uninstall resolve st3/fractal systemd units and launchd labels, including instances. Linux also recognises Home Manager's smalltalk.service. Multiple present or loaded names are an error, not a preference. Installers continue writing existing names and refuse to install over a renamed service. Script and Home Manager cutover support remains separate." },
+  "compatibility": { "status": "changed", "detail": "CLI status, restart, stop, reset and uninstall resolve st3/fractal systemd units and launchd labels, including instances. Linux also recognises Home Manager's smalltalk.service. Legacy and Fractal families coexisting are an error; multiple legacy units retain the previous CLI target. Installers continue writing existing names and refuse only renamed services, permitting HM-only legacy hosts. Setup, uninstall and fleet settings commands preflight conflicts before fallback or mutation when service management is enabled. Script and Home Manager cutover support remains separate." },
   "downtime": { "status": "none", "detail": "Lookup-only expansion: no service is renamed or restarted by upgrading the binary." },
   "manual": { "status": "none", "detail": "No host migration is performed or required by this change." },
   "recovery": { "status": "none", "detail": "Existing service definitions and drop-ins are unchanged." }

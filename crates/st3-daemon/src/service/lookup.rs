@@ -13,17 +13,44 @@ impl std::fmt::Display for ConflictingServices {
 
 impl std::error::Error for ConflictingServices {}
 
-fn select(mut statuses: Vec<ServiceStatus>) -> Result<ServiceStatus> {
-    let mut selected: Option<usize> = None;
-    for (index, status) in statuses.iter().enumerate() {
+fn is_new_family(status: &ServiceStatus) -> bool {
+    status.name.starts_with("fractal") || status.name.starts_with("com.compoundingtech.fractal")
+}
+
+fn check_conflicts<'a>(statuses: impl IntoIterator<Item = &'a ServiceStatus>) -> Result<()> {
+    let mut legacy: Option<&ServiceStatus> = None;
+    let mut new: Option<&ServiceStatus> = None;
+    for status in statuses {
         if status.installed || status.running {
-            if let Some(previous) = selected {
-                return Err(ConflictingServices(statuses[previous].name.clone(), status.name.clone()).into());
+            if is_new_family(status) {
+                new = Some(status);
+            } else {
+                legacy = Some(status);
             }
-            selected = Some(index);
         }
     }
-    Ok(statuses.swap_remove(selected.unwrap_or(0)))
+    if let (Some(legacy), Some(new)) = (legacy, new) {
+        return Err(ConflictingServices(legacy.name.clone(), new.name.clone()).into());
+    }
+    Ok(())
+}
+
+fn select(mut statuses: Vec<ServiceStatus>) -> Result<ServiceStatus> {
+    check_conflicts(&statuses)?;
+    // Candidate order retains the original CLI target when legacy installs coexist.
+    let selected = statuses.iter().position(|status| status.installed || status.running).unwrap_or(0);
+    Ok(statuses.swap_remove(selected))
+}
+
+fn allow_install(services: &Services) -> Result<()> {
+    for status in [&services.daemon, &services.replication] {
+        anyhow::ensure!(
+            !(status.installed || status.running) || !is_new_family(status),
+            "{} already exists; this installer still writes legacy names; refusing to create a second service",
+            status.name
+        );
+    }
+    Ok(())
 }
 
 pub(super) struct Services {
@@ -70,7 +97,9 @@ pub(super) fn native() -> Result<Services> {
             }
         }).collect::<Result<Vec<_>>>()?)
     };
-    Ok(Services { daemon: resolve(old[0])?, replication: resolve(old[1])? })
+    let services = Services { daemon: resolve(old[0])?, replication: resolve(old[1])? };
+    check_conflicts([&services.daemon, &services.replication])?;
+    Ok(services)
 }
 
 #[cfg(target_os = "linux")]
@@ -85,19 +114,7 @@ pub(super) fn launchd_path(label: &str) -> Result<PathBuf> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn before_install() -> Result<()> {
-    let services = native()?;
-    #[cfg(target_os = "linux")]
-    let old = [service_name(), replication_service_name()];
-    #[cfg(target_os = "macos")]
-    let old = [service_label(), replication_service_label()];
-    for (status, old) in [services.daemon, services.replication].iter().zip(old) {
-        anyhow::ensure!(
-            !(status.installed || status.running) || status.name == old,
-            "{} already exists; this installer still writes {old}; refusing to create a second service",
-            status.name
-        );
-    }
-    Ok(())
+    allow_install(&native()?)
 }
 
 #[cfg(test)]
@@ -133,5 +150,39 @@ mod tests {
             assert!(select(vec![status(old, false, true), status(new, false, true)]).is_err());
             assert!(select(vec![status(old, true, false), status(new, false, true)]).is_err());
         }
+    }
+
+    #[test]
+    fn legacy_coexistence_preserves_the_cli_target_and_allows_install() {
+        let daemon = select(vec![
+            status("st3.service", true, false),
+            status("fractal.service", false, false),
+            status("smalltalk.service", true, true),
+        ]).unwrap();
+        assert_eq!(daemon.name, "st3.service");
+        assert!(allow_install(&Services {
+            daemon,
+            replication: status("st3-replication.service", false, false),
+        }).is_ok());
+    }
+
+    #[test]
+    fn home_manager_only_install_is_allowed() {
+        assert!(allow_install(&Services {
+            daemon: status("smalltalk.service", true, true),
+            replication: status("st3-replication.service", false, false),
+        }).is_ok());
+    }
+
+    #[test]
+    fn families_conflict_even_across_daemon_and_replication() {
+        assert!(check_conflicts([
+            &status("smalltalk.service", true, false),
+            &status("fractal-replication.service", true, false),
+        ]).is_err());
+        assert!(allow_install(&Services {
+            daemon: status("fractal.service", true, false),
+            replication: status("fractal-replication.service", false, false),
+        }).is_err());
     }
 }

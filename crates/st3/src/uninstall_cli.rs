@@ -7,6 +7,7 @@ fn directory_is_empty(path: &Path) -> bool {
 }
 
 pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
+    st3::service::preflight(!args.no_service)?;
     let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
     let config_dir = Config::default_path()

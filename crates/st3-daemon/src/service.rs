@@ -282,6 +282,15 @@ pub fn status() -> Result<ServiceStatusReport> {
     status_native_service()
 }
 
+/// Refuse a service-family conflict before a command writes state or starts a subprocess.
+/// An unavailable user manager still permits the existing unmanaged execution path.
+pub fn preflight(enabled: bool) -> Result<()> {
+    if enabled && let Err(error) = status() && error.is::<ConflictingServices>() {
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub fn permissions(open: bool) -> Result<()> {
     print!("{}", permissions_guidance()?);
     if open {
