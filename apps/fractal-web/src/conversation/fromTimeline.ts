@@ -156,18 +156,24 @@ const itemOf = ({
 }): ConversationItem => {
   switch (entry.type) {
     case 'content': {
-      // body.text is a legacy fallback for the blocks, not independent visible prose.
-      // Source records only annotate that prose; internal presentation blocks replace it.
-      // Keep mixed bodies inspectable too: the fallback has no per-block text boundaries.
-      if (entry.body.blocks?.some((block) =>
-        block.kind !== 'source_record' &&
-        (block.visibility === 'internal' || block.visibility === 'hidden-by-harness'),
+      // Native text blocks can carry only {body_ref:true}, not their own prose:
+      // external_sessions.rs:3698-3728,4813-4832; Schema.generated.ts:2639-2662.
+      // Mixed bodies therefore need a visible disclosure, not guessed text boundaries.
+      // This mixed-content path goes away once TimelineBlock carries per-block text or body ranges.
+      const blocks = entry.body.blocks?.filter((block) => block.kind !== 'source_record')
+      if (blocks?.some((block) =>
+        block.visibility === 'internal' || block.visibility === 'hidden-by-harness',
       )) {
+        const mixedContent = blocks.some((block) =>
+          block.visibility !== 'internal' && block.visibility !== 'hidden-by-harness',
+        )
+        const primaryType = blocks[0]?.view?.type
         return {
           _tag: 'UnknownEvent',
           id: entry.id,
           at: entryTimestamp(entry),
-          eventType: 'internal native content',
+          eventType: typeof primaryType === 'string' ? primaryType : primaryType?.raw ?? 'internal native content',
+          ...(mixedContent ? { mixedContent: true } : {}),
           data: entry.body,
         }
       }

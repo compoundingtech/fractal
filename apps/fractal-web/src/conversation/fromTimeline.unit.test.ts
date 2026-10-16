@@ -34,7 +34,7 @@ describe('native block visibility', () => {
 
   it('keeps internal tool-start fallback out of prose, preserving inspectable data', () => {
     expect(project(text, [block])).toMatchObject([{
-      _tag: 'UnknownEvent', eventType: 'internal native content',
+      _tag: 'UnknownEvent', eventType: 'tool_start',
       data: { blocks: [{ visibility: 'internal', payload: { raw }, view: { type: 'tool_start' } }] },
     }])
     expect(project(text, [block])[0]).not.toHaveProperty('text')
@@ -46,7 +46,7 @@ describe('native block visibility', () => {
   it.each(['internal', 'hidden-by-harness'])('uses %s visibility, not a label or view type', (visibility) => {
     expect(project('Different fallback with {"synthetic":true}', [{
       id: block.id, kind: block.kind, source_type: block.source_type, payload: block.payload, visibility,
-    }])[0]?._tag).toBe('UnknownEvent')
+    }])).toMatchObject([{ _tag: 'UnknownEvent', eventType: 'internal native content' }])
   })
 
   it('keeps visible system JSON and even the same tool-start label as prose', () => {
@@ -59,16 +59,35 @@ describe('native block visibility', () => {
   })
 
   it('does not treat an internal source record as the visibility of visible prose', () => {
-    expect(project('Visible system text {"synthetic":true}', [{
+    const visibleText = 'Visible system text {"synthetic":true}'
+    expect(project(visibleText, [{
+      id: 'native-1/visible', kind: 'text', source_type: 'content', payload: { body_ref: true },
+    }, {
       id: block.id, kind: 'source_record', source_type: block.source_type,
       payload: block.payload, visibility: 'internal',
-    }])[0]?._tag).toBe('Text')
+    }])).toMatchObject([{ _tag: 'Text', text: visibleText }])
   })
 
-  it('does not leak a mixed body fallback containing an internal block', () => {
+  it.each(['visible', undefined])('retains a mixed body for visible disclosure (%s)', (visibility) => {
+    const visible = {
+      id: 'native-1/1', kind: 'text', source_type: 'content',
+      payload: { body_ref: true }, ...(visibility === undefined ? {} : { visibility }),
+    }
+    expect(project(`Visible synthetic prose\n${text}`, [block, visible])).toMatchObject([{
+      _tag: 'UnknownEvent', mixedContent: true, eventType: 'tool_start',
+      data: { text: `Visible synthetic prose\n${text}`, blocks: [block, visible] },
+    }])
+  })
+
+  it('preserves unspecified visibility as ordinary prose', () => {
+    const { visibility: _, ...unspecified } = block
+    expect(project(text, [unspecified])).toMatchObject([{ _tag: 'Text', text }])
+  })
+
+  it('does not count internal source records as mixed content', () => {
     expect(project(text, [block, {
-      ...block, id: 'native-1/1', visibility: 'visible',
-    }])[0]?._tag).toBe('UnknownEvent')
+      ...block, id: 'native-1/source', kind: 'source_record',
+    }])[0]).not.toHaveProperty('mixedContent')
   })
 })
 
