@@ -247,6 +247,18 @@ copies reference-free downloads and sources fetched by the run, plus the closure
 baseline, historical messaging channel and provider components. It leaves the installer-managed
 `/nix` directory intact. Cache failures emit a warning and let the job build normally.
 
+Genie uses a separate `nix6-genie-closure-...` entry keyed on its locked shell and cache policy.
+It retains the complete `nix print-dev-env .#genie` profile closure, including upstream-signed
+stdenv inputs such as Linux headers. The older selective archives cannot satisfy this key.
+Workspace CI and main's existing Genie warmer share it; only protected main publishes the archive.
+Genie's local cache initialization and closure save fail visibly. After saving, a hosted control
+copies the closure into an empty store with public substituters and builders disabled, checks
+every path's NAR hash, and verifies that removing a required cache entry makes the copy fail.
+The summary reports closure bytes, cache file bytes, path count and verification time; these are
+not billed cost or a claim of lower wall time. Cold seeds and evicted entries still need upstream
+downloads. A valid warm archive supplies the entire shell without the public NAR fetch that failed
+in run 38922273766/job 117046015044.
+
 The [original trial measurements](https://github.com/compoundingtech/smalltalk/pull/849#issuecomment-5936374396)
 recorded a warm run of 6m59s with this design, versus 8m49s to 9m30s with only the Cargo cache.
 That trial excluded the messaging matrix; current CI includes it. Caching the entire Nix store
@@ -283,7 +295,7 @@ environment variable that enables this behavior, even if the executable is renam
 Fixture command helpers clear inherited `ST_AGENT`/`ST3_*`; temporary-repository Git helpers
 isolate global/system config, hooks, signing and author identity on each command. Real
 repository commits keep the host's Git policy. Run the same suite from an agent seat with
-`nix develop --command cargo nextest run -p st3 --locked --profile ci --retries 0`.
+`nix develop --command cargo nextest run -p st3 -p st3-daemon --locked --profile ci --retries 0`.
 Provider fixtures that load st3 extensions publish their isolated hook set with
 `st3::hooks::ensure_installed`, preserving every declared asset and relative import.
 
@@ -362,6 +374,10 @@ Any crate/lint count above its baseline fails, including a newly introduced crat
 Removing warnings also requires lowering the baseline in the same pull request, so a later
 change cannot spend the removed warnings. CI checks that the committed counts do not increase
 relative to the event's immutable base SHA (PR base, merge-group base, or preceding main commit).
+When a crate is split out of another one, the new crate's warnings are the origin's: list it in
+`.github/clippy-splits.json` (`{"st3-daemon": "st3"}`), and against a base that lacks the new crate the
+two are compared together, so the split can move warnings between them and never add any. Once the base has the
+new crate it is an ordinary crate and the entry has no effect; `--update` applies the same rule.
 The first rollout permits a base without the file. There is no new required check:
 `linux-gate` already requires `linux-clippy`.
 
@@ -409,6 +425,19 @@ fails the stage. Collection compiles workspace targets, including excluded legac
 while st2 remains a member; the filters preserve execution coverage rather than avoid compilation.
 Matching rendered hooks are installed by a CI binary that calls the driver
 library directly, rather than by the legacy runner CLI.
+
+Outside GitHub Actions on Linux, `scripts/ci-nextest run` keeps the tests' temporary files in a
+per-run directory `/dev/shm/st-nextest.XXXXXX` (removed when the run ends) when `TMPDIR` is unset,
+`/tmp` or `/var/tmp` and `/dev/shm` has 4 GiB free. The file-backed SQLite stores sync every WAL
+commit, and that wait is most of the wall time of the tests that use them (the st3 library set
+measured 251 s on tmpfs against 407 s on disk with the same CPU, about 0.5 GiB of scratch either
+way). The 4 GiB check is made at start and reserves nothing: concurrent local runs share that RAM. A run
+killed with SIGKILL leaves its directory in RAM until reboot; sweep with
+`find /dev/shm -maxdepth 1 -name 'st-nextest.*' -mmin +1440 -exec rm -rf {} +`. Set
+`ST_NEXTEST_TMPDIR=disk` to keep the disk. CI never takes this branch, so the hosted runs keep real
+disks and every test that syncs to one; a local tmpfs pass does not exercise fsync or disk behavior
+and is not evidence for those tests, and nothing a local run produces stands in for the hosted
+required checks.
 
 The old trusted fleet runner and st merge train are retired; there is no operations installation
 handoff. Namespace workflows use this script from the checkout and land through GitHub's merge
