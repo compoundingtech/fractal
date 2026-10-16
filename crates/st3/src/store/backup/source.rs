@@ -37,6 +37,7 @@ fn log_digest(connection: &Connection) -> Result<String> {
     hash.update(INVENTORY_DIGEST_DOMAIN);
     let mut after = (String::new(), 0_u64, String::new());
     loop {
+        smallclaims::read_budget::check()?;
         // Both index seeks are bounded before the UNION sorts at most two pages.
         let identities = connection.prepare_cached(
             "WITH live AS (SELECT writer,sequence,envelope_hash FROM replica_envelopes
@@ -122,6 +123,10 @@ pub(super) fn write(
     bodies: Option<&crate::message_body::Bodies>,
     owned: &[OwnedBody],
 ) -> Result<Header> {
+    // This connection remains pinned across pages: there is no new pool checkout to
+    // check its read budget. Bound Rust/output work cooperatively, including small
+    // queries that do not reach SQLite's progress-handler instruction threshold.
+    smallclaims::read_budget::check()?;
     // Admission and projection commit separately. Only a snapshot whose persisted
     // projection frontier covers its log can promise the same graph on restore.
     let health: Option<(String, u64)> = connection.query_row(
@@ -145,6 +150,7 @@ pub(super) fn write(
     let mut after = (String::new(), 0_u64, String::new());
     let mut count = 0;
     loop {
+        smallclaims::read_budget::check()?;
         let identities = connection
             .prepare_cached(
                 "SELECT writer,sequence,envelope_hash FROM replica_envelopes
@@ -194,6 +200,7 @@ pub(super) fn write(
         // claims on restore. No SQL or local checkpoint bookkeeping enters the archive.
         let mut after = None;
         loop {
+            smallclaims::read_budget::check()?;
             let page = smallclaims::store::checkpoint::tombstones::manifest_page_at(
                 connection,
                 &CheckpointManifestRequest {
@@ -213,6 +220,7 @@ pub(super) fn write(
     if let Some(bodies) = bodies {
         use base64::Engine as _;
         for (subject, actor, sha256) in owned {
+            smallclaims::read_budget::check()?;
             // A body that vanished or changed since it was checked is left out, and
             // the restore report counts it as not returned.
             let Some(bytes) = bodies.read(actor, subject)? else {
@@ -234,6 +242,7 @@ pub(super) fn write(
         }
     }
     check_chains(connection)?;
+    smallclaims::read_budget::check()?;
     serde_json::to_writer(
         &mut *output,
         &Record::End {
@@ -256,6 +265,7 @@ pub(super) fn check_chains(connection: &Connection) -> Result<()> {
     )?;
     let mut after = 0_i64;
     loop {
+        smallclaims::read_budget::check()?;
         let page = statement
             .query_map(params![after, PAGE], |row| {
                 Ok((

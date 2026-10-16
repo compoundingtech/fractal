@@ -107,7 +107,15 @@ fn read_only_v2_preserves_owned_missing_mismatched_and_stray_body_semantics() {
     bodies.put("person/alex", "message/mismatch", b"different bytes").unwrap();
     bodies.put("person/alex", "message/stray", b"no claim names this").unwrap();
     bodies.put("person/alex", "message/foreign-holder", body.as_bytes()).unwrap();
+    let before_delivery = store.message("message/owned").unwrap().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "message/owned".into(), kind: "message.delivered".into(), actor: Some("agent/reader".into()),
+        fields: BTreeMap::from([("status".into(), json!("delivered"))]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
     let before_receipt = store.message("message/owned").unwrap().unwrap();
+    assert_eq!(before_receipt.created_index, before_delivery.created_index);
+    assert_eq!(before_receipt.status, "delivered");
     store.append_claim(&ClaimInput {
         subject: "message/owned".into(), kind: "message.read".into(), actor: Some("agent/reader".into()),
         fields: BTreeMap::from([("status".into(), json!("read"))]),
@@ -201,7 +209,19 @@ fn read_only_refuses_old_or_incomplete_layout_and_unprojected_cut_without_repair
                 "old-version" => connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION - 1).unwrap(),
                 "missing-registry" => { connection.execute("DELETE FROM meta WHERE key='projection_digest_registry'", []).unwrap(); }
                 "missing-digest" => { connection.execute("DELETE FROM projection_digest_state WHERE table_name='claim_sources'", []).unwrap(); }
-                _ => { connection.execute("UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap(); }
+                _ => {
+                    // A purely local fixture need not have a persisted graph-health row.
+                    // Establish the stale state under test instead of silently updating zero rows.
+                    assert_eq!(connection.execute(
+                        "INSERT INTO projection_health(aggregate,status,last_good_store_index,updated_at_unix_ms)
+                         VALUES ('graph','stale',0,'0') ON CONFLICT(aggregate) DO UPDATE SET status='stale'",
+                        [],
+                    ).unwrap(), 1);
+                    assert_eq!(connection.query_row(
+                        "SELECT status FROM projection_health WHERE aggregate='graph'", [],
+                        |row| row.get::<_, String>(0),
+                    ).unwrap(), "stale");
+                }
             }
         }
         drop(store);

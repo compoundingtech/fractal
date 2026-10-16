@@ -1153,7 +1153,8 @@ mod tests {
             let result = read_budget::with(Some(budget), || {
                 source.readers.request_read(|| source.write_backup(&mut output))
             }).unwrap();
-            assert!(result.is_err());
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("cancelled"), "{error:#}");
             assert!(!output.bytes.is_empty(), "cancellation follows a real header write");
             let report = source.readers.live_read_report();
             assert_eq!(report.snapshot_checkouts, 0);
