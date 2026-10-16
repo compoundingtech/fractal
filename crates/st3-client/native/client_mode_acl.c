@@ -19,6 +19,10 @@ _Static_assert(ACL_ENTRY_LIMIT_INHERIT == KAUTH_ACE_LIMIT_INHERIT, "limit inheri
 _Static_assert(ACL_ENTRY_ONLY_INHERIT == KAUTH_ACE_ONLY_INHERIT, "inherit-only namespace");
 _Static_assert(ACL_FLAG_NO_INHERIT == KAUTH_ACL_NO_INHERIT, "no inherit namespace");
 
+_Static_assert(KAUTH_FILESEC_SIZE(0) == offsetof(struct kauth_filesec, fsec_acl.acl_ace), "entry zero offset");
+_Static_assert(KAUTH_FILESEC_SIZE(1) == offsetof(struct kauth_filesec, fsec_acl.acl_ace) + sizeof(struct kauth_ace), "entry one offset");
+_Static_assert(KAUTH_FILESEC_SIZE(ACL_MAX_ENTRIES - 1) == offsetof(struct kauth_filesec, fsec_acl.acl_ace) + (ACL_MAX_ENTRIES - 1) * sizeof(struct kauth_ace), "last entry offset");
+
 struct st_acl_observation {
     uint32_t reason; // 0 accepted, 1 query, 2 representation, 3 unknown, 4 allow, 5 qualifier
     int32_t os_error;
