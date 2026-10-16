@@ -61,3 +61,10 @@ fn named_instances_have_distinct_account_anchored_authority() {
     assert_eq!(a["state"]["mode"], "local");
     assert_eq!(b["state"]["mode"], "local");
 }
+
+#[test]
+fn instance_named_default_does_not_alias_the_default_account_authority() {
+    let a = status(None, None);
+    let b = status(None, Some("default"));
+    assert_ne!(a["authority_path"], b["authority_path"]);
+}

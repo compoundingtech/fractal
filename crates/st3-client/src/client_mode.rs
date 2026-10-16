@@ -131,7 +131,7 @@ impl Store {
     /// separate namespace, not another location for the default instance's daemon state.
     pub fn for_instance(instance: Option<&str>) -> Result<Self> {
         let home = account_home().context("Cannot determine authoritative client-mode state")?;
-        let path = match instance {
+        let legacy = match instance {
             Some(name) => {
                 ensure!(
                     !name.is_empty()
@@ -149,6 +149,12 @@ impl Store {
                     .join("state/st3/client-mode.json")
             }
             None => home.join(".local/state/st3/client-mode.json"),
+        };
+        reject_legacy_evidence(&legacy)?;
+        let root = home.join(".st3-client-mode");
+        let path = match instance {
+            Some(name) => root.join("instances").join(name).join("client-mode.json"),
+            None => root.join("default/client-mode.json"),
         };
         Self::at(path)
     }
@@ -312,6 +318,25 @@ impl Store {
             first_enrollment,
         })
     }
+}
+
+/// Earlier draft foundations never shipped a production writer. Nevertheless, retained
+/// old authority evidence must require explicit recovery rather than disappear on relocation.
+fn reject_legacy_evidence(path: &Path) -> Result<()> {
+    for artifact in [
+        path.to_path_buf(),
+        path.with_extension("lock"),
+        path.with_extension("recovery"),
+    ] {
+        match fs::symlink_metadata(artifact) {
+            Ok(_) => {
+                anyhow::bail!("Legacy client-mode authority exists; explicit recovery required")
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("Inspect legacy client-mode authority"),
+        }
+    }
+    Ok(())
 }
 
 /// Walk opened directory descriptors, never a caller-owned symlink. Every ancestor is
@@ -663,6 +688,23 @@ mod tests {
         drop(child.stdin.take());
         child.wait()?;
         assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn relocation_never_ignores_legacy_authority_evidence() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("mode.json");
+        reject_legacy_evidence(&path)?;
+        for artifact in [
+            path.clone(),
+            path.with_extension("lock"),
+            path.with_extension("recovery"),
+        ] {
+            fs::write(&artifact, b"")?;
+            assert!(reject_legacy_evidence(&path).is_err());
+            fs::remove_file(artifact)?;
+        }
         Ok(())
     }
 
