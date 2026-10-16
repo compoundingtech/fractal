@@ -23,12 +23,12 @@ fn measured<T>(work: impl FnOnce() -> T) -> (T, SqliteWork, (usize, usize)) {
     (result, sql, (after.0 - before.0, after.1 - before.1))
 }
 
-fn note(store: &Store, name: &str) {
+fn note(store: &Store, name: &str) -> crate::claim::ClaimRecord {
     store.append_claim(&ClaimInput {
         subject: format!("note/{name}"), kind: "example.note".into(), actor: None,
         fields: BTreeMap::new(), evidence: Vec::new(), expected_subject: None,
         idempotency_key: None,
-    }).unwrap();
+    }).unwrap()
 }
 
 fn parity(store: &Store) -> String {
@@ -38,25 +38,39 @@ fn parity(store: &Store) -> String {
 }
 
 #[test]
+// This is smallclaims physical-trim freshness, not Smalltalk checkpoint planning or
+// desired/mission/document protected-reference coverage. The st3 companion exercises a
+// real Smalltalk capture/plan separately; no application schema is fabricated here.
 fn authority_digest_keeps_write_reopen_and_real_trim_freshness() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("authority.sqlite3");
     let store = Store::open(&path, "alder", Arc::new(runtime::Plain)).unwrap();
     let empty = parity(&store);
-    note(&store, "first");
+    let claim = note(&store, "first");
     let written = parity(&store);
     assert_ne!(empty, written, "local writes cannot be hidden by a stale guard digest");
-    let sealed = store.checkpoint_sealed_set(now_ms() + 1).unwrap();
-    let claim = sealed.claims.iter().find(|c| c.claim.subject == "note/first").unwrap();
-    let envelope = sealed.envelopes.iter().find(|e| e.key == claim.envelope).unwrap();
-    assert_eq!(envelope.records, 1, "the disposable trim must drop only this note");
-    let tombstone = EnvelopeTombstone {
-        writer: envelope.key.writer.clone(), sequence: envelope.key.sequence,
-        envelope_hash: envelope.key.envelope_hash.clone(),
-        accepted_at_unix_ms: envelope.accepted_at_unix_ms,
+    // Plain has no application projections for checkpoint planning's protected-reference
+    // reads. This control tests trimming, not planning: derive the exact tombstones from
+    // the claim just committed and its actual sealed envelope, without fake app tables.
+    let envelope = store.readers.get().query_row(
+        "SELECT writer, sequence, envelope_hash, accepted_at_unix_ms
+         FROM replica_envelopes WHERE batch_id=?1",
+        [&claim.batch_id], |row| Ok(EnvelopeTombstone {
+            writer: row.get(0)?, sequence: row.get(1)?, envelope_hash: row.get(2)?,
+            accepted_at_unix_ms: row.get::<_, String>(3)?.parse::<u128>().unwrap(),
+        })).unwrap();
+    let records: usize = store.readers.get().query_row(
+        "SELECT COUNT(*) FROM claims WHERE batch_id=?1", [&claim.batch_id], |r| r.get(0)).unwrap();
+    assert_eq!(records, 1, "the disposable trim must drop only this note");
+    let tombstone = ClaimTombstone {
+        id: claim.id.clone(), writer: envelope.writer.clone(), sequence: envelope.sequence,
+        envelope_hash: envelope.envelope_hash.clone(), subject: claim.subject.clone(),
+        kind: claim.kind.clone(), actor: claim.actor.clone(), predecessors: claim.predecessors.clone(),
+        operation_id: claim.operation_id.clone(), request_digest: claim.request_digest.clone(),
+        accepted_at_unix_ms: claim.accepted_at_unix_ms,
     };
     store.trim_checkpoint("checkpoint/guard-fixture", now_ms() + 1, "fixture",
-        &[tombstone], &[checkpoint::claim_tombstone(claim)], false, &mut Vec::new()).unwrap();
+        &[envelope], &[tombstone], false, &mut Vec::new()).unwrap();
     assert_eq!(parity(&store), written, "a trim replaces payload with the same authority identities");
     assert_eq!(store.readers.get().query_row(
         "SELECT COUNT(*) FROM claims WHERE subject='note/first'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);

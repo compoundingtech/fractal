@@ -265,3 +265,58 @@ async fn only_typed_authority_backend_sends_compact_flag_and_bad_digests_are_err
     server.abort();
     let _ = server.await;
 }
+
+/// Unlike Plain, this uses Smalltalk's real application tables and capture/planner for
+/// a redundant middle harness observation. This is not exhaustive desired/mission/document
+/// protected-reference coverage or whole-runtime checkpoint proof.
+#[test]
+fn compact_digest_survives_smalltalk_planned_trim_and_reopen() {
+    fn parity(store: &crate::store::Store) -> String {
+        let digest = store.replication_authority_digest().unwrap();
+        assert_eq!(digest, store.export_replication_summary(FLEET).unwrap().authority_digest);
+        digest
+    }
+    fn observed(store: &crate::store::Store, key: &str) -> crate::model::ClaimRecord {
+        store.append_claim(&crate::model::ClaimInput {
+            subject: "agent/alder.worker".into(), kind: "harness.observed".into(),
+            actor: Some("agent/alder.worker".into()),
+            fields: std::collections::BTreeMap::from([
+                ("state".into(), json!("idle")),
+                ("incarnation_id".into(), json!("guard-fixture")),
+            ]), evidence: Vec::new(), expected_subject: None, idempotency_key: Some(key.into()),
+        }).unwrap()
+    }
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("smalltalk-authority.sqlite3");
+    let store = crate::store::Store::open(&path, "alder").unwrap();
+    let empty = parity(&store);
+    store.set_write_clock_at(100).unwrap();
+    observed(&store, "guard-run-start");
+    store.set_write_clock_at(200).unwrap();
+    let middle = observed(&store, "guard-redundant-middle");
+    store.set_write_clock_at(300).unwrap();
+    let latest = observed(&store, "guard-current");
+    let before = parity(&store);
+    assert_ne!(empty, before);
+    let cut = 40 * 86_400_000u128;
+    let sealed = store.checkpoint_sealed_set(cut).unwrap();
+    let plan = crate::store::plan_drops(&sealed);
+    assert!(plan.claims.iter().any(|claim| claim.id == middle.id),
+        "the real planner must select the redundant middle fixture claim");
+    assert!(!plan.claims.iter().any(|claim| claim.id == latest.id),
+        "the current observation must survive the real plan");
+    store.trim_checkpoint("checkpoint/guard-smalltalk-fixture", cut, &plan.drop_digest,
+        &plan.envelopes, &plan.claims, false, &mut Vec::new()).unwrap();
+    assert_eq!(parity(&store), before);
+    for (id, expected) in [(&middle.id, 0i64), (&latest.id, 1)] {
+        let count: i64 = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM claims WHERE id=?1", [id], |row| row.get(0)).unwrap();
+        assert_eq!(count, expected, "physical trim result for {id}");
+    }
+    drop(store);
+    let store = crate::store::Store::open(&path, "alder").unwrap();
+    assert_eq!(parity(&store), before);
+    store.set_write_clock_at(400).unwrap();
+    observed(&store, "guard-after-reopen");
+    assert_ne!(parity(&store), before);
+}
