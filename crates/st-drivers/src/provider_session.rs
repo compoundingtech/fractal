@@ -606,13 +606,13 @@ pub(crate) fn run_provider_observed_with_env_removals(
             return Err(error).with_context(|| format!("starting {provider} provider {program}"));
         }
     };
-    if let Some(observed) = observed.filter(|observer| observer.harness == "claude") {
-        if let Err(error) = crate::claude_process::spawned(
+    if let Some(observed) = observed.filter(|observer| observer.harness == "claude")
+        && let Err(error) = crate::claude_process::spawned(
             &observed.agent_dir, &observed.session, observed.seq, child.id(),
-        ) {
-            let _ = crate::claude_process::ended(&observed.agent_dir, &observed.session, observed.seq);
-            tracing::error!("Claude primary process registration refused: {error:#}");
-        }
+        )
+    {
+        let _ = crate::claude_process::ended(&observed.agent_dir, &observed.session, observed.seq);
+        tracing::error!("Claude primary process registration refused: {error:#}");
     }
     supervise_provider(
         provider,
@@ -662,12 +662,13 @@ fn supervise_provider(
     struct ClosePrimary<'a> { observer: Option<&'a SessionObserver>, detached: bool }
     impl Drop for ClosePrimary<'_> {
         fn drop(&mut self) {
-            if !self.detached {
-                if let Some(observer) = self.observer.filter(|o| o.harness == "claude") {
-                    if let Err(error) = crate::claude_process::ended(
-                        &observer.agent_dir, &observer.session, observer.seq,
-                    ) { tracing::warn!("closing Claude primary ownership: {error:#}"); }
-                }
+            if !self.detached
+                && let Some(observer) = self.observer.filter(|o| o.harness == "claude")
+                && let Err(error) = crate::claude_process::ended(
+                    &observer.agent_dir, &observer.session, observer.seq,
+                )
+            {
+                tracing::warn!("closing Claude primary ownership: {error:#}");
             }
         }
     }

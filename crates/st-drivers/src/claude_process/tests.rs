@@ -767,6 +767,9 @@ fn kernel_orphan_zombie_wrapper_exit_and_reexec_keep_generation_fences() {
             "exit" => {}
             "wrapper-source" => {
                 let seq = claim(&dir, "fixture", "fixture", "orphan").unwrap();
+                // Waiting here would remove the reparenting fault this branch must create.
+                // The root waits this wrapper; its child exits after the bounded release barrier.
+                #[expect(clippy::zombie_processes, reason = "deliberate private orphan fixture; wrapper exits before the released child")]
                 let child = command("orphan-provider").spawn().unwrap();
                 spawned(&dir, "orphan", seq, child.id()).unwrap();
                 // Deliberately exit without ended: this models a wrapper disappearing with
@@ -807,6 +810,8 @@ fn kernel_orphan_zombie_wrapper_exit_and_reexec_keep_generation_fences() {
             }
             "reexec-before" => {
                 let seq = claim(&dir, "fixture", "fixture", "reexec").unwrap();
+                // The same parent PID reaps the recorded child with waitpid after exec below.
+                #[expect(clippy::zombie_processes, reason = "owned child is explicitly reaped by reexec-after using its recorded PID")]
                 let child = command("held-provider").spawn().unwrap();
                 spawned(&dir, "reexec", seq, child.id()).unwrap();
                 use std::os::unix::process::CommandExt as _;

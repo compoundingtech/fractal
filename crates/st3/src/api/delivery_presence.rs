@@ -250,18 +250,18 @@ pub(super) fn attachment(recipient: &str, incarnation: &str) -> Option<crate::ma
 /// Admission metadata is set by the daemon, not a helper's readiness claim. It grants no
 /// health or mailbox custody, and a legacy delivery generation is visible even on old helpers.
 pub(super) fn record_ownership(fence: &crate::mailbox::Fence, legacy: bool) {
-    if fence.component == "delivery" {
-        if let Ok(mut ownership) = presence().ownership.lock() {
-            let row = ownership
-                .entry(fence.subject.clone())
-                .or_insert_with(|| Ownership::new(&fence.incarnation, legacy));
-            if row.incarnation != fence.incarnation {
-                *row = Ownership::new(&fence.incarnation, legacy);
-            }
-            row.legacy = legacy;
-            if !legacy {
-                row.shape = None;
-            }
+    if fence.component == "delivery"
+        && let Ok(mut ownership) = presence().ownership.lock()
+    {
+        let row = ownership
+            .entry(fence.subject.clone())
+            .or_insert_with(|| Ownership::new(&fence.incarnation, legacy));
+        if row.incarnation != fence.incarnation {
+            *row = Ownership::new(&fence.incarnation, legacy);
+        }
+        row.legacy = legacy;
+        if !legacy {
+            row.shape = None;
         }
     }
 }
@@ -443,18 +443,18 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
             .cloned()
     });
     let mut assessment = ownership_warning(assessment, driver == "claude" && owner.is_some());
-    if let Some(owner) = owner {
-        if let Some((at, shape)) = owner.shape {
-            let cap = if owner.used == SHAPE_LIMIT {
-                "; capture cap reached, later peers unobserved"
-            } else {
-                ""
-            };
-            assessment.reason = Some(format!(
-                "{LEGACY_REASON}; {shape}; sampled {}s ago (not health or enforcement){cap}",
-                at.elapsed().as_secs()
-            ));
-        }
+    if let Some(owner) = owner
+        && let Some((at, shape)) = owner.shape
+    {
+        let cap = if owner.used == SHAPE_LIMIT {
+            "; capture cap reached, later peers unobserved"
+        } else {
+            ""
+        };
+        assessment.reason = Some(format!(
+            "{LEGACY_REASON}; {shape}; sampled {}s ago (not health or enforcement){cap}",
+            at.elapsed().as_secs()
+        ));
     }
     if let Some(proof) = presence.uncertain.lock().ok().and_then(|rows|
         rows.get(recipient).filter(|r| incarnation == Some(r.fence.incarnation.as_str())).cloned()) {
