@@ -7,8 +7,6 @@ pub use smallclaims::claim::{
     ClaimInput, ClaimRecord, ClaimsPage, DocumentVersion, ReplicaBatch, ReplicaEnvelope,
     ReplicaEnvelopeId, ReplicaEnvelopeSignature,
 };
-// st3-daemon's store tests name these through this module.
-pub use smallclaims::replication::{ReplicaRange, ReplicationBatch, ReplicationResponse};
 pub use smallclaims::replication::{
     InventoryCheckpoint, ReplicaRecordView, ReplicationExchange, ReplicationExportRequest,
     ReplicationExportResponse, ReplicationFirstSync, ReplicationInventory,
