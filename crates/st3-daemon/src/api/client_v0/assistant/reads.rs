@@ -1,8 +1,13 @@
-//! Minimal assistant read projections. Each one reuses a native snapshot reader and copies
-//! only allowlisted identifiers, closed enums, counts and timestamps out of it, so titles,
-//! goals, previews, paths and other free text in source rows never reach an assistant.
-//! Content reads return one bounded text range of one exactly named resource.
+//! Bounded assistant projections backed by native readers. Metadata and operational
+//! reads copy only explicitly selected fields; conversation content uses bounded text
+//! and revision-pinned references. Declaration environments, workspace paths and terminal
+//! content never enter operational or conversation projections.
 use super::*;
+
+#[path = "reads_conversation.rs"]
+mod conversation_reads;
+#[path = "reads_operational.rs"]
+mod operational_reads;
 
 /// Default and ceiling of an assistant response, including its whole JSON envelope. The
 /// route enforces the envelope; content sources read no more than this many bytes.
@@ -61,6 +66,10 @@ pub(super) async fn project(
         },
         "missions" => page(state, snapshot, "assistant.missions", parameters, max_bytes, mission_rows).await,
         "agents" => page(state, snapshot, "assistant.agents", parameters, max_bytes, agent_rows).await,
+        "conversations" | "conversation-detail" | "conversation-timeline" | "conversation-search" =>
+            conversation_reads::project(state, snapshot, projection, parameters, max_bytes).await,
+        "mission-detail" | "work" | "work-detail" | "agent-detail" | "agent-queue" =>
+            operational_reads::project(state, snapshot, projection, parameters, max_bytes).await,
         "conversation-content" => Ok((snapshot.clone(), conversation(state, parameters, max_bytes).await?)),
         "terminal-content" => Ok((snapshot.clone(), terminal(state, parameters, max_bytes).await?)),
         _ => Err(ApiError::not_found("unknown assistant projection")),

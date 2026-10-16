@@ -15,6 +15,9 @@ pub(in crate::api) struct SearchQuery {
     since: Option<String>,
     cursor: Option<String>,
     limit: Option<usize>,
+    // Internal projection policy, never accepted from an external query string.
+    #[serde(skip)]
+    assistant_text_only: bool,
 }
 
 struct IndexState {
@@ -31,7 +34,7 @@ struct IndexState {
 }
 
 type HeldIndex = Arc<Mutex<IndexState>>;
-type IndexKey = (usize, String);
+type IndexKey = (usize, String, bool);
 static INDEXES: OnceLock<Mutex<BTreeMap<IndexKey, HeldIndex>>> = OnceLock::new();
 
 #[derive(Deserialize, Serialize)]
@@ -43,10 +46,11 @@ struct Cursor {
     entry: String,
 }
 
-fn index_for(state: &AppState, session: &ClientSession) -> Result<HeldIndex, ApiError> {
+fn index_for(state: &AppState, session: &ClientSession, assistant_text_only: bool) -> Result<HeldIndex, ApiError> {
     let key = (
         Arc::as_ptr(&state.store) as usize,
         session.authority_actor.clone(),
+        assistant_text_only,
     );
     let mut indexes = INDEXES.get_or_init(Default::default).lock().unwrap();
     indexes.retain(|_, index| index.lock().unwrap().store.strong_count() > 0);
@@ -97,6 +101,24 @@ fn searchable_text(value: &Value, output: &mut String) {
         }
         _ => {}
     }
+}
+
+/// The assistant index shares native search machinery but indexes only human-readable
+/// conversation text, never tool bodies or source-record metadata. Its cache and cursors
+/// are separate from the unrestricted native client index.
+fn entry_text(item: &Value, assistant_text_only: bool) -> String {
+    if assistant_text_only {
+        if item["type"] == "content"
+            && matches!(item["role"].as_str(), Some("assistant" | "user"))
+            && item["body"]["media_type"] == "text/plain"
+        {
+            return item["body"]["text"].as_str().unwrap_or_default().to_owned();
+        }
+        return String::new();
+    }
+    let mut text = String::new();
+    searchable_text(&item["body"], &mut text);
+    text
 }
 
 /// A conversation considered in the original per-source budget order.
@@ -290,11 +312,11 @@ fn local_pages(
     session: ClientSession,
     id: String,
     owner: String,
-    start_budget: usize,
-    start_slots: usize,
+    capacity: (usize, usize),
+    assistant_text_only: bool,
 ) -> (Vec<SearchEntry>, (usize, usize), Vec<String>, bool) {
-    let mut budget = start_budget;
-    let mut slots = start_slots;
+    let (start_budget, start_slots) = capacity;
+    let (mut budget, mut slots) = capacity;
     let mut query = ClientListQuery {
         limit: Some(200),
         ..Default::default()
@@ -321,8 +343,7 @@ fn local_pages(
             if !matches!(kind, "content" | "tool_call" | "tool_result") {
                 continue;
             }
-            let mut text = String::new();
-            searchable_text(&item["body"], &mut text);
+            let text = entry_text(item, assistant_text_only);
             if text.trim().is_empty() {
                 continue;
             }
@@ -358,6 +379,7 @@ fn refresh(
     session: &ClientSession,
     held: &HeldIndex,
     runtime: &tokio::runtime::Handle,
+    assistant_text_only: bool,
 ) -> anyhow::Result<()> {
     let old = held.lock().unwrap().stamps.clone();
     let old_sizes = held.lock().unwrap().sizes.clone();
@@ -438,8 +460,7 @@ fn refresh(
                     if !matches!(kind, "content" | "tool_call" | "tool_result") {
                         continue;
                     }
-                    let mut text = String::new();
-                    searchable_text(&item["body"], &mut text);
+                    let text = entry_text(item, assistant_text_only);
                     if text.trim().is_empty() {
                         continue;
                     }
@@ -482,8 +503,8 @@ fn refresh(
                         local_session,
                         local_id,
                         local_owner,
-                        fetch_budget,
-                        fetch_slots,
+                        (fetch_budget, fetch_slots),
+                        assistant_text_only,
                     )
                 }))
                 .map_err(anyhow::Error::from)?;
@@ -580,6 +601,7 @@ pub(in crate::api) async fn search(
             &query.agent,
             &query.since,
             limit,
+            query.assistant_text_only,
         ))
         .map_err(ApiError::internal)?,
     ));
@@ -610,7 +632,7 @@ pub(in crate::api) async fn search(
     {
         return Err(validation("invalid search cursor timestamp"));
     }
-    let held = index_for(&state, &session)?;
+    let held = index_for(&state, &session, query.assistant_text_only)?;
     {
         let mut index = held.lock().unwrap();
         if cursor.is_none()
@@ -623,9 +645,10 @@ pub(in crate::api) async fn search(
             let session = session.clone();
             let held = held.clone();
             let runtime = tokio::runtime::Handle::current();
+            let assistant_text_only = query.assistant_text_only;
             std::thread::spawn(move || {
                 let _permit = permit;
-                let result = refresh(&state, &session, &held, &runtime);
+                let result = refresh(&state, &session, &held, &runtime, assistant_text_only);
                 let mut index = held.lock().unwrap();
                 index.refreshing = false;
                 index.checked = Instant::now();
@@ -642,6 +665,21 @@ pub(in crate::api) async fn search(
     crate::api::read_deadline::spawn_blocking(move || search_page(&state, &query, cursor, held, binding, limit))
         .await
         .map_err(ApiError::internal)?
+}
+
+/// Native bounded search with a text-only index policy for the assistant projection.
+pub(super) async fn assistant_search(
+    state: AppState,
+    session: ClientSession,
+    text: String,
+    agent: Option<String>,
+    cursor: Option<String>,
+    limit: usize,
+) -> Result<Json<Value>, ApiError> {
+    search(State(state), Extension(session), Query(SearchQuery {
+        text, agent, cursor, limit: Some(limit), assistant_text_only: true,
+        ..Default::default()
+    })).await
 }
 
 fn search_page(
@@ -727,6 +765,26 @@ fn search_page(
 mod tests {
     use super::*;
 
+    #[test]
+    fn assistant_index_excludes_native_metadata_and_tool_payloads() {
+        let mut item = json!({
+            "type":"content", "role":"assistant",
+            "body":{"media_type":"text/plain","text":"allowed conversation text",
+                "blocks":[{"kind":"source_record","payload":{"cwd":"/PRIVATE","environment":"PRIVATE"}}]},
+        });
+        assert_eq!(entry_text(&item, true), "allowed conversation text");
+        assert!(entry_text(&item, false).contains("PRIVATE"));
+        item["type"] = json!("tool_result");
+        assert!(entry_text(&item, true).is_empty());
+        item["type"] = json!("content");
+        item["body"]["media_type"] = json!("application/json");
+        assert!(entry_text(&item, true).is_empty());
+        let query: SearchQuery = serde_json::from_value(json!({
+            "text":"word", "assistant_text_only":true,
+        })).unwrap();
+        assert!(!query.assistant_text_only);
+    }
+
     fn claim(state: &AppState, subject: &str, kind: &str, mut fields: Value) {
         if kind == "message.sent" {
             fields["status"] = json!("sent");
@@ -762,10 +820,10 @@ mod tests {
     }
     async fn rebuild(state: &AppState, person: &str) {
         let session = ClientSession::local(Some(person)).unwrap();
-        let held = index_for(state, &session).unwrap();
+        let held = index_for(state, &session, false).unwrap();
         let runtime = tokio::runtime::Handle::current();
         let state = state.clone();
-        crate::api::read_deadline::spawn_blocking(move || refresh(&state, &session, &held, &runtime))
+        crate::api::read_deadline::spawn_blocking(move || refresh(&state, &session, &held, &runtime, false))
             .await
             .unwrap()
             .unwrap();
@@ -910,7 +968,7 @@ mod tests {
             .unwrap()
             .lock()
             .unwrap()
-            .remove(&(Arc::as_ptr(&state.store) as usize, "person/alex".to_owned()));
+            .remove(&(Arc::as_ptr(&state.store) as usize, "person/alex".to_owned(), false));
         assert_eq!(
             read(&state, "person/alex", evicted).await.unwrap_err().code,
             "cursor-gap"
@@ -993,7 +1051,7 @@ mod tests {
         }
         rebuild(&state, "person/alex").await;
         let session = ClientSession::local(Some("person/alex")).unwrap();
-        let held = index_for(&state, &session).unwrap();
+        let held = index_for(&state, &session, false).unwrap();
         let (first_sizes, first_stamps, first_revision, first_incomplete) = {
             let index = held.lock().unwrap();
             (
