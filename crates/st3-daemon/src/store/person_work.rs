@@ -503,37 +503,6 @@ pub(super) fn enrich_responses(
 }
 
 impl Store {
-    /// A daemon-owned approval ask, projected in the same transaction as its durable claim.
-    pub(crate) fn ask_daemon_approval(&self, person: &str, key: &str, proposal: Value) -> Result<StepRunView, St3Error> {
-        let subject = format!("step-run/chatgpt-{key}/ask");
-        let mission_id = format!("chatgpt/{key}");
-        let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal \"Approve ChatGPT proposal\"; step \"ask\" {{ assigned-to {person:?}; goal \"Approve exact proposed action\"; }} }}");
-        let mut intent = crate::graph::parse_internal_intent(&kdl, &self.origin)?;
-        let mission = intent.missions.remove(&mission_id).ok_or_else(|| St3Error::new("internal","approval mission absent"))?;
-        let input = PersonAskRequest { legacy_request:None, person:person.into(), actor:"daemon/chatgpt-approval".into(),
-            title:"Approve ChatGPT proposal".into(), reason:serde_json::to_string(&proposal).map_err(internal)?,
-            step:None, new_run:Some(mission_id), incarnation:None, idempotency_key:key.into(),
-            request:Some(json!({"version":1,"type":"decision","question":"Execute this exact ChatGPT proposal?",
-                "why_person":"Only the owner authorizes assistant writes.","summary":"Approve the exact typed action in the alert detail; original fences remain mandatory.",
-                "answers":[{"id":"approve","label":"Approve","consequence":"Execute this exact action once, subject to its original fence.","outcome":"accept"},
-                    {"id":"deny","label":"Deny","consequence":"Do not execute the action.","outcome":"decline"}]})) };
-        let structured = canonical_request(&input)?;
-        self.connection.batched(|tx| {
-            if let Some(existing) = request(tx,&subject).map_err(internal)? {
-                if existing.body["fields"]["person"] != person || existing.body["fields"]["request"] != structured {
-                    return Err(St3Error::new("idempotency-conflict","approval key already names another request"));
-                }
-                return step(tx,&subject).map_err(internal)?.ok_or_else(|| St3Error::new("internal","approval ask absent"));
-            }
-            let claim = append_claim_tx(tx,&self.origin,&subject,"work.person-asked",Some("daemon/chatgpt-approval"),
-                &with_request(json!({"fields":{"run":format!("mission-run/chatgpt/{key}"),
-                    "generation":format!("run-generation/chatgpt-{key}"),"person":person,"title":input.title,"reason":input.reason,
-                    "key":key,"attempt":1,"status":"ready","mission_spec":mission}}),&structured),&[],None).map_err(claim_append_error)?;
-            project(tx,&claim)?;
-            step(tx,&subject).map_err(internal)?.ok_or_else(|| St3Error::new("internal","approval ask absent"))
-        }).map_err(internal)?
-    }
-
     pub fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, St3Error> {
         if !input.person.starts_with("person/")
             || input.person.matches('/').count() != 1
@@ -636,8 +605,7 @@ impl Store {
         authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
     ) -> Result<StepRunView, St3Error> {
         if let Some(authorization) = authorization
-            && (authorization.scope != "read.assistant.attention" || authorization.approval_subject.is_none()
-                || authorization.owner != input.actor || cancel)
+            && (authorization.scope != "write.assistant.answers" || authorization.owner != input.actor || cancel)
         {
             return Err(St3Error::new("forbidden", "assistant authorization does not bind this person answer"));
         }
@@ -647,9 +615,8 @@ impl Store {
             None => None,
         };
         self.connection.batched(|tx| {
-            if let Some(authorization) = authorization {
-                super::assistant_write::authorize(tx, &self.origin, authorization)?;
-            }
+            let assistant_grant_id = authorization.map(|authorization|
+                super::assistant_write::authorize_grant(tx, &self.origin, authorization)).transpose()?;
             let subject = normalize_step_run(&input.subject);
             let mut view = step(tx, &subject).map_err(internal)?
                 .ok_or_else(|| St3Error::new("missing-step-run", "the person step does not exist"))?;
@@ -713,6 +680,10 @@ impl Store {
                 "summary": summary, "key": input.idempotency_key, "episode": ask.as_ref().map(|a| a.id.clone()).unwrap_or_else(|| format!("{}:{}:{}", view.generation, view.attempt, view.readiness_epoch))}, "evidence": input.evidence});
             if let Some(answer) = &answer {
                 body["fields"]["answer"] = answer.clone();
+            }
+            if let Some(grant_id) = &assistant_grant_id {
+                body["fields"]["sender_class"] = json!("external-assistant");
+                body["fields"]["assistant_grant_id"] = json!(grant_id);
             }
             if let Some(proof) = &input.delegation {
                 if cancel { return Err(St3Error::new("delegation-refused", "cancelling another agent's ask is outside the delegation list")); }
@@ -1003,9 +974,19 @@ fn send_answer_tx(
     if let Some(run) = fields["owner_run"].as_str() {
         tags.push(Value::String(format!("mission-run:{run}")));
     }
-    append_claim_tx(tx, origin, &subject, "message.sent", Some("daemon/runtime"),
-        &json!({"fields": {"from": "daemon/runtime", "to": requester, "content": content, "status": "sent",
-            "title": format!("Answered: {title}"), "in_reply_to": null, "tags": tags}, "evidence": [response.id]}),
+    let mut body = json!({"fields": {"from": "daemon/runtime", "to": requester, "content": content, "status": "sent",
+        "title": format!("Answered: {title}"), "in_reply_to": null, "tags": tags}, "evidence": [response.id]});
+    if response.body["fields"]["sender_class"] == "external-assistant" {
+        body["fields"]["sender_class"] = json!("external-assistant");
+        body["fields"]["assistant_grant_id"] = response.body["fields"]["assistant_grant_id"].clone();
+        // The answer's grant was authorized in this same writer transaction. Preserve its
+        // server-established provenance without entering the unverified generic writer.
+        super::retirements::admit_recipient(tx, Some(requester))?;
+        append_admitted_claim_tx(tx, origin, &subject, "message.sent", Some("daemon/runtime"), &body,
+            &[], None).map_err(claim_append_error)?;
+        return Ok(());
+    }
+    append_claim_tx(tx, origin, &subject, "message.sent", Some("daemon/runtime"), &body,
         &[], None).map_err(claim_append_error)?;
     Ok(())
 }

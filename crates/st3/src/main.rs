@@ -2998,6 +2998,9 @@ struct AssistantGrantTerms {
     #[arg(long, value_parser = parse_assistant_grant_expiry)]
     expires_in: Option<u64>,
     /// One exact assistant scope; repeat for each scope. Nothing is granted implicitly.
+    /// Add write.assistant.answers to answer supported owner alerts immediately;
+    /// read.assistant.attention only permits reads. write.assistant.messages permits
+    /// messages to any existing agent, never a person.
     #[arg(long = "scope", value_parser = parse_assistant_scope)]
     scopes: Vec<AssistantScope>,
     /// Consent that every assistant read is disclosed to OpenAI.
@@ -3019,7 +3022,7 @@ enum AssistantGrantCommand {
         grant: String,
         #[command(flatten)]
         terms: AssistantGrantTerms,
-        /// Exact agent IDs permitted as low-risk assistant message recipients.
+        /// Stored recipient metadata; does not restrict sends to existing agents.
         #[arg(long = "allow-recipient")]
         recipients: Vec<String>,
     },

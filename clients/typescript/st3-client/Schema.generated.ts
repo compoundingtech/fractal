@@ -1255,7 +1255,7 @@ export const AssistantReadTrust = /*#__PURE__*/ (() => Schema.Struct({
 export type AssistantReadTrust = typeof AssistantReadTrust.Type
 export type AssistantReadTrustEncoded = typeof AssistantReadTrust.Encoded
 
-export const AssistantScope = /*#__PURE__*/ (() => Schema.Literals(["read.assistant.summary","read.assistant.attention","read.assistant.missions","read.assistant.agents","read.assistant.conversation","read.assistant.terminal","write.assistant.messages","write.assistant.custom-reply"]).annotate({ identifier: "AssistantScope" }))()
+export const AssistantScope = /*#__PURE__*/ (() => Schema.Literals(["read.assistant.summary","read.assistant.attention","read.assistant.missions","read.assistant.agents","read.assistant.conversation","read.assistant.terminal","write.assistant.messages","write.assistant.custom-reply","write.assistant.answers"]).annotate({ identifier: "AssistantScope" }))()
 export type AssistantScope = typeof AssistantScope.Type
 export type AssistantScopeEncoded = typeof AssistantScope.Encoded
 
@@ -1279,7 +1279,8 @@ export const AssistantGrant = /*#__PURE__*/ (() => Schema.Struct({
   "principal": AssistantPrincipal,
   /** Owner-provisioned public pins for SCG read proofs. Absent means every assistant read is denied. */
   "read_trust": optionalKey(AssistantReadTrust),
-  "recipient_allowlist": Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u")))),
+  /** Stored policy metadata; does not restrict message.send. write.assistant.messages permits any existing agent recipient, never a person. */
+  "recipient_allowlist": Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u")))).annotate({ description: "Stored policy metadata; does not restrict message.send. write.assistant.messages permits any existing agent recipient, never a person." }),
   "revoked": Schema.Boolean,
   "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique()),
   "sender_class": AssistantSenderClass,
@@ -1294,7 +1295,8 @@ export const AssistantGrantPolicy = /*#__PURE__*/ (() => Schema.Struct({
   "disclosure_consent": Schema.Literal(true),
   "expires_in_seconds": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(2592000))),
   "minimal_read_mode": AssistantMinimalReadMode,
-  "recipient_allowlist": optionalKey(Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u"))))),
+  /** Stored policy metadata; does not restrict message.send. write.assistant.messages permits any existing agent recipient, never a person. */
+  "recipient_allowlist": optionalKey(Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u"))))).annotate({ description: "Stored policy metadata; does not restrict message.send. write.assistant.messages permits any existing agent recipient, never a person." }),
   "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique())
 }).annotate({ identifier: "AssistantGrantPolicy" }))()
 export type AssistantGrantPolicy = typeof AssistantGrantPolicy.Type

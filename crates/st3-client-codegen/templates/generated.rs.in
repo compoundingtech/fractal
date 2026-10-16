@@ -3160,6 +3160,8 @@ pub enum AssistantScope {
     Messages,
     #[serde(rename = "write.assistant.custom-reply")]
     CustomReply,
+    #[serde(rename = "write.assistant.answers")]
+    Answers,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]

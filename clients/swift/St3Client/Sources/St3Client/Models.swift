@@ -704,7 +704,7 @@ public enum AssistantSenderClass: String, Codable, Sendable { case externalAssis
 public enum AssistantMinimalReadMode: String, Codable, Sendable { case approvalOnce = "approval-once", callerBoundAllow = "caller-bound-allow" }
 public enum AssistantScope: String, Codable, Sendable {
     case summary = "read.assistant.summary", attention = "read.assistant.attention", missions = "read.assistant.missions", agents = "read.assistant.agents", conversation = "read.assistant.conversation", terminal = "read.assistant.terminal"
-    case messages = "write.assistant.messages", customReply = "write.assistant.custom-reply"
+    case messages = "write.assistant.messages", customReply = "write.assistant.custom-reply", answers = "write.assistant.answers"
 }
 public struct AssistantPairingBegin: Codable, Sendable {
     public let apiVersion, deviceName: String; public let assistantID: AssistantPrincipal; public let scopes: [AssistantScope]; public let expiresInSeconds: UInt64?; public let disclosureConsent: Bool; public let consentEvidence: String; public let minimalReadMode: AssistantMinimalReadMode?

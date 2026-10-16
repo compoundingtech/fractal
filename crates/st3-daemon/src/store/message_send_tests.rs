@@ -685,7 +685,7 @@ fn assistant_provenance_stamps_authenticated_grant_and_preserves_replica_admissi
     let authorization = assistant_write::AssistantWriteAuthorization {
         grant_subject: grant_subject.into(), actor: "assistant/chatgpt/session/native-fixture".into(),
         owner: "person/eval".into(), policy_revision: 1, scope: "write.assistant.messages".into(),
-        recipient: Some("agent/eval.recipient".into()), approval_subject: None,
+        recipient: Some("agent/eval.recipient".into()),
     };
     let mut input = request();
     input.fields.insert("sender_class".into(), json!("external-assistant"));

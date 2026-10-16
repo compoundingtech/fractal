@@ -2508,7 +2508,7 @@
     },
     "AssistantPrincipal": { "enum": ["assistant/chatgpt"] },
     "AssistantSenderClass": { "enum": ["external-assistant"] },
-    "AssistantScope": { "enum": ["read.assistant.summary", "read.assistant.attention", "read.assistant.missions", "read.assistant.agents", "read.assistant.conversation", "read.assistant.terminal", "write.assistant.messages", "write.assistant.custom-reply"] },
+    "AssistantScope": { "enum": ["read.assistant.summary", "read.assistant.attention", "read.assistant.missions", "read.assistant.agents", "read.assistant.conversation", "read.assistant.terminal", "write.assistant.messages", "write.assistant.custom-reply", "write.assistant.answers"] },
     "AssistantMinimalReadMode": { "enum": ["approval-once", "caller-bound-allow"] },
     "AssistantGrant": {
       "type": "object",
@@ -2527,7 +2527,7 @@
         "expires_at": { "$ref": "#/$defs/Timestamp" },
         "policy_revision": { "type": "integer", "minimum": 1 },
         "minimal_read_mode": { "$ref": "#/$defs/AssistantMinimalReadMode" },
-        "recipient_allowlist": { "type": "array", "items": { "type": "string", "pattern": "^agent/.+$" } },
+        "recipient_allowlist": { "type": "array", "items": { "type": "string", "pattern": "^agent/.+$" }, "description": "Stored policy metadata; does not restrict message.send. write.assistant.messages permits any existing agent recipient, never a person." },
         "disclosure_consent": { "type": "boolean" },
         "consent_evidence": { "type": "string", "minLength": 1, "maxLength": 512 },
         "revoked": { "type": "boolean" },
@@ -2544,7 +2544,7 @@
         "expires_in_seconds": { "type": "integer", "minimum": 1, "maximum": 2592000, "default": 3600 },
         "disclosure_consent": { "const": true },
         "consent_evidence": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "recipient_allowlist": { "type": "array", "items": { "type": "string", "pattern": "^agent/.+$" } },
+        "recipient_allowlist": { "type": "array", "items": { "type": "string", "pattern": "^agent/.+$" }, "description": "Stored policy metadata; does not restrict message.send. write.assistant.messages permits any existing agent recipient, never a person." },
         "minimal_read_mode": { "$ref": "#/$defs/AssistantMinimalReadMode" }
       }
     },

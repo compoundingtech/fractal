@@ -3821,6 +3821,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
     if kind == "work.submitted" {
         fields.insert("submitted_incarnation".into(), string());
     }
+    if kind == "work.person-done" {
+        fields.insert("sender_class".into(), enumeration(&["external-assistant"]));
+        fields.insert("assistant_grant_id".into(), string());
+    }
     if matches!(kind, "work.person-done" | "gate.result" | "message.closed") {
         fields.insert("acted_for".into(), reference_to(&["person"]));
         fields.insert("delegation".into(), object());

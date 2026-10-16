@@ -605,7 +605,7 @@ export type AssistantReadTrustRequest = {
 
 export type AssistantResponseBytes = number;
 
-export type AssistantScope = "read.assistant.summary" | "read.assistant.attention" | "read.assistant.missions" | "read.assistant.agents" | "read.assistant.conversation" | "read.assistant.terminal" | "write.assistant.messages" | "write.assistant.custom-reply";
+export type AssistantScope = "read.assistant.summary" | "read.assistant.attention" | "read.assistant.missions" | "read.assistant.agents" | "read.assistant.conversation" | "read.assistant.terminal" | "write.assistant.messages" | "write.assistant.custom-reply" | "write.assistant.answers";
 
 export type AssistantSenderClass = "external-assistant";
 
