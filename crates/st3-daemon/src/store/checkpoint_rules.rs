@@ -36,8 +36,9 @@ pub(crate) use staged::plan_staged;
 /// `runtime.reconcile-decision` of each decision key.
 /// Version 16 preserves exact review binding, withdrawal and author-attempt references.
 /// It ships in the reader release before review-at-head activation.
-/// Version 17 adds harness-question lifecycle retention after main's version 16.
-pub const RULES_VERSION: u32 = 17;
+/// Version 18 adds harness-question lifecycle retention after #1473's allocated version 17.
+/// Whichever PR lands second must renumber in a plain follow-up commit.
+pub const RULES_VERSION: u32 = 18;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest

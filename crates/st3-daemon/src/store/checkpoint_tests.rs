@@ -2947,7 +2947,7 @@ carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
 fn the_policy_renders_the_rules_description_with_review_and_question_history_compaction() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 17);
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 18);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),

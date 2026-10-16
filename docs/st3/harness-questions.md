@@ -53,9 +53,10 @@ observations, subject to the ordinary checkpoint guards. No text or bulky harnes
 data is stored in these claims. Independently derived bulky data may expire, but never the
 compact owner record.
 
-The rule `all-while-pending,newest-once-resolved-1d-before-cut` uses rules version 17,
-after main's review-reader version 16. The proof compares the same compact question before
-and after compaction. Resolved questions never become pending again: re-observation of the
+The rule `all-while-pending,newest-once-resolved-1d-before-cut` uses rules version 18,
+following #1473's allocated version 17 and main's review-reader version 16. Whichever PR
+lands second must renumber in a plain follow-up commit. The proof compares the same compact
+question before and after compaction. Resolved questions never become pending again: re-observation of the
 same native call is refused even after history expiry or checkpoint trimming, including when
 the resolution status is `expired`. Its original resolution and receipt remain authoritative.
 
