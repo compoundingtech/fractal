@@ -4418,7 +4418,7 @@ enum WorkCommand {
     ///
     /// Records progress in the graph without messaging another agent; people read it in stui.
     #[command(mut_arg("subject", |arg| arg.add(ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))))]
-    Progress(WorkActionArgs),
+    Progress(WorkProgressArgs),
     /// Add time to the execution budget of claimed work that ran out of it.
     Extend(WorkExtendArgs),
     /// Stop the execution clock while claimed work waits for something outside this seat.
@@ -4664,6 +4664,19 @@ struct WorkWaitArgs {
     /// What the step waits for, such as "build slot" or "merge queue".
     #[arg(long)]
     reason: String,
+}
+
+#[derive(Args)]
+struct WorkProgressArgs {
+    #[command(flatten)]
+    action: WorkActionArgs,
+    /// Estimated finish: a positive duration from now or a future RFC3339 timestamp.
+    ///
+    /// Adds a self-reported ETA to this progress note, not an execution deadline.
+    /// The next nonempty summary replaces it. Use --summary without --eta to withdraw it.
+    /// Handoff clears it; revisions do not carry it. Work show prints its age and author.
+    #[arg(long)]
+    eta: Option<String>,
 }
 
 #[derive(Args)]
@@ -6166,8 +6179,9 @@ fn guard_mutating_cli_actor(
             WorkCommand::Start(args) => Some(args.actor.as_str()),
             WorkCommand::Handoff(args) => Some(args.actor.as_str()),
             WorkCommand::Acknowledge(args) => Some(args.actor.as_str()),
-            WorkCommand::Claim(args) | WorkCommand::Renew(args) | WorkCommand::Progress(args)
+            WorkCommand::Claim(args) | WorkCommand::Renew(args)
             | WorkCommand::Complete(args) | WorkCommand::Fail(args) | WorkCommand::Release(args) => args.actor.as_deref(),
+            WorkCommand::Progress(args) => args.action.actor.as_deref(),
             WorkCommand::Wake(args) => args.actor.as_deref(),
             WorkCommand::PublishMission(args) => args.actor.as_deref(),
             WorkCommand::Revise(args) => args.actor.as_deref(),
@@ -11811,6 +11825,7 @@ fn outcome_time(value: &str, now: u128) -> Result<u128> {
     Ok(now.saturating_sub(ago.as_millis()))
 }
 
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct OutcomeCursor {
     collection: String,
@@ -17315,7 +17330,17 @@ async fn run_work(
         }
         WorkCommand::Claim(args) => post_work(client, "claim", args, json_output).await,
         WorkCommand::Renew(args) => post_work(client, "renew", args, json_output).await,
-        WorkCommand::Progress(args) => post_work(client, "progress", args, json_output).await,
+        WorkCommand::Progress(mut args) => {
+            if let Some(eta) = args.eta {
+                args.action.summary = Some(st3::work_eta::summary(
+                    args.action.summary.as_deref(),
+                    &eta,
+                    args.action.actor.as_deref().context("a work action needs explicit --as")?,
+                    current_unix_ms()?,
+                )?);
+            }
+            post_work(client, "progress", args.action, json_output).await
+        }
         WorkCommand::Complete(args) => post_work(client, "complete", args, json_output).await,
         WorkCommand::Fail(args) => post_work(client, "fail", args, json_output).await,
         WorkCommand::Release(args) => post_work(client, "release", args, json_output).await,
@@ -17530,6 +17555,12 @@ fn render_client_work_detail(work: &st3_client::Work) -> String {
     }
     for blocker in &work.blockers {
         let _ = writeln!(output, "Blocker: {blocker}");
+    }
+    if let Some(progress) = &work.last_progress {
+        let age = work.progress_at.as_deref()
+            .map(|at| ago(at, st_drivers::message::now_ms()))
+            .unwrap_or_else(|| "age unknown".to_owned());
+        let _ = writeln!(output, "Progress ({age}): {progress}");
     }
     for goal in &work.goals {
         let _ = writeln!(output, "Goal: {goal}");
@@ -31176,6 +31207,18 @@ mod tests {
         assert_eq!(parse_timeout("2m").unwrap(), Duration::from_secs(120));
         assert_eq!(parse_timeout("0").unwrap(), Duration::ZERO);
         assert!(parse_timeout("forever").is_err());
+    }
+
+    #[test]
+    fn progress_eta_flag_is_not_an_execution_action_flag() {
+        assert!(Cli::try_parse_from([
+            "st3", "work", "progress", "step-run/example", "--eta", "2h"
+        ]).is_ok());
+        for action in ["claim", "renew", "complete", "fail", "release", "resume"] {
+            assert!(Cli::try_parse_from([
+                "st3", "work", action, "step-run/example", "--eta", "2h"
+            ]).is_err(), "{action}");
+        }
     }
 
     #[test]

@@ -9364,7 +9364,7 @@ impl Store {
                 }
                 // A revision carries a claim into the successor generation. Its worker may still name the
                 // step by the predecessor subject.
-                let (subject, current) = match (action != "claim")
+                let (subject, mut current) = match (action != "claim")
                     .then(|| carried_claim_successor_tx(transaction, &current, &actor))
                     .transpose()
                     .map_err(internal)?
@@ -9444,6 +9444,7 @@ impl Store {
                 }
                 if let Some(input) = handoff {
                     adhoc_work::validate_recipient(transaction, input, &current)?;
+                    enrich_step_summaries_at(transaction, &mut current, now).map_err(internal)?;
                 }
                 if action == "claim" && adhoc_work::pending_handoff(transaction, &current)? {
                     return Err(St3Error::new("handoff-not-acknowledged", "read the handoff note and acknowledge its message before claiming this work"));
@@ -9741,6 +9742,9 @@ impl Store {
                         &request.idempotency_key,
                     )
                     .map_err(claim_append_error)?;
+                    if let Some(input) = handoff {
+                        adhoc_work::clear_eta_tx(transaction, &self.origin, &current, input)?;
+                    }
                     transaction
                         .execute(
                             "DELETE FROM local_work_lease_renewals WHERE subject=?1",

@@ -141,6 +141,32 @@ pub(super) fn transfer_tx(
     Ok(())
 }
 
+pub(super) fn clear_eta_tx(
+    tx: &Transaction<'_>,
+    origin: &str,
+    current: &StepRunView,
+    input: &WorkHandoffRequest,
+) -> Result<(), St3Error> {
+    let Some(summary) = current.progress_summary.as_deref().and_then(crate::work_eta::without_eta) else {
+        return Ok(());
+    };
+    // This summary-only progress follows the release in the same transaction. Replay
+    // leaves ownership and the execution clock alone; the normal summary fold and
+    // IVM both replace the old note for exactly this subject and attempt.
+    append_claim_tx(
+        tx,
+        origin,
+        &current.subject,
+        "work.progress",
+        Some(&input.actor),
+        &json!({"fields": {"attempt": current.attempt, "summary": summary}}),
+        &[],
+        None,
+    )
+    .map_err(claim_append_error)?;
+    Ok(())
+}
+
 pub(super) fn enrich_handoff(
     connection: &Connection,
     view: &mut StepRunView,
@@ -353,6 +379,10 @@ mod tests {
                 &request(&start.actor, "claim-alder"),
             )
             .unwrap();
+        let eta = crate::work_eta::summary(Some("Fixture inspected"), "2h", &start.actor, now_ms()).unwrap();
+        let mut progress = request(&start.actor, "progress-eta");
+        progress.summary = Some(eta.clone());
+        source.work_action(&work.subject, "progress", &progress).unwrap();
         let input = WorkHandoffRequest {
             actor: start.actor.clone(),
             incarnation: Some(format!("{}-one", start.actor)),
@@ -380,6 +410,7 @@ mod tests {
                 Some(start.actor.as_str())
             );
             assert!(source.messages(None, true).unwrap().is_empty());
+            assert_eq!(source.step_run(&work.subject).unwrap().unwrap().progress_summary.as_deref(), Some(eta.as_str()));
         }
         let mut empty = input.clone();
         empty.note = " ".into();
@@ -387,7 +418,8 @@ mod tests {
             source.handoff_work(&work.subject, &empty).unwrap_err().code,
             "handoff-needs-note"
         );
-        source.handoff_work(&work.subject, &input).unwrap();
+        let released = source.handoff_work(&work.subject, &input).unwrap();
+        assert_eq!(released.progress_summary.as_deref(), Some("Fixture inspected"));
         assert_eq!(
             source
                 .handoff_work(&work.subject, &input)
@@ -418,6 +450,7 @@ mod tests {
             .remove(0);
         assert_eq!(transferred.assigned_to.as_deref(), Some(input.to.as_str()));
         assert!(transferred.claimant.is_none());
+        assert_eq!(transferred.progress_summary.as_deref(), Some("Fixture inspected"));
         let message = target.messages(Some(&input.to), true).unwrap().remove(0);
         assert!(message.content.contains(&input.note));
         assert_eq!(

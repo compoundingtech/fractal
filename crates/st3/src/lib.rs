@@ -121,6 +121,7 @@ pub mod test_support;
 /// Attaches a local terminal to another fleet host's PTY session over Fabric, without st daemons.
 pub mod terminal_fabric;
 pub mod terminal_binding;
+pub mod work_eta;
 /// Runs each agent as its own Unix user, in its own namespaces and root-owned cgroup.
 pub mod tiles;
 
