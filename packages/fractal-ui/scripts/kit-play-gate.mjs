@@ -13,14 +13,15 @@ if (!buildDirectory || !outputDirectory) throw new Error('Usage: node kit-play-g
 // KIT_PLAY_SET=critical runs only stories tagged `critical` (the per-commit set);
 // KIT_PLAY_A11Y=off skips axe, which the separate full run keeps; KIT_PLAY_MAX_SECONDS
 // is the set's wall-time budget: every case still runs, and a run over budget fails.
+// An empty value is unset: workflow expressions yield '' for "no value".
 const option = (name, allowed, fallback) => {
-  const value = process.env[name] ?? fallback
+  const value = process.env[name] || fallback
   if (!allowed.includes(value)) throw new Error(`${name} must be one of ${allowed.join(', ')}`)
   return value
 }
 const set = option('KIT_PLAY_SET', ['all', 'critical'], 'all')
 const a11y = option('KIT_PLAY_A11Y', ['on', 'off'], 'on')
-const maxSeconds = process.env.KIT_PLAY_MAX_SECONDS === undefined ? null : Number(process.env.KIT_PLAY_MAX_SECONDS)
+const maxSeconds = process.env.KIT_PLAY_MAX_SECONDS ? Number(process.env.KIT_PLAY_MAX_SECONDS) : null
 if (maxSeconds !== null && !(Number.isFinite(maxSeconds) && maxSeconds > 0)) throw new Error('KIT_PLAY_MAX_SECONDS must be a positive number of seconds')
 const root = resolve(buildDirectory)
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' }

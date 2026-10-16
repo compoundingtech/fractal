@@ -48,10 +48,11 @@ const runGate = async ({ env = {}, report } = {}) => {
 }
 
 test('full set with a11y requires one passed a11y report per case', { timeout: 60000 }, async () => {
-  const { code, receipt } = await runGate()
+  // Empty values are unset, as a workflow expression with no value yields them.
+  const { code, receipt } = await runGate({ env: { KIT_PLAY_SET: '', KIT_PLAY_A11Y: '', KIT_PLAY_MAX_SECONDS: '' } })
   assert.equal(code, 0)
   assert.equal(receipt.pass, true)
-  assert.deepEqual([receipt.set, receipt.a11y, receipt.stories, receipt.cases], ['all', 'on', 2, 8])
+  assert.deepEqual([receipt.set, receipt.a11y, receipt.maxSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 2, 8])
   assert.ok(receipt.cpu.count > 0 && receipt.cpu.busyCoreMinutes >= 0 && receipt.cpu.loadavgEnd.length === 3)
 })
 
@@ -86,7 +87,7 @@ test('a run over its wall-time budget fails after running every case', { timeout
 })
 
 test('invalid options fail before any case runs', { timeout: 60000 }, async () => {
-  for (const env of [{ KIT_PLAY_SET: 'some' }, { KIT_PLAY_A11Y: 'no' }, { KIT_PLAY_MAX_SECONDS: '0' }, { KIT_PLAY_MAX_SECONDS: 'soon' }]) {
+  for (const env of [{ KIT_PLAY_SET: 'some' }, { KIT_PLAY_A11Y: 'no' }, { KIT_PLAY_MAX_SECONDS: '-1' }, { KIT_PLAY_MAX_SECONDS: 'soon' }]) {
     await assert.rejects(() => runGate({ env }), /ENOENT/)
   }
 })
