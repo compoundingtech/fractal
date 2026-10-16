@@ -202,17 +202,70 @@ struct World {
 /// A scratch directory for one world's stores. They are real files, and every commit of a
 /// WAL-mode SQLite store syncs to disk: for four seeds 160 s of wall time on a disk against
 /// 48 s on tmpfs, with the same 51 s of CPU. Nothing here tests durability (the crashes are
-/// injected faults, not power loss), so a Linux tmpfs is used where there is one. A failure
-/// fixture kept with `CONVERGENCE_SAVE_FAILURE` stays on the ordinary temporary directory.
+/// injected faults, not power loss), so a Linux tmpfs is used where there is one with room.
+/// Otherwise, and for a failure fixture kept with `CONVERGENCE_SAVE_FAILURE`, it is the
+/// ordinary temporary directory.
 fn scratch_dir() -> tempfile::TempDir {
     #[cfg(target_os = "linux")]
     if std::env::var_os("CONVERGENCE_SAVE_FAILURE").is_none()
         && !REAL_DISK.with(std::cell::Cell::get)
-        && let Ok(directory) = tempfile::tempdir_in("/dev/shm")
+        && let Some(directory) = tmpfs_scratch()
     {
         return directory;
     }
     tempfile::tempdir().unwrap()
+}
+
+/// Where tmpfs scratch directories live, and what names them, so a test killed before it could
+/// remove its stores (they are RAM) is swept by the next run that finds the directory a day old.
+#[cfg(target_os = "linux")]
+const TMPFS: &str = "/dev/shm";
+#[cfg(target_os = "linux")]
+const TMPFS_PREFIX: &str = "st3-convergence-";
+/// One world's stores peaked at 48 MiB (seed 377) and eight worlds at once at 295 MiB (du of the
+/// scratch directory, polled each second); the room required is far above that.
+#[cfg(target_os = "linux")]
+const TMPFS_ROOM_BYTES: u64 = 2 << 30;
+
+#[cfg(target_os = "linux")]
+fn tmpfs_scratch() -> Option<tempfile::TempDir> {
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    SWEPT.call_once(|| {
+        let Ok(entries) = std::fs::read_dir(TMPFS) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let stale = entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(TMPFS_PREFIX)
+                && entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > std::time::Duration::from_secs(24 * 60 * 60));
+            if stale {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    });
+    let path = std::ffi::CString::new(TMPFS).unwrap();
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stats` is a statvfs the call fills in.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: statvfs returned 0, so it initialized the struct.
+    let stats = unsafe { stats.assume_init() };
+    let available = stats.f_bavail as u64 * stats.f_frsize as u64;
+    if available < TMPFS_ROOM_BYTES {
+        return None;
+    }
+    tempfile::Builder::new()
+        .prefix(TMPFS_PREFIX)
+        .tempdir_in(TMPFS)
+        .ok()
 }
 
 thread_local! {
@@ -1543,7 +1596,17 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !NEVER_TRIMS.contains(&seed),
-        "seed {seed}: checkpoints trimmed in only the runs that reach a trim; NEVER_TRIMS is {NEVER_TRIMS:?}"
+        "seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        if outcome.trimmed {
+            "trimmed"
+        } else {
+            "did not trim"
+        },
+        if NEVER_TRIMS.contains(&seed) {
+            "one of"
+        } else {
+            "not one of"
+        }
     );
 }
 
