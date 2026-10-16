@@ -278,7 +278,9 @@ impl Store {
                     lock = Some(staged.discard()?);
                 }
                 Err(error) if space_failed => {
-                    staged.discard()?;
+                    // This staged capture is durable and every completed page is committed.
+                    // The admission refusal happened between phases; keep the valid cursor so
+                    // the next attempt resumes after capacity is restored.
                     return Err(error);
                 }
                 Err(error) => return Err(error),

@@ -62,6 +62,12 @@ struct Data {
     window: Mutex<Window>,
 }
 
+// SAFETY: after registration the VFS name, base pointer and guard are immutable. SQLite's
+// registration mutex protects the vfs header; open-file count and admission state are atomic or
+// mutex protected. Drop unregisters only after all files have closed.
+unsafe impl Send for Data {}
+unsafe impl Sync for Data {}
+
 pub(super) struct ProofVfs {
     data: Option<Box<Data>>,
 }
@@ -77,9 +83,14 @@ impl ProofVfs {
             bail!("checkpoint proof VFS unavailable: SQLite VFS version below 3");
         }
         let methods = unsafe { &*base };
-        if methods.xOpen.is_none() || methods.xDelete.is_none() || methods.xAccess.is_none()
-            || methods.xFullPathname.is_none() || methods.xRandomness.is_none()
-            || methods.xSleep.is_none() || methods.xCurrentTime.is_none() {
+        if methods.xOpen.is_none()
+            || methods.xDelete.is_none()
+            || methods.xAccess.is_none()
+            || methods.xFullPathname.is_none()
+            || methods.xRandomness.is_none()
+            || methods.xSleep.is_none()
+            || methods.xCurrentTime.is_none()
+        {
             bail!("checkpoint proof VFS unavailable: incomplete default VFS methods");
         }
         // SQLite allocates file storage aligned for its default VFS. Our header is followed by
@@ -281,9 +292,12 @@ impl Data {
         // SAFETY: SQLite supplies a NUL-terminated filename to xOpen.
         let bytes = unsafe { CStr::from_ptr(name).to_bytes() };
         let path = Path::new(OsStr::from_bytes(bytes));
-        if bytes.strip_prefix(self.guard.live.as_os_str().as_bytes())
-            .is_some_and(|suffix| suffix.is_empty() || suffix == b"-wal"
-                || suffix == b"-shm" || suffix == b"-journal") {
+        if bytes
+            .strip_prefix(self.guard.live.as_os_str().as_bytes())
+            .is_some_and(|suffix| {
+                suffix.is_empty() || suffix == b"-wal" || suffix == b"-shm" || suffix == b"-journal"
+            })
+        {
             Class::Live
         } else if path.starts_with(&self.guard.scratch) {
             Class::Scratch
@@ -295,7 +309,13 @@ impl Data {
     }
 
     fn before_write(&self, class: Class, kind: Kind, amount: u128) -> c_int {
-        if self.guard.failure.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some() {
+        if self
+            .guard
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
             return ffi::SQLITE_FULL;
         }
         #[cfg(test)]
@@ -355,17 +375,28 @@ impl Data {
         }
         if class == Class::Temp {
             let proposed = window.temp_total_requested.saturating_add(amount);
-            if temp_separate && proposed.max(window.temp_used + window.temp_pending + amount) > self.guard.temp_budget {
+            if temp_separate
+                && proposed.max(window.temp_used + window.temp_pending + amount)
+                    > self.guard.temp_budget
+            {
                 return self.refuse(format!("checkpoint proof SQLite temp budget refused before write: temp={} requested={} budget={}", self.guard.temp.display(), proposed, self.guard.temp_budget));
             }
-            if !temp_separate && window.scratch_used + window.scratch_pending + proposed > self.guard.budget {
+            if !temp_separate
+                && window.scratch_used + window.scratch_pending + proposed > self.guard.budget
+            {
                 return self.refuse(format!("checkpoint proof scratch/temp budget refused before write: scratch={} allocated_or_requested={} budget={}", self.guard.scratch.display(), window.scratch_used + window.scratch_pending + proposed, self.guard.budget));
             }
             window.temp_total_requested = proposed;
             window.temp_pending += amount;
         } else {
-            let proposed = window.scratch_used + window.scratch_pending + amount
-                + if temp_separate { 0 } else { window.temp_total_requested };
+            let proposed = window.scratch_used
+                + window.scratch_pending
+                + amount
+                + if temp_separate {
+                    0
+                } else {
+                    window.temp_total_requested
+                };
             if proposed > self.guard.budget {
                 return self.refuse(format!("checkpoint proof scratch budget refused before write: scratch={} allocated_or_requested={} budget={}", self.guard.scratch.display(), proposed, self.guard.budget));
             }
@@ -410,7 +441,13 @@ unsafe extern "C" fn open(
 ) -> c_int {
     let data = unsafe { data(vfs) };
     if flags & ffi::SQLITE_OPEN_CREATE != 0
-        && data.guard.failure.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some() {
+        && data
+            .guard
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    {
         return ffi::SQLITE_FULL;
     }
     let class = data.classify(name);
@@ -444,15 +481,23 @@ unsafe extern "C" fn open(
         return rc;
     }
     let methods = unsafe { &*(*inner).pMethods };
-    let required = methods.iVersion >= 3 && methods.xClose.is_some()
-        && methods.xRead.is_some() && methods.xWrite.is_some()
-        && methods.xTruncate.is_some() && methods.xSync.is_some()
-        && methods.xFileSize.is_some() && methods.xLock.is_some()
-        && methods.xUnlock.is_some() && methods.xCheckReservedLock.is_some()
-        && methods.xFileControl.is_some() && methods.xSectorSize.is_some()
+    let required = methods.iVersion >= 3
+        && methods.xClose.is_some()
+        && methods.xRead.is_some()
+        && methods.xWrite.is_some()
+        && methods.xTruncate.is_some()
+        && methods.xSync.is_some()
+        && methods.xFileSize.is_some()
+        && methods.xLock.is_some()
+        && methods.xUnlock.is_some()
+        && methods.xCheckReservedLock.is_some()
+        && methods.xFileControl.is_some()
+        && methods.xSectorSize.is_some()
         && methods.xDeviceCharacteristics.is_some();
     if !required {
-        if let Some(close) = methods.xClose { unsafe { close(inner) }; }
+        if let Some(close) = methods.xClose {
+            unsafe { close(inner) };
+        }
         return data.refuse("checkpoint proof VFS requires complete SQLite io methods v3".into());
     }
     unsafe {
@@ -549,7 +594,9 @@ unsafe extern "C" fn file_control(
         if arg.is_null() {
             return ffi::SQLITE_IOERR;
         }
-        unsafe { *(arg as *mut *mut ffi::sqlite3_vfs) = std::ptr::addr_of_mut!((*wrapped.data).vfs) };
+        unsafe {
+            *(arg as *mut *mut ffi::sqlite3_vfs) = std::ptr::addr_of_mut!((*wrapped.data).vfs)
+        };
         return ffi::SQLITE_OK;
     }
     if op == ffi::SQLITE_FCNTL_FILE_POINTER || op == ffi::SQLITE_FCNTL_JOURNAL_POINTER {

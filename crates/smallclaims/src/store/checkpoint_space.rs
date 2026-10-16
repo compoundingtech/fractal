@@ -14,6 +14,7 @@ use rusqlite::{Connection, OptionalExtension as _};
 const GIB: u128 = 1024 * 1024 * 1024;
 const LIVE_FLOOR: u128 = 8 * GIB;
 const REACTION_MARGIN: u128 = 256 * 1024 * 1024;
+#[cfg(test)]
 const PROGRESS_OPCODES: i32 = 1000;
 
 mod vfs;
@@ -487,6 +488,7 @@ impl SpaceGuard {
             .is_some()
     }
 
+    #[cfg(test)]
     pub(super) fn install(&self, connection: &Connection) {
         let guard = self.clone();
         connection.progress_handler(
