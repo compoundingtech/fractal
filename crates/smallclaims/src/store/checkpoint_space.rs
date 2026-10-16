@@ -16,6 +16,9 @@ const LIVE_FLOOR: u128 = 8 * GIB;
 const REACTION_MARGIN: u128 = 256 * 1024 * 1024;
 const PROGRESS_OPCODES: i32 = 1000;
 
+mod vfs;
+pub(super) use vfs::ProofVfs;
+
 #[derive(Clone, Copy)]
 struct Filesystem {
     device: u64,
@@ -221,7 +224,7 @@ impl ProofOwnership {
         }
     }
 
-    pub(super) fn finish(self, proof: &Path) -> Result<()> {
+    pub(super) fn finish(&self, proof: &Path) -> Result<()> {
         let mut failures = Vec::new();
         self.remove_set(proof, &mut failures);
         if !failures.is_empty() {
@@ -587,6 +590,7 @@ mod tests {
         let error = owner.finish(&proof).err().unwrap().to_string();
         assert!(error.contains("proof-example.sqlite3-journal"), "{error}");
         assert!(PathBuf::from(format!("{}.owner", proof.display())).exists());
+        drop(owner);
         assert!(ProofOwnership::acquire(dir.path()).is_err());
     }
 
@@ -666,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn vacuum_into_invokes_the_space_watchdog() {
+    fn progress_handler_cannot_bound_a_vacuum_write() {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("live.sqlite3");
         let connection = Connection::open(&live).unwrap();
@@ -709,6 +713,10 @@ mod tests {
                 .unwrap()
                 .to_string()
                 .contains("reserve")
+        );
+        assert!(
+            allocated(&copy).unwrap() > 128 * 1024,
+            "a progress callback can fire after a VACUUM INTO write much larger than the VFS budget fixture"
         );
     }
 }

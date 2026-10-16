@@ -436,9 +436,9 @@ impl StagedSet {
                  PRAGMA cache_size = -{STAGING_CACHE_KIB}; PRAGMA temp_store = FILE;"
             ))?;
             staging.execute_batch(SCHEMA)?;
-            if let Some(space) = &space {
-                space.install(&staging);
-            }
+            // Capture is resumable. Its full-size staging allowance is charged at admission;
+            // a VFS refusal inside a staging transaction could prevent SQLite's rollback and
+            // leave a file that cannot resume. Check between capture phases instead.
             Ok(staging)
         };
         let mut staging = connect()?;

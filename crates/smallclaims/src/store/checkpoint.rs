@@ -633,18 +633,19 @@ fn clone_file(_source: &Path, _target: &Path) -> std::io::Result<()> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
 
-fn open_checkpoint_copy(copy: &Path, space: Option<&super::checkpoint_space::SpaceGuard>) -> Result<Connection> {
-    let connection = Connection::open(copy)?;
-    if let Some(space) = space {
-        space.install(&connection);
-    }
+fn open_checkpoint_copy(copy: &Path, vfs: Option<&super::checkpoint_space::ProofVfs>) -> Result<Connection> {
+    let connection = if let Some(vfs) = vfs {
+        Connection::open_with_flags_and_vfs(copy, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE, vfs.name())?
+    } else {
+        Connection::open(copy)?
+    };
     projection_digest::register(&connection)?;
     // This scratch transaction can rewrite most of the store twice. Its rollback journal
     // belongs on disk, not in an allocation proportional to the database's size. The copy is
     // discarded after the proof, so its commits need not wait for the disk.
     connection.execute_batch(&format!(
         "PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE; PRAGMA synchronous = OFF;
-         PRAGMA cache_size = -{}; PRAGMA temp_store = FILE;",
+         PRAGMA cache_size = -{}; PRAGMA temp_store = FILE; PRAGMA mmap_size = 0;",
         crate::sqlite::READ_CACHE_KIB,
     ))?;
     Ok(connection)
@@ -799,9 +800,9 @@ fn prove_on_scratch_copy(
     runtime: &dyn Runtime,
     copy: &Path,
     input: &dyn ProofInput,
-    space: Option<&super::checkpoint_space::SpaceGuard>,
+    vfs: Option<&super::checkpoint_space::ProofVfs>,
 ) -> Result<CheckpointProof> {
-    prove(runtime, copy, input, true, space)
+    prove(runtime, copy, input, true, vfs)
 }
 
 /// Read every dropped subject's answers on `transaction`, a page of subjects at a time, into
@@ -966,13 +967,16 @@ fn prove(
     copy: &Path,
     input: &dyn ProofInput,
     commit_preparation: bool,
-    space: Option<&super::checkpoint_space::SpaceGuard>,
+    vfs: Option<&super::checkpoint_space::ProofVfs>,
 ) -> Result<CheckpointProof> {
     let _completion = super::checkpoint_completion::Completion::work();
     runtime.checkpoint_preflight()?;
-    let mut connection = open_checkpoint_copy(copy, space)?;
+    let mut connection = open_checkpoint_copy(copy, vfs)?;
     input.attach(&connection)?;
-    let transaction = connection.transaction()?;
+    let mut transaction = connection.transaction()?;
+    // A VFS refusal latches SQLITE_FULL. The disposable copy is removed after this function
+    // returns, so do not issue a rollback SQL statement from Transaction::drop on an error.
+    if vfs.is_some() { transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore); }
     // Keep only the sealed set.
     transaction.execute_batch(
         "CREATE TEMP TABLE sealed_claims(id TEXT PRIMARY KEY);
@@ -990,7 +994,9 @@ fn prove(
     let transaction = if commit_preparation {
         transaction.commit()?;
         keep_sealed_claims_in_canonical_order(&connection)?;
-        connection.transaction()?
+        let mut transaction = connection.transaction()?;
+        if vfs.is_some() { transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore); }
+        transaction
     } else {
         keep_sealed_claims_in_canonical_order(&transaction)?;
         transaction
@@ -1633,10 +1639,9 @@ impl Store {
     fn copy_store_to_guarded(
         &self,
         copy: &Path,
-        space: Option<&super::checkpoint_space::SpaceGuard>,
+        vfs: Option<&super::checkpoint_space::ProofVfs>,
     ) -> Result<StoreCopy> {
-        if !self.shared_memory && self.clone_store_to_guarded(copy, space)? {
-            if let Some(space) = space { space.check_now()?; }
+        if !self.shared_memory && self.clone_store_to_guarded(copy, vfs)? {
             return Ok(StoreCopy::Clone);
         }
         // `VACUUM INTO` reads the whole store in one transaction on a connection of its own, which
@@ -1649,11 +1654,13 @@ impl Store {
         } else {
             OpenFlags::SQLITE_OPEN_READ_WRITE
         };
-        let connection = Connection::open_with_flags(&self.path, flags)?;
-        if let Some(space) = space { space.install(&connection); }
-        connection.execute_batch("PRAGMA busy_timeout = 5000;")?;
+        let connection = if let Some(vfs) = vfs {
+            Connection::open_with_flags_and_vfs(&self.path, flags, vfs.name())?
+        } else {
+            Connection::open_with_flags(&self.path, flags)?
+        };
+        connection.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA mmap_size = 0;")?;
         connection.execute("VACUUM INTO ?1", [copy.to_string_lossy()])?;
-        if let Some(space) = space { space.check_now()?; }
         Ok(StoreCopy::Full)
     }
 
@@ -1665,7 +1672,7 @@ impl Store {
     fn clone_store_to_guarded(
         &self,
         copy: &Path,
-        space: Option<&super::checkpoint_space::SpaceGuard>,
+        vfs: Option<&super::checkpoint_space::ProofVfs>,
     ) -> Result<bool> {
         let mut wal = self.path.as_os_str().to_os_string();
         wal.push("-wal");
@@ -1693,8 +1700,12 @@ impl Store {
             Err(_) => return Ok(false),
         }
         // Fold the cloned WAL into the copy, so it is one file, as a `VACUUM INTO` copy is.
-        let cloned = Connection::open(copy)?;
-        if let Some(space) = space { space.install(&cloned); }
+        let cloned = if let Some(vfs) = vfs {
+            Connection::open_with_flags_and_vfs(copy, OpenFlags::SQLITE_OPEN_READ_WRITE, vfs.name())?
+        } else {
+            Connection::open(copy)?
+        };
+        cloned.execute_batch("PRAGMA mmap_size = 0;")?;
         cloned.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
         Ok(true)
     }
@@ -1756,13 +1767,24 @@ impl Store {
             Some(super::checkpoint_space::SpaceGuard::admit(&self.path, scratch, false)?)
         };
         let ownership = super::checkpoint_space::ProofOwnership::acquire(scratch)?;
+        let vfs = space.as_ref().map(super::checkpoint_space::ProofVfs::register).transpose()?;
+        if let Some(vfs) = &vfs {
+            let probe = scratch.join(format!("proof-vfs-test-{}.sqlite3", Uuid::now_v7().simple()));
+            vfs.self_test(&ownership, &probe)?;
+        }
         let copy = scratch.join(format!("proof-{}.sqlite3", Uuid::now_v7().simple()));
         ownership.mark(&copy)?;
         let result = (|| {
             if let Some(space) = &space { space.check_now()?; }
-            self.copy_store_to_guarded(&copy, space.as_ref())?;
-            prove_on_scratch_copy(&*self.runtime, &copy, input, space.as_ref())
+            self.copy_store_to_guarded(&copy, vfs.as_ref())?;
+            prove_on_scratch_copy(&*self.runtime, &copy, input, vfs.as_ref())
         })();
+        let result = match (result, vfs.as_ref().map(|vfs| vfs.check_closed()).transpose()) {
+            (Ok(proof), Ok(())) => Ok(proof),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(close)) => Err(error.context(format!("also {close}"))),
+        };
         let result = match space.as_ref() { Some(space) => space.explain(result), None => result };
         let cleanup = ownership.finish(&copy);
         match (result, cleanup) {
