@@ -7127,10 +7127,7 @@ async fn run_trace_to(
             .context("the daemon health response has no store index")?;
     }
     client.follow_recovered();
-    let mut event_feed = LocalEventFeed {
-        trace: true,
-        ..Default::default()
-    };
+    let mut event_feed = LocalEventFeed { trace: true };
     loop {
         if cli_output::closed() {
             return Ok(());
@@ -9162,35 +9159,23 @@ fn event_cursor_error(error: anyhow::Error, query: &str, trace: bool) -> anyhow:
 
 #[derive(Default)]
 struct LocalEventFeed {
-    legacy: bool,
     trace: bool,
 }
 
 impl LocalEventFeed {
     async fn read(&mut self, client: &Client, query: &str) -> Result<LocalEventPage> {
-        if !self.legacy {
-            match client.get(&format!("/v1/events/page?{query}")).await {
-                Ok(page) => return Ok(page),
-                Err(error) if st3::client::is_missing_route(&error) => {
-                    let health: Value = client.get("/v1/health").await?;
-                    anyhow::ensure!(
-                        health
-                            .pointer("/features/bounded_legacy_events")
-                            .and_then(Value::as_u64)
-                            == Some(1),
-                        "this daemon does not support bounded event continuation; upgrade the daemon and retry"
-                    );
-                    self.legacy = true;
-                }
-                Err(error) => return Err(event_cursor_error(error, query, self.trace)),
-            }
-        }
-        let items: Vec<EventRecord> = client
-            .get(&format!("/v1/events?{query}"))
+        client
+            .get(&format!("/v1/events/page?{query}"))
             .await
-            .map_err(|error| event_cursor_error(error, query, self.trace))?;
-        let next_after = items.last().map(|event| event.store_index);
-        Ok(LocalEventPage { items, next_after })
+            .map_err(|error| {
+                if st3::client::is_missing_route(&error) {
+                    anyhow::anyhow!(
+                        "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
+                    )
+                } else {
+                    event_cursor_error(error, query, self.trace)
+                }
+            })
     }
 }
 
