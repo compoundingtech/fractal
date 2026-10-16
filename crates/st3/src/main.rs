@@ -18906,7 +18906,7 @@ async fn read_message_after_lifecycle(
             {
                 None
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error),
         };
         if detail.as_ref().and_then(|detail| detail["mail_custody"]["successor"].as_str())
             != Some(actor.as_str()) {
