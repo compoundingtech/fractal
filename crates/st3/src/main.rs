@@ -20633,7 +20633,35 @@ mod tests {
 
     #[test]
     fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
-        let cli_source = include_str!("main.rs");
+        // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
+        // list must name every one, so a legacy handler cannot come back in a command file.
+        let command_files = [
+            ("agents", include_str!("agents_cli.rs")),
+            ("attention", include_str!("attention_cli.rs")),
+            ("change", include_str!("change_cli.rs")),
+            ("conversations", include_str!("conversations_cli.rs")),
+            ("doctor", include_str!("doctor_cli.rs")),
+            ("driver", include_str!("driver_cli.rs")),
+            ("fleet", include_str!("fleet_cli.rs")),
+            ("launch", include_str!("launch_cli.rs")),
+            ("replication", include_str!("replication_cli.rs")),
+            ("terminals", include_str!("terminals_cli.rs")),
+            ("uninstall", include_str!("uninstall_cli.rs")),
+            ("work", include_str!("work_cli.rs")),
+        ];
+        let main_source = include_str!("main.rs");
+        let declared: BTreeSet<&str> = main_source
+            .lines()
+            .filter_map(|line| line.strip_prefix("mod ")?.strip_suffix("_cli;"))
+            .collect();
+        assert_eq!(
+            declared,
+            command_files.iter().map(|(name, _)| *name).collect::<BTreeSet<_>>(),
+            "every command file main.rs declares is scanned"
+        );
+        let cli_source = std::iter::once(main_source)
+            .chain(command_files.iter().map(|(_, source)| *source))
+            .collect::<String>();
         for handler in [
             "run_preview",
             "run_exec",
