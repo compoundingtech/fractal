@@ -616,15 +616,24 @@ fn clone_file(source: &Path, target: &Path) -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 fn clone_file(source: &Path, target: &Path) -> std::io::Result<()> {
     use std::os::fd::AsRawFd as _;
-    let source = fs::File::open(source)?;
+    let source_file = fs::File::open(source)?;
     let file = fs::OpenOptions::new().write(true).create_new(true).open(target)?;
     // SAFETY: both descriptors are open for the length of the call.
-    if unsafe { libc::ioctl(file.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } == 0 {
+    if unsafe { libc::ioctl(file.as_raw_fd(), libc::FICLONE, source_file.as_raw_fd()) } == 0 {
         return Ok(());
     }
     let error = std::io::Error::last_os_error();
     drop(file);
-    let _ = fs::remove_file(target);
+    if let Err(cleanup) = fs::remove_file(target) {
+        return Err(std::io::Error::new(
+            cleanup.kind(),
+            format!(
+                "clone {} failed: {error}; removing incomplete target {} failed: {cleanup}",
+                source.display(),
+                target.display(),
+            ),
+        ));
+    }
     Err(error)
 }
 
@@ -1693,11 +1702,25 @@ impl Store {
         match wal {
             Ok(Ok(())) => {}
             // A failed clone leaves nothing behind, so only the store clone needs removing.
-            Ok(Err(_)) => {
+            Ok(Err(error)) => {
+                if copy_wal.exists() {
+                    return Err(error).context(format!(
+                        "checkpoint clone left an incomplete WAL at {}",
+                        copy_wal.display()
+                    ));
+                }
                 fs::remove_file(copy)?;
                 return Ok(false);
             }
-            Err(_) => return Ok(false),
+            Err(error) => {
+                if copy.exists() {
+                    return Err(error).context(format!(
+                        "checkpoint clone left an incomplete database at {}",
+                        copy.display()
+                    ));
+                }
+                return Ok(false);
+            }
         }
         // Fold the cloned WAL into the copy, so it is one file, as a `VACUUM INTO` copy is.
         let cloned = if let Some(vfs) = vfs {
