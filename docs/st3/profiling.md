@@ -360,6 +360,44 @@ checks. Large retained sealed sets still consume memory; reader page-cache setti
 bound decoded claim bodies or allocator retention. Compare live allocations and SQLite's
 allocator counters with RSS before attributing an RSS plateau to retained read connections.
 
+## Writer worker admission
+
+Writer-bound API handlers, replication receive, mailbox control and daemon maintenance
+wait asynchronously before entering Tokio's blocking pool. Each writer admits at most 32
+top-level synchronous writer-bound callbacks by default. Mutation handlers run as admitted
+future polls: when a body, service, mutex or receipt wait returns pending, its blocking worker and
+writer permit return before the future waits asynchronously for its next wake. Set
+`SMALLCLAIMS_MAX_WRITE_WORKERS` in the **daemon's** environment to a positive integer to
+override this count; zero, invalid, or values beyond Tokio's semaphore capacity use 32. The value is read once per process.
+
+Admission holds no SQLite connection or store lock. Dependent nested callbacks share their
+parent's capacity, including when a current-thread runtime needs a separate blocking child.
+Started callbacks retain capacity through completion or panic even if their awaiting task
+is dropped. API mutations keep their existing completion and acknowledgement behavior.
+Non-writing publication/git preflight, gate startup, attestation and terminal control effects
+run independently of writer admission; their mutation continuation admits again before
+polling store work. The request and result receipts still surround each terminal effect.
+Read workers and health checks have independent capacity. The existing writer queue still
+orders foreground jobs, drains fences and schedules background loans; admission does not
+change a callback's loan class. Synchronous/raw writer access remains available and does not
+become a process-wide thread bound.
+
+This bounds the thread multiplier while a writer is held; it does not shorten that hold
+(#2185) or budget retained reader caches (#1381/#1936). Tokio's global blocking limit stays
+unchanged: native provider sessions occupy blocking threads for their lifetime and may wait
+on daemon control, and current-thread nested callbacks require another blocking slot.
+A global cap needs a separate dependency-safe design.
+
+The isolated Linux `smallclaims` example from issue #2636 preserves a raw control path:
+
+```sh
+cargo run -p smallclaims --example blocking_pool -- 128 --writer-only
+cargo run -p smallclaims --example blocking_pool -- 128 --writer-only --admitted
+```
+
+Omit `--writer-only` to run the original raw-reader cache phase too. That phase deliberately
+bypasses admission so reader retention can be compared independently.
+
 ## Read connections and SQLite allocation
 
 Top-level API read queries admit before opening a connection or pinning a snapshot.
@@ -520,6 +558,21 @@ With trace export enabled, HTTP reads of a published complete roster or startup 
 `st.roster.mode=hit` and the served publication's card count on their request span. Rebuilds
 remain independent roots of the background refresher, not children of the reading request.
 
+Fresh published first pages also add attributes to that existing request span:
+`st.roster.fresh_wait` is `published`, `unchanged`, `refresh_failed`, `disconnected`,
+`timeout` or `read_failed`. `st.roster.fresh_wait_cut` is the actual wait target,
+which can follow `st.roster.requested_cut`; neither is the served
+`st.roster.publication_cut`. The wait cut is absent if its initial index read failed.
+`st.roster.fresh_proof` is `not_checked`, `verified`, `refused` or `read_failed`,
+and `st.roster.fresh_unchanged_verified` is true exactly for `verified`.
+Only an `unchanged` exit attempts verification, against the exact complete cards,
+cut and publication timestamp served, using the existing fault, expiry, local-frontier
+and claim-delta guards. Eviction between selection and proof honestly refuses verification;
+a head or not-ready response cannot verify a complete publication. Failure, disconnection
+and timeout never imply unchanged cards. These attributes change no response fields or wait
+policy. Only recording traced requests perform the additional read-only snapshot/range proof;
+its cost under claim churn remains unmeasured until the focused native receipt is available.
+
 The focused 70-agent, 20-session fixture reports card-status, usage, repeated-projection and
 incremental-update costs with `cargo test -p st3 --lib agent_roster_snapshot_fixture_timing --
 --ignored --nocapture`. It is a serial fixture micro-measure, not a load benchmark. CI's
@@ -613,6 +666,21 @@ malformed operation metadata, an operation conflict, and `incremental-error:CODE
 incremental chunks produce no fallback log. The target is the admitted index observed at entry;
 a full replay can also include claims admitted since that observation.
 
+The daemon reserves both Unix socket addresses right after acquiring its startup lock, before
+opening SQLite, but does not listen on them. A socket that is bound and not listening makes the
+kernel refuse every connection at once, so clients and `st doctor` keep seeing "daemon starting"
+with the current phase, and nothing queues behind an uninitialized router. The daemon starts
+listening only when migrations, admission, canonical projection catch-up and application
+initialization have finished. A per-address advisory lock (`<socket>.reservation.lock`) is held
+from reservation through serving, so a second daemon neither unlinks a reserved address nor a
+live listener; the lock is released when the process exits.
+
+Reserving early moves the path preparation (live-listener probe, stale-file removal, bind,
+permissions and discovery link) off the ready-to-listen interval. It does not preserve an exited
+process's established streams or remove the stop-to-bind refusal window. Zero-refusal restarts
+require a service-manager-owned socket that survives the writer handoff, with the replacement
+accepting only after SQLite is ready.
+
 ### Startup phase durations
 
 Every successful daemon start emits one structured stderr line when both listeners are ready:
@@ -629,7 +697,8 @@ The phase keys partition that interval: `configuration_ms`, `install_hooks_ms`,
 instance-lock setup; hooks include profiler initialization and the file-descriptor limit.
 Opening the store includes signing-key setup. Settlement and projection share one interval;
 the runtime prelude includes the startup claim, notification state, and PTY directory.
-Binding ends at the second listener's readiness callback. The summary adds no per-request
+`bind_ms` adds the early socket reservation to the interval that ends at the second listener's
+readiness callback. The summary adds no per-request
 instrumentation and is not repeated for projection chunks or readiness progress updates.
 
 ## Reproduce a mailbox-wake comparison

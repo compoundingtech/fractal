@@ -2189,6 +2189,15 @@
       "verification": "CLI parser and real st ui under a PTY, raw kitty keys and isolated paired-only members"
     },
     {
+      "command": "st ui open",
+      "description": "Ask the person's open terminal interface on this machine to show an agent, mission or machine in a tab or split",
+      "tests": [
+        "crates/st3/tests/ui_open.rs::a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_interface",
+        "crates/st3/tests/ui_open.rs::an_alert_a_seat_raises_for_itself_shows_above_the_input_and_is_dismissed_there"
+      ],
+      "verification": "real terminal interface under a PTY against a real store; a seat process asks, the picture changes, a missing interface and an unknown subject are reported and nothing stays queued"
+    },
+    {
       "command": "st uninstall",
       "description": "Remove st3 from this machine: leave its fleet, then its services, state, and settings",
       "tests": [
@@ -2798,10 +2807,10 @@
       "verification": "local palette/reducer; resulting daemon effects are listed separately"
     },
     {
-      "action": "ToggleTerminalFirst",
+      "action": "ToggleConversationFirst",
       "tests": [
-        "crates/stui/src/ui/glass.rs::what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that",
-        "crates/stui/src/ui/glass.rs::glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g"
+        "crates/stui/src/ui/glass.rs::opening_an_agent_attaches_its_terminal_unless_this_device_chose_conversation_first",
+        "crates/stui/tests/support/attach_default.rs::attach_default_probe"
       ],
       "verification": "local palette/reducer; resulting daemon effects are listed separately"
     },
