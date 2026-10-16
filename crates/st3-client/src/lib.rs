@@ -1372,7 +1372,10 @@ impl Client {
                     retryable: true,
                     retry_after_ms: None,
                     details: std::collections::BTreeMap::from([
-                        ("reason".into(), serde_json::json!("agent-roster-cut-not-ready")),
+                        (
+                            "reason".into(),
+                            serde_json::json!("agent-roster-cut-not-ready"),
+                        ),
                         ("min_cut".into(), serde_json::json!(requested)),
                     ]),
                 }),
