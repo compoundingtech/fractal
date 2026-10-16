@@ -791,7 +791,8 @@ inventory below its tail (which its checkpoints make), or a switch between range
 inventories. A peer on an older build advertises no checkpoint, and a narrowing within range
 comparison changes neither, so only the arrival cap guards those; a peer that starts advertising a
 checkpoint resets the window once. A measurement no exchange has renewed for 35 seconds is shown
-as stale, with its counts and time but no rates or estimate. Zero envelopes missing means nothing
+as stale, with its counts and time but no rates or estimate; when nothing was missing, the status
+says so of the last measurement and when it was taken, rather than "caught up". Zero envelopes missing means nothing
 the peer listed is missing here, at arrival: admission, projection and visibility can lag behind
 it.
 The estimate is for arrival only: claims admitted, projected and visible can lag behind it, and

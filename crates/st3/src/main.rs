@@ -12633,6 +12633,14 @@ fn render_replication_peers(
                     )
                 }
             );
+            // A stale view carries no forecast, not even "caught up": say only what was true.
+            if sync.peer_only_envelopes == 0 {
+                let _ = writeln!(
+                    output,
+                    "  nothing was missing at the last measurement (arrival only; measured {})",
+                    relative_time(sync.measured_at_unix_ms, now)
+                );
+            }
         }
         let compared = sync
             .graph_compared_at_unix_ms
@@ -29615,15 +29623,45 @@ mod tests {
             "{output}"
         );
         // Nothing missing: no catching-up summary and no promise of a time.
-        let output = render(st3::model::ReplicationPeerSync {
+        let nothing_missing = st3::model::ReplicationPeerSync {
             peer_only_envelopes: 0,
             local_only_envelopes: 3,
             catching_up: false,
             estimated_catch_up_seconds: Some(0),
             ..behind(Some(0.0), Some(0.0), Some(0))
-        });
+        };
+        let output = render(nothing_missing.clone());
         assert!(!output.contains("catching up"), "{output}");
         assert!(!output.contains("caught up in") && !output.contains("closing at"), "{output}");
+        assert!(!output.contains("nothing was missing at the last measurement"), "{output}");
+        // The same measurement gone stale: view() withdrew its rates and its zero forecast, and
+        // the status says only what the last measurement found, whether or not this node held
+        // envelopes the peer lacked. The graph comparison lines are unchanged.
+        for local_only in [3, 0] {
+            let output = render(st3::model::ReplicationPeerSync {
+                stale: true,
+                local_only_envelopes: local_only,
+                receive_rate_per_second: None,
+                catch_up_rate_per_second: None,
+                estimated_catch_up_seconds: None,
+                ..nothing_missing.clone()
+            });
+            assert!(
+                output.contains("  stale: no exchange since the measurement below (2s ago)"),
+                "{output}"
+            );
+            assert!(
+                output.contains(
+                    "  nothing was missing at the last measurement (arrival only; measured 2s ago)"
+                ),
+                "{output}"
+            );
+            assert!(!output.contains("estimating time to catch up"), "{output}");
+            assert!(
+                !output.contains("caught up in about") && !output.contains("catching up"),
+                "{output}"
+            );
+        }
     }
 
     #[test]
