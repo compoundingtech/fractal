@@ -562,15 +562,14 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     return () => observer.disconnect()
   }, [measurable, publishVisible, rowsById, controller])
   const command = React.useRef(scrollToBottomKey)
+  // A jump needs a source-command commit even when the loaded snapshot is unchanged.
+  const [jumpCommit, requestJumpCommit] = React.useReducer((count: number) => count + 1, 0)
   React.useLayoutEffect(() => {
     if (!measurable) return
     if (scrollToBottomKey !== undefined && command.current !== scrollToBottomKey) controller.jump()
     command.current = scrollToBottomKey
     controller.afterRowsChange(items, historyKey, sourceIds)
-  })
-  // A jump resolves against the next committed render; request one so an
-  // absent target settles Missing even when the host commits nothing else.
-  const [, requestJumpCommit] = React.useReducer((count: number) => count + 1, 0)
+  }, [measurable, controller, items, sourceIds, scrollToBottomKey, jumpCommit])
   React.useImperativeHandle(ref, () => ({
     jumpTo: (id: string) => {
       const result = controller.jumpTo(id)
