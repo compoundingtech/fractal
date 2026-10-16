@@ -16,8 +16,8 @@ export const sidebarV2 = (input: unknown, roster: readonly SidebarSeat[]): Sideb
   if (input === undefined) return { _tag: 'Legacy' }
   if (!isArrangement(input)) return { _tag: 'Refused', error: { _tag: 'InvalidArrangement' } }
   if (input.resolved == null) return { _tag: 'Legacy' }
-  // Operational metadata is not a projection input; its encoded optional null differs from Models.
-  const arrangement: Omit<Arrangement, 'operational'> = input
+  // The wire schema's optional fields allow null; resolved was checked above, operational is not read.
+  const arrangement: Omit<Arrangement, 'operational' | 'resolved'> = input
   const result = build(arrangement, roster.map(seat => seat.subject))
   if (result._tag === 'Refused') return result
   const seats = new Map<string, SidebarNode[]>()

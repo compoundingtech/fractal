@@ -16,7 +16,7 @@ export const canonicalSidebarVector = (vector: typeof vectors.cases[number]) => 
   }
   const parent = (id: string | null): string | null => id === null ? null : folderId(id)
   const input = vector.arrangement
-  const arrangement: Omit<ArrangementModel, 'operational'> = Schema.decodeUnknownSync(Schema.toEncoded(Arrangement))({ ...input,
+  const decoded = Schema.decodeUnknownSync(Schema.toEncoded(Arrangement))({ ...input,
     body: { ...input.body,
       folders: Object.fromEntries(Object.entries(input.body.folders).flatMap(([id, folder]) => folder === undefined ? [] : [[folderId(id), {
         ...folder, position: { ...folder.position, value: { ...folder.position.value, parent: parent(folder.position.value.parent) } },
@@ -30,5 +30,10 @@ export const canonicalSidebarVector = (vector: typeof vectors.cases[number]) => 
       folders: Object.fromEntries(Object.entries(input.resolved.folders).flatMap(([id, value]) => value === undefined ? [] : [[id, parent(value)]])),
     },
   })
+  const arrangement: ArrangementModel = {
+    id: decoded.id, kind: decoded.kind, owner: decoded.owner, body: decoded.body,
+    deleted: decoded.deleted, revision: decoded.revision, updated_at: decoded.updated_at,
+    ...(decoded.resolved == null ? {} : { resolved: decoded.resolved }),
+  }
   return { arrangement, folderId }
 }

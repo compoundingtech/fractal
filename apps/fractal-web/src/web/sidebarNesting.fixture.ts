@@ -4,12 +4,13 @@ import vectors from '../../../../fixtures/clients/sidebar-v2.json'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { arrangementSidebarDoc, type FolderState } from '../folders/client.ts'
 import { canonicalSidebarVector } from '../folders/sidebarV2.fixture.ts'
+import type { EditOutcome } from '../folders/edit.ts'
 
 const vector = vectors.cases[1]!
 export const { arrangement, folderId: nestingFolderId } = canonicalSidebarVector(vector)
 export const nestingFolderSource = Atom.make<FolderState>({
   arrangement, doc: arrangementSidebarDoc(arrangement), phase: 'fixture', readOnly: true,
-  edit: async () => ({ _tag: 'Refused', reason: { _tag: 'Unknown' }, detail: 'Read-only fixture.', targets: [] }),
+  edit: async (): Promise<EditOutcome> => ({ _tag: 'Refused', reason: { _tag: 'Unknown' }, detail: 'Read-only fixture.', targets: [] }),
 })
 export const nestingSource = fixtureSource({ world: {
   now: Date.parse('2026-10-15T00:00:00.000Z'),
