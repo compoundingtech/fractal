@@ -480,11 +480,30 @@ pub(super) fn enrich_responses(
             continue;
         };
         if from_origin {
-            view.constraints.push(format!("Person response: {summary}"));
+            let mut constraint = format!("Person response: {summary}");
+            if let Some(sender_class) = fields["sender_class"].as_str() {
+                constraint.push_str(" [sender_class: ");
+                constraint.push_str(sender_class);
+                constraint.push(']');
+            }
+            if let Some(grant) = fields["assistant_grant_id"].as_str() {
+                constraint.push_str(" [assistant_grant_id: ");
+                constraint.push_str(grant);
+                constraint.push(']');
+            }
+            view.constraints.push(constraint);
         }
         view.person_answers.push(crate::model::PersonAnswerView {
             acted_for: fields
                 .get("acted_for")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            sender_class: fields
+                .get("sender_class")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            assistant_grant_id: fields
+                .get("assistant_grant_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             ask,
@@ -621,6 +640,15 @@ impl Store {
             let mut view = step(tx, &subject).map_err(internal)?
                 .ok_or_else(|| St3Error::new("missing-step-run", "the person step does not exist"))?;
             let ask = request(tx, &subject).map_err(internal)?;
+            if let Some(authorization) = authorization {
+                let ask = ask.as_ref().filter(|ask| ask.kind == "work.person-asked"
+                    && ask.body["fields"]["person"] == authorization.owner
+                    && view.assigned_to.as_deref() == Some(authorization.owner.as_str()))
+                    .ok_or_else(|| St3Error::new("forbidden", "assistant answers require an owner-assigned person ask"))?;
+                if structured_request(ask)?.is_none() || input.answer.as_ref().and_then(|answer| answer.id.as_ref()).is_none() {
+                    return Err(St3Error::new("forbidden", "assistant answers require a supported named answer"));
+                }
+            }
             // Checked after authority and fences below; a replay compares against it first.
             let resolved = resolve_answer(ask.as_ref(), input, cancel);
             let kind = if cancel { "work.person-cancelled" } else { "work.person-done" };
@@ -1669,6 +1697,64 @@ mission "person-work" state="ready" {{
                 {"id": "revise-auth", "label": "Revise auth and review", "outcome": "request_changes", "consequence": "The author changes sign-in and asks again."}
             ]
         })
+    }
+
+    #[test]
+    fn assistant_answer_keeps_attribution_on_origin_and_ask_after_replay() {
+        let (store, origin, mut input) = fixture();
+        input.request = Some(gateway_decision());
+        let ask = store.ask_person(&input).unwrap();
+        let grant_id = "assistant-grant/projection-test";
+        let authorization = super::super::assistant_write::AssistantWriteAuthorization {
+            grant_subject: "custom/client/assistant-projection-test".into(),
+            actor: "assistant/chatgpt".into(),
+            owner: "person/avery".into(),
+            policy_revision: 1,
+            scope: "write.assistant.answers".into(),
+            recipient: None,
+        };
+        store.append_claim(&ClaimInput {
+            subject: authorization.grant_subject.clone(),
+            kind: "custom.client.assistant.v1.granted".into(),
+            actor: Some("person/avery".into()),
+            fields: serde_json::from_value(json!({
+                "grant_id": grant_id, "principal": "assistant/chatgpt",
+                "session_actor": authorization.actor, "issuer": authorization.owner,
+                "disclosure_consent": true, "policy_revision": 1,
+                "expires_at_unix_ms": (now_ms() + 60_000) as u64,
+                "scopes": ["write.assistant.answers"]
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let item = store.attention_items(Some("person/avery")).unwrap()
+            .into_iter().find(|item| item.subject == ask.subject).unwrap();
+        store.finish_person_step_authorized(&PersonStepResponse {
+            delegation: None, subject: ask.subject.clone(), actor: "person/avery".into(),
+            summary: String::new(), evidence: vec![], episode: Some(item.episode),
+            idempotency_key: "assistant-projection-answer".into(),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+        }, false, Some(&authorization)).unwrap();
+        let check = |store: &Store| {
+            for subject in [&origin.subject, &ask.subject] {
+                let view = store.step_run(subject).unwrap().unwrap();
+                let answer = &view.person_answers[0];
+                assert_eq!(answer.respondent, "person/avery");
+                assert_eq!(answer.sender_class.as_deref(), Some("external-assistant"));
+                assert_eq!(answer.assistant_grant_id.as_deref(), Some(grant_id));
+                let json = serde_json::to_value(&view).unwrap();
+                assert_eq!(json["person_answers"][0]["sender_class"], "external-assistant");
+                assert_eq!(json["person_answers"][0]["assistant_grant_id"], grant_id);
+                if subject == &origin.subject {
+                    assert!(view.constraints.iter().any(|constraint|
+                        constraint.starts_with("Person response:")
+                            && constraint.contains("sender_class: external-assistant")
+                            && constraint.contains(&format!("assistant_grant_id: {grant_id}"))));
+                }
+            }
+        };
+        check(&store);
+        store.replay_replication_graph().unwrap();
+        check(&store);
     }
 
     /// A structured ask shows its request to the person, takes only a named answer, and gives

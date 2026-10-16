@@ -1048,6 +1048,10 @@ dismissed it, and a request that defines its own `dismiss` answer keeps that mea
 which is where a `--new-run` asker reads it. `st work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for
 history. A free-text ask works as before: it keeps no `request` field and takes no named answer.
+Assistant-submitted answers also retain optional `sender_class` and `assistant_grant_id`
+attribution in that projection, so an answer recorded for a person is distinguishable from
+one they submitted directly. Human-readable work details display both fields when present,
+and the resumed origin's `Person response:` constraint includes them too.
 
 #### Updates
 

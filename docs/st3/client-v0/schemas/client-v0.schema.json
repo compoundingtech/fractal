@@ -2239,6 +2239,8 @@
         "summary": {"type": "string"},
         "respondent": {"$ref": "#/$defs/Id"},
         "acted_for": {"$ref": "#/$defs/Id", "description": "The person whose prior instruction the agent respondent recorded."},
+        "sender_class": {"type": "string", "description": "External assistant attribution when the response was submitted through an assistant grant."},
+        "assistant_grant_id": {"$ref": "#/$defs/Id", "description": "The assistant grant that authorized the response."},
         "answered_at_unix_ms": {"type": "integer", "minimum": 0},
         "answer": {"$ref": "#/$defs/PersonAnswer"},
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/Id"}}

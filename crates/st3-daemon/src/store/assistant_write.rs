@@ -41,6 +41,13 @@ fn authorized_grant(connection: &Connection, origin: &str, authorization: &Assis
         || fields["expires_at_unix_ms"].as_u64().map(u128::from).is_none_or(|expiry| expiry <= now_ms())
         || !fields["scopes"].as_array().is_some_and(|scopes| scopes.iter().any(|scope| scope.as_str() == Some(&authorization.scope)))
     { return Err(denied()); }
+    if authorization.scope == "write.assistant.messages" {
+        let recipient = authorization.recipient.as_deref().filter(|id| id.starts_with("agent/"))
+            .ok_or_else(|| St3Error::new("forbidden", "assistant messages require an existing agent recipient"))?;
+        if current_desired_row(connection, recipient).map_err(internal)?.is_none_or(|row| row.kind != "agent") {
+            return Err(St3Error::new("forbidden", "assistant messages require an existing agent recipient"));
+        }
+    }
     Ok(granted)
 }
 

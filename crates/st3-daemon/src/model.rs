@@ -2967,6 +2967,11 @@ pub struct PersonAnswerView {
     /// The person whose prior instruction the respondent recorded, when delegated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acted_for: Option<String>,
+    /// Assistant provenance, absent for responses submitted directly by a person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_grant_id: Option<String>,
     pub ask: String,
     /// `completed` when the person answered, `cancelled` when the ask was withdrawn.
     pub status: String,

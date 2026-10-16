@@ -195,6 +195,15 @@ async fn direct_answer_executes_without_approval_with_provenance_and_rejects_sta
     let durable = h.state.store.step_run(&ask).unwrap().unwrap();
     assert_eq!(durable.person_answers.len(), 1);
     assert_eq!(durable.person_answers[0].answer.as_ref().unwrap()["id"], "yes");
+    assert_eq!(durable.person_answers[0].sender_class.as_deref(), Some("external-assistant"));
+    assert_eq!(durable.person_answers[0].assistant_grant_id.as_deref(), Some(paired.grant.id.as_str()));
+    let shown = h.owner("GET", &format!("/v1/client/work/{ask}"), &()).await;
+    let projected = &shown["value"]["person_answers"][0];
+    assert_eq!(projected["sender_class"], "external-assistant");
+    assert_eq!(projected["assistant_grant_id"], paired.grant.id);
+    let decoded: st3_client::Work = serde_json::from_value(shown["value"].clone()).unwrap();
+    assert_eq!(decoded.person_answers[0].sender_class.as_deref(), Some("external-assistant"));
+    assert_eq!(decoded.person_answers[0].assistant_grant_id.as_deref(), Some(paired.grant.id.as_str()));
     let claim = h.state.store.latest_claim(&ask, Some("work.person-done")).unwrap().unwrap();
     assert_eq!(claim.actor.as_deref(), Some(OWNER));
     assert_eq!(claim.body["fields"]["sender_class"], "external-assistant");
@@ -313,6 +322,10 @@ async fn writer_transaction_rechecks_policy_revision_actor_scope_and_revocation(
     let mut missing_scope = authorization.clone();
     missing_scope.scope = "write.assistant.unknown".into();
     assert!(authorize(&transaction, "assistant-native", &missing_scope).is_err());
+    for recipient in ["agent/does-not-exist", "daemon/runtime", OWNER] {
+        let invalid_recipient = AssistantWriteAuthorization { recipient: Some(recipient.into()), ..authorization.clone() };
+        assert!(authorize(&transaction, "assistant-native", &invalid_recipient).is_err(), "{recipient}");
+    }
     transaction.rollback().unwrap();
     h.policy(&paired, scopes()).await;
     let transaction = connection.transaction().unwrap();
@@ -414,4 +427,39 @@ async fn assistant_provenance_generic_and_native_forgery_is_refused() {
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
     assert!(h.state.store.messages(Some(AGENT), true).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn assistant_cannot_complete_authored_owner_step_but_owner_can() {
+    let h = Harness::new();
+    let source = format!("version 2\nagent \"native.worker\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"authored-review\" state=\"ready\" {{ goal \"Review\"; step \"review\" {{ assigned-to \"person/ada\"; goal \"Review release\"; }} }}", h.root.path());
+    h.state.store.apply_internal(&st3::graph::parse_intent(&source, "assistant-native").unwrap(), "authored-review").unwrap();
+    let run = h.state.store.create_mission_run(&st3::model::MissionRunRequest {
+        mission: "authored-review".into(), revision: None, workspace: h.root.path().to_string_lossy().into_owned(),
+        requester: Some(OWNER.into()), mode: Some("run".into()), inputs: Default::default(), idempotency_key: "authored-review".into(),
+    }).unwrap();
+    let step = &run.steps[0];
+    assert_eq!(step.status, "ready");
+    let paired = h.pair().await;
+    let action = ActionRequest::work_done("action/authored", "authored-answer", h.fence().await,
+        PersonStepParameters { target_id: step.subject.clone(), summary: "Reviewed".into(),
+            episode: format!("{}:{}:{}", step.generation, step.attempt, step.readiness_epoch),
+            ..Default::default() }).unwrap();
+    let (status, denied) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &action).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert!(h.state.store.step_run(&step.subject).unwrap().unwrap().person_answers.is_empty());
+    h.owner("POST", "/v1/client/actions", &action).await;
+    assert_eq!(h.state.store.step_run(&step.subject).unwrap().unwrap().status, "completed");
+}
+
+#[tokio::test]
+async fn assistant_message_recipient_must_be_a_currently_declared_agent() {
+    let h = Harness::new();
+    let paired = h.pair().await;
+    for (index, recipient) in ["agent/does-not-exist", "daemon/runtime", "person/ada"].iter().enumerate() {
+        let message = h.message(recipient, &format!("invalid-recipient-{index}")).await;
+        let (status, denied) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
+        assert!(!status.is_success(), "{recipient}: {denied}");
+        assert!(h.state.store.messages(Some(recipient), true).unwrap().is_empty());
+    }
 }
