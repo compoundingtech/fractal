@@ -543,7 +543,7 @@ impl Store {
         self.set_planning_status(id, actor, status, published_revision)
     }
 
-    fn set_planning_status(
+    pub(super) fn set_planning_status(
         &self,
         id: &str,
         actor: &str,
@@ -681,7 +681,7 @@ impl Store {
         self.create_mission_run_inner(request, child, Some(&subject), None)
     }
 
-    fn create_mission_run_inner(
+    pub(super) fn create_mission_run_inner(
         &self,
         request: &MissionRunRequest,
         child: Option<ChildMissionContext>,
@@ -1800,7 +1800,7 @@ impl Store {
         Ok(view)
     }
 
-    fn finish_proposal_cutover(
+    pub(super) fn finish_proposal_cutover(
         &self,
         proposal_id: &str,
         actor: &str,
@@ -1936,7 +1936,7 @@ impl Store {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn adopt_approved_mission_revision(
+    pub(super) fn adopt_approved_mission_revision(
         &self,
         run: &str,
         mission: &MissionSpec,
@@ -2482,7 +2482,7 @@ impl Store {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn adopt_mission_revision_inner(
+    pub(super) fn adopt_mission_revision_inner(
         &self,
         run: &str,
         mission: &MissionSpec,
@@ -2922,7 +2922,7 @@ impl Store {
         self.mission_run_states_among(Some(subjects))
     }
 
-    fn mission_run_states_among(
+    pub(super) fn mission_run_states_among(
         &self,
         subjects: Option<&[String]>,
     ) -> Result<BTreeMap<String, MissionRunStateMoment>> {
@@ -3551,7 +3551,7 @@ impl Store {
         self.append_claim(&input)
     }
 
-    fn work_at_snapshot_internal(
+    pub(super) fn work_at_snapshot_internal(
         &self,
         actor: Option<&str>,
         include_terminal: bool,
@@ -3572,7 +3572,7 @@ impl Store {
     /// `work_for_reconcile` reads them less the completed, failed and cancelled ones. A finished
     /// step stays finished in every view, so they are left out before reading, and the open
     /// steps index keeps the read to the fleet's open steps, not every step it ever ran.
-    fn open_work_for_seat(&self, agent: &str) -> Result<Vec<StepRunView>> {
+    pub(super) fn open_work_for_seat(&self, agent: &str) -> Result<Vec<StepRunView>> {
         self.work_at_snapshot_internal_with_agentless(
             Some(agent),
             true,
@@ -3583,7 +3583,7 @@ impl Store {
         )
     }
 
-    fn work_at_snapshot_internal_with_agentless(
+    pub(super) fn work_at_snapshot_internal_with_agentless(
         &self,
         actor: Option<&str>,
         include_terminal: bool,
@@ -3850,7 +3850,7 @@ impl Store {
         Ok(visible_to_actor.then_some(view))
     }
 
-    fn work_history_at_snapshot_with_agentless(
+    pub(super) fn work_history_at_snapshot_with_agentless(
         &self,
         actor: Option<&str>,
         snapshot_unix_ms: u128,
@@ -3968,7 +3968,7 @@ impl Store {
             .collect())
     }
 
-    fn work_annotation_with_owner(
+    pub(super) fn work_annotation_with_owner(
         work: &StepRunView,
         owner: Option<(String, String, String, String, String, String, String)>,
     ) -> OperationalAnnotation {
@@ -4112,7 +4112,7 @@ impl Store {
         )
     }
 
-    fn work_action_with_handoff(
+    pub(super) fn work_action_with_handoff(
         &self,
         subject: &str,
         action: &str,
@@ -4751,7 +4751,7 @@ impl Store {
         self.retry_step_as(subject, None, reason, backoff_ms)
     }
 
-    fn retry_step_as(
+    pub(super) fn retry_step_as(
         &self,
         subject: &str,
         actor: Option<&str>,
@@ -4876,7 +4876,7 @@ impl Store {
         self.mission_at_with_declared_agents(intent, resolved_intent, at_index, &BTreeSet::new())
     }
 
-    fn mission_at_with_declared_agents(
+    pub(super) fn mission_at_with_declared_agents(
         &self,
         intent: &NormalizedIntent,
         resolved_intent: IntentInput,
@@ -5747,7 +5747,7 @@ impl Store {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn record_resource_observation_attempt(
+    pub(super) fn record_resource_observation_attempt(
         &self,
         observer: &str,
         desired_revision: &str,

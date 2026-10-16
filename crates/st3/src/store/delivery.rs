@@ -166,7 +166,7 @@ impl Store {
         self.messages_through_inner(Some(recipient), false, through, true)
     }
 
-    fn messages_through_inner(
+    pub(super) fn messages_through_inner(
         &self,
         recipient: Option<&str>,
         include_closed: bool,
@@ -255,7 +255,7 @@ impl Store {
             .transpose()
     }
 
-    fn message_view_cached(
+    pub(super) fn message_view_cached(
         &self,
         connection: &Connection,
         subject: &str,
@@ -362,7 +362,7 @@ impl Store {
         self.messages_page_inner(Some(recipient), false, after, through, limit, true)
     }
 
-    fn messages_page_inner(
+    pub(super) fn messages_page_inner(
         &self,
         recipient: Option<&str>,
         include_closed: bool,
@@ -525,7 +525,7 @@ impl Store {
         })
     }
 
-    fn subscription_fault_items(&self, as_of: u128) -> Result<Vec<AttentionItemView>> {
+    pub(super) fn subscription_fault_items(&self, as_of: u128) -> Result<Vec<AttentionItemView>> {
         let mut items = Vec::new();
         {
             let connection = self.readers.get();
@@ -834,7 +834,7 @@ impl Store {
         self.bind_mailbox_with_admission_checked(request, None, Some(member), validate)
     }
 
-    fn bind_mailbox_with_admission_checked(
+    pub(super) fn bind_mailbox_with_admission_checked(
         &self,
         request: &crate::mailbox::Fence,
         authority: Option<&crate::mailbox::Authority>,

@@ -11,6 +11,13 @@ macro_rules! message_desired_recipient_match {
     };
 }
 
+// Store methods by domain (the crate plan's domain rules); core stays in this file.
+mod attention;
+mod delivery;
+mod evidence;
+mod github;
+mod missions;
+mod seats;
 mod trace_principal;
 #[cfg(test)]
 mod accountable_tests;

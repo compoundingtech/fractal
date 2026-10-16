@@ -2,7 +2,7 @@ use super::*;
 
 impl Store {
     #[cfg(test)]
-    fn count_refolded_cards_for_test(&self, cards: usize) {
+    pub(super) fn count_refolded_cards_for_test(&self, cards: usize) {
         self.smalltalk.agent_resources_refolded_cards.fetch_add(cards, std::sync::atomic::Ordering::Relaxed);
         self.smalltalk.agent_resources_largest_fold.fetch_max(cards, std::sync::atomic::Ordering::Relaxed);
     }
@@ -55,7 +55,7 @@ impl Store {
         self.mission_run_summaries_for_ids(Some(ids))
     }
 
-    fn mission_run_summaries_for_ids(&self, ids: Option<&[String]>) -> Result<Vec<MissionRunView>> {
+    pub(super) fn mission_run_summaries_for_ids(&self, ids: Option<&[String]>) -> Result<Vec<MissionRunView>> {
         let connection = self.readers.get();
         let placeholders = ids.map(|ids| vec!["?"; ids.len()].join(","));
         let sql = placeholders.as_ref().map(|placeholders| MISSION_RUN_HEADER_SELECT.replace(
@@ -581,7 +581,7 @@ impl Store {
 
     /// The attention items that belong to a mission run: gate reviews, launch approvals and
     /// revision approvals. A run's header is all they read of the run.
-    fn mission_run_attention_items(&self, person: Option<&str>) -> Result<Vec<AttentionItemView>> {
+    pub(super) fn mission_run_attention_items(&self, person: Option<&str>) -> Result<Vec<AttentionItemView>> {
         let mut items = Vec::new();
         let reviews = self.pending_human_reviews(person)?;
         {
@@ -718,7 +718,7 @@ impl Store {
     }
 
     /// Keep the items requested by `as_of` whose run is still current, then order them.
-    fn current_attention(
+    pub(super) fn current_attention(
         &self,
         mut items: Vec<AttentionItemView>,
         as_of: u128,
@@ -802,7 +802,7 @@ impl Store {
         self.read_snapshot(|snapshot| self.usage_summaries_pinned(subjects, at_index, snapshot))
     }
 
-    fn usage_summaries_pinned(
+    pub(super) fn usage_summaries_pinned(
         &self,
         subjects: &[String],
         at_index: Option<u64>,
@@ -911,7 +911,7 @@ impl Store {
         Ok(summaries)
     }
 
-    fn usage_summary_from_rows<I>(
+    pub(super) fn usage_summary_from_rows<I>(
         rows: I,
         incarnation: Option<&str>,
     ) -> Result<Option<UsageSummary>>
@@ -931,7 +931,7 @@ impl Store {
     /// One alert per login that needs a person: seats that share a login directory on a host
     /// fail together and one sign-in fixes them all, so they share an alert that names each seat
     /// and shows in each one's conversation. It clears when the login works again.
-    fn harness_login_attention_items(
+    pub(super) fn harness_login_attention_items(
         &self,
         person: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {

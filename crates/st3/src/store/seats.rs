@@ -3,7 +3,7 @@ use super::*;
 impl Store {
     /// Classify the bounded claim interval by the dependencies that cards actually read.
     /// Unknown or structural claims still cold-build; queue changes are diffed separately.
-    fn changed_agent_resources(
+    pub(super) fn changed_agent_resources(
         &self,
         after: u64,
         through: u64,
@@ -122,7 +122,7 @@ impl Store {
 
     /// An allow-list for shallow refs, narrower than card-local invalidation: runtime status
     /// can move an undeclared or stopped agent into history, so runtime.observed is not safe.
-    fn agent_page_refs_unchanged(&self, after: u64, through: u64, refs: &[Value]) -> Result<bool> {
+    pub(super) fn agent_page_refs_unchanged(&self, after: u64, through: u64, refs: &[Value]) -> Result<bool> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT subject, kind FROM claims WHERE store_index>?1 AND store_index<=?2",
@@ -148,7 +148,7 @@ impl Store {
     /// The last claim that can change an agent's status: one about an agent, or about the run
     /// or generation that owns it, whose row decides the agent's projection layer. Steps,
     /// gates, subscriptions and diagnostics commit far more often and change no agent status.
-    fn agent_status_index(&self, snapshot_index: u64) -> Result<u64> {
+    pub(super) fn agent_status_index(&self, snapshot_index: u64) -> Result<u64> {
         // Walk back from the snapshot: about one recent claim in ten matches, so this stops
         // after a few rows instead of scanning every agent observation. The unary `+` keeps
         // SQLite from answering the three patterns from the subject index instead, which reads
@@ -192,7 +192,7 @@ impl Store {
             .due[usize::from(history)].clone()
     }
 
-    fn agent_roster_faults_pending(&self, history: bool) -> bool {
+    pub(super) fn agent_roster_faults_pending(&self, history: bool) -> bool {
         let retries = self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned");
         let mode = usize::from(history);
         !retries.due[mode].is_empty() || !retries.pending[mode].is_empty()
@@ -434,7 +434,7 @@ impl Store {
     /// Say once when a refresh request has gone unanswered so long that the refresher must be
     /// slow, failing or stopped. Readers keep serving the newest publication, which carries its
     /// own cut and publication time, rather than refusing rows that exist.
-    fn warn_if_agent_roster_overdue(&self) {
+    pub(super) fn warn_if_agent_roster_overdue(&self) {
         let requested = self.smalltalk.agent_roster_requested_at.load(std::sync::atomic::Ordering::Acquire);
         let waited = (now_ms() as u64).saturating_sub(requested);
         if requested != 0 && waited > AGENT_ROSTER_OVERDUE_MS
@@ -458,7 +458,7 @@ impl Store {
 
     /// Queue selection changes at lease expiry even when the claim frontier is unchanged.
     /// Scan only on a cache miss, inside the same SQLite snapshot as the queue projection.
-    fn agent_queue_valid_until(&self, now: u128) -> Result<Option<u128>> {
+    pub(super) fn agent_queue_valid_until(&self, now: u128) -> Result<Option<u128>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT lease_expires_at_unix_ms FROM step_runs
@@ -541,7 +541,7 @@ impl Store {
         self.cached_agent_resources_folding(index, history, Some(selected), true, build)
     }
 
-    fn cached_agent_resources_folding(
+    pub(super) fn cached_agent_resources_folding(
         &self,
         index: u64,
         history: bool,
@@ -1161,7 +1161,7 @@ impl Store {
         self.agent_card_status_at(Some(&names), index, history)
     }
 
-    fn desired_harness_login_candidates(&self) -> Result<Vec<DesiredSubject>> {
+    pub(super) fn desired_harness_login_candidates(&self) -> Result<Vec<DesiredSubject>> {
         smallclaims::touched::note_read(|| "desired-kind:agent".to_owned());
         smallclaims::touched::note_read(|| "kind:harness.observed".to_owned());
         smallclaims::touched::note_read(|| "kind:harness.diagnostic".to_owned());
@@ -1585,7 +1585,7 @@ impl Store {
     /// Resume an agent's kept usage fold with only the usage claims after it, when every one of
     /// them sorts after the last claim it folded. `None` when one does not, such as a replicated
     /// claim accepted earlier, or two new claims tie on accepted time; the caller folds afresh.
-    fn usage_fold_after(
+    pub(super) fn usage_fold_after(
         connection: &rusqlite::Connection,
         subject: &str,
         cached: &CachedUsageFold,
@@ -1631,7 +1631,7 @@ impl Store {
         Ok((rows, self.agent_message_estimate(&days)?))
     }
 
-    fn usage_period_data(
+    pub(super) fn usage_period_data(
         &self,
         since_ms: u64,
         until_ms: u64,
@@ -1646,7 +1646,7 @@ impl Store {
         })
     }
 
-    fn usage_period_data_from_rows(
+    pub(super) fn usage_period_data_from_rows(
         rows: impl IntoIterator<Item = rusqlite::Result<(String, u64, String)>>,
         since_ms: u64,
         until_ms: u64,
@@ -1913,7 +1913,7 @@ impl Store {
     /// account this node placed it on, else the harness's own default login on that host. Only
     /// the seat's own node knows which pool account it chose, so a pooled seat on another node
     /// stands alone rather than being merged with seats that may use another login.
-    fn seat_login(&self, desired: &DesiredSubject, host: &str, driver: &str) -> Result<String> {
+    pub(super) fn seat_login(&self, desired: &DesiredSubject, host: &str, driver: &str) -> Result<String> {
         let account = match crate::accounts::harness_binding(&desired.desired).map(|b| b.binding) {
             Some(crate::accounts::Binding::Account(name)) => name,
             Some(crate::accounts::Binding::Pool(_)) if host == self.origin => {
