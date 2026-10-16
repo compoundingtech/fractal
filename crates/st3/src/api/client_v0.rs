@@ -2465,6 +2465,26 @@ pub(super) async fn usage_period(
     Ok(Json(value))
 }
 
+/// Every objective and budget with what is left of each: the rows `st slo` prints. The text
+/// fields are this daemon's own display wording, not a contract.
+pub(super) async fn slo_list(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&session, "read.projections")?;
+    super::get_slo(State(state)).await
+}
+
+/// What was left of one objective or budget across a period, from the daemon's local history.
+pub(super) async fn slo_history(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+    Query(query): Query<super::SloHistoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&session, "read.projections")?;
+    super::get_slo_history(State(state), Query(query)).await
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SubjectDefinitionQuery {
@@ -2865,6 +2885,7 @@ pub(super) fn capabilities(session: &ClientSession) -> Vec<Value> {
     // Attention rows say whether each is an alert and name its agent conversation; `alerts` names
     // the attention collection and routes, and the summary counts alerts.
     capabilities.push(json!({"id":"alerts", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"slo", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"inventory-collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"custom-subjects", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
@@ -2889,6 +2910,8 @@ pub(super) fn capabilities(session: &ClientSession) -> Vec<Value> {
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    // Agent rows carry st's presentation (docs/clients/ui-contract.md, Agent).
+    capabilities.push(json!({"id":"presentation", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities
 }
 
@@ -3233,6 +3256,7 @@ pub(super) fn mission_list_cards_with(
                 "id":step.subject,"path":step.step,"title":step.title,"state":client_work_state(&step.status),
                 "attempt":step.attempt,"assignee":step.assigned_to,"claimant":step.claimant,
                 "agentless":step.agentless,"since":client_timestamp(step.updated_at_unix_ms),
+                "keep_open":crate::mission::step_keeps_open(definition.map(|d| &d.mission), &step.step),
                 "progress_at": null,
                 "blocked_reason":step.blocked_reason.as_deref().or_else(|| scheduler_fault.as_deref().filter(|_| step.status=="pending")),"blockers":step.blockers,
                 "goals":step.goals,"constraints":step.constraints
@@ -3256,6 +3280,7 @@ pub(super) fn mission_list_cards_with(
         let historical = matches!(state,"completed"|"failed"|"cancelled"|"retired");
         Ok(json!({"id":id,"kind":"mission","revision":revision,"updated_at":client_timestamp(updated),
             "title":id.trim_start_matches("mission/"),"state":state,"mission_revision":revision,
+            "system":crate::mission::is_system(id, definition.map(|d| &d.mission)),
             "runs":newest.iter().rev().map(|r| r["id"].clone()).collect::<Vec<_>>(),
             "run_details":details,"active_runs":active,"total_runs":overview["total_runs"],
             "run_counts":overview["counts"],"runs_truncated":overview["total_runs"].as_u64().unwrap_or(0)>newest.len() as u64,
@@ -3562,6 +3587,7 @@ fn mission_resources_filtered(
                                     "assignee": step.assigned_to,
                                     "claimant": step.claimant,
                                     "agentless": step.agentless,
+                                    "keep_open": crate::mission::step_keeps_open(definition.map(|(definition, _)| definition), &step.step),
                                     "since": client_timestamp(step.updated_at_unix_ms),
                                     "last_progress": step.progress_summary,
                                     "progress_at": step.progress_at_unix_ms.map(client_timestamp),
@@ -3633,6 +3659,7 @@ fn mission_resources_filtered(
                 "title": mission.strip_prefix("mission/").unwrap_or(&mission),
                 "state": state,
                 "mission_revision": revision,
+                "system": crate::mission::is_system(&mission, definition.map(|(definition, _)| definition)),
                 "runs": runs.into_iter().map(|run| run.subject).collect::<Vec<_>>(),
                 "run_details": run_details,
                 "must_act": must_act,
@@ -12733,6 +12760,15 @@ mission "queue-parity" state="ready" {
         assert_eq!(observed.load(Ordering::SeqCst), 1);
         socket.close(None).await.unwrap();
         server.abort();
+    }
+
+    #[test]
+    fn a_daemon_serving_presentations_advertises_them() {
+        assert!(capabilities(&ClientSession::local(None).unwrap()).iter().any(|capability| {
+            capability["id"] == "presentation"
+                && capability["version"] == 1
+                && capability["state"] == "granted"
+        }));
     }
 
     #[tokio::test]
