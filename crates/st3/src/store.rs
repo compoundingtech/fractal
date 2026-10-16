@@ -54,6 +54,7 @@ mod roster_fresh_proof_tests;
 mod agents_window_deadline_tests;
 pub(crate) mod step_labels;
 mod operation_audit;
+mod work_lease_expiry;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[cfg(test)]
@@ -1045,7 +1046,9 @@ CREATE TABLE IF NOT EXISTS local_work_lease_renewals (
     lease_owner TEXT NOT NULL,
     lease_incarnation TEXT NOT NULL,
     lease_expires_at_unix_ms TEXT NOT NULL,
-    updated_at_unix_ms TEXT NOT NULL
+    updated_at_unix_ms TEXT NOT NULL,
+    accepted_at_unix_ms TEXT,
+    accepted_request_at_unix_ms TEXT
 );
 -- Observations of `local` retention. Rows never enter a batch, an envelope or a digest and
 -- never replicate. `after_store_index` is the newest claim when the row was written, so a
@@ -9348,6 +9351,9 @@ impl Store {
                     .ok_or_else(|| St3Error::new("missing-step-run", format!("step run `{subject}` does not exist")))?;
                 // A claim must use the same effective readiness that reads expose:
                 // an expired worker no longer owns this step, even before repair.
+                let reclaims_expired_lease = action == "claim"
+                    && matches!(current.status.as_str(), "claimed" | "working" | "verifying" | "blocked")
+                    && current.claim_expires_at_unix_ms.is_some_and(|expiry| expiry <= now);
                 let mut current = current;
                 if action == "claim" {
                     apply_effective_step_state(transaction, &mut current, now).map_err(internal)?;
@@ -9662,6 +9668,15 @@ impl Store {
                 let readiness_epoch = current
                     .readiness_epoch
                     .saturating_add(u32::from(status == "ready" && current.status != "ready"));
+                // Reclaim can beat reconciliation. Notify the expired holder before
+                // replacing its lease and renewal evidence, in this claim's transaction.
+                if reclaims_expired_lease {
+                    if work_lease_expiry::prepare_notice(transaction, &self.origin, &subject, now_ms())
+                        .map_err(internal)?.is_none()
+                    {
+                        return Err(St3Error::new("work-already-claimed", "the writer still sees a live work lease"));
+                    }
+                }
                 transaction
                     .execute(
                         "UPDATE step_runs SET status=?2, worker_reported=?3, lease_owner=?4, lease_incarnation=?5,
@@ -9741,14 +9756,17 @@ impl Store {
                     transaction
                         .execute(
                             "INSERT INTO local_work_lease_renewals
-                             (subject, attempt, lease_owner, lease_incarnation, lease_expires_at_unix_ms, updated_at_unix_ms)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                             (subject, attempt, lease_owner, lease_incarnation, lease_expires_at_unix_ms, updated_at_unix_ms,
+                              accepted_at_unix_ms, accepted_request_at_unix_ms)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6)
                              ON CONFLICT(subject) DO UPDATE SET attempt=excluded.attempt,
                                lease_owner=excluded.lease_owner, lease_incarnation=excluded.lease_incarnation,
                                lease_expires_at_unix_ms=excluded.lease_expires_at_unix_ms,
-                               updated_at_unix_ms=excluded.updated_at_unix_ms",
+                               updated_at_unix_ms=excluded.updated_at_unix_ms,
+                               accepted_at_unix_ms=excluded.accepted_at_unix_ms,
+                               accepted_request_at_unix_ms=excluded.accepted_request_at_unix_ms",
                             params![subject, current.attempt, actor, requested_incarnation,
-                                    claim_expiry.expect("a renewal has a lease expiry").to_string(), now.to_string()],
+                                    claim_expiry.expect("a renewal has a lease expiry").to_string(), now.to_string(), now_ms().to_string()],
                         )
                         .map_err(internal)?;
                 }
@@ -9850,6 +9868,14 @@ impl Store {
                     return Ok(false);
                 }
                 let now = now_ms();
+                let expiry_reason = if status == "ready" && reason == Some("the worker lease expired") {
+                    let detail = work_lease_expiry::prepare_notice(transaction, &self.origin, &subject, now)?;
+                    let Some(detail) = detail else { return Ok(false) };
+                    Some(detail)
+                } else {
+                    None
+                };
+                let reason = expiry_reason.as_deref().or(reason);
                 let readiness_epoch = current_epoch.saturating_add(u32::from(status == "ready"));
                 transaction.execute(
                     "UPDATE step_runs SET status=?2, blocked_reason=?3,
@@ -34840,7 +34866,8 @@ fn apply_effective_step_state_with_owner(
         .is_some_and(|expiry| expiry <= snapshot_unix_ms)
     {
         view.status = "ready".into();
-        view.blocked_reason = Some("the worker lease expired".into());
+        let expiry = view.claim_expires_at_unix_ms.expect("the expired lease was checked");
+        view.blocked_reason = Some(work_lease_expiry::reason(connection, view, expiry)?);
         // Expiry is a new readiness episode even before a repair writes it. Old
         // consumed wakes must not acknowledge this newly unclaimed work. A claim
         // persists this effective epoch, so later expiries advance it once more.
@@ -34860,7 +34887,10 @@ fn apply_effective_step_state_with_owner(
     if view.status == "ready" && view.blocked_reason.is_some() {
         view.blockers = active_step_blockers_tx(connection, &view.subject, snapshot_unix_ms)?;
         if view.blockers.is_empty() {
-            view.blocked_reason = None;
+            // Lease loss is transition provenance, not a blocker that disappeared.
+            if !work_lease_expiry::is_reason(view.blocked_reason.as_deref()) {
+                view.blocked_reason = None;
+            }
         } else {
             view.status = "blocked".into();
             view.claimant = None;

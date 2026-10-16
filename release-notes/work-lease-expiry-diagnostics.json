@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Keep lease-expiry reasons and tell the previous claimer when the lease expired and the last renewal was accepted",
+  "replay": {
+    "status": "none",
+    "detail": "Existing step state reason and message claims carry the diagnostics. No claim history rewrite."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Two nullable columns in the member-local local_work_lease_renewals table record writer acceptance time and the request stamp it belongs to. Existing rows retain their request timestamp with acceptance time unknown. No shared projection, index, claim, client type or user_version changes; an older writer ignores the extra columns and a mismatched request stamp prevents stale metadata from being displayed as current."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Lease duration, attempt policy and the claim registry are unchanged. The expiry writer rechecks the current lease and atomically commits the ready transition and previous-claimer message. A direct reclaim also commits the expiry notice before replacing the previous lease. A live renewal that wins first prevents release and notification."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Work detail retains expiry transition provenance even when no blocker exists. Reason text and the previous-claimer wake include expiry and last accepted renewal times, or explicitly say no renewal was accepted for this claim. Older quiet renewal rows show their request time and explicitly say acceptance time was not recorded. The notice identifies the expired incarnation so it remains clear after another worker reclaims the step."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Open idempotently adds the missing nullable local columns. Existing values are not rewritten; no shared projection rebuild or history replay."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Workers claim the newly ready step before resuming, as before."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Existing lease fencing and readiness epochs remain in place; new diagnostics use accepted evidence and survive restart. This slice adds no recovery procedure."
+  }
+}
