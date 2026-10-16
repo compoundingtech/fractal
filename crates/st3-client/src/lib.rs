@@ -5,8 +5,8 @@ mod checkout;
 pub use checkout::{agent_branch, checkout_label};
 mod contract;
 pub mod device;
-pub mod product_dirs;
 mod generated;
+pub mod product_dirs;
 /// W3C context injection, enabled by the optional `trace-propagation` feature.
 pub mod propagation;
 pub use contract::*;
