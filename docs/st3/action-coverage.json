@@ -2223,6 +2223,15 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st validate",
+      "description": "Validate KDL files offline using default host \"local\", without contacting a daemon",
+      "tests": [
+        "crates/st3/tests/validate.rs::validate_reads_files_without_a_daemon_or_configuration",
+        "crates/st3/tests/validate.rs::declaration_mission_revision_is_pinned"
+      ],
+      "verification": "real CLI with no daemon and an unreadable configuration; library parse pinned to a golden revision"
+    },
+    {
       "command": "st work acknowledge",
       "description": "Record the recipient read receipt and acknowledge an exact handoff note",
       "tests": [

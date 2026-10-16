@@ -79,6 +79,7 @@ mod launch_cli;
 mod replication_cli;
 mod terminals_cli;
 mod uninstall_cli;
+mod validate_cli;
 mod work_cli;
 use agents_cli::run_agents;
 use attention_cli::run_attention;
@@ -89,6 +90,7 @@ use launch_cli::{run_launch, run_mission_view};
 use replication_cli::run_replication;
 use terminals_cli::run_pty;
 use uninstall_cli::run_uninstall;
+use validate_cli::{ValidateArgs, run_validate};
 use work_cli::{run_wait, run_work};
 
 use presentation::{
@@ -150,6 +152,9 @@ enum Command {
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
     /// Gate checks run mission and step scripts; loop until scripts run after each round.
     Apply(ApplyArgs),
+    /// Validate KDL files offline using default host "local", without contacting a daemon.
+    /// This is not an authorization or deployment preview.
+    Validate(ValidateArgs),
     /// Inspect owned sets and their source publication receipts.
     Sets {
         #[command(subcommand)]
@@ -4208,6 +4213,16 @@ fn cli_main() -> ExitCode {
         Err(error) => exit_usage_error(error),
     };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    // Validation must precede identity lookup, configuration loading and client construction.
+    if let Command::Validate(args) = &cli.command {
+        return match run_validate(args, cli.json) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("st: {}", plain_error(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
     // Root runs tiles. Entering one makes namespaces, which needs this process single-threaded,
     // so it runs before any runtime or thread starts.
     if let Command::Tiles(args) = cli.command {
@@ -4652,6 +4667,7 @@ async fn run(cli: Cli) -> Result<()> {
     let immediate = Client::new(endpoint.clone());
     match cli.command {
         Command::Setup(_) => unreachable!(),
+        Command::Validate(_) => unreachable!("validation runs before the CLI runtime"),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
@@ -20636,6 +20652,7 @@ mod tests {
             ("replication", include_str!("replication_cli.rs")),
             ("terminals", include_str!("terminals_cli.rs")),
             ("uninstall", include_str!("uninstall_cli.rs")),
+            ("validate", include_str!("validate_cli.rs")),
             ("work", include_str!("work_cli.rs")),
         ];
         let main_source = include_str!("main.rs");
