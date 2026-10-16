@@ -61,7 +61,8 @@ uint32_t st_client_mode_acl_check_export(const void *bytes, size_t size) {
     if (header.fsec_magic != KAUTH_FILESEC_MAGIC ||
         header.fsec_entrycount > ACL_MAX_ENTRIES ||
         KAUTH_FILESEC_SIZE(header.fsec_entrycount) != size) return 2;
-    if ((header.fsec_flags & ~(ACL_FLAG_DEFER_INHERIT | ACL_FLAG_NO_INHERIT)) != 0) return 3;
+    // Deferred inheritance (KAUTH bit16) and reserved raw low bits refuse.
+    if ((header.fsec_flags & ~KAUTH_ACL_NO_INHERIT) != 0) return 3;
     for (uint32_t i = 0; i < header.fsec_entrycount; ++i) {
         struct kauth_ace entry;
         memcpy(&entry, (const unsigned char *)bytes + KAUTH_FILESEC_SIZE(i), sizeof(entry));
@@ -106,7 +107,9 @@ void st_client_mode_acl_inspect(int fd, int private_object,
         ACL_WRITE_SECURITY | ACL_CHANGE_OWNER;
     const uint32_t entry_flags = ACL_ENTRY_INHERITED | ACL_ENTRY_FILE_INHERIT |
         ACL_ENTRY_DIRECTORY_INHERIT | ACL_ENTRY_LIMIT_INHERIT | ACL_ENTRY_ONLY_INHERIT;
-    const uint32_t acl_flags = ACL_FLAG_DEFER_INHERIT | ACL_FLAG_NO_INHERIT;
+    // Raw exported flags use KAUTH, not the public acl_flag_t namespace.
+    // Deferred inheritance could change the ACL at rename; explicitly unsupported.
+    const uint32_t acl_flags = KAUTH_ACL_NO_INHERIT;
     acl_t acl = NULL;
     struct kauth_filesec *external = NULL;
     uint64_t maximum = 0;

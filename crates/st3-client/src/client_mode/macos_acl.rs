@@ -97,6 +97,8 @@ mod tests {
         assert_eq!(check(&valid), 0);
         for (name, offset, value, reason) in [
             ("unknown-acl-flag", layout[3], 1 << 31, 3),
+            ("reserved-raw-low-bit", layout[3], 1, 3),
+            ("unsupported-deferred-inheritance", layout[3], 1 << 16, 3),
             ("unknown-entry-flag", layout[4], 2 | (1 << 31), 3),
             ("unknown-tag", layout[4], 15, 3),
             ("unknown-right", layout[5], 1 << 31, 3),
