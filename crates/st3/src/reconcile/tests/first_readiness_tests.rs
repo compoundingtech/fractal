@@ -385,6 +385,7 @@ mission "progressed" state="ready" {
 
     let notify = Arc::new(Notify::new());
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: notify.clone(),
         event_notify: tokio::sync::watch::channel(0).0,

@@ -12862,7 +12862,9 @@ mission "queue-parity" state="ready" {
 
     #[test]
     fn a_daemon_serving_presentations_advertises_them() {
-        assert!(capabilities(&ClientSession::local(None).unwrap()).iter().any(|capability| {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        assert!(capabilities(&state, &ClientSession::local(None).unwrap()).iter().any(|capability| {
             capability["id"] == "presentation"
                 && capability["version"] == 1
                 && capability["state"] == "granted"
