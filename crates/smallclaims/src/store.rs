@@ -3748,29 +3748,46 @@ pub const REPLICATION_EXCHANGE_BODY_BUDGET: usize = crate::sync::MAX_EXCHANGE_BY
 /// A page whose upper bound already fits is kept without measuring; otherwise each envelope is
 /// measured as serde writes it, counting bytes without keeping them.
 pub fn fit_exchange_body(exchange: &mut ReplicationExchange, budget: usize) -> Result<()> {
-    if exchange.envelopes.is_empty() {
-        return Ok(());
-    }
     let envelopes = std::mem::take(&mut exchange.envelopes);
     // The body without envelopes includes their empty brackets; each kept envelope adds its own
     // serialized bytes and, after the first, one separating comma.
     let base = serialized_len(&*exchange)?;
-    let bound = envelopes
-        .iter()
-        .map(|envelope| envelope_size_bound(envelope) + 1)
-        .sum::<usize>();
-    if base + bound <= budget {
+    if base > budget {
+        exchange.envelopes = envelopes;
+        // Nothing here is dropped to fit: the inventory, digests and signatures are what the
+        // peer needs to compare at all, so an exchange whose metadata alone passes the budget
+        // is refused as it is, with its size, for the path that built it to be bounded.
+        return Err(St3Error::new(
+            "replication-exchange-metadata-too-large",
+            format!(
+                "the exchange without envelopes takes {base} bytes, past {budget}: inventory \
+                 listing {} identities and {} range digests, {} signature requests, {} signatures",
+                exchange.inventory.envelopes.len(),
+                exchange.inventory.buckets.len(),
+                exchange.signature_requests.len(),
+                exchange.signatures.len()
+            ),
+        )
+        .into());
+    }
+    if envelopes.is_empty() {
+        return Ok(());
+    }
+    let bound = envelopes.iter().try_fold(base, |total, envelope| {
+        total.checked_add(envelope_size_bound(envelope).checked_add(1)?)
+    });
+    if bound.is_some_and(|bound| bound <= budget) {
         exchange.envelopes = envelopes;
         return Ok(());
     }
     let mut size = base;
     let mut kept = 0;
     for envelope in &envelopes {
-        let added = serialized_len(envelope)? + usize::from(kept > 0);
-        if size + added > budget {
-            break;
+        let added = serialized_len(envelope)?.saturating_add(usize::from(kept > 0));
+        match size.checked_add(added) {
+            Some(next) if next <= budget => size = next,
+            _ => break,
         }
-        size += added;
         kept += 1;
     }
     if kept == 0 {
@@ -3798,7 +3815,10 @@ fn envelope_size_bound(envelope: &ReplicaEnvelope) -> usize {
         + envelope.previous_hash.as_ref().map_or(0, String::len)
         + envelope.member_key.as_ref().map_or(0, String::len)
         + envelope.signature.as_ref().map_or(0, String::len);
-    6 * strings + envelope.payload.wire_len_bound() + 256
+    strings
+        .saturating_mul(6)
+        .saturating_add(envelope.payload.wire_len_bound())
+        .saturating_add(256)
 }
 
 /// How many bytes serde writes for `value`, without keeping them.
@@ -3816,18 +3836,6 @@ fn serialized_len<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize> {
     let mut counting = Counting(0);
     serde_json::to_writer(&mut counting, value)?;
     Ok(counting.0)
-}
-
-#[cfg(test)]
-thread_local! {static EXCHANGE_BODY_BUDGET: std::cell::Cell<Option<usize>> = const {std::cell::Cell::new(None)};}
-
-/// The exchange body budget, or a test's smaller one on this thread.
-fn exchange_body_budget() -> usize {
-    #[cfg(test)]
-    if let Some(budget) = EXCHANGE_BODY_BUDGET.get() {
-        return budget;
-    }
-    REPLICATION_EXCHANGE_BODY_BUDGET
 }
 
 /// The most envelopes this build takes in one exchange, which it says in each inventory it
@@ -5860,11 +5868,27 @@ impl Store {
         remote: &ReplicationInventory,
         signature_requests: &[ReplicaEnvelopeId],
     ) -> Result<ReplicationExchange> {
+        self.export_replication_exchange_within(
+            fleet_id,
+            remote,
+            signature_requests,
+            REPLICATION_EXCHANGE_BODY_BUDGET,
+        )
+    }
+
+    /// `export_replication_exchange_answering`, with the body cut to `budget` bytes.
+    fn export_replication_exchange_within(
+        &self,
+        fleet_id: &str,
+        remote: &ReplicationInventory,
+        signature_requests: &[ReplicaEnvelopeId],
+        budget: usize,
+    ) -> Result<ReplicationExchange> {
         let mut exchange = self.export_replication_difference(fleet_id, remote)?;
         let _timing = time_stage(&self.replication_timers.export);
         exchange.signatures = self.replication_signatures_for(signature_requests)?;
         exchange.signature_requests = self.replication_signature_requests()?;
-        fit_exchange_body(&mut exchange, exchange_body_budget())?;
+        fit_exchange_body(&mut exchange, budget)?;
         Ok(exchange)
     }
 

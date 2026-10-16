@@ -180,81 +180,150 @@ fn the_cheap_bound_is_never_below_the_measured_size() {
 }
 
 #[test]
-fn a_cut_exchange_leaves_the_rest_for_the_next_one_with_nothing_lost_or_repeated() {
+fn cut_exchanges_drain_both_directions_through_the_real_export_with_nothing_lost_or_repeated() {
     const FLEET: &str = "invented-fleet";
     let node = |name: &str| Store::open_memory(name, Arc::new(super::runtime::Plain)).unwrap();
-    let source = node("alder");
-    let target = node("birch");
-    source.bind_fleet(FLEET).unwrap();
-    target.bind_fleet(FLEET).unwrap();
-    for index in 0..24 {
-        source
-            .append_claim(&ClaimInput {
-                subject: format!("note/{index}"),
-                kind: "example.note".into(),
-                actor: None,
-                fields: BTreeMap::from([("text".into(), json!("x".repeat(2_000)))]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
+    let alder = node("alder");
+    let birch = node("birch");
+    for (store, prefix) in [(&alder, "alder"), (&birch, "birch")] {
+        store.bind_fleet(FLEET).unwrap();
+        for index in 0..16 {
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("note/{prefix}-{index}"),
+                    kind: "example.note".into(),
+                    actor: None,
+                    fields: BTreeMap::from([("text".into(), json!("x".repeat(2_000)))]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
     }
-    // What the target answers the source with: its inventory, listing the ranges that differ.
-    let answer = || {
-        let summary = source.export_replication_summary(FLEET).unwrap();
-        target
+    let keys = |exchange: &ReplicationExchange| {
+        exchange
+            .envelopes
+            .iter()
+            .map(|envelope| (envelope.writer.clone(), envelope.sequence))
+            .collect::<Vec<_>>()
+    };
+    // What each side holds that the other lacks, from one unbounded export each way.
+    let lacking = |from: &Store, to: &Store| {
+        let summary = from.export_replication_summary(FLEET).unwrap();
+        let answer = to
             .export_replication_exchange(FLEET, &summary.inventory)
-            .unwrap()
-            .inventory
-    };
-    let full = source
-        .export_replication_exchange(FLEET, &answer())
-        .unwrap();
-    let all = full
-        .envelopes
-        .iter()
-        .map(|envelope| (envelope.writer.clone(), envelope.sequence))
-        .collect::<Vec<_>>();
-    assert!(all.len() >= 4, "{} envelopes", all.len());
-    let empty = ReplicationExchange {
-        envelopes: Vec::new(),
-        ..full.clone()
-    };
-    let budget = serialized_len(&empty).unwrap() + serialized_len(&full.envelopes).unwrap() / 2;
-    EXCHANGE_BODY_BUDGET.set(Some(budget));
-    let mut received = Vec::new();
-    let mut rounds = 0;
-    loop {
-        let exchange = source
-            .export_replication_exchange(FLEET, &answer())
             .unwrap();
-        if exchange.envelopes.is_empty() {
+        keys(
+            &from
+                .export_replication_exchange(FLEET, &answer.inventory)
+                .unwrap(),
+        )
+    };
+    let mut expected = [lacking(&alder, &birch), lacking(&birch, &alder)];
+    assert!(expected.iter().all(|keys| keys.len() >= 4));
+    let empty = size(&exchange(Vec::new()));
+    // Room for about a third of one side's envelopes per exchange.
+    let budget = empty + 16 * 3_000 / 3 + 4_096;
+    let mut moved = [Vec::new(), Vec::new()];
+    let mut pages = [0, 0];
+    for round in 0..60 {
+        let mut idle = true;
+        for (side, (from, to, relay)) in [(&alder, &birch, "alder"), (&birch, &alder, "birch")]
+            .into_iter()
+            .enumerate()
+        {
+            // The answer `to` gives: its real inventory, listing the ranges that differ.
+            let summary = from.export_replication_summary(FLEET).unwrap();
+            let answer = to
+                .export_replication_exchange(FLEET, &summary.inventory)
+                .unwrap();
+            let page = from
+                .export_replication_exchange_within(FLEET, &answer.inventory, &[], budget)
+                .unwrap();
+            assert!(size(&page) <= budget, "round {round} side {side}");
+            if page.envelopes.is_empty() {
+                continue;
+            }
+            idle = false;
+            moved[side].extend(keys(&page));
+            pages[side] += 1;
+            to.receive_replication_exchange(relay, FLEET, &page)
+                .unwrap();
+        }
+        if idle {
             break;
         }
-        assert!(
-            serialized_len(&exchange).unwrap() <= budget,
-            "round {rounds}"
-        );
-        received.extend(
-            exchange
-                .envelopes
-                .iter()
-                .map(|envelope| (envelope.writer.clone(), envelope.sequence)),
-        );
-        target
-            .receive_replication_exchange("alder", FLEET, &exchange)
-            .unwrap();
-        rounds += 1;
-        assert!(rounds < 50, "the backlog keeps moving");
     }
-    EXCHANGE_BODY_BUDGET.set(None);
-    assert!(rounds >= 2, "the budget cut the first exchange");
-    let mut unique = received.clone();
-    unique.sort();
-    unique.dedup();
-    assert_eq!(unique.len(), received.len(), "no envelope was sent twice");
-    let mut expected = all.clone();
-    expected.sort();
-    assert_eq!(unique, expected, "every envelope arrived");
+    for side in 0..2 {
+        let mut unique = moved[side].clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            moved[side].len(),
+            "side {side}: nothing sent twice"
+        );
+        expected[side].sort();
+        assert_eq!(unique, expected[side], "side {side}: everything arrived");
+        assert!(
+            pages[side] >= 2,
+            "side {side}: the budget cut its backlog into pages"
+        );
+    }
+    // Nothing is left: both inventories now agree.
+    assert_eq!(
+        alder
+            .export_replication_summary(FLEET)
+            .unwrap()
+            .inventory
+            .digest,
+        birch
+            .export_replication_summary(FLEET)
+            .unwrap()
+            .inventory
+            .digest
+    );
+}
+
+#[test]
+fn an_exchange_whose_metadata_alone_passes_the_budget_is_refused_whole() {
+    let mut oversized = exchange(vec![envelope("agent/plain", 1, vec![1; 10])]);
+    oversized.inventory.envelopes = (0..200)
+        .map(|sequence| ReplicaEnvelopeId {
+            writer: "agent/plain".into(),
+            sequence,
+            hash: format!("{sequence:064x}"),
+        })
+        .collect();
+    let budget = size(&exchange(Vec::new())) + 1_000;
+    let before = oversized.inventory.envelopes.len();
+    let error = fit_exchange_body(&mut oversized, budget).unwrap_err();
+    let error = error.downcast_ref::<St3Error>().unwrap();
+    assert_eq!(error.code, "replication-exchange-metadata-too-large");
+    assert!(
+        error.message.contains("listing 200 identities"),
+        "{}",
+        error.message
+    );
+    // Nothing was dropped to make it fit.
+    assert_eq!(oversized.inventory.envelopes.len(), before);
+    assert_eq!(oversized.envelopes.len(), 1);
+}
+
+#[test]
+fn the_signed_answer_around_a_fitted_exchange_stays_within_the_inflate_limit() {
+    // The wrapper's fields do not grow with the exchange; with a long node name and the largest
+    // store index it adds far less than the margin the budget leaves.
+    let node = "n".repeat(256);
+    for envelopes in [Vec::new(), assorted()] {
+        let inner = exchange(envelopes);
+        let wrapped = crate::sync::PeerResponse::new(&node, u64::MAX, inner.clone());
+        let overhead = serialized_len(&wrapped).unwrap() - serialized_len(&inner).unwrap();
+        assert!(overhead < 1024, "{overhead}");
+        assert!(
+            REPLICATION_EXCHANGE_BODY_BUDGET + overhead <= crate::sync::MAX_EXCHANGE_BYTES,
+            "{overhead}"
+        );
+    }
 }
