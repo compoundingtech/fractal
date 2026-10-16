@@ -127,6 +127,22 @@ the daemon could not take. A deploy re-executes every driver and restarts the da
 few seconds. With a fixed pause, every driver would reach the new daemon in the instant it starts
 to listen.
 
+A driver resumed in a new binary then waits a random share of 30 seconds before it sends the
+daemon what its seat's delivery does not need. That covers the harness events its hooks wrote
+during the deploy, Claude attachment checks, its native session, harness publications, subagents
+and work renewals. Its mailbox, receipts, delivery control and the provider's exit do not wait. At
+hetz2's 07:30:58Z restart on 2026-10-14, about 60 resumed drivers sent all of this in the new
+daemon's first eight seconds. It added about seven seconds of writer time to those eight seconds,
+and write-acks queued behind it. A launched driver does not wait.
+
+Only a binary replacement starts this wait, and a replacement only arrives with a deploy, when
+every seat's driver re-executes at once. `st agents resume`, a restart and Claude channel recovery
+launch a fresh driver, which does not wait. A re-executed driver keeps its seat's incarnation, and
+`st agents suspend` reads the newest quiet report for that incarnation with no age limit, so a seat
+that was quiet before the deploy can be suspended at once. A seat whose harness changed state
+during the deploy, such as a turn that finished while the daemon was down, reports its new state
+only when its wait ends. A suspend sent before then is refused for up to 30 seconds.
+
 Claude's MCP handshake is local to its stdio child and does not wait for the daemon, so a daemon
 outage cannot consume Claude's 30-second MCP startup timeout.
 
