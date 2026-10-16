@@ -409,7 +409,8 @@ pub struct ReplicationPeerSync {
     /// Forecast in exact JSON-safe integer seconds up to [`MAX_SAFE_DURATION_SECONDS`], from
     /// [`ReplicationPeerSync::closing_rate_per_second`]; absent when no finite positive rate or
     /// representable forecast exists, including while the gap is not closing and once the
-    /// measurement is `stale`. Missing a forecast does not mean the peer is caught up. Zero
+    /// measurement is `stale`, even one with nothing missing. Missing a forecast does not mean
+    /// the peer is caught up. Zero
     /// means nothing the peer listed was missing here, at arrival: admission, projection and
     /// visibility can lag behind it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1379,9 +1379,7 @@ impl PeerSyncProgress {
         if sync.stale {
             sync.receive_rate_per_second = None;
             sync.catch_up_rate_per_second = None;
-            if sync.peer_only_envelopes != 0 {
-                sync.estimated_catch_up_seconds = None;
-            }
+            sync.estimated_catch_up_seconds = None;
         }
         sync.catching_up = sync.peer_only_envelopes > REPLICATION_EXCHANGE_ENVELOPE_LIMIT as u64
             && now.saturating_sub(sync.measured_at_unix_ms) <= REPLICATION_SYNC_STALE_MS;
@@ -4898,6 +4896,27 @@ pub fn sync_progress_view_withdraws_rates_with_no_new_measurement() {
     let next = progress.view(measured + REPLICATION_SYNC_WINDOW_MS).unwrap();
     assert_eq!(next.closing_rate_per_second(), Some(rate));
     assert_eq!(next.estimated_catch_up_seconds, Some((8_000.0 / rate).ceil() as u64));
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_stale_view_of_nothing_missing_keeps_counts_but_no_forecast() {
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((10_000, 0)), 1_000);
+    let measured = 1_000 + REPLICATION_SYNC_WINDOW_MS;
+    progress.observe(10_000, Some((0, 2)), measured);
+    assert_eq!(progress.view(measured).unwrap().estimated_catch_up_seconds, Some(0));
+    let quiet = progress.view(measured + PEER_QUIET_EXCHANGE_MS).unwrap();
+    assert!(quiet.stale);
+    assert_eq!(
+        (quiet.peer_only_envelopes, quiet.local_only_envelopes, quiet.measured_at_unix_ms),
+        (0, 2, measured)
+    );
+    assert_eq!(
+        (quiet.receive_rate_per_second, quiet.catch_up_rate_per_second),
+        (None, None)
+    );
+    assert_eq!(quiet.estimated_catch_up_seconds, None);
 }
 
 #[cfg(test)]
