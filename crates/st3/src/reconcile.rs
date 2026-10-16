@@ -944,6 +944,14 @@ struct LaunchEvidence {
     checked_at_ms: u128,
 }
 
+/// An exec or PTY task declared under an agent root, as one pass saw it.
+#[derive(Clone)]
+struct RootTask {
+    subject: String,
+    runtime_id: String,
+    terminal: bool,
+}
+
 pub struct Reconciler<R = NativeRuntime> {
     store: Arc<Store>,
     runtime: Arc<R>,
@@ -999,9 +1007,9 @@ pub struct Reconciler<R = NativeRuntime> {
     stop_observation_retries: Mutex<HashMap<String, StopObservationRetry>>,
     /// The kill deadline already logged for each active stop operation.
     reported_kill_survivors: Mutex<HashMap<String, String>>,
-    /// This pass's nested tasks of each stopped root, by root subject: (task subject, runtime
-    /// id, terminal). A root is not settled while one of them still runs on this host.
-    stopped_root_tasks: Mutex<BTreeMap<String, Vec<(String, String, bool)>>>,
+    /// This pass's tasks of each stopped root, by root subject. A root is not settled while
+    /// one of them still runs on this host.
+    stopped_root_tasks: Mutex<BTreeMap<String, Vec<RootTask>>>,
     /// When each batched subscription may next send what it collected.
     batch_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     /// When a failed `checkout` may run Git again, and why it failed, by agent subject.
@@ -2502,7 +2510,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .filter(|subject| subject.kind == "stop" && subject.subject.starts_with("agent/"))
             .map(|subject| subject.subject.as_str())
             .collect::<BTreeSet<_>>();
-        let mut root_tasks = BTreeMap::<String, Vec<(String, String, bool)>>::new();
+        let mut root_tasks = BTreeMap::<String, Vec<RootTask>>::new();
         let mut task_stops = BTreeSet::new();
         if !stopped_roots.is_empty() {
             for subject in &desired {
@@ -2522,7 +2530,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     root_tasks
                         .entry(root.clone())
                         .or_default()
-                        .push((subject.subject.clone(), member.runtime_id.clone(), member.terminal));
+                        .push(RootTask {
+                            subject: subject.subject.clone(),
+                            runtime_id: member.runtime_id.clone(),
+                            terminal: member.terminal,
+                        });
                 }
             }
         }
@@ -5883,9 +5895,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             .cloned()
             .unwrap_or_default();
         let mut running = Vec::new();
-        for (subject, runtime_id, terminal) in tasks {
+        for RootTask { subject, runtime_id, terminal } in tasks {
             let live = if terminal {
-                // A PTY task's state is its last observation; its own stop records `stopped`.
+                // A PTY task's state is its last observation; its own stop records `stopped`. One
+                // never observed on this host never ran here, so it does not hold the root.
+                smallclaims::touched::note_read(|| format!("pty:{runtime_id}"));
                 self.store
                     .latest_actual_value(&subject)?
                     .and_then(|actual| {
@@ -5919,6 +5933,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             serde_json::from_value::<MemberSpec>(operation.body["member"].clone())).transpose()?;
         let actual = self.store.latest_actual_value(&subject.subject)?.or_else(|| pending_member.as_ref()
             .map(|member| serde_json::json!({"fields": member_fields(member, "starting", None, false)})));
+        // A fault or decision recorded on the subject is no observation of a runtime: a root
+        // whose only claims are those has none, and is settled like one never observed.
+        let actual = actual.filter(|actual| {
+            let fields = actual.get("fields").unwrap_or(actual);
+            fields.get("status").is_some() || fields.get("runtime_id").is_some()
+        });
         let Some(actual) = actual else {
             // A stop-only declaration with no observed runtime is already satisfied.
             // Only its declaring host may project that fact. Otherwise every peer
@@ -22870,6 +22890,13 @@ agent "good" { workspace "/tmp"; command "true" }
     fn headless_root_with_running_execs(
         names: &[&str],
     ) -> (Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>) {
+        headless_root_with_running_execs_skipping(names, false)
+    }
+
+    fn headless_root_with_running_execs_skipping(
+        names: &[&str],
+        skipping: bool,
+    ) -> (Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>) {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let execs = names
             .iter()
@@ -22886,7 +22913,8 @@ agent "good" { workspace "/tmp"; command "true" }
             runtime.clone(),
             "node".into(),
             Arc::new(Notify::new()),
-        );
+        )
+        .skipping_unneeded(skipping);
         reconciler.reconcile_once().unwrap();
         for name in names {
             runtime.execs.lock().unwrap().insert(
@@ -23009,6 +23037,40 @@ agent "good" { workspace "/tmp"; command "true" }
         end_exec(&runtime, "exec.node.app.worker", "stopped");
         reconciler.reconcile_once().unwrap();
         assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn headless_root_settles_when_its_exec_ends_between_incremental_passes() {
+        // Skipping mode: a stop item is evaluated again only when something it read changed.
+        let (store, runtime, reconciler) =
+            headless_root_with_running_execs_skipping(&["web"], true);
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(&*runtime.stops.lock().unwrap(), &["exec.node.app.web"]);
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        // Nothing is written: only the exec's own status changes.
+        reconciler.reconcile_once().unwrap();
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        end_exec(&runtime, "exec.node.app.web", "stopped");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn headless_root_retries_after_its_exec_could_not_be_observed() {
+        let (store, runtime, reconciler) = headless_root_with_running_execs(&["web"]);
+        runtime
+            .failed_observes
+            .lock()
+            .unwrap()
+            .insert("exec.node.app.web".into());
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        runtime.failed_observes.lock().unwrap().clear();
+        end_exec(&runtime, "exec.node.app.web", "stopped");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
     }
 
     #[test]
