@@ -20,7 +20,6 @@ pub use smallclaims::replication::{
 
 pub const MAX_EVAL_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 
-/// The error code of a send or reply addressed to a person.
 /// The diagnostic code of a call Claude's auto mode classifier denied (`driver_hook`).
 pub(crate) const PERMISSION_DENIED_CODE: &str = "permission-denied";
 /// The claim an operator writes when a seat's former placement is gone (`placement`).
@@ -72,6 +71,7 @@ pub(crate) fn new_request_id() -> String {
     )
 }
 
+/// The error code of a send or reply addressed to a person.
 pub const PERSON_HAS_NO_INBOX_CODE: &str = "person-has-no-inbox";
 
 /// What a refused send or reply says. The order matters: print in the chat first; an attention
