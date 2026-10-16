@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@smalltalk/st3-client": "file:../../clients/typescript/st3-client",
+    "@smalltalk/st3-views": "workspace:*",
     "effect": "4.0.0",
     "fractional-indexing": "3.2.0",
     "@smalltalk/fractal-ui": "workspace:*",
