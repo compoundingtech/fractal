@@ -66,7 +66,9 @@ Bare `fractal` follows bare `st`'s first-run setup and terminal/agent guards;
 `fractal tui` follows explicit `st ui`. Setup records an owned `fractal` symlink
 in its uninstall manifest. Uninstall also discovers that alias beside a recorded
 `st3` when upgrading an older manifest, and preserves a foreign replacement of
-`fractal`, including inside a named instance.
+`fractal`, including inside a named instance. The ownership check applies only to
+identified executable aliases; state, config and data directories named `fractal`
+remain subject to normal uninstall removal and remaining-file reporting.
 
 Put the chosen bin directory on `PATH`. The installer serializes installations in that directory,
 stages both tools and the `st` link, preserves the previous files, then replaces each by atomic

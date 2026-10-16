@@ -1376,6 +1376,17 @@ fn directory_is_empty(path: &Path) -> bool {
     fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
 }
 
+fn remove_uninstall_path(path: &Path, binary_aliases: &[&Path]) -> std::io::Result<()> {
+    if binary_aliases.contains(&path) && !fractal::owns_alias(path) {
+        return Ok(());
+    }
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
 async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
     let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
@@ -1406,6 +1417,17 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
             .filter_map(|path| path.as_str().map(PathBuf::from))
             .collect::<Vec<_>>(),
     );
+    let instance_alias = instance
+        .as_ref()
+        .map(|instance| instance.bin_dir().join("fractal"));
+    let mut binary_aliases = binaries
+        .iter()
+        .filter(|path| path.file_name() == Some(std::ffi::OsStr::new("fractal")))
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    if let Some(alias) = instance_alias.as_deref() {
+        binary_aliases.push(alias);
+    }
     let work_root = config.work_root().ok();
     let st2_state = state_home.join("st2");
     let st2_only_hooks = fs::read_dir(&st2_state)
@@ -1534,15 +1556,8 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
         eprintln!("could not unregister st's Claude plugin: {error:#}");
     }
     for path in &paths {
-        // Ownership may have changed since the removal list was prepared.
-        if !fractal::may_remove(path) {
-            continue;
-        }
-        let result = if path.is_dir() {
-            fs::remove_dir_all(path)
-        } else {
-            fs::remove_file(path)
-        };
+        // Recheck ownership only for identified executable aliases, never state directories.
+        let result = remove_uninstall_path(path, &binary_aliases);
         if let Err(error) = result
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -1573,7 +1588,6 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
     let remaining = paths
         .iter()
         .filter(|path| path.exists())
-        .filter(|path| fractal::may_remove(path))
         .collect::<Vec<_>>();
     for path in &remaining {
         println!("remains\t{}", path.display());
@@ -34677,5 +34691,28 @@ mod instance_uninstall_tests {
         fs::remove_file(&alias).unwrap();
         fs::write(&alias, "foreign").unwrap();
         assert_eq!(names(instance_removals(root.path(), &work)), ["st3"]);
+    }
+
+    #[test]
+    fn a_state_directory_named_fractal_is_removed_without_alias_ownership_checks() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let alias = bin.join("fractal");
+        fs::write(&alias, "foreign").unwrap();
+        let binary_aliases = [alias.as_path()];
+        for parent in ["state", "config", "data"] {
+            let directory = root.path().join(parent).join("fractal");
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join("owned-state"), "ours").unwrap();
+            remove_uninstall_path(&directory, &binary_aliases).unwrap();
+            assert!(!directory.exists());
+        }
+        remove_uninstall_path(&alias, &binary_aliases).unwrap();
+        assert_eq!(fs::read_to_string(&alias).unwrap(), "foreign");
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink("st3", &alias).unwrap();
+        remove_uninstall_path(&alias, &binary_aliases).unwrap();
+        assert!(fs::symlink_metadata(&alias).is_err());
     }
 }
