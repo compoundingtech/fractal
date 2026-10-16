@@ -11228,7 +11228,12 @@ async fn dispatch_action(
                 state,
                 MessageSendRequest {
                     idempotency_key: request.idempotency_key.clone(),
-                    from: authority_actor.clone(),
+                    // Owner authority permits the operation, but is never the assistant's sender.
+                    from: if session.assistant_write.is_some() {
+                        assistant::PRINCIPAL.into()
+                    } else {
+                        authority_actor.clone()
+                    },
                     to,
                     // An attachment may travel alone; text is then optional.
                     content: if p.get("attachments").is_some_and(|value| value.as_array().is_some_and(|list| !list.is_empty())) {

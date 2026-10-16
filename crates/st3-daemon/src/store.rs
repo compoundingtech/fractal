@@ -4369,8 +4369,8 @@ impl Store {
     ) -> Result<(ClaimRecord, bool), St3Error> {
         if input.kind != "message.sent" || authorization.scope != "write.assistant.messages"
             || authorization.recipient.as_deref() != input.fields.get("to").and_then(Value::as_str)
-            || input.actor.as_deref() != Some(authorization.owner.as_str())
-            || input.fields.get("from").and_then(Value::as_str) != Some(authorization.owner.as_str())
+            || input.actor.as_deref() != Some("assistant/chatgpt")
+            || input.fields.get("from").and_then(Value::as_str) != Some("assistant/chatgpt")
         { return Err(St3Error::new("forbidden", "assistant authorization does not bind this message")); }
         #[cfg(feature = "test-support")]
         let _gate = assistant_write_gate::pause(&authorization.grant_subject)?;
@@ -10101,7 +10101,7 @@ pub(crate) fn append_claim_tx(
 ) -> Result<ClaimRecord> {
     let fields = body.get("fields").unwrap_or(body);
     assistant_write::refuse_unverified(kind, actor, fields.get("from").and_then(Value::as_str),
-        fields.get("sender_class").is_some() || fields.get("assistant_grant_id").is_some())
+        ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| fields.get(*key).is_some()))
         .map_err(anyhow::Error::new)?;
     // Daemon notifications already inside a larger transaction use the same admission seam
     // as API sends. Replication inserts authenticated history through its separate import path.
@@ -47944,7 +47944,7 @@ fn append_claim_with_commit_context(
     if context.assistant.is_none() {
         assistant_write::refuse_unverified(&input.kind, input.actor.as_deref(),
             input.fields.get("from").and_then(Value::as_str),
-            input.fields.contains_key("sender_class") || input.fields.contains_key("assistant_grant_id"))?;
+            ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| input.fields.contains_key(*key)))?;
     }
     validate_claim_input(input)?;
     if local_retention(&input.kind)
@@ -47965,6 +47965,8 @@ fn append_claim_with_commit_context(
                 assistant_input = input.clone();
                 assistant_input.fields.insert("sender_class".into(), json!("external-assistant"));
                 assistant_input.fields.insert("assistant_grant_id".into(), json!(grant_id));
+                assistant_input.fields.insert("assistant_owner".into(), json!(authorization.owner));
+                assistant_input.fields.insert("assistant_session_actor".into(), json!(authorization.actor));
                 &assistant_input
             } else { input };
             let operation = claim_operation(input)?;

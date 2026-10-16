@@ -34,7 +34,7 @@ pub(in crate::api) async fn propose(State(state): State<AppState>, Extension(sna
             return Err(forbidden("assistant writes cannot supply person signatures"));
         }
         if request.action_type == "message.send" {
-            if ["from", "actor", "sender_class", "assistant_grant_id"].iter().any(|field| request.parameters.get(*field).is_some()) {
+            if ["from", "actor", "sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|field| request.parameters.get(*field).is_some()) {
                 return Err(forbidden("assistant message identity and provenance are server-owned"));
             }
             let to = parameter_string(&request.parameters,"to")?;
@@ -43,6 +43,8 @@ pub(in crate::api) async fn propose(State(state): State<AppState>, Extension(sna
             }
         }
         let mut owner_session = ClientSession::local(Some(&owner))?;
+        // The owner supplies delegated authority only. The message action selects PRINCIPAL
+        // as its sender and the writer records owner/session/grant provenance atomically.
         owner_session.actor = session.actor.clone();
         owner_session.pairing_grant = current_session.pairing_grant.clone();
         owner_session.grant_expires_at = current_session.grant_expires_at;
