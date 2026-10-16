@@ -1265,6 +1265,9 @@ impl PeerSyncProgress {
         now: u128,
     ) {
         self.window_received = self.window_received.saturating_add(received as u64);
+        // A receipt whose inventory could not be compared counts toward the open window's
+        // arrivals but compares nothing: neither the window nor its basis changes, and the next
+        // comparable measurement is judged against the basis the window opened with.
         let Some((peer_only, local_only)) = difference else {
             return;
         };
@@ -4772,6 +4775,7 @@ pub fn sync_progress_omits_stalled_forecasts_and_recovers_on_progress() {
     assert!(sync.catching_up);
     assert_eq!(sync.catch_up_rate_per_second, Some(0.0));
     assert_eq!(sync.receive_rate_per_second, Some(0.0));
+    assert_eq!(sync.closing_rate_per_second(), Some(0.0));
 
     // The stall left both rates at zero, so the next window starts fresh from its own sample:
     // 1,000 envelopes arrive and close the gap in one window.
@@ -4780,6 +4784,7 @@ pub fn sync_progress_omits_stalled_forecasts_and_recovers_on_progress() {
     let sync = progress.view(621_000).unwrap();
     assert_eq!(sync.receive_rate_per_second, Some(rate));
     assert_eq!(sync.catch_up_rate_per_second, Some(rate));
+    assert_eq!(sync.closing_rate_per_second(), Some(rate));
     assert_eq!(
         sync.estimated_catch_up_seconds,
         Some((8_000.0 / rate).ceil() as u64)
@@ -4932,6 +4937,19 @@ pub fn sync_progress_measures_no_rate_across_a_change_of_inventory_basis() {
         let sync = progress.view(1_000 + window).unwrap();
         assert_eq!(sync.closing_rate_per_second(), rate, "{case}: {sync:?}");
     }
+    // Receipts that could not be compared leave the window and its basis alone, so a later
+    // comparable measurement on a moved checkpoint still discards the window.
+    let mut progress = PeerSyncProgress::default();
+    progress.observe_on(0, Some((10_000, 0)), basis(Some("checkpoint/a"), true), 1_000);
+    progress.observe_on(400, None, basis(Some("checkpoint/b"), true), 1_000 + window / 2);
+    progress.observe_on(600, Some((9_000, 0)), basis(Some("checkpoint/b"), true), 1_000 + window);
+    let sync = progress.view(1_000 + window).unwrap();
+    assert_eq!(
+        (sync.receive_rate_per_second, sync.catch_up_rate_per_second),
+        (None, None)
+    );
+    assert_eq!(sync.estimated_catch_up_seconds, None);
+    assert_eq!(sync.peer_only_envelopes, 9_000);
     // A peer that starts advertising a checkpoint changes the basis once, as on an upgrade.
     let mut progress = PeerSyncProgress::default();
     progress.observe_on(1, Some((10_000, 0)), basis(None, true), 1_000);
