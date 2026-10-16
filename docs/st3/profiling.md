@@ -56,6 +56,12 @@ that poll; time asleep, queued, or waiting between polls is not CPU. Blocking
 callbacks are measured on their executing thread, not the awaiting Tokio worker.
 These counters do not require file profiling. An unavailable thread CPU clock
 omits that CPU sample rather than recording wall time; polls still count.
+Task metric recording is enabled only after the OTel metrics provider is installed.
+With metrics disabled, each async wrapper checks that switch once and awaits its
+future directly; each blocking scope checks it once before constructing instruments,
+reading clocks or entering the task-metric recorder. Existing synchronous
+performance/profile/origin attribution remains independent of that switch, including
+its shared performance-meter lock; it is not claimed to be zero-cost.
 Each future keeps CPU and poll totals locally, flushing to OTel at most once a
 second while polling and once when it completes or is dropped. A parked task's
 remaining sample is flushed when it next polls or is dropped; there is no timer

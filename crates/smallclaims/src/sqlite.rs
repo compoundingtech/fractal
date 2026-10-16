@@ -2269,6 +2269,7 @@ mod tests {
         let provider = SdkMeterProvider::builder()
             .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
         opentelemetry::global::set_meter_provider(provider.clone());
+        crate::task_cpu::init(true);
         crate::profile::init_from_env();
         telemetry::init(true);
         let directory = tempfile::tempdir().unwrap();

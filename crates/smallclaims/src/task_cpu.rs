@@ -3,6 +3,7 @@ use std::cell::Cell;
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use opentelemetry::KeyValue;
@@ -16,7 +17,19 @@ struct Instruments {
 static METRICS: LazyLock<Instruments> =
     LazyLock::new(|| instruments(&opentelemetry::global::meter("st3")));
 
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static RECORDER_ENTRIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Enable task metrics only after the process metrics provider is installed.
+pub fn init(enabled: bool) {
+    ENABLED.store(enabled, Ordering::Relaxed);
+}
+
 fn instruments(meter: &opentelemetry::metrics::Meter) -> Instruments {
+    #[cfg(test)]
+    RECORDER_ENTRIES.fetch_add(1, Ordering::Relaxed);
     Instruments {
         cpu: meter.f64_counter("st.task.cpu_time")
             .with_description("Thread CPU consumed while polling a daemon task or running its blocking work")
@@ -82,6 +95,8 @@ struct Sampling {
 
 impl Sampling {
     fn start() -> Self {
+        #[cfg(test)]
+        RECORDER_ENTRIES.fetch_add(1, Ordering::Relaxed);
         let nested = MEASURING.with(|active| active.replace(true));
         Self { started: (!nested).then(thread_cpu).flatten(), nested }
     }
@@ -122,6 +137,9 @@ impl Drop for Sample<'_, '_> {
 /// polling, plus a final flush on completion or cancellation. Nested wrappers on
 /// the same thread count polls but leave their CPU to the outermost wrapper.
 pub async fn account<F: Future>(name: &'static str, future: F) -> F::Output {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return future.await;
+    }
     measured(name, future, &METRICS).await
 }
 
@@ -146,17 +164,25 @@ pub fn blocking<T>(name: &'static str, work: impl FnOnce() -> T) -> T {
 pub(crate) struct BlockingScope {
     profile: Option<crate::profile::TaskScope>,
     sampling: Option<Sampling>,
-    accumulator: Accumulator<'static>,
+    accumulator: Option<Accumulator<'static>>,
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 pub(crate) fn blocking_scope(name: &'static str) -> BlockingScope {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return BlockingScope {
+            profile: Some(crate::profile::task_scope(name)),
+            sampling: None,
+            accumulator: None,
+            _thread: std::marker::PhantomData,
+        };
+    }
     let accumulator = Accumulator::new(name, &METRICS);
     let sampling = Sampling::start();
     let mut scope = BlockingScope {
         profile: None,
         sampling: Some(sampling),
-        accumulator,
+        accumulator: Some(accumulator),
         _thread: std::marker::PhantomData,
     };
     // Install the sampling guard before profile entry, including its unwind path.
@@ -166,11 +192,12 @@ pub(crate) fn blocking_scope(name: &'static str) -> BlockingScope {
 
 impl Drop for BlockingScope {
     fn drop(&mut self) {
+        let Some(sampling) = self.sampling.take() else { return };
         // Keep a Sample guard alive while profiling exits, so even an exit panic
         // restores sampling TLS. Its drop precedes the accumulator's OTel flush.
         let _sample = Sample {
-            sampling: self.sampling.take().expect("one blocking scope exit"),
-            accumulator: &mut self.accumulator,
+            sampling,
+            accumulator: self.accumulator.as_mut().expect("enabled scope accumulator"),
         };
         drop(self.profile.take());
     }
@@ -182,6 +209,34 @@ mod tests {
     use opentelemetry::metrics::MeterProvider as _;
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
     use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+
+    #[tokio::test]
+    async fn disabled_task_metrics_do_not_enter_recorder() {
+        const CHILD: &str = "SMALLCLAIMS_DISABLED_TASK_METRICS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "task_cpu::tests::disabled_task_metrics_do_not_enter_recorder"])
+                .env(CHILD, "1").env_remove("ST3_PROFILE_DIR").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        init(false);
+        let entries = RECORDER_ENTRIES.load(Ordering::Relaxed);
+        account("test.disabled.async", async {
+            assert!(!MEASURING.with(Cell::get));
+        }).await;
+        blocking("test.disabled.blocking", || {
+            assert!(!MEASURING.with(Cell::get));
+            // Existing /performance attribution is independent of OTel export.
+            assert_eq!(crate::performance::current().unwrap().kind(), "test.disabled.blocking");
+        });
+        {
+            let scope = blocking_scope("test.disabled.lexical");
+            assert!(scope.accumulator.is_none());
+            assert!(scope.sampling.is_none());
+        }
+        assert_eq!(RECORDER_ENTRIES.load(Ordering::Relaxed), entries);
+    }
 
     #[test]
     fn lexical_and_callback_scopes_match_on_success_nesting_and_unwind() {
@@ -203,6 +258,7 @@ mod tests {
         let provider = SdkMeterProvider::builder()
             .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
         opentelemetry::global::set_meter_provider(provider.clone());
+        init(true);
         crate::profile::init_from_env();
         for (lexical, name) in [(false, "test.callback"), (true, "test.lexical"),
             (false, "test.callback.panic"), (true, "test.lexical.panic")] {
