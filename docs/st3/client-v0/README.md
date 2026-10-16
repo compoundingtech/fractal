@@ -557,6 +557,41 @@ retention decision for native per-request records remain later work.
 The Rust method is `Client::usage_period(since_ms, until_ms)`;
 Swift has `usagePeriod(sinceMS:untilMS:)` and TypeScript `usagePeriod({ since_ms, until_ms })`.
 
+### Objectives and budgets
+
+`GET /v1/client/slo` lists every objective and budget, the rows `st slo ls` prints. It requires
+`read.projections`. The value is `SloList { as_of_unix_ms, rows }`. An objective is a target with
+windows and an error budget (the daemon's latency, store, CPU and database targets and a paired
+phone's live-share target); a budget is an allowance that resets (each account's weekly and 5-hour
+limit, from the readings `usage.period` reports in `limits`). Every `SloRow` has `id`, `kind`
+(`objective` or `budget`), `about`, `target`, `current`, `window`, `remaining_percent` (what is
+left of the error budget or allowance; null when nothing was measured), `status` (`met`, `missed`,
+`no-data` or `stale`, the last meaning the newest reading is not recent) and `explain`, the row in
+plain words. A budget adds `account`, `resets_at_unix_ms` and `measured_at_unix_ms`. The list is
+computed on each read from live windows and readings; it writes nothing.
+
+`GET /v1/client/slo/history?id=…&since_ms=…&until_ms=…&steps=…` reads what was left of one row
+across a period, from the daemon's local observation log (one reading a minute, kept seven days;
+it is not in the graph and does not replicate). The period defaults to the 24 hours ending now,
+spans at most seven days and answers in `steps` equal steps (default 120, 1 to 1000); a period
+that ends before it starts, is longer than seven days or asks for another number of steps is
+`validation-failed` (HTTP 422). The value is `SloHistory { id, since_ms, until_ms, samples, steps }`: each
+step holds its lowest reading, and a step with no reading is null, so a gap means "not measured",
+never "spent". A daemon that has run for less than the period has fewer readings than steps. An
+id the daemon has no rows for answers with no readings (`samples` 0 and every step null), not an
+error: a client that remembers an id should check it against the list.
+
+The objectives are this daemon's own: each member reports the targets and limits it measures, and
+nothing replicates between members. The wording in `about`, `target`, `current`, `window` and
+`explain` is display text built by the daemon for a person to read; it may change between builds,
+so a client shows it and does not parse it. The pair of reads is experimental while the TUI,
+the phone and the web app settle on what they need. The `slo` capability (version 1) is granted to
+a session with `read.projections`; an older daemon does not list it and answers both paths with 404.
+
+The Rust methods are `Client::slo_list()` and `Client::slo_history(id, since_ms, until_ms, steps)`;
+Swift has `sloList()` and `sloHistory(id:sinceMS:untilMS:steps:)`, and TypeScript `sloList()` and
+`sloHistory(id, { since_ms, until_ms, steps })`.
+
 ### Clients connected now
 
 A client may name itself and its build in an `x-st3-client` header on every request and stream,
@@ -668,24 +703,39 @@ a permission, a question or a review. Its `source_id` and `conversation_id` are 
 `episode` is the harness observation that opened the prompt, and its detail carries the prompt
 text the harness reported. It clears when the harness reports the prompt gone, however it was
 answered, when Claude's terminal shows it was refused (Claude reports no event for that), or
-when the seat's runtime incarnation changes. It offers no typed action yet: its action attaches
-to the seat's terminal to answer there.
+when the seat's runtime incarnation changes. Its action attaches to the seat's terminal to answer
+there.
 
-A Claude permission prompt or a Codex approval request can also be answered from a client: its
-alert lists `answers` (`allow`, `deny`) under `action_parameters["prompt.respond"]` with its
-`target_id` and `episode`, and offers the typed action `prompt.respond`. The alert names only
-Claude's tool (a Codex alert names none); the call it would make (its command, path or other
-input) is conversation content, read from the seat's conversation, where the harness records the
-pending call before it asks. A client shows that pending call in full beside the answers and
-offers `allow` only when it can show it. Only the seat's person answers, only the prompt still
-waiting, and only once; the answer is recorded as a replicated `harness.diagnostic`
-(`native-prompt-answered`, naming the seat's driver). On the seat's host, Claude's prompt hook,
-which waits while Claude shows its own dialog, returns it to Claude; the Codex driver's control
-connection to the app-server sends it as the request's response (`accept`/`decline` for a
-command or file change; the requested permissions, or none, for a permissions request), which
-closes the TUI's prompt. Each waits on the exact observation its prompt wrote, so an answer to an
-earlier prompt never answers a later one. An answer in the terminal still wins at once. A
-question prompt, and prompts of other harnesses, are answered in the terminal.
+A prompt st can deliver an answer to lists its `answers` under `action_parameters["prompt.respond"]`
+with its `target_id` and `episode`, and offers the typed action `prompt.respond`:
+
+| Prompt | `answers` | What is sent as `answer` |
+|---|---|---|
+| Claude permission (its own or a subagent's), Codex command, file change or permissions approval | `allow`, `deny` | the answer |
+| Claude plan approval (`ExitPlanMode`) | `approve`, `deny` | the answer |
+| Claude question (`AskUserQuestion`, single or multi-select) | `answer`, `deny` | `deny`, or the choices: a JSON object of each question's text to its chosen label, several comma-separated |
+| Claude's new-MCP-server dialog | `use`, `use-all`, `skip` | the answer |
+| Claude's or Codex's workspace trust dialog | `trust`, and `exit` or `quit` | the answer |
+
+The alert names only Claude's tool, or what a Codex request asks to do; the call it would make
+(its command, path, plan, questions or other input) is conversation content, read from the seat's
+conversation, where the harness records the pending call before it asks. A client shows that
+pending call in full beside the answers, and offers `allow` or `approve` only when it can show it,
+and `answer` only when it can show the call's questions to choose from. A screen prompt (the MCP
+and trust dialogs) has no pending call: its detail says what it asks. Only the seat's person
+answers, only the prompt still waiting, and only once; the answer is recorded as a replicated
+`harness.diagnostic` (`native-prompt-answered`, naming the seat's driver). On the seat's host,
+Claude's prompt hook, which waits while Claude shows its own dialog, returns it to Claude (a
+question's choices as the tool's answers); the Codex driver's control connection to the app-server
+sends it as the request's response (`accept`/`decline` for a command or file change; the requested
+permissions, or none, for a permissions request); a plan's approval and a screen prompt's answer
+are pressed into the dialog with its own keys by the reconciler, only while the screen still shows
+that dialog. Each waits on the exact observation its prompt wrote, so an answer to an earlier
+prompt never answers a later one. An answer in the terminal still wins at once. A Claude prompt is
+answered from a client only while its hook still waits (a day); a Codex approval only when the
+driver saw its request. Other prompts are answered in the terminal. A refusal because the prompt
+is gone or terminal-only is `stale-fence` with a message beginning `that prompt `, written for the
+person; sending it again never helps.
 
 A `fault` also carries `target_states`: for each target with a lifecycle (a mission, run,
 generation, step, or agent), its current `state` and, when known, the `since`
