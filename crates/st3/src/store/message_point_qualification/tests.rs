@@ -611,18 +611,41 @@ fn malformed_types_encoding_and_payload_errors_keep_their_causes_without_a_point
         ("body", "UPDATE claims SET body=X'7B7D' WHERE id='sent'"),
         (
             "encoding",
-            "UPDATE claims SET body=CAST(X'FF' AS TEXT) WHERE id='sent'",
+            // Unlike body, predecessors has no JSON expression index. Invalid UTF-8
+            // can reach the canonical history reader without changing the schema.
+            "UPDATE claims SET predecessors=CAST(X'FF' AS TEXT) WHERE id='sent'",
         ),
-        ("json", "UPDATE claims SET body='{' WHERE id='sent'"),
     ] {
         let store = fixture();
         store.connection.write().execute(sql, []).unwrap();
         let error = capture_point(&store, "message/selected").unwrap_err();
         match column {
             "kind" | "body" => assert!(matches!(error, Cause::InvalidSource("text column type"))),
-            "encoding" | "json" => assert!(std::error::Error::source(&error).is_some()),
+            "encoding" => {
+                assert!(matches!(&error, Cause::Canonical(_)));
+                assert!(std::error::Error::source(&error).is_some());
+            }
             _ => unreachable!(),
         }
+    }
+
+    // Retain the original malformed-body inputs as storage-level before-controls:
+    // JSON expression indexes reject them during UPDATE, before capture can run.
+    // Do not drop indexes or claim to have exercised a corrupt body in capture.
+    for sql in [
+        "UPDATE claims SET body=CAST(X'FF' AS TEXT) WHERE id='sent'",
+        "UPDATE claims SET body='{' WHERE id='sent'",
+    ] {
+        let store = fixture();
+        let error = store.connection.write().execute(sql, []).unwrap_err();
+        assert!(matches!(
+            error,
+            rusqlite::Error::SqliteFailure(_, Some(ref message))
+                if message.contains("malformed JSON")
+        ));
+        let point = capture_point(&store, "message/selected").unwrap().unwrap();
+        assert_eq!(point.core.message.content, "original");
+        compare_core_with_real_oracles(&store, "message/selected", &point);
     }
 }
 
@@ -808,35 +831,38 @@ fn reentrant_capture_uses_outer_physical_cut_not_a_newer_atomic_index() {
             "10",
         );
     }
-    store
+    let outer_cut = store
         .read_snapshot(|cut| {
-            {
-                let db = store.connection.write();
-                claim(
-                    &db,
-                    "selected",
-                    "read",
-                    "message/selected",
-                    "message.read",
-                    json!({"fields":{"status":"read"}}),
-                    "20",
-                );
-            }
+            // The writer's physical connection commits on a thread with no read pin.
+            // The outer reader already established its WAL snapshot at current_index;
+            // reentrant capture must join it despite the newer committed/atomic index.
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let db = store.connection.write();
+                        claim(
+                            &db,
+                            "selected",
+                            "read",
+                            "message/selected",
+                            "message.read",
+                            json!({"fields":{"status":"read"}}),
+                            "20",
+                        );
+                    })
+                    .join()
+                    .unwrap();
+            });
+            assert!(store.index().unwrap() > cut);
             let point = capture_point(&store, "message/selected").unwrap().unwrap();
             assert_eq!(point.physical_cut, cut);
             assert_eq!(point.core.message.status, "sent");
-            Ok(())
+            Ok(cut)
         })
         .unwrap();
-    assert_eq!(
-        capture_point(&store, "message/selected")
-            .unwrap()
-            .unwrap()
-            .core
-            .message
-            .status,
-        "read"
-    );
+    let next = capture_point(&store, "message/selected").unwrap().unwrap();
+    assert!(next.physical_cut > outer_cut);
+    assert_eq!(next.core.message.status, "read");
 }
 
 fn measured(store: &Store) -> (Point, SqliteWork) {
