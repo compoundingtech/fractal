@@ -62,6 +62,9 @@ fn authority_digest_keeps_write_reopen_and_real_trim_freshness() {
     let records: usize = store.readers.get().query_row(
         "SELECT COUNT(*) FROM claims WHERE batch_id=?1", [&claim.batch_id], |r| r.get(0)).unwrap();
     assert_eq!(records, 1, "the disposable trim must drop only this note");
+    // This note has no operation (no idempotency key), so both operation fields are
+    // None, matching claim_tombstone's extraction from the body. This is not an
+    // equivalence check for operation-bearing claims.
     let tombstone = ClaimTombstone {
         id: claim.id.clone(), writer: envelope.writer.clone(), sequence: envelope.sequence,
         envelope_hash: envelope.envelope_hash.clone(), subject: claim.subject.clone(),
