@@ -138,9 +138,9 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
 fn history_query_plan_bounds_each_kind_scan_before_sorting_a_large_fixture() {
     fn episode_seek(detail: &str) -> bool {
         matches!(detail,
-            "SEARCH e USING INDEX sqlite_autoindex_claims_1 (id=?)"
-            | "SEARCH e USING INDEX sqlite_autoindex_claims_1 (id=? AND rowid<?)"
-            | "SEARCH e USING INDEX sqlite_autoindex_claims_1 (id=? AND store_index<?)")
+            "SEARCH e USING INDEX sqlite_autoindex_claims_1 (id=?) LEFT-JOIN"
+            | "SEARCH e USING INDEX sqlite_autoindex_claims_1 (id=? AND rowid<?) LEFT-JOIN"
+            | "SEARCH e USING INDEX sqlite_autoindex_claims_1 (id=? AND store_index<?) LEFT-JOIN")
     }
     // The existing cut has been in the episode join since e1236bec. SQLite can
     // expose that extra range on the same index; scans and non-equality seeks
@@ -148,9 +148,9 @@ fn history_query_plan_bounds_each_kind_scan_before_sorting_a_large_fixture() {
     for refused in [
         "SCAN claims",
         "SCAN e",
-        "SEARCH e USING INDEX another_index (id=?)",
-        "SEARCH e USING INDEX sqlite_autoindex_claims_1 (rowid<?)",
-        "SEARCH e USING INDEX sqlite_autoindex_claims_1 (id>?)",
+        "SEARCH e USING INDEX another_index (id=?) LEFT-JOIN",
+        "SEARCH e USING INDEX sqlite_autoindex_claims_1 (rowid<?) LEFT-JOIN",
+        "SEARCH e USING INDEX sqlite_autoindex_claims_1 (id>?) LEFT-JOIN",
     ] {
         assert!(!episode_seek(refused), "unexpected accepted plan: {refused}");
     }
