@@ -1,4 +1,6 @@
 use super::*;
+// The same print macros as main.rs: CLI output goes through st3's writer.
+use st3::{cli_print as print, cli_println as println};
 
 pub(super) async fn run_wait(client: &Client, args: WaitArgs, json_output: bool) -> Result<()> {
     validate_wait_condition(&args.condition)?;

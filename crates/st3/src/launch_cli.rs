@@ -1,4 +1,6 @@
 use super::*;
+// The same print macros as main.rs: CLI output goes through st3's writer.
+use st3::{cli_print as print, cli_println as println};
 
 pub(super) async fn run_launch(
     client: &Client,

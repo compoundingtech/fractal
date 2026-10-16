@@ -1,4 +1,6 @@
 use super::*;
+// The same print macro as main.rs: CLI output goes through st3's writer.
+use st3::cli_println as println;
 
 fn directory_is_empty(path: &Path) -> bool {
     fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())

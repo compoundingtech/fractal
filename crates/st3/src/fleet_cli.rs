@@ -1,4 +1,6 @@
 use super::*;
+// The same print macros as main.rs: CLI output goes through st3's writer.
+use st3::{cli_print as print, cli_println as println};
 
 fn parse_fleet_duration(text: &str) -> Result<u64> {
     let text = text.trim();
