@@ -820,7 +820,7 @@ export type Envelope = {
   api_version: "st3.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog);
+  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = ("recipient-retired" | "lifecycle-unavailable" | "retirement-upgrade-required" | "attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "suspend-authored-session-selection" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "internal" | string);
@@ -1172,6 +1172,7 @@ export type Mission = ResourceHeader & {
   kind: "mission";
   mission_revision: Revision;
   must_act?: MustAct;
+  presentation?: MissionPresentation;
   run_counts?: {
   [key: string]: number;
 };
@@ -1189,7 +1190,42 @@ export type Mission = ResourceHeader & {
   visualization?: (Visualization | null);
 };
 
+export type MissionActionOffer = {
+  action: string;
+  confirm: boolean;
+  id: "retry-step" | "restart-agent" | "cancel-run" | "chat";
+  target: Id;
+};
+
 export type MissionId = string;
+
+export type MissionPresentation = {
+  actions: Array<MissionActionOffer>;
+  card: ("what-you-can-do" | "nothing-to-do" | null);
+  last_progress: string | null;
+  progress: {
+  done: number;
+  total: number;
+};
+  queued_behind: (MissionQueuedBehind | null);
+  settled_at: (Timestamp | null);
+  steps: Array<MissionStepPresentation>;
+  stuck: (MissionStuck | null);
+  system: boolean;
+  who: PresentationActor;
+  word: "decision" | "stalled" | "unstaffed" | "unclaimed" | "queued" | "working" | "watching" | "held" | "idle" | "done" | "failed" | "cancelled" | "not_started";
+};
+
+export type MissionQueuedBehind = {
+  agent: AgentId;
+  busy_with?: ({
+  label: string;
+  mission: Id;
+  path: string;
+} | null);
+  label: string;
+  state?: string | null;
+};
 
 export type MissionRunId = string;
 
@@ -1259,6 +1295,30 @@ export type MissionStep = {
   title?: string | null;
   wake?: (MissionWake | null);
   wake_reason?: string | null;
+};
+
+export type MissionStepPresentation = {
+  attempts: number;
+  blockers: Array<string>;
+  id: StepRunId;
+  keep_open: boolean;
+  note?: string | null;
+  owner: PresentationActor;
+  path: string;
+  title?: string | null;
+  word: "needs_you" | "done" | "working" | "ready" | "waiting" | "cancelled" | "failed" | "pending";
+};
+
+export type MissionStuck = {
+  agent?: ({
+  id: AgentId;
+  label: string;
+  state: string;
+} | null);
+  attempts: number;
+  blockers: Array<string>;
+  step: StepRunId;
+  word: "needs_you" | "done" | "working" | "ready" | "waiting" | "cancelled" | "failed" | "pending";
 };
 
 export type MissionWake = {
@@ -1491,6 +1551,13 @@ export type PlannerConfig = {
   provider: "codex" | "claude" | "pi" | "omp" | "opencode";
 };
 
+export type PresentationActor = {
+  agent?: AgentId;
+  kind: "person" | "agent" | "st" | "nobody";
+  label?: string;
+  person?: Id;
+};
+
 export type ProjectionEvent = Omit<{
   body: {
 
@@ -1507,7 +1574,7 @@ export type ProjectionEvent = Omit<{
 }, 'type' | 'body'> & ({ type: "timeline.delta"; body: TimelineDelta });
 
 export type PromptRespondParameters = {
-  answer: "allow" | "deny";
+  answer: string;
   episode: string;
   target_id: Id;
 };
@@ -1620,6 +1687,34 @@ export type Session = ResourceHeader & {
   state: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled";
   timeline_cursor: Cursor;
   usage?: (UsageSummary | null);
+};
+
+export type SloHistory = {
+  id: string;
+  samples: number;
+  since_ms: number;
+  steps: Array<number | null>;
+  until_ms: number;
+};
+
+export type SloList = {
+  as_of_unix_ms: number;
+  rows: Array<SloRow>;
+};
+
+export type SloRow = {
+  about: string;
+  account?: string;
+  current: string;
+  explain: string;
+  id: string;
+  kind: "objective" | "budget";
+  measured_at_unix_ms?: number;
+  remaining_percent: number | null;
+  resets_at_unix_ms?: number | null;
+  status: "met" | "missed" | "no-data" | "stale";
+  target: string;
+  window: string;
 };
 
 export type Snapshot = {
@@ -2040,7 +2135,7 @@ export type TimelineUsageBody = {
   turn_id?: string;
 };
 
-export type TimelineView = (TimelineViewBash | TimelineViewEdit | TimelineViewWrite | TimelineViewRead | TimelineViewSearch | TimelineViewTodo | TimelineViewAsk | TimelineViewTask | TimelineViewHub | TimelineViewEval | TimelineViewGeneric | TimelineViewIrc | TimelineViewJob | TimelineViewSkill | TimelineViewCompaction | TimelineViewAssistantError | TimelineViewModelChange | TimelineViewThinkingLevel | TimelineViewTitle | TimelineViewSessionExit | TimelineViewToolStart | TimelineViewResetBoundary | TimelineViewCredentialPin | {
+export type TimelineView = (TimelineViewBash | TimelineViewEdit | TimelineViewWrite | TimelineViewRead | TimelineViewSearch | TimelineViewTodo | TimelineViewAsk | TimelineViewTask | TimelineViewHub | TimelineViewEval | TimelineViewGeneric | TimelineViewIrc | TimelineViewJob | TimelineViewSkill | TimelineViewCompaction | TimelineViewAssistantError | TimelineViewModelChange | TimelineViewThinkingLevel | TimelineViewTitle | TimelineViewSessionExit | TimelineViewToolStart | TimelineViewResetBoundary | TimelineViewCredentialPin | TimelineViewOmpEvent | {
   type: string;
 });
 
@@ -2184,6 +2279,14 @@ export type TimelineViewModelChange = {
   model: string;
   role?: string;
   type: "model_change";
+};
+
+export type TimelineViewOmpEvent = {
+  attribution?: unknown;
+  content?: unknown;
+  details?: unknown;
+  kind: string;
+  type: "omp_event";
 };
 
 export type TimelineViewRead = {
