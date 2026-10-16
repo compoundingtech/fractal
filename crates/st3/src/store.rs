@@ -21,6 +21,8 @@ mod mailbox_lease;
 #[cfg(test)]
 mod message_send_tests;
 #[cfg(test)]
+mod custody_count_fixture;
+#[cfg(test)]
 mod message_thread_legacy_rank_dependency_tests;
 #[cfg(test)]
 mod actual_state_sorter_tests;
