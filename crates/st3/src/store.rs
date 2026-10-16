@@ -23246,24 +23246,6 @@ fn message_view_tx(
             .unwrap_or_else(|| "requester".into()),
     );
     let to = normalize_message_party(&field("to").or_else(|| child("to")).unwrap_or_default());
-    let mut status = field("status").unwrap_or_else(|| "sent".into());
-    if !matches!(status.as_str(), "read" | "closed") {
-        // A custody read can be admitted directly from `sent`. The canonical
-        // actual-state fold may still select that sent value when the two claims
-        // share a timestamp, but the accepted lifecycle receipt settles what the
-        // mailbox shows. A raw close excludes the message even across repair.
-        let settled: (bool, bool) = connection.query_row(
-            &format!("SELECT
-                EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
-                       WHERE subject=?1 AND kind='message.closed'),
-                EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
-                       WHERE subject=?1 AND kind='message.read' AND {UNREPAIRED_CLAIM})"),
-            [subject],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        if settled.0 { status = "closed".into(); }
-        else if settled.1 { status = "read".into(); }
-    }
     // A replicated claim is another member's word: keep only references a file name can be
     // built from, so a hostile hash never reaches a path or a URL.
     let (attachments, body) = crate::message_body::split_attachments(actual.get("attachments"));
@@ -23274,7 +23256,7 @@ fn message_view_tx(
         content: field("content")
             .or_else(|| child("content"))
             .unwrap_or_default(),
-        status,
+        status: field("status").unwrap_or_else(|| "sent".into()),
         title: field("title").or_else(|| child("title")),
         in_reply_to: field("in_reply_to").or_else(|| child("in-reply-to")),
         tags: actual

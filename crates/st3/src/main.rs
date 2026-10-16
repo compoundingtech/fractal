@@ -18919,7 +18919,14 @@ async fn read_message_after_lifecycle(
     }
     // Lifecycle writes are synchronous, so refetching makes JSON and other machine-readable
     // output describe the state that this command actually committed instead of its input state.
-    read_message(client, &message.subject).await
+    let mut result = read_message(client, &message.subject).await?;
+    if actor != message.to {
+        // A successor's signed receipt can be canonically ordered alongside the
+        // original send. The command has just committed its read or close, so
+        // present that result here without changing the shared mailbox view.
+        result.status = if archive { "closed" } else { "read" }.into();
+    }
+    Ok(result)
 }
 
 async fn accept_message(client: &Client, message: &MessageView, actor: &str) -> Result<()> {
@@ -31925,6 +31932,7 @@ mod tests {
         }
         assert!(socket.exists());
         let client = Client::unix(&socket);
+        assert_eq!(read_message(&client, &message.subject).await.unwrap().status, "sent");
         let read = read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
         let signed = store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap();
         assert_eq!(signed.actor.as_deref(), Some("agent/example/new"));
