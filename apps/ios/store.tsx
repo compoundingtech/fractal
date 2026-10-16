@@ -5,7 +5,7 @@ import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
 import { resendMessage, sendMessage, type SendOutcome } from './messageSend';
-import { API_VERSION, ClientError, St3Client, isTransient, notApplied, plainError, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
+import { API_VERSION, ClientError, St3Client, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@smalltalk/st3-views';
 import app from './app.json';
 import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/st-device-key';
@@ -16,11 +16,12 @@ import { rememberBounded } from './boundedCache';
 import { wantsScreenSequence, withFreshTerminalFence, type TerminalFence } from './terminalControls';
 import { sendFences } from './sendFence';
 import { Feed } from './feed';
+import { watchSync, type SyncRead } from './syncWatch';
 import { quality, localDrafts } from './qualityNative';
 import { nativeCollectionSocket } from './modules/st-collections';
 import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, toObservationReport, type Context } from './observations';
-import { buildFabricDefault, credentialFor, defaultMemberName, fabricGatewayId, fabricMembers, fabricTargetFromText, isFabricGatewayId, MAX_FABRIC_MEMBERS, memberName, memberPairing, memberProfileKey, readFabricMembers, sameFabricTarget, sameName, storedFabricMembers, walkableMembers, type FabricMember } from './fabricTarget';
+import { buildFabricDefault, builtFabricMembers, credentialFor, defaultMemberName, fabricGatewayId, fabricMembers, fabricTargetFromText, isFabricGatewayId, MAX_FABRIC_MEMBERS, memberName, memberPairing, memberProfileKey, readFabricMembers, sameFabricTarget, sameName, storedFabricMembers, walkableMembers, type FabricMember } from './fabricTarget';
 import { fabricAvailable, fabricIdentity, fabricPathInUse, nativeCarrierPorts } from './fabricBridge';
 import { ForegroundGate } from './foreground';
 import type { FabricProfile } from './fabricProof';
@@ -133,6 +134,9 @@ function useAppStore(proof?: FabricProfile) {
   capsRef.current = caps;
   const [status, setStatus] = useState<Status>('setup');
   const [hasSynced, setHasSynced] = useState(false);
+  // The page `sync` notice (this host lacks records a peer holds): the socket's frames carry none, so a
+  // small page read supplies it while online. Unread is `undefined`, and level with its peers is `null`.
+  const [sync, setSync] = useState<SyncRead>(undefined);
   // Whether the missions window (followed only while a missions screen shows) has delivered its rows.
   const [missionsLoaded, setMissionsLoaded] = useState(false);
   const [error, setError] = useState(''), [pairingIssue, setPairingIssue] = useState(''), [busy, setBusy] = useState(false);
@@ -280,16 +284,22 @@ function useAppStore(proof?: FabricProfile) {
     const state = reporting.current;
     state.send = () => {
       if (state.busy || Date.now() - state.last < 30_000) return;
-      const batch = observations.nextReport();
-      if (!batch) return;
-      const report = toObservationReport(batch);
-      if (!report.samples.length) { observations.accepted(batch.report_id); return; }
+      // Preparing a batch can synchronously notify ready while it closes a minute.
       state.busy = true;
-      state.last = Date.now();
-      void client.observationsReport(report as never).then(
-        () => observations.accepted(batch.report_id),
-        () => { /* the identical batch is sent again at the next measurement; an older member just refuses */ },
-      ).finally(() => { state.busy = false; });
+      try {
+        const batch = observations.nextReport();
+        if (!batch) { state.busy = false; return; }
+        const report = toObservationReport(batch);
+        if (!report.samples.length) { observations.accepted(batch.report_id); state.busy = false; return; }
+        state.last = Date.now();
+        void client.observationsReport(report as never).then(
+          () => observations.accepted(batch.report_id),
+          () => { /* the identical batch is sent again at the next measurement; an older member just refuses */ },
+        ).finally(() => { state.busy = false; });
+      } catch (error) {
+        state.busy = false;
+        throw error;
+      }
     };
     observations.ready = state.send;
     return () => { if (observations.ready === state.send) observations.ready = undefined; };
@@ -311,7 +321,7 @@ function useAppStore(proof?: FabricProfile) {
       const built = buildFabricDefault();
       setFabricBuilt(available);
       const saved = readFabricMembers(storedList, stored);
-      setFabricMemberList(saved.length ? saved : built ? [{ ...built, name: defaultMemberName(0) }] : []);
+      setFabricMemberList(saved.length ? saved : builtFabricMembers(built));
       setCarrierChoice(choice === 'fabric' || choice === 'tailscale' ? choice : available && built ? 'fabric' : 'tailscale');
       setFallbackOn(fallback !== '0');
     })();
@@ -384,6 +394,12 @@ function useAppStore(proof?: FabricProfile) {
       setCaps(capability.value);
     } catch (e) { if (current()) setError(errorText(e)); }
   }, [client]);
+
+  useEffect(() => {
+    setSync(undefined);
+    if (!client || status !== 'online' || proofRef.current) return;
+    return watchSync(async () => (await client.attentionList({ limit: 1 })).value.sync ?? null, setSync);
+  }, [client, status]);
 
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
   // current. It closes in the background and opens fresh, snapshots first, in the foreground.
@@ -580,11 +596,14 @@ function useAppStore(proof?: FabricProfile) {
     const capability = await client.capabilities();
     return { snapshot_id: capability.snapshot.id, subject_revisions: revisions };
   }
-  /** Run an action, trying again (with a fresh fence each time) while st refused it only because it raced a busy store. */
-  async function runAction(action: () => Promise<unknown>, reload: readonly OnDemand[] = []): Promise<boolean> {
+  /**
+   * Run an action, trying again (with a fresh fence each time) while st refused it only because it
+   * raced a busy store, as `retryable` says.
+   */
+  async function runAction(action: () => Promise<unknown>, reload: readonly OnDemand[] = [], retryable: (error: unknown) => boolean = notApplied): Promise<boolean> {
     if (status !== 'online' || (proof && !proof.ready)) { setError('Still connecting; try again in a moment.'); return false; }
     setBusy(true);
-    try { await retryTransient(8, action, notApplied); setError(''); await loadLists(reload); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
+    try { await retryTransient(8, action, retryable); setError(''); await loadLists(reload); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
   }
 
   /**
@@ -843,14 +862,18 @@ function useAppStore(proof?: FabricProfile) {
       acted.current.add(item.id);
       return runAction(async () => { const id = actionId(); return client.messageRead({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: item.source_id } }); });
     },
-    /** Answer a Claude permission prompt from its alert. Only the prompt still waiting is answered, once; an answer in the terminal wins. */
-    async respondPrompt(item: Attention, answer: 'allow' | 'deny') {
+    /**
+     * Answer a native prompt from its alert with one of the answers it offers: a question's
+     * `answer` sends `sent`, its choices (see `questionAnswer`). Only the prompt still waiting is
+     * answered, once; an answer in the terminal wins, and a prompt st says is gone is not sent again.
+     */
+    async respondPrompt(item: Attention, answer: string, sent: string = answer) {
       if (!client) return false;
       const prompt = promptAnswers(item);
       if (!prompt || !prompt.answers.includes(answer)) { setError('This prompt cannot be answered here. Answer it in the terminal.'); return false; }
       acted.current.add(item.id);
       const qualityToken = proof ? 0 : quality.answerSent(item.id);
-      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer } }); });
+      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer: sent } }); }, [], error => notApplied(error) && !promptGone(error));
       if (qualityToken) quality.answerConfirmed(item.id, qualityToken, accepted);
       return accepted;
     },
@@ -1040,7 +1063,7 @@ function useAppStore(proof?: FabricProfile) {
   const canControlTerminal = caps?.capabilities.some(capability => capability.id === 'terminal.input' && capability.state === 'granted') ?? false;
 
   return {
-    actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, missionsLoaded,
+    actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },

@@ -172,6 +172,8 @@ pub struct Context {
     pub(crate) open_timing: Option<super::open_timing::Trace>,
     pub(crate) process_started: Instant,
     pub initial_subject: Option<String>,
+    /// Where seats on this machine leave requests to show something; none for a paired device.
+    pub requests: Option<std::path::PathBuf>,
 }
 
 // Setup's initial destination waits for a live inventory, rather than cached agent data.
@@ -192,6 +194,40 @@ pub(super) fn focus_initial_subject(
         return;
     }
     ui.open(&id);
+}
+
+/// Open what seats asked for with `st ui open`, once the inventory is live: an agent a seat has
+/// only just made is waited for, and one that never appears is answered as not found.
+pub(super) fn answer_open_requests(
+    ui: &mut Ui,
+    inbox: &mut super::requests::Inbox,
+    ready: bool,
+) {
+    inbox.read();
+    if !ready || !matches!(ui.world.link, super::view::Link::Live) {
+        return;
+    }
+    let waiting = inbox
+        .waiting()
+        .map(|(request, since)| (request.clone(), since.elapsed()))
+        .collect::<Vec<_>>();
+    for (request, waited) in waiting {
+        let Ok(pane) = super::requests::pane_for(&request.subject) else {
+            inbox.answer(&request.id, &super::requests::Answer::NotFound);
+            continue;
+        };
+        if ui.inventory_has(&pane) {
+            let answer = ui.open_requested(
+                pane,
+                request.place,
+                request.keep_focus,
+                request.from.as_deref(),
+            );
+            inbox.answer(&request.id, &answer);
+        } else if waited >= super::requests::GRACE {
+            inbox.answer(&request.id, &super::requests::Answer::NotFound);
+        }
+    }
 }
 
 fn cancel_initial_subject(subject: &mut Option<String>, input: &Event) {
@@ -426,8 +462,11 @@ pub fn run(context: Context) -> Result<()> {
         mut open_timing,
         process_started,
         mut initial_subject,
+        requests,
     } = context;
     let (fetched_tx, fetched) = mpsc::channel::<Fetched>();
+    // What seats ask this terminal to show (`st ui open`); a paired device has no seats here.
+    let mut open_requests = super::requests::Inbox::new(requests);
     let mut model = cached.unwrap_or_default();
     let mut agents_live = false;
     // The feed announces a granted glasses window before sending any core window.
@@ -509,6 +548,7 @@ pub fn run(context: Context) -> Result<()> {
     terminal.hide_cursor()?;
     let started = Instant::now();
     let mut changed = true;
+    let mut offline_drawn = false;
     // When st is next asked how long a message it takes: on connecting, then now and then, since
     // a daemon that is upgraded changes it.
     let mut limit_next = Instant::now();
@@ -519,11 +559,8 @@ pub fn run(context: Context) -> Result<()> {
     let mut terminal_runtimes_by_agent: BTreeMap<String, Vec<String>> = BTreeMap::new();
     // The fleet host that owns each opened terminal, so a dropped stream attaches again directly.
     let mut terminal_owners: BTreeMap<String, String> = BTreeMap::new();
-    // Attaching a dropped terminal again: whether a try is out, and how many failed.
-    let mut reattaching = false;
     // When a terminal was asked for, while it connects: the wait is shown, and a long one named.
     let mut attach_started: Option<Instant> = None;
-    let mut reattach_tries = 0_u32;
     // The cursor shape last set, so it changes only when the attached terminal asks.
     let mut cursor_style: Option<crossterm::cursor::SetCursorStyle> = None;
     // The tab shown on the last pass: opening a tab loads what only it needs.
@@ -737,6 +774,7 @@ pub fn run(context: Context) -> Result<()> {
                     }
                     extras.live = true;
                     extras.offline = None;
+                    extras.offline_since = None;
                     extras.degraded = None;
                     model.last_connected =
                         Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
@@ -848,6 +886,7 @@ pub fn run(context: Context) -> Result<()> {
                     // nothing on screen is cleared.
                     extras.live = false;
                     extras.offline = None;
+                    extras.offline_since = None;
                     ui.flash(format!(
                         "Live stream lost ({reason}); st answers, reconnecting"
                     ));
@@ -860,6 +899,7 @@ pub fn run(context: Context) -> Result<()> {
                     extras.live = false;
                     extras.degraded = None;
                     extras.offline = Some(error);
+                    extras.offline_since.get_or_insert_with(Instant::now);
                     attached = None;
                     save_cache(cache_path.as_deref(), &person, &model);
                     changed = true;
@@ -1151,7 +1191,6 @@ pub fn run(context: Context) -> Result<()> {
                     ui.flash(format!("Attached · {route}"));
                 }
                 Fetched::Reattached { agent, outcome } => {
-                    reattaching = false;
                     if let Some(native) = ui
                         .terminal_view(&agent)
                         .and_then(|view| view.native.as_ref())
@@ -1160,7 +1199,7 @@ pub fn run(context: Context) -> Result<()> {
                             Ok(direct) => native.reconnect(direct.stream, &direct.name),
                             Err(reason) if reason.contains("restarted") => native.give_up(reason),
                             // Still unreachable: the next try waits longer.
-                            Err(_) => reattach_tries += 1,
+                            Err(reason) => native.retry_failed(reason),
                         }
                     }
                 }
@@ -1733,6 +1772,15 @@ pub fn run(context: Context) -> Result<()> {
             });
         }
 
+        // The grace for a restart of st ends on its own clock: draw the link as offline then.
+        match extras.offline_since {
+            Some(since) if !offline_drawn && since.elapsed() >= adapt::offline_grace() => {
+                offline_drawn = true;
+                changed = true;
+            }
+            None => offline_drawn = false,
+            Some(_) => {}
+        }
         if changed {
             ui.content.index(&timelines);
             extras.conversations = conversations(&model, &person, &timelines, &failed, &conversing);
@@ -1759,7 +1807,7 @@ pub fn run(context: Context) -> Result<()> {
         }
         // The missions window is large, so it is followed only while a mission list or card is on
         // screen, and kept for a while after so flipping between tabs does not fetch it each time.
-        let wanted_now = ui.missions_wanted();
+        let wanted_now = ui.missions_wanted() || open_requests.wants_missions();
         if wanted_now {
             missions_until = Some(Instant::now() + MISSIONS_GRACE);
         }
@@ -1768,6 +1816,7 @@ pub fn run(context: Context) -> Result<()> {
             missions_sent = wanted;
             let _ = commands.send(Command::Missions { follow: wanted });
         }
+        answer_open_requests(&mut ui, &mut open_requests, agents_live && glasses_ready);
         ui.step_voice();
         ui.step_terminal_hold();
         ui.step_default_view();
@@ -1888,25 +1937,12 @@ pub fn run(context: Context) -> Result<()> {
             });
         }
         // A stream that dropped while the program ran attaches again, to the same incarnation,
-        // after a wait that grows with each try.
-        if !reattaching
-            && extras.live
-            && let Some((view, native)) = ui
-                .terminal
-                .iter()
-                .chain(ui.parked.iter())
-                .filter_map(|view| view.native.as_ref().map(|native| (view, native)))
-                .find(|(_, native)| {
-                    native.dropped().is_some_and(|at| {
-                        at.elapsed() >= Duration::from_secs(2_u64.pow(reattach_tries.min(5)))
-                    })
-                })
+        // after a wait that grows with each try (`pty::retry_delay`).
+        if extras.live
+            && let Some((agent, expected)) = ui.reattach_due()
         {
-            reattaching = true;
             let client = client.clone();
             let tx = fetched_tx.clone();
-            let agent = view.agent.clone();
-            let expected = native.incarnation.clone();
             let runtime_ids = terminal_runtimes_by_agent
                 .get(&agent)
                 .cloned()
@@ -1926,14 +1962,6 @@ pub fn run(context: Context) -> Result<()> {
                 let _ = tx.send(Fetched::Reattached { agent, outcome });
             });
         }
-        if ui
-            .terminal
-            .iter()
-            .chain(ui.parked.iter())
-            .all(|view| view.native.is_none())
-        {
-            reattach_tries = 0;
-        }
         ui.terminal_requests();
         // While an attached terminal's output flows, or voice listens, draw it as it comes.
         let flowing = ui.voice.is_some()
@@ -1949,11 +1977,7 @@ pub fn run(context: Context) -> Result<()> {
             |input| {
                 cancel_initial_subject(&mut initial_subject, &input);
                 match input {
-                    Event::Key(key)
-                        if !extras.live
-                            && key.code == crossterm::event::KeyCode::Char('r')
-                            && !ui.editing =>
-                    {
+                    Event::Key(key) if reconnect_key(&key, extras.live) => {
                         let _ = commands.send(Command::Reconnect);
                         true
                     }
@@ -2088,6 +2112,16 @@ const FILL_ROWS: usize = 200;
 const FILL_PAGES: usize = 7;
 
 /// A page st took this long to give is a sign it is busy: no more pages are read on their own.
+/// Ctrl+R asks to reconnect while there is no live link. A bare `r` is a letter like any other:
+/// it must reach the message box, link or no link (Nathan, 2026-10-14: a lowercase r could not be
+/// typed while the link was stale).
+fn reconnect_key(key: &crossterm::event::KeyEvent, live: bool) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    !live
+        && key.code == KeyCode::Char('r')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 const FILL_SLOW: Duration = Duration::from_millis(1500);
 
 fn slow_page(took: Duration) -> bool {
@@ -3112,6 +3146,85 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn open_requests_wait_for_a_live_inventory_and_answer_each_seat_once() {
+        use super::super::requests::{self, Answer, Inbox, Place};
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("requests");
+        let mut world = super::super::demo::world();
+        world.link = super::super::view::Link::Live;
+        let known = world.agents.items()[1].id.clone();
+        let mut ui = Ui::new(world);
+        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        ui.show_focused();
+        let mut inbox = Inbox::new(Some(dir.clone()));
+        let early = requests::enqueue(&dir, &known, Place::Right, false, None).unwrap();
+        assert!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o077 == 0);
+
+        // Cached inventory is not a reason to open anything.
+        answer_open_requests(&mut ui, &mut inbox, false);
+        assert_eq!(ui.live_conversations().iter().filter(|id| **id == known).count(), 0);
+        assert!(dir.join(format!("{early}.json")).exists());
+
+        answer_open_requests(&mut ui, &mut inbox, true);
+        assert_eq!(ui.focus(), (1, Some(known.clone())));
+        assert!(!dir.join(format!("{early}.json")).exists());
+        let answer = std::fs::read(dir.join(format!("{early}.answer"))).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Answer>(&answer).unwrap(),
+            Answer::Opened { focused: true }
+        );
+
+        // An agent that is not in the inventory yet waits, and is not found once the grace ends.
+        let later = requests::enqueue(&dir, "agent/garden/not-yet", Place::Tab, false, None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        answer_open_requests(&mut ui, &mut inbox, true);
+        assert!(dir.join(format!("{later}.json")).exists(), "still waiting for st to know it");
+        assert_eq!(inbox.waiting().count(), 1);
+        inbox.waiting_since_for_test(&later, requests::GRACE);
+        answer_open_requests(&mut ui, &mut inbox, true);
+        let answer = std::fs::read(dir.join(format!("{later}.answer"))).unwrap();
+        assert_eq!(serde_json::from_slice::<Answer>(&answer).unwrap(), Answer::NotFound);
+        assert_eq!(inbox.waiting().count(), 0);
+    }
+
+    #[test]
+    fn a_request_the_layout_cannot_show_without_moving_focus_is_not_called_opened() {
+        use super::super::pane::Pane;
+        use super::super::requests::{Answer, Place};
+        let mut world = super::super::demo::world();
+        world.link = super::super::view::Link::Live;
+        let known = world.agents.items()[1].id.clone();
+        let mut ui = Ui::new(world);
+        ui.glasses = None;
+        let pane = || Pane::Agent(Some(known.clone()));
+        // The classic layout has no tabs or splits: only the list can show it, which moves focus.
+        let kept = ui.open_requested(pane(), Place::Tab, true, None);
+        assert_eq!(kept, Answer::NotShown);
+        let moved = ui.open_requested(pane(), Place::Tab, false, None);
+        assert_eq!(moved, Answer::Opened { focused: true });
+        // A name another process wrote cannot put control characters in the flash.
+        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        ui.show_focused();
+        ui.open_requested(pane(), Place::Right, false, Some("agent/x/bad\x1b[2Jname\n"));
+        let (shown, _) = ui.flash.clone().unwrap();
+        assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
+        assert!(shown.contains("bad[2Jname"), "{shown:?}");
+    }
+
+    #[test]
+    fn only_ctrl_r_reconnects_and_never_a_letter() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        let ctrl_r = key(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        let plain_r = key(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(reconnect_key(&ctrl_r, false), "Ctrl+R retries a link that is down");
+        assert!(!reconnect_key(&ctrl_r, true), "Ctrl+R is left to the conversation when live");
+        assert!(!reconnect_key(&plain_r, false), "a lowercase r is typed, never taken");
+        assert!(!reconnect_key(&key(KeyCode::Char('R'), KeyModifiers::SHIFT), false));
+    }
 
     #[test]
     fn initial_subject_waits_for_live_inventory_and_opens_only_once() {
