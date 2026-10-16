@@ -231,6 +231,14 @@ export const AnswerAlert = ({
   const [confirming, setConfirming] = React.useState<AlertChoice>()
   const [sending, setSending] = React.useState(false)
   const [status, setStatus] = React.useState<string>()
+  // A new revision may carry a new question under the same id: a pending confirmation or an
+  // earlier answer's status belongs to the revision the person read. Their words stay theirs.
+  const [read, setRead] = React.useState(alert.revision)
+  if (read !== alert.revision) {
+    setRead(alert.revision)
+    setConfirming(undefined)
+    if (!sending) setStatus(undefined)
+  }
   const wordsId = React.useId()
   const takesWords = choices?.some((choice) => choice.words !== 'none') === true
   const send = (choice: AlertChoice) => {
