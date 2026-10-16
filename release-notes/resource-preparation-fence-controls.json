@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Document missing resource-preparation fences and add test-only source discriminators",
+  "replay": {"status": "none", "detail": "Test and documentation changes only; no projection replay or rebuild."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers, layout or migration changes."},
+  "rules": {"status": "none", "detail": "No retention, authority or checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "No production API, wire, claim, effect or retry-policy changes."},
+  "downtime": {"status": "none", "detail": "No runtime installation or activation is part of this private unit."},
+  "manual": {"status": "none", "detail": "No operator action or live capture is requested."},
+  "recovery": {"status": "none", "detail": "No recovery, deployment, restore or rollback change."}
+}

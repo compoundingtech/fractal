@@ -32,6 +32,8 @@ mod owned_sets_tests;
 #[cfg(test)]
 mod usage_fold_tests;
 mod resources;
+#[cfg(test)]
+mod resource_preparation_fence_tests;
 mod github_workflow_failures;
 pub mod git_changes;
 pub(crate) mod message_subscriptions;
