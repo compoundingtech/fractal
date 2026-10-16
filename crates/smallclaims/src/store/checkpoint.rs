@@ -1714,10 +1714,10 @@ impl Store {
             }
             Err(error) => {
                 if copy.exists() {
-                    return Err(error).context(format!(
-                        "checkpoint clone left an incomplete database at {}",
+                    anyhow::bail!(
+                        "checkpoint clone left an incomplete database at {}: {error}",
                         copy.display()
-                    ));
+                    );
                 }
                 return Ok(false);
             }
