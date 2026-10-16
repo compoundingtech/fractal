@@ -7,6 +7,7 @@ import { canonicalSidebarVector } from './sidebarV2.fixture.ts'
 // Golden contract at #3072, 7ca55a3e7bd54fec04cfafc96e4f84e7fb82885d.
 describe('sidebar-v2 folder-only adapter', () => {
   for (const vector of fixture.cases) it(vector.name, () => {
+    const inventory: readonly string[] = vector.inventory
     const roster = vector.inventory.map(subject => ({ id: subject, subject, label: subject, host: 'fixture' }))
     const { arrangement, folderId } = canonicalSidebarVector(vector)
     const result = sidebarV2(arrangement, roster)
@@ -23,11 +24,11 @@ describe('sidebar-v2 folder-only adapter', () => {
     const expected: Record<string, string | null> = {}
     for (const entry of Object.values(vector.expected.nodes)) {
       const node = entry.node
-      if (node._tag === 'Subject' && !vector.inventory.includes(node.subject)) continue
+      if (node._tag === 'Subject' && !inventory.includes(node.subject!)) continue
       expected[node._tag === 'Folder' ? `folder:${folderId(node.id!)}` : node.subject!] = entry.shownUnder._tag === 'Root' ? null : `folder:${folderId(entry.shownUnder.id!)}`
     }
     expect(parents).toEqual(expected)
-    expect(result.tree.map(node => node.id)).toEqual(vector.expected.roots.flatMap(node => node._tag === 'Folder' ? [`folder:${folderId(node.id!)}`] : vector.inventory.includes(node.subject!) ? [node.subject!] : []))
+    expect(result.tree.map(node => node.id)).toEqual(vector.expected.roots.flatMap(node => 'id' in node && node.id !== undefined ? [`folder:${folderId(node.id)}`] : 'subject' in node && node.subject !== undefined && inventory.includes(node.subject) ? [node.subject] : []))
   })
 
   it('keeps legacy behavior when no arrangement or no authoritative resolution is sent', () => {

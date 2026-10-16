@@ -1,5 +1,6 @@
 import { Schema } from 'effect'
 import { Arrangement } from '@smalltalk/st3-client/schema'
+import type { Arrangement as ArrangementModel } from '@smalltalk/st3-client'
 import vectors from '../../../../fixtures/clients/sidebar-v2.json'
 
 /** Golden projection IDs are symbolic; the wire schema requires UUIDv7 folder identities. */
@@ -15,7 +16,7 @@ export const canonicalSidebarVector = (vector: typeof vectors.cases[number]) => 
   }
   const parent = (id: string | null): string | null => id === null ? null : folderId(id)
   const input = vector.arrangement
-  const arrangement = Schema.decodeUnknownSync(Schema.toEncoded(Arrangement))({ ...input,
+  const arrangement: Omit<ArrangementModel, 'operational'> = Schema.decodeUnknownSync(Schema.toEncoded(Arrangement))({ ...input,
     body: { ...input.body,
       folders: Object.fromEntries(Object.entries(input.body.folders).flatMap(([id, folder]) => folder === undefined ? [] : [[folderId(id), {
         ...folder, position: { ...folder.position, value: { ...folder.position.value, parent: parent(folder.position.value.parent) } },

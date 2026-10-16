@@ -1,5 +1,6 @@
 import { Schema } from 'effect'
 import { Arrangement as ArrangementSchema } from '@smalltalk/st3-client/schema'
+import type { Arrangement } from '@smalltalk/st3-client'
 import { build, nodeKey, type ProjectionError } from '@smalltalk/st3-views/sidebarView'
 import type { SidebarNode } from './sidebarContract.ts'
 import type { SidebarSeat } from './sidebarAdapter.ts'
@@ -15,7 +16,9 @@ export const sidebarV2 = (input: unknown, roster: readonly SidebarSeat[]): Sideb
   if (input === undefined) return { _tag: 'Legacy' }
   if (!isArrangement(input)) return { _tag: 'Refused', error: { _tag: 'InvalidArrangement' } }
   if (input.resolved == null) return { _tag: 'Legacy' }
-  const result = build(input, roster.map(seat => seat.subject))
+  // Operational metadata is not a projection input; its encoded optional null differs from Models.
+  const arrangement: Omit<Arrangement, 'operational'> = input
+  const result = build(arrangement, roster.map(seat => seat.subject))
   if (result._tag === 'Refused') return result
   const seats = new Map<string, SidebarNode[]>()
   for (const seat of roster) {
