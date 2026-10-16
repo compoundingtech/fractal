@@ -1133,6 +1133,7 @@ To refresh the capacity measurement, dispatch `namespace-capacity.yml` on `main`
 `gh workflow run namespace-capacity.yml --ref main`. The same workflow runs hourly at minute 17 UTC.
 Its only job uses one Namespace runner to publish platform limits, current usage and an observation
 timestamp to the job summary and the `namespace-capacity` artifact (retained for 30 days).
+The newest request replaces an older pending or running reading instead of accumulating a backlog.
 It performs no checkout, build or cache setup and reports no workspace or account identity.
 The read retains priority 3 and can wait for the same Namespace capacity it measures; a queued
 reading is not current quota evidence. Dispatching Workspace CI is no longer a capacity read.

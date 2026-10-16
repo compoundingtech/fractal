@@ -6,6 +6,7 @@ export default githubWorkflow(auditCaches({
   name: 'Namespace capacity',
   on: { workflow_dispatch: {}, schedule: [{ cron: '17 * * * *' }] },
   permissions: { contents: 'read' },
+  concurrency: { group: 'namespace-capacity', 'cancel-in-progress': true },
   actionlint: defaultActionlintConfig,
   jobs: {
     'namespace-capacity': {

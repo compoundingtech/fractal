@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: namespace-capacity
+  cancel-in-progress: true
+
 jobs:
   namespace-capacity:
     name: namespace-capacity
