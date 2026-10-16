@@ -1,6 +1,6 @@
 {
   "format": "st-custody-canonical-fixtures-v1",
-  "status": "proposal-before-wire-code",
+  "status": "historical-v1-encoding-only-NOT-current-protocol",
   "request_encoding": "domain st-custody-request-v1 NUL; version u32be; length-prefixed fleet/source/custody/operation UTF8; raw 32-byte challenge; length-prefixed db; u32be epoch count then sorted length-prefixed epochs; u64be frontier; u32be registry; raw inventory/dependency/manifest digests; u32be page index/count. Outer exact-body request digest is separately bound by existing peer authentication, not represented by this semantic fixture.",
   "vectors": [
     {
@@ -444,5 +444,6 @@
       "outcome": "REFUSE",
       "reason": "fresh-exit-proof-required"
     }
-  ]
+  ],
+  "superseded_by": "custody-v2 request vector commitment; old scalar frontier is not valid custody proof"
 }
