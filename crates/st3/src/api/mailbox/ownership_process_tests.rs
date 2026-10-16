@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 const TEST: &str = "api::mailbox::ownership_process_tests::nested_real_peers_never_change_primary_attachment_or_recovery";
 const ROLE: &str = "ST_TEST_OWNERSHIP_ROLE";
-const SUBJECT: &str = "agent/ownership-real-peer";
+const SUBJECT: &str = "agent/node.ownership-real-peer";
 const SESSION: &str = "owned-process-fixture";
 const LIMIT: Duration = Duration::from_secs(60);
 // Deliberately shared discovery inputs. These real peer helpers are NOT Claude plugin loaders;

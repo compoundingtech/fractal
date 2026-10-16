@@ -330,8 +330,13 @@ pub(super) fn finish_legacy_shape(
 
 fn ownership_warning(mut assessment: Assessment, legacy: bool) -> Assessment {
     if legacy && matches!(assessment.state, "current" | "outdated" | "legacy") {
-        assessment.state = "legacy";
-        assessment.reason = Some("legacy ownership: unprotected until next natural restart".into());
+        // Ownership protection and delivery readiness are independent observations.
+        // Keep truthful binary/readiness state; retain the ownership warning as a reason.
+        assessment.reason = Some(match assessment.reason.take() {
+            Some(reason) if !unprotected_reason(&reason) => format!("{LEGACY_REASON}; {reason}"),
+            Some(reason) => reason,
+            None => LEGACY_REASON.into(),
+        });
     }
     assessment
 }
@@ -549,17 +554,8 @@ fn assess_beat(
             "the channel is polling but has not received the provider's initial idle proof".into()
         }));
     }
-    if driver == "claude"
-        && report.reason.as_deref()
-            == Some("legacy ownership: unprotected until next natural restart")
-    {
-        return Assessment {
-            state: "legacy",
-            reason: report.reason,
-            polled_seconds_ago: Some(age.as_secs()),
-            transport: report.transport,
-        };
-    }
+    let unprotected = driver == "claude"
+        && report.reason.as_deref().is_some_and(unprotected_reason);
     let current_image = |image: Option<&str>| match (image, daemon_image) {
         (Some(image), Some(daemon)) => image == daemon,
         // A daemon that cannot read its own image cannot judge anyone else's.
@@ -609,16 +605,19 @@ fn assess_beat(
             outdated = Some(replaced("Claude channel", channel.pid));
         }
     }
-    Assessment {
-        state: if outdated.is_some() {
-            "outdated"
-        } else {
-            "current"
+    ownership_warning(
+        Assessment {
+            state: if outdated.is_some() {
+                "outdated"
+            } else {
+                "current"
+            },
+            reason: outdated,
+            polled_seconds_ago: Some(age.as_secs()),
+            transport: report.transport,
         },
-        reason: outdated,
-        polled_seconds_ago: Some(age.as_secs()),
-        transport: report.transport,
-    }
+        unprotected,
+    )
 }
 
 #[cfg(test)]
@@ -768,9 +767,20 @@ mod tests {
             Some((Duration::from_secs(1), legacy.clone())),
             "claude",
         );
-        assert_eq!(current.state, "legacy");
+        assert_eq!(current.state, "current");
         assert!(!current.stale());
         assert!(reason(&current).contains("unprotected until next natural restart"));
+        let mut old_image = legacy.clone();
+        old_image.channel.as_mut().unwrap().image = Some("old".into());
+        let outdated = assess_beat(
+            Duration::from_secs(60),
+            DAEMON,
+            Some((Duration::from_secs(1), old_image)),
+            "claude",
+        );
+        assert_eq!(outdated.state, "outdated");
+        assert!(reason(&outdated).contains("unprotected until next natural restart"));
+        assert!(reason(&outdated).contains("Claude channel"));
         legacy.ready = Some(false);
         assert!(
             assess_beat(

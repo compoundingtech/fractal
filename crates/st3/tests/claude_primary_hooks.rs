@@ -30,7 +30,9 @@ fn records(dir: &Path) -> Value {
     })
 }
 fn hook(event: &str, native: &str, raw: Option<&[u8]>) -> std::process::Output {
-    let mut command = Command::new(test_env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut command = Command::new(
+        std::env::var_os("ST_TEST_PRIMARY_HOOK_BINARY").expect("root-resolved fixture binary"),
+    );
     if event == "statusline" {
         command.args(["driver-hook", "claude-statusline"]);
     } else {
@@ -195,6 +197,10 @@ fn inherited_hook_processes_cannot_bind_record_context_or_request_permission() {
         .env(ROLE, "provider")
         .envs(paths.environment("fixture/primary-hooks"))
         .env("ST_TEST_PRIMARY_HOOK_DIR", &paths.agent_dir)
+        .env(
+            "ST_TEST_PRIMARY_HOOK_BINARY",
+            test_env!("CARGO_BIN_EXE_st3-fixture"),
+        )
         .env("ST_AGENT", "agent/fixture/primary-hooks")
         .env("ST3_SUBJECT", "agent/fixture/primary-hooks")
         .env("ST_CLAUDE_SESSION", "wrapper-session")

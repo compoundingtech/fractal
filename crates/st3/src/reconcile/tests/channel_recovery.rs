@@ -726,7 +726,7 @@ fn adopting_the_window_never_spends_historical_requests_or_uses_their_park_fault
         apply_source(
             &store,
             "version 2\nagent \"orchid\" { workspace \"/tmp/replacement\"; restart \"never\"; harness \"claude\" {} }",
-            "channel-recovery",
+            "channel-recovery-replacement",
         );
         assert_ne!(
             store.selected_desired_token(SEAT).unwrap().unwrap(),
