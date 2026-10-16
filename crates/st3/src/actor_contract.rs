@@ -34,6 +34,8 @@ fn accepts_person(argument: &clap::Arg) -> bool {
 //   the selected person in config.person (crates/st3/src/setup.rs).
 // - st ui: main::run_terminal_ui calls stui::run, which falls back to
 //   configured_person() and passes that actor to Client::unix_as (crates/stui/src/lib.rs).
+// - st ui open: stui::open_in_terminal_ui resolves configured_person() before
+//   queueing a request in that person's terminal UI request directory.
 // - st note and its subcommands: main's Command::Note passes config.person to
 //   directive_note::run, which resolves it with configured_actor before dispatch.
 // - st changes except list/show: main's Command::Changes resolves config.person
@@ -43,6 +45,7 @@ fn accepts_person(argument: &clap::Arg) -> bool {
 fn implicit_person(path: &str) -> bool {
     path == "st setup"
         || path == "st ui"
+        || path == "st ui open"
         || path == "st note"
         || path.starts_with("st note ")
         || (path.starts_with("st changes ")
@@ -155,6 +158,7 @@ mod tests {
             "st note clear",
             "st setup",
             "st ui",
+            "st ui open",
             "st changes sync",
         ] {
             assert_eq!(commands[path]["can_carry_person"], true, "{path}");
@@ -199,10 +203,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn configured_person_supplement_covers_the_reviewed_clap_families() {
-        let inventory =
-            super::super::read_contract_inventory_for_command(super::super::Cli::command());
+    fn assert_reviewed_configured_person_families(command: clap::Command) {
+        let inventory = super::super::read_contract_inventory_for_command(command);
         let paths = inventory["commands"].as_array().unwrap();
         let reviewed = [
             "st changes list",
@@ -213,14 +215,15 @@ mod tests {
             "st note set",
             "st setup",
             "st ui",
+            "st ui open",
         ];
         let actual = paths
             .iter()
             .map(|path| path.as_str().unwrap())
             .filter(|path| {
-                matches!(*path, "st setup" | "st ui" | "st note")
-                    || path.starts_with("st note ")
-                    || path.starts_with("st changes ")
+                ["st setup", "st ui", "st note", "st changes"]
+                    .into_iter()
+                    .any(|family| *path == family || path.starts_with(&format!("{family} ")))
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -239,6 +242,39 @@ mod tests {
                 .filter(|path| !matches!(*path, "st changes list" | "st changes show"))
                 .collect::<Vec<_>>(),
             "configured-person supplement has missing or unreviewed paths"
+        );
+    }
+
+    #[test]
+    fn configured_person_supplement_covers_the_reviewed_clap_families() {
+        assert_reviewed_configured_person_families(super::super::Cli::command());
+    }
+
+    #[test]
+    #[should_panic(expected = "configured-person command family changed")]
+    fn configured_person_guard_rejects_new_ui_descendants() {
+        assert_reviewed_configured_person_families(
+            super::super::Cli::command().mut_subcommand("ui", |command| {
+                command.subcommand(clap::Command::new("unreviewed-probe"))
+            }),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "configured-person command family changed")]
+    fn configured_person_guard_rejects_new_setup_descendants() {
+        assert_reviewed_configured_person_families(
+            super::super::Cli::command().mut_subcommand("setup", |command| {
+                command.subcommand(clap::Command::new("unreviewed-probe"))
+            }),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "configured-person command family changed")]
+    fn configured_person_guard_rejects_removed_ui_descendants() {
+        assert_reviewed_configured_person_families(
+            super::super::Cli::command().mut_subcommand("ui", |_| clap::Command::new("ui")),
         );
     }
 

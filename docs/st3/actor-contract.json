@@ -2091,6 +2091,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st ui open": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": true,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st uninstall": {
         "actor": "optional",
         "accepts_person": true,

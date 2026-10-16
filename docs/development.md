@@ -68,8 +68,11 @@ Use the binary built from the changed source. Resolve any rebase conflict in
 hand-merging the JSON. The snapshot test fails if a
 command is added or removed, if its actor parser changes the published fields, or
 if an alias changes. Supplement coverage also compares the reviewed setup/UI,
-note and changes paths against the real clap inventory, so family additions or
-removals require reviewing the identity handlers named beside `implicit_person`.
+note and changes paths, including every descendant, against the real clap
+inventory. Additions or removals require reviewing the identity handlers named
+beside `implicit_person`; mutation tests exercise added setup/UI descendants and
+a removed UI descendant. `st ui open` resolves the configured person before
+queueing a request in that person's terminal UI request directory.
 This is freshness coverage, not proof of live runtime fallback or authority.
 Host, account, repository and harness policy remains in the
 operator layer. Person-authority enforcement is a separate daemon change.
