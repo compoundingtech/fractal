@@ -8,6 +8,10 @@ the command's output and exit status.
 Sekrets is opt-in and Linux-first. On a host without a gateway, `st sekrets profiles` reports
 that sekrets is not set up. This document describes the installed gateway and its commands.
 
+Root-enrolled Linux system services can use an exact command grant without a daemon or a
+person login. See [run-only programs](sekrets-programs.md) for CI caller identity, private
+checkout mounts and signer key isolation; enrollment and installation require operator setup.
+
 ## Model
 
 - **Gateway.** `st sekrets serve`, run by systemd as the Unix user `sekrets`. It owns the store
@@ -72,6 +76,11 @@ The gateway checks the caller three ways, and the caller's own word counts for n
 A process that is neither is refused as unidentified. A person's own terminal inside st (a seat's
 terminal, or a terminal st started) is in the service manager, so the person calls from a login
 session.
+
+`st sekrets` finds the daemon as other st commands do: `--endpoint`, then `ST3_ENDPOINT`, then the
+configured socket, and only over a Unix socket. `st sekrets enable` registers the key of the
+daemon found that way, so a person enables from a login environment whose `ST3_ENDPOINT`, if set,
+names their own daemon.
 
 ### Tiles
 
