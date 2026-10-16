@@ -1202,6 +1202,34 @@ pub struct PeerSyncProgress {
     pub last_failed_exchange: Option<crate::replication::ReplicationExchangeTransport>,
     /// How many envelopes this node held when it took the last measurement.
     pub measured_inventory_envelopes: u64,
+    /// What the open window's measurements were compared against.
+    pub window_basis: InventoryBasis,
+}
+
+/// What a measured difference is relative to. When it changes, the number of envelopes the peer
+/// holds that this node lacks can fall without any receipt, so a window that spans the change
+/// measures no rate.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InventoryBasis {
+    /// The peer's newest stable checkpoint, `None` from a peer that advertises none.
+    pub peer_checkpoint: Option<String>,
+    /// This node's newest stable checkpoint.
+    pub local_checkpoint: Option<String>,
+    /// Whether the peer sent a compact inventory, compared range by range.
+    pub compact: bool,
+}
+
+impl InventoryBasis {
+    /// Whether `next` measures against a different basis than this window's. A peer that
+    /// advertises no checkpoint (an older build) keeps the window: only the guard in
+    /// [`ReplicationPeerSync::closing_rate_per_second`] then bounds a drop it cannot see. A
+    /// peer that starts advertising one changes the basis, so an upgrade resets the window
+    /// once.
+    fn changed_to(&self, next: &InventoryBasis) -> bool {
+        self.local_checkpoint != next.local_checkpoint
+            || self.compact != next.compact
+            || (next.peer_checkpoint.is_some() && self.peer_checkpoint != next.peer_checkpoint)
+    }
 }
 
 impl PeerSyncProgress {
@@ -1217,9 +1245,25 @@ impl PeerSyncProgress {
     }
 
     /// Record one receipt from the peer and, when the peer's inventory allowed it, the measured
-    /// difference `(peer_only, local_only)`. Rates are sampled over windows of at least
-    /// `REPLICATION_SYNC_WINDOW_MS` and smoothed so one slow exchange does not swing the estimate.
+    /// difference `(peer_only, local_only)`, against an unchanging basis.
     pub fn observe(&mut self, received: usize, difference: Option<(u64, u64)>, now: u128) {
+        let basis = self.window_basis.clone();
+        self.observe_on(received, difference, basis, now);
+    }
+
+    /// Record one receipt and measurement, made against `basis`. Rates are sampled over windows
+    /// of at least `REPLICATION_SYNC_WINDOW_MS` and smoothed so one slow exchange does not swing
+    /// the estimate. A window in which nothing arrived, or the gap did not shrink, sets that
+    /// rate to zero rather than halving an older one, and the next window starts fresh from its
+    /// own sample. A window longer than `REPLICATION_SYNC_STALE_MS`, or one whose basis changed,
+    /// measures no rate.
+    pub fn observe_on(
+        &mut self,
+        received: usize,
+        difference: Option<(u64, u64)>,
+        basis: InventoryBasis,
+        now: u128,
+    ) {
         self.window_received = self.window_received.saturating_add(received as u64);
         let Some((peer_only, local_only)) = difference else {
             return;
@@ -1228,12 +1272,27 @@ impl PeerSyncProgress {
         sync.peer_only_envelopes = peer_only;
         sync.local_only_envelopes = local_only;
         sync.measured_at_unix_ms = now;
+        if self.window_started_at_unix_ms != 0 && self.window_basis.changed_to(&basis) {
+            // A checkpoint or a change of comparison moved the count, not catching up.
+            sync.receive_rate_per_second = None;
+            sync.catch_up_rate_per_second = None;
+            self.window_started_at_unix_ms = 0;
+        }
         let elapsed = now.saturating_sub(self.window_started_at_unix_ms);
         if self.window_started_at_unix_ms != 0 && elapsed >= REPLICATION_SYNC_WINDOW_MS {
             if elapsed <= REPLICATION_SYNC_STALE_MS {
                 let seconds = elapsed as f64 / 1000.0;
+                // A zero sample stands alone, and a rate after a zero starts again from its own
+                // sample: averaging either way would keep half of a rate that no longer holds.
                 let smooth = |previous: Option<f64>, sample: f64| {
-                    Some(previous.map_or(sample, |previous| (previous + sample) / 2.0))
+                    if sample <= 0.0 {
+                        return Some(0.0);
+                    }
+                    Some(
+                        previous
+                            .filter(|previous| *previous > 0.0)
+                            .map_or(sample, |previous| (previous + sample) / 2.0),
+                    )
                 };
                 sync.receive_rate_per_second = smooth(
                     sync.receive_rate_per_second,
@@ -1242,6 +1301,10 @@ impl PeerSyncProgress {
                 let caught_up = self.window_peer_only as f64 - peer_only as f64;
                 sync.catch_up_rate_per_second =
                     smooth(sync.catch_up_rate_per_second, caught_up.max(0.0) / seconds);
+            } else {
+                // Measurements this far apart say nothing about the current rates.
+                sync.receive_rate_per_second = None;
+                sync.catch_up_rate_per_second = None;
             }
             self.window_started_at_unix_ms = 0;
         }
@@ -1249,11 +1312,12 @@ impl PeerSyncProgress {
             self.window_started_at_unix_ms = now;
             self.window_peer_only = peer_only;
             self.window_received = 0;
+            self.window_basis = basis;
         }
         sync.estimated_catch_up_seconds = if peer_only == 0 {
             Some(0)
         } else {
-            sync.catch_up_rate_per_second
+            sync.closing_rate_per_second()
                 .filter(|rate| rate.is_finite() && *rate > 0.0)
                 .map(|rate| (peer_only as f64 / rate).ceil())
                 .filter(|seconds| {
@@ -1301,6 +1365,11 @@ impl PeerSyncProgress {
     pub fn view(&self, now: u128) -> Option<ReplicationPeerSync> {
         let mut sync = self.measured.clone()?;
         sync.stale = now.saturating_sub(sync.measured_at_unix_ms) >= PEER_QUIET_EXCHANGE_MS;
+        // No forecast from a measurement the peer has not renewed: a receipt whose inventory
+        // could not be compared keeps the counts, not a promise about when they close.
+        if sync.stale && sync.peer_only_envelopes != 0 {
+            sync.estimated_catch_up_seconds = None;
+        }
         sync.catching_up = sync.peer_only_envelopes > REPLICATION_EXCHANGE_ENVELOPE_LIMIT as u64
             && now.saturating_sub(sync.measured_at_unix_ms) <= REPLICATION_SYNC_STALE_MS;
         sync.graph_compared_at_unix_ms = self.graph_compared_at_unix_ms;
@@ -4694,12 +4763,151 @@ pub fn sync_progress_omits_stalled_forecasts_and_recovers_on_progress() {
     assert_eq!(sync.peer_only_envelopes, 9_000);
     assert_eq!(sync.local_only_envelopes, 3);
     assert!(sync.catching_up);
-    assert!(sync.catch_up_rate_per_second.unwrap() > 0.0);
+    assert_eq!(sync.catch_up_rate_per_second, Some(0.0));
+    assert_eq!(sync.receive_rate_per_second, Some(0.0));
 
+    // The stall left both rates at zero, so the next window starts fresh from its own sample:
+    // 1,000 envelopes arrive and close the gap in one window.
     progress.observe(1_000, Some((8_000, 3)), 621_000);
+    let rate = 1_000.0 / (REPLICATION_SYNC_WINDOW_MS as f64 / 1000.0);
     let sync = progress.view(621_000).unwrap();
-    assert_eq!(sync.estimated_catch_up_seconds, Some(160));
+    assert_eq!(sync.receive_rate_per_second, Some(rate));
+    assert_eq!(sync.catch_up_rate_per_second, Some(rate));
+    assert_eq!(
+        sync.estimated_catch_up_seconds,
+        Some((8_000.0 / rate).ceil() as u64)
+    );
     assert_eq!(sync.peer_only_envelopes, 8_000);
+}
+
+#[cfg(test)]
+const SYNC_WINDOW_SECONDS: f64 = REPLICATION_SYNC_WINDOW_MS as f64 / 1000.0;
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_forecasts_nothing_while_the_gap_grows() {
+    let window = REPLICATION_SYNC_WINDOW_MS;
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((15_000, 0)), 1_000);
+    // One window closes 1,000 envelopes.
+    progress.observe(1_000, Some((14_000, 0)), 1_000 + window);
+    let fast = 1_000.0 / SYNC_WINDOW_SECONDS;
+    assert_eq!(
+        progress.view(1_000 + window).unwrap().estimated_catch_up_seconds,
+        Some((14_000.0 / fast).ceil() as u64)
+    );
+    // Then the peer writes faster than this node receives: the gap grows 22 a window.
+    for step in 1..=3 {
+        progress.observe(1, Some((14_000 + step as u64 * 22, 0)), 1_000 + window * (step + 1));
+    }
+    let sync = progress.view(1_000 + window * 4).unwrap();
+    assert_eq!(sync.catch_up_rate_per_second, Some(0.0));
+    assert_eq!(sync.estimated_catch_up_seconds, None, "{sync:?}");
+    assert!(sync.catching_up);
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_forecasts_no_faster_than_envelopes_arrive() {
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((15_872, 0)), 1_000);
+    // The measured gap falls by 1,220 while one envelope arrives: a checkpoint on the peer or a
+    // narrower comparison, not catching up.
+    progress.observe(1, Some((14_652, 0)), 1_000 + REPLICATION_SYNC_WINDOW_MS);
+    let received = 1.0 / SYNC_WINDOW_SECONDS;
+    let sync = progress.view(1_000 + REPLICATION_SYNC_WINDOW_MS).unwrap();
+    assert_eq!(sync.catch_up_rate_per_second, Some(1_220.0 / SYNC_WINDOW_SECONDS));
+    assert_eq!(sync.receive_rate_per_second, Some(received));
+    assert_eq!(sync.closing_rate_per_second(), Some(received));
+    assert_eq!(
+        sync.estimated_catch_up_seconds,
+        Some((14_652.0 / received).ceil() as u64)
+    );
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_forgets_both_rates_after_a_long_gap_between_measurements() {
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((10_000, 0)), 1_000);
+    progress.observe(1_000, Some((9_000, 0)), 1_000 + REPLICATION_SYNC_WINDOW_MS);
+    assert!(progress.view(1_000 + REPLICATION_SYNC_WINDOW_MS).unwrap().estimated_catch_up_seconds.is_some());
+    // The next measurement comes after more than the stale window, with a larger gap.
+    let later = 1_000 + REPLICATION_SYNC_WINDOW_MS + REPLICATION_SYNC_STALE_MS + 1;
+    progress.observe(0, Some((12_000, 0)), later);
+    let sync = progress.view(later).unwrap();
+    assert_eq!(sync.receive_rate_per_second, None);
+    assert_eq!(sync.catch_up_rate_per_second, None);
+    assert_eq!(sync.estimated_catch_up_seconds, None, "{sync:?}");
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_drops_the_forecast_of_a_measurement_gone_quiet() {
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((10_000, 0)), 1_000);
+    let measured = 1_000 + REPLICATION_SYNC_WINDOW_MS;
+    progress.observe(1_000, Some((9_000, 0)), measured);
+    // Receipts whose inventory could not be compared keep the last measurement.
+    progress.observe(5, None, measured + 1_000);
+    assert!(progress.view(measured + 1_000).unwrap().estimated_catch_up_seconds.is_some());
+    let quiet = progress.view(measured + PEER_QUIET_EXCHANGE_MS).unwrap();
+    assert!(quiet.stale);
+    assert_eq!(quiet.peer_only_envelopes, 9_000);
+    assert_eq!(quiet.estimated_catch_up_seconds, None);
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_measures_no_rate_across_a_change_of_inventory_basis() {
+    let basis = |peer: Option<&str>, compact: bool| InventoryBasis {
+        peer_checkpoint: peer.map(str::to_owned),
+        local_checkpoint: Some("checkpoint/local".into()),
+        compact,
+    };
+    let window = REPLICATION_SYNC_WINDOW_MS;
+    for (case, next, rate) in [
+        // The peer adopted a newer checkpoint: its count fell by what the checkpoint dropped.
+        ("checkpoint moved", basis(Some("checkpoint/b"), true), None),
+        // The comparison switched from ranges to a full listing.
+        ("comparison changed", basis(Some("checkpoint/a"), false), None),
+        // An older peer advertises no checkpoint: the window stays, bounded by arrivals.
+        ("older peer", basis(None, true), Some(1.0 / SYNC_WINDOW_SECONDS)),
+        ("unchanged", basis(Some("checkpoint/a"), true), Some(1.0 / SYNC_WINDOW_SECONDS)),
+    ] {
+        let mut progress = PeerSyncProgress::default();
+        progress.observe_on(0, Some((10_000, 0)), basis(Some("checkpoint/a"), true), 1_000);
+        progress.observe_on(1, Some((9_000, 0)), next, 1_000 + window);
+        let sync = progress.view(1_000 + window).unwrap();
+        assert_eq!(sync.closing_rate_per_second(), rate, "{case}: {sync:?}");
+    }
+    // A peer that starts advertising a checkpoint changes the basis once, as on an upgrade.
+    let mut progress = PeerSyncProgress::default();
+    progress.observe_on(1, Some((10_000, 0)), basis(None, true), 1_000);
+    progress.observe_on(1_000, Some((9_000, 0)), basis(Some("checkpoint/a"), true), 1_000 + window);
+    assert_eq!(progress.view(1_000 + window).unwrap().catch_up_rate_per_second, None);
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_keeps_a_steady_forecast_and_reports_caught_up() {
+    let window = REPLICATION_SYNC_WINDOW_MS;
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((10_000, 0)), 1_000);
+    for step in 1..=3_u64 {
+        // Every arrival closes the gap: 500 envelopes a window.
+        progress.observe(500, Some((10_000 - step * 500, 0)), 1_000 + step as u128 * window);
+    }
+    let rate = 500.0 / SYNC_WINDOW_SECONDS;
+    let sync = progress.view(1_000 + 3 * window).unwrap();
+    assert_eq!(sync.receive_rate_per_second, Some(rate));
+    assert_eq!(sync.catch_up_rate_per_second, Some(rate));
+    assert_eq!(sync.estimated_catch_up_seconds, Some((8_500.0 / rate).ceil() as u64));
+    progress.observe(8_500, Some((0, 0)), 1_000 + 4 * window);
+    assert_eq!(
+        progress.view(1_000 + 4 * window).unwrap().estimated_catch_up_seconds,
+        Some(0)
+    );
 }
 
 pub fn collect_referenced_blobs(
@@ -6198,7 +6406,12 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let progress = sync.entry(relay.to_owned()).or_default();
-        progress.observe(received, difference, now);
+        let basis = InventoryBasis {
+            peer_checkpoint: input.inventory.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
+            local_checkpoint: snapshot.inventory.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
+            compact: !input.inventory.buckets.is_empty(),
+        };
+        progress.observe_on(received, difference, basis, now);
         if difference.is_some() {
             progress.measured_inventory_envelopes = snapshot.inventory.envelopes.len() as u64;
         }

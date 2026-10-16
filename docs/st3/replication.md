@@ -771,15 +771,26 @@ peer	node-b	up
   last exchange 2s ago
   node-b has 124,384 envelopes this node lacks
   this node has 3 envelopes node-b lacks
-  receiving 142.5 envelopes/s, caught up in about 15m (measured 2s ago)
+  receiving 142.5 envelopes/s, closing at 140.0/s, caught up in about 15m (arrival only; measured 2s ago)
 ```
 
 Each node measures the difference from the inventory its peer already sends in every exchange, so
 the protocol does not change and a peer on an older build is measured too. A range both sides hold
 with different digests counts exactly once the peer lists it; until then its count is a lower
 bound. The estimate divides the remaining envelopes by how fast that number shrank over recent
-10-second windows, so a peer that keeps writing lengthens it. The measurements live in memory; the
-first exchange after a restart rebuilds them.
+10-second windows, so a peer that keeps writing lengthens it. It never divides by more than the
+rate envelopes arrive, because the number can also fall without a receipt, when the peer's
+checkpoint drops envelopes or the comparison narrows; the status shows that rate as `closing at`.
+A window in which the number did not shrink, or nothing arrived, leaves no forecast, and the status
+says `not catching up`; the next window then starts from its own rate rather than half of it. A gap
+of more than five minutes between measurements forgets both rates, and so does a change in what
+the count is compared against: the peer's or this node's checkpoint, or a switch between range and
+full inventories. A peer on an older build advertises no checkpoint, so only the arrival bound
+guards it; a peer that starts advertising one resets the window once. A forecast whose
+measurement has gone quiet is withdrawn until the next one.
+The estimate is for arrival only: claims admitted, projected and visible can lag behind it, and
+the clients' JSON field (`estimated_catch_up_seconds`) is absent in every case without a forecast.
+The measurements live in memory; the first exchange after a restart rebuilds them.
 
 The `timings` line shows where this daemon has spent replication time since it started:
 

@@ -12545,7 +12545,7 @@ fn render_replication_peers(
             "sync\tcatching up: {} has {} this node lacks, {}",
             peer.peer,
             envelope_count(sync.peer_only_envelopes),
-            catch_up_estimate(sync.estimated_catch_up_seconds)
+            arrival_estimate(sync)
         );
     }
     for peer in peers {
@@ -12721,15 +12721,32 @@ fn render_replication_peers(
                 .receive_rate_per_second
                 .map(|rate| format!("receiving {rate:.1} envelopes/s, "))
                 .unwrap_or_default();
+            let closing = sync
+                .closing_rate_per_second()
+                .filter(|rate| *rate > 0.0)
+                .map(|rate| format!("closing at {rate:.1}/s, "))
+                .unwrap_or_default();
             let _ = writeln!(
                 output,
-                "  {rate}{} (measured {})",
-                catch_up_estimate(sync.estimated_catch_up_seconds),
+                "  {rate}{closing}{} (arrival only; measured {})",
+                arrival_estimate(sync),
                 relative_time(sync.measured_at_unix_ms, now)
             );
         }
     }
     output
+}
+
+/// When the envelopes this node lacks will have arrived, or that the gap is not closing. It
+/// forecasts arrival only: admission, projection and visibility can lag behind it.
+fn arrival_estimate(sync: &st3::model::ReplicationPeerSync) -> String {
+    // The lower of the catch-up and receive rates: nothing arriving is not catching up either.
+    if sync.peer_only_envelopes != 0
+        && sync.closing_rate_per_second().is_some_and(|rate| rate <= 0.0)
+    {
+        return "not catching up".into();
+    }
+    catch_up_estimate(sync.estimated_catch_up_seconds)
 }
 
 /// Whether the comparison the status reports for a peer found its projections equal. An older
@@ -29518,6 +29535,56 @@ mod tests {
     }
 
     #[test]
+    fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
+        let now = 1_000_000;
+        let peer = |sync: st3::model::ReplicationPeerSync| ReplicationPeerStatus {
+            last_successful_exchange: None,
+            last_failed_exchange: None,
+            worker: None,
+            projection_digests: BTreeMap::new(),
+            incompatible_projection_tables: Vec::new(),
+            differing_tables: Vec::new(),
+            projection_comparison_waiting: false,
+            projection_comparison_waiting_reason: None,
+            projection_graphs_equal: None,
+            projection_compared_at_unix_ms: None,
+            peer: "ExampleMac".into(),
+            status: "up".into(),
+            last_success_at_unix_ms: Some(now - 2_000),
+            last_error: None,
+            last_failure_at_unix_ms: None,
+            refusal_reason: None,
+            schema_digest: None,
+            projection_registry_digest: None,
+            projection_versions: Default::default(),
+            authority_digest: None,
+            graph_digest: None,
+            sync: Some(sync),
+        };
+        let behind = |receive: f64, catch_up: f64| st3::model::ReplicationPeerSync {
+            peer_only_envelopes: 14_652,
+            measured_at_unix_ms: now - 2_000,
+            receive_rate_per_second: Some(receive),
+            catch_up_rate_per_second: Some(catch_up),
+            estimated_catch_up_seconds: None,
+            catching_up: true,
+            ..Default::default()
+        };
+        // The count fell without receipts (receive 0, catch-up positive), and the gap grew
+        // (catch-up 0): neither closes it, so neither promises an estimate.
+        for sync in [behind(0.0, 122.0), behind(0.1, 0.0)] {
+            let output = render_replication_peers(&[peer(sync.clone())], "local", now);
+            assert!(
+                output.contains("sync\tcatching up: ExampleMac has 14,652 envelopes this node lacks, not catching up\n"),
+                "{sync:?}\n{output}"
+            );
+            assert!(output.contains("not catching up (arrival only; measured 2s ago)"), "{output}");
+            assert!(!output.contains("estimating time to catch up"), "{output}");
+            assert!(!output.contains("closing at"), "{output}");
+        }
+    }
+
+    #[test]
     fn replication_status_says_which_side_holds_what_and_how_long_catching_up_takes() {
         let now = 1_000_000;
         let local = "1111111111111111aaaa";
@@ -29604,7 +29671,8 @@ mod tests {
              \x20 last seen 2s ago\n\
              \x20 ExampleMac has 124,384 envelopes this node lacks\n\
              \x20 this node has 3 envelopes ExampleMac lacks\n\
-             \x20 receiving 142.5 envelopes/s, caught up in about 15m (measured 2s ago)\n\
+             \x20 receiving 142.5 envelopes/s, closing at 140.0/s, caught up in about 15m \
+             (arrival only; measured 2s ago)\n\
              peer\tQuiet\tup\t\n\
              \x20 last seen 2s ago\n\
              \x20 in sync: the same envelopes and the same graph (measured now, graphs compared now)\n\

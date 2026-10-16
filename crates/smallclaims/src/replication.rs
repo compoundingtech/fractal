@@ -397,15 +397,20 @@ pub struct ReplicationPeerSync {
     /// Until the next exchange, the peer has not seen them from this node.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub added_since_measured_envelopes: u64,
-    /// Envelopes received from the peer per second over recent exchanges.
+    /// Envelopes received from the peer per second over recent exchanges; absent after a gap
+    /// between measurements longer than `REPLICATION_SYNC_STALE_MS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receive_rate_per_second: Option<f64>,
-    /// How fast `peer_only_envelopes` shrinks, net of the envelopes the peer keeps writing.
+    /// How fast `peer_only_envelopes` shrinks, net of the envelopes the peer keeps writing; zero
+    /// once a window passes in which it did not shrink, and absent after a gap between
+    /// measurements longer than `REPLICATION_SYNC_STALE_MS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catch_up_rate_per_second: Option<f64>,
-    /// Forecast in exact JSON-safe integer seconds up to [`MAX_SAFE_DURATION_SECONDS`];
-    /// absent when no finite positive rate or representable forecast exists.
-    /// Missing a forecast does not mean the peer is caught up.
+    /// Forecast in exact JSON-safe integer seconds up to [`MAX_SAFE_DURATION_SECONDS`], from
+    /// [`ReplicationPeerSync::closing_rate_per_second`]; absent when no finite positive rate or
+    /// representable forecast exists, including while the gap is not closing. Missing a forecast
+    /// does not mean the peer is caught up. It forecasts arrival only: admission, projection and
+    /// visibility can lag behind it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_catch_up_seconds: Option<u64>,
     /// The peer recently held more envelopes than one exchange carries, so this node's views
@@ -425,6 +430,21 @@ pub struct ReplicationPeerSync {
     /// exchanges cannot fix that, so this node's views can be wrong until it is repaired.
     #[serde(default)]
     pub diverged: bool,
+}
+
+impl ReplicationPeerSync {
+    /// The rate the forecast divides by: how fast the gap closes, never faster than envelopes
+    /// arrive. The gap can also shrink without a receipt, when the peer's checkpoint drops
+    /// envelopes or the inventory comparison narrows, and that must not shorten the forecast.
+    /// Zero while the gap is not closing. It measures arrival only, not admission, projection
+    /// or visibility.
+    pub fn closing_rate_per_second(&self) -> Option<f64> {
+        let closing = self.catch_up_rate_per_second?;
+        Some(
+            self.receive_rate_per_second
+                .map_or(closing, |received| closing.min(received)),
+        )
+    }
 }
 
 /// Two members that hold the same envelopes and project one table differently. A projection is
