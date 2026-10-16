@@ -76,36 +76,67 @@ mod tests {
         process::Command,
     };
 
-    fn fixture_root() -> tempfile::TempDir {
-        // Fixed root-owned APFS temp venue, not caller-selected TMPDIR. Inspect
-        // retained ancestors before creating anything; only /private/tmp may be
-        // other-writable, with root-owned sticky semantics and no mutating ACL.
+    struct FixtureRoot {
+        directory: tempfile::TempDir,
+        retained: File,
+    }
+    impl FixtureRoot {
+        fn path(&self) -> &std::path::Path {
+            self.directory.path()
+        }
+    }
+
+    fn fixture_root() -> FixtureRoot {
+        // The runner must supply a private fixture parent in its own isolated
+        // work directory. No TMPDIR/HOME fallback or shared-sticky exception.
+        let venue = std::path::PathBuf::from(
+            std::env::var_os("ST_CLIENT_MODE_ACL_FIXTURE_PARENT")
+                .expect("native fixtures require a reviewed private fixture parent"),
+        );
+        assert!(venue.is_absolute());
         let mut parent = File::open("/").unwrap();
-        for (name, sticky_tmp) in [("", false), ("private", false), ("tmp", true)] {
-            if !name.is_empty() {
-                let name = std::ffi::CString::new(name).unwrap();
-                let fd = unsafe {
-                    libc::openat(
-                        parent.as_raw_fd(),
-                        name.as_ptr(),
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                    )
-                };
-                assert!(fd >= 0);
-                parent = unsafe { File::from_raw_fd(fd) };
-            }
+        let root_metadata = parent.metadata().unwrap();
+        assert_eq!(root_metadata.uid(), 0);
+        assert_eq!(root_metadata.mode() & 0o022, 0);
+        assert_eq!(
+            inspect(&parent, false).disposition,
+            AclDisposition::Accepted
+        );
+        for component in venue.components() {
+            let std::path::Component::Normal(component) = component else {
+                assert!(matches!(component, std::path::Component::RootDir));
+                continue;
+            };
+            let name = std::ffi::CString::new(component.as_encoded_bytes()).unwrap();
+            let fd = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            assert!(fd >= 0);
+            parent = unsafe { File::from_raw_fd(fd) };
             let metadata = parent.metadata().unwrap();
-            assert_eq!(metadata.uid(), 0);
-            assert!(metadata.mode() & 0o022 == 0 || (sticky_tmp && metadata.mode() & 0o1000 != 0));
+            assert!(metadata.uid() == 0 || metadata.uid() == unsafe { libc::geteuid() });
+            assert_eq!(
+                metadata.mode() & 0o022,
+                0,
+                "fixture ancestor writable by another UID"
+            );
             assert_eq!(
                 inspect(&parent, false).disposition,
                 AclDisposition::Accepted
             );
         }
+        let venue_metadata = parent.metadata().unwrap();
+        assert_eq!(venue_metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(venue_metadata.mode() & 0o777, 0o700);
+        assert_eq!(inspect(&parent, true).disposition, AclDisposition::Accepted);
         let root = tempfile::Builder::new()
             .prefix("st-client-acl-fixture-")
             .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir_in("/private/tmp")
+            .tempdir_in(&venue)
             .unwrap();
         let name =
             std::ffi::CString::new(root.path().file_name().unwrap().as_encoded_bytes()).unwrap();
@@ -127,7 +158,42 @@ mod tests {
             inspect(&retained, true).disposition,
             AclDisposition::Accepted
         );
-        root
+        FixtureRoot {
+            directory: root,
+            retained,
+        }
+    }
+
+    fn checked_chmod(root: &FixtureRoot, path: &std::path::Path, args: &[&str]) {
+        assert_eq!(path.parent(), Some(root.path()));
+        let name = std::ffi::CString::new(path.file_name().unwrap().as_encoded_bytes()).unwrap();
+        let open = || {
+            let fd = unsafe {
+                libc::openat(
+                    root.retained.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            assert!(fd >= 0);
+            unsafe { File::from_raw_fd(fd) }
+        };
+        let before = open();
+        assert!(
+            Command::new("/bin/chmod")
+                .args(args)
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let after = open();
+        let before_metadata = before.metadata().unwrap();
+        let after_metadata = after.metadata().unwrap();
+        assert_eq!(
+            (before_metadata.dev(), before_metadata.ino()),
+            (after_metadata.dev(), after_metadata.ino())
+        );
     }
 
     unsafe extern "C" {
@@ -201,23 +267,9 @@ mod tests {
         }
         // Only the fresh, owned fixture directory is modified. No account-home
         // path, production authority, Keychain or credential operation is used.
-        assert!(
-            Command::new("/bin/chmod")
-                .arg("-N")
-                .arg(&path)
-                .status()
-                .unwrap()
-                .success()
-        );
+        checked_chmod(&root, &path, &["-N"]);
         if let Some(ace) = ace {
-            assert!(
-                Command::new("/bin/chmod")
-                    .args(["+a", ace])
-                    .arg(&path)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
+            checked_chmod(&root, &path, &["+a", ace]);
         }
         let file = File::open(&path).unwrap();
         let observation = inspect(&file, private);
@@ -355,25 +407,11 @@ mod tests {
         let root = fixture_root();
         let path = root.path().join("authority");
         std::fs::create_dir(&path).unwrap();
-        assert!(
-            Command::new("/bin/chmod")
-                .arg("-N")
-                .arg(&path)
-                .status()
-                .unwrap()
-                .success()
-        );
+        checked_chmod(&root, &path, &["-N"]);
         let retained = File::open(&path).unwrap();
         std::fs::rename(&path, root.path().join("original")).unwrap();
         std::fs::create_dir(&path).unwrap();
-        assert!(
-            Command::new("/bin/chmod")
-                .args(["+a", "everyone allow write"])
-                .arg(&path)
-                .status()
-                .unwrap()
-                .success()
-        );
+        checked_chmod(&root, &path, &["+a", "everyone allow write"]);
         assert_eq!(
             inspect(&retained, true).disposition,
             AclDisposition::Accepted
