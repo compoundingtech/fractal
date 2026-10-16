@@ -310,9 +310,29 @@ fn terminal_rows(items: Vec<Resource>) -> Vec<super::resource_sidebar::ResourceR
     }).collect()
 }
 
-/// How long a polled inventory must keep failing before its error is shown (the feed's windows
-/// wait the same before reporting).
-const LEGACY_REPORT_AFTER: Duration = Duration::from_secs(20);
+/// A polled inventory's read finished at `now` (older daemons serve no inventory windows).
+/// Its error is held until it has kept failing for the time the feed waits before reporting a
+/// window (`feed::REPORT_AFTER`); a read that succeeds clears both the clock and the error.
+fn note_legacy_read(
+    failing: &mut BTreeMap<&'static str, Instant>,
+    errors: &mut BTreeMap<String, String>,
+    name: &'static str,
+    error: Option<&String>,
+    now: Instant,
+) {
+    match error {
+        Some(error) => {
+            let since = *failing.entry(name).or_insert(now);
+            if now.duration_since(since) >= feed::REPORT_AFTER {
+                errors.insert(name.into(), error.clone());
+            }
+        }
+        None => {
+            failing.remove(name);
+            errors.remove(name);
+        }
+    }
+}
 
 fn window_label(window: Window) -> String {
     match window { Window::Inventory(inventory) => inventory.collection().into(), _ => format!("{window:?}") }
@@ -1140,16 +1160,7 @@ pub fn run(context: Context) -> Result<()> {
                         InventoryRead::Clients(outcome) => outcome.as_ref().err(),
                         InventoryRead::Usage(_, outcome) => outcome.as_ref().err(),
                     };
-                    match error {
-                        Some(error) => {
-                            let since = *legacy_failing.entry(name).or_insert_with(Instant::now);
-                            if since.elapsed() >= LEGACY_REPORT_AFTER { extras.window_errors.insert(name.into(), error.clone()); }
-                        }
-                        None => {
-                            legacy_failing.remove(name);
-                            extras.window_errors.remove(name);
-                        }
-                    }
+                    note_legacy_read(&mut legacy_failing, &mut extras.window_errors, name, error, Instant::now());
                     match result {
                         // A failed read keeps the last good rows; the stale note says so if it lasts.
                         InventoryRead::Rows(inventory, outcome) => if let Ok(rows) = outcome {
@@ -2906,6 +2917,38 @@ async fn send_message(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_polled_inventory_that_fails_briefly_says_nothing_and_one_that_keeps_failing_is_said() {
+        let start = Instant::now();
+        let mut failing = BTreeMap::new();
+        let mut errors = BTreeMap::new();
+        let why = "st did not answer".to_owned();
+        let stale = |errors: &BTreeMap<String, String>| {
+            let extras = Extras { window_errors: errors.clone(), ..Extras::default() };
+            adapt::world(&Model::default(), "person/avery", &extras).stale
+        };
+
+        // Young failures leave no error and no stale line, and the rows say loading, not none.
+        note_legacy_read(&mut failing, &mut errors, "machines", Some(&why), start);
+        note_legacy_read(&mut failing, &mut errors, "machines", Some(&why), start + feed::REPORT_AFTER - Duration::from_millis(1));
+        assert!(errors.is_empty());
+        assert!(stale(&errors).is_empty());
+        let extras = Extras { window_errors: errors.clone(), ..Extras::default() };
+        assert!(matches!(adapt::world(&Model::default(), "person/avery", &extras).machines, Load::Loading));
+
+        // One that has lasted is said, in the stale note.
+        note_legacy_read(&mut failing, &mut errors, "machines", Some(&why), start + feed::REPORT_AFTER);
+        assert_eq!(errors.get("machines"), Some(&why));
+        assert_eq!(stale(&errors), ["machines: st did not answer"]);
+
+        // A read that succeeds clears the error and the clock; the next failure starts over.
+        note_legacy_read(&mut failing, &mut errors, "machines", None, start + feed::REPORT_AFTER * 2);
+        assert!(errors.is_empty() && failing.is_empty());
+        assert!(stale(&errors).is_empty());
+        note_legacy_read(&mut failing, &mut errors, "machines", Some(&why), start + feed::REPORT_AFTER * 3);
+        assert!(errors.is_empty());
+    }
+
     #[test]
     fn hidden_inventory_windows_leave_after_grace_and_period_changes_replace_one_slot() {
         let now = Instant::now();
