@@ -1308,7 +1308,7 @@ export type PushEnvironmentEncoded = typeof PushEnvironment.Encoded
 export const PushRegistrationStatus = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "registered": Schema.Literal(false) }),
   Schema.Struct({ "environment": PushEnvironment, "registered": Schema.Literal(true) })
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("registered")).annotate({ identifier: "PushRegistrationStatus", description: "Safe registration summary; never carries the token. `environment` is present exactly when `registered` is true." }))()
+], { mode: "oneOf" }).annotate({ identifier: "PushRegistrationStatus", description: "Safe registration summary; never carries the token. `environment` is present exactly when `registered` is true." }))()
 export type PushRegistrationStatus = typeof PushRegistrationStatus.Type
 export type PushRegistrationStatusEncoded = typeof PushRegistrationStatus.Encoded
 

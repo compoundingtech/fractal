@@ -224,8 +224,12 @@ async fn push_invalid_and_identity_body_extras_never_mutate_or_echo_inputs() {
     grant(&state, client_now_ms() as u64 + 600_000);
     let app = fabric_router(state.clone());
     let (status, response) = send(
-        app.clone(), "POST", Some(CREDENTIAL), serde_json::to_vec(&body()).unwrap(),
-    ).await;
+        app.clone(),
+        "POST",
+        Some(CREDENTIAL),
+        serde_json::to_vec(&body()).unwrap(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{response}");
     let before = state.store.index().unwrap();
     let mut invalid = vec![];
@@ -271,7 +275,7 @@ async fn push_invalid_and_identity_body_extras_never_mutate_or_echo_inputs() {
     for bytes in invalid {
         let (status, response) = send(app.clone(), "POST", Some(CREDENTIAL), bytes).await;
         assert!(status.is_client_error());
-        assert_eq!(response["error"]["code"], "validation-failed");
+        assert_eq!(response["code"], "validation-failed", "{response}");
     }
     let mut oversized = serde_json::to_vec(&body()).unwrap();
     oversized.resize(MAX_BODY_BYTES + 1, b' ');
@@ -358,7 +362,7 @@ async fn push_http_logs_and_storage_failures_are_redacted() {
         drop(connection);
         let (status, error) = send(app, "POST", Some(CREDENTIAL), serde_json::to_vec(&body()).unwrap()).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(error["error"]["message"], "local push registration storage is unavailable");
+        assert_eq!(error["message"], "local push registration storage is unavailable", "{error}");
     }.with_subscriber(subscriber).await;
     let captured = logs
         .0
