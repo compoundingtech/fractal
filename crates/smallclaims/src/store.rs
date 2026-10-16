@@ -41,7 +41,11 @@ pub mod prepared_envelope;
 mod replica_record;
 pub use operation_metadata::OperationMetadata;
 #[cfg(test)]
+mod exchange_budget_tests;
+#[cfg(test)]
 mod projection_busy_tests;
+#[cfg(test)]
+mod projection_stage_tests;
 #[cfg(test)]
 mod receive_writer_tests;
 #[cfg(test)]
@@ -3732,6 +3736,110 @@ const ADMISSION_WRITER_BUDGET: std::time::Duration = std::time::Duration::from_m
 /// queued lease renewals and messages behind its entire incremental projection.
 pub const PROJECTION_CHUNK_CLAIMS: usize = 128;
 
+/// The most bytes one exchange's JSON may take before compression: the limit a peer inflates to
+/// (`MAX_EXCHANGE_BYTES`), less room for the signed answer that wraps it. A page is chosen by
+/// count, and a page of large envelopes can pass the limit; the peer then refuses the whole body
+/// and the same page is chosen again, so nothing moves.
+pub const REPLICATION_EXCHANGE_BODY_BUDGET: usize = crate::sync::MAX_EXCHANGE_BYTES - 1024 * 1024;
+
+/// Keep only the leading envelopes of `exchange` that fit its serialized body within `budget`
+/// bytes, everything else in it included. The ones dropped stay missing at the peer, so a later
+/// exchange chooses them again. An envelope too large to send even alone is a typed error rather
+/// than an exchange that silently carries nothing.
+///
+/// A page whose upper bound already fits is kept without measuring; otherwise each envelope is
+/// measured as serde writes it, counting bytes without keeping them.
+pub fn fit_exchange_body(exchange: &mut ReplicationExchange, budget: usize) -> Result<()> {
+    let envelopes = std::mem::take(&mut exchange.envelopes);
+    // The body without envelopes includes their empty brackets; each kept envelope adds its own
+    // serialized bytes and, after the first, one separating comma.
+    let base = serialized_len(&*exchange)?;
+    if base > budget {
+        exchange.envelopes = envelopes;
+        // Nothing here is dropped to fit: the inventory, digests and signatures are what the
+        // peer needs to compare at all, so an exchange whose metadata alone passes the budget
+        // is refused as it is, with its size, for the path that built it to be bounded.
+        return Err(St3Error::new(
+            "replication-exchange-metadata-too-large",
+            format!(
+                "the exchange without envelopes takes {base} bytes, past {budget}: inventory \
+                 listing {} identities and {} range digests, {} signature requests, {} signatures",
+                exchange.inventory.envelopes.len(),
+                exchange.inventory.buckets.len(),
+                exchange.signature_requests.len(),
+                exchange.signatures.len()
+            ),
+        )
+        .into());
+    }
+    if envelopes.is_empty() {
+        return Ok(());
+    }
+    let bound = envelopes.iter().try_fold(base, |total, envelope| {
+        total.checked_add(envelope_size_bound(envelope).checked_add(1)?)
+    });
+    if bound.is_some_and(|bound| bound <= budget) {
+        exchange.envelopes = envelopes;
+        return Ok(());
+    }
+    let mut size = base;
+    let mut kept = 0;
+    for envelope in &envelopes {
+        let added = serialized_len(envelope)?.saturating_add(usize::from(kept > 0));
+        match size.checked_add(added) {
+            Some(next) if next <= budget => size = next,
+            _ => break,
+        }
+        kept += 1;
+    }
+    if kept == 0 {
+        let first = &envelopes[0];
+        return Err(St3Error::new(
+            "replication-envelope-too-large",
+            format!(
+                "envelope {} {} of {} cannot be sent: its exchange body would pass {budget} bytes",
+                first.writer, first.sequence, first.hash
+            ),
+        )
+        .into());
+    }
+    exchange.envelopes = envelopes;
+    exchange.envelopes.truncate(kept);
+    Ok(())
+}
+
+/// An upper bound on one envelope's serialized length: JSON escapes a byte of a string as at
+/// most six, the payload goes as base64, and the field names, numbers, nulls and punctuation
+/// take under 256 bytes.
+fn envelope_size_bound(envelope: &ReplicaEnvelope) -> usize {
+    let strings = envelope.writer.len()
+        + envelope.hash.len()
+        + envelope.previous_hash.as_ref().map_or(0, String::len)
+        + envelope.member_key.as_ref().map_or(0, String::len)
+        + envelope.signature.as_ref().map_or(0, String::len);
+    strings
+        .saturating_mul(6)
+        .saturating_add(envelope.payload.wire_len_bound())
+        .saturating_add(256)
+}
+
+/// How many bytes serde writes for `value`, without keeping them.
+fn serialized_len<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize> {
+    struct Counting(usize);
+    impl std::io::Write for Counting {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counting = Counting(0);
+    serde_json::to_writer(&mut counting, value)?;
+    Ok(counting.0)
+}
+
 /// The most envelopes this build takes in one exchange, which it says in each inventory it
 /// sends. Admission commits once per pass, so a page this size admits well within the peer
 /// request timeout, and a first sync needs a few dozen exchanges instead of hundreds.
@@ -5762,10 +5870,27 @@ impl Store {
         remote: &ReplicationInventory,
         signature_requests: &[ReplicaEnvelopeId],
     ) -> Result<ReplicationExchange> {
+        self.export_replication_exchange_within(
+            fleet_id,
+            remote,
+            signature_requests,
+            REPLICATION_EXCHANGE_BODY_BUDGET,
+        )
+    }
+
+    /// `export_replication_exchange_answering`, with the body cut to `budget` bytes.
+    fn export_replication_exchange_within(
+        &self,
+        fleet_id: &str,
+        remote: &ReplicationInventory,
+        signature_requests: &[ReplicaEnvelopeId],
+        budget: usize,
+    ) -> Result<ReplicationExchange> {
         let mut exchange = self.export_replication_difference(fleet_id, remote)?;
         let _timing = time_stage(&self.replication_timers.export);
         exchange.signatures = self.replication_signatures_for(signature_requests)?;
         exchange.signature_requests = self.replication_signature_requests()?;
+        fit_exchange_body(&mut exchange, budget)?;
         Ok(exchange)
     }
 
@@ -6731,7 +6856,17 @@ impl Store {
         let mut chunked = false;
         let mut processed = 0_u64;
         loop {
+            // Each chunk's loan records where its hold went. The scope ends when the loan does,
+            // so the tail verdict pass after it is its own hold. No other writer loan is asked
+            // for on this thread inside the scope: none comes before `write()`, and a second one
+            // while this loan is held would wait on itself. Every caller sink below runs
+            // through `progress_staged` or `log_staged`, charged to `callbacks`.
+            let stages = crate::windows::holds::Stages::begin();
+            let mut progress_staged =
+                |update: ProjectionProgress| stages.during("callbacks", || progress(update));
+            let mut log_staged = |line: &str| stages.during("callbacks", || log(line));
             let mut connection = self.connection.write();
+            stages.enter("begin");
             // Acquire SQLite's write lock before reading a snapshot. A deferred upgrade can
             // fail immediately when the independent WAL checkpoint connection holds that lock.
             let transaction = connection
@@ -6743,13 +6878,14 @@ impl Store {
                         let error = error.with_detail("projection_stage", "begin-immediate")
                             .with_detail("projection_frontier_unknown", true);
                         // No transaction exists from which to read the committed frontier.
-                        self.log_projection_failure(&error, phase, 0, target, &mut log);
+                        self.log_projection_failure(&error, phase, 0, target, &mut log_staged);
                         return error;
                     }
                     // No transaction began: surface the typed error, preserving the entry
                     // deferred generation and attempt time. The daemon also schedules retry.
                     error
                 })?;
+            stages.enter("chunk-read");
             let frontier: u64 = transaction
                 .query_row(
                     "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
@@ -6768,7 +6904,7 @@ impl Store {
                     |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, u64>(1)?)),
                 )?;
             let through = through.unwrap_or(target.max(frontier));
-            progress(ProjectionProgress {
+            progress_staged(ProjectionProgress {
                 phase: "project-incremental",
                 frontier,
                 target,
@@ -6778,6 +6914,7 @@ impl Store {
             let result = (|| -> Result<bool, St3Error> {
                 // Non-contention incremental failures retain the full replay fallback,
                 // which quarantines claims it cannot project. SQLite contention defers below.
+                stages.enter("incremental");
                 transaction
                     .execute_batch("SAVEPOINT project_incremental")
                     .map_err(internal)?;
@@ -6806,14 +6943,14 @@ impl Store {
                                         details,
                                     };
                                     self.log_projection_failure(
-                                        &error, phase, frontier, target, &mut log,
+                                        &error, phase, frontier, target, &mut log_staged,
                                     );
                                     Some(reason.to_owned())
                                 }
                             }
                         }
                         Err(error) => {
-                            self.log_projection_failure(&error, phase, frontier, target, &mut log);
+                            self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                             if error.is_sqlite_contention() {
                                 // Roll back the whole chunk below. Replaying the same claims
                                 // cannot repair a connection lock and would lengthen its hold.
@@ -6834,14 +6971,15 @@ impl Store {
                 drop(incremental);
                 let projected = fallback_reason.is_none();
                 if let Some(reason) = fallback_reason {
-                    log(&full_replay_log_line(phase, &reason, frontier, target));
+                    log_staged(&full_replay_log_line(phase, &reason, frontier, target));
+                    stages.enter("replay");
                     #[cfg(any(test, feature = "test-support"))]
                     FULL_REPLAYS.with(|replays| replays.set(replays.get() + 1));
                     let _replay = crate::profile::span("projection/full-replay");
                     crate::profile::note("projection: full replay");
                     self.runtime
                         .replay_from_nothing_with_progress(&transaction, &mut |stage| {
-                            progress(ProjectionProgress {
+                            progress_staged(ProjectionProgress {
                                 phase: stage.phase,
                                 frontier,
                                 target,
@@ -6850,23 +6988,25 @@ impl Store {
                             });
                         }).map_err(|error| {
                             let error = error.with_detail("projection_stage", "full-replay");
-                            self.log_projection_failure(&error, phase, frontier, target, &mut log);
+                            self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                             error
                         })?;
                 } else {
                     crate::profile::note("projection: incremental");
                 }
+                stages.enter("after-projection");
                 self.runtime
                     .after_projection(&transaction)
                     .map_err(|error| {
                         let error = error.with_detail("projection_stage", "after-projection");
-                        self.log_projection_failure(&error, phase, frontier, target, &mut log);
+                        self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                         error
                     })?;
                 Ok(!projected)
             })();
             match result {
                 Ok(replayed) => {
+                    stages.enter("health");
                     // A fallback replay folds the whole log, including anything admitted after
                     // this pass started. An incremental chunk advances only its bounded frontier.
                     let through = if replayed {
@@ -6881,11 +7021,12 @@ impl Store {
                         error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
                     params![through, now_ms().to_string()],
                 )?;
+                    stages.enter("commit");
                     transaction.commit()?;
                     if !replayed {
                         processed += count;
                     }
-                    progress(ProjectionProgress {
+                    progress_staged(ProjectionProgress {
                         phase: "projection-committed",
                         frontier: through,
                         target,
@@ -6897,7 +7038,9 @@ impl Store {
                     // mistake its not-yet-committed claims for an empty backlog.
                     let projection_state =
                         self.replication_projection_state.load(Ordering::Acquire);
+                    stages.enter("release");
                     drop(connection);
+                    drop(stages);
                     // Readers may have cached the preceding prefix at the same admitted store
                     // index. Its projection changed even when no additional claim arrived.
                     chunked |= through < target;
@@ -6936,6 +7079,7 @@ impl Store {
                     return Ok(true);
                 }
                 Err(error) => {
+                    stages.enter("rollback");
                     transaction.rollback()?;
                     if error.is_sqlite_contention() {
                         // Preserve committed health/frontier, not all process state: entry
@@ -6943,8 +7087,10 @@ impl Store {
                         // time, so the existing catch-up throttle applies. A daemon retry is
                         // scheduled separately; receive/wake passes can also recover sooner.
                         self.note_projection_contention();
+                        stages.enter("release");
                         return Ok(false);
                     }
+                    stages.enter("health");
                     connection.execute(
                     "INSERT INTO projection_health(aggregate, status, error_code, error_message, updated_at_unix_ms)
                      VALUES ('graph', 'stale', ?1, ?2, ?3)
@@ -6952,6 +7098,7 @@ impl Store {
                         error_message=excluded.error_message, updated_at_unix_ms=excluded.updated_at_unix_ms",
                     params![error.code, error.message, now_ms().to_string()],
                 )?;
+                    stages.enter("release");
                     return Ok(false);
                 }
             }
