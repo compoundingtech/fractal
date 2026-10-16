@@ -802,14 +802,59 @@ class RequireAll(unittest.TestCase):
             base = self._base(two_check_policy(mode, 'off'))
             code, out, _ = self.f.cli('--tree', self.tree, '--require-all', '--keys-from', base, '--policy-from', base, '--repository', 'org/repo')
             self.assertEqual((code, json.loads(out)['decision']), (expected[0], expected[1]), (mode, out))
-        # a pull request's own copy of the policy is not read: asking for the commit without a policy is no_policy
+        # a pull request's own copy of the policy is not read: asking for the commit without a policy is an error, never a reject
         code, out, _ = self.f.cli('--tree', self.tree, '--require-all', '--keys-from', base, '--policy-from', self.commit, '--repository', 'org/repo')
-        self.assertEqual((code, json.loads(out)['reason']), (1, 'no_policy'))
+        self.assertEqual((code, json.loads(out)['decision'], json.loads(out)['reason']), (2, 'error', 'no_policy'))
         for bad in (['--check', 'unit'], ['--project'], ['--command', '["x"]'], ['--kinds', 'observed'], ['--max-age', '60']):
             self.assertEqual(self.f.cli('--tree', self.tree, '--require-all', '--keys-from', base, '--policy-from', base,
                                         '--repository', 'org/repo', *bad)[0], 2, bad)
         self.assertEqual(self.f.cli('--tree', self.tree, '--require-all', '--keys-from', base)[0], 2)  # needs the policy and repository
         self.assertEqual(self.f.cli('--tree', self.tree, '--keys-from', base)[0], 2)  # without --require-all, --check is still required
+
+    def test_a_verifier_that_cannot_decide_exits_two_with_decision_error_never_zero_or_one(self):
+        def run_cli(text):
+            base = self._base(text)
+            return self.f.cli('--tree', self.tree, '--require-all', '--keys-from', base, '--policy-from', base, '--repository', 'org/repo')
+        broken = json.loads(two_check_policy('reject'))
+        broken['checks']['unit']['require'] = 'sometimes'
+        no_command = json.loads(two_check_policy('reject'))
+        del no_command['checks']['unit']['kinds']['observed']['command']  # a kind rule without a command is a policy error
+        no_level_command = json.loads(two_check_policy('reject'))
+        no_level_command['checks']['unit']['kinds']['observed']['by_level'] = {'machine': {'events': ['pull_request']}}
+        for name, text in (('invalid json', 'not json'), ('unknown top-level key', json.dumps({'version': 1, 'checks': {}, 'x': 1})),
+                           ('invalid require', json.dumps(broken)), ('kind without a command', json.dumps(no_command)),
+                           ('by_level without a command', json.dumps(no_level_command))):
+            code, out, _ = run_cli(text)
+            document = json.loads(out)
+            self.assertEqual((code, document['decision'], document['satisfied'], document['reason']), (2, 'error', False, 'error'), (name, out))
+        # a base commit that has no policy file at all
+        base = self._base('{}')
+        self.f.git('rm', '-q', '.st/evidence-skip-policy.json')
+        self.f.git('commit', '-q', '-m', 'no policy')
+        base = self.f.git('rev-parse', 'HEAD')
+        code, out, _ = self.f.cli('--tree', self.tree, '--require-all', '--keys-from', base, '--policy-from', base, '--repository', 'org/repo')
+        self.assertEqual((code, json.loads(out)['decision'], json.loads(out)['reason']), (2, 'error', 'no_policy'))
+        # an unreadable key list and an unexpected exception inside the judging both end as errors too
+        base = self._base(two_check_policy('reject'))
+        code, out, _ = self.f.cli('--tree', self.tree, '--require-all', '--keys', str(self.f.root / 'missing-keys'), '--policy-from', base, '--repository', 'org/repo')
+        self.assertEqual((code, json.loads(out)['decision']), (2, 'error'))
+        import contextlib, io
+        original = evidence_verify.require_all
+        evidence_verify.require_all = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('boom'))
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = evidence_verify.main(['--repo', str(self.f.repo), '--tree', self.tree, '--require-all', '--keys-from', base,
+                                             '--policy-from', base, '--repository', 'org/repo'])
+        finally:
+            evidence_verify.require_all = original
+        self.assertEqual((code, json.loads(out.getvalue())['decision'], json.loads(out.getvalue())['detail']), (2, 'error', 'RuntimeError: boom'))
+
+    def test_a_lane_is_always_held_to_the_recorded_argv_of_its_kind_because_a_kind_cannot_omit_one(self):
+        # (intake-b) require_all passes no command of its own; the kind's rule always supplies one, so a note that ran anything else fails
+        self.note('unit', command=('make', 'less'))
+        lane = self.judge(two_check_policy('reject'))['lanes']['unit']
+        self.assertEqual((lane['satisfied'], lane['reason']), (False, 'wrong_command'))
 
     def _base(self, text):
         (self.f.repo / '.st').mkdir(exist_ok=True)

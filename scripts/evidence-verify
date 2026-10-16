@@ -564,7 +564,7 @@ def main(argv):
     parser.add_argument('--check')
     parser.add_argument('--require-all', action='store_true',
                         help='judge every check whose policy says `require` (needs --policy-from, --repository and keys); '
-                             'exit 1 only when a check in mode reject is not satisfied')
+                             'exit 1 only when a check in mode reject is not satisfied, exit 2 (decision error) when it could not decide')
     parser.add_argument('--project', action='store_true',
                         help='print the input key of the tree for the check\'s declared paths and exit (needs no keys)')
     parser.add_argument('--paths', metavar='PATH[,PATH...]', help='with --project: declared paths instead of the policy\'s')
@@ -690,10 +690,19 @@ def main(argv):
         print(json.dumps(result, indent=2))
         return 0
     except Failure as failure:
+        if args.require_all:
+            # Exit 1 means exactly "a reject lane is not satisfied"; a verifier that could not decide exits 2.
+            print(json.dumps({'mode': 'require-all', 'decision': 'error', 'satisfied': False, 'reason': failure.reason,
+                              'detail': failure.detail}, indent=2))
+            return 2
         print(json.dumps({'satisfied': False, 'reason': failure.reason, 'check': args.check,
                           'detail': failure.detail, **failure.extra}, indent=2))
         return 1
     except Exception as error:  # any surprise is a refusal with a reason, never a traceback or a pass
+        if args.require_all:
+            print(json.dumps({'mode': 'require-all', 'decision': 'error', 'satisfied': False, 'reason': 'error',
+                              'detail': f'{type(error).__name__}: {error}'}, indent=2))
+            return 2
         print(json.dumps({'satisfied': False, 'reason': 'error', 'check': args.check,
                           'detail': f'{type(error).__name__}: {error}'}, indent=2))
         return 1

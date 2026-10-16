@@ -731,7 +731,7 @@ work that has one. `scripts/evidence-verify --require-all --tree T --keys-from B
 every check whose `require` is not `off`, each by exactly the rules of a single check, and prints one entry per check with its own reason
 (`no_record`, `stale_tree`, `bad_signature`, `untrusted_signer`, `untrusted_level`, `wrong_command`, `check_failed`, ...), so a missing lane is named.
 The overall `decision` is `reject` when a `reject` check is not satisfied, `would-reject` when only `shadow` checks are not, and `ok` otherwise
-(also when nothing requires anything). The exit code is 1 only for `reject`; `shadow` never fails. The policy and the keys are read from the
+(also when nothing requires anything). The exit code is 1 only for `reject`; `shadow` never fails; a verifier that could not decide (invalid or missing base policy, unreadable keys, any unexpected error) exits 2 with `decision: error`, so a consumer can tell an error from a reject. Every kind rule must declare its command (the policy refuses one that does not), so a lane is always held to the argv its kind records. With no check requiring anything the answer is `ok` with an empty `lanes`; a queue mode built on this must treat an empty required set as an error, and this switch never enables skipping (`enforce` does). The policy and the keys are read from the
 accepted base like everything else here. Nothing calls it yet and no check sets `require`: this adds the switch and the report, and a test
 asserts that every committed check is `off`. Making any check `reject` is a separate reviewed change, and making it a required status
 check is a repository ruleset change that is not made here. A pass for a tree is never evidence for the combined tree the merge queue tests.
