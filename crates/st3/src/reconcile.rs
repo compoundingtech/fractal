@@ -18050,6 +18050,7 @@ pub(crate) mod tests {
     mod doctor_eligibility_tests;
     mod first_readiness_tests;
     mod gate_on_demand;
+    mod readiness_priority_tests;
     mod github_watch_selection;
     mod incremental_deadlines;
     pub(crate) mod mission_eval_reuse;

@@ -2253,3 +2253,9 @@ accepted. Final work and cleanup proceed under their original ownership while a 
 run can be admitted. `final-cancelled` and `cleanup-cancelled` runs no longer consume the
 mission's active-run limit or constrain it with a cancelled revision's limit. Live uncancelled
 runs still enforce the strictest limit among their revisions.
+
+
+A current generation with pending or blocked work at readiness 0 shares first-readiness
+priority even after another step completes. The existing predicate evaluator decides which
+steps can become ready. Runs are newest-first within each priority group, and all active
+run IDs remain in the finite snapshot; new arrivals enter the following snapshot.

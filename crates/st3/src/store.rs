@@ -7816,8 +7816,9 @@ impl Store {
         Ok(subjects)
     }
 
-    /// All-pending current generations first, newest first within each group. This puts first
-    /// readiness before older runs' gate writes. Every active run remains in the finite snapshot;
+    /// Current generations with work awaiting its first readiness come first, newest first
+    /// within each group. Dependent steps share the priority of initial steps. Every active
+    /// run remains in the finite snapshot;
     /// arrivals during a pass wait for the next pass and cannot displace its remaining work.
     /// Build views separately so a malformed run cannot hide other runs.
     pub fn active_mission_run_ids_for_origin(&self, origin: &str) -> Result<Vec<String>> {
@@ -7832,10 +7833,11 @@ impl Store {
                    AND claims.kind='mission-run.created'
                    AND claims.origin=?1
                )
-             ORDER BY EXISTS (
+             ORDER BY NOT EXISTS (
                  SELECT 1 FROM step_runs
                  WHERE step_runs.generation_id=mission_runs.current_generation_id
-                   AND step_runs.status<>'pending'
+                   AND step_runs.status IN ('pending','blocked')
+                   AND step_runs.readiness_epoch=0
              ), CAST(mission_runs.created_at_unix_ms AS INTEGER) DESC, mission_runs.id DESC",
         )?;
         statement

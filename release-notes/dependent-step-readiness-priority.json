@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Give dependent steps awaiting first readiness the same scheduling priority as initial work",
+  "replay": {
+    "status": "none",
+    "detail": "This changes evaluation order over existing current-generation step state. No claim replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "The priority existence check uses the existing generation index and readiness_epoch column. No table or index changes."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Current pending or blocked steps with readiness 0 put their run in the first-readiness priority group, including partially progressed runs. Existing readiness predicates decide promotion."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Satisfied dependent steps can receive readiness before newer gate writers that have already offered readiness. Each finite snapshot retains every active run, with newest-first order inside each priority group."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No migration or history replay."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "The normal reactive scheduler applies the order automatically."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Readiness epoch and claim fencing retain their existing transitions."
+  }
+}
