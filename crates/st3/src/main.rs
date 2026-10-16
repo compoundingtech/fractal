@@ -59,6 +59,8 @@ use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
 mod cli_help;
+mod setup;
+mod onboarding;
 mod change_cli;
 mod directive_note;
 mod completion;
@@ -116,7 +118,7 @@ const DEFAULT_DAEMON_WAIT_SECS: u64 = 30;
 #[derive(Subcommand)]
 enum Command {
     /// Configure this machine and start st, with flags for unattended setup.
-    Setup(st3::setup::SetupArgs),
+    Setup(crate::setup::SetupArgs),
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
     #[command(version = st_drivers::version::display_version())]
     Ui(stui::Args),
@@ -291,6 +293,8 @@ enum Command {
     },
     /// Run any CLI with credentials no seat can read, through the sekrets gateway.
     Sekrets(st3::sekrets::cli::SekretsArgs),
+    /// Run an agent's tools in its tile: its own Unix user, namespaces and cgroup. Root only.
+    Tiles(st3::tiles::cli::TilesArgs),
     /// Discover native harness sessions and move one under durable st ownership.
     Import {
         #[command(subcommand)]
@@ -1394,6 +1398,8 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
         config.client_gateway_socket.clone(),
     ];
     paths.extend(st3::startup::paths(&config.socket));
+    paths.push(st3::api::unix_reservation_path(&config.socket));
+    paths.push(st3::api::unix_reservation_path(&config.client_gateway_socket));
     if st2_only_hooks {
         paths.push(st2_state);
     }
@@ -3243,12 +3249,21 @@ st restarts a seat for an account or model change, a declaration change, or an o
 request; every session that starts after a restart is given the handoff and the live state of the \
 seat's work as its first message. Write what the graph does not hold: what you were in the middle of, \
 the branches and pull requests you own, what you wait on, what to do next, and anything running \
-that you started. Same-session resume (claude --resume, codex resume) stays preferred where it works.")]
+that you started. Same-session resume (claude --resume, codex resume) stays preferred where it works.\n\n\
+Before a planned restart st sends the seat a \"Prepare for restart\" message with a deadline. Writing the \
+handoff acknowledges it; `ready` acknowledges a handoff that is already current. The restart goes ahead \
+at the acknowledgement or the deadline, whichever comes first.")]
 enum HandoffCommand {
     /// Replace this seat's handoff with FILE, or with standard input when FILE is `-` or absent.
     Write {
         file: Option<PathBuf>,
         /// The seat whose handoff to write; only that seat may write it.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
+    },
+    /// Say this seat's handoff is current, so a restart that is waiting for it can go ahead.
+    Ready {
+        /// The seat that is ready; a readiness claim counts only when it names that seat as its actor.
         #[arg(long = "as", value_parser = parse_actor_subject)]
         actor: Option<String>,
     },
@@ -3415,6 +3430,8 @@ enum AgentsCommand {
     /// A host without a systemd user manager ends only the harness's process tree and process
     /// groups; docs/st3/priority.md says what else keeps running there.
     Stop(AgentStopArgs),
+    /// Permanently retire an agent identity; later starts and first sends are refused.
+    Retire(AgentRetireArgs),
     /// Restart a top-level or mission seat, preserving its declaration; wait for a new incarnation.
     Restart(AgentRestartArgs),
     /// Acknowledge an interrupted seed attempt and its warning; never gate launch or rearm seed.
@@ -3957,6 +3974,18 @@ struct AgentNewArgs {
 }
 
 #[derive(Args)]
+struct AgentRetireArgs {
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
+    subject: String,
+    #[arg(long = "as", value_parser = parse_publication_actor)]
+    actor: String,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    reason: String,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    idempotency_key: String,
+}
+
+#[derive(Args)]
 struct AgentStopArgs {
     /// Exact seat subject or its identity without the `agent/` prefix.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: true })))]
@@ -4027,6 +4056,10 @@ struct AgentRestartArgs {
     /// How long to wait for a new running incarnation.
     #[arg(long, default_value = "10m")]
     timeout: String,
+    /// Restart at once. By default a seat that is up and ready is first asked for its handoff and
+    /// restarted at its acknowledgement or after two minutes; use this for a seat that cannot answer.
+    #[arg(long)]
+    now: bool,
 }
 
 #[derive(Subcommand)]
@@ -5309,7 +5342,7 @@ fn cli_main() -> ExitCode {
         cli_output::stdout().is_terminal(),
         std::env::var_os("ST_AGENT").is_some(),
     ) {
-        let subject = match st3::setup::prepare_plain_ui() {
+        let subject = match crate::setup::prepare_plain_ui() {
             Ok(subject) => subject,
             Err(error) => {
                 eprintln!("st: {}", plain_error(&error));
@@ -5342,6 +5375,17 @@ fn cli_main() -> ExitCode {
         Err(error) => exit_usage_error(error),
     };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    // Root runs tiles. Entering one makes namespaces, which needs this process single-threaded,
+    // so it runs before any runtime or thread starts.
+    if let Command::Tiles(args) = cli.command {
+        return match st3::tiles::cli::run(args) {
+            Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+            Err(error) => {
+                eprintln!("st tiles: {error:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if let Command::Ui(options) = cli.command {
         return run_terminal_ui(options, cli.endpoint.as_deref());
     }
@@ -5449,7 +5493,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
     if args.driver == "claude-mcp" {
         return Ok(None);
     }
-    let config = Config::load_unvalidated(None)?;
+    let config = Config::load_client_unvalidated(None)?.0;
     let endpoint = cli
         .endpoint
         .clone()
@@ -5548,6 +5592,9 @@ fn record_daemon_commands(args: &UpArgs) {
     unsafe { std::env::set_var("PATH", path) };
 }
 
+// Writer-bound store work admits before spawn_blocking. A global blocking-thread cap
+// cannot replace that admission: native provider sessions occupy pool threads for their
+// lifetime, and their control callbacks can depend on another blocking worker.
 #[tokio::main]
 async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
     let native_driver = matches!(&cli.command, Command::Driver(_));
@@ -5703,7 +5750,7 @@ async fn run(cli: Cli) -> Result<()> {
     let mission_run = std::env::var("ST_MISSION_RUN").ok();
     guard_mutating_cli_actor(&cli.command, own.as_deref(), mission_run.as_deref())?;
     if let Command::Setup(args) = cli.command {
-        return st3::setup::run(args).await.map(|_| ());
+        return crate::setup::run(args).await.map(|_| ());
     }
     // Completion is a remote device operation. It needs neither a local daemon nor its config.
     if let Command::Devices(DevicesArgs {
@@ -5755,7 +5802,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
-        let code = st3::sekrets::cli::run(args, cli.json).await?;
+        let code = st3::sekrets::cli::run(args, cli.json, cli.endpoint).await?;
         use std::io::Write as _;
         let _ = cli_output::stdout().flush();
         return Err(CommandExit(code as u8).into());
@@ -5797,7 +5844,7 @@ async fn run(cli: Cli) -> Result<()> {
         telemetry.shutdown();
         return result;
     }
-    let config = Config::load_unvalidated(None)?;
+    let (config, unknown_config_keys) = Config::load_client_unvalidated(None)?;
     let endpoint = cli
         .endpoint
         .or_else(|| std::env::var("ST3_ENDPOINT").ok())
@@ -5817,6 +5864,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Skill(_) => unreachable!(),
         Command::Evidence(_) => unreachable!(),
         Command::Sekrets(_) => unreachable!(),
+        Command::Tiles(_) => unreachable!(),
         Command::Admission { .. } => unreachable!(),
         Command::ReplicationWorker(_) => unreachable!(),
         Command::Now(args) => run_now(&endpoint, config.person.as_deref(), args, cli.json).await,
@@ -5914,7 +5962,7 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Command::Doctor(args) => run_doctor(&immediate, args, cli.json).await,
+        Command::Doctor(args) => run_doctor(&immediate, args, cli.json, &unknown_config_keys).await,
         Command::Recorder { command } => run_recorder(command, &config, cli.json),
         Command::Repair { command } => run_repair(&client, command, cli.json).await,
         Command::Backup { command } => match command {
@@ -6090,6 +6138,7 @@ fn guard_mutating_cli_actor(
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             AgentsCommand::Start(args) => Some(args.actor.as_str()),
             AgentsCommand::Stop(args) => Some(args.actor.as_str()),
+            AgentsCommand::Retire(args) => Some(args.actor.as_str()),
             AgentsCommand::Restart(args) => Some(args.actor.as_str()),
             AgentsCommand::Rollout(args) => Some(args.actor.as_str()),
             AgentsCommand::Suspend(args) => Some(args.actor.as_str()),
@@ -6767,6 +6816,15 @@ async fn run_up(args: UpArgs) -> Result<()> {
     fs::create_dir_all(&config.state_dir)?;
     let startup = Arc::new(st3::startup::Startup::begin(&config.socket)?);
     startup_phases.configuration_ms = phase_elapsed_ms();
+    startup.phase("bind-listeners");
+    let state_socket = config.state_dir.join("run/st3.sock");
+    let (local_reserved, gateway_reserved) = tokio::try_join!(
+        st3::api::reserve_unix_socket(&config.socket, Some(&state_socket)),
+        st3::api::reserve_unix_socket(&config.client_gateway_socket, None),
+    )?;
+    // Only addresses are bound. Until initialization finishes, connections are
+    // refused and clients use the existing live startup-phase observation.
+    let reserved_bind_ms = phase_elapsed_ms();
     startup.phase("install-hooks");
     startup_telemetry.phase("install-hooks");
     st3::hooks::ensure_installed(&st3::hooks::root(&config.state_dir)).context(
@@ -6924,6 +6982,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
     };
+    // Tiles this daemon's user supervises reach it only through their restricted endpoint.
+    #[cfg(target_os = "linux")]
+    st3::api::spawn_tile_endpoints(state.clone());
     st3::gate_check::set_endpoint(config.socket.display().to_string());
     startup_phases.app_state_ms = phase_elapsed_ms();
     let reconciler = Arc::new(Reconciler::native(
@@ -6947,7 +7008,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // The policy reads `[limits]` again on every pass, so an edit applies without a restart.
     st3::config::set_daemon_config(args_config.as_deref());
     tokio::spawn(enforce_account_limits(store.clone(), config.limits.clone(), reconciler));
-    recycle_idle_wal(config.state_dir.join("claims.sqlite3"), Arc::downgrade(&store));
+    recycle_idle_wal(store.path.clone(), Arc::downgrade(&store));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(convert_envelope_payloads(store.clone()));
     tokio::spawn(migrate_event_payloads(store.clone()));
@@ -6994,9 +7055,6 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .await;
         }
     });
-    let local_socket = config.socket.clone();
-    let state_socket = config.state_dir.join("run/st3.sock");
-    let client_gateway_socket = config.client_gateway_socket.clone();
     // The first diagnostic report and delayed repair share one operation audit. Later reports
     // audit current state independently; no request waits for this startup report.
     if let Some(audit) = st3::api::start_operation_report(&state) {
@@ -7014,7 +7072,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     return;
                 }
             };
-            match tokio::task::spawn_blocking(move || {
+            match store.connection.write_workers().spawn_blocking(move || {
                 store.repair_operation_projection_drift_from_audit(&drift)
             })
             .await
@@ -7077,7 +7135,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                         .unwrap_or_else(|| "person/operator".into()),
                 });
             tokio::spawn(async move {
-                match tokio::task::spawn_blocking({
+                match activation_store.connection.write_workers().spawn_blocking({
                     let store = activation_store.clone();
                     move || store.complete_replication_activation()
                 })
@@ -7101,7 +7159,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             startup_telemetry.serving();
             let ready_at = Instant::now();
             startup_phases.log_ready(
-                ready_at.duration_since(bind_started_at).as_secs_f64() * 1_000.0,
+                reserved_bind_ms + ready_at.duration_since(bind_started_at).as_secs_f64() * 1_000.0,
                 ready_at.duration_since(started_at).as_secs_f64() * 1_000.0,
             );
             startup.serving();
@@ -7113,13 +7171,13 @@ async fn run_up(args: UpArgs) -> Result<()> {
         }
     };
     tokio::try_join!(
-        st3::api::serve_unix_bound_with_ready(
-            &local_socket,
-            &state_socket,
+        st3::api::serve_reserved_unix_with_ready(
+            local_reserved,
             router(state.clone()),
+            true,
             ready
         ),
-        st3::api::serve_unix_with_ready(&client_gateway_socket, fabric_router(state), ready),
+        st3::api::serve_reserved_unix_with_ready(gateway_reserved, fabric_router(state), false, ready),
     )?;
     telemetry.shutdown();
     Ok(())
@@ -11652,7 +11710,7 @@ async fn wait_for_condition(
 async fn agent_wait_interruption(client: &Client, actor: &str) -> Result<Option<String>> {
     let work: Vec<StepRunView> = client
         .get(&format!(
-            "/v1/work?actor={}&include_terminal=false",
+            "/v1/work?actor={}&include_terminal=false&caller=wait-interruption",
             urlencoding::encode(actor)
         ))
         .await?;
@@ -12067,20 +12125,35 @@ async fn doctor_request<T: serde::de::DeserializeOwned>(
     }
 }
 
-async fn run_doctor(client: &Client, args: DoctorArgs, json_output: bool) -> Result<()> {
+async fn run_doctor(
+    client: &Client,
+    args: DoctorArgs,
+    json_output: bool,
+    unknown_config_keys: &[String],
+) -> Result<()> {
+    let config_check = doctor_cli::client_config_check(unknown_config_keys);
     if args.developer {
         let environment = st3::environment::snapshot()?;
         let check = doctor_cli::developer_tools(&environment);
+        let status = doctor_cli::client_config_status(&check.status, config_check.is_some());
         if json_output {
             print_value(
-                &json!({"status": check.status, "scope": "local developer tools", "checks": [check]}),
+                &json!({"status": status, "scope": "local developer tools", "checks":
+                    std::iter::once(&check).chain(config_check.iter()).collect::<Vec<_>>()}),
                 true,
             )?;
         } else {
             println!("{}\t{}\t{}", check.status, check.name, check.message);
+            if let Some(config_check) = &config_check {
+                println!(
+                    "{}\t{}\t{}",
+                    config_check.status, config_check.name, config_check.message
+                );
+            }
         }
+        anyhow::ensure!(status != "fail", "st doctor found a failed check");
         anyhow::ensure!(
-            !args.strict || check.status != "warn",
+            !args.strict || status != "warn",
             "st doctor found a computed warning in strict mode"
         );
         return Ok(());
@@ -12091,6 +12164,9 @@ async fn run_doctor(client: &Client, args: DoctorArgs, json_output: bool) -> Res
         let mut report: Value =
             doctor_request(client, "/v1/performance", readiness.as_ref(), json_output).await?;
         if json_output {
+            if let Some(config_check) = &config_check {
+                report["client_config"] = serde_json::to_value(config_check)?;
+            }
             if let Some(startup) = &readiness {
                 report["startup"] = serde_json::to_value(startup)?;
             }
@@ -12104,11 +12180,23 @@ async fn run_doctor(client: &Client, args: DoctorArgs, json_output: bool) -> Res
             };
             println!("{status}\tstartup\t{}", startup.summary());
         }
+        if let Some(config_check) = &config_check {
+            println!(
+                "{}\t{}\t{}",
+                config_check.status, config_check.name, config_check.message
+            );
+        }
         print!("{}", render_performance(&report));
         return Ok(());
     }
-    let report: DoctorReport =
+    let mut report: DoctorReport =
         doctor_request(client, "/v1/doctor", readiness.as_ref(), json_output).await?;
+    if let Some(config_check) = config_check {
+        report.checks.push(config_check);
+        if report.status == "pass" {
+            report.status = "warn".into();
+        }
+    }
     if json_output {
         let mut value = serde_json::to_value(&report)?;
         if let Some(startup) = &readiness {
@@ -12466,6 +12554,24 @@ fn render_replication_peers(
                 .or(peer.last_error.as_deref())
                 .unwrap_or("")
         );
+        for (label, record) in [
+            ("last successful exchange", &peer.last_successful_exchange),
+            ("last failed exchange", &peer.last_failed_exchange),
+        ] {
+            if let Some(record) = record {
+                let _ = writeln!(
+                    output,
+                    "  {label} {} via {}{}",
+                    relative_time(record.at_unix_ms, now),
+                    record.carrier.as_str(),
+                    record
+                        .fabric_route
+                        .as_ref()
+                        .map(|route| format!(" (Fabric route {route})"))
+                        .unwrap_or_default()
+                );
+            }
+        }
         if let Some(worker) = &peer.worker {
             let _ = writeln!(
                 output,
@@ -13039,8 +13145,8 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
             )
         }
         ServiceCommand::Status => {
-            let mut report = st3::service::status()?;
             let config = Config::load_unvalidated(None)?;
+            let mut report = st3::service::status()?;
             if let Some(startup) = st3::startup::read(&config.client_socket()) {
                 for service in &mut report.services {
                     if service.name == "st3.service" || service.name == "com.compoundingtech.st3" {
@@ -13518,6 +13624,30 @@ async fn run_handoff(
                 print_value(&response, true)
             } else {
                 println!("{}@{}", response.name, response.hash);
+                Ok(())
+            }
+        }
+        HandoffCommand::Ready { actor } => {
+            let agent = configured_actor(actor.as_deref(), configured_person, "handoff ready")?;
+            document(&agent)?;
+            let claim: ClaimRecord = client
+                .post(
+                    "/v1/claims",
+                    &ClaimInput {
+                        subject: st3::handoff::ready_subject(&agent),
+                        kind: st3::handoff::READY_KIND.into(),
+                        actor: Some(agent.clone()),
+                        fields: std::collections::BTreeMap::from([("agent".into(), agent.clone().into())]),
+                        evidence: vec![],
+                        expected_subject: None,
+                        idempotency_key: Some(format!("restart-ready:{agent}:{}", uuid::Uuid::now_v7())),
+                    },
+                )
+                .await?;
+            if json_output {
+                print_value(&claim, true)
+            } else {
+                println!("{agent} is ready to restart");
                 Ok(())
             }
         }
@@ -14137,20 +14267,71 @@ async fn run_agents(
                 if let Some(handoff) = &agent.handoff {
                     println!("{subject}: {} → {}", handoff.phase, handoff.destination);
                     if !handoff.pending_sources.is_empty() {
-                        println!("Waiting for source stop: {}", handoff.pending_sources.join(", "));
+                        println!(
+                            "Waiting for source stop: {}",
+                            handoff.pending_sources.join(", ")
+                        );
                     }
                     if !handoff.overridden_sources.is_empty() {
-                        println!("Source-offline override recorded: {}", handoff.overridden_sources.join(", "));
+                        println!(
+                            "Source-offline override recorded: {}",
+                            handoff.overridden_sources.join(", ")
+                        );
                     }
                 } else {
                     let state = cli_help::agent_state(
-                        &agent.state, agent.harness_state.as_deref(),
-                        agent.fault.as_deref(), &agent.reachability,
+                        &agent.state,
+                        agent.harness_state.as_deref(),
+                        agent.fault.as_deref(),
+                        &agent.reachability,
                     );
-                    print!("{}", cli_help::agent_next_steps(&subject, &args.actor, &state));
+                    print!(
+                        "{}",
+                        cli_help::agent_next_steps(&subject, &args.actor, &state)
+                    );
                 }
             }
             Ok(())
+        }
+        AgentsCommand::Retire(args) => {
+            let subject = if args.subject.starts_with("agent/") {
+                args.subject.clone()
+            } else {
+                format!("agent/{}", args.subject)
+            };
+            let client = generated_client(endpoint, Some(&args.actor))?;
+            let status = status_for(&cli_client(endpoint), &subject).await?;
+            let token = status
+                .subjects
+                .first()
+                .and_then(|subject| subject.desired_token.clone())
+                .context("agent has no selected declaration")?;
+            let snapshot = client.capabilities().await?.snapshot.id;
+            let action_id = format!(
+                "action/retire-{}",
+                hex::encode(Sha256::digest(args.idempotency_key.as_bytes()))
+            );
+            let result = client
+                .agent_retire(
+                    action_id,
+                    args.idempotency_key,
+                    ClientFence {
+                        snapshot_id: snapshot,
+                        runtime_desired_revision: Some(token),
+                        ..ClientFence::default()
+                    },
+                    st3_client::AgentRetireParameters {
+                        agent: subject.clone(),
+                        reason: args.reason,
+                    },
+                )
+                .await?;
+            if json_output {
+                print_value(&result, true)
+            } else {
+                println!("Retired {subject}");
+                Ok(())
+            }
         }
         AgentsCommand::Suspend(args) => {
             let subject = format!("agent/{}", args.subject);
@@ -14239,6 +14420,7 @@ async fn run_agents(
                         "subject": subject,
                         "actor": args.actor,
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
+                        "now": args.now,
                     }),
                 )
                 .await?;
@@ -15056,6 +15238,7 @@ async fn run_agent_inspection(
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
         | AgentsCommand::Start(_)
         | AgentsCommand::Stop(_)
+        | AgentsCommand::Retire(_)
         | AgentsCommand::Rollout(_)
         | AgentsCommand::Restart(_)
         | AgentsCommand::AcknowledgeSeed(_)
@@ -19819,6 +20002,9 @@ struct NativeLoopState {
     claude_attachment_terminal: Option<ClaudeAttachmentTerminal>,
     #[serde(default)]
     claude_readiness_fallback: ClaudeReadinessFallback,
+    /// This image's own settle. A replacement image draws a new one, so it is never carried.
+    #[serde(skip)]
+    settle: ResumeSettle,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -19863,6 +20049,7 @@ async fn resume_native_driver(
         resume.subject
     );
     resume.loop_state.harness_record_started = true;
+    resume.loop_state.settle = ResumeSettle::resumed();
     let _ = write_driver_log(
         subject,
         &format!(
@@ -19899,6 +20086,49 @@ async fn resume_native_driver(
         task,
     )
     .await
+}
+
+/// When a driver may send the daemon what its seat's delivery does not need: its harness events,
+/// Claude attachment checks, native session, harness publications, subagents and work renewals.
+/// A deploy re-executes every driver in the seconds it restarts the daemon. A resumed driver waits
+/// a random share of [`st3::client::RESUME_SETTLE`], so the drivers do not all reach the new
+/// daemon's writer at once. Mail, receipts, delivery control and the provider's exit never wait.
+#[derive(Clone, Copy, Debug, Default)]
+struct ResumeSettle(Option<tokio::time::Instant>);
+
+impl ResumeSettle {
+    /// A launched driver has nothing to spread.
+    fn none() -> Self {
+        Self(None)
+    }
+
+    fn resumed() -> Self {
+        Self::after(st3::client::resume_settle_pause())
+    }
+
+    fn after(pause: Duration) -> Self {
+        Self(Some(tokio::time::Instant::now() + pause))
+    }
+
+    fn passed(&self) -> bool {
+        self.0
+            .is_none_or(|until| tokio::time::Instant::now() >= until)
+    }
+
+    async fn wait(&self) {
+        if let Some(until) = self.0 {
+            tokio::time::sleep_until(until).await;
+        }
+    }
+
+    /// When the driver starts checking the channel's attachment, so a resumed driver's wait does
+    /// not count toward the channel's 20 s to attach.
+    fn attach_started(&self) -> Instant {
+        let left = self.0.map_or(Duration::ZERO, |until| {
+            until.saturating_duration_since(tokio::time::Instant::now())
+        });
+        Instant::now() + left
+    }
 }
 
 /// Follows the installed st binary for a native driver. Once a replacement is ready, the driver
@@ -20017,6 +20247,7 @@ async fn drive_st2_native(
     mut loop_state: NativeLoopState,
     mut task: tokio::task::JoinHandle<Result<()>>,
 ) -> Result<()> {
+    let settle = loop_state.settle;
     let NativePaths {
         session_dir,
         agent_dir,
@@ -20026,15 +20257,15 @@ async fn drive_st2_native(
     } = paths.clone();
     let mut mailbox =
         NativeMailbox::start(client, subject, &incarnation, driver, &mut loop_state).await?;
-    let attach_started = Instant::now();
-    if driver == "claude" && mailbox.subscription.is_some()
+    let attach_started = settle.attach_started();
+    if driver == "claude" && mailbox.subscription.is_some() && settle.passed()
         && let Err(error) = check_claude_attachment(
             client, subject, &incarnation, &mailbox, attach_started, &mut loop_state,
         ).await
     {
         let _ = write_driver_log(subject, &format!("Claude attachment check will retry: {error:#}"));
     }
-    let mut observations = NativeObservations::start(&agent_dir, &incarnation)?;
+    let mut observations = NativeObservations::start(&agent_dir, &incarnation)?.settle(settle);
     loop_state.claude_readiness_fallback.native_state_seen |= observations.native_state_seen;
     let harness_state_path = st_drivers::harness_state::harness_state_path(&agent_dir);
     let inbox = st_drivers::message::inbox_dir(&agent_dir);
@@ -20176,7 +20407,8 @@ async fn drive_st2_native(
                 return outcome;
             }
             _ = interval.tick(), if !completion_announced => {
-                if driver == "claude" && mailbox.subscription.is_some()
+                let settled = settle.passed();
+                if driver == "claude" && mailbox.subscription.is_some() && settled
                     && let Err(error) = check_claude_attachment(
                         client, subject, &incarnation, &mailbox, attach_started, &mut loop_state,
                     ).await
@@ -20187,7 +20419,7 @@ async fn drive_st2_native(
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
 
-                if observations.retry_pending {
+                if observations.retry_due() {
                     match observations.drain_live(client, subject, driver, &mut loop_state.ready).await {
                         Ok(ended) => completion_announced |= ended,
                         Err(error) => note_driver_tick_failure(subject, error, &mut last_control_warning),
@@ -20195,7 +20427,7 @@ async fn drive_st2_native(
                     if completion_announced { continue; }
                 }
 
-                if driver == "claude" && mailbox.subscription.is_some() {
+                if driver == "claude" && mailbox.subscription.is_some() && settled {
                     match publish_claude_readiness_fallback(
                         client, &mailbox, &mut observations, &mut loop_state, current_unix_ms()? as u64,
                     ).await {
@@ -20241,7 +20473,7 @@ async fn drive_st2_native(
                     "opencode" => st3::native_resume::opencode_bound_session(&agent_dir),
                     _ => None,
                 };
-                if let Some(session) = bound
+                if let Some(session) = bound.filter(|_| settled)
                     && let Err(error) = report_native_session(
                         client,
                         subject,
@@ -20255,7 +20487,7 @@ async fn drive_st2_native(
                 {
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
-                if driver == "claude"
+                if driver == "claude" && settled
                     && let Some(reason) = binding_watch.overdue(
                         &agent_dir,
                         provider_incarnation.as_deref(),
@@ -20338,7 +20570,7 @@ async fn drive_st2_native(
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
                 let tick: Result<()> = async {
-                    if observations.enabled { return Ok(()) }
+                    if observations.enabled || !settled { return Ok(()) }
                     // The wrapper writes admission before claiming a new harness session. Wait
                     // for that claim so a predecessor's record cannot fence a successor.
                     if matches!(driver, "omp" | "opencode") && loop_state.harness_record_started {
@@ -20460,14 +20692,14 @@ async fn drive_st2_native(
                 if let Err(error) = tick {
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
-                if let Some(subagents) = subagents.as_mut()
+                if let Some(subagents) = subagents.as_mut().filter(|_| settled)
                     && let Err(error) = subagents.tick(client).await
                 {
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
                 replacement.check();
             }
-            _ = work_interval.tick(), if !completion_announced => {
+            _ = work_interval.tick(), if !completion_announced && settle.passed() => {
                 let tick: Result<()> = async {
                     if let Some(minute) = renewal_minute(subject)?
                         && renewed_minute != Some(minute)
@@ -20680,6 +20912,7 @@ struct NativeObservations {
     retry_pending: bool,
     initial_wake: bool,
     pipe: Option<tokio::io::unix::AsyncFd<std::fs::File>>,
+    settle: ResumeSettle,
 }
 impl NativeObservations {
     fn start(dir: &Path, runtime: &str) -> Result<Self> {
@@ -20721,9 +20954,25 @@ impl NativeObservations {
             retry_pending: enabled,
             initial_wake: enabled,
             pipe,
+            settle: ResumeSettle::none(),
         })
     }
+    /// Hold every drain until `settle` passes. Hooks keep writing the outbox meanwhile; their
+    /// wakes go to a non-blocking pipe, so a held wake never blocks a hook.
+    fn settle(mut self, settle: ResumeSettle) -> Self {
+        self.settle = settle;
+        self
+    }
+    /// Whether a pending drain may go now.
+    fn retry_due(&self) -> bool {
+        self.retry_pending && self.settle.passed()
+    }
     async fn recv(&mut self) -> Result<()> {
+        if self.enabled && !self.settle.passed() {
+            self.settle.wait().await;
+            self.initial_wake = false;
+            return Ok(());
+        }
         if self.initial_wake {
             self.initial_wake = false;
             return Ok(());
@@ -21483,7 +21732,7 @@ async fn native_timeline_claim(
         && receipt.valid() && receipt.actor == subject
     {
         let work: Vec<StepRunView> = client.get(&format!(
-            "/v1/work?actor={}", urlencoding::encode(subject))).await?;
+            "/v1/work?actor={}&caller=timeline-binding", urlencoding::encode(subject))).await?;
         if let Some(step) = work.into_iter().find(|step| {
             step.subject == receipt.step_run && step.status == "ready"
                 && step.wake.as_ref().is_some_and(|wake| {
@@ -23202,6 +23451,7 @@ async fn drive_codex_native(
     start: ProviderStart,
     mut loop_state: NativeLoopState,
 ) -> Result<()> {
+    let settle = loop_state.settle;
     let mut paths = if matches!(start, ProviderStart::Launch(
         _,
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
@@ -23248,7 +23498,7 @@ async fn drive_codex_native(
     let archive = st_drivers::message::archive_dir(&agent_dir);
     let mut mailbox =
         NativeMailbox::start(client, subject, &incarnation, "codex", &mut loop_state).await?;
-    let mut observations = NativeObservations::start(&agent_dir, &incarnation)?;
+    let mut observations = NativeObservations::start(&agent_dir, &incarnation)?.settle(settle);
     if push_mailbox_enabled() {
         st_drivers::push_mailbox::register(&agent_dir);
     }
@@ -23399,7 +23649,7 @@ async fn drive_codex_native(
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
 
-                if observations.retry_pending {
+                if observations.retry_due() {
                     match observations.drain_live(client, subject, "codex", &mut loop_state.ready).await {
                         Ok(ended) => completion_announced |= ended,
                         Err(error) => note_driver_tick_failure(subject, error, &mut last_control_warning),
@@ -23443,7 +23693,9 @@ async fn drive_codex_native(
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
                 }
+                let settled = settle.passed();
                 let tick: Result<()> = async {
+                    if !settled { return Ok(()) }
                     if !loop_state.ready && std::fs::read(state_dir.join("binding.json"))
                         .ok()
                         .is_some_and(|binding| Some(&binding) != prior_binding.as_ref())
@@ -23573,7 +23825,7 @@ async fn drive_codex_native(
                         &runtime_id,
                     ),
                 );
-                if let Err(error) = subagents.tick(client).await {
+                if settled && let Err(error) = subagents.tick(client).await {
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
                 // Only a bound session can be adopted, so wait for the binding before following
@@ -23582,7 +23834,7 @@ async fn drive_codex_native(
                     replacement.check();
                 }
             }
-            _ = work_interval.tick(), if !completion_announced => {
+            _ = work_interval.tick(), if !completion_announced && settle.passed() => {
                 let tick: Result<()> = async {
                     if let Some(minute) = renewal_minute(subject)?
                         && renewed_minute != Some(minute)
@@ -23719,7 +23971,7 @@ async fn publish_provider_capacity_diagnostic(
         fields.insert("retry_after_unix_ms".into(), Value::from(retry_after));
     }
     let work: Vec<StepRunView> = client
-        .get(&format!("/v1/work?actor={}", urlencoding::encode(subject)))
+        .get(&format!("/v1/work?actor={}&caller=capacity-diagnostics", urlencoding::encode(subject)))
         .await?;
     if let Some(step) = work.into_iter().find(|step| {
         matches!(step.status.as_str(), "claimed" | "working")
@@ -23889,11 +24141,11 @@ fn work_incarnation_key(incarnation: Option<&str>) -> String {
 
 async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Result<()> {
     let work: Vec<StepRunView> = client
-        .get(&format!("/v1/work?actor={}", urlencoding::encode(subject)))
+        .get(&format!("/v1/work?actor={}&view=renewal", urlencoding::encode(subject)))
         .await?;
     // Most resident seats hold no work. Only a held claim needs the status reduction
     // that proves its harness incarnation is still live before renewing the lease.
-    if !work.iter().any(|step| work_claim_is_held_by(step, subject)) {
+    if !work.iter().any(|step| step.work_claim_is_held_by(subject)) {
         return Ok(());
     }
     let status: StatusResponse = client
@@ -24020,19 +24272,12 @@ fn renewal_lost_its_claim(error: &anyhow::Error) -> bool {
     )
 }
 
-fn work_claim_is_held_by(step: &StepRunView, subject: &str) -> bool {
-    matches!(
-        step.status.as_str(),
-        "claimed" | "working" | "verifying" | "blocked"
-    ) && step.claimant.as_deref() == Some(subject)
-}
-
 fn work_claim_has_active_harness(
     step: &StepRunView,
     subject: &str,
     harness: Option<&CurrentHarnessView>,
 ) -> bool {
-    work_claim_is_held_by(step, subject)
+    step.work_claim_is_held_by(subject)
         && harness.is_some_and(|harness| {
             harness.state != "ended"
                 && step.claim_incarnation.as_deref() == Some(harness.incarnation_id.as_str())
@@ -25597,7 +25842,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: st3::config::Li
             continue;
         };
         let pass = store.clone();
-        match tokio::task::spawn_blocking(move || {
+        match pass.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task enforce-account-limits", || {
                 let now = now_ms();
                 let check = pass.account_limits_check(now, policy.fresh_ms)?;
@@ -25704,7 +25949,7 @@ fn retry_projection_contention_observed(
             let Some(attempt) = attempt else { continue };
             // Only this task schedules these attempts. The existing projection mutex also
             // serializes them with receive/wake passes. Store ownership ends at attempt return.
-            let result = tokio::task::spawn_blocking(move || {
+            let result = store.connection.write_workers().spawn_blocking(move || {
                 let result = store.project_replication_backlog_unless_catching_up();
                 (result, store.projection_contention_generation(), store.replication_projection_deferred())
             })
@@ -26231,7 +26476,7 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
 async fn convert_envelope_payloads(store: Arc<Store>) {
     loop {
         let store = store.clone();
-        let result = tokio::task::spawn_blocking(move || store.convert_envelope_payloads()).await;
+        let result = store.connection.write_workers().spawn_blocking(move || store.convert_envelope_payloads()).await;
         match result {
             Ok(Ok(report)) if report.done => return,
             Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(50)).await,
@@ -26248,7 +26493,7 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
 async fn catch_up_coordination_counts(store: Arc<Store>) {
     loop {
         let page_store = store.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = page_store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task coordination-counts-catch-up", || {
                 page_store.advance_coordination_counts()
             })
@@ -26311,7 +26556,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                 }
                 Ok(Ok(false)) => {
                     let page_store = store.clone();
-                    match tokio::task::spawn_blocking(move || {
+                    match page_store.connection.write_workers().spawn_blocking(move || {
                         page_store.advance_publication_evidence()
                     })
                     .await
@@ -26451,7 +26696,7 @@ async fn expire_completed_responses(
         }
         clock_deferred = false;
         let clean_store = store.clone();
-        match tokio::task::spawn_blocking(move || {
+        match clean_store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task expire-completed-responses", || {
                 clean_store.cleanup_idempotency(now)
             })
@@ -26756,7 +27001,7 @@ async fn catch_up_account_limits(store: Arc<Store>, notify: Arc<Notify>) {
     let mut announced = false;
     loop {
         let page_store = store.clone();
-        let more = tokio::task::spawn_blocking(move || {
+        let more = page_store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task account-limits-catch-up", || {
                 page_store.catch_up_account_limits(st3::store::LIMITS_CATCH_UP_PAGE)
             })
@@ -26813,7 +27058,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
     loop {
         let observation_store = store.clone();
         let max_per_subject_kind = observations.max_per_subject_kind;
-        let trimmed = tokio::task::spawn_blocking(move || {
+        let trimmed = observation_store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task trim-local-observations", || {
                 observation_store.trim_local_observations(
                     now_ms().saturating_sub(u128::from(retention_ms)),
@@ -26824,7 +27069,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         })
         .await;
         let usage_store = store.clone();
-        if let Ok(Err(error)) = tokio::task::spawn_blocking(move || {
+        if let Ok(Err(error)) = usage_store.connection.write_workers().spawn_blocking(move || {
             usage_store.trim_usage_responses(
                 now_ms().saturating_sub(st3::store::USAGE_RESPONSE_HORIZON_MS),
                 LOCAL_OBSERVATION_TRIM_CHUNK,
@@ -26842,7 +27087,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         }
         // The database target's sample: after the trims, so it counts what they freed.
         let size_store = store.clone();
-        match tokio::task::spawn_blocking(move || size_store.record_database_size(now_ms())).await {
+        match size_store.connection.write_workers().spawn_blocking(move || size_store.record_database_size(now_ms())).await {
             Ok(Ok(size)) => st3::slo::note_database_size(&size),
             Ok(Err(error)) => eprintln!("st3: database size sample failed: {error:#}"),
             Err(error) => eprintln!("st3: database size sample stopped: {error}"),
@@ -26870,7 +27115,7 @@ async fn run_checkpoints(store: Arc<Store>, context: st3::store::CheckpointConte
             now_unix_ms: now_ms(),
             ..context.clone()
         };
-        match tokio::task::spawn_blocking(move || {
+        match store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task checkpoint", || store.checkpoint_step(&context))
         })
         .await
@@ -27358,8 +27603,11 @@ mod tests {
 
     fn peer_status(peer: &str, digest: Option<&str>) -> st3::model::ReplicationPeerStatus {
         st3::model::ReplicationPeerStatus {
+            last_successful_exchange: None,
+            last_failed_exchange: None,
             worker: None,
             projection_digests: Default::default(),
+            incompatible_projection_tables: Vec::new(),
             differing_tables: Vec::new(),
             projection_comparison_waiting: false,
             projection_comparison_waiting_reason: None,
@@ -27372,6 +27620,8 @@ mod tests {
             last_failure_at_unix_ms: None,
             refusal_reason: None,
             schema_digest: None,
+            projection_registry_digest: None,
+            projection_versions: Default::default(),
             authority_digest: digest.map(str::to_owned),
             graph_digest: None,
             sync: None,
@@ -28364,6 +28614,7 @@ mod tests {
                 claude_attachment_reconciled: false,
                 claude_attachment_terminal: None,
                 claude_readiness_fallback: ClaudeReadinessFallback::default(),
+                settle: ResumeSettle::resumed(),
             },
         };
         let back: DriverResume =
@@ -28380,6 +28631,8 @@ mod tests {
         );
         // A predecessor's harness record is only a startup fence; it never crosses an exec.
         assert!(back.loop_state.predecessor_harness_record.is_none());
+        // Nor does a settle: the replacement image draws its own.
+        assert!(back.loop_state.settle.0.is_none());
     }
 
     #[test]
@@ -29258,8 +29511,11 @@ mod tests {
         let peer =
             |name: &str, graph: Option<&str>, sync: Option<st3::model::ReplicationPeerSync>| {
                 ReplicationPeerStatus {
+                    last_successful_exchange: None,
+                    last_failed_exchange: None,
                     worker: None,
                     projection_digests: BTreeMap::from([("claim_sources".into(), "sample".into())]),
+                    incompatible_projection_tables: Vec::new(),
                     differing_tables: Vec::new(),
                     projection_comparison_waiting: false,
                     projection_comparison_waiting_reason: None,
@@ -29272,6 +29528,8 @@ mod tests {
                     last_failure_at_unix_ms: None,
                     refusal_reason: None,
                     schema_digest: None,
+                    projection_registry_digest: None,
+                    projection_versions: Default::default(),
                     authority_digest: None,
                     graph_digest: graph.map(str::to_owned),
                     sync,
@@ -29363,6 +29621,8 @@ mod tests {
         page.sync = Some(st3_client::SyncNotice {
             state: "catching-up".into(),
             peers: vec![st3_client::SyncPeer {
+                last_successful_exchange: None,
+                last_failed_exchange: None,
                 host_id: "host/ExampleMac".into(),
                 peer_only_envelopes: 1,
                 local_only_envelopes: 0,
@@ -29826,13 +30086,13 @@ mod tests {
         for state in ["claimed", "working", "verifying", "blocked"] {
             let mut held = step.clone();
             held.status = state.into();
-            assert!(work_claim_is_held_by(&held, "agent/node.worker"));
-            assert!(!work_claim_is_held_by(&held, "agent/other"));
+            assert!(held.work_claim_is_held_by("agent/node.worker"));
+            assert!(!held.work_claim_is_held_by("agent/other"));
         }
         for state in ["ready", "pending", "completed", "cancelled", "failed"] {
             let mut unheld = step.clone();
             unheld.status = state.into();
-            assert!(!work_claim_is_held_by(&unheld, "agent/node.worker"));
+            assert!(!unheld.work_claim_is_held_by("agent/node.worker"));
         }
     }
 
@@ -33719,6 +33979,104 @@ mission "review" state="ready" {
         assert_eq!(captured.len(), 2);
         assert_eq!(captured[0], captured[1]);
         assert_eq!(store.local_observations_tail(100).unwrap().len(), 1);
+        server.abort();
+    }
+    /// A deploy re-executes every driver while the daemon restarts. A resumed driver keeps the
+    /// harness events its hooks write meanwhile in the outbox and sends them once its settle
+    /// passes, not in the new daemon's first instant. A launched driver sends them at once.
+    #[tokio::test]
+    async fn a_resumed_driver_sends_its_outbox_only_after_its_settle() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::{Arc, Mutex};
+        let root = tempfile::tempdir().unwrap();
+        st_drivers::harness_events::enable(root.path(), "runtime-a").unwrap();
+        let seq =
+            st_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-a")
+                .unwrap();
+        let mut writer = st_drivers::harness_state::Writer::new(
+            root.path(),
+            "example/seat",
+            "claude",
+            Some("pty".into()),
+        )
+        .with_ownership("provider-a", seq);
+        let active = || {
+            st_drivers::harness_state::Observation::new(
+                st_drivers::harness_state::Activity::Active,
+                st_drivers::harness_state::BlockedOn::None,
+                st_drivers::harness_state::InputBuffer::Unknown,
+            )
+        };
+        writer.observe(active()).unwrap();
+        let posted = Arc::new(Mutex::new(Vec::<tokio::time::Instant>::new()));
+        let store = Arc::new(Store::open_memory("amber").unwrap());
+        let app = Router::new().route(
+            "/v1/harness-events",
+            post({
+                let posted = posted.clone();
+                move |Json(request): Json<st3::harness_events::Publication>| {
+                    let posted = posted.clone();
+                    let store = store.clone();
+                    async move {
+                        posted.lock().unwrap().push(tokio::time::Instant::now());
+                        let record = store.append_claim(&request.claim).unwrap();
+                        Json(json!({"api_version":"st3.v1","value":record}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(st3::client::Endpoint::Http(format!(
+            "http://{}",
+            listener.local_addr().unwrap()
+        )));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let pause = Duration::from_millis(600);
+        let settle = ResumeSettle::after(pause);
+        let until = tokio::time::Instant::now() + pause;
+        let mut observations = NativeObservations::start(root.path(), "runtime-a")
+            .unwrap()
+            .settle(settle);
+        assert!(!observations.retry_due());
+        // A hook writes while the driver settles; its wake does not end the wait.
+        writer
+            .observe(st_drivers::harness_state::Observation::new(
+                st_drivers::harness_state::Activity::Idle,
+                st_drivers::harness_state::BlockedOn::None,
+                st_drivers::harness_state::InputBuffer::Unknown,
+            ))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(pause / 2, observations.recv())
+                .await
+                .is_err(),
+            "a wake ended the settle early"
+        );
+        assert!(posted.lock().unwrap().is_empty());
+        observations.recv().await.unwrap();
+        assert!(tokio::time::Instant::now() >= until);
+        assert!(observations.retry_due());
+        let mut ready = false;
+        observations
+            .drain_live(&client, "agent/example/seat", "claude", &mut ready)
+            .await
+            .unwrap();
+        let first = posted.lock().unwrap().first().copied().unwrap();
+        assert!(first >= until, "an event went before the settle passed");
+        assert!(
+            st_drivers::harness_events::pending(root.path(), 100)
+                .unwrap()
+                .is_empty()
+        );
+
+        writer.observe(active()).unwrap();
+        let mut launched = NativeObservations::start(root.path(), "runtime-a").unwrap();
+        assert!(launched.retry_due());
+        tokio::time::timeout(Duration::from_millis(100), launched.recv())
+            .await
+            .expect("a launched driver drains at once")
+            .unwrap();
         server.abort();
     }
     #[tokio::test]

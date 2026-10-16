@@ -52,6 +52,10 @@ pub struct ReplicationExchange {
     pub peer: String,
     pub fleet_id: String,
     pub schema_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_registry_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub projection_versions: BTreeMap<String, u64>,
     pub authority_digest: String,
     /// Six-table compatibility digest for older peers. Modern peers compare projection_digests.
     pub graph_digest: String,
@@ -132,6 +136,9 @@ pub struct ReplicationReceiveRequest {
     /// How long the worker's request that returned this exchange took, when it made one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round_trip_ms: Option<u64>,
+    /// Local dial evidence, never part of the signed or replicated exchange.
+    #[serde(default)]
+    pub carrier: ReplicationCarrier,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -146,6 +153,8 @@ pub struct ReplicationPeerFailureRequest {
     pub peer: String,
     pub status: String,
     pub error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier: Option<ReplicationCarrier>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -265,8 +274,56 @@ pub struct ReplicationWorkerStatus {
     pub next_retry_at_unix_ms: Option<u128>,
 }
 
+/// The carrier attempted locally, or unknown when this host has no dial evidence.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicationCarrier {
+    Tailscale,
+    Fabric,
+    Loopback,
+    #[default]
+    Unknown,
+}
+
+impl ReplicationCarrier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tailscale => "tailscale",
+            Self::Fabric => "fabric",
+            Self::Loopback => "loopback",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// One locally initiated exchange observation. Absent after restart; never a replicated claim.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReplicationExchangeTransport {
+    pub at_unix_ms: u128,
+    pub carrier: ReplicationCarrier,
+    /// Fabric exposes no evidence for the direct/relay path of this particular dial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_route: Option<String>,
+}
+
+impl ReplicationExchangeTransport {
+    pub fn new(at_unix_ms: u128, carrier: ReplicationCarrier) -> Self {
+        Self {
+            at_unix_ms,
+            carrier,
+            fabric_route: (carrier == ReplicationCarrier::Fabric).then(|| "unknown".into()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReplicationPeerStatus {
+    /// Last successful locally initiated exchange, with its original dial evidence and time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_successful_exchange: Option<ReplicationExchangeTransport>,
+    /// Last failed locally initiated exchange/attempt, independent of success and last_error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failed_exchange: Option<ReplicationExchangeTransport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker: Option<ReplicationWorkerStatus>,
     pub peer: String,
@@ -282,6 +339,12 @@ pub struct ReplicationPeerStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal_reason: Option<String>,
     pub schema_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_registry_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub projection_versions: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incompatible_projection_tables: Vec<String>,
     pub authority_digest: Option<String>,
     pub graph_digest: Option<String>,
     #[serde(default)]

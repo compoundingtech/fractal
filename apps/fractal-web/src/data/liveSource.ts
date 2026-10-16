@@ -30,6 +30,7 @@ import { getDebug } from '../telemetry/measurement/index.ts'
 import { unavailableTerminalHistory } from '../terminal/historySource.ts'
 import { gatewayTerminalInput } from '../terminal/terminal-input-port.ts'
 import { gatewayTerminalResize } from '../terminal/terminal-resize-port.ts'
+import { gatewayAgentControls } from '../agents/agent-control-port.ts'
 import { gatewayPromptAnswers } from '../conversation/alerts/prompt-answer-port.ts'
 import { gatewayDocuments } from '../documents/document-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
@@ -1102,6 +1103,7 @@ export const liveSource = ({
         if (feed._tag === 'Unavailable' && feed.retryable === true) retainTerminal(ref).retry()
       },
       terminalResize: gatewayTerminalResize(client),
+      agentControls: gatewayAgentControls(client),
       prompts: gatewayPromptAnswers(client),
       documents: gatewayDocuments(client),
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
