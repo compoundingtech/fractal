@@ -79,6 +79,22 @@ fn every_exit_reaps_the_daemon_even_when_the_rust_test_is_killed() {
 }
 
 #[test]
+fn the_supervisor_reports_each_owned_process_peak_memory() {
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new("python3")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .arg(repo.join("scripts/st3-test-memory-report-test"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn interrupted_tests_keep_logs_and_pending_observations() {
     if st3::test_support::supervise_test() {
         return;

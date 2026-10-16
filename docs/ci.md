@@ -302,6 +302,15 @@ uses only the supervisor's descendants, including when evidence collection fails
 temporary binary directory has already been removed. The Python boot, no-st2, subagent,
 messaging-fault and delivery-probe entrypoints use the same supervisor when run directly.
 
+With `SMALLTALK_TEST_MEMORY_REPORT=FILE` set, the supervisor also records the peak resident memory
+of every process the test owns: the test itself and each daemon, worker, driver and PTY under it,
+detached ones included. It reads the kernel's high-water mark (`VmHWM`) of each descendant on its
+100 ms poll and once more before teardown, and takes the peak of an adopted process it reaps
+(`wait4`), so a daemon that exits mid-test keeps its row (unnamed if it died before a poll saw it).
+It appends one JSON line per supervised test to FILE: `test`, `exit`, `wall_s` and `processes`
+(`name` such as `st3 up`, `argv`, `pid`, `peak_kb`), largest first. It is read-only and off unless
+the variable is set. A peak is resident size, so it includes the pages of the mapped binary. `scripts/st3-test-memory-report-test` is its proof.
+
 The isolated-process audit covers `boot_canaries`, `broken_gates`, `daemon_environment`,
 `first_sync`, `fleet`, `getting_started`, `mission_cancellation`, `daemon_restart`,
 `idle_budget`, `driver_incarnation`, `codex_bootstrap`, `no_st2_seat`, `subagents_seat`,
