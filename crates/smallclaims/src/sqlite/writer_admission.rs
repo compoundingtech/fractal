@@ -6,7 +6,6 @@ use std::time::Instant;
 pub(super) struct WorkerQueue {
     epoch: Instant,
     depth: AtomicU64,
-    enqueued_micros: AtomicU64,
     // u64::MAX means no busy period has been published yet.
     busy_since_micros: AtomicU64,
 }
@@ -16,7 +15,6 @@ impl WorkerQueue {
         let queue = Arc::new(Self {
             epoch: Instant::now(),
             depth: AtomicU64::new(0),
-            enqueued_micros: AtomicU64::new(0),
             busy_since_micros: AtomicU64::new(u64::MAX),
         });
         telemetry::register_worker_queue(&queue);
@@ -24,25 +22,7 @@ impl WorkerQueue {
     }
 
     pub(super) fn sample(&self) -> (u64, f64) {
-        self.sample_with(|| {})
-    }
-
-    fn sample_with(&self, mut after_depth: impl FnMut()) -> (u64, f64) {
-        for _ in 0..3 {
-            let depth = self.depth.load(Ordering::Acquire);
-            if depth == 0 {
-                return (0, 0.0);
-            }
-            after_depth();
-            let sum = self.enqueued_micros.load(Ordering::Relaxed);
-            if depth != self.depth.load(Ordering::Acquire) {
-                continue;
-            }
-            let age = self.micros().saturating_sub(sum / depth);
-            return (depth, std::time::Duration::from_micros(age).as_secs_f64());
-        }
-        // A changing queue is not a consistent sample: emit zero, not an uptime spike.
-        (0, 0.0)
+        (self.depth.load(Ordering::Acquire), self.busy_age())
     }
 
     pub(super) fn busy_age(&self) -> f64 {
@@ -68,7 +48,6 @@ impl WorkerQueue {
         std::sync::LazyLock::force(&telemetry::METRICS);
         let at = Instant::now();
         let micros = u64::try_from(at.duration_since(self.epoch).as_micros()).unwrap_or(u64::MAX);
-        self.enqueued_micros.fetch_add(micros, Ordering::Relaxed);
         if self.depth.fetch_add(1, Ordering::AcqRel) == 0 {
             self.busy_since_micros.fetch_min(micros, Ordering::AcqRel);
         }
@@ -85,7 +64,6 @@ struct QueuedWorker {
 impl Drop for QueuedWorker {
     fn drop(&mut self) {
         let last = self.queue.depth.fetch_sub(1, Ordering::AcqRel) == 1;
-        self.queue.enqueued_micros.fetch_sub(self.micros, Ordering::Relaxed);
         if last {
             let since = self.queue.busy_since_micros.swap(u64::MAX, Ordering::AcqRel);
             // A new 0->1 enqueue may publish before our clear. Recheck depth and
@@ -299,32 +277,6 @@ mod tests {
     use futures_util::poll;
     use std::task::Poll;
     use std::time::Duration;
-
-    #[test]
-    fn queue_sample_retries_when_last_callback_starts() {
-        let queue = WorkerQueue::new();
-        let mut queued = Some(queue.enqueue());
-        let sample = queue.sample_with(|| drop(queued.take()));
-        assert_eq!(sample, (0, 0.0));
-        assert_eq!(queue.busy_age(), 0.0);
-    }
-
-    #[test]
-    fn queue_sample_reports_zero_after_bounded_retries() {
-        let queue = WorkerQueue::new();
-        let queued = queue.enqueue();
-        let mut attempts = 0;
-        let sample = queue.sample_with(|| {
-            // Model a depth change between every pair of loads.
-            queue.depth.fetch_add(1, Ordering::Relaxed);
-            attempts += 1;
-        });
-        assert_eq!(attempts, 3);
-        assert_eq!(sample, (0, 0.0));
-        queue.depth.fetch_sub(attempts, Ordering::Relaxed);
-        drop(queued);
-        assert_eq!(queue.sample(), (0, 0.0));
-    }
 
     #[test]
     fn busy_period_covers_all_queued_callbacks_and_clears() {

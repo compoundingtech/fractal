@@ -446,14 +446,10 @@ pub(super) fn register_worker_queue(queue: &Arc<super::writer_admission::WorkerQ
     queues.push(Arc::downgrade(queue));
 }
 
-fn worker_queue_sample() -> (u64, f64, f64) {
+fn worker_queue_sample() -> (u64, f64) {
     let queues = WORKER_QUEUES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    queues.iter().filter_map(std::sync::Weak::upgrade).map(|queue| {
-        let (depth, mean) = queue.sample();
-        (depth, mean, queue.busy_age())
-    }).fold((0, 0.0_f64, 0.0_f64), |(depth, mean, busy), (count, mean_age, busy_age)| {
-        (depth + count, mean.max(mean_age), busy.max(busy_age))
-    })
+    queues.iter().filter_map(std::sync::Weak::upgrade).map(|queue| queue.sample())
+        .fold((0, 0.0_f64), |(depth, busy), (count, age)| (depth + count, busy.max(age)))
 }
 
 pub(super) fn register_pool(pool: &super::ReadPool) {
@@ -478,13 +474,9 @@ fn register_gauges(meter: &Meter) {
         .with_unit("{job}")
         .with_callback(|observer| observer.observe(worker_queue_sample().0, &[]))
         .build();
-    meter.f64_observable_gauge("st.write_workers.queue.mean_age")
-        .with_unit("s")
-        .with_callback(|observer| observer.observe(worker_queue_sample().1, &[]))
-        .build();
     meter.f64_observable_gauge("st.write_workers.queue.busy_age")
         .with_unit("s")
-        .with_callback(|observer| observer.observe(worker_queue_sample().2, &[]))
+        .with_callback(|observer| observer.observe(worker_queue_sample().1, &[]))
         .build();
     meter.f64_observable_gauge("st.db.writer.current_hold")
         .with_unit("s")
@@ -664,9 +656,6 @@ mod tests {
             let depth = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.depth").unwrap();
             let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = depth.data() else { panic!("depth gauge"); };
             assert_eq!(gauge.data_points().next().unwrap().value(), 1);
-            let mean = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.mean_age").unwrap();
-            let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = mean.data() else { panic!("age gauge"); };
-            assert!(gauge.data_points().next().unwrap().value() >= age);
             let busy = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.busy_age").unwrap();
             let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = busy.data() else { panic!("busy gauge"); };
             assert!(gauge.data_points().next().unwrap().value() >= age);
@@ -703,9 +692,6 @@ mod tests {
         let depth = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.depth").unwrap();
         let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = depth.data() else { panic!("depth gauge"); };
         assert_eq!(gauge.data_points().next().unwrap().value(), 0);
-        let mean = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.mean_age").unwrap();
-        let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = mean.data() else { panic!("age gauge"); };
-        assert_eq!(gauge.data_points().next().unwrap().value(), 0.0);
         let busy = metrics.iter().find(|metric| metric.name() == "st.write_workers.queue.busy_age").unwrap();
         let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = busy.data() else { panic!("busy gauge"); };
         assert_eq!(gauge.data_points().next().unwrap().value(), 0.0);

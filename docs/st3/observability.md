@@ -420,7 +420,6 @@ They use the existing SDK meter provider and daemon resource identity.
 | Instrument | Kind | Unit | Attributes / meaning |
 | --- | --- | --- | --- |
 | `st.write_workers.queue.depth` | Observable gauge | `{job}` | Queued, not-yet-started top-level callbacks |
-| `st.write_workers.queue.mean_age` | Observable gauge | `s` | Maximum per-store mean age of queued callbacks; zero when empty |
 | `st.write_workers.queue.busy_age` | Observable gauge | `s` | Maximum per-store busy-period age: conservative upper bound on oldest queued age, not exact; zero when empty |
 | `st.write_workers.queue.wait` | Histogram | `s` | `origin`: normalized HTTP route when available, otherwise `other`; enqueue through callback start (or explicit admission grant) |
 | `st.write_workers.abandoned_callback_starts` | Counter | `{job}` | `outcome=ran`: callbacks starting after their request waiter was dropped |
@@ -428,13 +427,8 @@ They use the existing SDK meter provider and daemon resource identity.
 Inherited dependent callbacks do not add queue entries. Pending admission cancellation
 removes the entry; admitted callbacks remain queued until their blocking thread starts.
 Explicit `admit_write` calls leave the queue when granted capacity. Each store tracks
-depth, the sum of monotonic enqueue timestamps, and a busy-period start using atomics,
-without a per-write mutex, map allocation or job scan. Mean sampling checks depth
-before and after reading the timestamp sum, retrying up to three times; it emits zero
-if empty or no stable-depth sample is found. It remains approximate during concurrent
-updates (including changes that leave depth unchanged); negative ages saturate to zero.
-Across stores the gauges sum depth and take the maximum per-store mean and busy age.
-Mean age alone can hide a single old outlier behind young callbacks.
+depth and a busy-period start using atomics, without a per-write mutex, map allocation
+or job scan. Across stores the gauges sum depth and take the maximum busy age.
 
 On a 0-to-1 depth transition, an atomic minimum publishes the busy start. On the
 1-to-0 decrement, the start is cleared, then depth is rechecked: if a new enqueue
@@ -454,19 +448,18 @@ HTTP requests; a pending handler can contribute again on a later abandoned poll.
 `outcome=skipped` is reserved for jobs skipped after abandonment; the current implementation
 does not skip jobs and emits only `ran`. Wait histograms use the storage duration buckets.
 
-An alert for potentially old queued work uses the conservative upper bound, not mean age:
+An alert for potentially old queued work uses the conservative upper bound:
 
 ```promql
 max by (host_name) (st_write_workers_queue_busy_age_seconds * on(instance) group_left(host_name) target_info{job="infra/st-daemon"}) > 5
 ```
 
 Proof: `worker_queue_exports_wait_and_abandoned_callback_starts` blocks worker capacity,
-checks exported depth, mean age and busy-age bound, drops the requester before start,
+checks exported depth and busy-age bound, drops the requester before start,
 and checks the exported abandonment counter, wait histogram, and empty-queue reset.
 It also checks pending-admission cancellation removes queue entries.
-`queue_sample_retries_when_last_callback_starts` deterministically removes the last
-entry between sample loads; `busy_period_covers_all_queued_callbacks_and_clears`
-checks busy-period publication, retention across queued callbacks, clear and restart.
+`busy_period_covers_all_queued_callbacks_and_clears` checks busy-period publication,
+retention across queued callbacks, clear and restart.
 
 A scoped thread-local `Option<Arc<WriterWait>>` shares a request accumulator across
 handler, store, action, and API blocking sections. Two relaxed atomics sum writer ACK
