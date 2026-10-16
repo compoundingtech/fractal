@@ -64,7 +64,10 @@ fn named_instances_have_distinct_account_anchored_authority() {
 
 #[test]
 fn instance_named_default_does_not_alias_the_default_account_authority() {
-    let a = status(None, None);
-    let b = status(None, Some("default"));
+    // The existing global --instance bootstrap requires HOME before command dispatch.
+    // Mode authority must still use NSS, and the two namespaces must remain distinct.
+    let home = tempfile::tempdir().unwrap();
+    let a = status(Some(home.path()), None);
+    let b = status(Some(home.path()), Some("default"));
     assert_ne!(a["authority_path"], b["authority_path"]);
 }
