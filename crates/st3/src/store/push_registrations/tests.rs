@@ -4,6 +4,7 @@ const PERSON: &str = "person/example";
 const ACTOR: &str = "person/example/session/phone";
 const GRANT: &str = "custom/client/push-phone";
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+const CREDENTIAL_HASH: &str = "cleanup-credential-hash";
 
 fn claim(store: &Store, subject: &str, kind: &str, fields: Value) {
     store
@@ -26,7 +27,7 @@ fn grant(store: &Store, subject: &str, person: &str, actor: &str, device: &str, 
         "custom.client.pairing-completed",
         json!({
             "person_id":person,"session_actor":actor,"device_id":device,
-            "expires_at_unix_ms":expiry,"scopes":[]
+            "expires_at_unix_ms":expiry,"scopes":[],"credential_hash":CREDENTIAL_HASH
         }),
     );
 }
@@ -48,6 +49,175 @@ fn count(store: &Store) -> usize {
             row.get(0)
         })
         .unwrap()
+}
+
+fn cleanup_proof(store: &Store, subject: &str) -> PushCleanupProof {
+    let pairing_index = store.readers.get().query_row(
+        "SELECT MAX(store_index) FROM claims WHERE subject=?1
+         AND kind='custom.client.pairing-completed'",
+        [subject],
+        |row| row.get(0),
+    ).unwrap();
+    PushCleanupProof {
+        grant: subject.into(),
+        pairing_index,
+        person: PERSON.into(),
+        device: "device/phone".into(),
+        actor: ACTOR.into(),
+        credential_hash: CREDENTIAL_HASH.into(),
+    }
+}
+
+#[test]
+fn push_terminal_cleanup_is_idempotent_for_current_expired_and_revoked_pairings() {
+    for (expiry, revoked) in [(9_000_000_000_000, false), (2000, false), (2000, true)] {
+        let store = Store::open_memory("push-owner").unwrap();
+        grant(&store, GRANT, PERSON, ACTOR, "device/phone", expiry);
+        let proof = cleanup_proof(&store, GRANT);
+        let input = registration(TOKEN, PushEnvironment::Development);
+        store.update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 1000)
+            .unwrap().unwrap();
+        if revoked {
+            claim(&store, GRANT, "custom.client.pairing-revoked", json!({}));
+        }
+        for _ in 0..2 {
+            assert_eq!(
+                store.cleanup_push_registration(&proof).unwrap(),
+                Some(PushRegistrationStatus::unregistered()),
+            );
+            assert_eq!(count(&store), 0);
+        }
+    }
+}
+
+#[test]
+fn push_terminal_cleanup_rechecks_every_proof_field_without_removing_other_rows() {
+    let store = Store::open_memory("push-owner").unwrap();
+    grant(&store, GRANT, PERSON, ACTOR, "device/phone", 2000);
+    let proof = cleanup_proof(&store, GRANT);
+    let input = registration(TOKEN, PushEnvironment::Development);
+    store.update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 1000)
+        .unwrap().unwrap();
+    for field in 0..6 {
+        for replacement in ["", "wrong-identity"] {
+            let mut bad = proof.clone();
+            match field {
+                0 => bad.grant = replacement.into(),
+                1 => bad.person = replacement.into(),
+                2 => bad.device = replacement.into(),
+                3 => bad.actor = replacement.into(),
+                4 => bad.credential_hash = replacement.into(),
+                _ => bad.pairing_index = if replacement.is_empty() { 0 } else { u64::MAX },
+            }
+            assert!(store.cleanup_push_registration(&bad).unwrap().is_none());
+            assert_eq!(count(&store), 1);
+        }
+    }
+    let mut wrong_index = proof.clone();
+    wrong_index.pairing_index += 1;
+    assert!(store.cleanup_push_registration(&wrong_index).unwrap().is_none());
+    assert_eq!(count(&store), 1);
+}
+
+#[test]
+fn push_terminal_cleanup_rejects_malformed_claims_and_foreign_issuers() {
+    for field in ["person_id", "device_id", "session_actor", "credential_hash"] {
+        let store = Store::open_memory("push-owner").unwrap();
+        let mut fields = json!({
+            "person_id":PERSON,"device_id":"device/phone","session_actor":ACTOR,
+            "credential_hash":CREDENTIAL_HASH,"expires_at_unix_ms":2000
+        });
+        fields[field] = json!(17);
+        claim(&store, GRANT, "custom.client.pairing-completed", fields);
+        let proof = cleanup_proof(&store, GRANT);
+        assert!(store.cleanup_push_registration(&proof).unwrap().is_none());
+    }
+    let issuer = Store::open_memory("push-foreign").unwrap();
+    let store = Store::open_memory("push-owner").unwrap();
+    grant(&issuer, GRANT, PERSON, ACTOR, "device/phone", 2000);
+    replicate(&issuer, &store);
+    let proof = cleanup_proof(&store, GRANT);
+    assert!(store.cleanup_push_registration(&proof).unwrap().is_none());
+}
+
+#[test]
+fn push_terminal_cleanup_queued_before_revocation_still_succeeds() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let store = Arc::new(Store::open_memory("push-owner").unwrap());
+    grant(&store, GRANT, PERSON, ACTOR, "device/phone", 2000);
+    let proof = cleanup_proof(&store, GRANT);
+    let input = registration(TOKEN, PushEnvironment::Development);
+    store.update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 1000)
+        .unwrap().unwrap();
+    let (proxy, incoming) = mpsc::channel();
+    let original = store.connection.jobs.lock().unwrap().replace(proxy).unwrap();
+    let worker_store = store.clone();
+    let worker = std::thread::spawn(move || worker_store.cleanup_push_registration(&proof));
+    let job = incoming.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(matches!(&job, smallclaims::sqlite::WriterJob::Batched { .. }));
+    *store.connection.jobs.lock().unwrap() = Some(original.clone());
+    claim(&store, GRANT, "custom.client.pairing-revoked", json!({}));
+    original.send(job).unwrap();
+    assert_eq!(worker.join().unwrap().unwrap(), Some(PushRegistrationStatus::unregistered()));
+    assert_eq!(count(&store), 0);
+}
+
+#[test]
+fn push_terminal_cleanup_queued_before_repairing_preserves_the_new_registration() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    for replacement_grant in [GRANT, "custom/client/new-phone"] {
+        let store = Arc::new(Store::open_memory("push-owner").unwrap());
+        grant(&store, GRANT, PERSON, ACTOR, "device/phone", 2000);
+        let proof = cleanup_proof(&store, GRANT);
+        let input = registration(TOKEN, PushEnvironment::Development);
+        store.update_push_registration(GRANT, PERSON, ACTOR, Some(&input), || 1000)
+            .unwrap().unwrap();
+        // Intercept actual queue admission so the replacement commits after proof
+        // authentication but before the cleanup transaction can inspect the claim.
+        let (proxy, incoming) = mpsc::channel();
+        let original = store.connection.jobs.lock().unwrap().replace(proxy).unwrap();
+        let worker_store = store.clone();
+        let worker_proof = proof.clone();
+        let worker = std::thread::spawn(move || worker_store.cleanup_push_registration(&worker_proof));
+        let job = incoming.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(matches!(&job, smallclaims::sqlite::WriterJob::Batched { .. }));
+        *store.connection.jobs.lock().unwrap() = Some(original.clone());
+        grant(&store, replacement_grant, PERSON, ACTOR, "device/phone", 3000);
+        store.update_push_registration(replacement_grant, PERSON, ACTOR, Some(&input), || 1000)
+            .unwrap().unwrap();
+        original.send(job).unwrap();
+        let result = worker.join().unwrap().unwrap();
+        if replacement_grant == GRANT {
+            assert_eq!(result, None, "a newer claim for the same subject invalidates the proof");
+        } else {
+            assert_eq!(result, Some(PushRegistrationStatus::unregistered()));
+        }
+        assert_eq!(count(&store), 1);
+        let connection = store.readers.get();
+        let (row_grant, row_index): (String, u64) = connection.query_row(
+            "SELECT pairing_grant,pairing_index FROM local_push_registrations",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(row_grant, replacement_grant);
+        assert!(row_index > proof.pairing_index);
+    }
+}
+
+#[test]
+fn push_terminal_cleanup_database_errors_are_redacted() {
+    let store = Store::open_memory("push-owner").unwrap();
+    grant(&store, GRANT, PERSON, ACTOR, "device/phone", 2000);
+    let proof = cleanup_proof(&store, GRANT);
+    store.connection.write().execute_batch("DROP TABLE local_push_registrations").unwrap();
+    let error = store.cleanup_push_registration(&proof).unwrap_err();
+    assert_eq!(error.to_string(), "local push registration cleanup failed");
+    let diagnostic = format!("{error:?}");
+    assert!(!diagnostic.contains(CREDENTIAL_HASH));
+    assert!(!diagnostic.contains(TOKEN));
 }
 
 #[test]
@@ -180,6 +350,8 @@ fn push_exact_session_identity_and_expiry_are_rechecked_inside_writer_transactio
 }
 
 #[test]
+// This regression intentionally exercises the live-session update helper's DELETE
+// branch. HTTP DELETE instead uses terminal cleanup and does not require a live grant.
 fn push_post_and_delete_reject_grant_expiry_while_queued_for_writer() {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::mpsc;

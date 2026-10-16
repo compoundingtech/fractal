@@ -1,7 +1,7 @@
 //! Paired-session-only registration. All input/database failures are redacted at this boundary.
 use super::client_v0::ClientSession;
 use super::*;
-use crate::store::push_registrations::{PushRegistration, PushRegistrationStatus};
+use crate::store::push_registrations::{PushCleanupProof, PushRegistration, PushRegistrationStatus};
 
 pub(super) const MAX_BODY_BYTES: usize = 4096;
 
@@ -18,6 +18,59 @@ fn invalid(message: &'static str) -> ApiError {
 
 fn unavailable() -> ApiError {
     ApiError::internal("local push registration storage is unavailable")
+}
+
+/// Cleanup proof is deliberately not a session: retired credentials regain no read/write scopes.
+pub(super) enum Authentication {
+    Session(ClientSession),
+    Cleanup(PushCleanupProof),
+}
+
+pub(super) fn authenticate(
+    state: &AppState,
+    request: &Request<Body>,
+    transport: &'static str,
+) -> Result<Authentication, ApiError> {
+    if request.method() != axum::http::Method::DELETE
+        || request.uri().path() != "/v1/client/push-registration"
+        || transport == "unix"
+    {
+        return super::client_v0::authenticate(state, request, transport)
+            .map(Authentication::Session);
+    }
+    let denied = || ApiError {
+        status: StatusCode::FORBIDDEN,
+        code: "forbidden".into(),
+        message: "push cleanup requires proof of a pairing issued by this member".into(),
+        details: Box::default(),
+    };
+    let credential = request.headers().get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(denied)?;
+    let digest = hex::encode(Sha256::digest(credential.as_bytes()));
+    let pairings = state.store
+        .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
+        .map_err(|_| unavailable())?;
+    let paired = pairings.claims.iter().find(|claim| {
+        claim.origin == state.store.origin()
+            && claim.body.pointer("/fields/credential_hash").and_then(Value::as_str)
+                == Some(digest.as_str())
+    }).ok_or_else(denied)?;
+    let field = |name: &str| paired.body.get("fields").and_then(|fields| fields.get(name))
+        .and_then(Value::as_str).filter(|value| !value.is_empty());
+    let person = field("person_id")
+        .filter(|person| person.starts_with("person/") && person.matches('/').count() == 1)
+        .ok_or_else(denied)?;
+    Ok(Authentication::Cleanup(PushCleanupProof {
+        grant: paired.subject.clone(),
+        pairing_index: paired.store_index,
+        person: person.into(),
+        device: field("device_id").ok_or_else(denied)?.into(),
+        actor: field("session_actor").ok_or_else(denied)?.into(),
+        credential_hash: digest,
+    }))
 }
 
 fn paired(session: &ClientSession) -> Result<&str, ApiError> {
@@ -106,10 +159,15 @@ pub(super) async fn register(
 
 pub(super) async fn unregister(
     State(state): State<AppState>,
-    Extension(session): Extension<ClientSession>,
+    proof: Option<Extension<PushCleanupProof>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    paired(&session)?;
+    let proof = proof.ok_or_else(|| ApiError {
+        status: StatusCode::FORBIDDEN,
+        code: "forbidden".into(),
+        message: "push cleanup requires proof of a pairing issued by this member".into(),
+        details: Box::default(),
+    })?.0;
     let body = body.map_err(|error| ApiError {
         status: error.status(),
         code: "validation-failed".into(),
@@ -119,7 +177,19 @@ pub(super) async fn unregister(
     if !body.is_empty() {
         return Err(invalid("push unregistration does not accept a body"));
     }
-    update(state, session, None).await
+    let store = state.store.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        store.cleanup_push_registration(&proof)
+            .map_err(|_| unavailable())?
+            .ok_or_else(|| ApiError {
+                status: StatusCode::FORBIDDEN,
+                code: "forbidden".into(),
+                message: "push cleanup proof is no longer valid".into(),
+                details: Box::default(),
+            })
+    }).await.map_err(|_| unavailable())??;
+    let _ = CHANGES.send(state.node.clone());
+    Ok(Json(json!(status)))
 }
 
 async fn update(

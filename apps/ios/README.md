@@ -115,11 +115,16 @@ version accompany the token.
 Turning the switch off unregisters from every issuer this phone may have registered with,
 including earlier members after switching connections. Before sending any registration, the phone
 durably records only its pairing-profile key as cleanup ownership—not a token or credential.
-That ownership survives restart and is cleared only after confirmed unregistration. An offline
-or failed opt-out stays visibly pending/failed until its issuer can be reached again.
-Forgetting this device or removing an independently paired member fences native work and
-requires confirmed cleanup before deleting the affected pairing credentials. If cleanup cannot
-be confirmed, the credentials remain and the phone shows a safe reconnect/retry message.
+That ownership survives restart and is cleared only after confirmed unregistration and durable
+journal removal. An offline or failed opt-out stays visibly pending/failed until its issuer can
+be reached again. Forgetting this device, removing an independently paired member, or replacing
+its pairing fences native work and requires confirmed cleanup before deleting or replacing the
+affected pairing credentials. After expiry or revocation, the saved bearer retains only authority
+to DELETE its exact old pairing incarnation's push registration on its issuer, returning the
+existing `registered: false` confirmation even if the registration was already removed. It cannot
+read, register, or delete a replacement pairing's registration. This is not a live paired session;
+a generic 401/403 or transport failure is not cleanup confirmation. If cleanup or journal removal
+fails, the credentials remain and the phone shows a safe reconnect/retry message.
 Never-enabled phones with no cleanup ownership can still forget while offline.
 Pending native permission/token callbacks are canceled locally on opt-out or forget; push HTTP
 requests have an eight-second abort deadline. The token is held only for native acquisition and

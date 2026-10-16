@@ -32,6 +32,18 @@ pub(crate) struct PushRegistration {
     pub app_version: String,
 }
 
+/// Immutable local pairing identity, used only to remove that pairing's registration.
+/// Deliberately not Debug or Serialize: the credential hash stays out of diagnostics.
+#[derive(Clone)]
+pub(crate) struct PushCleanupProof {
+    pub grant: String,
+    pub pairing_index: u64,
+    pub person: String,
+    pub device: String,
+    pub actor: String,
+    pub credential_hash: String,
+}
+
 #[derive(Clone, Copy, Debug, serde::Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PushEnvironment {
@@ -65,9 +77,57 @@ impl PushRegistrationStatus {
 }
 
 impl Store {
+    /// Cleanup remains available after expiry or revocation, without restoring session
+    /// authority. Recheck the immutable local claim after writer admission; a replacement
+    /// pairing for the same grant invalidates the proof, but revocation does not.
+    pub(crate) fn cleanup_push_registration(
+        &self,
+        proof: &PushCleanupProof,
+    ) -> Result<Option<PushRegistrationStatus>> {
+        self.connection.batched(|tx| -> Result<Option<PushRegistrationStatus>> {
+            if proof.grant.is_empty() || proof.person.is_empty() || proof.device.is_empty()
+                || proof.actor.is_empty() || proof.credential_hash.is_empty()
+                || proof.pairing_index == 0 || proof.pairing_index > i64::MAX as u64
+            {
+                return Ok(None);
+            }
+            let valid: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims
+                 WHERE subject=?1 AND store_index=?2 AND origin=?3
+                   AND kind='custom.client.pairing-completed'
+                   AND json_type(body,'$.fields.person_id')='text'
+                   AND json_extract(body,'$.fields.person_id')=?4
+                   AND json_type(body,'$.fields.device_id')='text'
+                   AND json_extract(body,'$.fields.device_id')=?5
+                   AND json_type(body,'$.fields.session_actor')='text'
+                   AND json_extract(body,'$.fields.session_actor')=?6
+                   AND json_type(body,'$.fields.credential_hash')='text'
+                   AND json_extract(body,'$.fields.credential_hash')=?7
+                   AND NOT EXISTS(SELECT 1 FROM claims AS newer
+                     WHERE newer.subject=?1 AND newer.store_index>?2
+                       AND newer.kind='custom.client.pairing-completed'))",
+                params![proof.grant, proof.pairing_index, self.origin(), proof.person,
+                    proof.device, proof.actor, proof.credential_hash],
+                |row| row.get(0),
+            )?;
+            if !valid {
+                return Ok(None);
+            }
+            tx.execute(
+                "DELETE FROM local_push_registrations
+                 WHERE pairing_grant=?1 AND pairing_index=?2 AND person=?3 AND device_id=?4",
+                params![proof.grant, proof.pairing_index, proof.person, proof.device],
+            )?;
+            Ok(Some(PushRegistrationStatus::unregistered()))
+        }).map_err(|_| anyhow::anyhow!("local push registration transaction failed"))?
+            .map_err(|_| anyhow::anyhow!("local push registration cleanup failed"))
+    }
+
     /// Resolve device identity and recheck the exact grant under the same writer transaction
     /// as the mutation, sampling the clock only after writer admission. A concurrent
     /// revocation or expiry cannot leave a newly registered secret behind.
+    /// Its `None` mutation is a live-session helper, not terminal cleanup; the HTTP
+    /// DELETE path uses `cleanup_push_registration` instead.
     pub(crate) fn update_push_registration(
         &self,
         grant: &str,

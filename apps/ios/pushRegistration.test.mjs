@@ -295,22 +295,154 @@ test('permission denial removes every owned issuer and retains failed ones for r
   assert.equal(h.lifecycle.snapshot().status, 'permission-denied');
 });
 
+test('expired and revoked registrations require exact-old-grant cleanup confirmation before Forget or issuer removal', async () => {
+  for (const retirement of ['expired', 'revoked']) for (const operation of ['forget', 'issuer']) {
+    const h = harness({ enabled: true }); h.connect(); await h.lifecycle.start();
+    assert.equal(h.lifecycle.snapshot().status, 'registered');
+    h.calls.length = 0;
+    const entered = deferred(), reply = deferred();
+    // Model the API boundary: normal authority is gone, but this issuer still has
+    // the saved old bearer and can explicitly confirm its exact grant's DELETE.
+    h.remote.register = async () => { assert.fail(`${retirement} pairing must not register`); };
+    h.remote.unregister = async () => { h.calls.push(['unregister']); entered.resolve(); return reply.promise; };
+    h.lifecycle.configure({ paired: true, granted: false, issuer: 'A', issuers: new Map([['A', h.remote]]) });
+    await h.lifecycle.refresh();
+    assert.deepEqual(h.calls, []);
+    assert.equal(h.state.changed, undefined);
+    const cleaning = operation === 'forget' ? h.lifecycle.forget() : h.lifecycle.forgetIssuer('A');
+    await entered.promise;
+    assert.deepEqual(h.state.owners, ['A'], 'server-side expiry/revocation alone is not phone cleanup confirmation');
+    reply.resolve({ registered: false });
+    assert.equal(await cleaning, true);
+    assert.deepEqual(h.calls.filter(call => call[0] === 'unregister'), [['unregister']]);
+    assert.deepEqual(h.state.owners, []);
+    assert.equal(h.lifecycle.snapshot().cleanup, 'complete');
+    assert.equal(await h.lifecycle.forget(), true, 'confirmed cleanup permits subsequent Forget without another DELETE');
+    assert.equal(h.calls.filter(call => call[0] === 'unregister').length, 1);
+  }
+});
+
+test('re-pair after expiry or revocation cleans the old incarnation before registering the replacement', async () => {
+  for (const retirement of ['expired', 'revoked']) {
+    const h = harness({ enabled: true }); h.connect(); await h.lifecycle.start();
+    const calls = [];
+    h.remote.register = async () => { assert.fail(`${retirement} pairing must not register`); };
+    h.remote.unregister = async () => { calls.push('old-delete'); return { registered: false }; };
+    h.lifecycle.configure({ paired: true, granted: false, issuer: 'A', issuers: new Map([['A', h.remote]]) });
+    await h.lifecycle.refresh();
+    // completePairing uses this gate before replacing the saved profile, then
+    // releases the retiring profile key in its finally block.
+    assert.equal(await h.lifecycle.forgetIssuer('A'), true);
+    assert.deepEqual(h.state.owners, []);
+    const replacement = {
+      register: async () => { calls.push('new-register'); return { registered: true }; },
+      unregister: async () => { calls.push('new-delete'); return { registered: false }; },
+    };
+    h.lifecycle.releaseIssuer('A');
+    h.lifecycle.configure({ paired: true, granted: true, issuer: 'A', remote: replacement, issuers: new Map([['A', replacement]]) });
+    await h.lifecycle.refresh();
+    assert.equal(calls[0], 'old-delete');
+    assert.ok(calls.slice(1).every(call => call === 'new-register'));
+    assert.ok(calls.includes('new-register'));
+    assert.deepEqual(h.state.owners, ['A']);
+    assert.equal(h.lifecycle.snapshot().status, 'registered');
+    assert.equal(await h.lifecycle.forget(), true);
+    assert.equal(calls.at(-1), 'new-delete');
+    assert.equal(calls.filter(call => call === 'old-delete').length, 1);
+    assert.deepEqual(h.state.owners, []);
+  }
+});
+
+test('retired pairing cleanup still blocks Forget, removal and re-pair on transport, authorization or journal failures', async () => {
+  for (const retirement of ['expired', 'revoked']) for (const operation of ['forget', 'issuer', 're-pair']) for (const failure of ['transport', '401', '403', 'journal']) {
+    const h = harness({ enabled: true }); h.connect(); await h.lifecycle.start();
+    h.remote.register = async () => { assert.fail(`${retirement} pairing must not register`); };
+    h.remote.unregister = async () => {
+      if (failure === 'journal') return { registered: false };
+      throw Object.assign(new Error(token), failure === 'transport' ? {} : { status: Number(failure) });
+    };
+    if (failure === 'journal') h.ownership.write = async () => { throw new Error(token); };
+    h.lifecycle.configure({ paired: true, granted: false, issuer: 'A', issuers: new Map([['A', h.remote]]) });
+    await h.lifecycle.refresh();
+    const clean = () => operation === 'forget' ? h.lifecycle.forget() : h.lifecycle.forgetIssuer('A');
+    assert.equal(await clean(), false, `${retirement}/${operation}/${failure} must retain the old profile`);
+    assert.deepEqual(h.state.owners, ['A']);
+    assert.equal(h.lifecycle.snapshot().cleanup, 'failed');
+    assert.equal(JSON.stringify(h.lifecycle.snapshot()).includes(token), false);
+    h.remote.unregister = async () => ({ registered: false });
+    h.ownership.write = async owners => { h.state.owners = [...owners]; };
+    assert.equal(await clean(), true, 'only explicit confirmation and durable journal removal release the gate');
+    assert.deepEqual(h.state.owners, []);
+  }
+});
+
 // Exercise the real profile cleanup helper without importing React Native into Node,
 // matching observationReporting.test.mjs's production-callback extraction pattern.
 const storeSource = ts.createSourceFile('store.tsx', readFileSync(new URL('./store.tsx', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const profileHelpers = [];
+const pushRouteDeclarations = new Map();
 const visitStore = node => {
   if (ts.isFunctionDeclaration(node) && node.name?.text === 'forgetMemberProfile') profileHelpers.push(node);
+  if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && ['pushIssuers', 'pushRemote'].includes(node.name.text)) {
+    assert.equal(pushRouteDeclarations.has(node.name.text), false);
+    pushRouteDeclarations.set(node.name.text, node);
+  }
   ts.forEachChild(node, visitStore);
 };
 visitStore(storeSource);
 assert.equal(profileHelpers.length, 1);
 const bindProfileCleanup = new Function('memberProfileKey', 'ownProfiles', 'push', 'SecureStore', 'removeDeviceKey', 'setOwnProfiles', 'setError',
   ts.transpile(`return (${profileHelpers[0].getText(storeSource)});`, { target: ts.ScriptTarget.ES2022 }));
+assert.equal(pushRouteDeclarations.size, 2);
+const bindPushRoutes = new Function('context', ts.transpile(`
+  const { useMemo, proof, credential, PROFILE_KEY, url, isFabricGatewayId, ownProfiles,
+    connectUrl, clientCredential, pushIssuer, pushGranted, status, St3Client, pushWrite,
+    gatewayFetch, clientName, app } = context;
+  const ${pushRouteDeclarations.get('pushIssuers').getText(storeSource)};
+  const ${pushRouteDeclarations.get('pushRemote').getText(storeSource)};
+  return { issuers: pushIssuers, remote: pushRemote };
+`, { target: ts.ScriptTarget.ES2022 }));
+
+test('real Fabric issuer routes allow retired-bearer cleanup without restoring registration authority', async () => {
+  for (const retirement of ['expired', 'revoked']) for (const [status, pushGranted] of [['offline', false], ['offline', true], ['online', false], ['online', true]]) {
+    const calls = [], bearer = `${retirement}-old-bearer`;
+    const context = {
+      useMemo: callback => callback(), proof: false, credential: bearer, PROFILE_KEY: 'A',
+      url: 'fabric:A', isFabricGatewayId: value => value.startsWith('fabric:'),
+      ownProfiles: new Map([['B', { url: 'fabric:B', credential: 'other-bearer' }]]),
+      connectUrl: 'http://127.0.0.1:12345', clientCredential: bearer, pushIssuer: 'A', pushGranted, status,
+      St3Client: class {
+        constructor(options) { this.options = options; }
+        async pushUnregister() {
+          calls.push([this.options.baseUrl, this.options.credential()]);
+          return { value: { registered: false } };
+        }
+      },
+      pushWrite: callback => callback(new AbortController().signal),
+      gatewayFetch: fetchImpl => fetchImpl, clientName: () => 'test', app: { expo: { version: '1.0' } },
+    };
+    const routes = bindPushRoutes(context);
+    assert.ok(routes.issuers.get('A'), 'current member-bound carrier must survive capability/session loss');
+    assert.equal(routes.issuers.get('B'), undefined, 'another member must not inherit the current carrier or bearer');
+    assert.equal(routes.remote, status === 'online' && pushGranted ? routes.issuers.get('A') : undefined,
+      'ordinary registration still needs both a live session and a granted capability');
+    assert.deepEqual(await routes.issuers.get('A').unregister(), { registered: false });
+    assert.deepEqual(calls, [[context.connectUrl, bearer]]);
+    assert.equal(bindPushRoutes({ ...context, connectUrl: undefined }).issuers.get('A'), undefined);
+    assert.equal(bindPushRoutes({ ...context, clientCredential: undefined }).issuers.get('A'), undefined);
+    assert.equal(bindPushRoutes({ ...context, proof: true }).issuers.size, 0);
+  }
+});
+
 
 test('real store member removal waits for issuer cleanup before deleting its credential and signing key', async () => {
-  for (const succeeds of [true, false]) {
+  for (const retirement of ['active', 'expired', 'revoked']) for (const succeeds of [true, false]) {
     const h = harness({ enabled: true }); h.connect(); await h.lifecycle.start();
+    if (retirement !== 'active') {
+      h.remote.register = async () => { assert.fail(`${retirement} pairing must not register`); };
+      h.lifecycle.configure({ paired: true, granted: false, issuer: 'A', issuers: new Map([['A', h.remote]]) });
+      await h.lifecycle.refresh();
+    }
     const entered = deferred(), reply = deferred(), deleted = [], issues = [];
     h.remote.unregister = async () => { entered.resolve(); return reply.promise; };
     const cleanup = bindProfileCleanup(() => 'A', new Map([['A', { signing: { handle: 'key-A' } }]]), h.lifecycle,

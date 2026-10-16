@@ -156,7 +156,7 @@ async fn push_http_register_replace_unregister_and_capability_are_local_and_safe
 }
 
 #[tokio::test]
-async fn push_local_unpaired_unknown_revoked_and_expired_sessions_are_forbidden() {
+async fn push_terminal_cleanup_preserves_normal_authentication_and_local_authority() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     grant(&state, client_now_ms() as u64 + 600_000);
@@ -193,19 +193,34 @@ async fn push_local_unpaired_unknown_revoked_and_expired_sessions_are_forbidden(
             idempotency_key: None,
         })
         .unwrap();
-    for (method, bytes) in [("POST", wire.clone()), ("DELETE", vec![])] {
-        assert_eq!(
-            send(app.clone(), method, Some(CREDENTIAL), bytes).await.0,
-            StatusCode::FORBIDDEN
-        );
+    for _ in 0..2 {
+        let (status, response) = send(app.clone(), "DELETE", Some(CREDENTIAL), vec![]).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_local_envelope(&response, json!({"registered":false}));
     }
+    let (status, response) = send(app.clone(), "POST", Some(CREDENTIAL), wire.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
     grant(&state, client_now_ms() as u64 - 1);
-    for (method, bytes) in [("POST", wire), ("DELETE", vec![])] {
-        assert_eq!(
-            send(app.clone(), method, Some(CREDENTIAL), bytes).await.0,
-            StatusCode::FORBIDDEN
-        );
+    let (status, response) = send(app.clone(), "POST", Some(CREDENTIAL), wire).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+    let (status, response) = send(app.clone(), "DELETE", Some(CREDENTIAL), vec![]).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_local_envelope(&response, json!({"registered":false}));
+    for (method, path) in [
+        ("GET", "/v1/client/capabilities"),
+        ("DELETE", "/v1/client/push-registration/"),
+        ("POST", "/v1/client/push-registration"),
+    ] {
+        let request = Request::builder().method(method).uri(path)
+            .header("authorization", format!("Bearer {CREDENTIAL}"))
+            .body(Body::empty()).unwrap();
+        assert!(authenticate(&state, &request, "fabric-loopback").is_err());
     }
+    // A replicated foreign claim must not confer cleanup authority, even with the right digest.
+    state.store.connection.write()
+        .execute("UPDATE claims SET origin='foreign-member' WHERE subject=?1", [GRANT]).unwrap();
+    let (status, response) = send(app, "DELETE", Some(CREDENTIAL), vec![]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
     let count: u64 = state
         .store
         .readers
@@ -294,6 +309,10 @@ async fn push_invalid_and_identity_body_extras_never_mutate_or_echo_inputs() {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
         assert_eq!(response["code"], "validation-failed", "{response}");
     }
+    let (status, response) = send(
+        app.clone(), "DELETE", Some(CREDENTIAL), vec![b' '; MAX_BODY_BYTES + 1],
+    ).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{response}");
     assert_eq!(state.store.index().unwrap(), before);
     assert_eq!(
         state
@@ -315,6 +334,28 @@ fn push_validation_accepts_both_exact_bounds_and_rejects_unbounded_metadata() {
             assert!(validate(&input).is_ok());
         }
     }
+}
+
+#[tokio::test]
+async fn push_cleanup_rejects_malformed_proof_and_redacts_database_failures() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    grant(&state, client_now_ms() as u64 + 600_000);
+    for header in ["Basic invalid", "Bearer ", "Bearer unknown"] {
+        let request = Request::builder().method("DELETE")
+            .uri("/v1/client/push-registration").header("authorization", header)
+            .body(Body::empty()).unwrap();
+        assert!(authenticate(&state, &request, "fabric-loopback").is_err());
+    }
+    state.store.connection.write()
+        .execute("DROP TABLE local_push_registrations", []).unwrap();
+    let (status, response) = send(
+        fabric_router(state), "DELETE", Some(CREDENTIAL), vec![],
+    ).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{response}");
+    assert!(!response.to_string().contains("no such table"));
+    assert!(!response.to_string().contains(CREDENTIAL));
+    assert!(!response.to_string().contains("credential_hash"));
 }
 
 #[derive(Clone, Default)]

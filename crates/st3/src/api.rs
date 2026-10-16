@@ -1113,7 +1113,7 @@ async fn response_envelope_unbounded(
             let authenticate_started = Instant::now();
             let authentication =
                 crate::relay_trace::result(crate::relay_trace::Phase::Authenticate, || {
-                    client_v0::authenticate(&auth_state, &auth_request, transport)
+                    client_push::authenticate(&auth_state, &auth_request, transport)
                 });
             let authenticate_ms = authenticate_started.elapsed().as_millis() as i64;
             drop(authentication_span);
@@ -1145,10 +1145,17 @@ async fn response_envelope_unbounded(
     } else {
         (Ok(None), None)
     };
-    if let Ok(Some(session)) = &client_authentication {
-        // The clients connected now: kept in memory, shown by clients.list, never enforced.
-        client_presence::note_request(&state.node, session, request.headers(), client_now_ms());
-        request.extensions_mut().insert(session.clone());
+    if let Ok(Some(authentication)) = &client_authentication {
+        match authentication {
+            client_push::Authentication::Session(session) => {
+                // The clients connected now: kept in memory, shown by clients.list, never enforced.
+                client_presence::note_request(&state.node, session, request.headers(), client_now_ms());
+                request.extensions_mut().insert(session.clone());
+            }
+            client_push::Authentication::Cleanup(proof) => {
+                request.extensions_mut().insert(proof.clone());
+            }
+        }
     }
     if let Some(snapshot) = &client_snapshot {
         request.extensions_mut().insert(snapshot.clone());

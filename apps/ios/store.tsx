@@ -310,10 +310,12 @@ function useAppStore(proof?: FabricProfile) {
     if (!proof) for (const [key, profile] of ownProfiles) {
       remotes.set(key, !isFabricGatewayId(profile.url) ? remoteFor(profile.url, profile.credential) : undefined);
     }
-    // Fabric's loopback route is valid only for the current member and connection.
-    if (!proof && status === 'online' && pushGranted && connectUrl && clientCredential) remotes.set(pushIssuer, remoteFor(connectUrl, clientCredential));
+    // Cleanup needs only the current member-bound carrier route, not a live session:
+    // an expired/revoked bearer still proves erasure ownership to its issuer.
+    // Registration remains gated separately by the current granted capability below.
+    if (!proof && connectUrl && clientCredential) remotes.set(pushIssuer, remoteFor(connectUrl, clientCredential));
     return remotes;
-  }, [proof, credential, url, ownProfiles, status, pushGranted, connectUrl, clientCredential, pushIssuer]);
+  }, [proof, credential, url, ownProfiles, connectUrl, clientCredential, pushIssuer]);
   const pushRemote = pushGranted && status === 'online' ? pushIssuers.get(pushIssuer) : undefined;
   const subscribePush = useCallback((changed: () => void) => {
     const unsubscribe = push.subscribe(changed);

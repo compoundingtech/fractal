@@ -42,14 +42,25 @@ is at most 4096 bytes.
 
 ## Who may register
 
-Only a current paired session on the member that issued its pairing may call either command.
+Only a current paired session on the member that issued its pairing may register.
 The person and device come from the session, never from the body. Read-only pairings may
 register: a registration grants nothing. Anonymous callers, local Unix sessions, pairings
-issued by another member, and expired or revoked pairings are refused.
+issued by another member, and expired or revoked pairings cannot register.
+
+Unregistration also accepts a cleanup-only proof from the saved bearer of an expired or
+revoked locally issued pairing. This exception applies only to exact
+`DELETE /v1/client/push-registration`, not reads, registration, or any other route. It does not
+create a normal paired session or restore any revoked/expired authority. The issuer checks the
+bearer's credential hash against its immutable pairing claim, including the local issuing actor
+and exact grant, claim index, person and device, and rechecks that identity in the deletion
+transaction. Only a registration belonging to that exact pairing incarnation can be deleted;
+an old bearer cannot delete a replacement pairing's registration. A valid proof returns the
+existing `{"registered": false}` response even when no matching registration remains.
 
 `GET /v1/client/capabilities` advertises `{"id": "push-registration", "version": 1}`. It is
 `granted` for a paired session on its issuer and `unavailable` for local sessions and on other
-members. Older servers omit it; a client that does not see it granted must not call these commands.
+members. Older servers omit it; a client that does not see it granted must not register.
+Cleanup with a saved issuer credential does not require a live capability read or grant.
 
 ## Storage
 
@@ -74,9 +85,12 @@ Registration eligibility never outlives its pairing:
   waiting in the writer queue never extends a pairing's authority.
 - The phone retains durable cleanup ownership for every issuer it may have registered with,
   even after switching members or restarting. This journal contains only pairing-profile keys.
-- "Forget this device" and independent-member removal clean affected registrations before
-  deleting pairing credentials. Offline/failed cleanup stays explicit and retains credentials
-  for retry; turning the switch off never claims successful remote opt-out while it is pending.
+- "Forget this device", independent-member removal and re-pairing clean affected registrations
+  before deleting or replacing pairing credentials. The retired bearer can confirm cleanup even
+  after expiry/revocation already removed the row. Offline/failed cleanup stays explicit and
+  retains credentials for retry; a generic 401/403 is not success. Ownership is released only
+  after an explicit `registered: false` confirmation and durable journal removal. Turning the
+  switch off never claims successful remote opt-out while it is pending.
 
 ## The token is a secret
 
