@@ -383,17 +383,22 @@ fn batched_work_metadata_reduces_whole_read_statements_on_128_1000_4200_steps() 
         let store = fixture(count);
         let at = now_ms();
         MAX_SNAPSHOT_CALL_NS.with(|maximum| maximum.set(0));
-        let (first_old, first_old_work, first_old_time) =
-            measured(|| oracle(&store, ACTOR, at).unwrap());
-        let (first_new, first_new_work, first_new_time) =
-            measured(|| read(&store, ACTOR, at).unwrap());
-        assert_eq!(
-            serde_json::to_value(first_new).unwrap(),
-            serde_json::to_value(first_old).unwrap()
+        // One recorded, measured pair per count. The per-step oracle is quadratic in the
+        // step count (about 11 s per call at 1000 steps in a debug build), and this test used
+        // to run it three times per count: a first measured pair that was only printed, a
+        // `parity` pair and the asserted pair. The statement and VM-step counts were identical
+        // on the first and later calls (517/28142 at 128, 4005/219110 at 1000), so one pair
+        // carries every assertion: output equality, the registered-dependency subset,
+        // the exact statement difference and fewer VM steps.
+        let ((old, old_work, old_time), old_keys) =
+            smallclaims::touched::record(|| measured(|| oracle(&store, ACTOR, at).unwrap()));
+        let ((new, new_work, new_time), new_keys) =
+            smallclaims::touched::record(|| measured(|| read(&store, ACTOR, at).unwrap()));
+        assert!(
+            old_keys.is_subset(&new_keys),
+            "batched read dropped registered dependencies: {:?}",
+            old_keys.difference(&new_keys).collect::<Vec<_>>()
         );
-        parity(&store, ACTOR, at);
-        let (old, old_work, old_time) = measured(|| oracle(&store, ACTOR, at).unwrap());
-        let (new, new_work, new_time) = measured(|| read(&store, ACTOR, at).unwrap());
         assert_eq!(
             serde_json::to_value(new).unwrap(),
             serde_json::to_value(old).unwrap()
@@ -401,7 +406,7 @@ fn batched_work_metadata_reduces_whole_read_statements_on_128_1000_4200_steps() 
         // This fixture has one exact run/generation pair and one pinned definition.
         let batched_statements = 2 + count.div_ceil(CHUNK) as u64;
         println!(
-            "{count}-step first calls (after fixture setup, not cold database): old {first_old_work:?} {first_old_time:?}; new {first_new_work:?} {first_new_time:?}; warm old: {old_work:?} {old_time:?}; warm new: {new_work:?} {new_time:?}"
+            "{count}-step calls (after fixture setup, not cold database): old {old_work:?} {old_time:?}; new {new_work:?} {new_time:?}"
         );
         MAX_SNAPSHOT_CALL_NS.with(|maximum| {
             println!(

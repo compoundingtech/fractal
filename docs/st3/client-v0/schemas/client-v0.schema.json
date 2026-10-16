@@ -49,7 +49,7 @@
         }}
       }
     },
-    "PromptRespondParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "episode", "answer"], "description": "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers (allow or deny).", "properties": {"target_id": {"$ref": "#/$defs/Id"}, "episode": {"type": "string"}, "answer": {"enum": ["allow", "deny"]}}},
+    "PromptRespondParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "episode", "answer"], "description": "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as a JSON object of each question's text to its chosen label (several comma-separated for a multi-select) in place of answer; a screen prompt's own answer (use, use-all, skip, trust, exit, quit).", "properties": {"target_id": {"$ref": "#/$defs/Id"}, "episode": {"type": "string"}, "answer": {"type": "string", "minLength": 1, "maxLength": 16384}}},
     "CustomReplyParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "registration", "revision", "episode", "fields"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "registration": {"type": "string"}, "revision": {"type": "string"}, "episode": {"type": "string"}, "fields": {"type": "object"}}},
     "ConversationSearchHit": {"type": "object", "additionalProperties": false, "required": ["conversation_id", "entry_id", "agent_id", "timestamp", "entry_type", "excerpt"], "properties": {"conversation_id": {"$ref": "#/$defs/Id"}, "entry_id": {"$ref": "#/$defs/Id"}, "agent_id": {"type": ["string", "null"]}, "timestamp": {"$ref": "#/$defs/Timestamp"}, "entry_type": {"type": "string"}, "excerpt": {"type": "string", "maxLength": 512}}},
     "ConversationSearch": {"type": "object", "additionalProperties": false, "required": ["kind", "items", "page", "indexed_at", "host_id", "incomplete_sources", "refreshing"], "properties": {"kind": {"const": "conversation-search"}, "items": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/ConversationSearchHit"}}, "page": {"$ref": "#/$defs/PageInfo"}, "indexed_at": {"$ref": "#/$defs/Timestamp"}, "host_id": {"$ref": "#/$defs/Id"}, "incomplete_sources": {"type": "array", "items": {"type": "string"}}, "refreshing": {"type": "boolean"}}},
@@ -188,7 +188,9 @@
             { "$ref": "#/$defs/StatusHistory" },
             { "$ref": "#/$defs/AgentQueue" },
             { "$ref": "#/$defs/UsagePeriod" },
-            { "$ref": "#/$defs/MailBacklog" }
+            { "$ref": "#/$defs/MailBacklog" },
+            { "$ref": "#/$defs/SloList" },
+            { "$ref": "#/$defs/SloHistory" }
           ]
         }
       }
@@ -668,6 +670,45 @@
     },
     "ConnectedClient": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["actor", "person", "member", "via", "connected", "streams", "since", "last_seen", "follows", "kind"], "properties": {"actor": {"type": "string"}, "person": {"type": "string"}, "client": {"type": ["string", "null"]}, "device_id": {"type": "string"}, "device_name": {"type": "string"}, "member": {"type": "string"}, "via": {"enum": ["local", "gateway", "tailscale"]}, "connected": {"type": "boolean"}, "streams": {"type": "integer", "minimum": 0}, "since": {"$ref": "#/$defs/Timestamp"}, "last_seen": {"$ref": "#/$defs/Timestamp"}, "follows": {"type": "array", "items": {"type": "string"}}, "kind": {"const": "connected-client"}}}]},
     "Usage": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["kind", "value"], "properties": {"kind": {"const": "usage"}, "value": {"$ref": "#/$defs/UsagePeriod"}}}]},
+    "SloList": {
+      "type": "object", "additionalProperties": false,
+      "required": ["as_of_unix_ms", "rows"],
+      "properties": {
+        "as_of_unix_ms": { "type": "integer", "minimum": 0 },
+        "rows": { "type": "array", "items": { "$ref": "#/$defs/SloRow" } }
+      }
+    },
+    "SloRow": {
+      "description": "One objective (a target with windows and an error budget) or one budget (an allowance that resets), as this daemon measures it. about, target, current, window and explain are display text for a person, not a contract; the pair of slo reads is experimental.",
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "about", "target", "current", "window", "remaining_percent", "status", "explain"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "enum": ["objective", "budget"] },
+        "account": { "type": "string", "description": "A budget's declared account." },
+        "about": { "type": "string" },
+        "target": { "type": "string" },
+        "current": { "type": "string" },
+        "window": { "type": "string" },
+        "remaining_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100, "description": "What is left of the error budget or allowance; null when nothing was measured." },
+        "status": { "enum": ["met", "missed", "no-data", "stale"] },
+        "resets_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "measured_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "explain": { "type": "string" }
+      }
+    },
+    "SloHistory": {
+      "description": "What was left of one objective or budget across a period, in equal steps; a step holds its lowest reading and is null when nothing was read.",
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "since_ms", "until_ms", "samples", "steps"],
+      "properties": {
+        "id": { "type": "string" },
+        "since_ms": { "type": "integer", "minimum": 0 },
+        "until_ms": { "type": "integer", "minimum": 0 },
+        "samples": { "type": "integer", "minimum": 0 },
+        "steps": { "type": "array", "items": { "type": ["number", "null"], "minimum": 0, "maximum": 100 } }
+      }
+    },
     "UsagePeriod": {
       "type": "object", "additionalProperties": false,
       "required": ["since_ms", "until_ms", "rows"],
