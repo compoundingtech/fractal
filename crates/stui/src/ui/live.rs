@@ -57,10 +57,11 @@ struct Pending {
 const MESSAGE_LIMIT_REREAD: Duration = Duration::from_secs(600);
 const MESSAGE_LIMIT_RETRY: Duration = Duration::from_secs(30);
 /// The followed windows arrive over the live stream, whose frames carry no `sync` notice, so a
-/// small Attention page read supplies it: first a few seconds after the link goes live, then once
-/// a minute, never again sooner after a failure. Remove when every supported daemon streams it.
-const SYNC_FIRST: Duration = Duration::from_secs(10);
-const SYNC_REREAD: Duration = Duration::from_secs(60);
+/// small Attention page read supplies it: once when st connects, before the first frames, and
+/// again only when a later Attention or Agents frame shows the graph moving, at most once a
+/// minute. An idle screen sends no request (see client_only's idle oracle). Remove when every
+/// supported daemon streams the notice.
+const SYNC_MIN_GAP: Duration = Duration::from_secs(60);
 
 /// How long a message waits for st's answer before it says st has not confirmed it.
 /// A draw slower than this, or a whole turn of the main loop (everything it did before waiting for
@@ -593,7 +594,11 @@ pub fn run(context: Context) -> Result<()> {
     let mut last_cache_save = Instant::now();
     // The notice the page read last found, carried onto every window the stream rebuilds.
     let mut page_sync: Option<st3_client::SyncNotice> = None;
-    let mut sync_next = Instant::now() + SYNC_FIRST;
+    let mut sync_read_at: Option<Instant> = None;
+    // When a read is wanted, because a frame after the first showed the graph moving.
+    let mut sync_due: Option<Instant> = None;
+    // The windows whose first frame has arrived on this connection: that frame is not a change.
+    let mut windows_seen: BTreeSet<String> = BTreeSet::new();
     // A closed terminal ends the loop: without this check a detached stui spins and keeps
     // polling the daemon forever.
     while !ui.quit
@@ -638,18 +643,10 @@ pub fn run(context: Context) -> Result<()> {
                 let _ = tx.send(Fetched::MessageLimit(limit));
             });
         }
-        if extras.live && extras.offline.is_none() && Instant::now() >= sync_next {
-            sync_next = Instant::now() + SYNC_REREAD;
-            let client = client.clone();
-            let tx = fetched_tx.clone();
-            runtime.spawn(async move {
-                let notice = client
-                    .attention_list(None, Some(1), false)
-                    .await
-                    .map(|found| found.value.sync)
-                    .map_err(|_| ());
-                let _ = tx.send(Fetched::Sync(notice));
-            });
+        if sync_due.is_some_and(|due| Instant::now() >= due) && extras.live && extras.offline.is_none() {
+            sync_due = None;
+            sync_read_at = Some(Instant::now());
+            read_sync(&runtime, &client, &fetched_tx);
         }
         while let Ok(update) = incoming.try_recv() {
             match update {
@@ -659,10 +656,14 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 feed::Update::Connected(member) => {
                     limit_next = Instant::now();
-                    // Another member may say something else: read again after the normal delay.
-                    sync_next = Instant::now() + SYNC_FIRST;
+                    // Another member may say something else: drop the old notice and read this
+                    // member's once, ahead of its first frames.
                     page_sync = None;
                     fill_notice(&mut model, None);
+                    windows_seen.clear();
+                    sync_due = None;
+                    sync_read_at = Some(Instant::now());
+                    read_sync(&runtime, &member, &fetched_tx);
                     ui.quality.live(false);
                     agents_live = false;
                     glasses_ready = true;
@@ -747,6 +748,10 @@ pub fn run(context: Context) -> Result<()> {
                         });
                     }
                     extras.window_errors.remove(&window_label(window));
+                    if matches!(window, Window::Attention | Window::Agents) {
+                        let first = windows_seen.insert(window_label(window));
+                        sync_due = sync_due_after_frame(first, sync_read_at, sync_due, Instant::now());
+                    }
                     if window == Window::Summary {
                         extras.summary = items.iter().find_map(|item| match item {
                             Resource::Summary(summary) => Some(summary.clone()),
@@ -2035,6 +2040,30 @@ pub fn run(context: Context) -> Result<()> {
     Ok(())
 }
 
+/// When a notice read is wanted after an Attention or Agents frame: never for a window's first
+/// frame on a connection (the read made at connect covers it), otherwise once the minimum gap since
+/// the last read has passed, and a read already wanted keeps its time.
+fn sync_due_after_frame(first: bool, read_at: Option<Instant>, due: Option<Instant>, now: Instant) -> Option<Instant> {
+    if first || due.is_some() {
+        return due;
+    }
+    Some(read_at.map_or(now, |at| at + SYNC_MIN_GAP).max(now))
+}
+
+/// Read the notice off a one-row Attention page, and send what it said (or that it failed).
+fn read_sync(runtime: &tokio::runtime::Runtime, client: &Client, tx: &std::sync::mpsc::Sender<Fetched>) {
+    let client = client.clone();
+    let tx = tx.clone();
+    runtime.spawn(async move {
+        let notice = client
+            .attention_list(None, Some(1), false)
+            .await
+            .map(|found| found.value.sync)
+            .map_err(|_| ());
+        let _ = tx.send(Fetched::Sync(notice));
+    });
+}
+
 /// A followed window as the model holds it: its rows, the snapshot they came from, and the
 /// notice the page read last found. The stream's frames carry no notice of their own, so every
 /// window the stream rebuilds takes the page's, or the one with the newest snapshot would drop it.
@@ -3258,6 +3287,21 @@ mod tests {
             assert!(matches!(shown.link, Link::Live));
             assert!(shown.diverged.is_empty() && shown.behind.is_empty(), "{:?} {:?}", shown.diverged, shown.behind);
         }
+    }
+
+    #[test]
+    fn a_notice_read_follows_a_moving_graph_at_most_once_a_minute_and_an_idle_screen_sends_none() {
+        let now = Instant::now();
+        // First frames are not changes: no read is wanted by them.
+        assert_eq!(sync_due_after_frame(true, Some(now), None, now), None);
+        // A later frame soon after a read waits out the minimum gap; a long-ago read is due now.
+        assert_eq!(sync_due_after_frame(false, Some(now), None, now + Duration::from_secs(5)), Some(now + SYNC_MIN_GAP));
+        let late = now + SYNC_MIN_GAP + Duration::from_secs(30);
+        assert_eq!(sync_due_after_frame(false, Some(now), None, late), Some(late));
+        // A read already wanted keeps its time however many frames follow; no read made yet is due now.
+        let wanted = Some(now + Duration::from_secs(40));
+        assert_eq!(sync_due_after_frame(false, Some(now), wanted, now + Duration::from_secs(10)), wanted);
+        assert_eq!(sync_due_after_frame(false, None, None, now), Some(now));
     }
 
     #[test]

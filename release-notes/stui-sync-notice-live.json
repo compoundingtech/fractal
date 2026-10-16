@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "stui shows behind and diverged on a running screen: it reads the sync notice once a minute while live, because the live stream's frames carry none",
+  "summary": "stui shows behind and diverged on a running screen: it reads the sync notice when st connects and again, at most once a minute, while the graph moves, because the live stream's frames carry none",
   "replay": {
     "status": "none",
     "detail": "No claim replay or recovery behavior changes."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "stui makes one extra one-row Attention page read about every minute while the link is live (10 seconds after it goes live, never sooner after a failure). No server, schema or client contract change; an older or newer daemon answers the same page. To be removed when the stream carries the notice."
+    "detail": "stui makes one extra one-row Attention page read when it connects to st, and again at most once a minute while later Attention or Agents frames arrive; an idle screen sends none. No server, schema or client contract change. To be removed when the stream carries the notice."
   },
   "downtime": {
     "status": "none",
