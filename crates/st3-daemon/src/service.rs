@@ -236,7 +236,7 @@ pub fn install_from_config_path(mut config: Config, config_path: Option<&Path>) 
     spec.read_cache_kib = crate::read_cache::override_kib();
     spec.config_path = config_path.map(|path| absolute_from(&current, path));
     if spec.config.access_mode.is_some() {
-        let path = spec.config_path.clone().unwrap_or_else(Config::default_path);
+        let path = spec.config_path.clone().unwrap_or_else(Config::creation_path);
         spec.config.initialize_install_config(&path)?;
     }
     install_native_service(&spec)?;

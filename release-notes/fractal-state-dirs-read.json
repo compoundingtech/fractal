@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Prepare daemon and CLI directory readers for the staged Fractal config, state and instance-root migration",
+  "replay": { "status": "none", "detail": "No stored history or replay change." },
+  "schema": { "status": "none", "detail": "No database or claim schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint or coordination change." },
+  "compatibility": { "status": "changed", "detail": "Daemon and CLI readers select existing fractal config/state directories and .fractal-instance/NAME roots. When old and new coexist, only a destination-local .fractal-migration-completed receipt containing the exact migration ID and newline selects the new directory; otherwise the old directory wins with one warning per process. XDG overrides, explicit config/state paths and instance-name precedence remain intact. Missing paths and new default config files retain their legacy creation locations. Instance workspaces retain their legacy locations. External installers, hooks, standalone clients and Home Manager remain outside this expansion." },
+  "downtime": { "status": "none", "detail": "Reader expansion only: no files moved and no daemon or service restart performed." },
+  "manual": { "status": "none", "detail": "Do not move live state or author completion receipts as part of this release. The per-site live migration is separate." },
+  "recovery": { "status": "none", "detail": "Existing installations without new directories resolve the same paths as before." }
+}

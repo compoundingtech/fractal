@@ -20,9 +20,33 @@ A name is 1 to 24 lowercase letters, digits and single hyphens. The flag works b
 subcommand and wins over the environment variable. Inside an instance, a different name is an
 error, so a seat of one instance cannot start another by accident.
 
+## Directory discovery
+
+The daemon and CLI resolve existing product config and state directories under
+`fractal`, falling back to `st3` under the same XDG base (`~/.config` and
+`~/.local/state` by default, including on macOS). Instance roots resolve
+`~/.fractal-instance/NAME`, falling back to `~/.st-instance/NAME`; selection is
+per name, and `--instance` still wins over `ST_INSTANCE`.
+
+When both candidates exist, the new directory is selected only if its
+`.fractal-migration-completed` file contains exactly
+`arn:lmig:smalltalk:2026-10-16-state-dirs-fractal` followed by a newline.
+Otherwise the old directory is used with one warning per process. A receipt
+is local to the directory it certifies, not its parent or another instance.
+Only the migration's verified completion may write it.
+
+Discovery does not move files or create directories. With neither candidate
+present, creation remains at the old path. A missing default config is also
+created under `st3`, not `fractal`. Explicit config/state paths are unchanged.
+Instance workspaces remain under `~/.st-instance/NAME/work`; workspace
+relocation is separate. The external installers, hooks and Home Manager
+declarations still use their existing paths; this reader expansion does not
+authorize moving a live installation.
+
 ## What an instance owns
 
-Everything below one directory, `~/.st-instance/NAME`:
+The legacy layout is below `~/.st-instance/NAME` (discovery above also accepts
+an existing migrated root, except that `work/` stays at its legacy location):
 
 | Directory | Holds | Set through |
 | --- | --- | --- |
