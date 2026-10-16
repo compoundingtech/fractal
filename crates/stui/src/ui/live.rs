@@ -172,6 +172,8 @@ pub struct Context {
     pub(crate) open_timing: Option<super::open_timing::Trace>,
     pub(crate) process_started: Instant,
     pub initial_subject: Option<String>,
+    /// Where seats on this machine leave requests to show something; none for a paired device.
+    pub requests: Option<std::path::PathBuf>,
 }
 
 // Setup's initial destination waits for a live inventory, rather than cached agent data.
@@ -192,6 +194,40 @@ pub(super) fn focus_initial_subject(
         return;
     }
     ui.open(&id);
+}
+
+/// Open what seats asked for with `st ui open`, once the inventory is live: an agent a seat has
+/// only just made is waited for, and one that never appears is answered as not found.
+pub(super) fn answer_open_requests(
+    ui: &mut Ui,
+    inbox: &mut super::requests::Inbox,
+    ready: bool,
+) {
+    inbox.read();
+    if !ready || !matches!(ui.world.link, super::view::Link::Live) {
+        return;
+    }
+    let waiting = inbox
+        .waiting()
+        .map(|(request, since)| (request.clone(), since.elapsed()))
+        .collect::<Vec<_>>();
+    for (request, waited) in waiting {
+        let Ok(pane) = super::requests::pane_for(&request.subject) else {
+            inbox.answer(&request.id, &super::requests::Answer::NotFound);
+            continue;
+        };
+        if ui.inventory_has(&pane) {
+            let answer = ui.open_requested(
+                pane,
+                request.place,
+                request.keep_focus,
+                request.from.as_deref(),
+            );
+            inbox.answer(&request.id, &answer);
+        } else if waited >= super::requests::GRACE {
+            inbox.answer(&request.id, &super::requests::Answer::NotFound);
+        }
+    }
 }
 
 fn cancel_initial_subject(subject: &mut Option<String>, input: &Event) {
@@ -351,6 +387,8 @@ enum Fetched {
         agent: String,
         outcome: Result<Direct, String>,
     },
+    /// A shell's attach was refused for a reason that passes; it is being tried again.
+    AttachWaiting { agent: String, reason: String },
     /// st gave no direct stream; follow its view of the terminal instead.
     NativeFailed {
         agent: String,
@@ -426,8 +464,11 @@ pub fn run(context: Context) -> Result<()> {
         mut open_timing,
         process_started,
         mut initial_subject,
+        requests,
     } = context;
     let (fetched_tx, fetched) = mpsc::channel::<Fetched>();
+    // What seats ask this terminal to show (`st ui open`); a paired device has no seats here.
+    let mut open_requests = super::requests::Inbox::new(requests);
     let mut model = cached.unwrap_or_default();
     let mut agents_live = false;
     // The feed announces a granted glasses window before sending any core window.
@@ -509,6 +550,7 @@ pub fn run(context: Context) -> Result<()> {
     terminal.hide_cursor()?;
     let started = Instant::now();
     let mut changed = true;
+    let mut offline_drawn = false;
     // When st is next asked how long a message it takes: on connecting, then now and then, since
     // a daemon that is upgraded changes it.
     let mut limit_next = Instant::now();
@@ -519,11 +561,10 @@ pub fn run(context: Context) -> Result<()> {
     let mut terminal_runtimes_by_agent: BTreeMap<String, Vec<String>> = BTreeMap::new();
     // The fleet host that owns each opened terminal, so a dropped stream attaches again directly.
     let mut terminal_owners: BTreeMap<String, String> = BTreeMap::new();
-    // Attaching a dropped terminal again: whether a try is out, and how many failed.
-    let mut reattaching = false;
     // When a terminal was asked for, while it connects: the wait is shown, and a long one named.
     let mut attach_started: Option<Instant> = None;
-    let mut reattach_tries = 0_u32;
+    // Why the attach in progress is waiting, when st refused it for a reason that passes.
+    let mut attach_note: Option<String> = None;
     // The cursor shape last set, so it changes only when the attached terminal asks.
     let mut cursor_style: Option<crossterm::cursor::SetCursorStyle> = None;
     // The tab shown on the last pass: opening a tab loads what only it needs.
@@ -576,7 +617,10 @@ pub fn run(context: Context) -> Result<()> {
                 .as_deref()
                 .is_some_and(|stale| stale.starts_with("connecting"))
         {
-            view.stale = Some(connecting_text(started.elapsed()));
+            view.stale = Some(match &attach_note {
+                Some(reason) => format!("{} · {reason}, trying again", connecting_text(started.elapsed())),
+                None => connecting_text(started.elapsed()),
+            });
         }
         if extras.live && Instant::now() >= limit_next {
             limit_next = Instant::now() + MESSAGE_LIMIT_RETRY;
@@ -737,6 +781,7 @@ pub fn run(context: Context) -> Result<()> {
                     }
                     extras.live = true;
                     extras.offline = None;
+                    extras.offline_since = None;
                     extras.degraded = None;
                     model.last_connected =
                         Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
@@ -817,6 +862,8 @@ pub fn run(context: Context) -> Result<()> {
                     // A permanent refusal is said once, without "retrying".
                     if !permanent {
                         ui.conversation_failed(&target, &message);
+                    } else {
+                        ui.stalled.remove(&target);
                     }
                     failed.insert(target, message);
                     changed = true;
@@ -848,6 +895,7 @@ pub fn run(context: Context) -> Result<()> {
                     // nothing on screen is cleared.
                     extras.live = false;
                     extras.offline = None;
+                    extras.offline_since = None;
                     ui.flash(format!(
                         "Live stream lost ({reason}); st answers, reconnecting"
                     ));
@@ -860,6 +908,7 @@ pub fn run(context: Context) -> Result<()> {
                     extras.live = false;
                     extras.degraded = None;
                     extras.offline = Some(error);
+                    extras.offline_since.get_or_insert_with(Instant::now);
                     attached = None;
                     save_cache(cache_path.as_deref(), &person, &model);
                     changed = true;
@@ -1122,6 +1171,7 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
                 Fetched::Native { agent, direct } => {
+                    attach_note = None;
                     let waited = attach_started.take().map(|at| at.elapsed());
                     if let Some(waited) = waited.filter(|waited| *waited >= Duration::from_secs(3))
                     {
@@ -1151,7 +1201,6 @@ pub fn run(context: Context) -> Result<()> {
                     ui.flash(format!("Attached · {route}"));
                 }
                 Fetched::Reattached { agent, outcome } => {
-                    reattaching = false;
                     if let Some(native) = ui
                         .terminal_view(&agent)
                         .and_then(|view| view.native.as_ref())
@@ -1160,8 +1209,13 @@ pub fn run(context: Context) -> Result<()> {
                             Ok(direct) => native.reconnect(direct.stream, &direct.name),
                             Err(reason) if reason.contains("restarted") => native.give_up(reason),
                             // Still unreachable: the next try waits longer.
-                            Err(_) => reattach_tries += 1,
+                            Err(reason) => native.retry_failed(reason),
                         }
+                    }
+                }
+                Fetched::AttachWaiting { agent, reason } => {
+                    if ui.terminal.as_ref().is_some_and(|view| view.agent == agent) {
+                        attach_note = Some(reason);
                     }
                 }
                 Fetched::NativeFailed {
@@ -1169,6 +1223,7 @@ pub fn run(context: Context) -> Result<()> {
                     runtime_ids,
                     reason,
                 } => {
+                    attach_note = None;
                     if terminal_opens.remove(&agent).is_some() {
                         super::slo::METRICS.add("terminal_open_errors", 1);
                     }
@@ -1449,6 +1504,15 @@ pub fn run(context: Context) -> Result<()> {
                 Effect::LoadContent(key) => {
                     content_reads.enqueue(key);
                 }
+                Effect::RetryConversation { target } => {
+                    retry_conversation_open(
+                        target,
+                        &mut failed,
+                        &mut sessions_requested,
+                        &commands,
+                    );
+                    changed = true;
+                }
                 Effect::OpenTerminal { agent } => {
                     terminal_opens.insert(agent.clone(), Instant::now());
                     // The PTY session's own bytes, through st's raw stream to whichever host owns
@@ -1487,6 +1551,7 @@ pub fn run(context: Context) -> Result<()> {
                         None => terminal_owners.remove(&agent),
                     };
                     attach_started = Some(Instant::now());
+                    attach_note = None;
                     let _ = commands.send(Command::Unfollow);
                     {
                         let client = client.clone();
@@ -1494,13 +1559,31 @@ pub fn run(context: Context) -> Result<()> {
                         let agent = agent.clone();
                         let fallback = ui.terminal_fallback;
                         runtime.spawn(async move {
-                            let attached = attach_known_then_direct(
-                                &client,
-                                &agent,
-                                known,
-                                &runtime_ids,
-                                owner.as_deref(),
-                                fallback,
+                            // A shell has no other view to fall back to, and one started a moment ago
+                            // can be refused while st settles which host runs it: wait, say why, retry.
+                            let delays: &[Duration] = if agent.starts_with("terminal/") {
+                                &ATTACH_RETRY_DELAYS
+                            } else {
+                                &[]
+                            };
+                            let attached = retry_attach(
+                                delays,
+                                |reason| {
+                                    let _ = tx.send(Fetched::AttachWaiting {
+                                        agent: agent.clone(),
+                                        reason: reason.to_owned(),
+                                    });
+                                },
+                                || {
+                                    attach_known_then_direct(
+                                        &client,
+                                        &agent,
+                                        known.clone(),
+                                        &runtime_ids,
+                                        owner.as_deref(),
+                                        fallback,
+                                    )
+                                },
                             )
                             .await;
                             let _ = tx.send(match attached {
@@ -1733,6 +1816,15 @@ pub fn run(context: Context) -> Result<()> {
             });
         }
 
+        // The grace for a restart of st ends on its own clock: draw the link as offline then.
+        match extras.offline_since {
+            Some(since) if !offline_drawn && since.elapsed() >= adapt::offline_grace() => {
+                offline_drawn = true;
+                changed = true;
+            }
+            None => offline_drawn = false,
+            Some(_) => {}
+        }
         if changed {
             ui.content.index(&timelines);
             extras.conversations = conversations(&model, &person, &timelines, &failed, &conversing);
@@ -1759,7 +1851,7 @@ pub fn run(context: Context) -> Result<()> {
         }
         // The missions window is large, so it is followed only while a mission list or card is on
         // screen, and kept for a while after so flipping between tabs does not fetch it each time.
-        let wanted_now = ui.missions_wanted();
+        let wanted_now = ui.missions_wanted() || open_requests.wants_missions();
         if wanted_now {
             missions_until = Some(Instant::now() + MISSIONS_GRACE);
         }
@@ -1768,6 +1860,7 @@ pub fn run(context: Context) -> Result<()> {
             missions_sent = wanted;
             let _ = commands.send(Command::Missions { follow: wanted });
         }
+        answer_open_requests(&mut ui, &mut open_requests, agents_live && glasses_ready);
         ui.step_voice();
         ui.step_terminal_hold();
         ui.step_default_view();
@@ -1888,25 +1981,12 @@ pub fn run(context: Context) -> Result<()> {
             });
         }
         // A stream that dropped while the program ran attaches again, to the same incarnation,
-        // after a wait that grows with each try.
-        if !reattaching
-            && extras.live
-            && let Some((view, native)) = ui
-                .terminal
-                .iter()
-                .chain(ui.parked.iter())
-                .filter_map(|view| view.native.as_ref().map(|native| (view, native)))
-                .find(|(_, native)| {
-                    native.dropped().is_some_and(|at| {
-                        at.elapsed() >= Duration::from_secs(2_u64.pow(reattach_tries.min(5)))
-                    })
-                })
+        // after a wait that grows with each try (`pty::retry_delay`).
+        if extras.live
+            && let Some((agent, expected)) = ui.reattach_due()
         {
-            reattaching = true;
             let client = client.clone();
             let tx = fetched_tx.clone();
-            let agent = view.agent.clone();
-            let expected = native.incarnation.clone();
             let runtime_ids = terminal_runtimes_by_agent
                 .get(&agent)
                 .cloned()
@@ -1926,14 +2006,6 @@ pub fn run(context: Context) -> Result<()> {
                 let _ = tx.send(Fetched::Reattached { agent, outcome });
             });
         }
-        if ui
-            .terminal
-            .iter()
-            .chain(ui.parked.iter())
-            .all(|view| view.native.is_none())
-        {
-            reattach_tries = 0;
-        }
         ui.terminal_requests();
         // While an attached terminal's output flows, or voice listens, draw it as it comes.
         let flowing = ui.voice.is_some()
@@ -1949,11 +2021,7 @@ pub fn run(context: Context) -> Result<()> {
             |input| {
                 cancel_initial_subject(&mut initial_subject, &input);
                 match input {
-                    Event::Key(key)
-                        if !extras.live
-                            && key.code == crossterm::event::KeyCode::Char('r')
-                            && !ui.editing =>
-                    {
+                    Event::Key(key) if reconnect_key(&key, extras.live) => {
                         let _ = commands.send(Command::Reconnect);
                         true
                     }
@@ -2078,6 +2146,18 @@ fn retry_failed_opens(
     requested.retain(|id| !failed.contains_key(id) || wanted.contains(id));
 }
 
+/// A person's explicit retry clears both the feed failure and the one-shot session read.
+fn retry_conversation_open(
+    target: String,
+    failed: &mut BTreeMap<String, String>,
+    requested: &mut HashSet<String>,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) {
+    failed.remove(&target);
+    requested.remove(&target);
+    let _ = commands.send(Command::Resubscribe { target });
+}
+
 /// Entries per page read back: st's largest, so a long session takes few requests.
 const OLDER_PAGE: usize = 200;
 
@@ -2088,6 +2168,16 @@ const FILL_ROWS: usize = 200;
 const FILL_PAGES: usize = 7;
 
 /// A page st took this long to give is a sign it is busy: no more pages are read on their own.
+/// Ctrl+R asks to reconnect while there is no live link. A bare `r` is a letter like any other:
+/// it must reach the message box, link or no link (Nathan, 2026-10-14: a lowercase r could not be
+/// typed while the link was stale).
+fn reconnect_key(key: &crossterm::event::KeyEvent, live: bool) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    !live
+        && key.code == KeyCode::Char('r')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 const FILL_SLOW: Duration = Duration::from_millis(1500);
 
 fn slow_page(took: Duration) -> bool {
@@ -2411,7 +2501,8 @@ async fn perform(
 ) -> Result<(String, Option<String>)> {
     match effect {
         // Glass writes and retries never reach here: the loop handles them itself.
-        Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::Forget { .. } | Effect::LoadContent(_) => {
+        Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::RetryConversation { .. }
+        | Effect::Forget { .. } | Effect::LoadContent(_) => {
             Ok((String::new(), None))
         }
         Effect::EditArrangement(write) => {
@@ -2854,6 +2945,55 @@ async fn send_message(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_shells_attach_waits_out_a_refusal_that_passes_and_says_why() {
+        // Nathan, 2026-10-16: a new terminal ended at once with "could not attach: st cannot tell
+        // yet which host runs this", and the shell was lost to him.
+        let run = |refusals: Vec<&'static str>, delays: usize| {
+            let mut refusals = refusals.into_iter();
+            let mut said = Vec::new();
+            let outcome = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap()
+                .block_on(retry_attach(
+                    &vec![Duration::ZERO; delays],
+                    |reason| said.push(reason.to_owned()),
+                    || {
+                        let next = refusals.next();
+                        async move { next.map_or(Ok(7), |reason| Err(reason.to_owned())) }
+                    },
+                ));
+            (outcome, said)
+        };
+        let unsure = "st cannot tell yet which host runs this";
+        // It works on the third try; each wait said why.
+        let (outcome, said) = run(vec![unsure, "host/example cannot be reached right now"], 5);
+        assert_eq!(outcome, Ok(7));
+        assert_eq!(said, [unsure, "host/example cannot be reached right now"]);
+        // It keeps refusing: the last refusal comes back once the waits are used up.
+        let (outcome, said) = run(vec![unsure; 10], 3);
+        assert_eq!(outcome, Err(unsure.to_owned()));
+        assert_eq!(said.len(), 3);
+        // A terminal that is gone, restarted or not allowed is not retried.
+        for reason in ["it is gone: terminal/x", "not allowed: nope", direct::RESTARTED] {
+            let (outcome, said) = run(vec![reason, unsure], 5);
+            assert_eq!(outcome, Err(reason.to_owned()));
+            assert!(said.is_empty(), "{reason} must not be retried");
+        }
+        // The retried reasons are the words st's own messages use.
+        assert!(super::worth_retrying(&st3_client::plain_message(
+            Some(&st3_client::ErrorCode::RuntimeAuthorityIndeterminate),
+            ""
+        )));
+        assert!(!super::worth_retrying(&st3_client::plain_message(
+            Some(&st3_client::ErrorCode::NotFound),
+            "terminal/x"
+        )));
+        // A refusal that passes waits about a minute and a half before the tab gives up.
+        assert!(super::ATTACH_RETRY_DELAYS.iter().sum::<Duration>() >= Duration::from_secs(90));
+    }
+
+    #[test]
     fn hidden_inventory_windows_leave_after_grace_and_period_changes_replace_one_slot() {
         let now = Instant::now();
         let mut grace = InventoryGrace::default();
@@ -3112,6 +3252,85 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn open_requests_wait_for_a_live_inventory_and_answer_each_seat_once() {
+        use super::super::requests::{self, Answer, Inbox, Place};
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("requests");
+        let mut world = super::super::demo::world();
+        world.link = super::super::view::Link::Live;
+        let known = world.agents.items()[1].id.clone();
+        let mut ui = Ui::new(world);
+        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        ui.show_focused();
+        let mut inbox = Inbox::new(Some(dir.clone()));
+        let early = requests::enqueue(&dir, &known, Place::Right, false, None).unwrap();
+        assert!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o077 == 0);
+
+        // Cached inventory is not a reason to open anything.
+        answer_open_requests(&mut ui, &mut inbox, false);
+        assert_eq!(ui.live_conversations().iter().filter(|id| **id == known).count(), 0);
+        assert!(dir.join(format!("{early}.json")).exists());
+
+        answer_open_requests(&mut ui, &mut inbox, true);
+        assert_eq!(ui.focus(), (1, Some(known.clone())));
+        assert!(!dir.join(format!("{early}.json")).exists());
+        let answer = std::fs::read(dir.join(format!("{early}.answer"))).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Answer>(&answer).unwrap(),
+            Answer::Opened { focused: true }
+        );
+
+        // An agent that is not in the inventory yet waits, and is not found once the grace ends.
+        let later = requests::enqueue(&dir, "agent/garden/not-yet", Place::Tab, false, None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        answer_open_requests(&mut ui, &mut inbox, true);
+        assert!(dir.join(format!("{later}.json")).exists(), "still waiting for st to know it");
+        assert_eq!(inbox.waiting().count(), 1);
+        inbox.waiting_since_for_test(&later, requests::GRACE);
+        answer_open_requests(&mut ui, &mut inbox, true);
+        let answer = std::fs::read(dir.join(format!("{later}.answer"))).unwrap();
+        assert_eq!(serde_json::from_slice::<Answer>(&answer).unwrap(), Answer::NotFound);
+        assert_eq!(inbox.waiting().count(), 0);
+    }
+
+    #[test]
+    fn a_request_the_layout_cannot_show_without_moving_focus_is_not_called_opened() {
+        use super::super::pane::Pane;
+        use super::super::requests::{Answer, Place};
+        let mut world = super::super::demo::world();
+        world.link = super::super::view::Link::Live;
+        let known = world.agents.items()[1].id.clone();
+        let mut ui = Ui::new(world);
+        ui.glasses = None;
+        let pane = || Pane::Agent(Some(known.clone()));
+        // The classic layout has no tabs or splits: only the list can show it, which moves focus.
+        let kept = ui.open_requested(pane(), Place::Tab, true, None);
+        assert_eq!(kept, Answer::NotShown);
+        let moved = ui.open_requested(pane(), Place::Tab, false, None);
+        assert_eq!(moved, Answer::Opened { focused: true });
+        // A name another process wrote cannot put control characters in the flash.
+        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        ui.show_focused();
+        ui.open_requested(pane(), Place::Right, false, Some("agent/x/bad\x1b[2Jname\n"));
+        let (shown, _) = ui.flash.clone().unwrap();
+        assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
+        assert!(shown.contains("bad[2Jname"), "{shown:?}");
+    }
+
+    #[test]
+    fn only_ctrl_r_reconnects_and_never_a_letter() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        let ctrl_r = key(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        let plain_r = key(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(reconnect_key(&ctrl_r, false), "Ctrl+R retries a link that is down");
+        assert!(!reconnect_key(&ctrl_r, true), "Ctrl+R is left to the conversation when live");
+        assert!(!reconnect_key(&plain_r, false), "a lowercase r is typed, never taken");
+        assert!(!reconnect_key(&key(KeyCode::Char('R'), KeyModifiers::SHIFT), false));
+    }
 
     #[test]
     fn initial_subject_waits_for_live_inventory_and_opens_only_once() {
@@ -3972,6 +4191,78 @@ mod tests {
     }
 
     #[test]
+    fn failed_conversation_hint_and_key_resubscribe_without_resending_messages() {
+        use super::super::{demo, glass, Hit};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        for (spaces, child) in [(false, false), (true, false), (true, true)] {
+            let mut ui = Ui::new(demo::world());
+            ui.live = true;
+            ui.tab = 1;
+            let selected = ui.selected_id().unwrap();
+            if spaces {
+                ui.glasses = Some(glass::Glasses::open(None, None));
+            }
+            let target = if child {
+                ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(
+                    "session/tester-child".into(),
+                )));
+                "session/tester-child".to_owned()
+            } else {
+                let target = selected;
+                if spaces {
+                    ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(target.clone())));
+                }
+                target
+            };
+            let mut failed = BTreeMap::from([(target.clone(), "access refused".into())]);
+            let mut requested = HashSet::from([target.clone()]);
+            ui.world.conversations = conversations(
+                &Model::default(),
+                "person/ada",
+                &BTreeMap::new(),
+                &failed,
+                std::slice::from_ref(&target),
+            );
+            ui.effects.clear();
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+            let shown: String = terminal.backend().buffer().content.iter()
+                .map(ratatui::buffer::Cell::symbol).collect();
+            assert!(shown.contains("access refused"), "{shown}");
+            assert!(shown.contains("Ctrl+R · retry opening this conversation"), "{shown}");
+            assert!(!shown.contains("retrying") && !shown.contains("Trying again"), "{shown}");
+            assert!(ui.effects.is_empty(), "rendering a refusal never retries it");
+
+            ui.conversation_state.drafts.insert(target.clone(), "saved draft".into());
+            let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+            ui.editing = true;
+            ui.key(key);
+            assert!(ui.effects.is_empty(), "a draft owns Ctrl+R while the box is open");
+            assert!(matches!(ui.world.conversations[&target], Load::Failed(_)));
+            ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            ui.key(key);
+            let effects = std::mem::take(&mut ui.effects);
+            let [Effect::RetryConversation { target: reopened }] = effects.as_slice() else {
+                panic!("opening is distinct from message resend: {effects:?}");
+            };
+            assert_eq!(reopened, &target);
+            assert!(matches!(ui.world.conversations[&target], Load::Loading));
+            assert!(!ui.stalled.contains_key(&target));
+            assert_eq!(ui.conversation_state.drafts[&target], "saved draft");
+            let (commands, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+            retry_conversation_open(reopened.clone(), &mut failed, &mut requested, &commands);
+            assert!(matches!(incoming.try_recv().unwrap(), Command::Resubscribe { target: sent } if sent == target));
+            assert!(!failed.contains_key(&target));
+            assert!(!requested.contains(&target));
+            ui.key(key);
+            assert!(ui.effects.is_empty(), "loading does not queue another explicit retry");
+            assert!(incoming.try_recv().is_err(), "no automatic retry is sent");
+        }
+    }
+
+    #[test]
     fn a_session_that_failed_to_open_says_why_and_is_asked_again_when_reopened() {
         let session = "session/example-child".to_owned();
         let failed = BTreeMap::from([(
@@ -4170,6 +4461,70 @@ fn connecting_text(waited: Duration) -> String {
         0..2 => "connecting".into(),
         2..8 => format!("connecting {}s", waited.as_secs()),
         seconds => format!("connecting {seconds}s, st is slow to answer"),
+    }
+}
+
+/// How long a shell's attach keeps trying after st refuses it for a reason that passes: about a
+/// minute and a half in all.
+const ATTACH_RETRY_DELAYS: [Duration; 20] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(3),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+];
+
+/// Whether an attach refused with `reason` may work a moment later: st cannot tell yet which host
+/// runs the terminal, that host is briefly out of reach, or st asked for a pause. A terminal that
+/// is gone, restarted or not allowed is not retried.
+fn worth_retrying(reason: &str) -> bool {
+    [
+        "cannot tell yet which host",
+        "cannot be reached right now",
+        "asked to slow down",
+        "changed while this was on its way",
+    ]
+    .iter()
+    .any(|passing| reason.contains(passing))
+}
+
+/// Try `attempt` again after each delay while it fails for a reason that passes, telling `waiting`
+/// the reason before each wait; the last refusal comes back once the delays are used up.
+async fn retry_attach<T, Fut>(
+    delays: &[Duration],
+    mut waiting: impl FnMut(&str),
+    mut attempt: impl FnMut() -> Fut,
+) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let mut delays = delays.iter();
+    loop {
+        match attempt().await {
+            Err(reason) if worth_retrying(&reason) => match delays.next() {
+                Some(delay) => {
+                    waiting(&reason);
+                    tokio::time::sleep(*delay).await;
+                }
+                None => return Err(reason),
+            },
+            done => return done,
+        }
     }
 }
 

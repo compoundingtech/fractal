@@ -49,8 +49,9 @@ async fn a_stale_restart_timer_cannot_erase_or_count_or_wake_its_replacement() {
             .delayed_restarts
             .lock()
             .unwrap()
-            .get(&desired.subject),
-        Some(&(now + 20))
+            .get(&desired.subject)
+            .map(|wake| wake.until),
+        Some(now + 20)
     );
     assert!(matches!(
         events.try_recv(),
