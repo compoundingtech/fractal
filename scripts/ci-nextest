@@ -23,6 +23,22 @@ if [[ "$action" == run && " $* " != *" --no-run "* && "${GITHUB_ACTIONS:-}" == t
   fi
 fi
 
+# Local runs on Linux keep the tests' temporary files in tmpfs. Their SQLite stores sync every WAL commit to
+# disk, and that wait, not CPU, is most of the wall time of the file-store tests (the st3 library set: 251 s
+# on /dev/shm against 407 s on disk with the same CPU, scratch peak about 0.5 GiB either way; four convergence
+# seeds: 48 s against 160 s). CI never takes this branch, so the hosted runs keep real disks and every test that
+# syncs to one. It applies only when TMPDIR is unset or one of the two ordinary directories, and when /dev/shm
+# has 4 GiB free; ST_NEXTEST_TMPDIR=disk turns it off, and a TMPDIR you set yourself is kept.
+if [[ "$action" == run && -z "${GITHUB_ACTIONS:-}" && "$(uname -s)" == Linux && "${ST_NEXTEST_TMPDIR:-}" != disk ]]; then
+  case "${TMPDIR:-}" in
+    ''|/tmp|/tmp/|/var/tmp|/var/tmp/)
+      if [[ -d /dev/shm && -w /dev/shm ]] && [[ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -ge $((4 * 1024 * 1024)) ]]; then
+        export TMPDIR=/dev/shm
+        echo 'ci-nextest: test temporary files in /dev/shm (ST_NEXTEST_TMPDIR=disk to use the disk)' >&2
+      fi ;;
+  esac
+fi
+
 # Keep the former workspace and three legacy integration targets in one invocation.
 # Intersect caller filtersets with this binary selection, including when callers ignore
 # the profile's default test filter. Multiple caller filtersets retain nextest's union.
