@@ -22495,7 +22495,7 @@ agent "import/omp/fixture" {{
                     None,
                 )
                 .unwrap(),
-                vec!["omp", "--resume", newer_id]
+                vec!["omp", "--resume", newer.to_str().unwrap()]
             );
         }
         // Relocation outside the linked inventory is intentionally unsupported.
