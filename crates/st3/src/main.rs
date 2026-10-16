@@ -82,7 +82,7 @@ mod uninstall_cli;
 mod work_cli;
 use agents_cli::run_agents;
 use attention_cli::run_attention;
-use conversations_cli::run_message;
+use conversations_cli::{run_message, upload_attachments};
 use driver_cli::{run_driver, run_driver_hook};
 use fleet_cli::run_fleet;
 use launch_cli::{run_launch, run_mission_view};
@@ -3349,6 +3349,10 @@ struct WorkAskArgs {
     /// feedback, with named answers the person picks and you read back as data.
     #[arg(long, value_name = "FILE", long_help = STRUCTURED_REQUEST_HELP)]
     request: Option<PathBuf>,
+    /// Show the person an image with the request (PNG, JPEG, GIF or WebP, at most 10 MiB, up
+    /// to 4). It is uploaded to this member and read by the person through the ask.
+    #[arg(long = "attach", value_name = "FILE", requires = "request")]
+    attach: Vec<PathBuf>,
     #[arg(long, conflicts_with = "new_run")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Any))))]
     step: Option<String>,
@@ -7011,10 +7015,7 @@ async fn run_trace_to(
             .context("the daemon health response has no store index")?;
     }
     client.follow_recovered();
-    let mut event_feed = LocalEventFeed {
-        trace: true,
-        ..Default::default()
-    };
+    let mut event_feed = LocalEventFeed { trace: true };
     loop {
         if cli_output::closed() {
             return Ok(());
@@ -9046,35 +9047,23 @@ fn event_cursor_error(error: anyhow::Error, query: &str, trace: bool) -> anyhow:
 
 #[derive(Default)]
 struct LocalEventFeed {
-    legacy: bool,
     trace: bool,
 }
 
 impl LocalEventFeed {
     async fn read(&mut self, client: &Client, query: &str) -> Result<LocalEventPage> {
-        if !self.legacy {
-            match client.get(&format!("/v1/events/page?{query}")).await {
-                Ok(page) => return Ok(page),
-                Err(error) if st3::client::is_missing_route(&error) => {
-                    let health: Value = client.get("/v1/health").await?;
-                    anyhow::ensure!(
-                        health
-                            .pointer("/features/bounded_legacy_events")
-                            .and_then(Value::as_u64)
-                            == Some(1),
-                        "this daemon does not support bounded event continuation; upgrade the daemon and retry"
-                    );
-                    self.legacy = true;
-                }
-                Err(error) => return Err(event_cursor_error(error, query, self.trace)),
-            }
-        }
-        let items: Vec<EventRecord> = client
-            .get(&format!("/v1/events?{query}"))
+        client
+            .get(&format!("/v1/events/page?{query}"))
             .await
-            .map_err(|error| event_cursor_error(error, query, self.trace))?;
-        let next_after = items.last().map(|event| event.store_index);
-        Ok(LocalEventPage { items, next_after })
+            .map_err(|error| {
+                if st3::client::is_missing_route(&error) {
+                    anyhow::anyhow!(
+                        "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
+                    )
+                } else {
+                    event_cursor_error(error, query, self.trace)
+                }
+            })
     }
 }
 
@@ -9795,10 +9784,10 @@ fn render_replication_peers(
         let sync = peer.sync.as_ref().expect("filtered on sync");
         let _ = writeln!(
             output,
-            "sync\tcatching up: {} has {} this node lacks, {}",
+            "sync\tcatching up: {} has {} this node lacks, {} (arrival only)",
             peer.peer,
             envelope_count(sync.peer_only_envelopes),
-            catch_up_estimate(sync.estimated_catch_up_seconds)
+            arrival_estimate(sync)
         );
     }
     for peer in peers {
@@ -9886,6 +9875,14 @@ fn render_replication_peers(
                     )
                 }
             );
+            // A stale view carries no forecast, not even "caught up": say only what was true.
+            if sync.peer_only_envelopes == 0 {
+                let _ = writeln!(
+                    output,
+                    "  nothing was missing at the last measurement (arrival only; measured {})",
+                    relative_time(sync.measured_at_unix_ms, now)
+                );
+            }
         }
         let compared = sync
             .graph_compared_at_unix_ms
@@ -9974,15 +9971,32 @@ fn render_replication_peers(
                 .receive_rate_per_second
                 .map(|rate| format!("receiving {rate:.1} envelopes/s, "))
                 .unwrap_or_default();
+            let closing = sync
+                .closing_rate_per_second()
+                .filter(|rate| *rate > 0.0)
+                .map(|rate| format!("closing at {rate:.1}/s, "))
+                .unwrap_or_default();
             let _ = writeln!(
                 output,
-                "  {rate}{} (measured {})",
-                catch_up_estimate(sync.estimated_catch_up_seconds),
+                "  {rate}{closing}{} (arrival only; measured {})",
+                arrival_estimate(sync),
                 relative_time(sync.measured_at_unix_ms, now)
             );
         }
     }
     output
+}
+
+/// When the envelopes this node lacks will have arrived, or that the gap is not closing. It
+/// forecasts arrival only: admission, projection and visibility can lag behind it.
+fn arrival_estimate(sync: &st3::model::ReplicationPeerSync) -> String {
+    // The lower of the catch-up and receive rates: nothing arriving is not catching up either.
+    if sync.peer_only_envelopes != 0
+        && sync.closing_rate_per_second().is_some_and(|rate| rate <= 0.0)
+    {
+        return "not catching up".into();
+    }
+    catch_up_estimate(sync.estimated_catch_up_seconds)
 }
 
 /// Whether the comparison the status reports for a peer found its projections equal. An older
@@ -12200,7 +12214,8 @@ and `"custom": true` also takes the person's own words. `feedback` asks for text
 answers. `why_person` says why no runtime fact or standing instruction settles it. Omit
 `recommendation` to make none. An `update` asks nothing: it names `about`, the person's own
 run or step or their message to you, and clears once read (`st work update` builds one). Subject kinds: pull_request, issue, document, mission, run,
-step, agent, host, commit, link; `revision` pins what was reviewed.
+step, agent, host, commit, link; `revision` pins what was reviewed. `--attach FILE` shows the
+person an image with the request (up to 4), as `st conversations send --attach` does.
 
   {"version": 1, "type": "decision",
    "question": "Land #11 then #12?",
