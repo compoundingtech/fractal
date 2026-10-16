@@ -3171,7 +3171,8 @@ fn production_journal_prune_post_commit_death_child() -> Result<()> {
     assert_eq!(pair.prune_journal()?, 0);
     // Both calls committed and returned their physical writer loans BEFORE this marker.
     durable_retention_artifact(&marker, phase.as_bytes())?;
-    println!("SLICE_TWO_CONSUMER_COMMITTED_PRUNE {phase}");
+    // libtest may leave its test-name prefix on the current stdout line.
+    println!("\nSLICE_TWO_CONSUMER_COMMITTED_PRUNE {phase}");
     std::io::stdout().flush()?;
     // Exit78 was unused in this fixture at the pinned parent. This is post-commit
     // process death with Store still live: no Rust destructors or explicit checkpoint.
@@ -3310,7 +3311,10 @@ fn production_journal_prune_post_commit_death_reopens_both_consumers() -> Result
     assert!(
         String::from_utf8_lossy(&output.stdout)
             .lines()
-            .any(|line| line == expected_stdout.as_str())
+            .any(|line| line == expected_stdout.as_str()),
+        "missing standalone phase marker; child stdout={:?}; stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     let mut phase_bytes = Vec::new();
     std::fs::File::open(&marker)?

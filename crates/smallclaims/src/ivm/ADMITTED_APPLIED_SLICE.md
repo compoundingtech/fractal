@@ -547,3 +547,12 @@ and production adoption remain deferred. All earlier prefixes, helpers, strict/
 growth/crash controls and limits are unchanged. The landed strict128-statement
 page has zero headroom and eight growth pages remain adverse. Skipped merge-
 group perf-cost is not a new cost pass, and old receipts do not qualify this path.
+
+The first hosted post-commit parent reached its exit78 gate but failed the exact
+stdout-line assertion on all three attempts; phase-file and reopen assertions
+were not reached. The child now explicitly starts its marker on a new line so
+libtest's progress prefix cannot share that line. The exact-line assertion stays
+unchanged and includes captured stdout/stderr on failure. The failed log did
+not retain the child's captured output, so progress-prefix framing is a source-
+based explanation, not an observed byte transcript. No gate or limit is relaxed,
+and the first failed control does not qualify the reopen or recovery behavior.
