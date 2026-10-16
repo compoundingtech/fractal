@@ -19,7 +19,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -38,7 +38,6 @@ pub enum Isolation {
 static MODE: OnceLock<Isolation> = OnceLock::new();
 static SCOPE_EXPANSION_FLAG: OnceLock<bool> = OnceLock::new();
 static WARNED: AtomicBool = AtomicBool::new(false);
-static SCOPE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn mode() -> Isolation {
     *MODE.get_or_init(detect)
@@ -137,11 +136,25 @@ pub fn systemd_user_available() -> bool {
 pub fn scope_unit(product: &str, task_id: &str) -> String {
     let safe_product = sanitize(product);
     let safe_task = sanitize(task_id);
-    let sequence = SCOPE_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "{safe_product}-{safe_task}-{}-{sequence}.scope",
-        std::process::id()
-    )
+    // A PID and per-process counter repeat after daemon PID reuse or reboot.
+    // A launch UUID keeps collected scopes from being mistaken for new ones.
+    format!("{safe_product}-{safe_task}-{}.scope", uuid::Uuid::new_v4())
+}
+
+/// The private scope record minted for this runtime's launch remains identity
+/// evidence after a PTY removes its registry on exit. PID/counter names cannot
+/// distinguish incarnations, so they never establish this authority.
+pub(crate) fn is_launch_scope(unit: &str, task_id: &str) -> bool {
+    let prefix = format!("st3-{}-", sanitize(task_id));
+    let Some(token) = unit
+        .strip_prefix(&prefix)
+        .and_then(|unit| unit.strip_suffix(".scope"))
+    else {
+        return false;
+    };
+    uuid::Uuid::parse_str(token).is_ok_and(|uuid| {
+        uuid.get_version() == Some(uuid::Version::Random) && token == uuid.to_string()
+    })
 }
 
 pub(crate) fn sanitize(value: &str) -> String {
@@ -646,6 +659,15 @@ mod tests {
         assert!(first.starts_with("st3-node_demo_task-"));
         assert!(first.ends_with(".scope"));
         assert_ne!(first, second);
+        let launch = first
+            .strip_prefix("st3-node_demo_task-")
+            .unwrap()
+            .strip_suffix(".scope")
+            .unwrap();
+        assert_eq!(
+            uuid::Uuid::parse_str(launch).unwrap().get_version(),
+            Some(uuid::Version::Random)
+        );
     }
 
     #[test]

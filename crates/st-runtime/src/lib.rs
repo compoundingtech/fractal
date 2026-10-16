@@ -9,6 +9,7 @@ mod isolate;
 mod priority;
 mod process;
 mod pty;
+mod pty_identity;
 
 pub use environment::{
     ShellStartupTimeout, expand_path_placeholder, is_shell_startup_timeout, login_environment,

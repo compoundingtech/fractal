@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Verify PTY kernel owner identity; st3 does not initiate signals on a mismatched or unknown owner and replaces confirmed lost owners through exact-record signal-free retirement.",
+  "replay": {
+    "status": "none",
+    "detail": "No store or projection change and no checkpoint invalidation. Identity is checked when the native runtime reads or controls a PTY."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database, storage-version, claim-kind or client-schema change. New launches add st3.boot-id to the existing free-form PTY tags."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule or digest change and no new fleet coordination protocol. Each owner is verified against its local kernel."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Records lacking valid recorded start or boot identity remain unverified and cannot authorize automatic signals, replacement, registry retirement or scope cleanup, even if their PID is gone or a nonleader. An explicit operator stop requires proof of the recorded owner; when unavailable, the existing runtime.action.failed record names the missing start token or boot identity, without a terminate request or timeout escalation. Existing control error codes, client/CLI shapes and action-failure fields are preserved. Records with both identity fields retain strict matching/mismatch rules. Producer-owned evidence and independent stop fencing remain compoundingtech/pty#140; st3 preflight checks do not close producer raw PID re-reads or the check-to-send race. Native macOS behavior remains unverified. A legacy PID/counter scope name without registry identity cannot authorize cleanup or replacement. New scope names contain a launch UUID, whose private original scope record preserves cleanup authority after the launched PTY removes its registry on exit. Unreadable registry entries remain refused and cannot be mistaken for self-removal."
+  },
+  "downtime": {
+    "status": "unknown",
+    "detail": "The ordinary binary deployment restarts the daemon. Restart-to-API and restart-to-health have not been measured for this change. Legacy PTY records remain unverifiable across that restart until they have trustworthy boot evidence."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "The legacy policy decision is complete: no automatic legacy signals or retirement; explicit stop only with checks proving the recorded owner. PID existence, wall-clock ordering and an operator request alone supply no identity proof. The measured legacy records lack both start and boot evidence and therefore remain refused. No qualified independent proof or Operations-owned retirement procedure is currently available; Operations must supply and acknowledge a complete transition before rollout. Newly launched PTYs receive a kernel-owned boot tag automatically. Merging triggers ordinary per-commit deployment, so keep this change draft until the qualified transition and review gates are satisfied."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "No database migration is required or reversed. Older binaries accept the free-form tag but restore unsafe PID-existence liveness and legacy signalling behavior; prefer rolling forward with verified producer evidence. Exact-record retirement of a confirmed mismatch cannot be reversed by reinstalling a binary."
+  }
+}
