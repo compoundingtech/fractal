@@ -59,6 +59,27 @@ fn restore_pair(root: &Path, bytes: &[u8], header: &Header) {
 }
 
 #[test]
+fn read_only_header_matches_the_default_runtime_projection_version_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("source.db");
+    let store = sealed(&path);
+    let default_runtime = crate::store::runtime();
+    assert!(!default_runtime.projection_versions().is_empty(),
+        "this control must discriminate the full identity from the inner registry digest");
+    let mut live_bytes = Vec::new();
+    let live = store.write_backup(&mut live_bytes).unwrap();
+    assert_eq!(live.registry_digest, default_runtime.schema_digest());
+    assert_ne!(live.registry_digest, default_runtime.projection_registry_digest());
+    drop(store);
+    let mut staged_bytes = Vec::new();
+    let staged = Store::write_read_only_backup(&path, &mut staged_bytes, None).unwrap();
+    // Assert the cause field before the whole-stream oracle, including its End hash.
+    assert_eq!(staged.registry_digest, live.registry_digest,
+        "the path-only stage must use the production DEFAULT runtime identity");
+    assert!(staged_bytes == live_bytes, "the full default-runtime archive must remain byte-identical");
+}
+
+#[test]
 fn read_only_v1_matches_the_prior_writer_with_signatures_documents_and_restore() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("source.db");

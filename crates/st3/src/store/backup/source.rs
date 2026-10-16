@@ -354,7 +354,12 @@ pub(super) fn write_read_only_connection(
     let result = (|| {
         ready(connection)?;
         let owned = owned_bodies(connection, bodies)?;
-        let registry = runtime::compatibility_digest(&st3_schema::registry().digest());
+        // Match the production default runtime's complete projection-version identity,
+        // not only its inner claim-registry/layout digest. A path has no custom Runtime:
+        // this writes the DEFAULT-registry identity, never a certificate for a custom
+        // registry or an arbitrary file's producing build. A custom-registry restore
+        // sees a different identity under its existing refusal/reporting rules.
+        let registry = crate::store::runtime().schema_digest();
         write(connection, &registry, output, bodies, &owned)
     })();
     // No implicit transaction destructor conceals the end of this read snapshot.
