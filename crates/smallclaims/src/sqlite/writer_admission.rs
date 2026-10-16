@@ -7,6 +7,8 @@ pub(super) struct WorkerQueue {
     epoch: Instant,
     depth: AtomicU64,
     enqueued_micros: AtomicU64,
+    // u64::MAX means no busy period has been published yet.
+    busy_since_micros: AtomicU64,
 }
 
 impl WorkerQueue {
@@ -15,21 +17,47 @@ impl WorkerQueue {
             epoch: Instant::now(),
             depth: AtomicU64::new(0),
             enqueued_micros: AtomicU64::new(0),
+            busy_since_micros: AtomicU64::new(u64::MAX),
         });
         telemetry::register_worker_queue(&queue);
         queue
     }
 
     pub(super) fn sample(&self) -> (u64, f64) {
-        let depth = self.depth.load(Ordering::Relaxed);
-        if depth == 0 {
-            return (0, 0.0);
+        self.sample_with(|| {})
+    }
+
+    fn sample_with(&self, mut after_depth: impl FnMut()) -> (u64, f64) {
+        for _ in 0..3 {
+            let depth = self.depth.load(Ordering::Acquire);
+            if depth == 0 {
+                return (0, 0.0);
+            }
+            after_depth();
+            let sum = self.enqueued_micros.load(Ordering::Relaxed);
+            if depth != self.depth.load(Ordering::Acquire) {
+                continue;
+            }
+            let age = self.micros().saturating_sub(sum / depth);
+            return (depth, std::time::Duration::from_micros(age).as_secs_f64());
         }
-        let mean_enqueue = self.enqueued_micros.load(Ordering::Relaxed) / depth;
-        // Independent atomic samples are approximate during concurrent changes.
-        // Saturation avoids a negative age when a new enqueue races observation.
-        let age = self.micros().saturating_sub(mean_enqueue);
-        (depth, std::time::Duration::from_micros(age).as_secs_f64())
+        // A changing queue is not a consistent sample: emit zero, not an uptime spike.
+        (0, 0.0)
+    }
+
+    pub(super) fn busy_age(&self) -> f64 {
+        if self.depth.load(Ordering::Acquire) == 0 {
+            return 0.0;
+        }
+        let since = self.busy_since_micros.load(Ordering::Acquire);
+        // An enqueue may not have published its start yet. Epoch zero remains an
+        // upper bound in that window, rather than hiding potentially old work.
+        let since = if since == u64::MAX { 0 } else { since };
+        let age = self.micros().saturating_sub(since);
+        if self.depth.load(Ordering::Acquire) == 0 {
+            return 0.0;
+        }
+        std::time::Duration::from_micros(age).as_secs_f64()
     }
 
     fn micros(&self) -> u64 {
@@ -39,9 +67,11 @@ impl WorkerQueue {
     fn enqueue(self: &Arc<Self>) -> QueuedWorker {
         std::sync::LazyLock::force(&telemetry::METRICS);
         let at = Instant::now();
-        let micros = self.micros();
+        let micros = u64::try_from(at.duration_since(self.epoch).as_micros()).unwrap_or(u64::MAX);
         self.enqueued_micros.fetch_add(micros, Ordering::Relaxed);
-        self.depth.fetch_add(1, Ordering::Relaxed);
+        if self.depth.fetch_add(1, Ordering::AcqRel) == 0 {
+            self.busy_since_micros.fetch_min(micros, Ordering::AcqRel);
+        }
         QueuedWorker { queue: self.clone(), micros, at }
     }
 }
@@ -54,8 +84,18 @@ struct QueuedWorker {
 
 impl Drop for QueuedWorker {
     fn drop(&mut self) {
-        self.queue.depth.fetch_sub(1, Ordering::Relaxed);
+        let last = self.queue.depth.fetch_sub(1, Ordering::AcqRel) == 1;
         self.queue.enqueued_micros.fetch_sub(self.micros, Ordering::Relaxed);
+        if last {
+            let since = self.queue.busy_since_micros.swap(u64::MAX, Ordering::AcqRel);
+            // A new 0->1 enqueue may publish before our clear. Recheck depth and
+            // restore the earlier start with atomic min, never moving a newer
+            // busy period forward. Overlapping empty transitions can retain an
+            // older start: this is a conservative bound, not exact oldest age.
+            if self.queue.depth.load(Ordering::Acquire) != 0 {
+                self.queue.busy_since_micros.fetch_min(since.min(self.micros), Ordering::AcqRel);
+            }
+        }
     }
 }
 
@@ -259,6 +299,53 @@ mod tests {
     use futures_util::poll;
     use std::task::Poll;
     use std::time::Duration;
+
+    #[test]
+    fn queue_sample_retries_when_last_callback_starts() {
+        let queue = WorkerQueue::new();
+        let mut queued = Some(queue.enqueue());
+        let sample = queue.sample_with(|| drop(queued.take()));
+        assert_eq!(sample, (0, 0.0));
+        assert_eq!(queue.busy_age(), 0.0);
+    }
+
+    #[test]
+    fn queue_sample_reports_zero_after_bounded_retries() {
+        let queue = WorkerQueue::new();
+        let queued = queue.enqueue();
+        let mut attempts = 0;
+        let sample = queue.sample_with(|| {
+            // Model a depth change between every pair of loads.
+            queue.depth.fetch_add(1, Ordering::Relaxed);
+            attempts += 1;
+        });
+        assert_eq!(attempts, 3);
+        assert_eq!(sample, (0, 0.0));
+        queue.depth.fetch_sub(attempts, Ordering::Relaxed);
+        drop(queued);
+        assert_eq!(queue.sample(), (0, 0.0));
+    }
+
+    #[test]
+    fn busy_period_covers_all_queued_callbacks_and_clears() {
+        let queue = WorkerQueue::new();
+        let first = queue.enqueue();
+        let since = queue.busy_since_micros.load(Ordering::Relaxed);
+        assert_ne!(since, u64::MAX);
+        let second = queue.enqueue();
+        assert_eq!(queue.busy_since_micros.load(Ordering::Relaxed), since);
+        drop(first);
+        assert_eq!(queue.busy_since_micros.load(Ordering::Relaxed), since);
+        assert!(since <= second.micros);
+        drop(second);
+        assert_eq!(queue.busy_since_micros.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(queue.sample(), (0, 0.0));
+        assert_eq!(queue.busy_age(), 0.0);
+        let next = queue.enqueue();
+        assert_ne!(queue.busy_since_micros.load(Ordering::Relaxed), u64::MAX);
+        drop(next);
+        assert_eq!(queue.busy_age(), 0.0);
+    }
 
     fn writer(limit: usize) -> Arc<WriterConnection> {
         with_write_limit_for_test(limit, || {
