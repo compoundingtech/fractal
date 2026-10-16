@@ -10464,7 +10464,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let mut waiting = false;
                 let mut gate_results = Vec::new();
                 for gate in &loop_spec.until {
-                    let gate_name = crate::graph::gate_name(gate).to_owned();
+                    let gate_name = crate::gate_parse::gate_name(gate).to_owned();
                     match self.evaluate_context_gate(
                         run,
                         &loop_subject,
@@ -10593,7 +10593,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let gate = loop_spec
                         .until
                         .iter()
-                        .find(|candidate| crate::graph::gate_name(candidate) == gate)
+                        .find(|candidate| crate::gate_parse::gate_name(candidate) == gate)
                         .with_context(|| {
                             format!("metric `{}` names an unavailable gate", metric.name)
                         })?;
@@ -13241,7 +13241,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(match outcome {
             GateOutcome::NotYet if stage.eval => GateOutcome::Fail(format!(
                 "exec gate `{}` exited 1",
-                crate::graph::gate_name(&gate)
+                crate::gate_parse::gate_name(&gate)
             )),
             GateOutcome::Broken(reason) if stage.eval => GateOutcome::Fail(reason),
             outcome => outcome,
@@ -15438,7 +15438,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             GateSpec::Human { reviewer, .. } => {
                 let operation = gate_operation_subject(
                     stage,
-                    crate::graph::gate_name(gate),
+                    crate::gate_parse::gate_name(gate),
                     &serde_json::to_value(gate)?,
                 )?;
                 let decision = self.store.latest_claim(&operation, Some("gate.result"))?;
@@ -15461,7 +15461,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         };
         if matches!(outcome, GateOutcome::Pass | GateOutcome::Fail(_)) {
-            let name = crate::graph::gate_name(gate);
+            let name = crate::gate_parse::gate_name(gate);
             let digest = hex::encode(sha2::Sha256::digest(
                 format!("{}:{name}", stage.subject).as_bytes(),
             ));

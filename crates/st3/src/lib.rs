@@ -40,7 +40,9 @@ pub mod fleet;
 /// Silent messages are stored and readable without waking the recipient.
 pub mod silent;
 /// `st missions check`: run a mission file's exec gates once, now, the way a run would.
+pub(crate) mod declaration_syntax;
 pub mod gate_check;
+pub(crate) mod gate_parse;
 /// Built-in gate kinds: what gates shelled out for most, answered by st itself.
 pub mod gate_kinds;
 /// What an `st` command run inside an exec gate reports about itself.
