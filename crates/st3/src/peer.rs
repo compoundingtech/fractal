@@ -3243,7 +3243,7 @@ mod tests {
             *request.headers_mut() = auth
                 .request_headers_for(CLIENT_READ_PATH, "near", &body)
                 .unwrap();
-            let router = peer_router(peer.clone(), smalltalk_routes());
+            let router = peer_router(peer.clone(), smalltalk_routes(crate::api::raw_terminal_owner_splice));
             async move {
                 let response = router.oneshot(request).await.unwrap();
                 let status = response.status();
@@ -3951,7 +3951,7 @@ mod tests {
         let response = relay_trace::test_peer_selector(
             FleetAuth::body_digest(&body),
             "source".into(),
-            peer_router(peer.clone(), smalltalk_routes()).oneshot(request),
+            peer_router(peer.clone(), smalltalk_routes(crate::api::raw_terminal_owner_splice)).oneshot(request),
         )
         .with_subscriber(diagnostic.dispatch())
         .await
@@ -4552,7 +4552,7 @@ mod tests {
         );
         let state = PeerState::new(MainBackend::new(sockets[1].to_path_buf()), "target".into(), auth.clone(), FleetContext::legacy(BTreeSet::from(["source".into()])));
         let peer_server =
-            tokio::spawn(async move { axum::serve(listener, peer_router(state, smalltalk_routes())).await });
+            tokio::spawn(async move { axum::serve(listener, peer_router(state, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await });
         let peer = PeerConfig {
             name: "target".into(),
             url: format!("http://{address}"),
