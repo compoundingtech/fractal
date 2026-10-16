@@ -35,6 +35,7 @@ struct Fence {
     count: Option<u64>,
     writer_micros: u128,
     scan_millis: u128,
+    scan_millis_each: Vec<u128>,
     fast: bool,
 }
 
@@ -95,6 +96,7 @@ fn fenced_count(store: &Store, recipient: &str) -> Result<Fence> {
             count: Some(scan.unread),
             writer_micros: fast_started.elapsed().as_micros(),
             scan_millis: scan.elapsed.as_millis(),
+            scan_millis_each: vec![scan.elapsed.as_millis()],
             fast: true,
         });
     }
@@ -104,6 +106,7 @@ fn fenced_count(store: &Store, recipient: &str) -> Result<Fence> {
     let observer = readonly_observer(&store.path)?;
     let mut attempts = 0;
     let mut last_scan_millis = 0;
+    let mut scan_millis_each = Vec::new();
     for attempt in 1..=MAX_ATTEMPTS {
         if Instant::now() >= deadline {
             break;
@@ -118,6 +121,7 @@ fn fenced_count(store: &Store, recipient: &str) -> Result<Fence> {
             break;
         };
         last_scan_millis = scan.elapsed.as_millis();
+        scan_millis_each.push(last_scan_millis);
         let mut writer = store.connection.write();
         let transaction =
             writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -138,6 +142,7 @@ fn fenced_count(store: &Store, recipient: &str) -> Result<Fence> {
                 count: Some(scan.unread),
                 writer_micros,
                 scan_millis: last_scan_millis,
+                scan_millis_each,
                 fast: false,
             });
         }
@@ -148,6 +153,7 @@ fn fenced_count(store: &Store, recipient: &str) -> Result<Fence> {
         count: None,
         writer_micros: 0,
         scan_millis: last_scan_millis,
+        scan_millis_each,
         fast: false,
     })
 }
@@ -466,7 +472,6 @@ fn trim_claim_as_checkpoint(store: &Store, claim: &ClaimRecord) {
 }
 
 #[test]
-#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
 fn visible_mailbox_lifecycle_oracle() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(&directory.path().join("state.sqlite3"), "host/fixture").unwrap();
@@ -560,7 +565,6 @@ fn visible_mailbox_lifecycle_oracle() {
 }
 
 #[test]
-#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
 fn data_version_covers_mail_and_projection_mutations() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite3");
@@ -657,11 +661,12 @@ fn data_version_covers_mail_and_projection_mutations() {
     );
     let child_before = data_version(&observer).unwrap();
     let status = std::process::Command::new("python3")
+        .arg("-I")
         .arg("-c")
         .arg("import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"INSERT OR REPLACE INTO meta(key,value) VALUES('custody_child_commit','1')\"); c.commit()")
         .arg(&path)
         .status()
-        .unwrap();
+        .expect("python3 -I is required for the second-process SQLite control");
     assert!(status.success(), "second-process SQLite commit failed");
     assert_ne!(
         child_before,
@@ -732,7 +737,6 @@ fn data_version_covers_mail_and_projection_mutations() {
 }
 
 #[test]
-#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
 fn data_version_covers_checkpoint_trim_without_digest_change() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite3");
@@ -827,7 +831,6 @@ fn data_version_covers_checkpoint_trim_without_digest_change() {
 }
 
 #[test]
-#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
 fn pinned_scan_connection_is_not_the_observer() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite3");
@@ -864,7 +867,6 @@ fn pinned_scan_connection_is_not_the_observer() {
 }
 
 #[test]
-#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
 fn other_connection_commits_during_a_pinned_page_scan() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite3");
@@ -917,7 +919,6 @@ fn other_connection_commits_during_a_pinned_page_scan() {
 }
 
 #[test]
-#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
 fn eval_run_desired_delete_moves_data_version() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite3");
@@ -979,8 +980,7 @@ mission "eval/custody" state="ready" timeout="1m" {
 }
 
 #[test]
-#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
-fn exact_unread_generation_fence_probe() {
+fn exact_unread_data_version_fence_probe() {
     for (sent, desired_old, desired_other) in [
         (100, 0, 0),
         (500, 0, 0),
@@ -1009,14 +1009,18 @@ fn exact_unread_generation_fence_probe() {
         assert!(!fence.busy);
         assert_eq!(fence.count, Some(desired_old as u64));
         println!(
-            "custody_fence attempts={} busy={} fast={} scan_ms={} writer_us={}",
-            fence.attempts, fence.busy, fence.fast, fence.scan_millis, fence.writer_micros
+            "custody_fence attempts={} busy={} fast={} scan_ms={} each_scan_ms={:?} writer_us={}",
+            fence.attempts,
+            fence.busy,
+            fence.fast,
+            fence.scan_millis,
+            fence.scan_millis_each,
+            fence.writer_micros
         );
     }
 }
 
 #[test]
-#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
 fn pinned_wal_and_unrelated_write_probe() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite3");
@@ -1094,12 +1098,13 @@ fn pinned_wal_and_unrelated_write_probe() {
         let (writes, elapsed) = writer.join().expect("writer thread");
         success += usize::from(!fenced.busy);
         println!(
-            "custody_contention trial={trial} target_writes_per_s=50 achieved_writes_per_s={:.1} attempts={} busy={} fast={} scan_ms={} exact_count={:?} writer_us={}",
+            "custody_contention trial={trial} target_writes_per_s=50 achieved_writes_per_s={:.1} attempts={} busy={} fast={} scan_ms={} each_scan_ms={:?} exact_count={:?} writer_us={}",
             writes as f64 / elapsed.as_secs_f64(),
             fenced.attempts,
             fenced.busy,
             fenced.fast,
             fenced.scan_millis,
+            fenced.scan_millis_each,
             fenced.count,
             fenced.writer_micros
         );
@@ -1110,7 +1115,6 @@ fn pinned_wal_and_unrelated_write_probe() {
 }
 
 #[test]
-#[ignore = "hosted fixture only; run explicitly after Intake source admission"]
 fn projection_only_recipient_change_invalidates_snapshot() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite3");
