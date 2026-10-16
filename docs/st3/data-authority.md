@@ -82,8 +82,11 @@ inside the daemon's writer transaction. Source runtime, spool sequence, claim ki
 semantics identify an exact retry; changed input is rejected. Graph-derived claim fields are
 persisted in the spool before the first HTTP attempt so retries preserve their original attribution.
 
-Authority reads reuse up to 64 harness-spool SQLite connections per thread, evicting the
-least recently used connection at capacity. Only connections are retained: each check opens
+Authority reads reuse up to 128 harness-spool SQLite connections across the process, with
+at most 64 per thread. At either limit a thread evicts its least recently used connection;
+at the global limit a thread with no cached connection reads without caching. Atomic slot
+reservations bound retained connections without a global query lock, and closing a connection
+releases its slot, including on thread exit. Only connections are retained: each check opens
 a fresh read transaction and releases it before returning, so subsequent checks observe
 committed producer writes without retaining a WAL snapshot. Reads still validate the spool
 format and provider/runtime binding; replacing the spool inode invalidates its connection.

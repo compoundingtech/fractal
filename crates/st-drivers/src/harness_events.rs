@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -27,12 +28,35 @@ pub const WAKE_PIPE: &str = ".st-harness-events-wake";
 pub const DATABASE: &str = "st-harness-events.sqlite";
 const MAX_PENDING_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_READ_CONNECTIONS: usize = 64;
+const MAX_TOTAL_READ_CONNECTIONS: usize = 128;
+static LIVE_READ_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+
+struct ReadConnectionSlot;
+
+impl ReadConnectionSlot {
+    fn reserve() -> Option<Self> {
+        LIVE_READ_CONNECTIONS
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
+                (live < MAX_TOTAL_READ_CONNECTIONS).then_some(live + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for ReadConnectionSlot {
+    fn drop(&mut self) {
+        LIVE_READ_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 struct ReadConnection {
     path: PathBuf,
     device: u64,
     inode: u64,
     connection: Connection,
+    // Fields drop in declaration order: close SQLite before releasing its cache slot.
+    _slot: ReadConnectionSlot,
 }
 
 thread_local! {
@@ -81,8 +105,9 @@ fn open(agent_dir: &Path) -> Result<Connection> {
 }
 
 /// Retain connections, never snapshots. Each call finishes its read transaction before
-/// returning, so the next call sees new commits. Per-thread LRU bounds avoid a process-wide
-/// query lock; checking the inode also prevents retaining authority from a replaced spool.
+/// returning, so the next call sees new commits. Per-thread LRUs avoid a process-wide
+/// query lock, while atomic reservations bound retained connections across all threads.
+/// Checking the inode prevents retaining authority from a replaced spool.
 fn with_read_connection<T>(
     agent_dir: &Path,
     read: impl FnOnce(&mut Connection) -> Result<T>,
@@ -99,12 +124,24 @@ fn with_read_connection<T>(
         let entry = cached.and_then(|index| connections.remove(index));
         let mut entry = match entry {
             Some(entry) if entry.device == metadata.dev() && entry.inode == metadata.ino() => entry,
-            _ => ReadConnection {
-                path,
-                device: metadata.dev(),
-                inode: metadata.ino(),
-                connection: open(agent_dir)?,
-            },
+            _ => {
+                let slot = ReadConnectionSlot::reserve().or_else(|| {
+                    // Only this thread owns its LRU. At the global cap replace one of
+                    // its entries; a thread with no entry performs an uncached read.
+                    connections.pop_front()?;
+                    ReadConnectionSlot::reserve()
+                });
+                let Some(slot) = slot else {
+                    return read(&mut open(agent_dir)?);
+                };
+                ReadConnection {
+                    path,
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                    connection: open(agent_dir)?,
+                    _slot: slot,
+                }
+            }
         };
         // Keep the existing format validation even when an external writer changes it.
         let version: u32 = entry
@@ -698,9 +735,66 @@ pub(crate) fn read_timeline(agent_dir: &Path) -> Result<Option<Record>> {
 mod tests {
     use super::*;
     use crate::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer, claim};
+    // Keep the saturation test from deliberately denying slots to reuse assertions.
+    static CACHE_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    #[test]
+    fn cached_connections_are_bounded_across_threads() {
+        const THREADS: usize = 8;
+        const SEATS: usize = 200;
+        let _guard = CACHE_TEST_LOCK.lock();
+        let root = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = (0..SEATS)
+            .map(|index| {
+                let path = root.path().join(index.to_string());
+                enable(&path, "runtime").unwrap();
+                path
+            })
+            .collect();
+        let ready = std::sync::Barrier::new(THREADS + 1);
+        let release = std::sync::Barrier::new(THREADS + 1);
+        let cached_entries = AtomicUsize::new(0);
+        #[cfg(target_os = "linux")]
+        let baseline_fds = std::fs::read_dir("/proc/self/fd").unwrap().count();
+        std::thread::scope(|scope| {
+            for paths in paths.chunks(SEATS / THREADS) {
+                let ready = &ready;
+                let release = &release;
+                let cached_entries = &cached_entries;
+                scope.spawn(move || {
+                    for path in paths {
+                        assert!(read_snapshot(path, "harness-state").unwrap().is_none());
+                        assert!(
+                            LIVE_READ_CONNECTIONS.load(Ordering::Relaxed)
+                                <= MAX_TOTAL_READ_CONNECTIONS
+                        );
+                    }
+                    READ_CONNECTIONS.with(|connections| {
+                        cached_entries.fetch_add(connections.borrow().len(), Ordering::Relaxed);
+                    });
+                    ready.wait();
+                    release.wait();
+                    READ_CONNECTIONS.with(|connections| connections.borrow_mut().clear());
+                });
+            }
+            ready.wait();
+            let retained = LIVE_READ_CONNECTIONS.load(Ordering::Relaxed);
+            assert!(retained <= MAX_TOTAL_READ_CONNECTIONS);
+            let entries = cached_entries.load(Ordering::Relaxed);
+            assert!(entries <= retained);
+            #[cfg(target_os = "linux")]
+            eprintln!(
+                "{SEATS} spools, {THREADS} threads: {retained} cached connections; \
+                 fd baseline={baseline_fds}, retained={}",
+                std::fs::read_dir("/proc/self/fd").unwrap().count()
+            );
+            release.wait();
+        });
+    }
 
     #[test]
     fn authority_reads_reuse_connections_and_observe_committed_successors() {
+        let _guard = CACHE_TEST_LOCK.lock();
         let root = tempfile::tempdir().unwrap();
         enable(root.path(), "runtime-a").unwrap();
         claim(root.path(), "agent/example", "claude", "provider-a").unwrap();
@@ -721,6 +815,7 @@ mod tests {
             );
         }
         assert_eq!(CONNECTION_OPENS.with(std::cell::Cell::get), opens);
+        eprintln!("authority reads: 30/30 warm-cache hits, no connect or initialization PRAGMA");
 
         enable(root.path(), "runtime-b").unwrap();
         // A retained predecessor is still evidence only for its original runtime.
@@ -755,6 +850,7 @@ mod tests {
 
     #[test]
     fn cached_authority_reads_reopen_replaced_spools() {
+        let _guard = CACHE_TEST_LOCK.lock();
         let root = tempfile::tempdir().unwrap();
         let agent = root.path().join("agent");
         enable(&agent, "runtime-old").unwrap();
