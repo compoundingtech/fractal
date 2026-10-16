@@ -49,3 +49,18 @@ assert.ok(notApplied(answered('some-future-code', 'none')), 'the answer decides,
 assert.equal(appliedAnswer(refused('forbidden')), undefined);
 assert.ok(!outcomeUnknown(refused('forbidden')), 'a plain refusal is not an unknown outcome');
 assert.ok(outcomeUnknown(new TypeError('Network request failed')), 'a lost answer is an unknown outcome');
+
+// The phone's generic error decoder keeps unfamiliar terminal codes and their definitive
+// answer; these codes require no special handling or retry in an older phone build.
+for (const [code, variant] of [['recipient-retired', 'Retired'], ['lifecycle-unavailable', 'LifecycleUnavailable'], ['future-terminal-code', 'FutureRefusal']]) {
+  const message = `${variant}: recipient agent/example/worker refuses this first send`;
+  const error = new ClientError(JSON.parse(JSON.stringify({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
+    request_id: 'request/example', code, message, retryable: false, applied: 'none',
+    details: { applied: 'none', refusal: { variant, recipient: 'agent/example/worker' } } })), 409);
+  assert.equal(plainError(error), message);
+  assert.equal(error.response.details.refusal.variant, variant);
+  assert.ok(notApplied(error) && !outcomeUnknown(error) && !isTransient(error));
+  let attempts = 0;
+  await assert.rejects(retryTransient(3, async () => { attempts++; throw error; }));
+  assert.equal(attempts, 1);
+}
