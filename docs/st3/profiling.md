@@ -64,6 +64,12 @@ lexical scopes also skip performance/profile/origin entry entirely when disabled
 Callbacks that already had synchronous attribution use explicit profile-preserving
 or performance-only adapters; their existing shared performance-meter lock and
 attribution remain independent of metrics export and are not claimed to be zero-cost.
+The reconcile cost-counter metric covers classified background passes only:
+completed startup, notification, deadline and changed-repeat trigger spans within
+`reconcile` operations, with only SQL recorded inside those same spans. Direct and
+unclassified passes, next-deadline callbacks and async polls are excluded.
+The direct/unclassified remainder is not measured and is not exported as zero.
+Process CPU remains a whole-process measurement, not classified-pass CPU.
 Each future keeps CPU and poll totals locally, flushing to OTel at most once a
 second while polling and once when it completes or is dropped. A parked task's
 remaining sample is flushed when it next polls or is dropped; there is no timer
