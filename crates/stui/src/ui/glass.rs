@@ -2798,9 +2798,15 @@ impl Ui {
             // Ctrl+R tries again: it sends a message st never had again. Speaking into the box is
             // Ctrl+Y, with the box open or not (Nathan, 2026-10-05: it did nothing until a letter
             // had opened the box; 2026-10-14: Ctrl+R means retry, so voice moved off it).
-            KeyCode::Char('r') if control && conversation.is_some() && self.live => {
-                if let Some(entry) = self.undelivered() {
-                    self.effects.push(Effect::Resend { entry });
+            KeyCode::Char('r') if control && quiet && !sidebar_keys && self.live => {
+                // A failed open owns retry before resend, including read-only child sessions.
+                if !self.retry_conversation() {
+                    if conversation.is_none() {
+                        return false;
+                    }
+                    if let Some(entry) = self.undelivered() {
+                        self.effects.push(Effect::Resend { entry });
+                    }
                 }
             }
             KeyCode::Char('y') if control && conversation.is_some() && self.live => self.start_voice(),
@@ -5931,6 +5937,37 @@ mod tests {
             ui.conversation_state.drafts["agent/example/atlas/builder"],
             "hello"
         );
+        ui.editing = false;
+        ui.world.conversations.insert(
+            "agent/example/atlas/builder".into(),
+            Load::Failed("access refused".into()),
+        );
+        ctrl(&mut ui, 'r');
+        assert_eq!(
+            ui.effects,
+            [Effect::RetryConversation {
+                target: "agent/example/atlas/builder".into(),
+            }],
+            "a failed-open card retries only its subscription, never message resend"
+        );
+        assert_eq!(
+            ui.conversation_state.drafts["agent/example/atlas/builder"],
+            "hello"
+        );
+        ui.effects.clear();
+        ui.world.conversations.insert(
+            "agent/example/atlas/builder".into(),
+            Load::Failed("access refused".into()),
+        );
+        let sidebar = &mut ui.glasses.as_mut().unwrap().sidebar;
+        sidebar.shown = true;
+        sidebar.focused = true;
+        ctrl(&mut ui, 'r');
+        assert!(ui.effects.is_empty(), "sidebar focus must not retry the conversation behind it");
+        assert!(matches!(
+            ui.world.conversations["agent/example/atlas/builder"],
+            Load::Failed(_)
+        ));
     }
 
     #[test]

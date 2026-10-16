@@ -4018,18 +4018,25 @@ mod tests {
         use super::super::{demo, glass, Hit};
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        for child in [false, true] {
+        for (spaces, child) in [(false, false), (true, false), (true, true)] {
             let mut ui = Ui::new(demo::world());
             ui.live = true;
             ui.tab = 1;
-            let target = if child {
+            let selected = ui.selected_id().unwrap();
+            if spaces {
                 ui.glasses = Some(glass::Glasses::open(None, None));
+            }
+            let target = if child {
                 ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(
                     "session/tester-child".into(),
                 )));
                 "session/tester-child".to_owned()
             } else {
-                ui.selected_id().unwrap()
+                let target = selected;
+                if spaces {
+                    ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(target.clone())));
+                }
+                target
             };
             let mut failed = BTreeMap::from([(target.clone(), "access refused".into())]);
             let mut requested = HashSet::from([target.clone()]);
@@ -4047,12 +4054,17 @@ mod tests {
             let shown: String = terminal.backend().buffer().content.iter()
                 .map(ratatui::buffer::Cell::symbol).collect();
             assert!(shown.contains("access refused"), "{shown}");
-            assert!(shown.contains("Ctrl+L · retry opening this conversation"), "{shown}");
+            assert!(shown.contains("Ctrl+R · retry opening this conversation"), "{shown}");
             assert!(!shown.contains("retrying") && !shown.contains("Trying again"), "{shown}");
             assert!(ui.effects.is_empty(), "rendering a refusal never retries it");
 
             ui.conversation_state.drafts.insert(target.clone(), "saved draft".into());
-            let key = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+            let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+            ui.editing = true;
+            ui.key(key);
+            assert!(ui.effects.is_empty(), "a draft owns Ctrl+R while the box is open");
+            assert!(matches!(ui.world.conversations[&target], Load::Failed(_)));
+            ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
             ui.key(key);
             let effects = std::mem::take(&mut ui.effects);
             let [Effect::RetryConversation { target: reopened }] = effects.as_slice() else {

@@ -1185,16 +1185,17 @@ impl Ui {
         self.stalled.insert(target.to_owned(), error.to_owned());
     }
 
-    fn retry_conversation(&mut self) {
+    fn retry_conversation(&mut self) -> bool {
         let Some(target) = self.content_conversation() else {
-            return;
+            return false;
         };
         if !matches!(self.world.conversations.get(&target), Some(Load::Failed(_))) {
-            return;
+            return false;
         }
         self.stalled.remove(&target);
         self.world.conversations.insert(target.clone(), Load::Loading);
         self.effects.push(Effect::RetryConversation { target });
+        true
     }
 
     /// What is on screen, as kinds and counts only, for a slow-turn note: which pane has focus,
@@ -2564,7 +2565,7 @@ impl Ui {
         );
         inner.blank();
         inner.wrap(
-            &[text::run("Ctrl+L · retry opening this conversation", theme::fg(theme::ACCENT))],
+            &[text::run("Ctrl+R · retry opening this conversation", theme::fg(theme::ACCENT))],
             width.saturating_sub(4),
         );
         doc.card("no conversation to show", theme::OVERLAY1, false, inner, width);
@@ -3777,7 +3778,7 @@ impl Ui {
                 ("wheel pgup pgdn ↑↓", "scroll the pane under the pointer"),
                 ("end", "jump to the newest message and follow it"),
                 ("ctrl+f", "find in this conversation"),
-                ("ctrl+l", "retry opening a failed conversation (outside the message box)"),
+                ("ctrl+r", "retry opening a failed conversation (outside the message box)"),
                 (
                     "ctrl+a",
                     "the agent's actions: restart, suspend, retire, terminal…",
@@ -4562,7 +4563,6 @@ impl Ui {
             KeyCode::Char('x') if self.tab == 2 => self.system = !self.system,
             KeyCode::Enter if self.tab == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.toggle_focused_tool(),
             KeyCode::Char('u') if self.tab == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.toggle_focused_images(),
-            KeyCode::Char('l') if self.tab == 1 && self.live && key.modifiers == KeyModifiers::CONTROL => self.retry_conversation(),
             KeyCode::Char('o') if self.tab == 1 => self.toggle_all_tools(),
             KeyCode::Char('O') => self.toggle_simple(),
             KeyCode::Char('/') if self.tab == 1 => {
@@ -4571,6 +4571,13 @@ impl Ui {
                 }
             }
             KeyCode::Char(letter @ ('r' | 'x')) if self.tab == 1 && self.live => {
+                if letter == 'r'
+                    && self.glasses.is_none()
+                    && key.modifiers == KeyModifiers::CONTROL
+                    && self.retry_conversation()
+                {
+                    return;
+                }
                 match self.undelivered() {
                     Some(entry) if letter == 'r' => self.effects.push(Effect::Resend { entry }),
                     Some(entry) => self.effects.push(Effect::Forget { entry }),
@@ -6921,7 +6928,7 @@ mod tests {
         ui.live = true;
         ui.tab = 1;
         let target = ui.selected_id().unwrap();
-        let key = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
         ui.key(key);
         assert!(ui.effects.is_empty(), "a ready conversation is not reopened");
 
