@@ -132,6 +132,7 @@ use std::sync::atomic::Ordering;
 #[allow(unused_imports)]
 use smallclaims::sqlite::*;
 pub use smallclaims::store::Store as GraphStore;
+pub use smallclaims::store::CHECKPOINT_SPACE_GATE_VERSION;
 #[allow(unused_imports)]
 use smallclaims::store::runtime::LegacyDigestTable;
 #[allow(unused_imports)]

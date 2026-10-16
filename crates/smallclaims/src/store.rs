@@ -61,6 +61,7 @@ pub mod idempotency;
 mod inventory_generation;
 mod checkpoint_capture_epoch;
 mod checkpoint_space;
+pub use checkpoint_space::CHECKPOINT_SPACE_GATE_VERSION;
 pub use binary_payloads::PayloadConversion;
 pub mod canonical;
 pub mod checkpoint;

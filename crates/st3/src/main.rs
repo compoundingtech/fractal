@@ -86,6 +86,8 @@ use presentation::{
 struct Cli {
     #[arg(long, global = true, hide = true)]
     read_contract_inventory_json: bool,
+    #[arg(long, global = true, hide = true)]
+    checkpoint_space_gate_capabilities: bool,
     #[arg(long, global = true)]
     endpoint: Option<String>,
     /// Run a second, fully separate st on this machine: its own state, config, sockets, node
@@ -5274,6 +5276,15 @@ fn read_contract_inventory_request(arguments: &[std::ffi::OsString]) -> Option<b
     present.then(|| arguments.len() == 2 && arguments[1] == FLAG)
 }
 
+fn checkpoint_space_gate_capabilities_request(arguments: &[std::ffi::OsString]) -> Option<bool> {
+    const FLAG: &str = "--checkpoint-space-gate-capabilities";
+    arguments
+        .iter()
+        .skip(1)
+        .any(|argument| argument == FLAG)
+        .then(|| arguments.len() == 2 && arguments[1] == FLAG)
+}
+
 fn main() -> ExitCode {
     cli_output::finish(cli_main())
 }
@@ -5284,6 +5295,23 @@ fn cli_main() -> ExitCode {
         st3::recorder::run(program);
     }
     let arguments = std::env::args_os().collect::<Vec<_>>();
+    match checkpoint_space_gate_capabilities_request(&arguments) {
+        Some(true) => {
+            println!(
+                "{}",
+                json!({
+                    "kind": "checkpoint-space-gate-capabilities",
+                    "version": st3::store::CHECKPOINT_SPACE_GATE_VERSION,
+                })
+            );
+            return ExitCode::SUCCESS;
+        }
+        Some(false) => {
+            eprintln!("st: --checkpoint-space-gate-capabilities must be used alone");
+            return ExitCode::from(2);
+        }
+        None => {}
+    }
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
             println!("{}", read_contract_inventory_json());

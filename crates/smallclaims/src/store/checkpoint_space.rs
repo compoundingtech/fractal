@@ -12,6 +12,9 @@ use anyhow::{Context as _, Result, bail};
 use rusqlite::{Connection, OptionalExtension as _};
 
 const GIB: u128 = 1024 * 1024 * 1024;
+/// Exact binary capability expected by the checkpoint deployment gate.
+/// Change this only when the admission/refusal contract changes and the deploy gate is updated.
+pub const CHECKPOINT_SPACE_GATE_VERSION: u32 = 1;
 const LIVE_FLOOR: u128 = 8 * GIB;
 const REACTION_MARGIN: u128 = 256 * 1024 * 1024;
 #[cfg(test)]
