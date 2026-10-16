@@ -188,7 +188,7 @@ injections are isolated controls, not new producer authority or incident cause.
 Intake must read the exact complete private delta and bodies before any compiler
 or publication decision. #2930's sqlite/telemetry seams and #3082's productive
 head/cohort are untouched. This source does not close the fleet incident, accept
-Silber's failed gate, release Bluey's disk hold or grant rollout/activation.
+a failed rollout gate, release a member's disk hold or grant rollout/activation.
 
 
 Composition note: the private successor merges exact GitHub main
