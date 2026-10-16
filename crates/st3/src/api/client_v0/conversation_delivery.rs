@@ -156,12 +156,26 @@ mod tests {
         }
 
         fn transcript(&self, texts: &[String]) {
-            let lines = texts.iter().enumerate().map(|(index, text)| format!("{}\n", json!({
-                "type":"user", "uuid":format!("native-{index:03}"),
-                "sessionId":self.source.native_id,
-                "timestamp":format!("2099-01-01T00:{:02}:{:02}Z", index / 60, index % 60),
-                "message":{"role":"user", "content":text},
-            }))).collect::<String>();
+            // Native sequence numbers include each record's byte offset. Keep those
+            // offsets fixed when calibrating content, or longer IDs change the overhead.
+            const RECORD_BYTES: usize = 16 * 1024;
+            let lines = texts
+                .iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    let mut line = json!({
+                        "type":"user", "uuid":format!("native-{index:03}"),
+                        "sessionId":self.source.native_id,
+                        "timestamp":format!("2099-01-01T00:{:02}:{:02}Z", index / 60, index % 60),
+                        "message":{"role":"user", "content":text},
+                    })
+                    .to_string();
+                    assert!(line.len() < RECORD_BYTES);
+                    line.extend(std::iter::repeat_n(' ', RECORD_BYTES - 1 - line.len()));
+                    line.push('\n');
+                    line
+                })
+                .collect::<String>();
             std::fs::write(&self.source.transcript, lines).unwrap();
         }
 
