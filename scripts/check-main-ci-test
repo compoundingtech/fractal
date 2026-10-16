@@ -51,7 +51,7 @@ for field, value in [('head_sha', 'b' * 40), ('event', 'pull_request'),
                      ('path', '.github/workflows/other.yml'),
                      ('head_branch', 'gh-readonly-queue/other/pr-1-example')]:
     check('reject ' + field, [{**run, field: value}], checks, 1)
-for status in ['failure', 'skipped', 'cancelled', None]:
+for status in ['failure', 'skipped', 'neutral', 'cancelled', None]:
     failed = copy.deepcopy(checks)
     failed[0]['conclusion'] = status
     check('reject required check ' + str(status), [run], failed, 1)
