@@ -995,7 +995,6 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Sync(Ok(notice)) => {
                     page_sync = notice;
                     fill_notice(&mut model, page_sync.as_ref());
-                    changed = true;
                 }
                 Fetched::Sync(Err(())) => {}
                 Fetched::MessageLimit(limit) => match limit {
@@ -3229,11 +3228,11 @@ mod tests {
     /// The world a running stui shows after the stream delivered Attention (older) and Agents
     /// (newest) windows, built by the same function the live loop uses.
     fn running_world(sync: Option<&st3_client::SyncNotice>) -> super::super::view::World {
-        let model = Model {
-            now: window_collection(Vec::new(), snapshot(5), false, sync),
-            agents: window_collection(Vec::new(), snapshot(9), false, sync),
-            ..Model::default()
-        };
+        let mut model = Model::default();
+        let now = window_collection(Vec::new(), snapshot(5), false, sync);
+        let agents = window_collection(Vec::new(), snapshot(9), false, sync);
+        model.now = now;
+        model.agents = agents;
         let extras = super::super::adapt::Extras { live: true, ..Default::default() };
         super::super::adapt::world(&model, "person/avery", &extras)
     }
@@ -3265,11 +3264,11 @@ mod tests {
     fn the_page_read_fills_the_notice_and_a_rebuilt_window_keeps_it_until_the_next_read() {
         let diverged = st3_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
         // The stream's windows arrive with nothing known, the newest being Agents.
-        let mut model = Model {
-            now: window_collection(Vec::new(), snapshot(5), false, None),
-            agents: window_collection(Vec::new(), snapshot(9), false, None),
-            ..Model::default()
-        };
+        let mut model = Model::default();
+        let now = window_collection(Vec::new(), snapshot(5), false, None);
+        let agents = window_collection(Vec::new(), snapshot(9), false, None);
+        model.now = now;
+        model.agents = agents;
         assert!(model.sync_notice().is_none());
         // The page read finds a diverged peer: it shows although Agents holds the newest snapshot.
         fill_notice(&mut model, Some(&diverged));
