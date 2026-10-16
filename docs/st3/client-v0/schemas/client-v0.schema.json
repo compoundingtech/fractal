@@ -188,7 +188,9 @@
             { "$ref": "#/$defs/StatusHistory" },
             { "$ref": "#/$defs/AgentQueue" },
             { "$ref": "#/$defs/UsagePeriod" },
-            { "$ref": "#/$defs/MailBacklog" }
+            { "$ref": "#/$defs/MailBacklog" },
+            { "$ref": "#/$defs/SloList" },
+            { "$ref": "#/$defs/SloHistory" }
           ]
         }
       }
@@ -667,6 +669,45 @@
     },
     "ConnectedClient": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["actor", "person", "member", "via", "connected", "streams", "since", "last_seen", "follows", "kind"], "properties": {"actor": {"type": "string"}, "person": {"type": "string"}, "client": {"type": ["string", "null"]}, "device_id": {"type": "string"}, "device_name": {"type": "string"}, "member": {"type": "string"}, "via": {"enum": ["local", "gateway", "tailscale"]}, "connected": {"type": "boolean"}, "streams": {"type": "integer", "minimum": 0}, "since": {"$ref": "#/$defs/Timestamp"}, "last_seen": {"$ref": "#/$defs/Timestamp"}, "follows": {"type": "array", "items": {"type": "string"}}, "kind": {"const": "connected-client"}}}]},
     "Usage": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["kind", "value"], "properties": {"kind": {"const": "usage"}, "value": {"$ref": "#/$defs/UsagePeriod"}}}]},
+    "SloList": {
+      "type": "object", "additionalProperties": false,
+      "required": ["as_of_unix_ms", "rows"],
+      "properties": {
+        "as_of_unix_ms": { "type": "integer", "minimum": 0 },
+        "rows": { "type": "array", "items": { "$ref": "#/$defs/SloRow" } }
+      }
+    },
+    "SloRow": {
+      "description": "One objective (a target with windows and an error budget) or one budget (an allowance that resets), as this daemon measures it. about, target, current, window and explain are display text for a person, not a contract; the pair of slo reads is experimental.",
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "about", "target", "current", "window", "remaining_percent", "status", "explain"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "enum": ["objective", "budget"] },
+        "account": { "type": "string", "description": "A budget's declared account." },
+        "about": { "type": "string" },
+        "target": { "type": "string" },
+        "current": { "type": "string" },
+        "window": { "type": "string" },
+        "remaining_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100, "description": "What is left of the error budget or allowance; null when nothing was measured." },
+        "status": { "enum": ["met", "missed", "no-data", "stale"] },
+        "resets_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "measured_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "explain": { "type": "string" }
+      }
+    },
+    "SloHistory": {
+      "description": "What was left of one objective or budget across a period, in equal steps; a step holds its lowest reading and is null when nothing was read.",
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "since_ms", "until_ms", "samples", "steps"],
+      "properties": {
+        "id": { "type": "string" },
+        "since_ms": { "type": "integer", "minimum": 0 },
+        "until_ms": { "type": "integer", "minimum": 0 },
+        "samples": { "type": "integer", "minimum": 0 },
+        "steps": { "type": "array", "items": { "type": ["number", "null"], "minimum": 0, "maximum": 100 } }
+      }
+    },
     "UsagePeriod": {
       "type": "object", "additionalProperties": false,
       "required": ["since_ms", "until_ms", "rows"],
@@ -894,6 +935,7 @@
             "kind": { "const": "mission" },
             "title": { "type": "string" },
             "state": {"$ref": "#/$defs/MissionState"},
+            "system": { "type": "boolean", "description": "st's own plumbing or a standing observer, which clients fold away until a person asks: declared with `system`, or st's own `mission/__st3/` missions, or (for revisions published before the flag) a `ci` path segment. Absent on older daemons." },
             "mission_revision": { "$ref": "#/$defs/Revision" },
             "runs": { "type": "array", "items": { "$ref": "#/$defs/MissionRunId" } },
             "run_details": { "type": "array", "items": { "$ref": "#/$defs/MissionRunSummary" } },
@@ -956,6 +998,7 @@
         "assignee": { "oneOf": [{ "$ref": "#/$defs/ActorRef" }, { "type": "null" }] },
         "claimant": { "oneOf": [{ "$ref": "#/$defs/ActorRef" }, { "type": "null" }] },
         "agentless": { "type": "boolean" },
+        "keep_open": { "type": "boolean", "description": "st's own step that holds its run open while the mission watches, not work: declared with `keep-open`, or (for revisions published before the flag) a step named keep-watch, retire, steward-intake, standing, keep-open or *-retirement. Absent on older daemons." },
         "since": { "$ref": "#/$defs/Timestamp" },
         "last_progress": { "type": ["string", "null"] },
         "progress_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." },
@@ -986,6 +1029,43 @@
         "acknowledged_by": { "type": ["string", "null"] },
         "failure": { "type": ["string", "null"] }
       }
+    },
+    "AgentPresentation": {
+      "type": "object",
+      "required": ["state", "group", "because", "now", "next", "queued"],
+      "properties": {
+        "state": { "enum": ["needs_you", "needs_login", "fault", "working", "compacting", "idle", "starting", "down", "stopped", "retired", "unknown"], "description": "The agent state word, by its fixtures/clients/words.json id." },
+        "group": { "enum": ["needs_you", "needs_login", "fault", "working", "idle", "stopped", "retired"], "description": "The agents list group. Sessions st found running but did not start are not agent rows." },
+        "because": { "type": ["string", "null"], "description": "Why it needs someone, in plain words, for the fault, needs_you, needs_login and down states." },
+        "now": { "oneOf": [{ "$ref": "#/$defs/AgentPresentationNow" }, { "type": "null" }] },
+        "next": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/AgentPresentationWork" }, "description": "Up to five queued steps, next first." },
+        "queued": { "type": "integer", "minimum": 0, "description": "How many steps are queued in all." }
+      }
+    },
+    "AgentPresentationWork": {
+      "type": "object",
+      "required": ["step", "mission", "path", "label"],
+      "properties": {
+        "step": { "$ref": "#/$defs/StepRunId" },
+        "mission": { "$ref": "#/$defs/Id" },
+        "path": { "type": "string" },
+        "title": { "type": ["string", "null"] },
+        "label": { "type": "string", "description": "mission › path, with the mission named without its mission/ prefix." }
+      }
+    },
+    "AgentPresentationNow": {
+      "allOf": [
+        { "$ref": "#/$defs/AgentPresentationWork" },
+        {
+          "type": "object",
+          "required": ["since"],
+          "properties": {
+            "goal": { "type": ["string", "null"] },
+            "since": { "$ref": "#/$defs/Timestamp", "description": "When it took the step." },
+            "holder_down_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] }
+          }
+        }
+      ]
     },
     "WorkLabel": {
       "type": "object",
@@ -1086,6 +1166,7 @@
             "incarnation_id": { "type": ["string", "null"] },
             "current_session_id": { "type": ["string", "null"] },
             "todo": { "oneOf": [{ "$ref": "#/$defs/AgentTodo" }, { "type": "null" }], "description": "Latest accepted harness todo snapshot and claim provenance; null if none was observed. Stale observations remain visible." },
+            "presentation": { "$ref": "#/$defs/AgentPresentation", "description": "st's presentation of this agent: its state word, list group, why it needs someone, and what it holds and has queued. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Agent). Absent on older daemons." },
             "current_work_ids": { "type": "array", "items": { "$ref": "#/$defs/StepRunId" } },
             "active_work_count": { "type": "integer", "minimum": 0 },
             "next_work_id": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }] },
