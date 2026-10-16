@@ -86,6 +86,15 @@ session already knows what it describes.
 
 ## Driver retries during a daemon outage
 
+Resumed native drivers retain the deploy settle before control reports and work renewals become
+eligible. Delivery and local housekeeping keep their regular interval during that settle, but
+they do not poll the deferred control retry or update its success/failure state. Renewals consume
+neither their interval nor their retry tick before eligibility. The first eligible loop iteration
+may perform one due attempt; skipped interval ticks do not become a catch-up burst. Settle itself
+never resets a failure count or retry deadline. After eligibility, exact retry deadlines resume
+waking between ordinary interval ticks. Claude attachment/readiness and other settled guards
+retain the same eligibility boundary.
+
 The native driver keeps the provider alive when the daemon cannot answer. Mailbox binding,
 mailbox opening, startup calls, periodic control reports and work renewal keep separate retry
 state. Repeated failures use base waits of 1, 2, 4, 8, 16 and then 30 seconds. The random share
