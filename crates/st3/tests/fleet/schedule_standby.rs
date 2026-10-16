@@ -35,6 +35,38 @@ async fn schedule_claims(node: &Node, name: &str, kind: &str) -> Vec<Value> {
     page["claims"].as_array().unwrap().iter().filter(|claim| claim["kind"] == kind).cloned().collect()
 }
 
+// Keep the same deadline and checks; collect bounded read-only fixture evidence on failure.
+async fn wait_for_standby<F, Fut>(what: &str, seconds: u64, node: &Node, root: &Path,
+    schedule: &str, mut check: F)
+where F: FnMut() -> Fut, Fut: std::future::Future<Output = bool> {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < deadline {
+        if check().await { return; }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let client = node.client();
+    let paths = [
+        format!("/v1/status?subject=schedule%2F{schedule}"),
+        "/v1/replication/status".into(),
+        format!("/v1/status?subject=daemon%2F{}", node.name),
+        format!("/v1/claims?subject=schedule%2F{schedule}&order=desc&limit=40"),
+    ];
+    let mut diagnostics = String::new();
+    for path in paths {
+        let read = async {
+            let result: Result<Value, _> = client.get(&path).await;
+            format!("{result:?}")
+        };
+        let body = match tokio::time::timeout(Duration::from_secs(3), read).await {
+            Ok(body) => body.chars().take(16_000).collect::<String>(),
+            Err(_) => "diagnostic read timed out".into(),
+        };
+        diagnostics.push_str(&format!("\n{path}: {body}"));
+    }
+    panic!("timed out waiting until {what}\nphysical starts: {:?}\n{}\n{diagnostics}",
+        starts(root), node.logs());
+}
+
 async fn available_pair(root: &Path) -> (Node, Node) {
     let primary = anchor(root, "ivory").await;
     let standby = joined(root, &primary, "jade", &[]).await;
@@ -84,7 +116,7 @@ async fn partition_performs_two_real_starts_then_converges_on_one_occurrence_run
     // runtimes stay live, with a known complete pre-partition primary view.
     primary.stop_worker();
     standby.stop_worker();
-    wait_until("both isolated runtimes physically performed the job", 60, || async {
+    wait_for_standby("both isolated runtimes physically performed the job", 60, &standby, root.path(), "split", || async {
         let rows = starts(root.path());
         rows.iter().any(|(home, _)| home.contains("/ivory/home"))
             && rows.iter().any(|(home, _)| home.contains("/jade/home"))
@@ -125,7 +157,7 @@ async fn fresh_primary_holds_standby_then_returning_primary_does_not_replay_stan
     }).await;
     assert!(schedule_claims(&standby, "return", "schedule.work-started").await.iter().all(|claim| claim["origin"] != "jade"), "fresh primary admitted standby work");
     primary.stop();
-    wait_until("stale-primary standby physically performs next due occurrence", 60, || async {
+    wait_for_standby("stale-primary standby physically performs next due occurrence", 60, &standby, root.path(), "return", || async {
         starts(root.path()).iter().any(|(home, _)| home.contains("/jade/home"))
     }).await;
     let standby_run = starts(root.path()).into_iter().find(|(home, _)| home.contains("/jade/home")).unwrap().1;
@@ -174,7 +206,7 @@ async fn restarted_standby_exposes_skip_limit_and_does_not_use_persisted_success
     primary.stop();
     // No unrelated user write or explicit reconcile call: the source-owned occurrence and
     // standby-eligibility deadlines alone must eventually perform a later due job.
-    wait_until("heard-primary standby deadline actually performs a later occurrence", 60, || async {
+    wait_for_standby("heard-primary standby deadline actually performs a later occurrence", 60, &standby, root.path(), "cold", || async {
         starts(root.path()).iter().any(|(home, _)| home.contains("/jade/home"))
     }).await;
 }
@@ -190,7 +222,7 @@ async fn unavailable_standby_workspace_fails_visibly_once_without_retry_burn() {
     let declaration = source(root.path(), "missing-work", &format!("at {at:?}"), "1s", &blocked);
     publish_pair(&primary, &standby, "missing-work", &declaration).await;
     primary.stop();
-    wait_until("one typed unavailable-work failure", 60, || async {
+    wait_for_standby("one typed unavailable-work failure", 60, &standby, root.path(), "missing-work", || async {
         schedule_claims(&standby, "missing-work", "schedule.work-failed").await.iter().any(|claim|
             claim["origin"] == "jade" && claim["body"]["fields"]["code"] == "standby-work-unavailable")
     }).await;
