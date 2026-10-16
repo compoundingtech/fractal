@@ -333,8 +333,7 @@ async fn st(socket: &Path, args: &[&str]) -> std::process::Output {
     let socket = socket.to_owned();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
-        st3::test_support::command(test_bin!("st3-fixture"))
-            .env_remove("ST_AGENT")
+        st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .args(["--endpoint", socket.to_str().unwrap()])
             .args(args)
@@ -350,8 +349,7 @@ async fn cli(socket: &Path, subject: &str, actor: &str, timeout: &str) -> std::p
     let actor = actor.to_owned();
     let timeout = timeout.to_owned();
     tokio::task::spawn_blocking(move || {
-        st3::test_support::command(test_bin!("st3-fixture"))
-            .env_remove("ST_AGENT")
+        st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .args([
                 "--endpoint",
@@ -711,8 +709,7 @@ fn restart_help_explains_seats_and_the_new_incarnation() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let output = st3::test_support::command(test_bin!("st3-fixture"))
-        .env_remove("ST_AGENT")
+    let output = st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .args(["agents", "--help"])
         .output()
         .unwrap();

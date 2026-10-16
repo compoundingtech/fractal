@@ -465,8 +465,20 @@ pub(crate) fn member_environment(
     executable: &Path,
     recorder: Option<&Path>,
 ) -> Result<BTreeMap<String, String>> {
+    // Bridge implementations live in environment::{write_aliases,remove_aliases}.
+    let mut inherited = crate::environment::snapshot()?;
+    for name in ["ST_AGENT", "ST_SUPERVISOR", "ST3_SUBJECT"] {
+        if !declared.contains_key(name)
+            && !st_drivers::contracts::fractal_env_name(name)
+                .is_some_and(|new| declared.contains_key(&new))
+        {
+            crate::environment::remove_aliases(&mut inherited, name);
+        }
+    }
+    let mut declared = declared.clone();
+    crate::environment::write_aliases(&mut declared);
     let mut environment =
-        st_runtime::overlay_environment(crate::environment::snapshot()?, declared, executable)?;
+        st_runtime::overlay_environment(inherited, &declared, executable)?;
     record_member_commands(&mut environment, recorder)?;
     Ok(environment)
 }
@@ -6984,7 +6996,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::rollout::RESUME_PATH_ENV,
         ] {
             if !member.environment.contains_key(variable) {
-                launch_member.environment.remove(variable);
+                crate::environment::remove_aliases(&mut launch_member.environment, variable);
             }
         }
         // Only a resume names a native session. A daemon started inside a resumed seat inherits
@@ -6993,9 +7005,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             .environment
             .contains_key(crate::suspension::RESUME_ENV)
         {
-            launch_member
-                .environment
-                .remove(crate::suspension::RESUME_ENV);
+            crate::environment::remove_aliases(
+                &mut launch_member.environment, crate::suspension::RESUME_ENV);
         }
         // The import claim has no incarnation: it is a bootstrap selector, not
         // evidence that a driver has bound the session. Once a driver binds, normal
@@ -7092,7 +7103,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .environment
                 .insert("ST_AGENT".into(), owner.clone());
         } else {
-            launch_member.environment.remove("ST_AGENT");
+            crate::environment::remove_aliases(&mut launch_member.environment, "ST_AGENT");
         }
         let executable = launch_executable()?;
         let st_binary = self.st_binary.as_ref().unwrap_or(&executable);
@@ -7137,6 +7148,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::suspension::LAUNCH_DESIRED_TOKEN_ENV.into(),
             desired_token.clone(),
         );
+        crate::environment::write_aliases(&mut launch_member.environment);
         let guard = || -> Result<()> {
             self.store.owned_desired_guard(subject)?;
             if member
@@ -7351,7 +7363,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         member: &MemberSpec,
         launch: &mut MemberSpec,
     ) -> Result<()> {
-        launch.environment.remove("ST3_ACCOUNT");
+        crate::environment::remove_aliases(&mut launch.environment, "ST3_ACCOUNT");
         if subject.kind != "agent" {
             return Ok(());
         }
@@ -7644,7 +7656,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .insert(suspended::RESUME_ENV.into(), session);
                 if agent.starts_with("agent/import/omp/") {
                     // A cold resume names the suspension's session, not the import.
-                    resumed.environment.remove(crate::rollout::RESUME_PATH_ENV);
+                    crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
                 }
                 if let Err(error) =
                     self.perform_start(subject, &resumed, "a suspended seat was resumed")

@@ -12,6 +12,24 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 type Environment = BTreeMap<String, String>;
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+/// Project authoritative launch assignments to both spellings before crossing a spawn boundary.
+pub(crate) fn write_aliases(environment: &mut Environment) {
+    let aliases: Vec<_> = environment.iter().filter_map(|(name, value)| {
+        let new = st_drivers::contracts::fractal_env_name(name)?;
+        (environment.get(&new) != Some(value)).then(|| (new, value.clone()))
+    }).collect();
+    environment.extend(aliases);
+}
+
+pub(crate) fn remove_aliases(environment: &mut Environment, name: &str) {
+    environment.remove(name);
+    if let Some(new) = st_drivers::contracts::fractal_env_name(name) {
+        environment.remove(&new);
+    }
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+
 #[derive(Default)]
 struct Cache {
     captured: Option<(Instant, Result<Environment, String>)>,
@@ -272,6 +290,21 @@ pub(crate) fn command_in(program: &str, environment: &Environment) -> Result<Com
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_assignments_and_removals_cover_both_spellings() {
+        let mut vars = Environment::from([
+            ("ST_AGENT".into(), "agent/seat".into()),
+            ("ST3_SUBJECT".into(), "agent/seat".into()),
+            ("ST_SUPERVISOR".into(), String::new()),
+        ]);
+        write_aliases(&mut vars);
+        assert_eq!(vars["FRACTAL_AGENT"], vars["ST_AGENT"]);
+        assert_eq!(vars["FRACTAL_SUBJECT"], vars["ST3_SUBJECT"]);
+        assert_eq!(vars["FRACTAL_SUPERVISOR"], "");
+        remove_aliases(&mut vars, "ST_AGENT");
+        assert!(!vars.contains_key("ST_AGENT") && !vars.contains_key("FRACTAL_AGENT"));
+    }
 
     #[test]
     fn refreshes_success_and_failure_after_the_interval() {

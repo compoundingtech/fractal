@@ -107,9 +107,9 @@ pub fn hook(env: &dyn HookEnv, run: impl FnOnce() -> u8) -> u8 {
     if invocations.is_empty() && logs.is_empty() && code == 0 {
         return code;
     }
-    let subject = env
-        .var("ST3_SUBJECT")
-        .or_else(|| env.var("ST_AGENT"))
+    let subject = (!crate::driver_hook::identity_conflict(env))
+        .then(|| env.var("ST3_SUBJECT").or_else(|| env.var("ST_AGENT")))
+        .flatten()
         .filter(|subject| subject.starts_with("agent/"));
     let incarnation =
         st_drivers::contracts::env_with(st_drivers::claude_session::SESSION_ENV, &|name| {

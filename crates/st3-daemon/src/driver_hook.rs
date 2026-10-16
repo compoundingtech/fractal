@@ -52,7 +52,7 @@ impl HookEnv for ProcessEnv {
         std::env::var(name).ok()
     }
     fn var(&self, name: &str) -> Option<String> {
-        std::env::var(name).ok().filter(|value| !value.is_empty())
+        st_drivers::contracts::env_with(name, &|key| self.raw_var(key))
     }
 }
 
@@ -61,7 +61,7 @@ impl HookEnv for BTreeMap<String, String> {
         self.get(name).cloned()
     }
     fn var(&self, name: &str) -> Option<String> {
-        self.get(name).filter(|value| !value.is_empty()).cloned()
+        st_drivers::contracts::env_with(name, &|key| self.raw_var(key))
     }
 }
 
@@ -69,7 +69,27 @@ fn hook_var(env: &dyn HookEnv, name: &str) -> Option<String> {
     st_drivers::contracts::env_with(name, &|key| env.raw_var(key))
 }
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+pub(crate) fn identity_conflict(env: &dyn HookEnv) -> bool {
+    ["ST_AGENT", "ST3_SUBJECT", "ST_DRIVER_IDENTITY", "ST_CLAUDE_IDENTITY"]
+        .into_iter().any(|name| {
+            let old = env.raw_var(name).or_else(|| {
+                st_drivers::contracts::legacy_env_name(name).and_then(|old| env.raw_var(&old))
+            });
+            let new = st_drivers::contracts::fractal_env_name(name)
+                .and_then(|new| env.raw_var(&new));
+            if old.zip(new).is_some_and(|(old, new)| old != new) {
+                let _ = hook_var(env, name); // Report through the shared, value-redacting warning.
+                true
+            } else {
+                false
+            }
+        })
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+
 fn hook_identity(env: &dyn HookEnv) -> Option<String> {
+    if identity_conflict(env) { return None; }
     env.var(st_drivers::driver_paths::IDENTITY_ENV)
         .or_else(|| hook_var(env, "ST_CLAUDE_IDENTITY"))
         .or_else(|| {
@@ -782,6 +802,23 @@ pub fn post_diagnostic(env: &dyn HookEnv, diagnostic: &Diagnostic) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_identity_cannot_fall_through_a_conflicting_alias() {
+        let mut env = BTreeMap::from([
+            ("ST_AGENT".into(), "agent/seat".into()),
+            ("FRACTAL_AGENT".into(), "agent/seat".into()),
+        ]);
+        assert_eq!(hook_identity(&env).as_deref(), Some("seat"));
+        env.remove("ST_AGENT");
+        assert_eq!(hook_identity(&env).as_deref(), Some("seat"));
+        env.insert("ST3_SUBJECT".into(), "agent/seat".into());
+        env.insert("FRACTAL_SUBJECT".into(), "agent/other".into());
+        assert!(hook_identity(&env).is_none());
+        env.remove("FRACTAL_SUBJECT");
+        env.insert("FRACTAL_AGENT".into(), String::new());
+        assert!(hook_identity(&env).is_none());
+    }
 
     fn seat(root: &Path) -> (PathBuf, BTreeMap<String, String>) {
         let catalog = root.join("catalog");

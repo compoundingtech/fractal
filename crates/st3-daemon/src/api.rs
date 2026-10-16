@@ -7579,15 +7579,17 @@ fn harness_ancestor(mut pid: u32) -> Option<String> {
     let mut seen = BTreeSet::new();
     while pid > 1 && pid != std::process::id() && seen.insert(pid) {
         let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        if let Some(agent) = environment.split(|byte| *byte == 0).find_map(|entry| {
-            std::str::from_utf8(entry)
-                .ok()?
-                .strip_prefix("ST_AGENT=")
-                .filter(|value| value.starts_with("agent/"))
-                .map(str::to_owned)
-        }) {
-            return Some(agent);
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
+            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
+            (key == name).then(|| value.to_owned())
+        });
+        // A masked/conflicting child identity must not inherit an ancestor's authority.
+        if lookup("ST_AGENT").is_some() || lookup("FRACTAL_AGENT").is_some() {
+            return st_drivers::contracts::env_with("ST_AGENT", &lookup)
+                .filter(|value| value.starts_with("agent/"));
         }
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
         let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         pid = stat
             .rsplit_once(") ")?
@@ -7637,11 +7639,14 @@ fn native_delivery_identity(
             _ => None,
         }
     })?;
-    let agent = env.iter().find_map(|entry| {
-        entry
-            .strip_prefix("ST_AGENT=agent/")
-            .map(|suffix| format!("agent/{suffix}"))
-    })?;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    let agent = st_drivers::contracts::env_with("ST_AGENT", &|name| {
+        env.iter().find_map(|entry| {
+            let (key, value) = entry.split_once('=')?;
+            (key == name).then(|| value.to_owned())
+        })
+    }).filter(|agent| agent.starts_with("agent/"))?;
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     Some(NativeDeliveryPeer {
         agent,
         transport,
@@ -19360,6 +19365,21 @@ mission "expiring-work" state="ready" {
             assert_eq!(peer.transport, format!("{driver}-channel"));
             assert!(!peer.archives_inbox);
             assert!(native_delivery_identity(37, &args, &[]).is_none(), "argv alone cannot authorize a seat");
+        }
+    }
+
+    #[test]
+    fn delivery_identity_accepts_new_names_and_rejects_masked_or_conflicting_aliases() {
+        let args = ["st3", "driver", "codex"].map(str::to_owned);
+        for (values, expected) in [
+            (vec!["ST_AGENT=agent/seat"], Some("agent/seat")),
+            (vec!["FRACTAL_AGENT=agent/seat"], Some("agent/seat")),
+            (vec!["ST_AGENT=agent/seat", "FRACTAL_AGENT=agent/seat"], Some("agent/seat")),
+            (vec!["ST_AGENT=agent/seat", "FRACTAL_AGENT=agent/other"], None),
+            (vec!["ST_AGENT=agent/seat", "FRACTAL_AGENT="], None),
+        ] {
+            let env: Vec<_> = values.into_iter().map(str::to_owned).collect();
+            assert_eq!(native_delivery_identity(37, &args, &env).map(|peer| peer.agent).as_deref(), expected);
         }
     }
 
