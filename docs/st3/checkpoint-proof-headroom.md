@@ -75,3 +75,22 @@ Ops took one read-only filesystem census at 16:13 UTC on 2026-10-16. The daemon'
 | hetz2 | `/home/myobie/.local/state/st3/checkpoint` | 177,268,850,688 | 172,960,161,792 | PASS, conditional; 4.3 GB margin |
 | Silber | `/Users/myobie/.local/state/st3/checkpoint` | 381,645,103,104 | 163,008,110,592 | PASS, conditional |
 | bluey | `/Users/nathanherald/.local/state/st3/checkpoint` | 66,230,939,648 | 161,004,036,096 | REFUSE; 94.8 GB deficit |
+
+## Staged binary capability for deployment
+
+`CHECKPOINT_SPACE_GATE_VERSION` is the fixed integer `1`, exported from
+`smallclaims::store` through `st3::store`. The staged `st3` binary answers
+`--checkpoint-space-gate-capabilities` with exactly one JSON line:
+
+```json
+{"kind":"checkpoint-space-gate-capabilities","version":1}
+```
+
+The flag runs before instance activation, configuration, daemon connection or database access.
+It exits successfully only when used alone; the integration test checks the JSON, a rejected
+extra argument and an empty temporary HOME/XDG tree after both invocations. A deployment
+manifest must bind the exact source commit, the staged binary's SHA-256, eligibility and gate
+version. The worker compares the staged binary's answer to the source marker, manifest and
+receipt version before a client mode or service switch. A matching JSON answer without that
+source and artifact join is insufficient qualification. The worker owns its 5 second process
+timeout and the final deployment decision.
