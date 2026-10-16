@@ -77,7 +77,11 @@ the delivered continuation. The new client uses this chain to reject a
 duplicate, reordered, or cross-generation change and request a fresh
 subscription. The server keeps the last **wire** cursor across silent internal
 cursor advances, so the next visible `from_cursor` still matches what the
-client holds. `resync-snapshot` starts a new chain and replaces both rows and
+client holds. On a `from_cursor` mismatch, the client rejects that `changes`
+frame without applying any part of it, keeps its last good window visibly
+stale, and requests a fresh subscription with the same bounded backoff used
+for `cursor-gap-loop` below. It never tries to splice the mismatched delta.
+`resync-snapshot` starts a new chain and replaces both rows and
 the wire cursor. The token is opaque, unique to a subscription generation and
 delivery, bound to its authority, collection, and filters. It identifies the
 server-held IVM continuation at that delivery's cut; it is not a graph index,
@@ -89,9 +93,9 @@ keys or raw provider state.
 
 The change begins in `graph_watch_ivm.rs`: the `page_with_rows` gap branch
 currently returns `ViewPage::Resync { reason, boundary }` with no rows. Extend
-that branch to invoke a full-window callback **inside its existing SQLite
-snapshot**, after authorization, and return the resulting window with the
-boundary. Use the same `collection_ivm.rs` adapter row function as ordinary
+that branch to invoke a full-window callback on the **reader connection inside
+its existing SQLite snapshot**, after authorization, and return the resulting
+window with the boundary. Use the same `collection_ivm.rs` adapter row function as ordinary
 `subscribe_snapshot`; do not introduce a second row reader or a second
 independent read after gap detection. `collection_ivm.rs` packages that
 window and a new `Delivered` built from the same boundary, then
@@ -124,16 +128,26 @@ serialization fails, send one small terminal `error` with code `internal`;
 if the encoded replacement exceeds `CLIENT_MAX_RESPONSE_BYTES` (the same
 1 MiB bound as an ordinary snapshot), send one small terminal `error` with
 code `collection-snapshot-too-large`. Both have `retryable: false`, end the
-subscription, and acknowledge no candidate. If even that error cannot be
-sent because the socket closed, close it without acknowledgment. Do not
+subscription, and acknowledge no candidate. The client shows the exact
+reason and does not automatically resubscribe; an explicit filter/limit
+change or a later daemon fix can start a new subscription. If even that
+error cannot be sent because the socket closed, close it without acknowledgment. Do not
 retry the identical oversize or serialization failure.
 
 One subscription generation may deliver at most **one** gap replacement
 without an intervening successfully delivered non-gap journal page that
 advances the new cursor (a silent page counts if it advances). A second gap
 before such progress sends one terminal `error` with code `cursor-gap-loop`,
-`retryable: false`, then drops that subscription without acknowledging the
-second candidate. This is a visible failure, not a polling/retry delay.
+`retryable: true`, then drops that subscription without acknowledging the
+second candidate. The client retains its last good window with a visible
+`cursor-gap-loop` stale reason and schedules one fresh subscription after
+exponential backoff with jitter: choose a random delay between half and all
+of the smaller of 30 seconds or 250 ms times 2 to the retry-attempt count.
+It keeps one pending
+retry per window, cancels it when the window is left, and resets the attempt
+count only after a successfully applied non-gap `changes` frame. This is a
+visible bounded recovery from repeated retention gaps, not an immediate
+server-side read loop or silent polling.
 Successful non-gap progress rearms the bound for a later genuine retention
 gap. A quiet store therefore produces no second resync; rapid expiry can
 produce a visible error instead of an unbounded replacement loop.
@@ -151,6 +165,15 @@ and check generated clients rather than hand-editing generated files. Queue
 the implementation PR alone with schema/codegen and old-client compatibility
 proofs because it changes the client-v0 wire contract.
 
+Add `cursor-gap-loop` and `collection-snapshot-too-large` to the schema's
+`ErrorCode` set and regenerated typed clients. Add safe user-facing text for
+both to `st3-client`'s `plain_message`/error-code registry. The existing
+`internal` code remains available for serialization failure. Opted-in
+`changes` frames carry both `from_cursor` and `cursor` throughout the
+subscription, including after the gap recovery; this is part of this contract,
+not an optional later enhancement. A non-opted old client receives neither
+field and never receives `resync-snapshot`.
+
 Consumers that recognize the new frame include the TypeScript client, Swift
 client, `st3-client` Rust collection follower, `st3-feed`/stui, and the iOS
 and web collection adapters that use them. Their handling must be updated or
@@ -165,7 +188,9 @@ opts in and keeps the current path.
   old daemon whose decoder ignores the unknown field; only v2 sends opt-in.
 - Force a journal gap: opted-in receives exactly one `resync-snapshot`; v1
   receives the existing `resync` then `snapshot` on the same ID. Check both
-  cursor chains and atomic client window replacement.
+  cursor chains and atomic client window replacement. Reject reordered and
+  duplicate `changes` on `from_cursor` mismatch and verify one backoff
+  resubscription; verify an unrelated old client never sees cursor fields.
 - Pause projection admission behind the store while producing a gap: no
   mixed-cut frame or cursor acknowledgment; after catch-up, rows and boundary
   use one cut. Exercise scoped filters and authority revocation at capture.
@@ -174,7 +199,9 @@ opts in and keeps the current path.
   skipped visible change and no partial-window splice.
 - Force a second gap without non-gap cursor progress: exactly one typed
   `cursor-gap-loop` error and no further reads for that subscription. Check
-  that successful page progress rearms the bound.
+  the client's visible stale reason, one pending jittered resubscription,
+  increasing backoff under repeat gaps, and reset after applied non-gap
+  progress. Check that successful server page progress rearms the bound.
 - Force oversize encoding, serialization refusal, and socket-send failure:
   one visible terminal error when transport allows, no cursor/cache
   acknowledgment, and no retry of the same invalid frame.
