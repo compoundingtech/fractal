@@ -106,6 +106,9 @@ fn identifier(value: &str) -> Result<()> {
 #[derive(Clone, Debug)]
 pub struct Store {
     path: PathBuf,
+    coordination_root: PathBuf,
+    authority_root: PathBuf,
+    account: bool,
 }
 
 impl Store {
@@ -114,7 +117,16 @@ impl Store {
             path.is_absolute() && path.file_name().is_some(),
             "Client-mode path must be absolute"
         );
-        Ok(Self { path })
+        let parent = path
+            .parent()
+            .context("Client-mode directory missing")?
+            .to_path_buf();
+        Ok(Self {
+            path,
+            coordination_root: parent.clone(),
+            authority_root: parent,
+            account: false,
+        })
     }
 
     pub fn configured() -> Result<Self> {
@@ -156,7 +168,12 @@ impl Store {
             Some(name) => root.join("instances").join(name).join("client-mode.json"),
             None => root.join("default/client-mode.json"),
         };
-        Self::at(path)
+        Ok(Self {
+            path,
+            coordination_root: home.clone(),
+            authority_root: root,
+            account: true,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -173,7 +190,7 @@ impl Store {
             .path
             .parent()
             .context("Client-mode directory missing")?;
-        match authority_directory(parent, false) {
+        match self.read_directory(parent) {
             Ok(_) => {}
             Err(error)
                 if error
@@ -247,20 +264,37 @@ impl Store {
         Ok(LocalLease { _lock: lock })
     }
 
+    fn read_directory(&self, parent: &Path) -> Result<File> {
+        let root = authority_directory(&self.authority_root, false)?;
+        ensure!(
+            root.metadata()?.permissions().mode() & 0o077 == 0,
+            "Client-mode authority directory must be private (0700)"
+        );
+        let directory = authority_directory(parent, false)?;
+        ensure!(
+            directory.metadata()?.permissions().mode() & 0o077 == 0,
+            "Client-mode namespace directory must be private (0700)"
+        );
+        Ok(directory)
+    }
+
     fn coordination(&self, exclusive: bool) -> Result<File> {
-        let parent = self
-            .path
-            .parent()
-            .context("Client-mode directory missing")?;
-        let _directory = authority_directory(parent, true)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(self.path.with_extension("coordination"))?;
-        private_regular(&file)?;
+        // This existing directory is the account-wide lock object, not enrollment evidence.
+        // No startup creation, even for a legacy account. Missing or hidden homes refuse.
+        let file = authority_directory(&self.coordination_root, false)?;
+        local_lock_filesystem(&file)?;
+        if self.account
+            && let Some(home) = std::env::var_os("HOME")
+        {
+            let caller_home = authority_directory(Path::new(&home), false)
+                .context("Producer HOME does not identify the effective account home")?;
+            let account = file.metadata()?;
+            let caller = caller_home.metadata()?;
+            ensure!(
+                account.dev() == caller.dev() && account.ino() == caller.ino(),
+                "Producer HOME differs from the effective account home; refusing startup"
+            );
+        }
         // flock locks the open file description. Separate producer opens share SH locks;
         // CLOEXEC prevents an exec'd seat/helper from retaining its parent's description.
         let operation = if exclusive {
@@ -270,7 +304,7 @@ impl Store {
         };
         if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } != 0 {
             return Err(std::io::Error::last_os_error())
-                .context("Client-mode coordination lease is held; enrollment/startup refused");
+                .context("Client-mode coordination lease is held; enrollment/startup refused (holder PID/start identity unavailable)");
         }
         Ok(file)
     }
@@ -283,7 +317,16 @@ impl Store {
             .path
             .parent()
             .context("Client-mode directory missing")?;
+        let root = authority_directory(&self.authority_root, true)?;
+        ensure!(
+            root.metadata()?.permissions().mode() & 0o077 == 0,
+            "Client-mode authority directory must be private (0700)"
+        );
         let directory = authority_directory(parent, true)?;
+        ensure!(
+            directory.metadata()?.permissions().mode() & 0o077 == 0,
+            "Client-mode namespace directory must be private (0700)"
+        );
         let options = || {
             let mut options = OpenOptions::new();
             options
@@ -328,9 +371,12 @@ fn reject_legacy_evidence(path: &Path) -> Result<()> {
         path.with_extension("lock"),
         path.with_extension("recovery"),
     ] {
-        match fs::symlink_metadata(artifact) {
+        match fs::symlink_metadata(&artifact) {
             Ok(_) => {
-                anyhow::bail!("Legacy client-mode authority exists; explicit recovery required")
+                anyhow::bail!(
+                    "Legacy client-mode authority exists at {}; explicit recovery required",
+                    artifact.display()
+                )
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error).context("Inspect legacy client-mode authority"),
@@ -354,7 +400,8 @@ fn authority_directory(path: &Path, create: bool) -> Result<File> {
             if path.starts_with(alias) && fs::symlink_metadata(alias)?.file_type().is_symlink() {
                 let metadata = fs::symlink_metadata(alias)?;
                 ensure!(
-                    metadata.uid() == 0 && fs::read_link(alias)? == Path::new(target),
+                    metadata.uid() == 0
+                        && Path::new("/").join(fs::read_link(alias)?) == Path::new(target),
                     "Untrusted system directory alias"
                 );
                 path = Path::new(target).join(path.strip_prefix(alias)?);
@@ -422,6 +469,30 @@ fn authority_directory(path: &Path, create: bool) -> Result<File> {
         directory.sync_all()?;
     }
     Ok(directory)
+}
+
+/// Refuse filesystems without the local kernel flock semantics this design requires.
+fn local_lock_filesystem(file: &File) -> Result<()> {
+    let mut info = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(file.as_raw_fd(), info.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("Inspect client-mode lock filesystem");
+    }
+    let info = unsafe { info.assume_init() };
+    #[cfg(target_os = "linux")]
+    let supported = matches!(
+        info.f_type as u64,
+        0xef53 | 0x58465342 | 0x9123683e | 0x01021994 | 0x794c7630
+    );
+    #[cfg(target_os = "macos")]
+    let supported =
+        unsafe { std::ffi::CStr::from_ptr(info.f_fstypename.as_ptr()) }.to_bytes() == b"apfs";
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let supported = false;
+    ensure!(
+        supported,
+        "Unsupported filesystem for client-mode coordination; refusing startup/enrollment"
+    );
+    Ok(())
 }
 
 fn ensure_fd(fd: libc::c_int) -> Result<()> {
@@ -558,6 +629,8 @@ mod tests {
         let store = Store::at(root.path().join("new/mode.json"))?;
         assert_eq!(store.read()?, State::default());
         assert!(!root.path().join("new").exists());
+        fs::create_dir(root.path().join("new"))?;
+        fs::set_permissions(root.path().join("new"), fs::Permissions::from_mode(0o700))?;
         let mut update = store.lock()?;
         update.publish(State::Transition {
             version: 1,
@@ -706,6 +779,22 @@ mod tests {
             fs::remove_file(artifact)?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn group_writable_authority_refuses() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = Store::at(root.path().join("mode.json"))?;
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o775))?;
+        assert!(store.local_start().is_err());
+        assert!(store.lock().is_err());
+        assert!(store.read().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn uppercase_instance_is_rejected_instead_of_case_folded() {
+        assert!(Store::for_instance(Some("Bluey")).is_err());
     }
 
     #[test]
