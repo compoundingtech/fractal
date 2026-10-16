@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read as _, Write as _},
-    os::unix::fs::{
-        DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
-    },
+    os::fd::{AsRawFd as _, FromRawFd as _},
+    os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
 };
 
@@ -164,9 +163,24 @@ impl Store {
     }
 
     fn read_state(&self, first_enrollment: bool) -> Result<State> {
+        let parent = self
+            .path
+            .parent()
+            .context("Client-mode directory missing")?;
+        match authority_directory(parent, false) {
+            Ok(_) => {}
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(State::default());
+            }
+            Err(error) => return Err(error),
+        }
         let file = match OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(&self.path)
         {
             Ok(file) => file,
@@ -206,7 +220,7 @@ impl Store {
     pub fn enrolled(&self) -> Result<bool> {
         match OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(self.path.with_extension("lock"))
         {
             Ok(file) => {
@@ -218,46 +232,59 @@ impl Store {
         }
     }
 
-    /// Serialize publication across processes. This lock is not the daemon's writer fence:
-    /// admission fencing and proof must complete before publishing a Client generation.
-    pub fn lock(&self) -> Result<Update<'_>> {
+    /// Hold this lease throughout a local producer's lifetime. Coordination alone does not
+    /// enroll a legacy account. Enrollment cannot begin while any producer holds its lease.
+    /// ENTER will need a daemon-mediated drain and lease handoff before using publication.
+    pub fn local_start(&self) -> Result<LocalLease> {
+        let lock = self.coordination(false)?;
+        self.read()?.require_local()?;
+        Ok(LocalLease { _lock: lock })
+    }
+
+    fn coordination(&self, exclusive: bool) -> Result<File> {
         let parent = self
             .path
             .parent()
             .context("Client-mode directory missing")?;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)?;
-        let directory = OpenOptions::new()
+        let _directory = authority_directory(parent, true)?;
+        let file = OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(parent)?;
-        // Persist newly created ancestor links too. Syncing only the leaf directory could
-        // lose its newly created parent after power loss and incorrectly reopen as Local.
-        directory.sync_all()?;
-        for ancestor in parent.ancestors().skip(1) {
-            OpenOptions::new()
-                .read(true)
-                // System ancestors may be symlinks (macOS /var -> /private/var).
-                // The state file and immediate private directory still reject symlinks.
-                .custom_flags(libc::O_DIRECTORY)
-                .open(ancestor)?
-                .sync_all()?;
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(self.path.with_extension("coordination"))?;
+        private_regular(&file)?;
+        // flock locks the open file description. Separate producer opens share SH locks;
+        // CLOEXEC prevents an exec'd seat/helper from retaining its parent's description.
+        let operation = if exclusive {
+            libc::LOCK_EX
+        } else {
+            libc::LOCK_SH
+        };
+        if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Client-mode coordination lease is held; enrollment/startup refused");
         }
-        let metadata = directory.metadata()?;
-        ensure!(
-            metadata.uid() == unsafe { libc::geteuid() }
-                && metadata.permissions().mode() & 0o022 == 0,
-            "Client-mode directory must belong to this user and not be writable by others"
-        );
+        Ok(file)
+    }
+
+    /// Serialize publication across processes. This lock is not the daemon's writer fence:
+    /// admission fencing and proof must complete before publishing a Client generation.
+    pub fn lock(&self) -> Result<Update<'_>> {
+        let coordination = self.coordination(true)?;
+        let parent = self
+            .path
+            .parent()
+            .context("Client-mode directory missing")?;
+        let directory = authority_directory(parent, true)?;
         let options = || {
             let mut options = OpenOptions::new();
             options
                 .read(true)
                 .write(true)
                 .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
             options
         };
         let (lock, first_enrollment) = match options()
@@ -280,10 +307,103 @@ impl Store {
             store: self,
             directory,
             _lock: lock,
+            _coordination: coordination,
             current,
             first_enrollment,
         })
     }
+}
+
+/// Walk opened directory descriptors, never a caller-owned symlink. Every ancestor is
+/// root/account-owned and non-writable by others. Root-owned sticky temporary directories
+/// permit private account-owned children; sticky semantics prevent another UID replacing them.
+/// Same-UID deletion of every authority artifact is outside this inhibition's threat model.
+fn authority_directory(path: &Path, create: bool) -> Result<File> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
+    let mut path = path.to_path_buf();
+    #[cfg(target_os = "macos")]
+    {
+        // These two fixed OS aliases alone are permitted; never canonicalize an arbitrary
+        // authority path, which would accept user-controlled symlinks in its middle.
+        for (alias, target) in [("/var", "/private/var"), ("/tmp", "/private/tmp")] {
+            if path.starts_with(alias) && fs::symlink_metadata(alias)?.file_type().is_symlink() {
+                let metadata = fs::symlink_metadata(alias)?;
+                ensure!(
+                    metadata.uid() == 0 && fs::read_link(alias)? == Path::new(target),
+                    "Untrusted system directory alias"
+                );
+                path = Path::new(target).join(path.strip_prefix(alias)?);
+                break;
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = &mut path;
+    let mut directory = File::open("/")?;
+    for component in path.components() {
+        let std::path::Component::Normal(component) = component else {
+            ensure!(
+                matches!(component, std::path::Component::RootDir),
+                "Noncanonical client-mode directory"
+            );
+            continue;
+        };
+        let name = CString::new(component.as_bytes())?;
+        // SAFETY: name is a valid NUL-terminated component; directory owns its descriptor.
+        let mut fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0
+            && create
+            && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound
+        {
+            let result = unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o700) };
+            if result < 0
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            directory.sync_all()?; // persist the new child link before using it
+            fd = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+        }
+        ensure_fd(fd)?;
+        let child = unsafe { File::from_raw_fd(fd) };
+        let metadata = child.metadata()?;
+        let mode = metadata.permissions().mode();
+        let root_sticky = metadata.uid() == 0 && mode & libc::S_ISVTX != 0;
+        ensure!(
+            (metadata.uid() == 0 || metadata.uid() == unsafe { libc::geteuid() })
+                && (mode & 0o022 == 0 || root_sticky),
+            "Untrusted client-mode directory ancestor"
+        );
+        directory = child;
+    }
+    let metadata = directory.metadata()?;
+    ensure!(
+        metadata.uid() == unsafe { libc::geteuid() } && metadata.permissions().mode() & 0o022 == 0,
+        "Client-mode directory must belong to this user and not be writable by others"
+    );
+    if create {
+        directory.sync_all()?;
+    }
+    Ok(directory)
+}
+
+fn ensure_fd(fd: libc::c_int) -> Result<()> {
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
 }
 
 /// Resolve the effective account through NSS, never through caller-supplied home variables.
@@ -334,10 +454,17 @@ fn private_regular(file: &File) -> Result<()> {
     Ok(())
 }
 
+/// A local startup decision remains valid only while this lease is held. Dropping it
+/// does not stop a producer; callers must retain it until all local writes have ended.
+pub struct LocalLease {
+    _lock: File,
+}
+
 pub struct Update<'a> {
     store: &'a Store,
     directory: File,
     _lock: File,
+    _coordination: File,
     current: State,
     first_enrollment: bool,
 }
@@ -384,6 +511,10 @@ impl Update<'_> {
 
 /// All daemon and local client entry points share this refusal. It is deliberately independent
 /// of endpoint overrides and daemon configuration, so an explicit socket cannot bypass mode.
+pub fn local_start() -> Result<LocalLease> {
+    Store::configured()?.local_start()
+}
+
 pub fn require_local() -> Result<()> {
     Store::configured()?
         .read()
@@ -491,17 +622,47 @@ mod tests {
     }
 
     #[test]
-    fn system_ancestor_symlinks_do_not_break_directory_durability() -> Result<()> {
+    fn user_owned_ancestor_symlinks_are_rejected() -> Result<()> {
         let root = tempfile::tempdir()?;
         fs::create_dir(root.path().join("real"))?;
         symlink(root.path().join("real"), root.path().join("alias"))?;
         let store = Store::at(root.path().join("alias/private/mode.json"))?;
-        store.lock()?.publish(State::Transition {
-            version: 1,
-            generation: 1,
-            operation: "one".into(),
-        })?;
-        assert!(store.read()?.require_local().is_err());
+        assert!(store.lock().is_err());
+        assert!(store.read().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn startup_and_first_enrollment_serialize_in_both_orders() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = Store::at(root.path().join("mode.json"))?;
+        let producer = store.local_start()?;
+        assert!(!store.enrolled()?);
+        assert_eq!(store.read()?, State::default());
+        assert!(store.lock().is_err());
+        assert!(!store.enrolled()?);
+        drop(producer);
+        let enrollment = store.lock()?;
+        assert!(store.local_start().is_err());
+        drop(enrollment); // crash before first publication must still refuse
+        assert!(store.local_start().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn exec_child_does_not_keep_a_dropped_startup_lease() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = Store::at(root.path().join("mode.json"))?;
+        let producer = store.local_start()?;
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "read line"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        drop(producer);
+        let result = store.lock();
+        drop(child.stdin.take());
+        child.wait()?;
+        assert!(result.is_ok());
         Ok(())
     }
 

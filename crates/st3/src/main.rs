@@ -5819,7 +5819,7 @@ async fn run(cli: Cli) -> Result<()> {
         return run_admission(command, cli.json);
     }
     if let Command::ReplicationWorker(args) = cli.command {
-        st3_client::client_mode::require_local()?;
+        let _client_mode_lease = st3_client::client_mode::local_start()?;
         let mut config = Config::load_unvalidated(args.config.as_deref())?;
         if let Some(value) = args.node {
             config.node = value;
@@ -6744,7 +6744,7 @@ fn daemon_start_version(machine_version: &str) -> Result<&str> {
 }
 
 async fn run_up(args: UpArgs) -> Result<()> {
-    st3_client::client_mode::require_local()?;
+    let _client_mode_lease = st3_client::client_mode::local_start()?;
     let started_at = Instant::now();
     let mut phase_finished_at = started_at;
     let mut phase_elapsed_ms = || {
