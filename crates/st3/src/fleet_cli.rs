@@ -131,7 +131,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 st3::store::valid_fleet_node_name(&node),
                 "`{node}` cannot name a fleet member; use --name"
             );
-            let services = !args.no_service && services_installed();
+            let services = !args.no_service && services_installed()?;
             let state_identity =
                 lock_fleet_admission(&client, &config, services, "founds a fleet").await?;
             let founded =
@@ -292,7 +292,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     None => (read_code_without_echo()?, None),
                 }
             };
-            let use_services = !args.no_service && services_installed();
+            let use_services = !args.no_service && services_installed()?;
             let state_identity =
                 lock_fleet_admission(&client, &config, use_services, "joins").await?;
             let joined = st3::fleet::join::join(&st3::fleet::join::JoinOptions {
@@ -461,7 +461,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 println!("leave cancelled");
                 return Ok(());
             }
-            let use_services = !args.no_service && services_installed();
+            let use_services = !args.no_service && services_installed()?;
             let confirmed = fleet_leave(
                 &client,
                 &config,
@@ -640,7 +640,7 @@ async fn save_and_publish_fleet_settings(
 }
 
 fn refresh_fleet_worker(no_service: bool) -> Result<()> {
-    if !no_service && services_installed() {
+    if !no_service && services_installed()? {
         st3::service::install(Config::load_with_fleet(None)?)?;
     } else {
         println!("Restart st3 replication-worker for the change to take effect.");
@@ -845,7 +845,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         } else {
             println!("This machine accepts legacy exchanges from config peers again.");
         }
-        if !args.no_service && services_installed() {
+        if !args.no_service && services_installed()? {
             st3::service::install(Config::load_with_fleet(None)?)?;
         } else {
             println!("Restart st3 replication-worker for this to take effect.");
@@ -903,7 +903,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
             configured_secret.display()
         )
     })?;
-    let use_services = !args.no_service && services_installed();
+    let use_services = !args.no_service && services_installed()?;
     let state_identity = lock_fleet_admission(client, config, use_services, "migrates").await?;
     let settings = migration_settings(&args.member, config);
     if args.anchor {
