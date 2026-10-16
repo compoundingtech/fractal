@@ -29,6 +29,28 @@ async fn delegated_prompt_actions_share_one_source_contract_and_cannot_choose_th
             },
             parameters,
         };
+        // Main's ordinary answers remain text; supplying proof narrows the
+        // source action to dismiss rather than granting those ordinary answers.
+        let before = state.store.index().unwrap();
+        for answer in ["allow", "approve", "use-all", r#"{"0":[1]}"#] {
+            let mut refused = request.clone();
+            refused.idempotency_key = format!("authored-{client}-refused-{answer}");
+            refused.parameters["answer"] = json!(answer);
+            assert_eq!(
+                action_inner(
+                    State(state.clone()),
+                    Extension(snapshot.clone()),
+                    Extension(session.clone()),
+                    Json(refused),
+                    None
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "delegation-refused"
+            );
+            assert_eq!(state.store.index().unwrap(), before);
+        }
         let mut forged = request.clone();
         forged.parameters["actor"] = json!("person/avery");
         assert_eq!(

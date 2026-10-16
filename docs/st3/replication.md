@@ -46,6 +46,12 @@ keeps the newest observation per origin/subject after the D+2 cut; a two-to-thre
 window holds roughly 5,760-8,640 refresh claims, plus each retained newest claim. These are
 arithmetic bounds, not measured saturated-daemon costs.
 
+The daemon caches its sealed membership view at the store's fleet generation, rather than
+folding the full fleet history on every worker poll. The generation and fold share a read
+snapshot. Fleet claims, their batch/envelope identities, verified signer rows and the pinned
+anchor invalidate it. This view never supplies the client's unsealed local-signer fallback;
+`current` describes an open writer window, not a wall-clock lease.
+
 Gateways cache filtered links and sealed membership for at most five seconds, including
 per-item `reaches()` checks. Links involving current dial-out members never support
 bidirectional owner routes, even while fresh. Dial-out owners return `remote-unavailable`
@@ -123,6 +129,21 @@ decide it, but it builds no replication snapshot and skips the once-per-process 
 batches skipped behind the sealing frontier. Both read every envelope or batch, about 15 s on a
 two-million-envelope store, and the daemon listens only after admission. The first export or
 replication activation after the daemon serves runs them on a read connection.
+
+Admission prepares each envelope before it takes the writer: it decodes the payload, checks
+the envelope, batch, blob and claim hashes, encodes each claim and, for a runtime that
+classifies without the store (st3's does), classifies its kinds and fields. The writer is held
+only for the checks that read stored state and the writes: the envelope row is still there and
+not dropped by a checkpoint, membership and signatures still admit it, earlier record states
+(a `repaired` record stays repaired), tombstones and blobs. The envelope hash names its bytes,
+so a preparation always describes the row's content. Admission also compares the row's rowid and
+receipt time with those it prepared from; an envelope whose row is seen to differ (deleted and
+received again) is left `pending` for the admission pass that its new receipt runs, and is never
+re-prepared under the writer. Admission prepares at most 8 envelopes and 16 MiB of payload ahead of the
+writer, one larger envelope alone. That is a payload budget, not a bound on resident memory:
+decoded, the set takes roughly twice its payload, plus its structures. The comparison can miss a reused rowid received in the same
+millisecond; only the pure content is reused then, and the hash binds it. This is a partial move of admission's cost, not a bound on its hold: the
+stored-state reads and writes still grow with the envelope's claims and bytes.
 
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each
