@@ -302,7 +302,8 @@ same answer and one place is measured and optimized
   rows of a collection a background refresher already publishes (`missions`, `agents`,
   `attention`), and on that collection's HTTP list and get reads, which answer from the same
   publication. The refresher computes it as it folds the row, from the row's own cut. No read
-  computes one. Before a list's first publication, its windows get a retryable `resync` and wait,
+  computes one, with one exception: the agent presentation reads the clock-dependent facts that
+  the roster's overlay settles on each read, so it is computed with them (see [Agent](#agent)). Before a list's first publication, its windows get a retryable `resync` and wait,
   as work windows do; the missions list adopts that rule when its projection ships. Serving them
   on existing rows adds no subscriptions to a socket's sixteen.
 - **One derivation, in Rust.** The refresher calls `st3-ui-model`, which the summary already
@@ -319,9 +320,10 @@ same answer and one place is measured and optimized
 - **Unknown is not a value.** A fact the refresher cannot establish is `null`, with
   `unknown_reason` beside it. It is never a default.
 - **Optional on the wire.** `presentation` is optional in the schema. A daemon that serves it
-  advertises the `presentation` capability, version 1. Against a daemon without it, a client
-  shows the row's raw `state` and says this host's st is older. It does not keep a derivation
-  as a fallback.
+  advertises the `presentation` capability, version 1. A row without it, from a daemon without
+  the capability, shows the row's raw `state` and says this host's st is older. A client does
+  not keep a derivation as a fallback. The terminal UI reads each row's own field, so a row st
+  could not present (the daemon logs it) reads the same way.
 
 **SLOs.** The first frame of each projection's stream, and its list and get reads, are
 `person-read` paths: p99 100 ms, or 300 ms from another machine. `stream missions`,
@@ -329,7 +331,12 @@ same answer and one place is measured and optimized
 projection ships; agents and attention are already in it. A new `projection-fresh` target
 covers the time from the commit that changes an input to the publication that carries it:
 p99 1500 ms, since refreshers fold at most once a second. Its paths are `publish missions`,
-`publish agents` and `publish attention`, timed by the refresher. Both targets appear on
+`publish agents` and `publish attention`, timed by the refresher: each publication that advances
+its cut is one sample, from the first claim this node committed after the previous cut to the
+new publication. Replicated claims carry another node's clock and start no sample, a
+publication more than 10,000 claims after the previous one (a catch-up) is none, and
+attention's first publication after no window read it (attention folds only while one does)
+is none either. Both targets appear on
 `GET /v1/client/request-latency` and in `st doctor`. `daemon_load` keeps its 300 ms
 first-snapshot budget for every window, now with projections on its rows, and stays under
 twice main's baseline. Bounds per row: a mission projection stays within 4 KiB, an agent
@@ -337,22 +344,29 @@ projection within 2 KiB, and an attention projection within 16 KiB including its
 
 ### Mission
 
-Served on the `missions` collection as `Mission.presentation`, on `GET /v1/client/missions` and
-on `GET /v1/client/missions/{*id}`. The summary's mission counts read the same projection.
+Served on the `missions` collection as `Mission.presentation`, and on `GET /v1/client/missions`
+and `GET /v1/client/missions/{*id}`. The missions refresher computes it with
+`st3-ui-model::missions::present` as it folds each card. A mission detail read copies the
+published card's presentation and computes none. Until st has published an agents roster (an
+empty published roster counts), nothing says which agent queues a ready step: a card whose word
+would hinge on that (`unclaimed`, `queued`, `unstaffed`) carries no presentation, and every other
+card carries one read without agents. The first roster refolds every card. At startup it follows
+the roster head at once; after the projections are replaced it waits until something reads the
+agents list, so no bound on that wait is promised.
 
 | Field | Meaning |
 |---|---|
 | `word` | The mission word: one of the thirteen `mission` ids in `words.json`. |
 | `system` | The mission is st's own or a standing observer (see [Graph flags](#graph-flags)). |
-| `who` | Who must act now: `{kind, agent, label}`. `kind` is `you`, `agent`, `st` or `nobody`. |
-| `steps[]` | The steps of the open runs, or of the latest run when none is open, in display order: `{id, path, title, word, owner, note, attempts, blockers[], keep_open}`. The step `word` is one of `needs_you`, `done`, `working`, `ready`, `waiting`, `cancelled`, `failed` or `pending`. `owner` is `{kind, agent, label}`, as in `who`. |
+| `who` | Who must act now: `{kind, person, agent, label}`. `kind` is `person` (with `person`), `agent` (with `agent`), `st` or `nobody`. Every reader sees the same row; a client says "you" when the person is its reader. |
+| `steps[]` | The steps of the open runs, or of the latest run when none is open, in display order: `{id, path, title, word, owner, note, attempts, blockers[], keep_open}`. The step `word` is one of `needs_you`, `done`, `working`, `ready`, `waiting`, `cancelled`, `failed` or `pending`. `owner` is shaped like `who`. |
 | `stuck` | For stalled, failed, unstaffed and queued missions: `{step, word, attempts, blockers[], agent}`. The step is the first one that is failed, ready or waiting. `agent` is that step's seat (its claimant, else the agent queuing it) as `{id, label, state}`. Otherwise `null`. |
 | `queued_behind` | For a ready step waiting on a busy agent: `{agent, label, busy_with}`, where `busy_with` is the `{mission, path, label}` it holds. When the agent is not busy, `state` replaces `busy_with`. Otherwise `null`. |
 | `card` | `what-you-can-do` (stalled, failed, unstaffed), `nothing-to-do` (queued), or `null`. |
 | `actions[]` | What a person can do: `{id, action, target, confirm}`. `id` is `retry-step` (`work.retry`), `restart-agent` (`agent.start`, or `runtime.restart` for a running seat), `cancel-run` (`mission.cancel`, `confirm: true`) or `chat` (`message.send` to the stuck agent). Clients run these actions instead of printing CLI hints. |
 | `progress`, `last_progress`, `settled_at` | `{done, total}`; the latest progress summary of a step in hand; and the time it completed, failed or was cancelled (else `null`). |
 
-Precedence is the one in `st3-ui-model::missions::adapt` today, first match wins: an open human
+Precedence (`st3-ui-model::missions::word`, shared with the terminal UI's own adapter), first match wins: an open human
 gate on the mission (decision); no runs (not_started); a blocked mission or step (stalled);
 completed (done); a failed mission or step (failed); cancelled; only keep-open steps still
 running (watching); a step claimed, working or verifying (working); a ready unclaimed step,
@@ -360,16 +374,18 @@ which is unstaffed when its queuing agent is stopped, failed or faulted, queued 
 queues it, and unclaimed otherwise; a waiting or pending step (held); standing, running, ready or
 draft (idle); otherwise done.
 
-`who` is `you` for decision; the stuck or working step's seat (its claimant, else the agent
-queuing it) for working, queued, unstaffed, stalled and failed; `st` when only agentless steps
-are open; and `nobody` otherwise.
+`who` is the person the open gate waits on for decision; the working step's owner for working
+and watching (`st` for an agentless step); the stuck step's seat for queued, unstaffed, stalled
+and failed; and `nobody` otherwise.
 
 The existing `must_act` (`you`, `agent`, `system`, `blocked`, `nobody`) stays on the row for
 older clients. `who` replaces it for display.
 
-**Inputs:** the mission's runs, steps and worker leases; open human-gate attention on it; and the
-state, fault and queue of every agent that claims or queues one of its steps. The missions
-refresher refolds on the first two today, and must also refold when one of those agents changes.
+**Inputs:** the mission's runs, steps and worker leases; the open human gates on it; and the
+state, fault, held step and queue of every agent that claims, is assigned or queues one of its
+steps, from the newest published agents roster. The missions refresher refolds a mission when any
+of these change: its claims and leases as before, a gate opening or closing, and an agent of its
+changing in a newer roster. A roster publication wakes the refresher.
 
 **Today, and what the projection settles:**
 
@@ -387,32 +403,36 @@ client, applied to `system`, `word` and `settled_at`.
 
 ### Agent
 
-Served on the `agents` collection as `Agent.presentation`, on `GET /v1/client/agents` and on
-`GET /v1/client/agents/{*id}`, folded by the roster refresher.
+Served on the `agents` collection as `Agent.presentation`, and on `GET /v1/client/agents` and
+`GET /v1/client/agents/{*id}`. `st3-ui-model::agents::present` computes it from the row alone.
 
 | Field | Meaning |
 |---|---|
-| `state` | One of the nine `agent` ids in `words.json`: `needs_you`, `needs_login`, `fault`, `working`, `compacting`, `idle`, `starting`, `stopped`, `unknown`. |
-| `managed` | `false` for a session st found running but did not start. |
-| `group` | The list group: `found_running` (unmanaged), `needs_you`, `needs_login`, `fault`, `working` (working, compacting), `idle` (idle, starting) or `stopped` (stopped, unknown). |
-| `because` | The fault, the ask, or the login reason in plain words when `state` is `fault`, `needs_you` or `needs_login`; otherwise `null`. |
-| `now` | What it holds: `{mission, mission_label, step, path, goal, since, progress}`, or `null`. |
-| `next[]`, `queued` | Up to five queued steps as `{mission, mission_label, step, path, title}`, and how many are queued in all. |
+| `state` | One of the eleven `agent` ids in `words.json`: `needs_you`, `needs_login`, `fault`, `working`, `compacting`, `idle`, `starting`, `down`, `stopped`, `retired`, `unknown`. A retired agent is `retired` whatever else st says of it. |
+| `group` | The list group: `needs_you`, `needs_login`, `fault` (fault, down), `working` (working, compacting), `idle` (idle, starting), `stopped` (stopped, unknown) or `retired`. Sessions st found running but did not start are not agent rows; clients list them in their own "found running" group. |
+| `because` | Why it needs someone, in plain words: the fault or why it is broken, when it lost its session, the ask, or the login it needs, for `fault`, `down`, `needs_you` and `needs_login`; otherwise `null`. |
+| `now` | What it holds: `{step, mission, path, title, label, goal, since, holder_down_since}`, or `null`. `label` is `mission › path`. The step's progress is on the mission projection's step. |
+| `next[]`, `queued` | Up to five queued steps as `{step, mission, path, title, label}`, next first, and how many are queued in all. |
 
-Precedence is the terminal UI's (`crates/stui/src/ui/adapt.rs`, `agents()`), first match wins:
-`fault` when a fault is set, delivery is stale or the runtime failed; `needs_login`; `compacting`;
-`working`; `idle` while running; `needs_you` when waiting on a person (`blocked_on: human`);
-`fault` when blocked on its channel; `needs_you` when blocked otherwise; `idle` when the harness
-is indeterminate but the seat is reachable; `starting`; `stopped`; `unknown`.
+Precedence, first match wins: `fault` when a fault is set, delivery is stale or the runtime
+failed; `down`; `needs_login`; `compacting`; `working`; `idle` while running; `needs_you` when
+waiting on a person (`blocked_on: human`); `fault` when blocked on its channel; `needs_you` when
+blocked otherwise; `idle` when the harness is indeterminate but the seat is reachable; `starting`;
+`stopped`; `unknown`.
+
+The row's freshness facts (`observation`, `down`, `delivery`) depend on the reader's clock, so st
+settles them in a light overlay on each read of the published roster. The presentation reads
+those facts, so the same overlay computes it right after them, from that one row. Nothing else is
+read or computed.
 
 **Inputs:** the agent row's runtime, harness observation, delivery, fault and queue, which the
 roster refresher already folds.
 
 | | Derivation | Differs from this contract |
 |---|---|---|
-| Terminal UI | `crates/stui/src/ui/adapt.rs` `agents()` (about 190 lines); `screens.rs` `agent_group` | Reference. |
+| Terminal UI | Reads `presentation.state` and `because` (`crates/stui/src/ui/adapt.rs`); its derivation moved to `st3-ui-model::agents` | Its labels still use mission titles from the missions window. |
 | Phone | `apps/ios/agentsView.ts` `agentState` (file 294 lines) | Ignores `blocked_on`, so every blocked seat reads as needs you; calls needs you "alert"; shows no next. |
-| Fractal | `apps/fractal-web/src/data/projections.ts` `activityOf`, `statusOf`; `web/sidebarRow.ts` | Its own status line and activity words; no nine states. |
+| Fractal | `apps/fractal-web/src/data/projections.ts` `activityOf`, `statusOf`; `web/sidebarRow.ts` | Its own status line and activity words; no shared states. |
 
 ### Attention row
 
@@ -479,18 +499,18 @@ Today no client reads a declaration: the terminal UI shows one only in the demo,
 
 Two declared flags replace name heuristics:
 
-- **`keep-open #true` on a step** compiles to `StepSpec.keep_open`. It marks st's own steps that
-  stay open while a mission watches; the mission projection's `watching` word and its step rows'
-  `keep_open` read it.
-- **`system #true` on a mission** compiles to `MissionSpec.system`. Missions under
-  `mission/__st3/` are system without declaring it. The mission projection's `system` reads it.
+- **A bare `keep-open` node on a step** compiles to `StepSpec.keep_open`. It marks st's own steps
+  that stay open while a mission watches. Mission rows carry it on each step as `keep_open`, and
+  the `watching` word reads it.
+- **A bare `system` node in a mission** compiles to `MissionSpec.system`. Missions under
+  `mission/__st3/` are system without declaring it. Mission rows carry it as `system`.
 
 For revisions published before the flags existed, the refresher treats an unset flag with
 today's name rule: steps named `keep-watch`, `retire`, `steward-intake`, `standing`,
 `keep-open` or `*-retirement`, and missions with a `ci` path segment. That one copy lives in the
-daemon and goes once published missions declare their flags. Today the rule is copied in
-`crates/st3-ui-model/src/missions.rs` (`keeps_open`, `is_system_mission`) and
-`apps/ios/missionsView.ts`; Fractal has none.
+daemon (`crate::mission::step_keeps_open` and `is_system`) and goes once published missions
+declare their flags. The terminal UI, the phone and Fractal read the served flags and keep no name
+rule.
 
 ### Sidebar identity
 
@@ -504,7 +524,9 @@ Sidebar:
 1. the live reserved subject, whatever its name;
 2. otherwise the live arrangement named exactly "Sidebar" with the lowest id, which a client
    created before the reserved id;
-3. otherwise none, and the first edit creates the reserved subject named "Sidebar".
+3. otherwise none, and the first edit creates the reserved subject named "Sidebar". If st refuses
+   that create with `arrangement-retired`, the person removed their Sidebar: the client says
+   restoring a removed Sidebar is not available yet and never tries to create it again.
 
 A client edits the Sidebar it picked and never copies a legacy one, so an older client still
 editing it loses nothing. When two clients create the reserved subject at once, the second gets
@@ -529,8 +551,10 @@ Today the terminal UI cleans with `st3-conversation-ui`, the phone with `st3-vie
 
 ### Order and adoption
 
-Projections ship in this order: graph flags and the Sidebar constant; mission; agent; attention,
-with launch, prompt and revision; the declaration read; the conversation stream. Each lands in
+Projections ship in this order: graph flags and the Sidebar constant; agent; mission; attention,
+with launch, prompt and revision; the declaration read; the conversation stream. The agent
+projection comes before the mission projection because it reads only its own row, while a
+mission's word also depends on the agents that queue its steps. Each lands in
 small PRs. The daemon PR carries the schema and regenerated clients, the refresher, the
 `words.json` check, the SLO entries and the `daemon_load` window. Separate PRs then move the
 terminal UI and the phone onto the projection and delete their derivations. When a projection
