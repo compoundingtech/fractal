@@ -1850,6 +1850,12 @@ seconds for a publication at or after the request cut, returns the retained publ
 promptly after a failed latest attempt with no newer attempt in flight, and uses the existing
 unchanged-card proof. Rust keeps `agents_list_fresh`; current-work `fresh=true` is unchanged.
 
+Ordinary `st agents ls` and `st agents tree` read the latest published roster without
+requesting a refresh. Immediately after starting or changing an agent they can show the
+earlier roster; after daemon startup the roster may still be being prepared. When you need
+to see your own write, pass its same-host receipt `store_index` as `min_cut` to the agents
+client read and check the served snapshot index. This is not a replicated or cross-host cut.
+
 A caller that needs a strict read-after-write fence passes `min_cut=N`, using the
 `ClaimRecord.store_index` returned by its write on this same host. This is a host-local
 acceptance index, not a replicated sequence: a cut minted on host A must not fence host B.

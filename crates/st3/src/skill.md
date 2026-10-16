@@ -22,6 +22,12 @@ A wake message is a direct connection: it wakes the recipient agent for a full t
 
 ## Mission work
 
+Ordinary `st agents ls` and `st agents tree` read the latest published roster without
+requesting a refresh. Immediately after starting or changing an agent they can show the
+earlier roster; after daemon startup the roster may still be being prepared. When you need
+to see your own write, pass its same-host receipt `store_index` as `min_cut` to the agents
+client read and check the served snapshot index. This is not a replicated or cross-host cut.
+
 `"$ST3_BIN" work ls --as "$ST_AGENT"` lists the steps available to this seat, and `work claim STEP --as "$ST_AGENT"` takes one and prints its goals, its constraints, and this machine's host facts.
 
 Status lives in the graph: `work progress` records progress, and stui and the phone show it first as this seat's status wherever the seat or its run appears; `work complete` records the result, each with `--as "$ST_AGENT"`. Message an agent for a question, a blocker or an action it needs to take; reach a person by printing in the conversation. Send progress or completion messages only when asked. To learn when something finishes, watch it instead of asking to be told: `st gh watch` watches PRs today; `st watch` for any subject is planned.
