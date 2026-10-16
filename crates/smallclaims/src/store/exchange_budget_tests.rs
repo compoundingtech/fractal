@@ -156,7 +156,8 @@ fn a_backlog_drains_in_pages_within_the_budget_without_duplicates_or_loss() {
 #[test]
 fn an_exchange_without_envelopes_is_left_alone() {
     let mut empty = exchange(Vec::new());
-    fit_exchange_body(&mut empty, 0).unwrap();
+    let exact = size(&empty);
+    fit_exchange_body(&mut empty, exact).unwrap();
     assert!(empty.envelopes.is_empty());
     assert!(REPLICATION_EXCHANGE_BODY_BUDGET < crate::sync::MAX_EXCHANGE_BYTES);
 }
