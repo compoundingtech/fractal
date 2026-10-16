@@ -46,10 +46,9 @@ pub async fn run(
         std::process::id(), None, st_drivers::claude_process::Caller::Channel, Ok);
     let legacy = match ownership {
         Ok(st_drivers::claude_process::Admission::Primary) => false,
-        Ok(st_drivers::claude_process::Admission::Legacy) => {
-            eprintln!("st: legacy ownership: unprotected until next natural restart");
-            true
-        }
+        // The report and initialization claim below retain the ownership warning.
+        // Accepted legacy startup must not write into the person's terminal.
+        Ok(st_drivers::claude_process::Admission::Legacy) => true,
         Err(error) => {
             eprintln!("st: {}", st_drivers::claude_process::diagnostic(&error));
             if st_drivers::claude_process::failure_kind(&error)
