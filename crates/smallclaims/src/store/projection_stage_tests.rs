@@ -263,7 +263,7 @@ fn project(store: &Store, label: &str, progress: impl FnMut(ProjectionProgress))
             .project_replication_backlog_with_progress("test", progress)
             .unwrap();
     });
-    staged_row(&store, label)
+    staged_row(store, label)
 }
 
 #[test]
