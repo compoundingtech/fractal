@@ -957,6 +957,10 @@ mod tests {
         )
         .unwrap();
         db.execute_batch("PRAGMA mmap_size=0; PRAGMA journal_mode=DELETE; PRAGMA temp_store=FILE; PRAGMA cache_size=1;").unwrap();
+        let mmap: i64 = db
+            .query_row("PRAGMA mmap_size", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mmap, 0);
         let before = vfs.metrics();
         db.execute_batch("UPDATE claims SET position=1025-position;")
             .unwrap();

@@ -31,14 +31,16 @@ writes. Its 256 MiB margin covers at most 16 MiB of writes between checks plus o
 16 MiB request, leaving 224 MiB for allocation rounding and concurrent activity. It guards
 allocation-capable truncate, shared-memory map and file-size hints as well. Every guarded
 connection sets `mmap_size=0`; an over-budget self-test write must be refused before the copy
-starts. On refusal the connection closes without more SQL and the disposable proof and sidecars
+starts. SQLite temp writes are charged by requested bytes, including overwrites, so the guard
+may refuse a proof with physical headroom still available. On refusal the connection closes
+without more SQL and the disposable proof and sidecars
 are removed with checked errors. There is no atomic guarantee against another process consuming
 the remaining margin between a check and a write. A project quota would supply that stronger
 guarantee. `ENOSPC` is still an abort path, never a verification claim. A seal published before
 the proof attempt remains in place.
 
 Resumable capture staging keeps the default SQLite VFS and is charged one full live DB-size
-allowance up front. Its short capture phases check available space between pages. A VFS refusal
+allowance up front. Its capture phases check available space at phase boundaries. A VFS refusal
 inside its transaction could prevent rollback and leave an unusable staging file. A later PR
 replaces the whole proof copy and puts `max_page_count` on construction.
 

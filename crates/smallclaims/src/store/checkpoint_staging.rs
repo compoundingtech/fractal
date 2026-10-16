@@ -1139,6 +1139,30 @@ pub struct StagedProof<'a> {
     pub plan: &'a StagedPlan,
 }
 
+#[cfg(test)]
+mod headroom_resume_tests {
+    use super::*;
+
+    #[test]
+    fn a_closed_capture_keeps_its_committed_cursor_for_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capture-checkpoint-2026-10-16-1.sqlite3");
+        let first = StagedSet::open(
+            &path, lock_staging(dir.path()).unwrap(), None, "same-identity".into(), 0, 1, 1,
+        ).unwrap();
+        first.staging.execute(
+            "UPDATE meta SET phase=?1, cursor=?2 WHERE id=1",
+            params![CLAIMS, 42_i64],
+        ).unwrap();
+        drop(first); // A headroom refusal closes the file without discarding committed pages.
+        let resumed = StagedSet::open(
+            &path, lock_staging(dir.path()).unwrap(), None, "same-identity".into(), 0, 1, 1,
+        ).unwrap();
+        let (phase, cursor, _) = resumed.position().unwrap();
+        assert_eq!((phase, cursor), (CLAIMS, 42));
+    }
+}
+
 impl ProofInput for StagedProof<'_> {
     fn cut_unix_ms(&self) -> u128 {
         self.staged.cut_unix_ms

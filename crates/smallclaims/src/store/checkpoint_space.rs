@@ -535,6 +535,21 @@ mod tests {
     }
 
     #[test]
+    fn capture_preflight_refusal_preserves_an_existing_staging_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.sqlite3");
+        let file = File::create(&live).unwrap();
+        file.set_len(1024 * 1024 * 1024 * 1024).unwrap();
+        let staging = dir.path().join("checkpoint");
+        fs::create_dir(&staging).unwrap();
+        let capture = staging.join("capture-existing.sqlite3");
+        fs::write(&capture, b"committed-cursor").unwrap();
+        let error = SpaceGuard::admit(&live, &staging, true).err().unwrap().to_string();
+        assert!(error.contains("refused before allocation"), "{error}");
+        assert_eq!(fs::read(&capture).unwrap(), b"committed-cursor");
+    }
+
+    #[test]
     fn refuses_before_allocation_with_actionable_headroom() {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("live.sqlite3");
