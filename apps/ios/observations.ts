@@ -154,6 +154,9 @@ export class Observations {
     series.max_ms = Math.max(series.max_ms, whole);
     const bound = canonicalUpperMs(whole);
     series.buckets[bound] = (series.buckets[bound] ?? 0) + 1;
+    // A new minute means earlier ones are over. Only after the write: a minute swept while still empty
+    // would lose what the caller is about to add to it.
+    this.sweep();
   }
 
   // ---- The share of foreground time with a live feed.
@@ -174,6 +177,9 @@ export class Observations {
         if (this.feedLive) share.live_ms += edge - from;
         from = edge;
       }
+      this.since = now;
+      this.sweep();
+      return;
     }
     this.since = now;
   }
@@ -185,8 +191,6 @@ export class Observations {
     if (!interval) {
       interval = { start, series: {}, shares: {} };
       this.minutes.set(start, interval);
-      // A new minute means earlier ones are over.
-      if (this.minutes.size > 1) this.sweep();
     }
     return interval;
   }
