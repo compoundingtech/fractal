@@ -56,6 +56,11 @@ struct Pending {
 /// How often st is asked how long a message it takes, and how soon again after it did not answer.
 const MESSAGE_LIMIT_REREAD: Duration = Duration::from_secs(600);
 const MESSAGE_LIMIT_RETRY: Duration = Duration::from_secs(30);
+/// The followed windows arrive over the live stream, whose frames carry no `sync` notice, so a
+/// small Attention page read supplies it: first a few seconds after the link goes live, then once
+/// a minute, never again sooner after a failure. Remove when every supported daemon streams it.
+const SYNC_FIRST: Duration = Duration::from_secs(10);
+const SYNC_REREAD: Duration = Duration::from_secs(60);
 
 /// How long a message waits for st's answer before it says st has not confirmed it.
 /// A draw slower than this, or a whole turn of the main loop (everything it did before waiting for
@@ -374,6 +379,8 @@ enum Fetched {
     Sent(String, Result<Option<String>, (String, bool)>),
     /// The longest message st says it takes, in UTF-8 bytes; None when it does not say.
     MessageLimit(Result<Option<usize>, ()>),
+    /// The `sync` notice on a one-row Attention page: None when st says nothing is missing.
+    Sync(Result<Option<st3_client::SyncNotice>, ()>),
     /// st started an agent asked for here.
     /// st started a shell asked for here.
     TerminalStarted(String),
@@ -584,6 +591,9 @@ pub fn run(context: Context) -> Result<()> {
     let mut said_asked: Option<String> = None;
     let mut said_typed: Option<(String, Instant)> = None;
     let mut last_cache_save = Instant::now();
+    // The notice the page read last found, carried onto every window the stream rebuilds.
+    let mut page_sync: Option<st3_client::SyncNotice> = None;
+    let mut sync_next = Instant::now() + SYNC_FIRST;
     // A closed terminal ends the loop: without this check a detached stui spins and keeps
     // polling the daemon forever.
     while !ui.quit
@@ -628,6 +638,19 @@ pub fn run(context: Context) -> Result<()> {
                 let _ = tx.send(Fetched::MessageLimit(limit));
             });
         }
+        if extras.live && extras.offline.is_none() && Instant::now() >= sync_next {
+            sync_next = Instant::now() + SYNC_REREAD;
+            let client = client.clone();
+            let tx = fetched_tx.clone();
+            runtime.spawn(async move {
+                let notice = client
+                    .attention_list(None, Some(1), false)
+                    .await
+                    .map(|found| found.value.sync)
+                    .map_err(|_| ());
+                let _ = tx.send(Fetched::Sync(notice));
+            });
+        }
         while let Ok(update) = incoming.try_recv() {
             match update {
                 feed::Update::GlassesVersion(version) => {
@@ -636,6 +659,10 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 feed::Update::Connected(member) => {
                     limit_next = Instant::now();
+                    // Another member may say something else: read again after the normal delay.
+                    sync_next = Instant::now() + SYNC_FIRST;
+                    page_sync = None;
+                    fill_notice(&mut model, None);
                     ui.quality.live(false);
                     agents_live = false;
                     glasses_ready = true;
@@ -738,12 +765,7 @@ pub fn run(context: Context) -> Result<()> {
                         extras.inventory_partial.retain(|name| name != inventory.collection());
                         if has_more { extras.inventory_partial.push(inventory.collection().into()); }
                     }
-                    let collection = Collection {
-                        items,
-                        snapshot: Some(snapshot),
-                        truncated: has_more,
-                        sync: None,
-                    };
+                    let collection = window_collection(items, snapshot, has_more, page_sync.as_ref());
                     match window {
                         Window::Attention => {
                             model.now = collection;
@@ -969,6 +991,13 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Read(id, result) => {
                     read_receipts.completed(id, result, Instant::now());
                 }
+                // A failed read keeps what was last found; the next try is the next minute.
+                Fetched::Sync(Ok(notice)) => {
+                    page_sync = notice;
+                    fill_notice(&mut model, page_sync.as_ref());
+                    changed = true;
+                }
+                Fetched::Sync(Err(())) => {}
                 Fetched::MessageLimit(limit) => match limit {
                     Ok(limit) => {
                         ui.message_limit = limit;
@@ -2005,6 +2034,33 @@ pub fn run(context: Context) -> Result<()> {
     save_cache(cache_path.as_deref(), &person, &model);
     ui.flush_drafts();
     Ok(())
+}
+
+/// A followed window as the model holds it: its rows, the snapshot they came from, and the
+/// notice the page read last found. The stream's frames carry no notice of their own, so every
+/// window the stream rebuilds takes the page's, or the one with the newest snapshot would drop it.
+fn window_collection(
+    items: Vec<Resource>,
+    snapshot: st3_client::Snapshot,
+    has_more: bool,
+    sync: Option<&st3_client::SyncNotice>,
+) -> Collection {
+    Collection { items, snapshot: Some(snapshot), truncated: has_more, sync: sync.cloned() }
+}
+
+/// Put a fresh page notice on every collection the stream follows, so `Model::sync_notice` finds it
+/// whichever of them holds the newest snapshot.
+fn fill_notice(model: &mut Model, sync: Option<&st3_client::SyncNotice>) {
+    for collection in [
+        &mut model.now,
+        &mut model.missions,
+        &mut model.agents,
+        &mut model.sessions,
+        &mut model.machines,
+        &mut model.devices,
+    ] {
+        collection.sync = sync.cloned();
+    }
 }
 
 fn save_cache(path: Option<&std::path::Path>, person: &str, model: &Model) {
@@ -3146,6 +3202,85 @@ mod tests {
     }
 
     use super::*;
+
+    fn peer(host: &str, missing: u64, diverged: bool) -> st3_client::SyncPeer {
+        st3_client::SyncPeer {
+            last_successful_exchange: None,
+            last_failed_exchange: None,
+            host_id: host.into(),
+            peer_only_envelopes: missing,
+            local_only_envelopes: 0,
+            last_exchange_at: None,
+            estimated_catch_up_seconds: Some(840),
+            diverged_since: diverged.then(|| "2026-09-29T10:00:00Z".into()),
+        }
+    }
+
+    fn snapshot(store_index: u64) -> st3_client::Snapshot {
+        st3_client::Snapshot {
+            id: format!("snapshot/{store_index}"),
+            host_id: "host/hearth".into(),
+            store_index,
+            projection_version: "1".into(),
+            created_at: "2026-10-16T11:00:00Z".into(),
+        }
+    }
+
+    /// The world a running stui shows after the stream delivered Attention (older) and Agents
+    /// (newest) windows, built by the same function the live loop uses.
+    fn running_world(sync: Option<&st3_client::SyncNotice>) -> super::super::view::World {
+        let model = Model {
+            now: window_collection(Vec::new(), snapshot(5), false, sync),
+            agents: window_collection(Vec::new(), snapshot(9), false, sync),
+            ..Model::default()
+        };
+        let extras = super::super::adapt::Extras { live: true, ..Default::default() };
+        super::super::adapt::world(&model, "person/avery", &extras)
+    }
+
+    #[test]
+    fn a_running_stui_says_diverged_or_behind_from_the_notice_the_windows_carry_and_live_otherwise() {
+        use super::super::view::Link;
+        let diverged = st3_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
+        let shown = running_world(Some(&diverged));
+        assert!(matches!(shown.link, Link::Live));
+        assert_eq!(shown.diverged, vec!["harbor".to_owned()]);
+        assert!(shown.behind.is_empty());
+
+        let behind = st3_client::SyncNotice { state: "catching-up".into(), peers: vec![peer("host/harbor", 26_820, false)] };
+        let shown = running_world(Some(&behind));
+        assert!(shown.diverged.is_empty());
+        assert_eq!(shown.behind.len(), 1, "{:?}", shown.behind);
+        assert!(shown.behind[0].starts_with("harbor has 26,820 envelopes"), "{:?}", shown.behind);
+
+        // No notice, or one that names nothing missing: nothing is claimed, and the link is live.
+        for sync in [None, Some(st3_client::SyncNotice { state: "catching-up".into(), peers: vec![peer("host/dock", 0, false)] })] {
+            let shown = running_world(sync.as_ref());
+            assert!(matches!(shown.link, Link::Live));
+            assert!(shown.diverged.is_empty() && shown.behind.is_empty(), "{:?} {:?}", shown.diverged, shown.behind);
+        }
+    }
+
+    #[test]
+    fn the_page_read_fills_the_notice_and_a_rebuilt_window_keeps_it_until_the_next_read() {
+        let diverged = st3_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
+        // The stream's windows arrive with nothing known, the newest being Agents.
+        let mut model = Model {
+            now: window_collection(Vec::new(), snapshot(5), false, None),
+            agents: window_collection(Vec::new(), snapshot(9), false, None),
+            ..Model::default()
+        };
+        assert!(model.sync_notice().is_none());
+        // The page read finds a diverged peer: it shows although Agents holds the newest snapshot.
+        fill_notice(&mut model, Some(&diverged));
+        assert_eq!(model.sync_notice(), Some(&diverged));
+        // A later frame rebuilds Agents with the notice the loop carries, not with none.
+        model.agents = window_collection(Vec::new(), snapshot(12), false, Some(&diverged));
+        assert_eq!(model.sync_notice(), Some(&diverged));
+        // The next read says level: the notice goes from every window.
+        fill_notice(&mut model, None);
+        assert!(model.sync_notice().is_none());
+    }
 
     #[test]
     fn open_requests_wait_for_a_live_inventory_and_answer_each_seat_once() {
