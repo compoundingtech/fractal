@@ -199,6 +199,16 @@ export function promptAnswers(item: { readonly actions: readonly string[]; reado
   return prompt;
 }
 
+/**
+ * Which prompt an alert's answer controls belong to: the alert, the episode it asks about and its
+ * revision. A client keys the person's choices on it, so a new prompt behind the same alert, or a
+ * new revision of it, starts with nothing chosen: positions chosen for one question never answer
+ * another.
+ */
+export function promptAlertKey(item: { readonly id: string; readonly revision: string; readonly actions: readonly string[]; readonly source_id: string; readonly episode?: string; readonly action_parameters?: unknown }): string {
+  return [item.id, promptAnswers(item)?.episode ?? item.episode ?? '', item.revision].join('\n');
+}
+
 /** The call a harness recorded before it asked, in full: its tool and each input, lines intact. */
 export type PendingCall = { id: string; tool: string; lines: string[]; input?: unknown };
 

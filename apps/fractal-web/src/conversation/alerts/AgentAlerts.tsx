@@ -10,6 +10,7 @@ import {
   pendingCalls,
   pendingQuestions,
   promptAnswers,
+  promptAlertKey,
   promptCalls,
   questionAnswer,
   type PendingCall,
@@ -117,7 +118,8 @@ export const AgentAlerts = ({
   if (alerts.length === 0) return null
   const one = (alert: Native.Attention) =>
     alert.attention_kind === 'harness-prompt'
-      ? <PromptAlert key={alert.id} alert={alert} calls={calls} onAnswer={onAnswer} />
+      // A new prompt or revision behind the same alert starts with nothing chosen.
+      ? <PromptAlert key={promptAlertKey(alert)} alert={alert} calls={calls} onAnswer={onAnswer} />
       : <AnswerAlert key={alert.id} alert={alert} onAct={onAct} />
   const [first, ...rest] = alerts
   return (

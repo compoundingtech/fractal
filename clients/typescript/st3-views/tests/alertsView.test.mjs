@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { alertConversations, alertsHeading, alertsIn, answerLabel, homeRows, isAlert, offeredAnswers, openAlerts, pendingCalls, pendingQuestions, promptAnswers, promptCalls, questionAnswer } from '@smalltalk/st3-views/homeView';
+import { alertConversations, alertsHeading, alertsIn, answerLabel, homeRows, isAlert, offeredAnswers, openAlerts, pendingCalls, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer } from '@smalltalk/st3-views/homeView';
 
 const item = (id, attention_kind, extra = {}) => ({ id: `attention/${id}`, kind: 'attention', attention_kind, title: id, detail: '', priority: 'normal', state: 'open', person_id: 'person/alex', requested_at: '2026-09-30T11:00:00Z', source_id: 'x', actions: [], ...extra });
 const actor = 'person/alex/session/phone';
@@ -84,6 +84,11 @@ assert.equal(questionAnswer(questions, [[1]]), null, 'every question needs a cho
 // Positions only: the questions' and options' words stay in the conversation.
 assert.deepEqual(JSON.parse(questionAnswer(questions, [[1], [2, 0]])), { 0: [1], 1: [0, 2] });
 assert.equal(questionAnswer(questions, [[1], [7]]), null, 'an option the question does not have');
+// Choices belong to one prompt: a new episode or revision behind the same alert is another key.
+const prompting = (episode, revision) => item('p', 'harness-prompt', { revision, actions: ['prompt.respond'], action_parameters: { 'prompt.respond': { target_id: 'x', episode, answers: ['answer', 'deny'] } } });
+assert.equal(promptAlertKey(prompting('e1', 'r1')), promptAlertKey(prompting('e1', 'r1')));
+assert.notEqual(promptAlertKey(prompting('e2', 'r1')), promptAlertKey(prompting('e1', 'r1')), 'a new prompt behind the alert');
+assert.notEqual(promptAlertKey(prompting('e1', 'r2')), promptAlertKey(prompting('e1', 'r1')), 'a new revision of it');
 assert.equal(pendingQuestions(pendingCalls([call('b', 'Bash', { command: 'ls' })])), null);
 assert.equal(pendingQuestions([]), null);
 const question = { target_id: 'a', episode: 'e', answers: ['answer', 'deny'] };
