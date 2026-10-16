@@ -27109,7 +27109,7 @@ mission "wake" state="ready" {
         let _wake = store.start_agent_roster_refresher().unwrap();
         roster_resilience_runtime(store, "agent/reset-cut", "old");
         refresh_agent_roster(store, false).unwrap();
-        let older = client_agents_published_page(&state, &ClientListQuery::default(), 0).unwrap();
+        let older = client_agents_published_page(&state, &ClientListQuery::default(), 0, None).unwrap();
         roster_resilience_runtime(store, "agent/reset-cut", "new");
         refresh_agent_roster(store, false).unwrap();
         let wanted = store.index().unwrap();
@@ -27118,7 +27118,7 @@ mission "wake" state="ready" {
         assert_eq!(error.code, "agent-roster-cut-not-ready");
         // Exercise the exact post-wait reset seam without adding a production test hook.
         store.forget_current_views();
-        let page = client_agents_published_page(&state, &ClientListQuery::default(), wanted).unwrap();
+        let page = client_agents_published_page(&state, &ClientListQuery::default(), wanted, None).unwrap();
         assert!(page.is_none());
         let error = checked_agent_roster_page(page, Some(wanted)).unwrap_err();
         assert_eq!(error.code, "agent-roster-cut-not-ready");
