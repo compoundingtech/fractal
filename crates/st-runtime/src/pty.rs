@@ -430,15 +430,25 @@ impl PtyRuntime {
             .iter()
             .map(OsString::as_os_str)
             .collect::<Vec<_>>();
+        let launch_environment = self.command_environment.as_ref().map(|base| {
+            let mut environment = base.clone();
+            environment.extend(terminal_env.clone());
+            environment
+        });
         const ATTEMPTS: u32 = 4;
         let mut last_error = String::new();
         for attempt in 0..ATTEMPTS {
-            let mut command =
-                crate::wrap_isolated(&unit, std::ffi::OsStr::new(&self.binary), &argument_refs);
-            if let Some(environment) = &self.command_environment {
-                command.env_clear().envs(environment);
+            // The launcher is built from its final environment, so the host systemd session
+            // is chosen from the same values the task receives.
+            let mut command = crate::isolate::wrap_in(
+                &unit,
+                std::ffi::OsStr::new(&self.binary),
+                &argument_refs,
+                launch_environment.as_ref(),
+            );
+            if launch_environment.is_none() {
+                command.envs(&terminal_env);
             }
-            command.envs(&terminal_env);
             command.env("PTY_ROOT", &self.root);
             // A later failed attempt cannot close a producer created by an earlier
             // attempt. Only failure to create the first launcher proves rejection.

@@ -1,7 +1,7 @@
 # The Smalltalk guide
 
 Smalltalk runs agents as durable seats and records missions, messages and decisions
-in a graph. This guide is bundled into the executable so the expert can help on a
+in a graph. This guide is bundled into the executable so the Assistant can help on a
 machine without a source checkout. Its version is pinned by the onboarding mission.
 
 ## Check the installation
@@ -40,7 +40,7 @@ the agent read the message; use the recorded receipt.
 doing and where it works. `st agents restart` recovers a stuck harness while keeping
 its declaration. `st agents stop` leaves it stopped until explicitly started.
 Suspend and resume preserve a quiet seat's native conversation on the same machine;
-they refuse busy seats. The built-in expert stays available after onboarding, and
+they refuse busy seats. The built-in Smalltalk Assistant stays available after onboarding, and
 setup does not resurrect it after the person stops it. `st setup --onboarding`
 explicitly starts another onboarding run.
 
@@ -53,6 +53,45 @@ Ctrl+Q quits the interface while work keeps running. Ctrl+] attaches to a select
 seat's terminal and Ctrl+\ detaches. Raw terminal keys belong to the harness while
 attached. Use a choice or decision on Now for a person-only answer; do not leave
 questions solely in a harness terminal.
+
+## Showing the person an agent or a mission
+
+`st ui open agent/NAME` shows an agent's conversation in the terminal interface the person
+has open on this machine, in a new tab. `--split` puts it in a split on the right and
+`--split --below` below. `st ui open mission-run/NAME/RUN` opens the mission view, which stays
+open and follows the mission from step to step, so the person can watch it beside the
+conversation. The pane takes the person's focus unless they are typing a message or you add
+`--keep-focus`. Asking again for something already open shows it rather than opening it twice.
+The command says whether the pane opened, whether st has no such agent or mission, or that no
+terminal interface answered, in which case nothing was queued and nothing will open later.
+Tell the person in your reply what you opened and why; the pane is not a message.
+
+## Raising an alert for yourself
+
+An alert appears in a bar above the message input of your conversation, with one tap per
+answer, and clears when the person answers it. A notice that asks nothing is a decision whose
+two answers both change nothing. Write the request once, then ask:
+
+```sh
+cat > "$TMPDIR/notice.json" <<'JSON'
+{"version": 1, "type": "decision",
+ "question": "Your demo folder is ready.",
+ "why_person": "Nothing waits on you; this is a notice you can dismiss.",
+ "answers": [
+  {"id": "ok", "label": "Got it", "outcome": "accept",
+   "consequence": "The notice goes away; nothing else happens."},
+  {"id": "dismiss", "label": "Dismiss", "outcome": "decline",
+   "consequence": "The notice goes away; nothing else happens."}]}
+JSON
+st work ask --for PERSON --title "Your demo folder is ready" --request "$TMPDIR/notice.json" \
+  --new-run demo-folder-ready --idempotency-key demo-folder-ready-1 --as "$ST_AGENT"
+```
+
+`PERSON` is the person you are talking with, for example `person/avery`. Use a new
+`--new-run` name and idempotency key for each alert. The person sees `◆ 1 alert` above the
+input, opens it with a click, and taps `Got it` or `Dismiss`; the answer then arrives in your
+conversation as a message. `st work update` is not for this: an update shows in Now, not above
+the input, and only for work the person asked for.
 
 ## Missions and evidence
 
@@ -90,7 +129,7 @@ is a recovery action, not proof that a problem was fixed: check the new incarnat
 and its read receipt. Never assume a machine name, a published release, a paired
 device, a successful installation, or a completed mission from a command attempt.
 
-Message agent/st/expert for later questions, and use `st --help` and nested command
+Message agent/st/assistant for later questions, and use `st --help` and nested command
 help for the installed build's current syntax. This curated guide draws on the
 repository's getting-started, talking-to-agents, seat-lifecycle, mission graph runtime
 and troubleshooting guides; it does not require a checkout to read them.

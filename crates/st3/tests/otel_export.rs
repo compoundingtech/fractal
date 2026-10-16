@@ -33,8 +33,10 @@ fn isolated_command(binary: &Path, root: &Path) -> Command {
     let mut command = Command::new(binary);
     command
         .env_clear()
-        // otelite's no-export child uses `env`; preserve only the executable search path.
+        // otelite's no-export child uses `env`. Daemon startup also needs the
+        // declared shell when the check account has no interactive login shell.
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .envs(std::env::var_os("SHELL").map(|shell| ("SHELL", shell)))
         .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_STATE_HOME", root.join("state"))
@@ -388,7 +390,6 @@ fn daemon_exports_allocator_heap_and_resident_memory() {
         .env("OTEL_METRIC_EXPORT_INTERVAL", "100")
         .env("OTEL_TRACES_EXPORTER", "none")
         .env("OTEL_LOGS_EXPORTER", "none")
-        .env("SHELL", std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()))
         .args(["run", "--out"])
         .arg(root.path().join("capture"))
         .args(["--protocol", "http/json", "--", "sh", "-c",
@@ -1734,13 +1735,18 @@ async fn daemon_request_id_and_roster_stages_match_response() {
     // Reads serve published cuts, including after a new claim. A fresh history read
     // waits for the refresher's publication; neither kind folds cards in the request.
     let mut responses = Vec::new();
+    let mut minimum_card_cut = None;
     for attempt in 0..3 {
         if attempt != 0 {
-            daemon.request("POST", "/v1/diagnostics/harness", Some(serde_json::json!({
+            let (changed, _) = daemon.request("POST", "/v1/diagnostics/harness", Some(serde_json::json!({
                 "actor":actor, "code":"otel-roster-advance", "reason":"stage fixture",
                 "severity":"warning", "status":"healthy", "incarnation_id":"otel-session",
                 "idempotency_key":format!("otel-roster-advance-{attempt}"),
             })), TRACEPARENT, None).await;
+            // Use the actual card-affecting claim's cut, not a response snapshot that
+            // might also include an unrelated later daemon claim.
+            minimum_card_cut = Some(changed["value"]["store_index"].as_i64()
+                .expect("diagnostic claim store_index"));
         }
         for (path, expected_path, expected_fresh) in [
             ("/v1/client/agents?history=true&status=stopped", "filtered_full", false),
@@ -1748,10 +1754,10 @@ async fn daemon_request_id_and_roster_stages_match_response() {
             ("/v1/client/agents?history=true", "published_complete", false),
         ] {
             let (body, bytes) = daemon.request("GET", path, None, TRACEPARENT, None).await;
-            responses.push((body, bytes, expected_path, expected_fresh));
+            responses.push((body, bytes, expected_path, expected_fresh, minimum_card_cut));
         }
     }
-    for (body, bytes, expected_path, expected_fresh) in responses {
+    for (body, bytes, expected_path, expected_fresh, minimum_card_cut) in responses {
         let request_id = body["request_id"].as_str().expect("response request_id");
         assert!(request_id.starts_with("request/"), "{body}");
         let rows = body["value"]["items"].as_array().expect("roster page").len();
@@ -1776,7 +1782,24 @@ async fn daemon_request_id_and_roster_stages_match_response() {
         let published = int_attribute(&span, "st.roster.publication_cut").expect("publication_cut integer");
         assert_eq!(Some(published), body["snapshot"]["store_index"].as_i64(), "{span}\n{body}");
         if fresh {
-            assert!(published >= requested, "fresh read served an older cut: {span}");
+            let outcome = string_attribute(&span, "st.roster.fresh_wait").expect("fresh wait outcome");
+            let wanted = int_attribute(&span, "st.roster.fresh_wait_cut").expect("actual wait target");
+            let proof = string_attribute(&span, "st.roster.fresh_proof").expect("served-publication proof outcome");
+            let verified = bool_attribute(&span, "st.roster.fresh_unchanged_verified").expect("unchanged verification bool");
+            assert!(wanted >= requested, "wait target cannot precede request cut: {span}");
+            assert_eq!(verified, proof == "verified", "{span}");
+            if verified {
+                assert_eq!(outcome, "unchanged", "only that wait exit may carry this proof: {span}");
+                assert!(published <= wanted, "proof must cover the actual served publication: {span}");
+            }
+            // Eviction after selection can honestly yield Refused. It is not an unchanged
+            // certificate, so an older cut still fails this assertion; never waive it here.
+            assert!(published >= requested || (outcome == "unchanged" && verified),
+                "fresh read lacks a current cut or exact-served unchanged proof: {span}");
+            if let Some(card_cut) = minimum_card_cut {
+                assert!(published >= card_cut,
+                    "fresh read missed an actual card-affecting diagnostic: {span}");
+            }
         }
     }
     // The seeded undeclared seat appears only in history. Await that one-card cold
