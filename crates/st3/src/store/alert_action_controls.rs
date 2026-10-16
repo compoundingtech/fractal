@@ -288,7 +288,14 @@ fn an_old_registry_holds_the_delegated_answer_but_admits_its_known_notice() {
     let current = node("alder", Some(&anchor), Some(&anchor));
     admit(&current, "alder", &anchor, "anchor", None);
     admit(&current, "older", &peer_key, "invite", None);
-    let older = node("older", Some(&peer_key), Some(&anchor));
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("older.sqlite3");
+    let older = Store::open(&path, "older").unwrap();
+    // The same authored fleet used by fleet_admission_tests::node. A real reopen
+    // below changes this fixture's build registry, never its write-once runtime.
+    older.bind_fleet("7c9e6679-7425-40de-944b-e07fc1f90ae7").unwrap();
+    older.pin_fleet_anchor(anchor.public()).unwrap();
+    older.set_member_key(Some(peer_key.clone())).unwrap();
     let mut old_registry = st3_schema::registry().clone();
     let diagnostic = old_registry.claims.get_mut("harness.diagnostic").unwrap();
     diagnostic.fields.remove("acted_for").unwrap();
@@ -316,21 +323,23 @@ fn an_old_registry_holds_the_delegated_answer_but_admits_its_known_notice() {
         |record| record.claim_id.as_deref() == Some(answer.id.as_str())
             && record.error_code.as_deref() == Some("unknown-claim-field")
     ));
-    // Installing the current registry admits the original authenticated bytes;
-    // it neither rewrites the answer nor repeats its already-admitted notice.
-    older.set_claim_registry(st3_schema::registry().clone());
-    older.validate_replication_backlog().unwrap();
-    older.apply_replication_repairs().unwrap();
-    older.project_replication_backlog().unwrap();
+    // A new runtime on the SAME durable store uses the current registry. The
+    // write-once old runtime is dropped; no reset or rewritten claim is involved.
+    drop(older);
+    let upgraded = Store::open(&path, "older").unwrap();
+    upgraded.set_member_key(Some(peer_key)).unwrap();
+    upgraded.validate_replication_backlog().unwrap();
+    upgraded.apply_replication_repairs().unwrap();
+    upgraded.project_replication_backlog().unwrap();
     assert_eq!(
-        older.claim_by_id(&answer.id).unwrap().unwrap().body,
+        upgraded.claim_by_id(&answer.id).unwrap().unwrap().body,
         answer.body
     );
     assert_eq!(
-        older.prompt_answer(&denial.id).unwrap().answer.as_deref(),
+        upgraded.prompt_answer(&denial.id).unwrap().answer.as_deref(),
         Some("dismiss")
     );
-    assert_eq!(older.messages(Some(SEAT), true).unwrap().len(), 1);
+    assert_eq!(upgraded.messages(Some(SEAT), true).unwrap().len(), 1);
 }
 
 fn append(
@@ -440,10 +449,20 @@ fn granted_denial_dismissal_records_agent_person_and_closes_the_source_once() {
     assert_eq!(result.actor.as_deref(), Some(ACTOR));
     assert_eq!(result.body["fields"]["acted_for"], proof.person);
     assert_eq!(result.body["fields"]["delegation"], json!(proof));
+    let expected_input = ClaimInput {
+        subject: SEAT.into(), kind: "harness.diagnostic".into(), actor: Some(ACTOR.into()),
+        fields: serde_json::from_value(result.body["fields"].clone()).unwrap(),
+        evidence: serde_json::from_value(result.body["evidence"].clone()).unwrap(),
+        expected_subject: None,
+        idempotency_key: Some(format!("native-prompt-answer:{}", denial.id)),
+    };
+    let (operation, digest) = smallclaims::store::claim_operation(&expected_input).unwrap().unwrap();
+    assert_eq!(result.body["_operation"], json!({"id":operation,"request_digest":digest}));
     assert_eq!(
         store.prompt_answer(&denial.id).unwrap().answer.as_deref(),
         Some("dismiss")
     );
+    let committed_index = store.index().unwrap();
     for _ in 0..2 {
         assert!(
             store
@@ -459,11 +478,37 @@ fn granted_denial_dismissal_records_agent_person_and_closes_the_source_once() {
                 .id,
             result.id
         );
+        assert_eq!(store.index().unwrap(), committed_index);
     }
+    assert_eq!(store.answer_native_prompt(SEAT, &denial.id, "approve-once", "person/avery")
+        .unwrap_err().code, "stale-fence");
+    assert_eq!(store.respond_native_prompt(SEAT, &denial.id, "dismiss", "agent/alder.stranger", Some(&proof))
+        .unwrap_err().code, "stale-fence");
+    let mut changed_proof = proof.clone();
+    changed_proof.quote = "a different instruction".into();
+    assert_eq!(store.respond_native_prompt(SEAT, &denial.id, "dismiss", ACTOR, Some(&changed_proof))
+        .unwrap_err().code, "stale-fence");
+    assert_eq!(store.index().unwrap(), committed_index);
+    // A different, declared seat of the same person reaches the retry identity
+    // fence; this does not turn an undeclared-seat ownership refusal into a pass.
+    let source = "version 2\nagent \"worker\" { workspace \"/tmp\"; harness \"claude\" {} }\nagent \"peer\" { workspace \"/tmp\"; harness \"claude\" {} }\n";
+    let intent = crate::graph::parse_internal_intent(source, "alder").unwrap();
+    let preview = store.mission(&intent, crate::model::IntentInput { kdl:source.into(), source_name:None }).unwrap();
+    store.apply_as(&intent, &preview.subject_tokens, "declared-peer", Some("person/avery")).unwrap();
+    assert_eq!(store.agent_person("agent/alder.peer").unwrap().as_deref(), Some("person/avery"));
+    let before_wrong_seat = store.index().unwrap();
+    assert_eq!(store.respond_native_prompt("agent/alder.peer", &denial.id, "dismiss", ACTOR, Some(&proof))
+        .unwrap_err().code, "stale-fence");
+    assert_eq!(store.index().unwrap(), before_wrong_seat);
+    assert_eq!(store.claims_for(SEAT, Some("harness.diagnostic")).unwrap().iter()
+        .filter(|claim| claim.body["fields"]["code"] == "native-prompt-answered").count(), 1);
     let notices = store.messages(Some(SEAT), true).unwrap();
     assert_eq!(notices.len(), 1);
     assert!(notices[0].content.contains("Do not run it"));
     assert!(notices[0].content.contains(ACTOR));
+    let notice = store.latest_claim(&notices[0].subject, Some("message.sent")).unwrap().unwrap();
+    assert_eq!(notice.body["_operation"]["id"], smallclaims::store::opaque_cache_key(
+        &format!("st3-denial-answer:{}", denial.id)));
 }
 
 #[test]

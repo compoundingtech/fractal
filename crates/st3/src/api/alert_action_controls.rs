@@ -104,8 +104,17 @@ async fn alerts_resolve_dismisses_only_the_exact_granted_denial_source() {
     assert_eq!(status, StatusCode::OK, "{result}");
     assert_eq!(result["outcome"], "dismissed");
     assert_eq!(result["actor"], "agent/alder.helper");
+    assert_eq!(state.store.prompt_answer(&denial.id).unwrap().answer.as_deref(), Some("dismiss"));
+    let answers = state.store.claims_for(&denial.subject, Some("harness.diagnostic")).unwrap()
+        .into_iter().filter(|claim| claim.body["fields"]["code"] == "native-prompt-answered")
+        .collect::<Vec<_>>();
+    assert_eq!(answers.len(), 1);
+    assert_eq!(answers[0].body["_operation"]["id"], smallclaims::store::operation_id_for_key(
+        &format!("native-prompt-answer:{}", denial.id)));
+    let committed_index = state.store.index().unwrap();
     let (status, repeated) = json_request(app.clone(), &path, body).await;
     assert_eq!(status, StatusCode::OK, "{repeated}");
+    assert_eq!(state.store.index().unwrap(), committed_index, "an identical retry appends nothing");
     assert_eq!(
         state
             .store

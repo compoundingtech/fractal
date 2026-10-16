@@ -1927,12 +1927,27 @@ impl Store {
         if let Some(proof) = delegation {
             super::delegation::add_fields(&mut answer_fields, proof);
             self.delegation_evidence(&mut evidence, proof)?;
+            // The ordinary answer readers use the typed claim operation identity.
+            // Receipt identities belong to secondary effects such as the notice.
+            let input = ClaimInput {
+                subject: seat.to_owned(),
+                kind: "harness.diagnostic".into(),
+                actor: Some(actor.to_owned()),
+                fields: answer_fields,
+                evidence,
+                expected_subject: None,
+                idempotency_key: Some(native_prompt_answer_key(episode)),
+            };
+            let (operation_id, request_digest) = smallclaims::store::claim_operation(&input)?
+                .expect("a native answer has an idempotency key");
+            let body = json!({"fields":input.fields,"evidence":input.evidence,
+                "_operation":{"id":operation_id,"request_digest":request_digest}});
             // A delegated close and its source notification commit together.
             // The shared append seam rechecks policy/source fences in this writer.
             return self.connection.batched(|tx| -> std::result::Result<Option<ClaimRecord>, St3Error> {
-                let recorded = append_receipt_claim_tx(tx, &self.origin, seat, "harness.diagnostic", Some(actor),
-                    &json!({"fields": answer_fields, "evidence": evidence}), &[episode.to_owned()], None,
-                    &native_prompt_answer_key(episode)).map_err(claim_append_error)?;
+                let recorded = append_claim_tx(tx, &self.origin, seat, "harness.diagnostic", Some(actor),
+                    &body, &[episode.to_owned()], None).map_err(claim_append_error)?;
+                register_operation_tx(tx, &recorded).map_err(internal)?;
                 let message_key = format!("st3-denial-answer:{episode}");
                 let message_id = &hex::encode(sha2::Sha256::digest(message_key.as_bytes()))[..16];
                 append_receipt_claim_tx(tx, &self.origin, &format!("message/{message_id}"), "message.sent", Some("daemon/runtime"),
