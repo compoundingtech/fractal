@@ -187,7 +187,6 @@ for job in ("linux-clippy", "linux-fleet-compat", "isolation-vm"):
         assert "namespace-features:" not in blocks[job], (job, "separate feature labels are unsupported with profiles")
     else:
         assert "namespace-features:github.run-id=" in blocks[job], (job, "shape labels need a separate features label")
-assert 'job.priority=5' in blocks['perf-cost'], 'optional cost uses lower Namespace priority'
 assert 'namespace-features:github.run-id=' in blocks['perf-cost'], 'cost retains run-id shape pair'
 for job in ('genie-freshness', 'typescript-client'):
     assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'light checks must not consume reserved or Namespace capacity')
@@ -349,7 +348,7 @@ print('passed: an evidence skip lets the aggregate accept skipped stages only wh
 
 assert 'runs-on: ubuntu-latest' in (ROOT / '.github/workflows/public-repo.yml').read_text()
 assert required_priority not in blocks['perf-cost'], 'optional cost must not join required PR priority'
-assert "job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}" in blocks['perf-cost']
+assert 'job.priority=5' in blocks['perf-cost'], 'optional cost keeps the explicit low Namespace class'
 print('passed: release/merge precede PR checks, then optional/manual; reservations, shapes and affinity preserved')
 
 # Exercise the actual generated step predicates, including restoring ordinary behavior.
