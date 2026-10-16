@@ -171,6 +171,7 @@ pub fn start_published_lists(state: &AppState) {
         "runtimes/refresh",
         client_v0::published_runtimes::fold,
         true,
+        false,
     );
     if !enabled() {
         return;
