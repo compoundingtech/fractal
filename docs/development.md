@@ -76,8 +76,15 @@ shared developer bar, meters, and build identity utilities from source. The web
 shell publishes their generated dependency closure into root-owned immutable
 source inputs before pnpm installs it; no install writes into `repos/`.
 The flake input supplies the matching toolchain without replacing the member link.
+Keep the member and flake input pinned together: the flake exports the external
+Buck rules cell and its sandbox runtime, while the member supplies generation
+inputs. Runtime fixes must reach the exported rules cell as well as the member's
+BUCK declarations; verify consumer targets under the production sandbox.
 After changing workspace membership, run `nix develop .#genie -c genie`,
 `nix develop .#web -c pnpm install`, and regenerate the dependency licenses below.
+The Buck client generators publish ordinary and product source trees with the
+same package-local inputs and separate recursive dependency views. Typechecks
+continue to use the ordinary tree.
 
 The app loads diagnostics only in development or explicit performance builds.
 Mod Shift B toggles the persisted bar preference. Counters and Meters open

@@ -276,6 +276,28 @@ assert "nix develop '.#web' -c bash scripts/ci-typescript-client" in client
 assert "corepack enable" not in client, "Nix owns the client job's pnpm toolchain"
 print("passed: client install and checks use the same Nix web toolchain")
 
+# The shared store renderer emits product views recursively; every workspace endpoint must exist.
+for package in ("st3-client", "st3-views"):
+    package_path = f"clients/typescript/{package}"
+    source = (root / package_path / "BUCK").read_text()
+    trees = {}
+    for body in re.findall(r"(?ms)^package_view\(\n(.*?)^\)", source):
+        name = re.search(r'    name = "([^"]+)",', body).group(1)
+        trees[name] = body
+    identity = package_path.replace("/", "_").replace("-", "_")
+    for name, prefix in (("package_tree", "view"), ("product_package_tree", "product_view")):
+        assert name in trees, f"{package_path} lacks {name}"
+        assert re.search(rf'dependency_view = "//buck2/dependencies:{prefix}_{identity}_[0-9a-f]+"', trees[name])
+        assert 'strip_project_references = True' in trees[name]
+        assert 'runtime = "//:package_tree_runtime"' in trees[name]
+        assert 'runtime_entry = "package-tree.ts"' in trees[name]
+    files = [re.search(r"(?ms)    files = \{\n(.*?)^    \},", trees[name]).group(1)
+             for name in ("package_tree", "product_package_tree")]
+    assert files[0] == files[1], f"{package_path} product tree changes its own declared files"
+    typechecks = re.findall(r"(?ms)^tsgo_typecheck\(\n(.*?)^\)", source)
+    assert typechecks and all('package_tree = ":package_tree"' in body for body in typechecks)
+print("passed: ordinary and product package trees match their dependency views and own inputs")
+
 freshness = blocks["genie-freshness"]
 assert "scripts/ci-genie-freshness" in freshness
 guard = (root / "scripts/ci-genie-freshness").read_text()

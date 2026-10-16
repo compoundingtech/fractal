@@ -12,7 +12,7 @@
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/3ae148d83572a9cd0ae6165a372e1b662ccb31c3";
+      "github:overengineeringstudio/effect-utils/8cb2135bd4a852b99ca3f677c0815d0268766ff5";
     # The messaging fixture must not invoke Nix or fetch a historical build in the sandbox.
     messaging-baseline.url = "github:compoundingtech/smalltalk/678103d3e8ae873a158bb2cb951d3ffefdf698c4";
   };
