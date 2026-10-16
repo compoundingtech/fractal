@@ -120,7 +120,9 @@ pub(crate) struct AgentResourcesEntry {
 impl SmalltalkRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
+        migrate_mission_run_deadlines(connection)?;
         connection.execute_batch(git_changes::SCHEMA)?;
+        retirements::create_selection_triggers(connection)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
         backfill_message_index(connection)?;
@@ -329,7 +331,18 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn schema_digest(&self) -> String {
+        // Older peers cannot compare individual definition versions. Their existing
+        // registry comparison suppresses graph heals, while signed log admission continues.
+        canonical_hash(&(self.projection_registry_digest(), self.projection_versions()))
+            .expect("projection definition identity serializes")
+    }
+
+    fn projection_registry_digest(&self) -> String {
         compatibility_digest(&self.claim_registry().digest())
+    }
+
+    fn projection_versions(&self) -> BTreeMap<String, u64> {
+        BTreeMap::from([("mission_run_deadlines".into(), 3)])
     }
 
     fn classify_replicated_claim(
@@ -339,6 +352,15 @@ impl Runtime for SmalltalkRuntime {
         claim: &ClaimRecord,
     ) -> Result<ReplicatedClaimAdmission, St3Error> {
         classify_replicated_claim_with_registry(claim, self.claim_registry())
+    }
+
+    fn classify_replicated_claim_unbound(
+        &self,
+        _batch: &ReplicaBatch,
+        claim: &ClaimRecord,
+    ) -> Option<Result<ReplicatedClaimAdmission, St3Error>> {
+        // The registry is this build's schema, fixed for the process.
+        Some(classify_replicated_claim_with_registry(claim, self.claim_registry()))
     }
 
     fn append_claim(
@@ -419,6 +441,8 @@ impl Runtime for SmalltalkRuntime {
             .unwrap_or_else(PoisonError::into_inner);
         cache.views.clear();
         cache.statuses.clear();
+        cache.summary_statuses.clear();
+        cache.runtime_statuses.clear();
         cache.card_statuses.clear();
         drop(cache);
         let mut owners = self.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner);
@@ -545,11 +569,13 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.execute_batch(SCHEMA)?;
         transaction.execute_batch(&RUNTIME_ID_INDEX)?;
         transaction.execute_batch(arrangements::SCHEMA)?;
+        transaction.execute_batch(retirements::SCHEMA)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(SCHEMA)?;
         connection.execute_batch(&RUNTIME_ID_INDEX)?;
         connection.execute_batch(arrangements::SCHEMA)?;
+        connection.execute_batch(retirements::SCHEMA)?;
     }
     Ok(())
 }
