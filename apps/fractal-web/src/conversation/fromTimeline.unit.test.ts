@@ -1,4 +1,4 @@
-import { TimelineEntry } from '@smalltalk/st3-client/schema'
+import { TimelineEntry, Timestamp } from '@smalltalk/st3-client/schema'
 import { Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { LiveTimeline } from './fromTimeline.ts'
@@ -16,7 +16,7 @@ describe('native block visibility', () => {
     payload: { raw }, visibility: 'internal',
     view: {
       type: 'tool_start', call_id: 'synthetic-call', tool: 'bash',
-      started_at: '2026-10-15T00:00:00Z',
+      started_at: '2026-10-15T00:00:00.000Z',
     },
   }
   const project = (text: string, blocks: ReadonlyArray<unknown>) => {
@@ -75,7 +75,9 @@ describe('native block visibility', () => {
     }
     expect(project(`Visible synthetic prose\n${text}`, [block, visible])).toMatchObject([{
       _tag: 'UnknownEvent', mixedContent: true, eventType: 'tool_start',
-      data: { text: `Visible synthetic prose\n${text}`, blocks: [block, visible] },
+      data: { text: `Visible synthetic prose\n${text}`, blocks: [{
+        ...block, view: { ...block.view, started_at: Schema.decodeUnknownSync(Timestamp)(block.view.started_at) },
+      }, visible] },
     }])
   })
 
