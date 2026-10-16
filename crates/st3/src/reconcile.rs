@@ -944,6 +944,14 @@ struct LaunchEvidence {
     checked_at_ms: u128,
 }
 
+/// An exec or PTY task declared under an agent root, as one pass saw it.
+#[derive(Clone)]
+struct RootTask {
+    subject: String,
+    runtime_id: String,
+    terminal: bool,
+}
+
 /// A deadline remains visible to the synchronous deadline view even without Tokio.
 /// The weak token distinguishes a pending deadline from a live timer task, without
 /// keeping an aborted or completed task alive.
@@ -1016,6 +1024,9 @@ pub struct Reconciler<R = NativeRuntime> {
     stop_observation_retries: Mutex<HashMap<String, StopObservationRetry>>,
     /// The kill deadline already logged for each active stop operation.
     reported_kill_survivors: Mutex<HashMap<String, String>>,
+    /// This pass's tasks of each stopped root, by root subject. A root is not settled while
+    /// one of them still runs on this host.
+    stopped_root_tasks: Mutex<BTreeMap<String, Vec<RootTask>>>,
     /// When each batched subscription may next send what it collected.
     batch_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     /// When a failed `checkout` may run Git again, and why it failed, by agent subject.
@@ -1181,6 +1192,7 @@ impl Reconciler<NativeRuntime> {
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
+            stopped_root_tasks: Mutex::new(BTreeMap::new()),
             batch_deadlines: Arc::new(Mutex::new(HashMap::new())),
             checkout_retries: Arc::new(Mutex::new(HashMap::new())),
             checkout_conflicts: Mutex::new(HashMap::new()),
@@ -1324,6 +1336,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
+            stopped_root_tasks: Mutex::new(BTreeMap::new()),
             batch_deadlines: Arc::new(Mutex::new(HashMap::new())),
             checkout_retries: Arc::new(Mutex::new(HashMap::new())),
             checkout_conflicts: Mutex::new(HashMap::new()),
@@ -2507,6 +2520,45 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject.kind = "stop".into();
             }
         }
+        // A stopped root ends every task it declared: each runs the exec's own stop below and is
+        // not launched or restarted meanwhile. Starting the root again declares them again.
+        let stopped_roots = desired
+            .iter()
+            .filter(|subject| subject.kind == "stop" && subject.subject.starts_with("agent/"))
+            .map(|subject| subject.subject.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut root_tasks = BTreeMap::<String, Vec<RootTask>>::new();
+        let mut task_stops = BTreeSet::new();
+        if !stopped_roots.is_empty() {
+            for subject in &desired {
+                let Some(member) = subject.member.as_ref().filter(|_| {
+                    matches!(subject.kind.as_str(), "exec" | "pty")
+                }) else {
+                    continue;
+                };
+                let Some(root) = member.tags.get("st3.agent") else {
+                    continue;
+                };
+                if !stopped_roots.contains(root.as_str()) {
+                    continue;
+                }
+                task_stops.insert(subject.subject.clone());
+                if member.host == self.host {
+                    root_tasks
+                        .entry(root.clone())
+                        .or_default()
+                        .push(RootTask {
+                            subject: subject.subject.clone(),
+                            runtime_id: member.runtime_id.clone(),
+                            terminal: member.terminal,
+                        });
+                }
+            }
+        }
+        *self
+            .stopped_root_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = root_tasks;
         let mut pty_span = crate::reconcile_telemetry::phase("pass/pty-snapshot");
         let ptys = self.runtime.snapshot_ptys();
         if let Ok(snapshot) = &ptys { pty_span.items(snapshot.len()); }
@@ -2553,7 +2605,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .collect()
         }));
 
-        let active = desired.iter().collect::<Vec<_>>();
+        let task_stop_subjects = desired
+            .iter()
+            .filter(|subject| task_stops.contains(&subject.subject))
+            .collect::<Vec<_>>();
+        let active = desired
+            .iter()
+            .filter(|subject| !task_stops.contains(&subject.subject))
+            .collect::<Vec<_>>();
         let eligible = match self.store.owned_desired_subjects(&desired) {
             Ok(eligible) => {
                 self.prune_stop_state(&gate_runners, &eligible);
@@ -2826,6 +2885,30 @@ impl<R: RuntimeControl> Reconciler<R> {
         drop(unreadable_span);
         let mut members_span = crate::reconcile_telemetry::phase("pass/members");
         members_span.items(active.len());
+        // Tasks of a stopped root stop first, so the root settles in the same pass.
+        for subject in &task_stop_subjects {
+            if !eligible(subject) {
+                continue;
+            }
+            let item = format!("stop:{}", subject.subject);
+            stops.insert(item.clone());
+            if skip_stops && !self.incremental.needs(&item, now_ms()) {
+                continue;
+            }
+            if !self.owned_desired_ready(subject) {
+                stops.remove(&item);
+                continue;
+            }
+            let _member_span = members_span.member(true);
+            self.reconcile_stop_item(
+                subject,
+                &item,
+                skip_stops,
+                ptys.as_ref(),
+                &live_workspaces,
+                &mut diagnostic_errors,
+            );
+        }
         for subject in &active {
             if !eligible(subject) {
                 continue;
@@ -5818,6 +5901,43 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
+    /// The tasks of stopped root `root` that still run on this host. A root is not settled
+    /// while one does: its stop is reported once every exec it started has ended.
+    fn running_root_tasks(&self, root: &str) -> Result<Vec<String>> {
+        let tasks = self
+            .stopped_root_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(root)
+            .cloned()
+            .unwrap_or_default();
+        let mut running = Vec::new();
+        for RootTask { subject, runtime_id, terminal } in tasks {
+            let live = if terminal {
+                // A PTY task's state is its last observation; its own stop records `stopped`. One
+                // never observed on this host never ran here, so it does not hold the root.
+                smallclaims::touched::note_read(|| format!("pty:{runtime_id}"));
+                self.store
+                    .latest_actual_value(&subject)?
+                    .and_then(|actual| {
+                        actual_field(&actual, "status")
+                            .and_then(Value::as_str)
+                            .map(|status| !matches!(status, "stopped" | "exited" | "absent" | "vanished"))
+                    })
+                    .unwrap_or(false)
+            } else {
+                smallclaims::touched::note_read(|| format!("exec:{runtime_id}"));
+                self.runtime
+                    .observe_exec(&runtime_id)?
+                    .is_some_and(|observation| observation.status == "running")
+            };
+            if live {
+                running.push(subject);
+            }
+        }
+        Ok(running)
+    }
+
     fn reconcile_stop_with_origin(
         &self,
         subject: &DesiredSubject,
@@ -5830,6 +5950,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             serde_json::from_value::<MemberSpec>(operation.body["member"].clone())).transpose()?;
         let actual = self.store.latest_actual_value(&subject.subject)?.or_else(|| pending_member.as_ref()
             .map(|member| serde_json::json!({"fields": member_fields(member, "starting", None, false)})));
+        // A fault or decision recorded on the subject is no observation of a runtime: a root
+        // whose only claims are those has none, and is settled like one never observed.
+        let actual = actual.filter(|actual| {
+            let fields = actual.get("fields").unwrap_or(actual);
+            fields.get("status").is_some() || fields.get("runtime_id").is_some()
+        });
         let Some(actual) = actual else {
             // A stop-only declaration with no observed runtime is already satisfied.
             // Only its declaring host may project that fact. Otherwise every peer
@@ -5842,6 +5968,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .as_deref()
                     == Some(self.host.as_str())
             {
+                // A root with no process of its own is stopped once its tasks have ended.
+                if !self.running_root_tasks(&subject.subject)?.is_empty() {
+                    return Ok(());
+                }
                 self.record_once(
                     &subject.subject,
                     "runtime.observed",
@@ -6487,6 +6617,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(subject);
+            // A root's primary process has ended, but its tasks are its processes too: it is
+            // not stopped while one still runs. Their own stops report the failure.
+            if !self.running_root_tasks(subject)?.is_empty() {
+                return Ok(false);
+            }
             // A harness that ended before the stop, or a stop that could not finish, can leave
             // processes in the runtime's work scope. They end with it.
             self.runtime.end_leftovers(runtime_id, terminal);
@@ -6862,6 +6997,32 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .environment
                 .remove(crate::suspension::RESUME_ENV);
         }
+        // The import claim has no incarnation: it is a bootstrap selector, not
+        // evidence that a driver has bound the session. Once a driver binds, normal
+        // continuation must follow its latest transcript rather than the import.
+        let import_bound = subject.subject.starts_with("agent/import/omp/")
+            && member.driver.as_deref() == Some("omp")
+            && member.environment.contains_key(crate::suspension::RESUME_ENV)
+            && member.environment.contains_key(crate::rollout::RESUME_PATH_ENV)
+            && !member
+                .environment
+                .contains_key(crate::rollout::OPERATION_ENV)
+            && !crate::suspension::current(&self.store, &subject.subject)?
+                .is_some_and(|state| state.action == "resume" && state.phase != "resumed")
+            && crate::suspension::omp_import_bootstrap_bound(
+                &self.store,
+                &subject.subject,
+                &member.environment[crate::suspension::RESUME_ENV],
+                &member.environment[crate::rollout::RESUME_PATH_ENV],
+            )?;
+        if import_bound {
+            launch_member
+                .environment
+                .remove(crate::suspension::RESUME_ENV);
+            launch_member
+                .environment
+                .remove(crate::rollout::RESUME_PATH_ENV);
+        }
         // Every other relaunch of a seat continues the native session its harness last bound,
         // so a restart, a hangup or a changed declaration never loses the conversation.
         launch_member
@@ -6880,7 +7041,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .insert(crate::suspension::SELECTOR_SCOPE_ENV.into(), scope.clone());
         }
         let continued = if subject.kind == "agent"
-            && !member
+            && !launch_member
                 .environment
                 .contains_key(crate::suspension::RESUME_ENV)
             && let Some(harness) = member.driver.as_deref()
@@ -6972,6 +7133,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         // Capture the token before starting; a publication during start must not relabel the launch.
         let desired_token = self.launch_token(&subject.subject)?;
+        launch_member.environment.insert(
+            crate::suspension::LAUNCH_DESIRED_TOKEN_ENV.into(),
+            desired_token.clone(),
+        );
         let guard = || -> Result<()> {
             self.store.owned_desired_guard(subject)?;
             if member
@@ -7477,6 +7642,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 resumed
                     .environment
                     .insert(suspended::RESUME_ENV.into(), session);
+                if agent.starts_with("agent/import/omp/") {
+                    // A cold resume names the suspension's session, not the import.
+                    resumed.environment.remove(crate::rollout::RESUME_PATH_ENV);
+                }
                 if let Err(error) =
                     self.perform_start(subject, &resumed, "a suspended seat was resumed")
                 {
@@ -22357,6 +22526,497 @@ mission "feedback-review" state="ready" {
     }
 
     #[test]
+    fn omp_import_repair_and_refusal_precedence_converge_across_replica_arrival() {
+        let root = tempfile::tempdir().unwrap();
+        let native = "5f9a6e16-5e30-4bce-b327-9a8241321bd6";
+        let transcript = root.path().join(format!("2026-10-06_{native}.jsonl"));
+        let seat = "agent/import/omp/repair-order";
+        let declaration = Store::open_memory("author").unwrap();
+        let base = 1_900_000_000_000;
+        declaration.set_write_clock_at(base).unwrap();
+        apply_source(
+            &declaration,
+            &format!(
+                r#"version 2
+agent "import/omp/repair-order" {{
+  workspace {:?}
+  harness "omp" {{ args "--resume={}" }}
+  restart "always"
+}}"#,
+                root.path().to_str().unwrap(),
+                transcript.display()
+            ),
+            "legacy-import",
+        );
+        let old = Store::open_memory("old-driver").unwrap();
+        old.import_replication("author", &declaration.export_replication(0).unwrap())
+            .unwrap();
+        let append_binding = |store: &Store, incarnation: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: "harness.session-file".into(),
+                    actor: Some(seat.into()),
+                    fields: BTreeMap::from([
+                        ("harness".into(), Value::String("omp".into())),
+                        ("session_id".into(), Value::String(native.into())),
+                        ("incarnation_id".into(), Value::String(incarnation.into())),
+                        (
+                            "desired_token".into(),
+                            Value::String(store.launch_lineage(seat).unwrap().pop().unwrap()),
+                        ),
+                        (
+                            "path".into(),
+                            Value::String(transcript.to_string_lossy().into_owned()),
+                        ),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        };
+        old.set_write_clock_at(base + 10).unwrap();
+        append_binding(&old, "before-repair");
+        old.set_write_clock_at(base + 20).unwrap();
+        old.append_claim(&ClaimInput {
+            subject: seat.into(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(seat.into()),
+            fields: BTreeMap::from([
+                (
+                    "code".into(),
+                    Value::String(crate::suspension::CONTINUE_UNAVAILABLE_CODE.into()),
+                ),
+                ("status".into(), Value::String("authored-session-selection".into())),
+                ("incarnation_id".into(), Value::String("before-repair".into())),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(crate::suspension::continue_unavailable_key(seat, native)),
+        })
+        .unwrap();
+        declaration.set_write_clock_at(base + 30).unwrap();
+        apply_source(
+            &declaration,
+            &format!(
+                r#"version 2
+agent "import/omp/repair-order" {{
+  workspace {:?}
+  harness "omp" {{}}
+  env {{
+    ST3_NATIVE_RESUME_SESSION "{native}"
+    ST3_NATIVE_RESUME_PATH {:?}
+  }}
+  restart "always"
+}}"#,
+                root.path().to_str().unwrap(),
+                transcript.to_str().unwrap()
+            ),
+            "repair-import",
+        );
+        // The incumbent reports again after repair publication, but was launched
+        // under the old declaration: this late binding must not consume bootstrap.
+        old.set_write_clock_at(base + 35).unwrap();
+        append_binding(&old, "before-repair");
+        let repaired = Store::open_memory("new-driver").unwrap();
+        repaired
+            .import_replication("author", &declaration.export_replication(0).unwrap())
+            .unwrap();
+        repaired.set_write_clock_at(base + 40).unwrap();
+        append_binding(&repaired, "after-repair");
+        let declaration_claims = declaration.export_replication(0).unwrap();
+        let old_claims = old.export_replication(0).unwrap();
+        let repaired_claims = repaired.export_replication(0).unwrap();
+        let launch = |store: Arc<Store>, strict: bool| {
+            let subject = store
+                .desired_subjects()
+                .unwrap()
+                .into_iter()
+                .find(|subject| subject.subject == seat)
+                .unwrap();
+            let mut runtime = FakeRuntime::default();
+            runtime
+                .ptys
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(RuntimeObservation {
+                    runtime_id: subject.member.as_ref().unwrap().runtime_id.clone(),
+                    terminal: true,
+                    status: "running".into(),
+                    exit_code: None,
+                    incarnation_id: Some("after-repair".into()),
+                });
+            let runtime = Arc::new(runtime);
+            let reconciler = Reconciler::new(
+                store.clone(),
+                runtime.clone(),
+                "node".into(),
+                Arc::new(Notify::new()),
+            );
+            reconciler
+                .perform_start(&subject, subject.member.as_ref().unwrap(), "repair-order proof")
+                .unwrap();
+            let starts = runtime
+                .started_members
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let member = starts.last().unwrap();
+            if strict {
+                assert_eq!(member.environment[crate::suspension::RESUME_ENV], native);
+                assert_eq!(
+                    member.environment[crate::rollout::RESUME_PATH_ENV],
+                    transcript.to_str().unwrap()
+                );
+                assert!(!member.environment.contains_key(crate::suspension::CONTINUE_ENV));
+            } else {
+                assert!(!member.environment.contains_key(crate::suspension::RESUME_ENV));
+                assert!(!member.environment.contains_key(crate::rollout::RESUME_PATH_ENV));
+                assert_eq!(member.environment[crate::suspension::CONTINUE_ENV], native);
+                assert_eq!(
+                    member.environment[crate::suspension::CONTINUE_PATH_ENV],
+                    transcript.to_str().unwrap()
+                );
+            }
+        };
+        let first = Arc::new(Store::open_memory("node").unwrap());
+        first.import_replication("author", &declaration_claims).unwrap();
+        first.import_replication("old-driver", &old_claims).unwrap();
+        launch(first.clone(), true);
+        first.import_replication("new-driver", &repaired_claims).unwrap();
+        declaration.set_write_clock_at(base + 50).unwrap();
+        apply_source(
+            &declaration,
+            &format!(
+                r#"version 2
+agent "import/omp/repair-order" {{
+  workspace {:?}
+  harness "omp" {{}}
+  env {{
+    ST3_NATIVE_RESUME_SESSION "{native}"
+    ST3_NATIVE_RESUME_PATH {:?}
+  }}
+  restart "never"
+}}"#,
+                root.path().to_str().unwrap(),
+                transcript.to_str().unwrap()
+            ),
+            "unrelated-restart-policy-edit",
+        );
+        first
+            .import_replication("author", &declaration.export_replication(0).unwrap())
+            .unwrap();
+        launch(first.clone(), false);
+        first
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: "runtime.action.succeeded".into(),
+                actor: None,
+                fields: BTreeMap::from([("action".into(), Value::String("stop".into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        first.trim_local_observations(u128::MAX, 1, 100).unwrap();
+        assert!(
+            first
+                .observations_for(seat, "runtime.action.succeeded")
+                .unwrap()
+                .iter()
+                .all(|claim| claim.body["fields"]["action"] != "start")
+        );
+        launch(first, false);
+        for reverse in [false, true] {
+            let replica = Arc::new(Store::open_memory("node").unwrap());
+            replica.import_replication("author", &declaration_claims).unwrap();
+            if reverse {
+                replica.import_replication("new-driver", &repaired_claims).unwrap();
+                replica.import_replication("old-driver", &old_claims).unwrap();
+            } else {
+                replica.import_replication("old-driver", &old_claims).unwrap();
+                replica.import_replication("new-driver", &repaired_claims).unwrap();
+            }
+            assert!(
+                replica
+                    .observations_for(seat, "runtime.action.succeeded")
+                    .unwrap()
+                    .is_empty()
+            );
+            launch(replica, false);
+        }
+        let old_build = Arc::new(Store::open_memory("node").unwrap());
+        old_build.import_replication("author", &declaration_claims).unwrap();
+        old_build
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: "harness.session-file".into(),
+                actor: Some(seat.into()),
+                fields: BTreeMap::from([
+                    ("harness".into(), Value::String("omp".into())),
+                    ("session_id".into(), Value::String(native.into())),
+                    ("incarnation_id".into(), Value::String("old-build".into())),
+                    (
+                        "path".into(),
+                        Value::String(transcript.to_string_lossy().into_owned()),
+                    ),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        launch(old_build, true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn omp_import_restart_follows_driver_binding_after_bootstrap() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let original_id = "5f9a6e16-5e30-4bce-b327-9a8241321bd6";
+        let newer_id = "27a1a145-ed86-4e9d-80e7-071dace5e3d2";
+        let original = root.path().join(format!("2026-10-06_{original_id}.jsonl"));
+        fs::write(
+            &original,
+            format!("{{\"type\":\"session\",\"id\":\"{original_id}\"}}\n"),
+        )
+        .unwrap();
+        apply_source(
+            &store,
+            &format!(
+                r#"version 2
+agent "import/omp/fixture" {{
+  workspace {:?}
+  harness "omp" {{}}
+  env {{
+    ST3_NATIVE_RESUME_SESSION "{original_id}"
+    ST3_NATIVE_RESUME_PATH {:?}
+  }}
+  restart "always"
+}}"#,
+                root.path().to_str().unwrap(),
+                original.to_str().unwrap()
+            ),
+            "omp-import-restart",
+        );
+        let subject = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|subject| subject.kind == "agent")
+            .unwrap();
+        let member = subject.member.as_ref().unwrap();
+        let binding = |id: &str, path: &Path, incarnation: Option<&str>| {
+            let mut fields = BTreeMap::from([
+                ("harness".into(), Value::String("omp".into())),
+                ("session_id".into(), Value::String(id.into())),
+                (
+                    "path".into(),
+                    Value::String(path.to_string_lossy().into_owned()),
+                ),
+            ]);
+            if let Some(incarnation) = incarnation {
+                fields.insert("incarnation_id".into(), Value::String(incarnation.into()));
+                fields.insert(
+                    "desired_token".into(),
+                    Value::String(store.launch_lineage(&subject.subject).unwrap().pop().unwrap()),
+                );
+            }
+            store
+                .append_claim(&ClaimInput {
+                    subject: subject.subject.clone(),
+                    kind: "harness.session-file".into(),
+                    actor: Some(subject.subject.clone()),
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        };
+        binding(original_id, &original, None);
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler
+            .perform_start(&subject, member, "import bootstrap")
+            .unwrap();
+        {
+            let starts = runtime
+                .started_members
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let launch = starts.last().unwrap();
+            assert_eq!(launch.environment[crate::suspension::RESUME_ENV], original_id);
+            assert_eq!(
+                launch.environment[crate::rollout::RESUME_PATH_ENV],
+                original.to_str().unwrap()
+            );
+            assert!(
+                !launch
+                    .environment
+                    .contains_key(crate::suspension::CONTINUE_ENV)
+            );
+        }
+        let managed = root.path().join("provider-sessions");
+        fs::create_dir(&managed).unwrap();
+        let newer = managed.join(format!("2026-10-06_{newer_id}.jsonl"));
+        fs::write(
+            &newer,
+            format!("{{\"type\":\"session\",\"id\":\"{newer_id}\"}}\n"),
+        )
+        .unwrap();
+        binding(newer_id, &newer, Some("driver-first"));
+        for moved in [false, true] {
+            if moved {
+                fs::rename(&original, root.path().join("moved-original.jsonl")).unwrap();
+            }
+            reconciler
+                .perform_start(&subject, member, "restart after binding")
+                .unwrap();
+            let starts = runtime
+                .started_members
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let launch = starts.last().unwrap();
+            assert!(
+                !launch
+                    .environment
+                    .contains_key(crate::suspension::RESUME_ENV)
+            );
+            assert!(
+                !launch
+                    .environment
+                    .contains_key(crate::rollout::RESUME_PATH_ENV)
+            );
+            assert_eq!(launch.environment[crate::suspension::CONTINUE_ENV], newer_id);
+            assert_eq!(
+                launch.environment[crate::suspension::CONTINUE_PATH_ENV],
+                newer.to_str().unwrap()
+            );
+            assert_eq!(
+                crate::native_resume::pi_family_argv(
+                    "omp",
+                    vec!["omp".into()],
+                    &managed,
+                    &launch.environment[crate::suspension::CONTINUE_ENV],
+                    None,
+                )
+                .unwrap(),
+                vec!["omp", "--resume", newer.to_str().unwrap()]
+            );
+        }
+        // Relocation outside the linked inventory is intentionally unsupported.
+        // Record the driver's visible refusal once; later launches must neither
+        // retry that continuation nor resurrect the original import selector.
+        let inventory = root.path().join("owned-inventory");
+        fs::rename(&managed, &inventory).unwrap();
+        std::os::unix::fs::symlink(&inventory, &managed).unwrap();
+        let relocated_dir = root.path().join("relocated");
+        fs::create_dir(&relocated_dir).unwrap();
+        let relocated = relocated_dir.join(newer.file_name().unwrap());
+        fs::rename(managed.join(newer.file_name().unwrap()), &relocated).unwrap();
+        binding(newer_id, &relocated, Some("driver-relocated"));
+        let refusal = crate::native_resume::pi_family_argv(
+            "omp",
+            vec!["omp".into()],
+            &managed,
+            newer_id,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(refusal.code, "transcript-missing");
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.subject.clone(),
+                kind: "harness.diagnostic".into(),
+                actor: Some(subject.subject.clone()),
+                fields: BTreeMap::from([
+                    ("severity".into(), Value::String("warning".into())),
+                    ("status".into(), Value::String(refusal.code.into())),
+                    (
+                        "code".into(),
+                        Value::String(crate::suspension::CONTINUE_UNAVAILABLE_CODE.into()),
+                    ),
+                    (
+                        "reason".into(),
+                        Value::String(format!(
+                            "omp started a new session instead of continuing {newer_id}: {}",
+                            refusal.reason
+                        )),
+                    ),
+                    ("incarnation_id".into(), Value::String("driver-relocated".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(crate::suspension::continue_unavailable_key(
+                    &subject.subject,
+                    newer_id,
+                )),
+            })
+            .unwrap();
+        for _ in 0..3 {
+            reconciler
+                .perform_start(&subject, member, "restart after continuation refusal")
+                .unwrap();
+            let starts = runtime
+                .started_members
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let launch = starts.last().unwrap();
+            for variable in [
+                crate::suspension::RESUME_ENV,
+                crate::rollout::RESUME_PATH_ENV,
+                crate::suspension::CONTINUE_ENV,
+                crate::suspension::CONTINUE_PATH_ENV,
+            ] {
+                assert!(!launch.environment.contains_key(variable), "{variable}");
+            }
+        }
+        assert_eq!(fs::read_link(&managed).unwrap(), inventory);
+        let diagnostics = store
+            .claims_for(&subject.subject, Some("harness.diagnostic"))
+            .unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].body["fields"]["code"],
+            crate::suspension::CONTINUE_UNAVAILABLE_CODE
+        );
+        // A strict repair can select the transcript, but a newer binding cannot
+        // clear a permanent continuation refusal for the same native ID.
+        let repaired = managed.join(relocated.file_name().unwrap());
+        fs::rename(&relocated, &repaired).unwrap();
+        assert_eq!(
+            crate::native_resume::pi_family_argv(
+                "omp",
+                vec!["omp".into()],
+                &managed,
+                newer_id,
+                Some(&repaired),
+            )
+            .unwrap(),
+            vec!["omp", "--resume", repaired.to_str().unwrap()]
+        );
+        binding(newer_id, &repaired, Some("driver-repaired"));
+        reconciler
+            .perform_start(&subject, member, "restart after successful strict repair")
+            .unwrap();
+        let starts = runtime
+            .started_members
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let launch = starts.last().unwrap();
+        assert!(!launch.environment.contains_key(crate::suspension::CONTINUE_ENV));
+        assert!(!launch.environment.contains_key(crate::suspension::CONTINUE_PATH_ENV));
+        assert!(!launch.environment.contains_key(crate::suspension::RESUME_ENV));
+    }
+
+    #[test]
     fn a_relaunch_continues_a_native_session_only_on_the_account_that_bound_it() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let workspace = tempfile::tempdir().unwrap();
@@ -23025,6 +23685,285 @@ agent "good" { workspace "/tmp"; command "true" }
                 .unwrap()
                 .unwrap()
                 .contains("fake stop failed")
+        );
+    }
+
+    /// A headless root `app` with the named execs, applied and launched once, each exec
+    /// observed running.
+    fn headless_root_with_running_execs(
+        names: &[&str],
+    ) -> (Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>) {
+        headless_root_with_running_execs_skipping(names, false)
+    }
+
+    fn headless_root_with_running_execs_skipping(
+        names: &[&str],
+        skipping: bool,
+    ) -> (Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>) {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let execs = names
+            .iter()
+            .map(|name| format!("  exec \"{name}\" {{ command \"sleep infinity\" }}\n"))
+            .collect::<String>();
+        apply_source(
+            &store,
+            &format!("version 2\nagent \"app\" {{\n  workspace \"/tmp\"\n  restart \"always\"\n{execs}}}\n"),
+            "headless-root",
+        );
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        )
+        .skipping_unneeded(skipping);
+        reconciler.reconcile_once().unwrap();
+        for name in names {
+            runtime.execs.lock().unwrap().insert(
+                format!("exec.node.app.{name}"),
+                RuntimeObservation {
+                    runtime_id: format!("exec.node.app.{name}"),
+                    terminal: false,
+                    status: "running".into(),
+                    exit_code: None,
+                    incarnation_id: Some(format!("{name}-one")),
+                },
+            );
+        }
+        reconciler.reconcile_once().unwrap();
+        (store, runtime, reconciler)
+    }
+
+    fn actual_status(store: &Store, subject: &str) -> Option<String> {
+        store
+            .latest_actual_value(subject)
+            .unwrap()
+            .and_then(|actual| {
+                actual_field(&actual, "status")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+    }
+
+    fn end_exec(runtime: &FakeRuntime, runtime_id: &str, status: &str) {
+        runtime
+            .execs
+            .lock()
+            .unwrap()
+            .get_mut(runtime_id)
+            .unwrap()
+            .status = status.into();
+    }
+
+    #[test]
+    fn headless_root_stop_stops_its_nested_execs_and_settles_after_they_end() {
+        let (store, runtime, reconciler) = headless_root_with_running_execs(&["web", "worker"]);
+        let started = runtime.starts.lock().unwrap().len();
+        assert_eq!(started, 2, "both execs launch: {:?}", runtime.starts.lock().unwrap());
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        let mut stops = runtime.stops.lock().unwrap().clone();
+        stops.sort();
+        assert_eq!(stops, ["exec.node.app.web", "exec.node.app.worker"]);
+        // Both still run: the root is not stopped, and nothing starts again.
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("stopped"));
+        assert_eq!(runtime.starts.lock().unwrap().len(), started);
+        end_exec(&runtime, "exec.node.app.web", "stopped");
+        reconciler.reconcile_once().unwrap();
+        assert_ne!(
+            actual_status(&store, "agent/node.app").as_deref(),
+            Some("absent"),
+            "one exec still runs"
+        );
+        end_exec(&runtime, "exec.node.app.worker", "stopped");
+        reconciler.reconcile_once().unwrap();
+        for subject in ["exec/node.app/web", "exec/node.app/worker"] {
+            assert_eq!(actual_status(&store, subject).as_deref(), Some("stopped"));
+        }
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        // Restart always does not bring either back.
+        end_exec(&runtime, "exec.node.app.web", "exited");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.starts.lock().unwrap().len(), started);
+    }
+
+    #[test]
+    fn headless_root_second_stop_changes_nothing() {
+        let (store, runtime, reconciler) = headless_root_with_running_execs(&["web"]);
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        end_exec(&runtime, "exec.node.app.web", "stopped");
+        reconciler.reconcile_once().unwrap();
+        let stops = runtime.stops.lock().unwrap().len();
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root-again");
+        reconciler.reconcile_once().unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.stops.lock().unwrap().len(), stops);
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn headless_root_stop_cleans_up_an_exec_that_exited_on_its_own() {
+        let (store, runtime, reconciler) = headless_root_with_running_execs(&["web"]);
+        end_exec(&runtime, "exec.node.app.web", "exited");
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        assert_eq!(
+            &*runtime.leftovers.lock().unwrap(),
+            &[("exec.node.app.web".to_owned(), false)]
+        );
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn headless_root_stays_unsettled_and_reports_a_failed_exec_stop() {
+        let (store, runtime, reconciler) = headless_root_with_running_execs(&["web", "worker"]);
+        runtime
+            .failed_stops
+            .lock()
+            .unwrap()
+            .insert("exec.node.app.web".into());
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        // The healthy exec's stop is not starved by the failing one.
+        assert!(runtime.stops.lock().unwrap().contains(&"exec.node.app.worker".to_owned()));
+        assert!(
+            store
+                .member_reconcile_fault("exec/node.app/web", None)
+                .unwrap()
+                .unwrap()
+                .contains("fake stop failed")
+        );
+        end_exec(&runtime, "exec.node.app.worker", "stopped");
+        reconciler.reconcile_once().unwrap();
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn headless_root_settles_when_its_exec_ends_between_incremental_passes() {
+        // Skipping mode: a stop item is evaluated again only when something it read changed.
+        let (store, runtime, reconciler) =
+            headless_root_with_running_execs_skipping(&["web"], true);
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(&*runtime.stops.lock().unwrap(), &["exec.node.app.web"]);
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        // Nothing is written: only the exec's own status changes.
+        reconciler.reconcile_once().unwrap();
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        end_exec(&runtime, "exec.node.app.web", "stopped");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn headless_root_settles_when_its_pty_ends_between_incremental_passes() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"app\" {\n  workspace \"/tmp\"\n  restart \"always\"\n  pty \"shell\" { command \"sleep infinity\" }\n}\n",
+            "headless-root-pty",
+        );
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        )
+        .skipping_unneeded(true);
+        reconciler.reconcile_once().unwrap();
+        let runtime_id = runtime
+            .started_members
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|member| member.terminal)
+            .map(|member| member.runtime_id.clone())
+            .expect("the pty task launches");
+        let running = RuntimeObservation {
+            runtime_id: runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("shell-one".into()),
+        };
+        runtime.ptys.lock().unwrap().push(running.clone());
+        reconciler.reconcile_once().unwrap();
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        // Only the pty's own state changes: the root's stop item must be needed again.
+        runtime.ptys.lock().unwrap().clear();
+        for _ in 0..3 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn headless_root_retries_after_its_exec_could_not_be_observed() {
+        let (store, runtime, reconciler) = headless_root_with_running_execs(&["web"]);
+        runtime
+            .failed_observes
+            .lock()
+            .unwrap()
+            .insert("exec.node.app.web".into());
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        runtime.failed_observes.lock().unwrap().clear();
+        end_exec(&runtime, "exec.node.app.web", "stopped");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn a_later_fault_or_decision_claim_does_not_unobserve_a_running_root() {
+        // Negative control for the settle-absent filter: a root observed running keeps that
+        // status across a later claim that carries none, so its stop still reaches the runtime
+        // and the root is not settled absent.
+        let (store, runtime, reconciler) = headless_root_with_running_execs(&["web"]);
+        end_exec(&runtime, "exec.node.app.web", "stopped");
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: "pty.node.app".into(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("app-one".into()),
+        });
+        reconciler
+            .record_once(
+                "agent/node.app",
+                "runtime.observed",
+                BTreeMap::from([
+                    ("status".into(), Value::String("running".into())),
+                    ("runtime_id".into(), Value::String("pty.node.app".into())),
+                    ("reachability".into(), Value::String("reachable".into())),
+                ]),
+            )
+            .unwrap();
+        reconciler
+            .record_once(
+                "agent/node.app",
+                "runtime.reconcile-decision",
+                BTreeMap::from([
+                    ("decision".into(), Value::String("member-fault".into())),
+                    ("reason".into(), Value::String("a later fault".into())),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(actual_status(&store, "agent/node.app").as_deref(), Some("running"));
+        apply_source(&store, "version 2\nstop \"agent/node.app\"\n", "stop-root");
+        reconciler.reconcile_once().unwrap();
+        assert_ne!(actual_status(&store, "agent/node.app").as_deref(), Some("absent"));
+        assert!(
+            runtime.stops.lock().unwrap().iter().any(|id| id == "pty.node.app"),
+            "stops: {:?}",
+            runtime.stops.lock().unwrap()
         );
     }
 
@@ -25483,7 +26422,7 @@ agent "worker" {
 
     #[test]
     fn a_top_level_checkout_leaves_after_stop_and_workspace_observations_do_not_repeat() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::canonical_tempdir();
         let repository = crate::checkout::test_support::repository(root.path());
         let workspace = root.path().join("worker");
         let store = Arc::new(Store::open_memory("node").unwrap());

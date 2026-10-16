@@ -56,6 +56,12 @@ struct Pending {
 /// How often st is asked how long a message it takes, and how soon again after it did not answer.
 const MESSAGE_LIMIT_REREAD: Duration = Duration::from_secs(600);
 const MESSAGE_LIMIT_RETRY: Duration = Duration::from_secs(30);
+/// The followed windows arrive over the live stream, whose frames carry no `sync` notice, so a
+/// small Attention page read supplies it: once when st connects, before the first frames, and
+/// again only when a later Attention or Agents frame shows the graph moving, at most once a
+/// minute. An idle screen sends no request (see client_only's idle oracle). Remove when every
+/// supported daemon streams the notice.
+const SYNC_MIN_GAP: Duration = Duration::from_secs(60);
 
 /// How long a message waits for st's answer before it says st has not confirmed it.
 /// A draw slower than this, or a whole turn of the main loop (everything it did before waiting for
@@ -374,6 +380,8 @@ enum Fetched {
     Sent(String, Result<Option<String>, (String, bool)>),
     /// The longest message st says it takes, in UTF-8 bytes; None when it does not say.
     MessageLimit(Result<Option<usize>, ()>),
+    /// The `sync` notice on a one-row Attention page: None when st says nothing is missing.
+    Sync(Result<Option<st3_client::SyncNotice>, ()>),
     /// st started an agent asked for here.
     /// st started a shell asked for here.
     TerminalStarted(String),
@@ -387,6 +395,8 @@ enum Fetched {
         agent: String,
         outcome: Result<Direct, String>,
     },
+    /// A shell's attach was refused for a reason that passes; it is being tried again.
+    AttachWaiting { agent: String, reason: String },
     /// st gave no direct stream; follow its view of the terminal instead.
     NativeFailed {
         agent: String,
@@ -561,6 +571,8 @@ pub fn run(context: Context) -> Result<()> {
     let mut terminal_owners: BTreeMap<String, String> = BTreeMap::new();
     // When a terminal was asked for, while it connects: the wait is shown, and a long one named.
     let mut attach_started: Option<Instant> = None;
+    // Why the attach in progress is waiting, when st refused it for a reason that passes.
+    let mut attach_note: Option<String> = None;
     // The cursor shape last set, so it changes only when the attached terminal asks.
     let mut cursor_style: Option<crossterm::cursor::SetCursorStyle> = None;
     // The tab shown on the last pass: opening a tab loads what only it needs.
@@ -584,6 +596,13 @@ pub fn run(context: Context) -> Result<()> {
     let mut said_asked: Option<String> = None;
     let mut said_typed: Option<(String, Instant)> = None;
     let mut last_cache_save = Instant::now();
+    // The notice the page read last found, carried onto every window the stream rebuilds.
+    let mut page_sync: Option<st3_client::SyncNotice> = None;
+    let mut sync_read_at: Option<Instant> = None;
+    // When a read is wanted, because a frame after the first showed the graph moving.
+    let mut sync_due: Option<Instant> = None;
+    // The windows whose first frame has arrived on this connection: that frame is not a change.
+    let mut windows_seen: BTreeSet<String> = BTreeSet::new();
     // A closed terminal ends the loop: without this check a detached stui spins and keeps
     // polling the daemon forever.
     while !ui.quit
@@ -613,7 +632,10 @@ pub fn run(context: Context) -> Result<()> {
                 .as_deref()
                 .is_some_and(|stale| stale.starts_with("connecting"))
         {
-            view.stale = Some(connecting_text(started.elapsed()));
+            view.stale = Some(match &attach_note {
+                Some(reason) => format!("{} · {reason}, trying again", connecting_text(started.elapsed())),
+                None => connecting_text(started.elapsed()),
+            });
         }
         if extras.live && Instant::now() >= limit_next {
             limit_next = Instant::now() + MESSAGE_LIMIT_RETRY;
@@ -628,6 +650,11 @@ pub fn run(context: Context) -> Result<()> {
                 let _ = tx.send(Fetched::MessageLimit(limit));
             });
         }
+        if sync_due.is_some_and(|due| Instant::now() >= due) && extras.live && extras.offline.is_none() {
+            sync_due = None;
+            sync_read_at = Some(Instant::now());
+            read_sync(&runtime, &client, &fetched_tx);
+        }
         while let Ok(update) = incoming.try_recv() {
             match update {
                 feed::Update::GlassesVersion(version) => {
@@ -636,6 +663,14 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 feed::Update::Connected(member) => {
                     limit_next = Instant::now();
+                    // Another member may say something else: drop the old notice and read this
+                    // member's once, ahead of its first frames.
+                    page_sync = None;
+                    fill_notice(&mut model, None);
+                    windows_seen.clear();
+                    sync_due = None;
+                    sync_read_at = Some(Instant::now());
+                    read_sync(&runtime, &member, &fetched_tx);
                     ui.quality.live(false);
                     agents_live = false;
                     glasses_ready = true;
@@ -720,6 +755,10 @@ pub fn run(context: Context) -> Result<()> {
                         });
                     }
                     extras.window_errors.remove(&window_label(window));
+                    if matches!(window, Window::Attention | Window::Agents) {
+                        let first = windows_seen.insert(window_label(window));
+                        sync_due = sync_due_after_frame(first, sync_read_at, sync_due, Instant::now());
+                    }
                     if window == Window::Summary {
                         extras.summary = items.iter().find_map(|item| match item {
                             Resource::Summary(summary) => Some(summary.clone()),
@@ -738,12 +777,7 @@ pub fn run(context: Context) -> Result<()> {
                         extras.inventory_partial.retain(|name| name != inventory.collection());
                         if has_more { extras.inventory_partial.push(inventory.collection().into()); }
                     }
-                    let collection = Collection {
-                        items,
-                        snapshot: Some(snapshot),
-                        truncated: has_more,
-                        sync: None,
-                    };
+                    let collection = window_collection(items, snapshot, has_more, page_sync.as_ref());
                     match window {
                         Window::Attention => {
                             model.now = collection;
@@ -855,6 +889,8 @@ pub fn run(context: Context) -> Result<()> {
                     // A permanent refusal is said once, without "retrying".
                     if !permanent {
                         ui.conversation_failed(&target, &message);
+                    } else {
+                        ui.stalled.remove(&target);
                     }
                     failed.insert(target, message);
                     changed = true;
@@ -969,6 +1005,12 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Read(id, result) => {
                     read_receipts.completed(id, result, Instant::now());
                 }
+                // A failed read keeps what was last found; the next try is the next minute.
+                Fetched::Sync(Ok(notice)) => {
+                    page_sync = notice;
+                    fill_notice(&mut model, page_sync.as_ref());
+                }
+                Fetched::Sync(Err(())) => {}
                 Fetched::MessageLimit(limit) => match limit {
                     Ok(limit) => {
                         ui.message_limit = limit;
@@ -1162,6 +1204,7 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
                 Fetched::Native { agent, direct } => {
+                    attach_note = None;
                     let waited = attach_started.take().map(|at| at.elapsed());
                     if let Some(waited) = waited.filter(|waited| *waited >= Duration::from_secs(3))
                     {
@@ -1203,11 +1246,17 @@ pub fn run(context: Context) -> Result<()> {
                         }
                     }
                 }
+                Fetched::AttachWaiting { agent, reason } => {
+                    if ui.terminal.as_ref().is_some_and(|view| view.agent == agent) {
+                        attach_note = Some(reason);
+                    }
+                }
                 Fetched::NativeFailed {
                     agent,
                     runtime_ids,
                     reason,
                 } => {
+                    attach_note = None;
                     if terminal_opens.remove(&agent).is_some() {
                         super::slo::METRICS.add("terminal_open_errors", 1);
                     }
@@ -1488,6 +1537,15 @@ pub fn run(context: Context) -> Result<()> {
                 Effect::LoadContent(key) => {
                     content_reads.enqueue(key);
                 }
+                Effect::RetryConversation { target } => {
+                    retry_conversation_open(
+                        target,
+                        &mut failed,
+                        &mut sessions_requested,
+                        &commands,
+                    );
+                    changed = true;
+                }
                 Effect::OpenTerminal { agent } => {
                     terminal_opens.insert(agent.clone(), Instant::now());
                     // The PTY session's own bytes, through st's raw stream to whichever host owns
@@ -1526,6 +1584,7 @@ pub fn run(context: Context) -> Result<()> {
                         None => terminal_owners.remove(&agent),
                     };
                     attach_started = Some(Instant::now());
+                    attach_note = None;
                     let _ = commands.send(Command::Unfollow);
                     {
                         let client = client.clone();
@@ -1533,13 +1592,31 @@ pub fn run(context: Context) -> Result<()> {
                         let agent = agent.clone();
                         let fallback = ui.terminal_fallback;
                         runtime.spawn(async move {
-                            let attached = attach_known_then_direct(
-                                &client,
-                                &agent,
-                                known,
-                                &runtime_ids,
-                                owner.as_deref(),
-                                fallback,
+                            // A shell has no other view to fall back to, and one started a moment ago
+                            // can be refused while st settles which host runs it: wait, say why, retry.
+                            let delays: &[Duration] = if agent.starts_with("terminal/") {
+                                &ATTACH_RETRY_DELAYS
+                            } else {
+                                &[]
+                            };
+                            let attached = retry_attach(
+                                delays,
+                                |reason| {
+                                    let _ = tx.send(Fetched::AttachWaiting {
+                                        agent: agent.clone(),
+                                        reason: reason.to_owned(),
+                                    });
+                                },
+                                || {
+                                    attach_known_then_direct(
+                                        &client,
+                                        &agent,
+                                        known.clone(),
+                                        &runtime_ids,
+                                        owner.as_deref(),
+                                        fallback,
+                                    )
+                                },
                             )
                             .await;
                             let _ = tx.send(match attached {
@@ -2007,6 +2084,57 @@ pub fn run(context: Context) -> Result<()> {
     Ok(())
 }
 
+/// When a notice read is wanted after an Attention or Agents frame: never for a window's first
+/// frame on a connection (the read made at connect covers it), otherwise once the minimum gap since
+/// the last read has passed, and a read already wanted keeps its time.
+fn sync_due_after_frame(first: bool, read_at: Option<Instant>, due: Option<Instant>, now: Instant) -> Option<Instant> {
+    if first || due.is_some() {
+        return due;
+    }
+    Some(read_at.map_or(now, |at| at + SYNC_MIN_GAP).max(now))
+}
+
+/// Read the notice off a one-row Attention page, and send what it said (or that it failed).
+fn read_sync(runtime: &tokio::runtime::Runtime, client: &Client, tx: &std::sync::mpsc::Sender<Fetched>) {
+    let client = client.clone();
+    let tx = tx.clone();
+    runtime.spawn(async move {
+        let notice = client
+            .attention_list(None, Some(1), false)
+            .await
+            .map(|found| found.value.sync)
+            .map_err(|_| ());
+        let _ = tx.send(Fetched::Sync(notice));
+    });
+}
+
+/// A followed window as the model holds it: its rows, the snapshot they came from, and the
+/// notice the page read last found. The stream's frames carry no notice of their own, so every
+/// window the stream rebuilds takes the page's, or the one with the newest snapshot would drop it.
+fn window_collection(
+    items: Vec<Resource>,
+    snapshot: st3_client::Snapshot,
+    has_more: bool,
+    sync: Option<&st3_client::SyncNotice>,
+) -> Collection {
+    Collection { items, snapshot: Some(snapshot), truncated: has_more, sync: sync.cloned() }
+}
+
+/// Put a fresh page notice on every collection the stream follows, so `Model::sync_notice` finds it
+/// whichever of them holds the newest snapshot.
+fn fill_notice(model: &mut Model, sync: Option<&st3_client::SyncNotice>) {
+    for collection in [
+        &mut model.now,
+        &mut model.missions,
+        &mut model.agents,
+        &mut model.sessions,
+        &mut model.machines,
+        &mut model.devices,
+    ] {
+        collection.sync = sync.cloned();
+    }
+}
+
 fn save_cache(path: Option<&std::path::Path>, person: &str, model: &Model) {
     if let Some(path) = path
         && model.missions.snapshot.is_some()
@@ -2100,6 +2228,18 @@ fn retry_failed_opens(
     wanted: &[String],
 ) {
     requested.retain(|id| !failed.contains_key(id) || wanted.contains(id));
+}
+
+/// A person's explicit retry clears both the feed failure and the one-shot session read.
+fn retry_conversation_open(
+    target: String,
+    failed: &mut BTreeMap<String, String>,
+    requested: &mut HashSet<String>,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) {
+    failed.remove(&target);
+    requested.remove(&target);
+    let _ = commands.send(Command::Resubscribe { target });
 }
 
 /// Entries per page read back: st's largest, so a long session takes few requests.
@@ -2445,7 +2585,8 @@ async fn perform(
 ) -> Result<(String, Option<String>)> {
     match effect {
         // Glass writes and retries never reach here: the loop handles them itself.
-        Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::Forget { .. } | Effect::LoadContent(_) => {
+        Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::RetryConversation { .. }
+        | Effect::Forget { .. } | Effect::LoadContent(_) => {
             Ok((String::new(), None))
         }
         Effect::EditArrangement(write) => {
@@ -2888,6 +3029,55 @@ async fn send_message(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_shells_attach_waits_out_a_refusal_that_passes_and_says_why() {
+        // Nathan, 2026-10-16: a new terminal ended at once with "could not attach: st cannot tell
+        // yet which host runs this", and the shell was lost to him.
+        let run = |refusals: Vec<&'static str>, delays: usize| {
+            let mut refusals = refusals.into_iter();
+            let mut said = Vec::new();
+            let outcome = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap()
+                .block_on(retry_attach(
+                    &vec![Duration::ZERO; delays],
+                    |reason| said.push(reason.to_owned()),
+                    || {
+                        let next = refusals.next();
+                        async move { next.map_or(Ok(7), |reason| Err(reason.to_owned())) }
+                    },
+                ));
+            (outcome, said)
+        };
+        let unsure = "st cannot tell yet which host runs this";
+        // It works on the third try; each wait said why.
+        let (outcome, said) = run(vec![unsure, "host/example cannot be reached right now"], 5);
+        assert_eq!(outcome, Ok(7));
+        assert_eq!(said, [unsure, "host/example cannot be reached right now"]);
+        // It keeps refusing: the last refusal comes back once the waits are used up.
+        let (outcome, said) = run(vec![unsure; 10], 3);
+        assert_eq!(outcome, Err(unsure.to_owned()));
+        assert_eq!(said.len(), 3);
+        // A terminal that is gone, restarted or not allowed is not retried.
+        for reason in ["it is gone: terminal/x", "not allowed: nope", direct::RESTARTED] {
+            let (outcome, said) = run(vec![reason, unsure], 5);
+            assert_eq!(outcome, Err(reason.to_owned()));
+            assert!(said.is_empty(), "{reason} must not be retried");
+        }
+        // The retried reasons are the words st's own messages use.
+        assert!(super::worth_retrying(&st3_client::plain_message(
+            Some(&st3_client::ErrorCode::RuntimeAuthorityIndeterminate),
+            ""
+        )));
+        assert!(!super::worth_retrying(&st3_client::plain_message(
+            Some(&st3_client::ErrorCode::NotFound),
+            "terminal/x"
+        )));
+        // A refusal that passes waits about a minute and a half before the tab gives up.
+        assert!(super::ATTACH_RETRY_DELAYS.iter().sum::<Duration>() >= Duration::from_secs(90));
+    }
+
+    #[test]
     fn hidden_inventory_windows_leave_after_grace_and_period_changes_replace_one_slot() {
         let now = Instant::now();
         let mut grace = InventoryGrace::default();
@@ -3146,6 +3336,100 @@ mod tests {
     }
 
     use super::*;
+
+    fn peer(host: &str, missing: u64, diverged: bool) -> st3_client::SyncPeer {
+        st3_client::SyncPeer {
+            last_successful_exchange: None,
+            last_failed_exchange: None,
+            host_id: host.into(),
+            peer_only_envelopes: missing,
+            local_only_envelopes: 0,
+            last_exchange_at: None,
+            estimated_catch_up_seconds: Some(840),
+            diverged_since: diverged.then(|| "2026-09-29T10:00:00Z".into()),
+        }
+    }
+
+    fn snapshot(store_index: u64) -> st3_client::Snapshot {
+        st3_client::Snapshot {
+            id: format!("snapshot/{store_index}"),
+            host_id: "host/hearth".into(),
+            store_index,
+            projection_version: "1".into(),
+            created_at: "2026-10-16T11:00:00Z".into(),
+        }
+    }
+
+    /// The world a running stui shows after the stream delivered Attention (older) and Agents
+    /// (newest) windows, built by the same function the live loop uses.
+    fn running_world(sync: Option<&st3_client::SyncNotice>) -> super::super::view::World {
+        let mut model = Model::default();
+        let now = window_collection(Vec::new(), snapshot(5), false, sync);
+        let agents = window_collection(Vec::new(), snapshot(9), false, sync);
+        model.now = now;
+        model.agents = agents;
+        let extras = super::super::adapt::Extras { live: true, ..Default::default() };
+        super::super::adapt::world(&model, "person/avery", &extras)
+    }
+
+    #[test]
+    fn a_running_stui_says_diverged_or_behind_from_the_notice_the_windows_carry_and_live_otherwise() {
+        use super::super::view::Link;
+        let diverged = st3_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
+        let shown = running_world(Some(&diverged));
+        assert!(matches!(shown.link, Link::Live));
+        assert_eq!(shown.diverged, vec!["harbor".to_owned()]);
+        assert!(shown.behind.is_empty());
+
+        let behind = st3_client::SyncNotice { state: "catching-up".into(), peers: vec![peer("host/harbor", 26_820, false)] };
+        let shown = running_world(Some(&behind));
+        assert!(shown.diverged.is_empty());
+        assert_eq!(shown.behind.len(), 1, "{:?}", shown.behind);
+        assert!(shown.behind[0].starts_with("harbor has 26,820 envelopes"), "{:?}", shown.behind);
+
+        // No notice, or one that names nothing missing: nothing is claimed, and the link is live.
+        for sync in [None, Some(st3_client::SyncNotice { state: "catching-up".into(), peers: vec![peer("host/dock", 0, false)] })] {
+            let shown = running_world(sync.as_ref());
+            assert!(matches!(shown.link, Link::Live));
+            assert!(shown.diverged.is_empty() && shown.behind.is_empty(), "{:?} {:?}", shown.diverged, shown.behind);
+        }
+    }
+
+    #[test]
+    fn a_notice_read_follows_a_moving_graph_at_most_once_a_minute_and_an_idle_screen_sends_none() {
+        let now = Instant::now();
+        // First frames are not changes: no read is wanted by them.
+        assert_eq!(sync_due_after_frame(true, Some(now), None, now), None);
+        // A later frame soon after a read waits out the minimum gap; a long-ago read is due now.
+        assert_eq!(sync_due_after_frame(false, Some(now), None, now + Duration::from_secs(5)), Some(now + SYNC_MIN_GAP));
+        let late = now + SYNC_MIN_GAP + Duration::from_secs(30);
+        assert_eq!(sync_due_after_frame(false, Some(now), None, late), Some(late));
+        // A read already wanted keeps its time however many frames follow; no read made yet is due now.
+        let wanted = Some(now + Duration::from_secs(40));
+        assert_eq!(sync_due_after_frame(false, Some(now), wanted, now + Duration::from_secs(10)), wanted);
+        assert_eq!(sync_due_after_frame(false, None, None, now), Some(now));
+    }
+
+    #[test]
+    fn the_page_read_fills_the_notice_and_a_rebuilt_window_keeps_it_until_the_next_read() {
+        let diverged = st3_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
+        // The stream's windows arrive with nothing known, the newest being Agents.
+        let mut model = Model::default();
+        let now = window_collection(Vec::new(), snapshot(5), false, None);
+        let agents = window_collection(Vec::new(), snapshot(9), false, None);
+        model.now = now;
+        model.agents = agents;
+        assert!(model.sync_notice().is_none());
+        // The page read finds a diverged peer: it shows although Agents holds the newest snapshot.
+        fill_notice(&mut model, Some(&diverged));
+        assert_eq!(model.sync_notice(), Some(&diverged));
+        // A later frame rebuilds Agents with the notice the loop carries, not with none.
+        model.agents = window_collection(Vec::new(), snapshot(12), false, Some(&diverged));
+        assert_eq!(model.sync_notice(), Some(&diverged));
+        // The next read says level: the notice goes from every window.
+        fill_notice(&mut model, None);
+        assert!(model.sync_notice().is_none());
+    }
 
     #[test]
     fn open_requests_wait_for_a_live_inventory_and_answer_each_seat_once() {
@@ -4085,6 +4369,78 @@ mod tests {
     }
 
     #[test]
+    fn failed_conversation_hint_and_key_resubscribe_without_resending_messages() {
+        use super::super::{demo, glass, Hit};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        for (spaces, child) in [(false, false), (true, false), (true, true)] {
+            let mut ui = Ui::new(demo::world());
+            ui.live = true;
+            ui.tab = 1;
+            let selected = ui.selected_id().unwrap();
+            if spaces {
+                ui.glasses = Some(glass::Glasses::open(None, None));
+            }
+            let target = if child {
+                ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(
+                    "session/tester-child".into(),
+                )));
+                "session/tester-child".to_owned()
+            } else {
+                let target = selected;
+                if spaces {
+                    ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(target.clone())));
+                }
+                target
+            };
+            let mut failed = BTreeMap::from([(target.clone(), "access refused".into())]);
+            let mut requested = HashSet::from([target.clone()]);
+            ui.world.conversations = conversations(
+                &Model::default(),
+                "person/ada",
+                &BTreeMap::new(),
+                &failed,
+                std::slice::from_ref(&target),
+            );
+            ui.effects.clear();
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+            let shown: String = terminal.backend().buffer().content.iter()
+                .map(ratatui::buffer::Cell::symbol).collect();
+            assert!(shown.contains("access refused"), "{shown}");
+            assert!(shown.contains("Ctrl+R · retry opening this conversation"), "{shown}");
+            assert!(!shown.contains("retrying") && !shown.contains("Trying again"), "{shown}");
+            assert!(ui.effects.is_empty(), "rendering a refusal never retries it");
+
+            ui.conversation_state.drafts.insert(target.clone(), "saved draft".into());
+            let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+            ui.editing = true;
+            ui.key(key);
+            assert!(ui.effects.is_empty(), "a draft owns Ctrl+R while the box is open");
+            assert!(matches!(ui.world.conversations[&target], Load::Failed(_)));
+            ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            ui.key(key);
+            let effects = std::mem::take(&mut ui.effects);
+            let [Effect::RetryConversation { target: reopened }] = effects.as_slice() else {
+                panic!("opening is distinct from message resend: {effects:?}");
+            };
+            assert_eq!(reopened, &target);
+            assert!(matches!(ui.world.conversations[&target], Load::Loading));
+            assert!(!ui.stalled.contains_key(&target));
+            assert_eq!(ui.conversation_state.drafts[&target], "saved draft");
+            let (commands, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+            retry_conversation_open(reopened.clone(), &mut failed, &mut requested, &commands);
+            assert!(matches!(incoming.try_recv().unwrap(), Command::Resubscribe { target: sent } if sent == target));
+            assert!(!failed.contains_key(&target));
+            assert!(!requested.contains(&target));
+            ui.key(key);
+            assert!(ui.effects.is_empty(), "loading does not queue another explicit retry");
+            assert!(incoming.try_recv().is_err(), "no automatic retry is sent");
+        }
+    }
+
+    #[test]
     fn a_session_that_failed_to_open_says_why_and_is_asked_again_when_reopened() {
         let session = "session/example-child".to_owned();
         let failed = BTreeMap::from([(
@@ -4283,6 +4639,70 @@ fn connecting_text(waited: Duration) -> String {
         0..2 => "connecting".into(),
         2..8 => format!("connecting {}s", waited.as_secs()),
         seconds => format!("connecting {seconds}s, st is slow to answer"),
+    }
+}
+
+/// How long a shell's attach keeps trying after st refuses it for a reason that passes: about a
+/// minute and a half in all.
+const ATTACH_RETRY_DELAYS: [Duration; 20] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(3),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+];
+
+/// Whether an attach refused with `reason` may work a moment later: st cannot tell yet which host
+/// runs the terminal, that host is briefly out of reach, or st asked for a pause. A terminal that
+/// is gone, restarted or not allowed is not retried.
+fn worth_retrying(reason: &str) -> bool {
+    [
+        "cannot tell yet which host",
+        "cannot be reached right now",
+        "asked to slow down",
+        "changed while this was on its way",
+    ]
+    .iter()
+    .any(|passing| reason.contains(passing))
+}
+
+/// Try `attempt` again after each delay while it fails for a reason that passes, telling `waiting`
+/// the reason before each wait; the last refusal comes back once the delays are used up.
+async fn retry_attach<T, Fut>(
+    delays: &[Duration],
+    mut waiting: impl FnMut(&str),
+    mut attempt: impl FnMut() -> Fut,
+) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let mut delays = delays.iter();
+    loop {
+        match attempt().await {
+            Err(reason) if worth_retrying(&reason) => match delays.next() {
+                Some(delay) => {
+                    waiting(&reason);
+                    tokio::time::sleep(*delay).await;
+                }
+                None => return Err(reason),
+            },
+            done => return done,
+        }
     }
 }
 

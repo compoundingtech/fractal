@@ -5104,7 +5104,17 @@ pub(super) async fn mission_detail(
     let snapshot_index = snapshot.store_index;
     let selected = client_detail_id("mission", &id);
     let items = super::blocking_store(move || {
-        mission_resources(&store, snapshot_index, true, Some(&selected))
+        let mut items = mission_resources(&store, snapshot_index, true, Some(&selected))?;
+        // The presentation the missions list publishes for this mission; a read computes none.
+        if let Some(published) = store.published_missions_list().newest()
+            && let Some(card) = published.rows.cards.get(&selected)
+            && let Some(presentation) = card.get("presentation")
+        {
+            for item in &mut items {
+                item["presentation"] = presentation.clone();
+            }
+        }
+        Ok(items)
     })
     .await?;
     client_detail(items, "mission", &id)
@@ -5694,8 +5704,15 @@ fn conversation_page_header(
     );
     crate::conversation_header::merge_register(
         derived,
-        crate::conversation_header::register_value(state, session_id).as_ref(),
+        conversation_register_value(state, session_id).as_ref(),
     )
+}
+
+/// The live latest-wins values for a conversation, e.g. `working`. Wire the register here when
+/// draft #1583 (the live conversation register) lands; until then no register exists and the
+/// header is derived from the transcript window alone.
+fn conversation_register_value(_state: &AppState, _session_id: &str) -> Option<Value> {
+    None
 }
 
 /// Only offset continuations (OpenCode and claim timelines) retain their original window
@@ -12875,6 +12892,71 @@ mission "queue-parity" state="ready" {
         let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
         assert_eq!(frame["id"], "window-0");
         assert_eq!(frame["kind"], "snapshot");
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn collections_socket_accepts_128_byte_subscription_ids_and_refuses_129_bytes() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let app = axum::Router::new().route(
+            "/stream",
+            axum::routing::get(move |upgrade: WebSocketUpgrade| {
+                let state = state.clone();
+                async move {
+                    upgrade.on_upgrade(move |socket| {
+                        collection_stream_socket_with_reader(
+                            socket,
+                            state,
+                            ClientSession::local(None).unwrap(),
+                            None,
+                            |state, session, request, permit| async move {
+                                collection_items(&state, &session, &request, permit).await
+                            },
+                        )
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream"))
+            .await
+            .unwrap();
+        // Multibyte ids distinguish the byte limit from a character-count limit.
+        let accepted = "é".repeat(64);
+        let refused = format!("{accepted}x");
+        assert_eq!(accepted.len(), 128);
+        assert_eq!(refused.len(), 129);
+        for (id, kind) in [(&accepted, "snapshot"), (&refused, "error")] {
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({"kind":"subscribe","id":id,"collection":"work","limit":2})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(frame["id"], id.as_str());
+            assert_eq!(frame["kind"], kind);
+            if kind == "error" {
+                assert_eq!(
+                    frame["message"],
+                    "invalid subscription or subscription limit exceeded"
+                );
+            }
+        }
         socket.close(None).await.unwrap();
         server.abort();
     }
