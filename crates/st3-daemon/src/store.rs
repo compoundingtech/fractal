@@ -7851,6 +7851,7 @@ fn enforce_mission_run_capacity(
                ON run_generations.id=mission_runs.current_generation_id
              WHERE mission_runs.mission_id=?1
                AND mission_runs.status IN ('running','standing','blocked')
+               AND mission_runs.phase NOT IN ('final-cancelled','cleanup-cancelled')
              ORDER BY mission_runs.created_at_unix_ms, mission_runs.id",
         )
         .map_err(internal)?;
@@ -15637,6 +15638,12 @@ fn catch_up_projection_cannot_clear_an_admission_deferred_after_its_index_read()
                     .unwrap();
                 assert!(target.validate_replication_backlog().unwrap().changed);
                 assert!(target.replication_catching_up());
+                // Pass A stamped its start before this closure. On a slow host the receive
+                // above can outlast the deferral window, and pass B would then project, and
+                // wait on A's own projection lock. Stamp now so the window is still open.
+                target
+                    .last_replication_projection_unix_ms
+                    .store(now_ms() as u64, Ordering::Release);
                 assert_eq!(
                     target
                         .project_replication_backlog_unless_catching_up()
@@ -22194,6 +22201,11 @@ mod tests {
     }
 
     const TEST_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+
+    mod run_capacity_tests {
+        use super::*;
+        include!("store/run_capacity_tests.rs");
+    }
 
     mod mission_deadline_probe {
         use super::*;
@@ -47195,7 +47207,7 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
 
 
     /// Run against a reflink-copied live store only:
-    /// `CLAIM_SUMMARY_BENCH=/path/to/copy.sqlite3 cargo test -p st3 --lib claim_summary -- --ignored --nocapture`.
+    /// `CLAIM_SUMMARY_BENCH=/path/to/copy.sqlite3 cargo test -p st3-daemon --lib claim_summary -- --ignored --nocapture`.
     /// Alternates full and summary reductions of the same subject at the same cut so both
     /// answers measure one store, one index and one page cache.
     #[test]
