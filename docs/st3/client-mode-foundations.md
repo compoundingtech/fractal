@@ -30,3 +30,18 @@ Custody is separately gated: authenticated fresh payload-present proof at a fixe
 macOS authority is explicitly unavailable in this draft: POSIX ownership/mode bits do not rule out independent allow ACLs. Opened-descriptor ACL validation and native qualification must precede enabling it. This also prevents legacy Mac startup through these guarded paths; the draft is not a deployable upgrade. No warning-only rollout or production enforcement is authorized by this code.
 
 The lease binding in `run_up`/`run_worker` lasts through the async body. Fallible returns and detached tasks mean this alone does not prove that every process-wide writer has ended before the lease drops. Drain/join of every producer is still a prerequisite to enrollment/ENTER; no such transition is exposed.
+
+Before any release, qualify the compatibility and rollout matrix below. This draft has no observe-only doctor rollout; it must not be deployed as that stage. A reviewed observe-only doctor/event stage must establish real host verdicts before an enforcing release. Downgrading this foundation needs no state cleanup because no production enrollment command exists. There is no bypass flag for an unsafe anchor.
+
+| Caller/environment | Current behavior and remaining qualification |
+| --- | --- |
+| `run_up` | Takes the shared lease before configuration and retains it through its async body; detached-writer closure remains unproved |
+| Separate replication-worker dispatch | Opens its own shared lease before configuration and retains it through `run_worker().await` |
+| Temporary-HOME test or secondary daemon | Uses the real NSS account authority/lease; starts while that account is Local, and is inhibited if that account is in Client/Transition mode |
+| Named instance | Uses an isolated state namespace but the same conservative account-wide coordination inode |
+| Nix development shell | Mandatory NSS anchor still applies; changing HOME does not redirect it |
+| Nix build sandbox/CI with absent, root-owned or hidden NSS home | Refuses visibly; sandbox daemon checks need explicit qualification before release, with no environment bypass |
+| Linux service/CI runner | Requires trusted existing account anchor and supported local filesystem; fleet-wide ownership/ACL/filesystem inventory is not complete |
+| macOS launchd/child shells | Unavailable until ACL-aware validation and native behavior are qualified; no Mac release |
+
+Operations must obtain approved read-only filesystem/owner/mode/ACL facts for every rollout host and qualify process/child inheritance and supervisor behavior. The earlier Bluey label inventory does not authorize new reads or establish those facts. No transition is exposed until full admission fencing, drain/join, recovery and exact service/worker handling are complete.
