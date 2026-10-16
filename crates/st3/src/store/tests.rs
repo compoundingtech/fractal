@@ -18485,7 +18485,7 @@ fn a_store_written_before_the_log_diet_upgrades_and_syncs_to_the_same_graph() {
     let path = directory.path().join("claims.sqlite3");
     let mut bytes = Vec::new();
     flate2::read::GzDecoder::new(
-        &include_bytes!("../tests/fixtures/pre-diet-store.sqlite3.gz")[..],
+        &include_bytes!("../../tests/fixtures/pre-diet-store.sqlite3.gz")[..],
     )
     .read_to_end(&mut bytes)
     .unwrap();
