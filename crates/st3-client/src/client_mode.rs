@@ -1,5 +1,5 @@
-//! Nonsecret mode state shared by st and stui. A missing file means the existing local mode;
-//! invalid or interrupted state always refuses local access, including explicit overrides.
+//! Nonsecret mode state shared by st and stui. Before enrollment the existing local mode applies;
+//! missing enrolled, invalid or interrupted state refuses local access, including overrides.
 use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -160,6 +160,10 @@ impl Store {
 
     /// Read-only: status must not create files or directories, even on a fresh instance.
     pub fn read(&self) -> Result<State> {
+        self.read_state(false)
+    }
+
+    fn read_state(&self, first_enrollment: bool) -> Result<State> {
         let file = match OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -167,11 +171,19 @@ impl Store {
         {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ensure!(
+                    first_enrollment || !self.enrolled()?,
+                    "Enrolled client-mode state is missing; recovery required"
+                );
                 return Ok(State::default());
             }
             Err(error) => return Err(error).context("Open client-mode state"),
         };
         private_regular(&file)?;
+        ensure!(
+            self.enrolled()?,
+            "Client-mode enrollment is missing; recovery required"
+        );
         ensure!(
             file.metadata()?.len() <= MAX_BYTES,
             "Client-mode state exceeds size limit"
@@ -187,6 +199,23 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("Invalid client-mode state"))?;
         state.validate()?;
         Ok(state)
+    }
+
+    /// The persistent private lock is also enrollment evidence. A missing state after it
+    /// exists is an interrupted/corrupt authority, never an implicit return to local mode.
+    pub fn enrolled(&self) -> Result<bool> {
+        match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(self.path.with_extension("lock"))
+        {
+            Ok(file) => {
+                private_regular(&file)?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).context("Read client-mode enrollment"),
+        }
     }
 
     /// Serialize publication across processes. This lock is not the daemon's writer fence:
@@ -210,7 +239,9 @@ impl Store {
         for ancestor in parent.ancestors().skip(1) {
             OpenOptions::new()
                 .read(true)
-                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                // System ancestors may be symlinks (macOS /var -> /private/var).
+                // The state file and immediate private directory still reject symlinks.
+                .custom_flags(libc::O_DIRECTORY)
                 .open(ancestor)?
                 .sync_all()?;
         }
@@ -220,23 +251,37 @@ impl Store {
                 && metadata.permissions().mode() & 0o022 == 0,
             "Client-mode directory must belong to this user and not be writable by others"
         );
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(self.path.with_extension("lock"))?;
+        let options = || {
+            let mut options = OpenOptions::new();
+            options
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+            options
+        };
+        let (lock, first_enrollment) = match options()
+            .create_new(true)
+            .open(self.path.with_extension("lock"))
+        {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                (options().open(self.path.with_extension("lock"))?, false)
+            }
+            Err(error) => return Err(error).context("Open client-mode enrollment lock"),
+        };
         private_regular(&lock)?;
         lock.try_lock()
             .context("Another process is changing client mode")?;
-        let current = self.read()?;
+        lock.sync_all()?;
+        directory.sync_all()?;
+        let current = self.read_state(first_enrollment)?;
         Ok(Update {
             store: self,
             directory,
             _lock: lock,
             current,
+            first_enrollment,
         })
     }
 }
@@ -294,6 +339,7 @@ pub struct Update<'a> {
     directory: File,
     _lock: File,
     current: State,
+    first_enrollment: bool,
 }
 
 impl Update<'_> {
@@ -310,7 +356,7 @@ impl Update<'_> {
             "Client-mode generation must advance by one"
         );
         ensure!(
-            self.store.read()? == self.current,
+            self.store.read_state(self.first_enrollment)? == self.current,
             "Client-mode state changed outside its lock"
         );
         let parent = self
@@ -331,6 +377,7 @@ impl Update<'_> {
             .context("Publish client-mode state")?;
         self.directory.sync_all()?;
         self.current = next;
+        self.first_enrollment = false;
         Ok(())
     }
 }
@@ -378,6 +425,8 @@ mod tests {
     fn malformed_public_symlink_and_future_state_refuse() -> Result<()> {
         let root = tempfile::tempdir()?;
         let store = Store::at(root.path().join("mode.json"))?;
+        // Establish enrollment before testing malformed contents rather than a missing marker.
+        drop(store.lock()?);
         fs::write(store.path(), b"private-token-must-not-appear")?;
         fs::set_permissions(store.path(), fs::Permissions::from_mode(0o600))?;
         let error = store.read().unwrap_err();
@@ -396,6 +445,63 @@ mod tests {
         fs::remove_file(store.path())?;
         symlink("absent", store.path())?;
         assert!(store.read().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_enrolled_state_refuses_even_before_first_publication() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = Store::at(root.path().join("mode.json"))?;
+        assert!(!store.enrolled()?);
+        let update = store.lock()?;
+        assert!(store.enrolled()?);
+        assert!(store.read().is_err());
+        drop(update);
+        assert!(store.read().is_err());
+        assert!(store.lock().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_enrollment_for_a_published_mode_is_not_unconfigured() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = Store::at(root.path().join("mode.json"))?;
+        store.lock()?.publish(State::Local {
+            version: 1,
+            generation: 1,
+        })?;
+        fs::remove_file(store.path().with_extension("lock"))?;
+        assert!(store.read().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_a_published_mode_does_not_restore_local_access() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = Store::at(root.path().join("mode.json"))?;
+        store.lock()?.publish(State::Transition {
+            version: 1,
+            generation: 1,
+            operation: "one".into(),
+        })?;
+        fs::remove_file(store.path())?;
+        assert!(store.read().is_err());
+        assert!(store.lock().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn system_ancestor_symlinks_do_not_break_directory_durability() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        fs::create_dir(root.path().join("real"))?;
+        symlink(root.path().join("real"), root.path().join("alias"))?;
+        let store = Store::at(root.path().join("alias/private/mode.json"))?;
+        store.lock()?.publish(State::Transition {
+            version: 1,
+            generation: 1,
+            operation: "one".into(),
+        })?;
+        assert!(store.read()?.require_local().is_err());
         Ok(())
     }
 

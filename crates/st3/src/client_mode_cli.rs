@@ -21,6 +21,7 @@ struct Status {
     version: u32,
     outcome: &'static str,
     authority_path: std::path::PathBuf,
+    authority_enrolled: bool,
     local_start_inhibited: bool,
     state: State,
 }
@@ -34,6 +35,7 @@ pub(crate) fn run(args: &Args, json: bool) -> Result<()> {
                 version: 1,
                 outcome: "read-succeeded",
                 authority_path: store.path().to_owned(),
+                authority_enrolled: store.enrolled()?,
                 local_start_inhibited: state.require_local().is_err(),
                 state,
             };
@@ -46,6 +48,7 @@ pub(crate) fn run(args: &Args, json: bool) -> Result<()> {
                     State::Transition { .. } => "transition (recovery required)",
                 };
                 println!("Mode: {mode}");
+                println!("Authority enrolled: {}", status.authority_enrolled);
                 println!("Generation: {}", status.state.generation());
                 println!("Local start inhibited: {}", status.local_start_inhibited);
             }
