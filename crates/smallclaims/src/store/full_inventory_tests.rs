@@ -1,6 +1,9 @@
 //! Which requests reach the full-inventory answer. It lists every identity the store holds, so
 //! on a large store it can pass `MAX_EXCHANGE_BYTES`; each one is counted, and logged at most
 //! once a minute, so a peer's inflate refusal can be traced to the request that caused it.
+//!
+//! The count is process-wide. CI runs each test in its own process (nextest), so the equality
+//! checks below hold; under a threaded runner another test could move it.
 use super::runtime::Plain;
 use super::*;
 

@@ -3755,7 +3755,7 @@ fn note_full_inventory_answer(identities: usize, listed: usize, complete: bool) 
     }
     eprintln!(
         "st: warning: answering a replication exchange with the full inventory ({identities} \
-         identities): the request had no range digests and a different digest, listing \
+         identities): the request had no range digests and no digest or a different one, listing \
          {listed} identities ({})",
         if complete { "a complete listing" } else { "not a complete listing" }
     );
