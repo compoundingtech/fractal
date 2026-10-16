@@ -33,8 +33,10 @@ const runGate = async ({ env = {}, report } = {}) => {
       other: { type: 'story', id: 'kit--other', importPath: './Kit.stories.tsx', tags: ['dev'] },
     } }))
     await writeFile(join(build, 'iframe.html'), iframe(report))
+    // The job's own KIT_PLAY_* options (CI sets them per event) must not reach the fixture runs.
+    const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('KIT_PLAY_')))
     const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output], {
-      env: { ...process.env, ...env },
+      env: { ...inherited, ...env },
       stdio: 'ignore',
     })
     const code = await new Promise((resolve, reject) => {
