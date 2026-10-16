@@ -11,6 +11,7 @@ async fn old_registry_unknown_takeover_detail_cannot_replay_a_primary_occurrence
     let at = (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let source = format!(r#"version 2
 mission "harvest" state="ready" {{
+  goal "Perform the scheduled harvest occurrence."
  completion {{ when "all-steps-exhausted" }}
  step "done" {{ agentless }}
 }}
@@ -71,6 +72,7 @@ async fn future_standby_skip_tick_is_local_until_due_and_eligible() {
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let source = format!(r#"version 2
 mission "harvest" state="ready" {{
+  goal "Perform the scheduled harvest occurrence."
  completion {{ when "all-steps-exhausted" }}
  step "done" {{ agentless }}
 }}

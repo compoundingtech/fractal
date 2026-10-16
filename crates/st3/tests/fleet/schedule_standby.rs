@@ -7,6 +7,7 @@ fn source(root: &Path, schedule: &str, timing: &str, after: &str, work_root: &Pa
     let command = format!("printf '%s %s\\n' \"$HOME\" \"$ST_MISSION_RUN\" >> '{}'", marker.display());
     format!(r#"version 2
 mission "harvest" state="ready" {{
+  goal "Perform the scheduled harvest occurrence."
   completion {{ when "all-steps-exhausted" }}
   step "perform" {{
     agentless
