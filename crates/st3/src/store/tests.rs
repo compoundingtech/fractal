@@ -4,33 +4,33 @@ use proptest::prelude::*;
 
 mod resource_pending_receive_tests {
     use super::*;
-    include!("store/resource_pending_receive_tests.rs");
+    include!("resource_pending_receive_tests.rs");
 }
 
 mod terminal_projection_date_tests {
     use super::*;
-    include!("store/terminal_projection_date_tests.rs");
+    include!("terminal_projection_date_tests.rs");
 }
 
 mod mission_eval_reuse_tests {
-    include!("store/mission_eval_reuse_tests.rs");
+    include!("mission_eval_reuse_tests.rs");
 }
 
 const TEST_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
 
 mod mission_deadline_probe {
     use super::*;
-    include!("store/mission_deadline_probe.rs");
+    include!("mission_deadline_probe.rs");
 }
 
 mod stopped_seat_declaration_controls {
     use super::*;
-    include!("store/stopped_seat_declaration_controls.rs");
+    include!("stopped_seat_declaration_controls.rs");
 }
 
 mod mission_deadline_tests {
     use super::*;
-    include!("store/mission_deadline_tests.rs");
+    include!("mission_deadline_tests.rs");
 }
 
 #[test]
@@ -395,37 +395,37 @@ fn terminal_capability_lookup_fences_the_subject_head_after_reopen() {
 
 mod mailbox_fence_tests {
     use super::*;
-    include!("store/mailbox_fence_tests.rs");
+    include!("mailbox_fence_tests.rs");
 }
 
 mod canonical_audit {
     use super::*;
-    include!("store/canonical_audit.rs");
+    include!("canonical_audit.rs");
 }
 
 mod declarative_revision_timestamp_tests {
     use super::*;
-    include!("store/declarative_revision_timestamp_tests.rs");
+    include!("declarative_revision_timestamp_tests.rs");
 }
 
 mod actual_purity_tests {
     use super::*;
-    include!("store/actual_purity_tests.rs");
+    include!("actual_purity_tests.rs");
 }
 
 mod activity_purity_tests {
     use super::*;
-    include!("store/activity_purity_tests.rs");
+    include!("activity_purity_tests.rs");
 }
 
 mod fault_history_tests {
     use super::*;
-    include!("store/fault_history_tests.rs");
+    include!("fault_history_tests.rs");
 }
 
 mod projection_divergence_tests {
     use super::*;
-    include!("store/projection_divergence_tests.rs");
+    include!("projection_divergence_tests.rs");
 }
 
 #[test]
