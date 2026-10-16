@@ -20295,7 +20295,17 @@ async fn drive_st2_native(
         ..
     } = paths.clone();
     let mut mailbox =
-        NativeMailbox::start(client, subject, &incarnation, driver, &mut loop_state).await?;
+        match NativeMailbox::start(client, subject, &incarnation, driver, &mut loop_state).await {
+            Ok(mailbox) => mailbox,
+            // A provider can run its whole life inside the bind's one-second retry pause (a
+            // loaded host, a short fixture). The daemon then refuses the binding because that
+            // provider has ended. There is nothing left to deliver to: record the exit as
+            // usual instead of failing the wrapper with the refusal.
+            Err(error) if provider_ended_before_bind(&error) && provider_task_settled(&task).await => {
+                NativeMailbox::unbound(subject, &incarnation, driver, &mut loop_state)
+            }
+            Err(error) => return Err(error),
+        };
     let attach_started = settle.attach_started();
     if driver == "claude" && mailbox.subscription.is_some() && settle.passed()
         && let Err(error) = check_claude_attachment(
@@ -25134,6 +25144,23 @@ fn claude_attachment_path(fence: &st3::mailbox::Fence) -> String {
     )
 }
 
+/// The daemon's refusal of a binding whose provider has already ended.
+fn provider_ended_before_bind(error: &anyhow::Error) -> bool {
+    st3::client::api_error_code(error) == Some("stale-mailbox-session")
+        && format!("{error:#}").contains("the provider authority is terminal")
+}
+
+/// Whether the provider's task has returned, waiting briefly for it: its terminal record is
+/// written just before it returns, so the refusal can arrive a moment ahead of the task.
+async fn provider_task_settled(task: &tokio::task::JoinHandle<Result<()>>) -> bool {
+    let settled = async {
+        while !task.is_finished() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), settled).await.is_ok()
+}
+
 struct NativeMailbox {
     subscription: Option<st3::mailbox::Subscription>,
     fence: st3::mailbox::Fence,
@@ -25143,6 +25170,26 @@ struct NativeMailbox {
     last_title_warning: Option<Instant>,
 }
 impl NativeMailbox {
+    /// A mailbox with no subscription, for a provider that ended before it could be bound.
+    fn unbound(subject: &str, incarnation: &str, driver: &str, state: &mut NativeLoopState) -> Self {
+        let component = if matches!(driver, "codex" | "opencode") {
+            "delivery"
+        } else {
+            "title"
+        };
+        let fence = state
+            .mailbox_fence
+            .get_or_insert_with(|| st3::mailbox::Fence::new(subject, incarnation, component))
+            .clone();
+        Self {
+            subscription: None,
+            fence,
+            messages: Vec::new(),
+            queued: BTreeMap::new(),
+            replayed: false,
+            last_title_warning: None,
+        }
+    }
     async fn start(
         client: &Client,
         subject: &str,
@@ -26174,6 +26221,14 @@ mod projection_contention_retry_tests {
         retry.finish(now + Duration::from_secs(30), 1, false);
         assert_eq!(retry.poll(now + Duration::from_secs(31), 2, true), None);
         assert_eq!(retry.poll(now + Duration::from_secs(61), 2, true), Some(1));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_provider_task_that_has_returned_is_settled_and_one_that_has_not_is_not() {
+        let done = tokio::spawn(async { Ok(()) });
+        assert!(provider_task_settled(&done).await);
+        let running = tokio::spawn(std::future::pending::<Result<()>>());
+        assert!(!provider_task_settled(&running).await);
+        running.abort();
     }
     #[tokio::test(start_paused = true)]
     async fn quiet_node_recovers_automatically_after_busy_writer_releases() {
