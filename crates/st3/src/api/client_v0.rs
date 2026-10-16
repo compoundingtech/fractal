@@ -7430,7 +7430,9 @@ fn conversation_first_page_at_generation(
             };
             Ok((page.0, fence, true, suppressed_sequence))
         }
-        None => Ok((timeline_first_page(state, snapshot, session, session_id.to_owned(), &query, None, managed)?.0, 0, false, 0)),
+        None => crate::performance::task("conversation/first-page", || {
+            Ok((timeline_first_page(state, snapshot, session, session_id.to_owned(), &query, None, managed)?.0, 0, false, 0))
+        }),
     }
 }
 
