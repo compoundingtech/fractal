@@ -17,7 +17,12 @@ already internally cut-consistent. The defect addressed here is the two-frame,
 two-capture recovery: a client can mark or clear the retained window on the
 first frame before the second arrives, and the two captures add read and
 delivery work to a gap recovery. Some clients choose to resubscribe on
-`resync`, adding another first snapshot. This proposal does not claim to fix
+`resync`, adding another first snapshot: the generated Swift collection streams
+in `clients/swift/St3Client/Sources/St3Client/Client.swift` send the subscribe
+command again on `resync`; `apps/fractal-web/packages/st3-sdk/src/effect/mod.ts`
+emits `Stale` and schedules retry, and `apps/ios/feed.ts` schedules a window
+retry. These are current client-path evidence, not a measured production SLO
+regression. This proposal does not claim to fix
 an inconsistent existing snapshot or a measured daemon CPU regression.
 
 The acceptance measure under a forced gap is one replacement frame and one
