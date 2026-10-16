@@ -1759,7 +1759,7 @@ beats {
 
     #[test]
     fn the_example_demos_are_playable_files() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/demos");
+        let dir = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../examples/demos");
         let mut found = 0;
         for entry in fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
