@@ -3,7 +3,7 @@ import { readFile, stat, mkdir, writeFile } from 'node:fs/promises'
 import { resolve, sep, extname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { strictStoryGuard } from './details-strict-story-guard.mjs'
-import { availableParallelism } from 'node:os'
+import { availableParallelism, cpus } from 'node:os'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
 import { phaseTimings } from './kit-play-phases.mjs'
@@ -40,6 +40,9 @@ await new Promise((accept, reject) => {
 })
 const base = `http://127.0.0.1:${server.address().port}`
 const started = performance.now()
+// Whole-machine CPU time at the start, to say at the end whether the plays were CPU-bound.
+const cpuTimes = () => cpus().reduce((sum, { times }) => ({ busy: sum.busy + times.user + times.nice + times.sys + times.irq, idle: sum.idle + times.idle }), { busy: 0, idle: 0 })
+const cpuStart = cpuTimes()
 const rows = []
 const workers = Math.min(6, availableParallelism())
 let ids = [], browser, fatalError
@@ -55,6 +58,10 @@ const writeReceipt = async () => {
     }
   }
   const phaseMeanMilliseconds = Object.fromEntries([...phaseTotals].map(([name, { sum, count }]) => [name, sum / count]))
+  const cpuEnd = cpuTimes()
+  const cpuTotal = cpuEnd.busy - cpuStart.busy + cpuEnd.idle - cpuStart.idle
+  const cpuBusyFraction = cpuTotal > 0 ? (cpuEnd.busy - cpuStart.busy) / cpuTotal : null
+  const domNodes = rows.map(row => row.domNodes).filter(Number.isFinite)
   const receipt = {
     pass: !fatalError && ids.length > 0 && rows.length === ids.length * 4 && rows.every(row => row.pass),
     stories: ids.length, expectedCases: ids.length * 4, cases: rows.length, workers,
@@ -63,6 +70,8 @@ const writeReceipt = async () => {
     effectiveWorkerSecondsPerCase: rows.length ? elapsedSeconds * workers / rows.length : null,
     meanCaseSeconds: rows.length ? rows.reduce((sum, row) => sum + row.elapsedSeconds, 0) / rows.length : null,
     phaseMeanMilliseconds,
+    cpuCount: cpus().length, cpuBusyFraction,
+    meanDomNodes: domNodes.length ? domNodes.reduce((sum, count) => sum + count, 0) / domNodes.length : null,
   }
   await writeFile(join(outputDirectory, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n')
   const { rows: _rows, ...summary } = receipt
@@ -106,7 +115,9 @@ try {
       }
       row.timings.assertionsMilliseconds = performance.now() - storyReady
       // Where the wait for storyFinished went, from the page's own clock; a failed read leaves it out.
-      Object.assign(row.timings, phaseTimings(await page.evaluate(() => window.__dt10StoryMarks ?? []).catch(() => [])))
+      const observed = await page.evaluate(() => ({ marks: window.__dt10StoryMarks ?? [], domNodes: document.querySelectorAll('*').length })).catch(() => ({ marks: [] }))
+      Object.assign(row.timings, phaseTimings(observed.marks))
+      row.domNodes = observed.domNodes
       row.pass = true
     } catch (error) {
       row.error = String(error)
