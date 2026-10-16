@@ -12519,7 +12519,7 @@ mod tests {
                 let _wake = list.start();
                 list.end();
             }
-            let session = ClientSession::for_tests_scoped("person/reader", "person/reader", &["read.projections"]);
+            let session = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
             let error = runtimes(State(state.clone()), Extension(new_client_snapshot(&state)),
                 Extension(session), Query(ClientListQuery::default())).await.unwrap_err();
             let response = super::super::response_body::Context {
@@ -12549,7 +12549,7 @@ mod tests {
         let query = ClientListQuery { limit: Some(1), ..ClientListQuery::default() };
         let other = client_page_read(&state, &snapshot, "runtime-cache-probe",
             vec![json!({"id":"first"}), json!({"id":"second"})], &query, true).unwrap();
-        let session = ClientSession::for_tests_scoped("person/reader", "person/reader", &["read.projections"]);
+        let session = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
         let (_, Json(first)) = runtimes(State(state.clone()), Extension(snapshot.clone()),
             Extension(session.clone()), Query(query.clone())).await.unwrap();
         let original = first.page.next_cursor.unwrap();
@@ -12592,7 +12592,7 @@ mod tests {
     async fn published_runtimes_match_legacy_and_freeze_cursors_across_republish() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
-        let session = ClientSession::for_tests_scoped("person/reader", "person/reader",
+        let session = ClientSession::for_tests_scoped("person/ada", "person/ada",
             &["read.projections", "terminal.read"]);
         for (subject, status, terminal) in [
             ("exec/runtime-c", "running", true),
@@ -12639,7 +12639,7 @@ mod tests {
         let state = test_state(root.path());
         observe_published_runtime(&state, "agent/not-ready", "running", false);
         let snapshot = new_client_snapshot(&state);
-        let session = ClientSession::for_tests_scoped("person/reader", "person/reader", &["read.projections"]);
+        let session = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
         let work = smallclaims::sqlite::work::SqliteWorkScope::start();
         let error = runtimes(State(state.clone()), Extension(snapshot), Extension(session),
             Query(ClientListQuery::default())).await.unwrap_err();
@@ -12663,7 +12663,7 @@ mod tests {
             }
             publish_runtimes_once(&state);
             let snapshot = new_client_snapshot(&state);
-            let session = ClientSession::for_tests_scoped("person/reader", "person/reader", &["read.projections"]);
+            let session = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
             let work = smallclaims::sqlite::work::SqliteWorkScope::start();
             let started = Instant::now();
             let (_, Json(page)) = runtimes(State(state.clone()), Extension(snapshot), Extension(session),
