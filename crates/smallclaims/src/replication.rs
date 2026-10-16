@@ -408,8 +408,9 @@ pub struct ReplicationPeerSync {
     pub catch_up_rate_per_second: Option<f64>,
     /// Forecast in exact JSON-safe integer seconds up to [`MAX_SAFE_DURATION_SECONDS`], from
     /// [`ReplicationPeerSync::closing_rate_per_second`]; absent when no finite positive rate or
-    /// representable forecast exists, including while the gap is not closing. Missing a forecast
-    /// does not mean the peer is caught up. It forecasts arrival only: admission, projection and
+    /// representable forecast exists, including while the gap is not closing and once the
+    /// measurement is `stale`. Missing a forecast does not mean the peer is caught up. Zero
+    /// means nothing the peer listed was missing here, at arrival: admission, projection and
     /// visibility can lag behind it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_catch_up_seconds: Option<u64>,
@@ -433,17 +434,21 @@ pub struct ReplicationPeerSync {
 }
 
 impl ReplicationPeerSync {
-    /// The rate the forecast divides by: how fast the gap closes, never faster than envelopes
-    /// arrive. The gap can also shrink without a receipt, when the peer's checkpoint drops
-    /// envelopes or the inventory comparison narrows, and that must not shorten the forecast.
-    /// Zero while the gap is not closing. It measures arrival only, not admission, projection
-    /// or visibility.
+    /// The rate the forecast divides by: how fast the gap closes, capped at the rate envelopes
+    /// arrive. `None` unless both rates are known and finite, so an unknown arrival rate never
+    /// counts as progress; zero while the gap is not closing or nothing arrives.
+    ///
+    /// The cap is a guard, not a proof. The gap can also shrink without a receipt, when a
+    /// checkpoint drops envelopes or the comparison narrows. A window that spans a change of
+    /// either node's advertised checkpoint, or between range and full comparison, measures no
+    /// rate, but a peer that advertises no checkpoint and a narrowing within range comparison
+    /// are not seen: when receipts coincide with such a drop, the forecast can still be too
+    /// short. It measures arrival only, not admission, projection or visibility.
     pub fn closing_rate_per_second(&self) -> Option<f64> {
-        let closing = self.catch_up_rate_per_second?;
-        Some(
-            self.receive_rate_per_second
-                .map_or(closing, |received| closing.min(received)),
-        )
+        let usable = |rate: Option<f64>| rate.filter(|rate| rate.is_finite() && *rate >= 0.0);
+        let closing = usable(self.catch_up_rate_per_second)?;
+        let received = usable(self.receive_rate_per_second)?;
+        Some(closing.min(received))
     }
 }
 

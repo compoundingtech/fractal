@@ -1365,10 +1365,16 @@ impl PeerSyncProgress {
     pub fn view(&self, now: u128) -> Option<ReplicationPeerSync> {
         let mut sync = self.measured.clone()?;
         sync.stale = now.saturating_sub(sync.measured_at_unix_ms) >= PEER_QUIET_EXCHANGE_MS;
-        // No forecast from a measurement the peer has not renewed: a receipt whose inventory
-        // could not be compared keeps the counts, not a promise about when they close.
-        if sync.stale && sync.peer_only_envelopes != 0 {
-            sync.estimated_catch_up_seconds = None;
+        // A measurement no exchange has renewed for `PEER_QUIET_EXCHANGE_MS`, including one
+        // followed only by receipts whose inventory could not be compared, keeps its counts and
+        // time, marked stale, but no current rate or forecast. The stored rates stay, so the
+        // next comparable window smooths from them; `REPLICATION_SYNC_STALE_MS` expires those.
+        if sync.stale {
+            sync.receive_rate_per_second = None;
+            sync.catch_up_rate_per_second = None;
+            if sync.peer_only_envelopes != 0 {
+                sync.estimated_catch_up_seconds = None;
+            }
         }
         sync.catching_up = sync.peer_only_envelopes > REPLICATION_EXCHANGE_ENVELOPE_LIMIT as u64
             && now.saturating_sub(sync.measured_at_unix_ms) <= REPLICATION_SYNC_STALE_MS;
@@ -4731,6 +4737,7 @@ pub fn sync_progress_estimates_catch_up_from_net_progress() {
 pub fn sync_progress_omits_forecasts_outside_safe_integer_seconds() {
     let mut progress = PeerSyncProgress {
         measured: Some(ReplicationPeerSync {
+            receive_rate_per_second: Some(1.0),
             catch_up_rate_per_second: Some(1.0),
             ..Default::default()
         }),
@@ -4854,7 +4861,51 @@ pub fn sync_progress_drops_the_forecast_of_a_measurement_gone_quiet() {
     let quiet = progress.view(measured + PEER_QUIET_EXCHANGE_MS).unwrap();
     assert!(quiet.stale);
     assert_eq!(quiet.peer_only_envelopes, 9_000);
+    assert_eq!(quiet.measured_at_unix_ms, measured);
+    assert_eq!(quiet.receive_rate_per_second, None);
+    assert_eq!(quiet.catch_up_rate_per_second, None);
     assert_eq!(quiet.estimated_catch_up_seconds, None);
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_view_withdraws_rates_with_no_new_measurement() {
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((10_000, 0)), 1_000);
+    let measured = 1_000 + REPLICATION_SYNC_WINDOW_MS;
+    progress.observe(1_000, Some((9_000, 0)), measured);
+    let rate = 1_000.0 / SYNC_WINDOW_SECONDS;
+    let fresh = progress.view(measured + PEER_QUIET_EXCHANGE_MS - 1).unwrap();
+    assert!(!fresh.stale);
+    assert_eq!(fresh.closing_rate_per_second(), Some(rate));
+    // No observe at all: only time passes.
+    let quiet = progress.view(measured + PEER_QUIET_EXCHANGE_MS).unwrap();
+    assert!(quiet.stale);
+    assert_eq!((quiet.peer_only_envelopes, quiet.measured_at_unix_ms), (9_000, measured));
+    assert_eq!(quiet.closing_rate_per_second(), None);
+    assert_eq!(quiet.estimated_catch_up_seconds, None);
+    // The stored rates stay for the next comparable window, which averages with them.
+    progress.observe(1_000, Some((8_000, 0)), measured + REPLICATION_SYNC_WINDOW_MS);
+    let next = progress.view(measured + REPLICATION_SYNC_WINDOW_MS).unwrap();
+    assert_eq!(next.closing_rate_per_second(), Some(rate));
+    assert_eq!(next.estimated_catch_up_seconds, Some((8_000.0 / rate).ceil() as u64));
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_forecasts_nothing_from_an_unknown_arrival_rate() {
+    let mut progress = PeerSyncProgress {
+        measured: Some(ReplicationPeerSync {
+            catch_up_rate_per_second: Some(100.0),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    progress.observe(0, Some((9_000, 0)), 1_000);
+    let sync = progress.view(1_000).unwrap();
+    assert_eq!(sync.receive_rate_per_second, None);
+    assert_eq!(sync.closing_rate_per_second(), None);
+    assert_eq!(sync.estimated_catch_up_seconds, None);
 }
 
 #[cfg(test)]

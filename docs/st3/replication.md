@@ -766,7 +766,7 @@ For each peer, the status view also reports when the last exchange happened and 
 two envelope sets were at that exchange:
 
 ```text
-sync	catching up: node-b has 124,384 envelopes this node lacks, caught up in about 15m
+sync	catching up: node-b has 124,384 envelopes this node lacks, caught up in about 15m (arrival only)
 peer	node-b	up
   last exchange 2s ago
   node-b has 124,384 envelopes this node lacks
@@ -779,15 +779,20 @@ the protocol does not change and a peer on an older build is measured too. A ran
 with different digests counts exactly once the peer lists it; until then its count is a lower
 bound. The estimate divides the remaining envelopes by how fast that number shrank over recent
 10-second windows, so a peer that keeps writing lengthens it. It never divides by more than the
-rate envelopes arrive, because the number can also fall without a receipt, when the peer's
-checkpoint drops envelopes or the comparison narrows; the status shows that rate as `closing at`.
+rate envelopes arrive, and gives no estimate while either rate is unknown; the status shows that
+rate as `closing at`. That cap is a guard, not a proof: the number can also fall without a receipt,
+when a checkpoint drops envelopes or the comparison narrows, and when receipts coincide with such a
+drop the estimate can still be too short.
 A window in which the number did not shrink, or nothing arrived, leaves no forecast, and the status
 says `not catching up`; the next window then starts from its own rate rather than half of it. A gap
 of more than five minutes between measurements forgets both rates, and so does a change in what
 the count is compared against: the peer's or this node's checkpoint, or a switch between range and
-full inventories. A peer on an older build advertises no checkpoint, so only the arrival bound
-guards it; a peer that starts advertising one resets the window once. A forecast whose
-measurement has gone quiet is withdrawn until the next one.
+full inventories. A peer on an older build advertises no checkpoint, and a narrowing within range
+comparison changes neither, so only the arrival cap guards those; a peer that starts advertising a
+checkpoint resets the window once. A measurement no exchange has renewed for 35 seconds is shown
+as stale, with its counts and time but no rates or estimate. Zero envelopes missing means nothing
+the peer listed is missing here, at arrival: admission, projection and visibility can lag behind
+it.
 The estimate is for arrival only: claims admitted, projected and visible can lag behind it, and
 the clients' JSON field (`estimated_catch_up_seconds`) is absent in every case without a forecast.
 The measurements live in memory; the first exchange after a restart rebuilds them.
