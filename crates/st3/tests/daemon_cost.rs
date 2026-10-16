@@ -2077,6 +2077,11 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         native_session_home: Some(root.join("home")),
         planner_default: st3::model::PlannerSpec::default(),
     };
+    let seeded_cut = store.index().unwrap();
+    st3::api::start_published_lists(&state);
+    tokio::time::timeout(Duration::from_secs(120),
+        st3::api::wait_published_lists_at_least(&store, seeded_cut))
+        .await.expect("cost census lists publish the seeded store cut").unwrap();
     let server_socket = socket.clone();
     let server =
         tokio::spawn(
