@@ -302,7 +302,7 @@ fn spawn_with(
                         .collect::<BTreeMap<_, _>>()
                 })
                 .unwrap_or_default();
-            withdraw_changed(&mut serving, &wanted).await;
+            withdraw_changed(&mut serving, &wanted, WITHDRAW_WAIT).await;
             if let Some(registry) = &registry {
                 for (name, served) in wanted {
                     if serving.contains_key(&name) {
@@ -330,14 +330,20 @@ fn spawn_with(
     });
 }
 
-/// Stop every served tile that `wanted` no longer names as it was served, and return only once
-/// each one's task is gone. Its listener closes when the task is dropped, which `abort` alone
-/// leaves for later: the replacement would then bind while the old listener still answers,
-/// take it for another process, give up, and leave a dead socket behind with nothing to
-/// retry on.
-async fn withdraw_changed<S: PartialEq, K: Ord + Clone>(
+/// How long the supervisor waits for one withdrawn tile's task to be dropped. A task only ends
+/// at an await point, so this is normally immediate; the bound keeps one stuck task from
+/// stalling the endpoints of every other tile.
+const WITHDRAW_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Stop every served tile that `wanted` no longer names as it was served, and return once each
+/// one's task is gone, or has not gone within `wait` (logged, then carried on). Its listener
+/// closes when the task is dropped, which `abort` alone leaves for later: the replacement would
+/// then bind while the old listener still answers, take it for another process, give up, and
+/// leave a dead socket behind with nothing to retry on.
+async fn withdraw_changed<S: PartialEq, K: Ord + Clone + std::fmt::Display>(
     serving: &mut BTreeMap<K, (S, tokio::task::JoinHandle<()>)>,
     wanted: &BTreeMap<K, S>,
+    wait: std::time::Duration,
 ) {
     let changed: Vec<K> = serving
         .iter()
@@ -345,10 +351,18 @@ async fn withdraw_changed<S: PartialEq, K: Ord + Clone>(
         .map(|(name, _)| name.clone())
         .collect();
     for name in changed {
-        if let Some((_, task)) = serving.remove(&name) {
+        if let Some((_, mut task)) = serving.remove(&name) {
             task.abort();
-            // Cancelled is the expected outcome; a task that had already ended is the same.
-            let _ = task.await;
+            match tokio::time::timeout(wait, &mut task).await {
+                // Cancelled is the expected outcome; a task that had already ended is the same.
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if error.is_cancelled() => {}
+                Ok(Err(error)) => eprintln!("st3: tile {name}'s endpoint task failed: {error}"),
+                Err(_) => eprintln!(
+                    "st3: tile {name}'s endpoint did not stop within {} s; carrying on",
+                    wait.as_secs()
+                ),
+            }
         }
     }
 }
@@ -534,23 +548,63 @@ mod tests {
                 std::future::pending::<()>().await;
             })
         };
-        let (changed, kept) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
-        let mut serving = BTreeMap::from([
-            ("atlas", (1, hold(&changed))),
-            ("birch", (1, hold(&kept))),
-        ]);
+        let (changed, kept) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut serving =
+            BTreeMap::from([("atlas", (1, hold(&changed))), ("birch", (1, hold(&kept)))]);
         // Let both tasks start, so abort has a running listener to cancel.
         tokio::task::yield_now().await;
-        withdraw_changed(&mut serving, &BTreeMap::from([("atlas", 2), ("birch", 1)])).await;
+        let wait = WITHDRAW_WAIT;
+        withdraw_changed(
+            &mut serving,
+            &BTreeMap::from([("atlas", 2), ("birch", 1)]),
+            wait,
+        )
+        .await;
         assert!(
             changed.load(Ordering::SeqCst),
             "the changed tile's listener must be closed when the withdrawal returns"
         );
-        assert!(!kept.load(Ordering::SeqCst), "an unchanged tile keeps serving");
+        assert!(
+            !kept.load(Ordering::SeqCst),
+            "an unchanged tile keeps serving"
+        );
         assert_eq!(serving.keys().copied().collect::<Vec<_>>(), ["birch"]);
         // A tile the registry dropped is withdrawn the same way.
-        withdraw_changed(&mut serving, &BTreeMap::new()).await;
+        withdraw_changed(&mut serving, &BTreeMap::new(), wait).await;
         assert!(kept.load(Ordering::SeqCst));
+        assert!(serving.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_task_that_will_not_stop_delays_the_withdrawal_by_the_bound_only() {
+        // A blocking task ignores abort, so it stands for a serving task that never ends.
+        let (release, stuck) = std::sync::mpsc::channel::<()>();
+        let task = tokio::task::spawn_blocking(move || {
+            let _ = stuck.recv();
+        });
+        // The paused clock moves on by itself once every task is waiting, so the time the
+        // withdrawal took is read on that clock, not from where this test happens to be.
+        let withdrawal = tokio::spawn(async move {
+            let mut serving = BTreeMap::from([("atlas", (1, task))]);
+            let began = tokio::time::Instant::now();
+            withdraw_changed(&mut serving, &BTreeMap::new(), WITHDRAW_WAIT).await;
+            (began.elapsed(), serving.is_empty())
+        });
+        let (elapsed, emptied) = withdrawal.await.unwrap();
+        assert_eq!(elapsed, WITHDRAW_WAIT, "the wait is exactly the bound");
+        assert!(emptied, "the stuck tile is dropped from the supervisor");
+        drop(release);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_task_that_panicked_is_reported_and_does_not_stop_the_withdrawal() {
+        let task = tokio::spawn(async { panic!("listener task failed") });
+        let mut serving = BTreeMap::from([("atlas", (1, task))]);
+        tokio::task::yield_now().await;
+        withdraw_changed(&mut serving, &BTreeMap::new(), WITHDRAW_WAIT).await;
         assert!(serving.is_empty());
     }
 
