@@ -5797,6 +5797,7 @@ async fn run(cli: Cli) -> Result<()> {
         command: PtyCommand::ServeFabric(args),
     } = &cli.command
     {
+        st3_client::client_mode::require_local()?;
         return st3::terminal_fabric::serve_stdio(&args.pty_root).await;
     }
     if let Command::Skill(args) = cli.command {
@@ -5814,6 +5815,7 @@ async fn run(cli: Cli) -> Result<()> {
         return Err(CommandExit(code as u8).into());
     }
     if let Command::Admission { command } = cli.command {
+        st3_client::client_mode::require_local()?;
         return run_admission(command, cli.json);
     }
     if let Command::ReplicationWorker(args) = cli.command {

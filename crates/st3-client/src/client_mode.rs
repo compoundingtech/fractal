@@ -119,8 +119,39 @@ impl Store {
     }
 
     pub fn configured() -> Result<Self> {
-        let profile = crate::device::profile_path()?;
-        Self::at(profile.with_file_name("client-mode.json"))
+        let instance = std::env::var("ST_INSTANCE")
+            .map(Some)
+            .or_else(|error| match error {
+                std::env::VarError::NotPresent => Ok(None),
+                _ => Err(anyhow::anyhow!("Cannot determine client-mode instance")),
+            })?;
+        Self::for_instance(instance.as_deref())
+    }
+
+    /// Account authority is independent of HOME and XDG overrides. An instance is an explicit
+    /// separate namespace, not another location for the default instance's daemon state.
+    pub fn for_instance(instance: Option<&str>) -> Result<Self> {
+        let home = account_home().context("Cannot determine authoritative client-mode state")?;
+        let path = match instance {
+            Some(name) => {
+                ensure!(
+                    !name.is_empty()
+                        && name.len() <= 24
+                        && name
+                            .bytes()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+                        && !name.starts_with('-')
+                        && !name.ends_with('-')
+                        && !name.contains("--"),
+                    "Invalid client-mode instance"
+                );
+                home.join(".st-instance")
+                    .join(name)
+                    .join("state/st3/client-mode.json")
+            }
+            None => home.join(".local/state/st3/client-mode.json"),
+        };
+        Self::at(path)
     }
 
     pub fn path(&self) -> &Path {
@@ -200,6 +231,43 @@ impl Store {
     }
 }
 
+/// Resolve the effective account through NSS, never through caller-supplied home variables.
+fn account_home() -> Result<PathBuf> {
+    use std::{ffi::CStr, os::unix::ffi::OsStrExt as _};
+    let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    // Bounded, one-shot NSS lookup. A local lookup error is a refusal, not a retry/fallback.
+    let mut buffer = vec![0_u8; 64 * 1024];
+    // SAFETY: all buffers/pointers are valid for the call; successful result fields point into
+    // buffer and are copied to an owned PathBuf before buffer is dropped.
+    let code = unsafe {
+        libc::getpwuid_r(
+            libc::geteuid(),
+            entry.as_mut_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    ensure!(
+        code == 0 && !result.is_null(),
+        "Effective account home lookup failed"
+    );
+    // SAFETY: getpwuid_r initialized entry on success and supplied a C string in buffer.
+    let entry = unsafe { entry.assume_init() };
+    ensure!(
+        !entry.pw_dir.is_null(),
+        "Effective account has no home directory"
+    );
+    let bytes = unsafe { CStr::from_ptr(entry.pw_dir) }.to_bytes();
+    let home = PathBuf::from(std::ffi::OsStr::from_bytes(bytes));
+    ensure!(
+        home.is_absolute(),
+        "Effective account home must be absolute"
+    );
+    Ok(home)
+}
+
 fn private_regular(file: &File) -> Result<()> {
     let metadata = file.metadata()?;
     ensure!(
@@ -260,7 +328,10 @@ impl Update<'_> {
 /// All daemon and local client entry points share this refusal. It is deliberately independent
 /// of endpoint overrides and daemon configuration, so an explicit socket cannot bypass mode.
 pub fn require_local() -> Result<()> {
-    Store::configured()?.read()?.require_local()
+    Store::configured()?
+        .read()
+        .context("Cannot read authoritative client-mode state")?
+        .require_local()
 }
 
 #[cfg(test)]

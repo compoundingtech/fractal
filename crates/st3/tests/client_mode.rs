@@ -1,94 +1,63 @@
-//! Mode inhibition must apply before config parsing, socket access or service changes, and an
-//! instance's interrupted transition must never affect its neighbour.
-use std::{fs, os::unix::fs::PermissionsExt as _, path::Path, process::Command};
+//! Read-only CLI checks use isolated instance names and never write the account authority file.
+//! State publication/refusal is tested with explicit temporary Stores in st3-client; production
+//! authority cannot be redirected to a test directory through HOME or XDG variables.
+use std::{path::Path, process::Command};
 
-fn command(home: &Path, instance: &str, args: &[&str]) -> std::process::Output {
-    Command::new(test_bin!("st3"))
-        .env_clear()
-        .env("HOME", home)
-        .args(["--instance", instance, "--daemon-wait", "0"])
-        .args(args)
-        .output()
-        .unwrap()
-}
-
-fn transition(home: &Path, instance: &str) {
-    let directory = home.join(format!(".st-instance/{instance}/config/st3"));
-    fs::create_dir_all(&directory).unwrap();
-    let path = directory.join("client-mode.json");
-    fs::write(
-        &path,
-        br#"{"mode":"transition","version":1,"generation":1,"operation":"enter/test"}"#,
-    )
-    .unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
-}
-
-#[test]
-fn isolated_instance_status_is_read_only_and_distinguishes_interrupted_transition() {
-    let home = tempfile::tempdir().unwrap();
-    let first = command(
-        home.path(),
-        "custody-a",
-        &["client-mode", "status", "--json"],
-    );
-    assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
-    assert_eq!(value["outcome"], "read-succeeded");
-    assert_eq!(value["state"]["mode"], "local");
-    assert!(
-        !home
-            .path()
-            .join(".st-instance/custody-a/config/st3/client-mode.json")
-            .exists()
-    );
-    transition(home.path(), "custody-a");
-    let interrupted = command(
-        home.path(),
-        "custody-a",
-        &["client-mode", "status", "--json"],
-    );
-    let value: serde_json::Value = serde_json::from_slice(&interrupted.stdout).unwrap();
-    assert_eq!(value["state"]["mode"], "transition");
-    assert_eq!(value["local_start_inhibited"], true);
-    let other = command(
-        home.path(),
-        "custody-b",
-        &["client-mode", "status", "--json"],
-    );
-    let value: serde_json::Value = serde_json::from_slice(&other.stdout).unwrap();
-    assert_eq!(value["state"]["mode"], "local");
-}
-
-#[test]
-fn direct_start_worker_and_service_mutations_refuse_before_touching_preserved_state() {
-    let home = tempfile::tempdir().unwrap();
-    transition(home.path(), "custody-a");
-    for args in [
-        vec!["up", "--config", "/nonexistent/client-mode-test.toml"],
-        vec![
-            "replication-worker",
-            "--config",
-            "/nonexistent/client-mode-test.toml",
-        ],
-        vec!["service", "install"],
-        vec!["service", "restart"],
-        vec!["service", "reset"],
-    ] {
-        let output = command(home.path(), "custody-a", &args);
-        assert!(!output.status.success(), "{args:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("inhibited"),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+fn status(home: Option<&Path>, instance: Option<&str>) -> serde_json::Value {
+    let mut command = Command::new(test_bin!("st3"));
+    command.env_clear();
+    if let Some(home) = home {
+        command
+            .env("HOME", home)
+            .env("XDG_CONFIG_HOME", home.join("shadow"));
     }
-    let state = home
-        .path()
-        .join(".st-instance/custody-a/config/st3/client-mode.json");
-    assert!(fs::read_to_string(state).unwrap().contains("enter/test"));
+    if let Some(instance) = instance {
+        command.args(["--instance", instance]);
+    }
+    let output = command
+        .args(["client-mode", "status", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn home_and_xdg_overrides_cannot_redirect_default_mode_authority() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let a = status(Some(first.path()), None);
+    let b = status(Some(second.path()), None);
+    assert_eq!(a["authority_path"], b["authority_path"]);
+    assert_eq!(a["outcome"], "read-succeeded");
+    assert!(!first.path().join("shadow").exists());
+    assert!(!second.path().join("shadow").exists());
+}
+
+#[test]
+fn no_home_or_xdg_still_resolves_the_effective_account() {
+    let home = tempfile::tempdir().unwrap();
+    let a = status(Some(home.path()), None);
+    let b = status(None, None);
+    assert_eq!(a["authority_path"], b["authority_path"]);
+}
+
+#[test]
+fn named_instances_have_distinct_account_anchored_authority() {
+    let home = tempfile::tempdir().unwrap();
+    let one = format!("cm-{}", &uuid::Uuid::now_v7().simple().to_string()[16..]);
+    let two = format!("cm-{}", &uuid::Uuid::now_v7().simple().to_string()[16..]);
+    let a = status(Some(home.path()), Some(&one));
+    let b = status(Some(home.path()), Some(&two));
+    assert_ne!(a["authority_path"], b["authority_path"]);
+    assert!(a["authority_path"].as_str().unwrap().contains(&one));
+    assert!(b["authority_path"].as_str().unwrap().contains(&two));
+    assert!(!std::path::Path::new(a["authority_path"].as_str().unwrap()).exists());
+    assert!(!std::path::Path::new(b["authority_path"].as_str().unwrap()).exists());
+    assert_eq!(a["state"]["mode"], "local");
+    assert_eq!(b["state"]["mode"], "local");
 }

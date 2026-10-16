@@ -20,6 +20,7 @@ enum Command {
 struct Status {
     version: u32,
     outcome: &'static str,
+    authority_path: std::path::PathBuf,
     local_start_inhibited: bool,
     state: State,
 }
@@ -27,10 +28,12 @@ struct Status {
 pub(crate) fn run(args: &Args, json: bool) -> Result<()> {
     match args.command {
         Command::Status => {
-            let state = Store::configured()?.read()?;
+            let store = Store::configured()?;
+            let state = store.read()?;
             let status = Status {
                 version: 1,
                 outcome: "read-succeeded",
+                authority_path: store.path().to_owned(),
                 local_start_inhibited: state.require_local().is_err(),
                 state,
             };

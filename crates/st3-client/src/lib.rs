@@ -45,11 +45,7 @@ const RAW_TERMINAL_CHUNK_BYTES: usize = 16_384;
 /// endpoint (including `ST3_ENDPOINT`, when the caller exposes it through clap) wins,
 /// followed by the normal st config file and then the XDG runtime/state defaults.
 pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, ClientError> {
-    client_mode::require_local().map_err(|_| {
-        ClientError::Protocol(
-            "Local endpoint inhibited by client mode; inspect st client-mode status".into(),
-        )
-    })?;
+    client_mode::require_local().map_err(|error| ClientError::Protocol(error.to_string()))?;
     if let Some(path) = explicit {
         return Ok(path);
     }
