@@ -91,12 +91,31 @@ def proof_for(tool, base, tree, check, keys_from):
         result = json.loads(done.stdout)
     except ValueError:
         return None, 'verify-error'
+    return proof_verdict(result)
+
+
+def proof_verdict(result):
+    """(record or None, reason) for one verifier result. Only a full, satisfied record from a first-attempt workflow
+    with a recorded retry count of zero is proof. The count lives in the record's inputs as `stage_flaky` (the
+    linux-gate aggregate, `linux-tests=<n>,...`) or `nextest_flaky` (a shard). An ABSENT count means retries unknown,
+    never zero: such a record is refused as proof, and its id is still returned so a report can count the candidate."""
     if not result.get('satisfied') or result.get('tier') != 'full':
         return None, f'no-record:{result.get("reason", "unsatisfied")}'
-    # A pass that needed a workflow re-run is weaker evidence than a clean one (Intake, condition 2). In-job nextest
-    # retries are not in the record yet; until a producer records them, flag the proof rather than trust it silently.
-    if str(result.get('inputs', {}).get('run_attempt', '1')) != '1':
+    inputs = result.get('inputs', {})
+    if str(inputs.get('run_attempt', '1')) != '1':
         return None, 'proof-was-a-rerun'
+    counts = [inputs[k] for k in ('stage_flaky', 'nextest_flaky') if k in inputs]
+    if not counts:
+        return result['record'], 'retries-unknown'
+    numbers = []
+    for value in counts:
+        for part in str(value).split(','):
+            number = part.rpartition('=')[2].strip()
+            if not number.isdigit():
+                return result['record'], 'retries-unknown'
+            numbers.append(int(number))
+    if any(numbers):
+        return None, 'proof-had-retries'
     return result['record'], 'match'
 
 
@@ -138,10 +157,11 @@ def decide(plugin, base, head, tool, keys_from):
         if commit != base_tip and project(tool, tree, check, inputs) != key:
             break
         proof, reason = proof_for(tool, base, tree, check, keys_from)
-        if not reason.startswith('no-record:stale_tree') and not reason.startswith('no-record:no_record'):
+        if not reason.startswith(('no-record:stale_tree', 'no-record:no_record')):
             break
-    if proof is None:
-        return dict(line, decision='run', reason=reason)
+    if proof is None or reason != 'match':
+        # retries-unknown keeps the candidate's id in `proof` for reports, but the decision is run.
+        return dict(line, decision='run', proof=proof, reason=reason)
     return dict(line, decision='covered', proof=proof, reason='match')
 
 

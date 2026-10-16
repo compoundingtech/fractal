@@ -151,6 +151,32 @@ class RustReads(unittest.TestCase):
             self.assertIn(module, rust.ALWAYS['whole-tree-lints'][-1])
 
 
+class ProofVerdict(unittest.TestCase):
+    BASE = {'satisfied': True, 'tier': 'full', 'record': 'r' * 40}
+
+    def verdict(self, **inputs):
+        return select.proof_verdict(dict(self.BASE, inputs=inputs))
+
+    def test_absent_retry_count_is_unknown_never_zero(self):
+        self.assertEqual(self.verdict(run_attempt='1'), ('r' * 40, 'retries-unknown'))
+
+    def test_unparsable_retry_count_is_unknown(self):
+        self.assertEqual(self.verdict(stage_flaky='linux-tests=?'), ('r' * 40, 'retries-unknown'))
+        self.assertEqual(self.verdict(stage_flaky=''), ('r' * 40, 'retries-unknown'))
+
+    def test_any_retried_test_refuses_the_proof(self):
+        self.assertEqual(self.verdict(stage_flaky='linux-tests=0,linux-tests-shard-2=1'), (None, 'proof-had-retries'))
+        self.assertEqual(self.verdict(nextest_flaky='3'), (None, 'proof-had-retries'))
+
+    def test_clean_first_attempt_with_zero_retries_is_proof(self):
+        self.assertEqual(self.verdict(run_attempt='1', stage_flaky='linux-tests=0,linux-tests-shard-2=0'), ('r' * 40, 'match'))
+
+    def test_rerun_workflow_and_unsatisfied_records_are_refused(self):
+        self.assertEqual(self.verdict(run_attempt='2', stage_flaky='linux-tests=0'), (None, 'proof-was-a-rerun'))
+        self.assertEqual(select.proof_verdict({'satisfied': False, 'reason': 'stale_tree'}), (None, 'no-record:stale_tree'))
+        self.assertEqual(select.proof_verdict(dict(self.BASE, tier='degraded')), (None, 'no-record:unsatisfied'))
+
+
 class Classification(unittest.TestCase):
     def repo(self, files):
         directory = Path(tempfile.mkdtemp(prefix='st-select-test-'))
