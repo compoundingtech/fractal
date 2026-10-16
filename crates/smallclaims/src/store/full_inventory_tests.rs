@@ -10,7 +10,12 @@ use super::*;
 const FLEET: &str = "invented-fleet";
 
 fn source() -> Store {
-    let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+    node("alder")
+}
+
+/// A store holding three claims, so its summary carries range digests.
+fn node(name: &str) -> Store {
+    let store = Store::open_memory(name, Arc::new(Plain)).unwrap();
     store.bind_fleet(FLEET).unwrap();
     for index in 0..3 {
         store
@@ -54,9 +59,14 @@ fn a_request_without_range_digests_and_a_different_digest_gets_a_counted_full_an
 #[test]
 fn a_request_with_range_digests_is_answered_compactly_and_not_counted() {
     let store = source();
-    let peer = Store::open_memory("birch", Arc::new(Plain)).unwrap();
-    peer.bind_fleet(FLEET).unwrap();
+    // An empty store's summary has no range digests, which is a bucketless request; a peer
+    // holding claims sends real ones.
+    let peer = node("birch");
     let compact = peer.export_replication_summary(FLEET).unwrap().inventory;
+    assert!(
+        !compact.buckets.is_empty(),
+        "the request carries range digests"
+    );
     let before = answers();
     let answer = store.export_replication_exchange(FLEET, &compact).unwrap();
     assert_eq!(answers(), before);
