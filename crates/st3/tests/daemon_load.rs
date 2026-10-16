@@ -1190,6 +1190,8 @@ fn targets_come_from_the_targets_file_and_describe_without_gating() {
         ("seat work", "GET /v1/work"),
         ("person read /v1/client/now", "GET /v1/client/now"),
         ("person read /v1/client/agents", "GET /v1/client/agents"),
+        ("person read /v1/client/missions", "GET /v1/client/missions"),
+        ("missions snapshot", "stream missions"),
         (ROSTER_SNAPSHOT, "stream agents"),
         (ROSTER_CONNECT_SNAPSHOT, "stream agents"),
         ("work snapshot", "stream work"),
@@ -1200,13 +1202,7 @@ fn targets_come_from_the_targets_file_and_describe_without_gating() {
             .unwrap_or_else(|| panic!("{path} has no target in slo/targets.toml"));
         assert_eq!(descriptive_target(name), Some(target.target(false)), "{name}");
     }
-    for name in [
-        "claim",
-        "replication exchange",
-        "person read /v1/client/missions",
-        "missions snapshot",
-        LONG_POLL,
-    ] {
+    for name in ["claim", "replication exchange", LONG_POLL] {
         assert_eq!(descriptive_target(name), None, "{name}");
     }
     // Include the existing measured fresh read: its 1000 ms budget is independent
