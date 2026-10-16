@@ -78,7 +78,7 @@ function TranscriptMessage() {
   const caption = React.useContext(SenderCaption)
   const continuation = React.useContext(RunContinuation)
   if (item === undefined || item._tag === 'ToolCall' || item._tag === 'Reasoning') return null
-  if (item._tag === 'Text' && item.role !== 'system') return item.role === 'user' ? <UserMessage item={{ ...item, role: 'user' }} /> : <SeatProse item={{ ...item, role: 'assistant' }} senderLine={caption} continuation={continuation} />
+  if (item._tag === 'Text' && item.role !== 'system') return item.role === 'user' ? <UserMessage item={item as TextItem & { readonly role: 'user' }} /> : <SeatProse item={item as TextItem & { readonly role: 'assistant' }} senderLine={caption} continuation={continuation} />
   if (item._tag === 'Message') return <SeatProse item={item} senderLine={caption ?? item.sender?.label ?? item.from} />
   return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{summary}</span></MessagePrimitive.Root>
 }
@@ -101,8 +101,11 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
   }, [item.text, expanded])
   return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}{item.sendState?._tag === 'Unconfirmed' && <SendUnconfirmed state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
 }
+// Sharing the formatter avoids constructing one for every mounted answer.
+let answerTime: Intl.DateTimeFormat | undefined
+const formatAnswerTime = (completed: number): string => (answerTime ??= new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })).format(completed)
 /** Sender, time and Copy share one header line; Copy shows on pointer hover or keyboard focus. A prose run shows the header once. */
-export function SeatProse({ item, senderLine, continuation = false }: { readonly item: (TextItem & { readonly role: 'assistant' }) | MessageItem; readonly senderLine?: string; readonly continuation?: boolean }) {
+export const SeatProse = React.memo(function SeatProse({ item, senderLine, continuation = false }: { readonly item: (TextItem & { readonly role: 'assistant' }) | MessageItem; readonly senderLine?: string; readonly continuation?: boolean }) {
   const streaming = item._tag === 'Text' && item.streaming
   const completed = streaming ? NaN : Date.parse(item.at)
   const showSeatHeader = React.useContext(SeatHeader)
@@ -112,11 +115,11 @@ export function SeatProse({ item, senderLine, continuation = false }: { readonly
   return <MessagePrimitive.Root data-testid="agent-message" data-item-id={item.id} data-item-kind={item._tag} data-run-continuation={continuation || undefined} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} {...stylex.props(styles.answer)}>
     {header && <div data-testid="message-header" {...stylex.props(styles.answerHeader)}>
       {senderLine !== undefined && <p data-testid="message-sender" {...stylex.props(styles.sender)}>{senderLine}</p>}
-      {!streaming && <span {...stylex.props(styles.answerMeta)}>{runText === undefined ? <ActionBarPrimitive.Copy aria-label="Copy answer" {...stylex.props(styles.copy, hovered && styles.copyVisible)}><Icon name="copy" size={12} /></ActionBarPrimitive.Copy> : <RunCopy text={runText} visible={hovered} />}{Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{new Date(completed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</span>}
+      {!streaming && <span {...stylex.props(styles.answerMeta)}>{runText === undefined ? <ActionBarPrimitive.Copy aria-label="Copy answer" {...stylex.props(styles.copy, hovered && styles.copyVisible)}><Icon name="copy" size={12} /></ActionBarPrimitive.Copy> : <RunCopy text={runText} visible={hovered} />}{Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{formatAnswerTime(completed)}</time>}</span>}
     </div>}
     {item._tag === 'Text' ? <Markdown text={item.text} streaming={item.streaming} /> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
   </MessagePrimitive.Root>
-}
+})
 /**
  * ActionBarPrimitive.Copy for a whole prose run: it writes the run text instead of this message's own text.
  * Like the primitive, the write starts inside the press; a missing API, sync throw or rejection is swallowed;
