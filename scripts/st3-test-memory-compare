@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Compare the peak memory a test run reported with a baseline, and say what grew.
+
+The report is the JSON lines the test supervisor appends when SMALLTALK_TEST_MEMORY_REPORT is
+set (docs/ci.md). Rows are keyed by test and process name (`st3 up`, `st3 replication-worker`,
+`test`); a test that ran again (a retry, or several daemons of one name) counts as its largest
+peak. Sizes are MiB of resident memory, the kernel's high-water mark.
+
+    st3-test-memory-compare REPORT --write-baseline BASELINE   # record a run as the baseline
+    st3-test-memory-compare REPORT --baseline BASELINE [--fail]  # flag growth against it
+
+A row is flagged when its peak is more than --growth (default 25%) AND more than --min-mib
+(default 100) above the baseline's, or when a process the baseline never had peaks over
+--min-mib. Both limits keep small processes and ordinary run-to-run noise out of the list.
+"""
+import argparse
+import json
+import sys
+
+KIB_PER_MIB = 1024
+
+
+def peaks(path):
+    rows = {}
+    with open(path) as report:
+        for number, line in enumerate(report, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                test = record["test"]
+                processes = record["processes"]
+            except (ValueError, KeyError, TypeError) as error:
+                raise SystemExit(f"{path}:{number}: not a memory report line ({error})")
+            for process in processes:
+                key = (test, process["name"])
+                rows[key] = max(rows.get(key, 0), int(process["peak_kb"]))
+    return rows
+
+
+def load_baseline(path):
+    with open(path) as baseline:
+        document = json.load(baseline)
+    if document.get("version") != 1:
+        raise SystemExit(f"{path}: unknown baseline version {document.get('version')!r}")
+    return {(test, name): kb for test, names in document["peaks_kb"].items() for name, kb in names.items()}
+
+
+def write_baseline(path, rows):
+    nested = {}
+    for (test, name), kb in sorted(rows.items()):
+        nested.setdefault(test, {})[name] = kb
+    with open(path, "w") as baseline:
+        json.dump({"version": 1, "unit": "KiB of VmHWM", "peaks_kb": nested}, baseline, indent=1, sort_keys=True)
+        baseline.write("\n")
+
+
+def flagged(rows, baseline, growth, min_mib):
+    """Rows over their baseline, largest increase first: (test, name, was_mib or None, now_mib)."""
+    out = []
+    for key, kb in rows.items():
+        now = kb / KIB_PER_MIB
+        was_kb = baseline.get(key)
+        if was_kb is None:
+            if now > min_mib:
+                out.append((*key, None, now))
+            continue
+        was = was_kb / KIB_PER_MIB
+        if now > was * (1 + growth) and now - was > min_mib:
+            out.append((*key, was, now))
+    return sorted(out, key=lambda row: -(row[3] - (row[2] or 0)))
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("report")
+    parser.add_argument("--baseline")
+    parser.add_argument("--write-baseline", metavar="FILE")
+    parser.add_argument("--growth", type=float, default=0.25)
+    parser.add_argument("--min-mib", type=float, default=100.0)
+    parser.add_argument("--top", type=int, default=15, help="rows of the largest peaks to print")
+    parser.add_argument("--fail", action="store_true", help="exit 1 when anything is flagged")
+    args = parser.parse_args(argv)
+    rows = peaks(args.report)
+    if not rows:
+        raise SystemExit(f"{args.report}: no processes reported")
+    if args.write_baseline:
+        write_baseline(args.write_baseline, rows)
+        print(f"baseline of {len(rows)} (test, process) peaks written to {args.write_baseline}")
+    print(f"largest peaks of {len(rows)} (test, process) rows, MiB:")
+    for (test, name), kb in sorted(rows.items(), key=lambda item: -item[1])[: args.top]:
+        print(f"  {kb / KIB_PER_MIB:9.1f}  {name:28} {test}")
+    if not args.baseline:
+        return 0
+    over = flagged(rows, load_baseline(args.baseline), args.growth, args.min_mib)
+    if not over:
+        print(f"no peak grew more than {args.growth:.0%} and {args.min_mib:g} MiB over the baseline")
+        return 0
+    print(f"GREW more than {args.growth:.0%} and {args.min_mib:g} MiB over the baseline (MiB):")
+    for test, name, was, now in over:
+        before = "new" if was is None else f"{was:.1f}"
+        print(f"  {before:>9} -> {now:9.1f}  {name:28} {test}")
+    return 1 if args.fail else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
