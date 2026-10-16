@@ -619,7 +619,9 @@ fn during<T>(clock: &Mutex<StageClock>, stage: &'static str, work: impl FnOnce()
 
 /// Run `work` as `stage` of the staged lend this thread is in, then resume the stage it
 /// interrupted, whose time excludes `work`'s. Outside a `Stages` scope it only runs `work`, so
-/// code that both a staged lend and other callers reach can mark its parts.
+/// code that both a staged lend and other callers reach can mark its parts. If `work` panics, the
+/// stage stays open until the writer closes the lend at the end of its hold, which charges it the
+/// rest, as for any stage a borrower leaves open.
 pub fn stage<T>(stage: &'static str, work: impl FnOnce() -> T) -> T {
     match STAGES.with(|stages| stages.borrow().clone()) {
         Some(clock) => during(&clock, stage, work),
