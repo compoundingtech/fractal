@@ -104,6 +104,8 @@ pub use tile_endpoint::{
 pub use published_lists::start_published_lists;
 mod changes;
 
+#[cfg(test)]
+mod legacy_handler_guard_tests;
 // Route families: each file holds the handlers of one group of routes; the router below names
 // them as family::handler.
 mod agents;
