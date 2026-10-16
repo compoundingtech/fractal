@@ -1342,9 +1342,9 @@ async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArg
 
 /// What an instance's uninstall removes from its directory: every entry except the one that holds
 /// the work root. The work root can lie inside the instance but holds the person's work, so
-/// everything else goes and it stays.
+/// everything else goes, except a foreign replacement of the fractal command.
 fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
-    fs::read_dir(root)
+    let mut removals: Vec<PathBuf> = fs::read_dir(root)
         .map(|entries| {
             entries
                 .flatten()
@@ -1352,7 +1352,24 @@ fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
                 .filter(|path| !work.starts_with(path))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // An instance owns its directory, but a foreign replacement of the new program name
+    // does not become ours. Plan bin entries separately so deletion rechecks its symlink.
+    let bin = root.join("bin");
+    if fs::symlink_metadata(bin.join("fractal")).is_ok()
+        && let Some(index) = removals.iter().position(|path| path == &bin)
+    {
+        removals.swap_remove(index);
+        if let Ok(entries) = fs::read_dir(&bin) {
+            removals.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| fractal::may_remove(path)),
+            );
+        }
+    }
+    removals
 }
 
 fn directory_is_empty(path: &Path) -> bool {
@@ -1380,13 +1397,15 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
     let manifest: Option<Value> = fs::read(data_dir.join("install.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-    let binaries = manifest
-        .as_ref()
-        .and_then(|manifest| manifest["files"].as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|path| path.as_str().map(PathBuf::from))
-        .collect::<Vec<_>>();
+    let binaries = fractal::installed_binaries(
+        manifest
+            .as_ref()
+            .and_then(|manifest| manifest["files"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|path| path.as_str().map(PathBuf::from))
+            .collect::<Vec<_>>(),
+    );
     let work_root = config.work_root().ok();
     let st2_state = state_home.join("st2");
     let st2_only_hooks = fs::read_dir(&st2_state)
@@ -1515,6 +1534,10 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
         eprintln!("could not unregister st's Claude plugin: {error:#}");
     }
     for path in &paths {
+        // Ownership may have changed since the removal list was prepared.
+        if !fractal::may_remove(path) {
+            continue;
+        }
         let result = if path.is_dir() {
             fs::remove_dir_all(path)
         } else {
@@ -1533,6 +1556,7 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
         let _ = fs::remove_dir(work);
     }
     if let Some(instance) = &instance {
+        let _ = fs::remove_dir(instance.bin_dir());
         // The directory that holds instances goes with the last one; `remove_dir` leaves it alone
         // while another instance, or anything else, is inside.
         let _ = fs::remove_dir(instance.root());
@@ -1549,6 +1573,7 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
     let remaining = paths
         .iter()
         .filter(|path| path.exists())
+        .filter(|path| fractal::may_remove(path))
         .collect::<Vec<_>>();
     for path in &remaining {
         println!("remains\t{}", path.display());
@@ -34637,5 +34662,20 @@ mod instance_uninstall_tests {
             names(instance_removals(root.path(), elsewhere.path())),
             ["bin", "state", "work"]
         );
+    }
+
+    #[test]
+    fn an_instance_uninstall_preserves_a_foreign_fractal_but_removes_its_owned_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::write(bin.join("st3"), "ours").unwrap();
+        let alias = bin.join("fractal");
+        std::os::unix::fs::symlink("st3", &alias).unwrap();
+        let work = root.path().join("work");
+        assert_eq!(names(instance_removals(root.path(), &work)), ["fractal", "st3"]);
+        fs::remove_file(&alias).unwrap();
+        fs::write(&alias, "foreign").unwrap();
+        assert_eq!(names(instance_removals(root.path(), &work)), ["st3"]);
     }
 }

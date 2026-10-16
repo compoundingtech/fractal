@@ -62,6 +62,12 @@ or move the foreign command and reinstall. Named instances place the alias in th
 own `~/.st-instance/NAME/bin`, not the default command directory. Default Nix and
 Home Manager installations do not expose `fractal`; those paths require explicit opt-in.
 
+Bare `fractal` follows bare `st`'s first-run setup and terminal/agent guards;
+`fractal tui` follows explicit `st ui`. Setup records an owned `fractal` symlink
+in its uninstall manifest. Uninstall also discovers that alias beside a recorded
+`st3` when upgrading an older manifest, and preserves a foreign replacement of
+`fractal`, including inside a named instance.
+
 Put the chosen bin directory on `PATH`. The installer serializes installations in that directory,
 stages both tools and the `st` link, preserves the previous files, then replaces each by atomic
 rename. A handled failure or signal restores the previous command set. This is a series of atomic

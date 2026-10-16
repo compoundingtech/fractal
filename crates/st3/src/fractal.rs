@@ -1,6 +1,6 @@
 //! Additive program-name routing; the existing CLI and UI keep their own identity.
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 #[derive(Debug, Eq, PartialEq)]
@@ -22,12 +22,37 @@ pub fn dispatch(arguments: &mut Vec<OsString>) -> Dispatch {
     }
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
     match arguments.get(1).and_then(|argument| argument.to_str()) {
-        None => arguments.push("ui".into()),
         Some("tui") => arguments[1] = "ui".into(),
         Some("web") => return Dispatch::Web,
         _ => {}
     }
     Dispatch::Cli
+}
+
+/// Only exact installer-created symlinks belong to this installation.
+pub fn owns_alias(path: &Path) -> bool {
+    std::fs::read_link(path)
+        .is_ok_and(|target| target == Path::new("st3") || target == path.with_file_name("st3"))
+}
+
+pub fn may_remove(path: &Path) -> bool {
+    path.file_name() != Some(OsStr::new("fractal")) || owns_alias(path)
+}
+
+/// Extend old setup manifests when an upgrade installed the new alias beside st3.
+/// Recheck recorded aliases too: a foreign replacement never belongs to uninstall.
+pub fn installed_binaries(mut files: Vec<PathBuf>) -> Vec<PathBuf> {
+    let recorded = files.len();
+    for index in 0..recorded {
+        if files[index].file_name() == Some(OsStr::new("st3")) {
+            let alias = files[index].with_file_name("fractal");
+            if owns_alias(&alias) && !files.contains(&alias) {
+                files.push(alias);
+            }
+        }
+    }
+    files.retain(|path| may_remove(path));
+    files
 }
 
 pub fn web(arguments: &[OsString]) -> ExitCode {
@@ -82,11 +107,21 @@ mod tests {
     }
 
     #[test]
-    fn fractal_dispatch_no_arguments_opens_tui() {
-        assert_eq!(
-            route(&["/bin/fractal"]),
-            (Dispatch::Cli, vec!["/bin/fractal".into(), "ui".into()])
-        );
+    fn fractal_dispatch_no_arguments_keeps_onboarding_and_terminal_guards() {
+        let (dispatch, arguments) = route(&["/bin/fractal"]);
+        assert_eq!(dispatch, Dispatch::Cli);
+        assert_eq!(arguments, vec![OsString::from("/bin/fractal")]);
+        for (stdin, stdout, seat, expected) in [
+            (true, true, false, true),
+            (false, true, false, false),
+            (true, false, false, false),
+            (true, true, true, false),
+        ] {
+            assert_eq!(
+                crate::plain_ui_requested(arguments.len(), stdin, stdout, seat),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -120,5 +155,37 @@ mod tests {
                 (Dispatch::Cli, input.iter().map(OsString::from).collect())
             );
         }
+    }
+
+    #[test]
+    fn installed_alias_is_discovered_for_old_manifests_and_only_removed_while_owned() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let st3 = directory.path().join("st3");
+        let alias = directory.path().join("fractal");
+        let legacy_files = vec![st3.clone(), directory.path().join("st")];
+        for target in [PathBuf::from("st3"), st3] {
+            symlink(&target, &alias).unwrap();
+            let upgraded = installed_binaries(legacy_files.clone());
+            assert_eq!(upgraded.last(), Some(&alias));
+            assert!(may_remove(&alias));
+            assert_eq!(installed_binaries(upgraded.clone()), upgraded);
+            std::fs::remove_file(&alias).unwrap();
+        }
+        for target in ["foreign", "/missing/foreign"] {
+            symlink(target, &alias).unwrap();
+            let mut recorded = legacy_files.clone();
+            recorded.push(alias.clone());
+            assert_eq!(installed_binaries(recorded), legacy_files);
+            assert!(!may_remove(&alias));
+            std::fs::remove_file(&alias).unwrap();
+        }
+        std::fs::write(&alias, "foreign").unwrap();
+        assert!(!may_remove(&alias));
+        assert_eq!(installed_binaries(legacy_files.clone()), legacy_files);
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::create_dir(&alias).unwrap();
+        assert!(!may_remove(&alias));
     }
 }
