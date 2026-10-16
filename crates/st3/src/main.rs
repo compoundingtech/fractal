@@ -6960,12 +6960,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let recorder = install_recorder(&config, &login_environment);
     startup_phases.recorder_ms = phase_elapsed_ms();
     if let Some(person) = &config.person {
-        let _ = st3::sekrets::daemon::PERSON.set(person.clone());
+        let _ = st3::sekrets_daemon::PERSON.set(person.clone());
     }
     // Long message bodies this machine owns that no claim names any longer are removed.
     st3::store::message_bodies::spawn_reconciler(store.clone(), config.state_dir.clone());
     // Sekrets is opt-in: this records a gateway's calls once one listens on this host.
-    st3::sekrets::daemon::spawn_importer(
+    st3::sekrets_daemon::spawn_importer(
         store.clone(),
         config.node.clone(),
         config.state_dir.clone(),

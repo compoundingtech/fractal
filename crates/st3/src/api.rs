@@ -16328,11 +16328,11 @@ struct LocalPeer {
 /// This node's key for sekrets attestations, for `st sekrets enable` to register.
 async fn sekrets_node(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let (node, key) =
-        crate::sekrets::daemon::node_key(&state.store, &state.node).map_err(ApiError::bad)?;
+        crate::sekrets_daemon::node_key(&state.store, &state.node).map_err(ApiError::bad)?;
     Ok(Json(json!({
         "node": node,
         "key": key,
-        "person": crate::sekrets::daemon::PERSON.get(),
+        "person": crate::sekrets_daemon::PERSON.get(),
     })))
 }
 
@@ -16355,7 +16355,7 @@ async fn sekrets_attest(
         )));
     };
     blocking_external(move || {
-        crate::sekrets::daemon::attest(
+        crate::sekrets_daemon::attest(
             &state.store,
             &state.node,
             &state.pty_root,
