@@ -68,7 +68,7 @@ fn a_page_that_fits_exactly_is_kept_whole_and_one_byte_less_drops_its_last_envel
     let mut short = whole.clone();
     fit_exchange_body(&mut short, exact - 1).unwrap();
     assert_eq!(short.envelopes.len(), 5);
-    assert!(size(&short) <= exact - 1);
+    assert!(size(&short) < exact);
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn an_exchange_without_envelopes_is_left_alone() {
     let exact = size(&empty);
     fit_exchange_body(&mut empty, exact).unwrap();
     assert!(empty.envelopes.is_empty());
-    assert!(REPLICATION_EXCHANGE_BODY_BUDGET < crate::sync::MAX_EXCHANGE_BYTES);
+    const { assert!(REPLICATION_EXCHANGE_BODY_BUDGET < crate::sync::MAX_EXCHANGE_BYTES) };
 }
 
 #[test]
