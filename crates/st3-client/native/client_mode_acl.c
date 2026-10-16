@@ -154,7 +154,8 @@ void st_client_mode_acl_inspect(int fd, int private_object,
         out->reason = 1; out->os_error = errno; goto done;
     }
     if (acl_present == 0) goto done;
-    if (acl_present != 1 || filesec_get_property(security, FILESEC_ACL, &acl) != 0 || acl == NULL) {
+    // filesec_query_property returns a nonzero validity bit, not necessarily 1.
+    if (filesec_get_property(security, FILESEC_ACL, &acl) != 0 || acl == NULL) {
         out->reason = 1; out->os_error = errno; goto done;
     }
     ssize_t size = acl_size(acl);

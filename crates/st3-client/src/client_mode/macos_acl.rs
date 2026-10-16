@@ -256,9 +256,9 @@ mod tests {
             inspect(&retained, true).disposition,
             AclDisposition::Accepted
         );
-        assert_ne!(
+        assert_eq!(
             inspect(&File::open(&path).unwrap(), true).disposition,
-            AclDisposition::Accepted
+            AclDisposition::AllowGrant
         );
     }
 }
