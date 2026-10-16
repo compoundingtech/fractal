@@ -1,129 +1,188 @@
-# Resource observation preparation: unresolved currentness fence
+# Private resource observation preparation prototype
 
-This private source unit is pinned to installed main
-`4b04f5bdbefb9d7ecac427711a4449866a64f03e`. It takes the explicit blocker branch
-of Root's `message/84b33f26f5e6111b`. It does **not** move production work, add a
-prepared-write API, or qualify a performance fix. All four authored controls are
-**UNRUN**, including their first compile. Only rustfmt parsing and `git diff --check`
-have run. No SQLite, Cargo, local compiler, daemon read, profile, CI action or
-publication was performed.
+This successor implements Root's native-fence direction and exact two-attempt
+progress decision (`message/33b0e7227461f7d0` and `message/36b5b6346537f193`)
+on installed source `4b04f5bdbefb9d7ecac427711a4449866a64f03e`. It supersedes
+the blocker-only implementation at `67001b07`; its four counterexamples remain.
+All 21 authored controls are **UNRUN**, including first compile. Static source
+comparison, rustfmt parsing, diff checks and JSON parsing are the only checks
+performed. No local Cargo, SQLite, compiler, live read, profile, CI action,
+publication or runtime adoption occurred.
 
-The starting evidence is
+The source trace remains
 `doc/fleet/smalltalk/speed/2026-10-16/writer-resource-source-trace@479ded00abd546c1cf6dfa1632ccc781ceffa509b15dfe3760ce41c459e27a39`.
-The retained 03:20:22.190Z event reports a 9,951.192 ms batch, a 9,869.132 ms
-longest job, and seven jobs. The installed call site is
-`Store::record_resource_observation`. This identifies a job, not its observer or
-the expensive inner operation. Only 82.060 ms remain for the other six jobs and
-the surrounding transaction machinery together. The observation function is
-byte-identical in the old ae128a22 and installed 4b04 cuts.
+Its 03:20:22.190Z event identifies a 9,951.192 ms batch with a 9,869.132 ms
+longest resource-observation job. It does not identify the resource or expensive
+inner operation. The original method is identical across ae128a22 and 4b04.
 
-## Exact obstruction
+## Algorithm and effects
 
-There is no established, bounded, keyed currentness token in this cut for the
-canonical actual-state inputs used by this method. The cheap rows already
-available are not such a token:
+`resource_preparation::inputs` extracts the original canonical prefix: active
+subscriptions, normalized facts and attribution, canonical resource and
+collection history, observer health, recipient existence, subscription state,
+and the no-change decision. It reads the canonical source, including repaired
+claims and ordering inputs, rather than trusting the latest resource projection
+or its pending marker. Registry inputs are this executable's immutable registry.
+The three helper parameter changes from Transaction to Connection are read-only;
+their bodies are unchanged.
 
-* `MAX(claims.store_index)` and `desired.claim_id` do not change when a retained
-  actual-state source becomes repaired. The actual fold excludes
-  `projection_digest_repaired_claims`. Observer/subscription state is not covered
-  by `local_resource_projection_pending`, whose claim filters name
-  `resource.observed` only. The existing `latest_actual_value` append-index cache
-  therefore cannot be substituted for the uncached fold used by this method as
-  a new authority fence.
-* `resource_observations` is a latest-value projection. Its clean marker is not a
-  certificate of all source coverage. Its pending triggers cover claim insert/
-  delete and record insert/update for resource claims. They do not establish
-  keyed coverage of every input to canonical ordering, both sides of record
-  identity changes, record deletion, or observer/subscription actuals. The
-  canonical comparator includes claim time, batch origin and sequence, and
-  record position (with a legacy-position fallback). A prepared dependency set
-  must cover these inputs or prove their immutability on every admitted path.
-* `projection_digest_generation` is a global diagnostic generation, not a keyed
-  authority token. It detects the repair case in the first control, but its
-  trigger registry does not cover all physical ordering inputs. The second
-  control changes batch ordering without changing that generation. This is an
-  injected physical source case, **not** a claim that an authenticated producer
-  is permitted to rewrite a signed batch or that this happened in the incident.
-  A narrower candidate still needs an explicit exclusion/coverage proof for
-  those paths.
-* A committed-write observer publishes after the transaction resolves. It cannot
-  fence a dependency changed earlier in the same outer transaction. The third
-  control retains the observer handle, mutates the repair source inside a
-  managed job, and compares that transaction's actual fold with the unchanged
-  commit counter. It does not hold a reader across a writer loan.
-* Installing a whole-store writer epoch would be a different native source
-  adapter with coverage and liveness obligations. Invalidating a multi-second
-  preparation on every unrelated write gives no progress argument on this busy
-  daemon. The existing global counters alone neither establish complete
-  coverage nor solve that problem. No such epoch or retry loop was added.
+Each of at most two attempts first borrows the existing writer at autocommit,
+reads its native cut and returns the loan. Then it starts and ends a fresh reader
+snapshot, prepares inputs, releases every guard/pin, and queues a normal batched
+job. That job retains the original completion/revision and idempotency checks.
+Before consuming any prepared value or error it compares a new native cut on the
+actual transaction connection. Staleness has no effects and requests another
+preparation. Two unusable/stale attempts select exactly one invocation of the
+canonical writer path. There is no busy error or unlimited loop. A previously
+cached response can return without consuming the prepared inputs, as before.
 
-The missing prerequisite is a qualified keyed invalidation/readiness adapter for
-the entire dependency closure, or an equivalent existing adapter whose source
-coverage and invariants can actually be established. It must observe repair,
-import and removal, canonical ordering, opener inputs, dirty projection state,
-observer revision/cancellation and subscription/recipient changes **before a
-later job in the same batch validates**. It must also bind to this store and
-epoch and refuse schema/coverage gaps. The writer must compare that token with
-bounded point work and return a stale-plan result, never fold history there.
-No existing adapter has been proved to provide that closure in this unit.
-Creating persisted generation tables/triggers would exceed the explicit
-no-new-storage condition; an in-memory native adapter would require its actual
-source-coverage/control design rather than an assumed commit hint. Neither was
-silently introduced.
+The append/delivery/idempotency suffix is the original implementation, with only
+its return wrapped in Option. It preserves claim versions/evidence, operation
+identity, attempt receipts, notification contents/recipients and authority.
+The original completion predicate still runs at both writer boundaries. The
+first normalization, collection/history reads and no-change determination move;
+changed observations still perform append-time normalization, author attribution
+and existing inline custom/resource maintenance in the writer. The fallback
+still performs the full old prefix there. Neither a writer-hold cap nor an outage
+cure follows from this prototype.
 
-## Authored source controls
+## Native cut and coverage
 
-The complete bodies are in
-`crates/st3/src/store/resource_preparation_fence_tests.rs`, registered only under
-`cfg(test)`. The helper is named `IncompleteFence`; it must never be used to
-authorize an effect. All four controls are UNRUN.
+The cut retains native connection identity, filename, total_changes64, main and
+TEMP schema cookies, main data_version and user_version. Store identity uses a
+retained Arc allocation belonging to this CoreStore, not the numeric committed
+claim frontier. Prepared values additionally belong to one Fence instance. The
+original Store remains borrowed throughout the operation; its writer is never
+closed/replaced by this path. Reopen allocates a new incarnation while the old
+Arc remains retained, so raw-address reuse cannot validate it.
 
-1. `repairing_observer_health_is_invisible_to_append_and_resource_projection_fences`
-   holds retained claims and the candidate token fixed, excludes the healthy
-   state through the actual repair-cache seam, and requires the uncached actual
-   fold to become degraded. It separately requires the global digest generation
-   to change, so it does not falsely say that generation misses this repair.
-2. `canonical_batch_order_is_not_covered_by_the_global_projection_generation`
-   constructs an invented equal-time ordering case, changes the ordering source,
-   and requires both candidate tokens to stay equal while the actual fold
-   changes. It rolls the injected metadata back and checks the old actual state
-   is restored. This tests physical coverage, not repair or signing authority.
-3. `a_commit_observer_does_not_fence_an_uncommitted_actual_state_change`
-   compares a retained live commit observer with the writer's actual state after
-   the repair seam changes but before commit; then requires publication after
-   commit. It does not assert that two separately scheduled jobs were batched.
-4. `unchanged_values_skip_history_but_a_named_attempt_keeps_its_idempotent_receipt`
-   exercises the real public observation method on an invented declared
-   resource/observer. An unchanged poll without an attempt must append nothing;
-   a named attempt must add exactly one matching observer receipt without a new
-   resource value; retrying the identical operation must add nothing further.
-   It uses actual claim counts and independently inspects the attempt field.
+Pinned dependencies are rusqlite 0.32.1 and libsqlite3-sys 0.30.1, bundled SQLite
+3.46.0. The bundled feature selects modern_sqlite, and InnerConnection's wrapper
+calls sqlite3_total_changes64. The following facts were checked in primary docs
+and the pinned wrapper/amalgamation source:
 
-Raw repair-cache and ordering writes here are isolated fixture mutations. They
-are not a new public repair operation, a simulated authenticated import, or a
-replacement for signed mixed-build/repair tests. Recipient/observer revision,
-opener/import and dirty-state race controls for a future real adapter remain
-owed. No passing result or complete race coverage is inferred from these bodies.
+* [total_changes](https://www.sqlite.org/c3ref/total_changes.html) counts completed
+  same-connection row mutations, including trigger and foreign-key work. REPLACE
+  omits its implicit deletion but its successful insertion counts. A synthetic
+  INSTEAD OF view row is omitted; its actual base-table writes count. The
+  prototype uses no update hook and therefore does not inherit its WITHOUT
+  ROWID or truncate-delete exclusions. Rollback of completed DML conservatively
+  invalidates; the authored control requires this pinned behavior.
+* [data_version](https://www.sqlite.org/pragma.html#pragma_data_version) is compared
+  only on the same native writer handle. It detects other-connection/process
+  commits; it is not evidence for own-connection writes. The in-transaction
+  total-changes comparison detects earlier same-batch DML before publication.
+* [schema_version](https://www.sqlite.org/pragma.html#pragma_schema_version)
+  catches ordinary DDL and VACUUM. The pinned VACUUM implementation restores its
+  saved row counter but increments the schema cookie. A schema cookie is never
+  treated as file identity. Native read errors and a signed-counter overflow
+  value make a plan unusable.
+* [SQLite isolation](https://www.sqlite.org/isolation.html) protects the later
+  transaction: a WAL read cut cannot upgrade after another writer has made it
+  stale. Existing canonical transaction errors remain errors, not fast-path
+  success. No uncommitted reader mode is admitted.
 
-## Writer work accounting and disposition
+This is a conservative connection-wide fence, not keyed invalidation. Supported
+raw DML, repair/import, row deletion, order changes, pending projection changes,
+observer/recipient/opener changes and trigger work need no separate registration:
+the same writer's actual counter is read before use. Neither observe_commits nor
+projection_digest_generation participates in the proof. No hook, dispatcher,
+transaction-finalizer, telemetry label or schema callback is installed/replaced.
 
-Production code is unchanged except for a test-only module declaration. The
-current writer still performs canonical normalization and history folds for the
-resource, observer, supplied collection items and active subscriptions. The
-no-change decision still follows those reads. A changed/attempt observation
-still appends receipts/deliveries and runs the existing inline custom/resource
-maintenance. No statement count, writer-hold reduction or CPU saving is claimed.
+Coverage is for this installed repository's ordinary physical mutation paths,
+not arbitrary new SQL extensions. The source audit found no production assignment
+of schema_version/writable_schema, native deserialize/backup-into-live-store,
+writer-handle replacement, or RAISE(FAIL/IGNORE) trigger. The latter matters to
+REPLACE: no unsupported abort-after-implicit-delete path is assumed covered by
+its omitted delete count. Cookie forgery, custom native functions that mutate
+physical pages outside SQLite DML, an externally replaced live file, and unknown
+custom mutation APIs are not proved safe by these numbers. If any is a supported
+production path, this candidate needs an additional native fence or eligibility
+proof before admission. This is an explicit review obligation, not a newly
+granted restriction on an existing caller. Logical caps and public errors are
+unchanged. The authored REPLACE control covers the actual ordinary successful
+REPLACE shape, not every possible custom trigger program.
 
-A future prepared implementation must prepare those canonical inputs in one
-off-writer read cut, release that cut before queueing, and compare a complete
-token under the writer. Claim/evidence identity, attempt receipts, idempotency,
-notifications, recipients and authority must remain intact. The token must
-make validation proportional to the actual dependency keys rather than their
-retained histories. This unit does not have the missing adapter and therefore
-does not wire an unsafe fast path or move validation behind an incomplete check.
+## Store, snapshot and loan eligibility
 
-Root and existing Intake/curator receive this private diff and all control
-bodies before any compiler/publication decision. The existing #2930 telemetry
-stack and #3082 productive cohort are untouched. The fleet latency incident,
-Window 4 hold, Silber failed gate and Bluey disk hold remain unresolved. This
-packet closes only the finite feasibility/discriminator unit, not the incident.
+CoreStore::open opens one native writer, normalizes its opened filename, and
+constructs ReadPool from that same path. open_memory constructs one unique UUID
+shared-memory URI for both; its native empty filename is accepted only for that
+Store's shared-memory mode. Preparation checks Store/ReadPool path agreement,
+reader native filename against the seed, and the reader's main schema cookie.
+It rejects foreign Fence/Store incarnations. It does not compare data_version
+between connections.
+
+An existing request loan or registered pin is ineligible; an unregistered active
+reader transaction is also ineligible. After the seed is returned, read_snapshot
+performs BEGIN and a first current_index read before the input closure. It
+cannot join an old same-store request/pin because those were excluded on the
+same thread before seed. Its guard rolls back/releases on every exit, before
+validation is enqueued. TEMP objects could change name resolution differently
+on the writer and reader; the private path permits only the existing write_clock
+table and otherwise selects the old path. The TEMP catalog check is additional
+SQL cost, not free metadata. It admits no alternate table/view/trigger shadow.
+
+The actual production call is reconcile's async observer completion, after the
+provider await and prior reader guards have ended. It holds no writer loan,
+pinned read or scheduler mutex. Its current predicate releases the scheduler
+mutex before returning. The unchanged method already enqueues batched work and
+cannot recursively be called while owning its writer; native write/batched also
+retain their existing no-pinned-write assertion. This candidate adds no support
+for such recursive calls and does not probe for ownership by taking that loan.
+The ambient unpinned request control instead demonstrates supported ineligibility
+and one canonical fallback without any seed. Other consumers require the same
+existing nonrecursive write precondition; a newly discovered supported loan-held
+caller would be a blocking review finding, not silently reclassified.
+
+Physical restore's existing gate requires an empty offline destination and an
+exclusive lock, creates/closes/checkpoints a separate staged Store, then publishes
+that file. It cannot replace the active nonempty Store through that supported
+path. Logical restore/repair/import uses ordinary writer DML and is conservatively
+fenced. The reopen control retains the old incarnation while reopening the same
+path. None of this authorizes a restore or tests a running member.
+
+## Cost and controls
+
+A quiet success adds one seed loan, one reader preparation, and one validation
+job. At worst there are TWO seed loans, TWO preparations, TWO stale validation
+jobs and ONE canonical fallback. Each native seed/validation reads five SQL
+statements: TEMP catalog and four PRAGMAs, plus native getters. Preparation has
+its own snapshot/catalog checks and canonical history work. Existing observer
+checks, idempotency reads, transaction/savepoint/finalizer/COMMIT/observer work
+are still real costs. Canonicalizing facts and computing the operation hash also
+repeat across attempts outside the writer. Each unrelated write can invalidate a plan; this design
+can add two full preparations before still holding the writer for the old fold.
+That outcome is adverse performance evidence, not acceptance by compatibility.
+
+Test-only records separate seed queue acquisition wait, borrower body-through-
+return elapsed and traced SQL; reader elapsed/SQL; enqueue-to-callback elapsed;
+callback elapsed/SQL; and full batched acknowledgement elapsed. Cached response
+returns are counted separately from validated fast successes. Borrower elapsed
+includes return work, enqueue-to-callback includes prior batch work, and callback
+SQL excludes finalizers/COMMIT/observers. These are not independent measurements
+of exact native queue/hold/commit phases. Seed accounting includes the return
+path on its caller thread; other-thread native work is not counted there. All
+records are cfg(test); no reporting contract is expanded. Passing nextest output
+may not retain the printed work report, so a later qualification must retain it
+through an admitted existing artifact route before making numerical claims.
+
+The 17 new complete control bodies live in
+`crates/st3/src/store/resource_preparation/tests.rs`; the four original negative
+fence/attempt bodies remain in `resource_preparation_fence_tests.rs`. They cover
+quiet versus two injected unrelated writes/fallback, history-width 2 versus 64,
+ordinary REPLACE/trigger/FK/view/WITHOUT ROWID/delete/rollback, raw repair/order/
+pending/DDL, another connection, store/Fence/reopen/path/snapshot/TEMP rejection,
+request-loan fallback, original error and cancellation, observer repair/revision,
+opener and recipient races, changed/attempt differential outcomes and repeated
+idempotent receipt, and real prequeued same-batch mutation. The batch control
+requires the jobs actually share a batch and fails loudly if scheduling misses
+that condition; no mock commit hint is its authority. The differential control
+uses the unchanged extracted canonical path; static suffix/prefix parity is
+part of its evidence, not an independent reimplementation oracle. Raw race
+injections are isolated controls, not new producer authority or incident cause.
+
+Intake must read the exact complete private delta and bodies before any compiler
+or publication decision. #2930's sqlite/telemetry seams and #3082's productive
+head/cohort are untouched. This source does not close the fleet incident, accept
+Silber's failed gate, release Bluey's disk hold or grant rollout/activation.
