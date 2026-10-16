@@ -3917,6 +3917,13 @@ struct AgentStartArgs {
     /// Read the daemon's declaration and print the effective seat KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
+    /// Start once without continuing the seat's last native session; the declaration is unchanged.
+    /// Needs --reason. The request stays pending until a new native session binds.
+    #[arg(long, requires = "reason", conflicts_with_all = ["print_kdl", "source_offline"])]
+    fresh_context: bool,
+    /// Why the fresh start was chosen; recorded with the request.
+    #[arg(long, requires = "fresh_context")]
+    reason: Option<String>,
 }
 
 #[derive(Args)]
@@ -9537,7 +9544,7 @@ async fn trace_claims(client: &Client, args: &TraceArgs) -> Result<Vec<ClaimReco
 
 fn write_trace_claim(output: &mut impl std::io::Write, claim: &ClaimRecord) -> Result<()> {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
-    let summary = ["state", "status", "verdict", "action", "reason"]
+    let mut summary = ["state", "status", "verdict", "action", "reason"]
         .into_iter()
         .filter_map(|key| {
             fields
@@ -9545,8 +9552,14 @@ fn write_trace_claim(output: &mut impl std::io::Write, claim: &ClaimRecord) -> R
                 .filter(|value| !value.is_null())
                 .map(|value| format!("{key}={}", trace_scalar(value)))
         })
-        .collect::<Vec<_>>()
-        .join(" · ");
+        .collect::<Vec<_>>();
+    // Who asked is part of what an action request says: a deliberate fresh start, a suspend.
+    if claim.kind == "runtime.action.requested"
+        && let Some(actor) = &claim.actor
+    {
+        summary.push(format!("actor={actor}"));
+    }
+    let summary = summary.join(" · ");
     let timestamp = chrono::DateTime::from_timestamp_millis(
         claim.accepted_at_unix_ms.min(i64::MAX as u128) as i64,
     )
@@ -14207,6 +14220,9 @@ async fn run_agents(
                 agent_start_declaration(&client, &args).await?;
             anyhow::ensure!(!args.source_offline || existing.is_some(),
                 "--source-offline needs an existing seat with a pending placement handoff");
+            if args.fresh_context {
+                request_fresh_context(&client, &subject, &args).await?;
+            }
             let response = if let Some(mission) = mission {
                 anyhow::ensure!(
                     args.harness.is_none()
@@ -24198,6 +24214,34 @@ async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Resu
 
 /// Ask the daemon to suspend or resume `subject`, then wait for the request to finish: the seat
 /// suspended, or resumed with its harness bound to the suspended native session.
+/// Record the one-time fresh start `st agents start --fresh-context` asks for. The daemon checks
+/// the seat and writes the request in one operation; nothing is written for a refusal.
+async fn request_fresh_context(client: &Client, subject: &str, args: &AgentStartArgs) -> Result<()> {
+    let result = client
+        .post::<_, ClaimRecord>(
+            "/v1/agents/fresh-context",
+            &json!({
+                "subject": subject,
+                "actor": args.actor,
+                "reason": args.reason.as_deref().unwrap_or_default(),
+                "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            }),
+        )
+        .await;
+    match result {
+        Ok(_) => {
+            println!(
+                "Recorded a fresh start for {subject}; it stays pending until a new native session binds"
+            );
+            Ok(())
+        }
+        Err(error) if st3::client::http_status(&error) == Some(404) => Err(anyhow::anyhow!(
+            "this daemon cannot start fresh yet; upgrade it, then run the command again"
+        )),
+        Err(error) => Err(error),
+    }
+}
+
 async fn request_suspension(
     endpoint: &Endpoint,
     route: &str,
@@ -34361,5 +34405,65 @@ mod instance_uninstall_tests {
             names(instance_removals(root.path(), elsewhere.path())),
             ["bin", "state", "work"]
         );
+    }
+}
+
+#[cfg(test)]
+mod fresh_context_start_tests {
+    use super::*;
+
+    fn parse(extra: &[&str]) -> Result<Cli, clap::Error> {
+        let mut args = vec!["st3", "agents", "start", "example/worker", "--as", "person/avery"];
+        args.extend_from_slice(extra);
+        Cli::try_parse_from(args)
+    }
+
+    #[test]
+    fn a_fresh_start_needs_its_reason_and_nothing_else_asks_for_one() {
+        let cli = parse(&["--fresh-context", "--reason", "scope removed"]).unwrap();
+        let Command::Agents { command: AgentsCommand::Start(args) } = cli.command else {
+            panic!("agents start did not parse");
+        };
+        assert!(args.fresh_context);
+        assert_eq!(args.reason.as_deref(), Some("scope removed"));
+        assert!(parse(&["--fresh-context"]).is_err(), "the reason is required");
+        assert!(parse(&["--reason", "why"]).is_err(), "a reason without the flag is a mistake");
+        assert!(
+            parse(&["--fresh-context", "--reason", "why", "--print-kdl"]).is_err(),
+            "a request is never recorded by a command that publishes nothing"
+        );
+        assert!(parse(&["--fresh-context", "--reason", "why", "--source-offline"]).is_err());
+        let plain = parse(&[]).unwrap();
+        let Command::Agents { command: AgentsCommand::Start(args) } = plain.command else {
+            panic!("agents start did not parse");
+        };
+        assert!(!args.fresh_context && args.reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_older_daemon_is_told_to_upgrade_and_nothing_is_written() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("old.sock");
+        let server_socket = socket.clone();
+        // A daemon from before the route: every unknown route answers 404.
+        let server = tokio::spawn(async move {
+            serve_unix(&server_socket, axum::Router::new()).await
+        });
+        while !socket.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let client = Client::new(Endpoint::Unix(socket));
+        let cli = parse(&["--fresh-context", "--reason", "scope removed"]).unwrap();
+        let Command::Agents { command: AgentsCommand::Start(args) } = cli.command else {
+            panic!("agents start did not parse");
+        };
+        let error = request_fresh_context(&client, "agent/example/worker", &args)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "this daemon cannot start fresh yet; upgrade it, then run the command again"
+        );
+        server.abort();
     }
 }

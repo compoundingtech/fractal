@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add `st agents start --fresh-context --reason TEXT` to start a stopped seat without its last native session (st2#3044)",
+  "replay": {
+    "status": "none",
+    "detail": "`st agents start AGENT --fresh-context --reason TEXT` starts a stopped, declared seat without resuming its last native session, once. The CLI asks a new daemon route, `POST /v1/agents/fresh-context`, which validates the request and records a `runtime.action.requested` claim with `action: fresh-context`; the seat's next launch skips the session continue, and the next `harness.session-file` binding ends the request. It adds a CLI flag and one daemon route; no existing route, claim shape, storage or replay rule changes. Mixed fleet: an older CLI has no flag, and a newer CLI needs a newer daemon (an older daemon answers 404, the CLI says so and writes nothing)."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "`st agents start AGENT --fresh-context --reason TEXT` starts a stopped, declared seat without resuming its last native session, once. The CLI asks a new daemon route, `POST /v1/agents/fresh-context`, which validates the request and records a `runtime.action.requested` claim with `action: fresh-context`; the seat's next launch skips the session continue, and the next `harness.session-file` binding ends the request. It adds a CLI flag and one daemon route; no existing route, claim shape, storage or replay rule changes. Mixed fleet: an older CLI has no flag, and a newer CLI needs a newer daemon (an older daemon answers 404, the CLI says so and writes nothing)."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "`st agents start AGENT --fresh-context --reason TEXT` starts a stopped, declared seat without resuming its last native session, once. The CLI asks a new daemon route, `POST /v1/agents/fresh-context`, which validates the request and records a `runtime.action.requested` claim with `action: fresh-context`; the seat's next launch skips the session continue, and the next `harness.session-file` binding ends the request. It adds a CLI flag and one daemon route; no existing route, claim shape, storage or replay rule changes. Mixed fleet: an older CLI has no flag, and a newer CLI needs a newer daemon (an older daemon answers 404, the CLI says so and writes nothing)."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "`st agents start AGENT --fresh-context --reason TEXT` starts a stopped, declared seat without resuming its last native session, once. The CLI asks a new daemon route, `POST /v1/agents/fresh-context`, which validates the request and records a `runtime.action.requested` claim with `action: fresh-context`; the seat's next launch skips the session continue, and the next `harness.session-file` binding ends the request. It adds a CLI flag and one daemon route; no existing route, claim shape, storage or replay rule changes. Mixed fleet: an older CLI has no flag, and a newer CLI needs a newer daemon (an older daemon answers 404, the CLI says so and writes nothing)."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "`st agents start AGENT --fresh-context --reason TEXT` starts a stopped, declared seat without resuming its last native session, once. The CLI asks a new daemon route, `POST /v1/agents/fresh-context`, which validates the request and records a `runtime.action.requested` claim with `action: fresh-context`; the seat's next launch skips the session continue, and the next `harness.session-file` binding ends the request. It adds a CLI flag and one daemon route; no existing route, claim shape, storage or replay rule changes. Mixed fleet: an older CLI has no flag, and a newer CLI needs a newer daemon (an older daemon answers 404, the CLI says so and writes nothing)."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "`st agents start AGENT --fresh-context --reason TEXT` starts a stopped, declared seat without resuming its last native session, once. The CLI asks a new daemon route, `POST /v1/agents/fresh-context`, which validates the request and records a `runtime.action.requested` claim with `action: fresh-context`; the seat's next launch skips the session continue, and the next `harness.session-file` binding ends the request. It adds a CLI flag and one daemon route; no existing route, claim shape, storage or replay rule changes. Mixed fleet: an older CLI has no flag, and a newer CLI needs a newer daemon (an older daemon answers 404, the CLI says so and writes nothing)."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "`st agents start AGENT --fresh-context --reason TEXT` starts a stopped, declared seat without resuming its last native session, once. The CLI asks a new daemon route, `POST /v1/agents/fresh-context`, which validates the request and records a `runtime.action.requested` claim with `action: fresh-context`; the seat's next launch skips the session continue, and the next `harness.session-file` binding ends the request. It adds a CLI flag and one daemon route; no existing route, claim shape, storage or replay rule changes. Mixed fleet: an older CLI has no flag, and a newer CLI needs a newer daemon (an older daemon answers 404, the CLI says so and writes nothing)."
+  }
+}

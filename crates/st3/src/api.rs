@@ -712,6 +712,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/agents/source-offline", post(override_placement_source))
         .route("/v1/agents/suspend", post(suspend_agent))
         .route("/v1/agents/resume", post(resume_agent))
+        .route("/v1/agents/fresh-context", post(fresh_context_agent))
         .route("/v1/internal/seat-snapshot", post(seat_snapshot_chunk))
         .route("/v1/agents/native-session", post(report_native_session))
         .route("/v1/missions/{id}", get(get_mission))
@@ -7780,6 +7781,7 @@ async fn guard_bound_request(
         "/v1/agents/source-offline",
         "/v1/agents/suspend",
         "/v1/agents/resume",
+        "/v1/agents/fresh-context",
         "/v1/agents/native-session",
         "/v1/delivery/hold",
         "/v1/lane-changes",
@@ -12555,6 +12557,131 @@ pub(crate) fn request_resume(
             actor: Some(actor),
             fields,
             evidence: vec![launch_token, suspend],
+            expected_subject: None,
+            idempotency_key: Some(key),
+        })
+        .map_err(ApiError::bad)?;
+    signal_changed(state);
+    Ok(claim)
+}
+
+#[derive(Deserialize, Serialize)]
+pub(crate) struct AgentFreshContextRequest {
+    pub subject: String,
+    pub actor: String,
+    pub reason: String,
+    pub idempotency_key: String,
+}
+
+/// Record that a seat's next start is a deliberate fresh one: no continuation of its last native
+/// session. The declaration is not touched, and the request applies until a new native session
+/// binds, so exactly one start is fresh.
+async fn fresh_context_agent(
+    State(state): State<AppState>,
+    Json(request): Json<AgentFreshContextRequest>,
+) -> Result<Json<ClaimRecord>, ApiError> {
+    request_fresh_context(&state, request).map(Json)
+}
+
+pub(crate) fn request_fresh_context(
+    state: &AppState,
+    request: AgentFreshContextRequest,
+) -> Result<ClaimRecord, ApiError> {
+    let actor = person_or_agent_actor(&request.actor, "invalid-fresh-context-actor")?;
+    let subject = agent_subject(request.subject);
+    let key = format!("agent-fresh-context:{subject}:{}", request.idempotency_key);
+    // A retry of an accepted request returns its claim and writes nothing.
+    if let Some(prior) = state
+        .store
+        .operation_claim(&key)
+        .map_err(ApiError::internal)?
+    {
+        return Ok(prior);
+    }
+    if request.reason.trim().is_empty() {
+        return Err(ApiError::bad(St3Error::new(
+            "fresh-context-reason-required",
+            "a fresh start records why it was chosen; give a reason",
+        )));
+    }
+    // Step-level fresh-context is how a seat gets a fresh context for itself.
+    if actor == subject {
+        return Err(ApiError::bad(St3Error::new(
+            "fresh-context-self",
+            "a seat cannot ask for its own fresh start; use fresh-context on its mission step",
+        )));
+    }
+    state
+        .store
+        .owned_member_guard(&subject)
+        .map_err(ApiError::bad)?;
+    let status = state
+        .store
+        .status(Some(&subject))
+        .map_err(ApiError::internal)?;
+    let current = status
+        .subjects
+        .into_iter()
+        .find(|item| item.subject == subject)
+        .ok_or_else(|| {
+            ApiError::bad(St3Error::new(
+                "missing-agent",
+                format!("no seat `{subject}`"),
+            ))
+        })?;
+    // A stopped seat keeps its declaration under a stop revision, so the token, not the current
+    // member, says the seat is declared. A seat that never bound a native session has nothing a
+    // fresh start would leave behind: a non-native harness, or one that never ran.
+    let token = current.desired_token.clone().ok_or_else(|| {
+        ApiError::bad(St3Error::new(
+            "fresh-context-not-declared",
+            "only a declared seat can be started fresh",
+        ))
+    })?;
+    if state
+        .store
+        .claims_for(&subject, Some("harness.session-file"))
+        .map_err(ApiError::internal)?
+        .is_empty()
+    {
+        return Err(ApiError::bad(St3Error::new(
+            "fresh-context-no-session",
+            "the seat has no native session to leave behind, so its next start is already fresh",
+        )));
+    }
+    let running = current
+        .actual
+        .as_ref()
+        .map(|actual| actual.get("fields").unwrap_or(actual))
+        .and_then(|fields| fields.get("status"))
+        .and_then(Value::as_str)
+        .is_some_and(|status| matches!(status, "running" | "starting"));
+    if running {
+        return Err(ApiError::bad(St3Error::new(
+            "fresh-context-running",
+            "the seat is running; stop it first, then start it fresh",
+        )));
+    }
+    if crate::suspension::current(&state.store, &subject)
+        .map_err(ApiError::internal)?
+        .is_some_and(|suspension| suspension.holds_seat())
+    {
+        return Err(ApiError::bad(St3Error::new(
+            "fresh-context-suspended",
+            "the seat is suspended; resume it, or stop it to end the suspension",
+        )));
+    }
+    let claim = state
+        .store
+        .append_claim(&ClaimInput {
+            subject,
+            kind: "runtime.action.requested".into(),
+            actor: Some(actor),
+            fields: BTreeMap::from([
+                ("action".into(), Value::String("fresh-context".into())),
+                ("reason".into(), Value::String(request.reason)),
+            ]),
+            evidence: vec![token],
             expected_subject: None,
             idempotency_key: Some(key),
         })
@@ -18012,6 +18139,7 @@ agent "eval/channel" { workspace "/tmp"; harness "claude" {} }
             "/v1/agents/start",
             "/v1/agents/suspend",
             "/v1/agents/resume",
+            "/v1/agents/fresh-context",
             "/v1/agents/native-session",
             "/v1/work/revision/approve/proposal",
             "/v1/work/delegation",

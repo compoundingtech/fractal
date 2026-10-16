@@ -1819,6 +1819,105 @@ async fn suspension_requests_survive_stale_incarnations_and_restarts() {
     );
 }
 
+/// #3044: a deliberate, one-time fresh start. The daemon route checks the seat and writes the
+/// request in one operation, so every refusal writes nothing; the request ends with the next
+/// native session binding; and the operator's history view shows who asked and why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_context_start_is_recorded_once_and_refusals_write_nothing() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let daemon = Daemon::new().await;
+    daemon.apply(&format!(
+        "version 2\nagent \"example/worker\" {{ host {NODE:?}; workspace {:?}; harness \"omp\" {{}} }}\n",
+        daemon.root.path().display().to_string()
+    ), "fresh-worker");
+    let ask = |actor: &'static str, reason: &'static str, key: &'static str| {
+        let transport = daemon.transport();
+        async move {
+            transport
+                .post::<_, st3::model::ClaimRecord>(
+                    "/v1/agents/fresh-context",
+                    &json!({"subject": WORKER, "actor": actor, "reason": reason, "idempotency_key": key}),
+                )
+                .await
+        }
+    };
+    let refused = |error: anyhow::Error| st3::client::api_error_code(&error).unwrap_or("none").to_owned();
+    // A seat that never bound a native session has nothing to leave behind.
+    assert_eq!(refused(ask(PERSON, "scope removed", "none").await.unwrap_err()), "fresh-context-no-session");
+    daemon.claim(WORKER, "harness.session-file", json!({"harness": "omp", "session_id": "native-old", "agent": WORKER, "incarnation_id": "1:old"}));
+    // A running seat is refused: stop it first.
+    daemon.claim(WORKER, "runtime.observed", json!({"status": "running", "runtime_id": "coverage-worker", "incarnation_id": "1:old"}));
+    assert_eq!(refused(ask(PERSON, "scope removed", "running").await.unwrap_err()), "fresh-context-running");
+    daemon.claim(WORKER, "runtime.observed", json!({"status": "stopped", "runtime_id": "coverage-worker", "incarnation_id": "1:old"}));
+    let stopped = daemon.store().index().unwrap();
+    // The reason is required, and a seat never asks for itself.
+    assert_eq!(refused(ask(PERSON, "  ", "blank").await.unwrap_err()), "fresh-context-reason-required");
+    assert_eq!(refused(ask(WORKER, "myself", "self").await.unwrap_err()), "fresh-context-self");
+    assert_eq!(refused(ask("daemon/not-a-person-or-agent", "why", "actor").await.unwrap_err()), "invalid-fresh-context-actor");
+    assert_eq!(daemon.store().index().unwrap(), stopped, "a refusal writes nothing");
+    assert!(daemon.store().claims_for(WORKER, Some("runtime.action.requested")).unwrap().is_empty());
+    let unknown = daemon
+        .transport()
+        .post::<_, st3::model::ClaimRecord>(
+            "/v1/agents/fresh-context",
+            &json!({"subject": "agent/example/missing", "actor": PERSON, "reason": "why", "idempotency_key": "missing"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused(unknown), "missing-agent");
+    assert_eq!(daemon.store().index().unwrap(), stopped);
+
+    // Until the request, a start continues the last session.
+    let continued = |daemon: &Daemon| {
+        st3::suspension::continue_session(daemon.store(), WORKER, "omp", None, None)
+            .unwrap()
+            .map(|(session, _)| session)
+    };
+    assert_eq!(continued(&daemon).as_deref(), Some("native-old"));
+    let claim = ask(PERSON, "scope removed", "once").await.unwrap();
+    assert_eq!(claim.kind, "runtime.action.requested");
+    assert_eq!(claim.actor.as_deref(), Some(PERSON));
+    assert_eq!(claim.body["fields"]["action"], "fresh-context");
+    assert_eq!(claim.body["fields"]["reason"], "scope removed");
+    let written = daemon.store().index().unwrap();
+    // A retried call returns the same claim and writes nothing.
+    let replay = ask(PERSON, "scope removed", "once").await.unwrap();
+    assert_eq!(replay.id, claim.id);
+    assert_eq!(daemon.store().index().unwrap(), written);
+    // The declaration is untouched, and the next start carries no continuation.
+    assert_eq!(daemon.store().selected_desired_token(WORKER).unwrap().as_deref(), claim.body["evidence"][0].as_str());
+    assert_eq!(continued(&daemon), None);
+    assert_eq!(continued(&daemon), None, "the request stays until a session binds");
+    // The operator's history view shows who asked and why.
+    let history = daemon.cli(PERSON, &["subject", "history", WORKER]).await;
+    let history = String::from_utf8_lossy(&history.stdout).into_owned();
+    let line = history
+        .lines()
+        .find(|line| line.contains("runtime.action.requested"))
+        .unwrap_or_else(|| panic!("no action request in the history: {history}"));
+    assert!(line.contains("action=fresh-context") && line.contains("reason=scope removed") && line.contains(&format!("actor={PERSON}")), "{line}");
+    // The fresh launch binds a new session; later starts continue it.
+    daemon.claim(WORKER, "harness.session-file", json!({"harness": "omp", "session_id": "native-new", "agent": WORKER, "incarnation_id": "2:new"}));
+    assert_eq!(continued(&daemon).as_deref(), Some("native-new"));
+    assert_eq!(continued(&daemon).as_deref(), Some("native-new"));
+    // A suspended seat is refused: resume it, or stop it to end the suspension.
+    daemon.store().append_claim(&ClaimInput {
+        subject: WORKER.into(),
+        kind: "runtime.action.requested".into(),
+        actor: Some(PERSON.into()),
+        fields: serde_json::from_value(json!({"action": "suspend", "incarnation_id": "1:old"})).unwrap(),
+        evidence: vec![daemon.store().selected_desired_token(WORKER).unwrap().unwrap()],
+        expected_subject: None,
+        idempotency_key: Some(format!("agent-suspend:{WORKER}:fresh-test")),
+    }).unwrap();
+    assert!(st3::suspension::current(daemon.store(), WORKER).unwrap().is_some_and(|suspension| suspension.holds_seat()));
+    let suspended = daemon.store().index().unwrap();
+    assert_eq!(refused(ask(PERSON, "again", "suspended").await.unwrap_err()), "fresh-context-suspended");
+    assert_eq!(daemon.store().index().unwrap(), suspended);
+}
+
 /// #2286: reject an authored selector before writing a suspension, regardless of whether
 /// the selected transcript exists. Both public mutation routes use the same preflight.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

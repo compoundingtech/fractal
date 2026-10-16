@@ -689,6 +689,27 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_start_request_applies_until_a_new_native_session_binds() {
+        let store = Store::open_memory("node").unwrap();
+        let bind = |session: &str| {
+            continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":session,"path":format!("/t/{session}.jsonl")}), None)
+        };
+        bind("old");
+        let continued = |store: &Store| continue_session(store, "agent/example", "omp", None, None).unwrap().map(|(session, _)| session);
+        assert_eq!(continued(&store).as_deref(), Some("old"));
+        // The request is newer than the binding: the next start, and every start until a new
+        // session binds, is fresh.
+        continuation_claim(&store, "runtime.action.requested", json!({"action":"fresh-context","reason":"scope removed"}), None);
+        assert_eq!(continued(&store), None);
+        assert_eq!(continued(&store), None);
+        // The fresh launch binds a new session; later starts continue it, and one more request
+        // would be needed for another fresh start.
+        bind("new");
+        assert_eq!(continued(&store).as_deref(), Some("new"));
+        assert_eq!(continued(&store).as_deref(), Some("new"));
+    }
+
+    #[test]
     fn continuation_fresh_context_wins_over_stale_authored_refusal() {
         let store = Store::open_memory("node").unwrap();
         continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"native"}), None);

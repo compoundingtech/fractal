@@ -286,6 +286,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/agents/suspend", "suspends a live seat"),
     ("POST /v1/agents/resume", "resumes a live seat"),
     (
+        "POST /v1/agents/fresh-context",
+        "records one stopped seat's deliberate fresh start; covered by action_coverage's fresh-context test",
+    ),
+    (
         "POST /v1/internal/seat-snapshot",
         "requires a stopped source and a sealed portable snapshot; covered by the two-daemon move proof",
     ),
