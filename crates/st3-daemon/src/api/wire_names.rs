@@ -30,13 +30,12 @@ pub(super) fn receive_headers(headers: &mut HeaderMap) -> Result<(), ApiError> {
 }
 
 pub(super) fn api_version(version: &str) -> bool {
-    matches!(version, "st3.client.v0" | "smalltalk.client.v0" | "fractal.client.v0")
+    matches!(version, "st3.client.v0" | "fractal.client.v0")
 }
 
 pub(super) fn protocol_matches(value: &str, old: &str) -> bool {
     value == old || old.strip_prefix("st3.client.").is_some_and(|suffix| {
         value.strip_prefix("fractal.client.") == Some(suffix)
-            || value.strip_prefix("smalltalk.client.") == Some(suffix)
     })
 }
 
@@ -49,7 +48,6 @@ pub(super) fn selected_protocol<'a>(protocols: &[&'a str], old: &str) -> Option<
 
 pub(super) fn capability(protocol: &str) -> Option<&str> {
     protocol.strip_prefix("st3.cap.")
-        .or_else(|| protocol.strip_prefix("smalltalk.cap."))
         .or_else(|| protocol.strip_prefix("fractal.cap."))
         .filter(|value| !value.is_empty())
 }
@@ -124,11 +122,11 @@ mod tests {
             assert_eq!(selected_protocol(&[&new], &old), Some(new.as_str()));
             assert!(selected_protocol(&[&old, &new], &old).is_none());
         }
-        for prefix in ["st3.cap.", "smalltalk.cap.", "fractal.cap."] {
+        for prefix in ["st3.cap.", "fractal.cap."] {
             assert_eq!(capability(&format!("{prefix}secret")), Some("secret"));
             assert!(capability(prefix).is_none());
         }
-        for version in ["st3.client.v0", "smalltalk.client.v0", "fractal.client.v0"] {
+        for version in ["st3.client.v0", "fractal.client.v0"] {
             assert!(api_version(version));
         }
         assert!(!api_version("fractal.client.v1"));
