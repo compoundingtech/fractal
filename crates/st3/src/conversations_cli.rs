@@ -145,7 +145,7 @@ async fn upload_attachments(
     Ok(attachments)
 }
 
-async fn run_message(
+pub(super) async fn run_message(
     client: &Client,
     endpoint: &Endpoint,
     configured_person: Option<&str>,

@@ -1,6 +1,6 @@
 use super::*;
 
-async fn run_pty(
+pub(super) async fn run_pty(
     client: &Client,
     endpoint: &Endpoint,
     configured_person: Option<&str>,

@@ -118,7 +118,7 @@ async fn run_handoff(
     }
 }
 
-async fn run_agents(
+pub(super) async fn run_agents(
     endpoint: &Endpoint,
     configured_person: Option<&str>,
     command: AgentsCommand,

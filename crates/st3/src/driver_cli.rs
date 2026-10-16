@@ -1,7 +1,7 @@
 use super::*;
 
 /// `st driver-hook NAME [ARGS]`: answer one harness hook with the payload on stdin.
-fn run_driver_hook() -> ExitCode {
+pub(super) fn run_driver_hook() -> ExitCode {
     let arguments = std::env::args().skip(2).collect::<Vec<_>>();
     let Some((name, rest)) = arguments.split_first() else {
         eprintln!(
@@ -42,7 +42,7 @@ async fn wait_for_agent_incarnation(client: &Client, actor: &str) -> Result<Stri
     wait_for_agent_incarnation_from(client, actor, has_local_pty_registry()).await
 }
 
-async fn run_driver(client: &Client, args: DriverArgs, catalog: Option<&Path>) -> Result<()> {
+pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Option<&Path>) -> Result<()> {
     if args.seed.is_some() {
         anyhow::ensure!(
             args.driver == "omp"

@@ -69,6 +69,28 @@ mod doctor_cli;
 mod follow_tests;
 mod presentation;
 
+// Command families: each file holds one command's implementation; main.rs dispatches to it.
+mod agents_cli;
+mod attention_cli;
+mod conversations_cli;
+mod driver_cli;
+mod fleet_cli;
+mod launch_cli;
+mod replication_cli;
+mod terminals_cli;
+mod uninstall_cli;
+mod work_cli;
+use agents_cli::run_agents;
+use attention_cli::run_attention;
+use conversations_cli::run_message;
+use driver_cli::{run_driver, run_driver_hook};
+use fleet_cli::run_fleet;
+use launch_cli::{run_launch, run_mission_view};
+use replication_cli::run_replication;
+use terminals_cli::run_pty;
+use uninstall_cli::run_uninstall;
+use work_cli::{run_wait, run_work};
+
 use presentation::{
     OutputStyle, follow_snapshot, glance, mission_run_signature, relative_time,
     render_attention_show, render_generation, render_generations, render_host_facts,

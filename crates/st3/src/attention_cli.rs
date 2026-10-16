@@ -78,7 +78,7 @@ async fn actionable_attention_item(
     Ok((item, card_id))
 }
 
-async fn run_attention(
+pub(super) async fn run_attention(
     client: &Client,
     endpoint: &Endpoint,
     configured_person: Option<&str>,

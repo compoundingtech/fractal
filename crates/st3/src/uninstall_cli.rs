@@ -4,7 +4,7 @@ fn directory_is_empty(path: &Path) -> bool {
     fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
 }
 
-async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
+pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
     let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
     let config_dir = Config::default_path()

@@ -1,6 +1,6 @@
 use super::*;
 
-async fn run_wait(client: &Client, args: WaitArgs, json_output: bool) -> Result<()> {
+pub(super) async fn run_wait(client: &Client, args: WaitArgs, json_output: bool) -> Result<()> {
     validate_wait_condition(&args.condition)?;
     if let Some(actor) = args.actor.as_deref() {
         reject_foreign_agent_actor(actor)?;
@@ -31,7 +31,7 @@ fn read_structured_request(path: &Path) -> Result<serde_json::Value> {
     serde_json::from_str(&text).context("the request is not JSON")
 }
 
-async fn run_work(
+pub(super) async fn run_work(
     client: &Client,
     endpoint: &Endpoint,
     command: WorkCommand,

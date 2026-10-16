@@ -1,6 +1,6 @@
 use super::*;
 
-async fn run_replication(
+pub(super) async fn run_replication(
     client: &Client,
     config: &Config,
     command: ReplicationCommand,

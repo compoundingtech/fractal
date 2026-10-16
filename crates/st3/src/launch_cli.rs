@@ -1,6 +1,6 @@
 use super::*;
 
-async fn run_launch(
+pub(super) async fn run_launch(
     client: &Client,
     endpoint: &Endpoint,
     command: LaunchCommand,
@@ -373,7 +373,7 @@ async fn run_launch(
     Ok(())
 }
 
-async fn run_mission_view(
+pub(super) async fn run_mission_view(
     client: &Client,
     endpoint: &Endpoint,
     command: MissionViewCommand,
