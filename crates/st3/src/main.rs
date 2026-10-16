@@ -82,7 +82,7 @@ mod uninstall_cli;
 mod work_cli;
 use agents_cli::run_agents;
 use attention_cli::run_attention;
-use conversations_cli::run_message;
+use conversations_cli::{run_message, upload_attachments};
 use driver_cli::{run_driver, run_driver_hook};
 use fleet_cli::run_fleet;
 use launch_cli::{run_launch, run_mission_view};
@@ -3349,6 +3349,10 @@ struct WorkAskArgs {
     /// feedback, with named answers the person picks and you read back as data.
     #[arg(long, value_name = "FILE", long_help = STRUCTURED_REQUEST_HELP)]
     request: Option<PathBuf>,
+    /// Show the person an image with the request (PNG, JPEG, GIF or WebP, at most 10 MiB, up
+    /// to 4). It is uploaded to this member and read by the person through the ask.
+    #[arg(long = "attach", value_name = "FILE", requires = "request")]
+    attach: Vec<PathBuf>,
     #[arg(long, conflicts_with = "new_run")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Any))))]
     step: Option<String>,
@@ -7127,10 +7131,7 @@ async fn run_trace_to(
             .context("the daemon health response has no store index")?;
     }
     client.follow_recovered();
-    let mut event_feed = LocalEventFeed {
-        trace: true,
-        ..Default::default()
-    };
+    let mut event_feed = LocalEventFeed { trace: true };
     loop {
         if cli_output::closed() {
             return Ok(());
@@ -9162,35 +9163,23 @@ fn event_cursor_error(error: anyhow::Error, query: &str, trace: bool) -> anyhow:
 
 #[derive(Default)]
 struct LocalEventFeed {
-    legacy: bool,
     trace: bool,
 }
 
 impl LocalEventFeed {
     async fn read(&mut self, client: &Client, query: &str) -> Result<LocalEventPage> {
-        if !self.legacy {
-            match client.get(&format!("/v1/events/page?{query}")).await {
-                Ok(page) => return Ok(page),
-                Err(error) if st3::client::is_missing_route(&error) => {
-                    let health: Value = client.get("/v1/health").await?;
-                    anyhow::ensure!(
-                        health
-                            .pointer("/features/bounded_legacy_events")
-                            .and_then(Value::as_u64)
-                            == Some(1),
-                        "this daemon does not support bounded event continuation; upgrade the daemon and retry"
-                    );
-                    self.legacy = true;
-                }
-                Err(error) => return Err(event_cursor_error(error, query, self.trace)),
-            }
-        }
-        let items: Vec<EventRecord> = client
-            .get(&format!("/v1/events?{query}"))
+        client
+            .get(&format!("/v1/events/page?{query}"))
             .await
-            .map_err(|error| event_cursor_error(error, query, self.trace))?;
-        let next_after = items.last().map(|event| event.store_index);
-        Ok(LocalEventPage { items, next_after })
+            .map_err(|error| {
+                if st3::client::is_missing_route(&error) {
+                    anyhow::anyhow!(
+                        "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
+                    )
+                } else {
+                    event_cursor_error(error, query, self.trace)
+                }
+            })
     }
 }
 
@@ -9911,10 +9900,10 @@ fn render_replication_peers(
         let sync = peer.sync.as_ref().expect("filtered on sync");
         let _ = writeln!(
             output,
-            "sync\tcatching up: {} has {} this node lacks, {}",
+            "sync\tcatching up: {} has {} this node lacks, {} (arrival only)",
             peer.peer,
             envelope_count(sync.peer_only_envelopes),
-            catch_up_estimate(sync.estimated_catch_up_seconds)
+            arrival_estimate(sync)
         );
     }
     for peer in peers {
@@ -10002,6 +9991,14 @@ fn render_replication_peers(
                     )
                 }
             );
+            // A stale view carries no forecast, not even "caught up": say only what was true.
+            if sync.peer_only_envelopes == 0 {
+                let _ = writeln!(
+                    output,
+                    "  nothing was missing at the last measurement (arrival only; measured {})",
+                    relative_time(sync.measured_at_unix_ms, now)
+                );
+            }
         }
         let compared = sync
             .graph_compared_at_unix_ms
@@ -10090,15 +10087,32 @@ fn render_replication_peers(
                 .receive_rate_per_second
                 .map(|rate| format!("receiving {rate:.1} envelopes/s, "))
                 .unwrap_or_default();
+            let closing = sync
+                .closing_rate_per_second()
+                .filter(|rate| *rate > 0.0)
+                .map(|rate| format!("closing at {rate:.1}/s, "))
+                .unwrap_or_default();
             let _ = writeln!(
                 output,
-                "  {rate}{} (measured {})",
-                catch_up_estimate(sync.estimated_catch_up_seconds),
+                "  {rate}{closing}{} (arrival only; measured {})",
+                arrival_estimate(sync),
                 relative_time(sync.measured_at_unix_ms, now)
             );
         }
     }
     output
+}
+
+/// When the envelopes this node lacks will have arrived, or that the gap is not closing. It
+/// forecasts arrival only: admission, projection and visibility can lag behind it.
+fn arrival_estimate(sync: &st3::model::ReplicationPeerSync) -> String {
+    // The lower of the catch-up and receive rates: nothing arriving is not catching up either.
+    if sync.peer_only_envelopes != 0
+        && sync.closing_rate_per_second().is_some_and(|rate| rate <= 0.0)
+    {
+        return "not catching up".into();
+    }
+    catch_up_estimate(sync.estimated_catch_up_seconds)
 }
 
 /// Whether the comparison the status reports for a peer found its projections equal. An older
@@ -12316,7 +12330,8 @@ and `"custom": true` also takes the person's own words. `feedback` asks for text
 answers. `why_person` says why no runtime fact or standing instruction settles it. Omit
 `recommendation` to make none. An `update` asks nothing: it names `about`, the person's own
 run or step or their message to you, and clears once read (`st work update` builds one). Subject kinds: pull_request, issue, document, mission, run,
-step, agent, host, commit, link; `revision` pins what was reviewed.
+step, agent, host, commit, link; `revision` pins what was reviewed. `--attach FILE` shows the
+person an image with the request (up to 4), as `st conversations send --attach` does.
 
   {"version": 1, "type": "decision",
    "question": "Land #11 then #12?",
@@ -20775,6 +20790,128 @@ mod tests {
     }
 
     #[test]
+    fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
+        let now = 1_000_000;
+        let peer = |sync: st3::model::ReplicationPeerSync| ReplicationPeerStatus {
+            last_successful_exchange: None,
+            last_failed_exchange: None,
+            worker: None,
+            projection_digests: BTreeMap::new(),
+            incompatible_projection_tables: Vec::new(),
+            differing_tables: Vec::new(),
+            projection_comparison_waiting: false,
+            projection_comparison_waiting_reason: None,
+            projection_graphs_equal: None,
+            projection_compared_at_unix_ms: None,
+            peer: "ExampleMac".into(),
+            status: "up".into(),
+            last_success_at_unix_ms: Some(now - 2_000),
+            last_error: None,
+            last_failure_at_unix_ms: None,
+            refusal_reason: None,
+            schema_digest: None,
+            projection_registry_digest: None,
+            projection_versions: Default::default(),
+            authority_digest: None,
+            graph_digest: None,
+            sync: Some(sync),
+        };
+        let behind = |receive: Option<f64>, catch_up: Option<f64>, eta: Option<u64>| {
+            st3::model::ReplicationPeerSync {
+                peer_only_envelopes: 14_652,
+                measured_at_unix_ms: now - 2_000,
+                receive_rate_per_second: receive,
+                catch_up_rate_per_second: catch_up,
+                estimated_catch_up_seconds: eta,
+                catching_up: true,
+                ..Default::default()
+            }
+        };
+        let summary = |estimate: &str| {
+            format!(
+                "sync\tcatching up: ExampleMac has 14,652 envelopes this node lacks, {estimate} (arrival only)\n"
+            )
+        };
+        let render = |sync| render_replication_peers(&[peer(sync)], "local", now);
+        // Stalled: the count fell without receipts, or the gap grew. Neither closes it.
+        for sync in [
+            behind(Some(0.0), Some(122.0), None),
+            behind(Some(0.1), Some(0.0), None),
+        ] {
+            let output = render(sync);
+            assert!(output.contains(&summary("not catching up")), "{output}");
+            assert!(
+                output.contains("not catching up (arrival only; measured 2s ago)"),
+                "{output}"
+            );
+            assert!(!output.contains("estimating time to catch up"), "{output}");
+            assert!(!output.contains("closing at"), "{output}");
+        }
+        // Stale: view() returns no rates or forecast for a measurement gone quiet.
+        let output = render(st3::model::ReplicationPeerSync {
+            stale: true,
+            ..behind(None, None, None)
+        });
+        assert!(output.contains(&summary("estimating time to catch up")), "{output}");
+        assert!(output.contains("  stale: no exchange since the measurement below"), "{output}");
+        assert!(
+            output.contains("  estimating time to catch up (arrival only; measured 2s ago)"),
+            "{output}"
+        );
+        assert!(!output.contains("receiving") && !output.contains("closing at"), "{output}");
+        // Positive: the forecast names the closing rate it divides by.
+        let output = render(behind(Some(142.5), Some(140.0), Some(889)));
+        assert!(output.contains(&summary("caught up in about 15m")), "{output}");
+        assert!(
+            output.contains(
+                "  receiving 142.5 envelopes/s, closing at 140.0/s, caught up in about 15m \
+                 (arrival only; measured 2s ago)"
+            ),
+            "{output}"
+        );
+        // Nothing missing: no catching-up summary and no promise of a time.
+        let nothing_missing = st3::model::ReplicationPeerSync {
+            peer_only_envelopes: 0,
+            local_only_envelopes: 3,
+            catching_up: false,
+            estimated_catch_up_seconds: Some(0),
+            ..behind(Some(0.0), Some(0.0), Some(0))
+        };
+        let output = render(nothing_missing.clone());
+        assert!(!output.contains("catching up"), "{output}");
+        assert!(!output.contains("caught up in") && !output.contains("closing at"), "{output}");
+        assert!(!output.contains("nothing was missing at the last measurement"), "{output}");
+        // The same measurement gone stale: view() withdrew its rates and its zero forecast, and
+        // the status says only what the last measurement found, whether or not this node held
+        // envelopes the peer lacked. The graph comparison lines are unchanged.
+        for local_only in [3, 0] {
+            let output = render(st3::model::ReplicationPeerSync {
+                stale: true,
+                local_only_envelopes: local_only,
+                receive_rate_per_second: None,
+                catch_up_rate_per_second: None,
+                estimated_catch_up_seconds: None,
+                ..nothing_missing.clone()
+            });
+            assert!(
+                output.contains("  stale: no exchange since the measurement below (2s ago)"),
+                "{output}"
+            );
+            assert!(
+                output.contains(
+                    "  nothing was missing at the last measurement (arrival only; measured 2s ago)"
+                ),
+                "{output}"
+            );
+            assert!(!output.contains("estimating time to catch up"), "{output}");
+            assert!(
+                !output.contains("caught up in about") && !output.contains("catching up"),
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
     fn replication_status_says_which_side_holds_what_and_how_long_catching_up_takes() {
         let now = 1_000_000;
         let local = "1111111111111111aaaa";
@@ -20856,12 +20993,13 @@ mod tests {
             "sync\tdiverged: Laptop holds the same envelopes but projects a different graph, \
              since 3m ago\n\
              sync\tcatching up: ExampleMac has 124,384 envelopes this node lacks, \
-             caught up in about 15m\n\
+             caught up in about 15m (arrival only)\n\
              peer\tExampleMac\tup\t\n\
              \x20 last seen 2s ago\n\
              \x20 ExampleMac has 124,384 envelopes this node lacks\n\
              \x20 this node has 3 envelopes ExampleMac lacks\n\
-             \x20 receiving 142.5 envelopes/s, caught up in about 15m (measured 2s ago)\n\
+             \x20 receiving 142.5 envelopes/s, closing at 140.0/s, caught up in about 15m \
+             (arrival only; measured 2s ago)\n\
              peer\tQuiet\tup\t\n\
              \x20 last seen 2s ago\n\
              \x20 in sync: the same envelopes and the same graph (measured now, graphs compared now)\n\
