@@ -861,10 +861,8 @@ fn run_write_batch(
     let mut answers = Vec::new();
     let mut lend = None;
     let (transaction, mut failure) = {
-        // Move a reborrow into the one-shot closure so the transaction can outlive it.
-        let connection = &mut *connection;
-        let attribution = &mut attribution;
-        crate::task_cpu::blocking("writer.batch.setup", move || {
+        let _scope = crate::task_cpu::blocking_scope("writer.batch.setup");
+        {
             let (transaction, mut failure) =
                 match connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
                     Ok(transaction) => (Some(transaction), None),
@@ -881,7 +879,7 @@ fn run_write_batch(
                 }
             }
             (transaction, failure)
-        })
+        }
     };
     let mut job = Some(first);
     while let Some(current) = job.take() {
@@ -924,7 +922,8 @@ fn run_write_batch(
                 // Include SQLite savepoint bookkeeping, not only the submitted callback.
                 // The captured profile remains current; nested CPU wrappers leave their CPU
                 // to this bounded aggregate job scope rather than counting it twice.
-                let savepoint = crate::task_cpu::blocking("writer.batch.job", || {
+                let savepoint = (|| {
+                    let _scope = crate::task_cpu::blocking_scope("writer.batch.job");
                     transaction.execute_batch("SAVEPOINT batched_write")?;
                     if run(transaction) {
                         transaction.execute_batch("RELEASE batched_write")
@@ -932,7 +931,7 @@ fn run_write_batch(
                         transaction
                             .execute_batch("ROLLBACK TO batched_write; RELEASE batched_write")
                     }
-                });
+                })();
                 crate::profile::writer_released(acquired);
                 hold.ran(&holder, running.elapsed());
                 failure = savepoint.err().map(anyhow::Error::from);

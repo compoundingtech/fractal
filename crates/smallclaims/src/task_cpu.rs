@@ -155,7 +155,10 @@ async fn measured<F: Future>(name: &'static str, future: F, metrics: &Instrument
 
 /// Measure one blocking invocation, and label any writer work it performs.
 pub fn blocking<T>(name: &'static str, work: impl FnOnce() -> T) -> T {
-    let _scope = blocking_scope(name);
+    if !ENABLED.load(Ordering::Relaxed) {
+        return crate::profile::task(name, work);
+    }
+    let _scope = enabled_blocking_scope(name);
     work()
 }
 
@@ -171,12 +174,16 @@ pub(crate) struct BlockingScope {
 pub(crate) fn blocking_scope(name: &'static str) -> BlockingScope {
     if !ENABLED.load(Ordering::Relaxed) {
         return BlockingScope {
-            profile: Some(crate::profile::task_scope(name)),
+            profile: None,
             sampling: None,
             accumulator: None,
             _thread: std::marker::PhantomData,
         };
     }
+    enabled_blocking_scope(name)
+}
+
+fn enabled_blocking_scope(name: &'static str) -> BlockingScope {
     let accumulator = Accumulator::new(name, &METRICS);
     let sampling = Sampling::start();
     let mut scope = BlockingScope {
@@ -234,6 +241,7 @@ mod tests {
             let scope = blocking_scope("test.disabled.lexical");
             assert!(scope.accumulator.is_none());
             assert!(scope.sampling.is_none());
+            assert!(scope.profile.is_none());
         }
         assert_eq!(RECORDER_ENTRIES.load(Ordering::Relaxed), entries);
     }
