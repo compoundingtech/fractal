@@ -172,6 +172,8 @@ pub struct Context {
     pub(crate) open_timing: Option<super::open_timing::Trace>,
     pub(crate) process_started: Instant,
     pub initial_subject: Option<String>,
+    /// Where seats on this machine leave requests to show something; none for a paired device.
+    pub requests: Option<std::path::PathBuf>,
 }
 
 // Setup's initial destination waits for a live inventory, rather than cached agent data.
@@ -192,6 +194,40 @@ pub(super) fn focus_initial_subject(
         return;
     }
     ui.open(&id);
+}
+
+/// Open what seats asked for with `st ui open`, once the inventory is live: an agent a seat has
+/// only just made is waited for, and one that never appears is answered as not found.
+pub(super) fn answer_open_requests(
+    ui: &mut Ui,
+    inbox: &mut super::requests::Inbox,
+    ready: bool,
+) {
+    inbox.read();
+    if !ready || !matches!(ui.world.link, super::view::Link::Live) {
+        return;
+    }
+    let waiting = inbox
+        .waiting()
+        .map(|(request, since)| (request.clone(), since.elapsed()))
+        .collect::<Vec<_>>();
+    for (request, waited) in waiting {
+        let Ok(pane) = super::requests::pane_for(&request.subject) else {
+            inbox.answer(&request.id, &super::requests::Answer::NotFound);
+            continue;
+        };
+        if ui.inventory_has(&pane) {
+            let answer = ui.open_requested(
+                pane,
+                request.place,
+                request.keep_focus,
+                request.from.as_deref(),
+            );
+            inbox.answer(&request.id, &answer);
+        } else if waited >= super::requests::GRACE {
+            inbox.answer(&request.id, &super::requests::Answer::NotFound);
+        }
+    }
 }
 
 fn cancel_initial_subject(subject: &mut Option<String>, input: &Event) {
@@ -426,8 +462,11 @@ pub fn run(context: Context) -> Result<()> {
         mut open_timing,
         process_started,
         mut initial_subject,
+        requests,
     } = context;
     let (fetched_tx, fetched) = mpsc::channel::<Fetched>();
+    // What seats ask this terminal to show (`st ui open`); a paired device has no seats here.
+    let mut open_requests = super::requests::Inbox::new(requests);
     let mut model = cached.unwrap_or_default();
     let mut agents_live = false;
     // The feed announces a granted glasses window before sending any core window.
@@ -816,6 +855,8 @@ pub fn run(context: Context) -> Result<()> {
                     // A permanent refusal is said once, without "retrying".
                     if !permanent {
                         ui.conversation_failed(&target, &message);
+                    } else {
+                        ui.stalled.remove(&target);
                     }
                     failed.insert(target, message);
                     changed = true;
@@ -1449,6 +1490,15 @@ pub fn run(context: Context) -> Result<()> {
                 Effect::LoadContent(key) => {
                     content_reads.enqueue(key);
                 }
+                Effect::RetryConversation { target } => {
+                    retry_conversation_open(
+                        target,
+                        &mut failed,
+                        &mut sessions_requested,
+                        &commands,
+                    );
+                    changed = true;
+                }
                 Effect::OpenTerminal { agent } => {
                     terminal_opens.insert(agent.clone(), Instant::now());
                     // The PTY session's own bytes, through st's raw stream to whichever host owns
@@ -1768,7 +1818,7 @@ pub fn run(context: Context) -> Result<()> {
         }
         // The missions window is large, so it is followed only while a mission list or card is on
         // screen, and kept for a while after so flipping between tabs does not fetch it each time.
-        let wanted_now = ui.missions_wanted();
+        let wanted_now = ui.missions_wanted() || open_requests.wants_missions();
         if wanted_now {
             missions_until = Some(Instant::now() + MISSIONS_GRACE);
         }
@@ -1777,6 +1827,7 @@ pub fn run(context: Context) -> Result<()> {
             missions_sent = wanted;
             let _ = commands.send(Command::Missions { follow: wanted });
         }
+        answer_open_requests(&mut ui, &mut open_requests, agents_live && glasses_ready);
         ui.step_voice();
         ui.step_terminal_hold();
         ui.step_default_view();
@@ -2060,6 +2111,18 @@ fn retry_failed_opens(
     wanted: &[String],
 ) {
     requested.retain(|id| !failed.contains_key(id) || wanted.contains(id));
+}
+
+/// A person's explicit retry clears both the feed failure and the one-shot session read.
+fn retry_conversation_open(
+    target: String,
+    failed: &mut BTreeMap<String, String>,
+    requested: &mut HashSet<String>,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) {
+    failed.remove(&target);
+    requested.remove(&target);
+    let _ = commands.send(Command::Resubscribe { target });
 }
 
 /// Entries per page read back: st's largest, so a long session takes few requests.
@@ -2405,7 +2468,8 @@ async fn perform(
 ) -> Result<(String, Option<String>)> {
     match effect {
         // Glass writes and retries never reach here: the loop handles them itself.
-        Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::Forget { .. } | Effect::LoadContent(_) => {
+        Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::RetryConversation { .. }
+        | Effect::Forget { .. } | Effect::LoadContent(_) => {
             Ok((String::new(), None))
         }
         Effect::EditArrangement(write) => {
@@ -3106,6 +3170,73 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn open_requests_wait_for_a_live_inventory_and_answer_each_seat_once() {
+        use super::super::requests::{self, Answer, Inbox, Place};
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("requests");
+        let mut world = super::super::demo::world();
+        world.link = super::super::view::Link::Live;
+        let known = world.agents.items()[1].id.clone();
+        let mut ui = Ui::new(world);
+        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        ui.show_focused();
+        let mut inbox = Inbox::new(Some(dir.clone()));
+        let early = requests::enqueue(&dir, &known, Place::Right, false, None).unwrap();
+        assert!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o077 == 0);
+
+        // Cached inventory is not a reason to open anything.
+        answer_open_requests(&mut ui, &mut inbox, false);
+        assert_eq!(ui.live_conversations().iter().filter(|id| **id == known).count(), 0);
+        assert!(dir.join(format!("{early}.json")).exists());
+
+        answer_open_requests(&mut ui, &mut inbox, true);
+        assert_eq!(ui.focus(), (1, Some(known.clone())));
+        assert!(!dir.join(format!("{early}.json")).exists());
+        let answer = std::fs::read(dir.join(format!("{early}.answer"))).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Answer>(&answer).unwrap(),
+            Answer::Opened { focused: true }
+        );
+
+        // An agent that is not in the inventory yet waits, and is not found once the grace ends.
+        let later = requests::enqueue(&dir, "agent/garden/not-yet", Place::Tab, false, None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        answer_open_requests(&mut ui, &mut inbox, true);
+        assert!(dir.join(format!("{later}.json")).exists(), "still waiting for st to know it");
+        assert_eq!(inbox.waiting().count(), 1);
+        inbox.waiting_since_for_test(&later, requests::GRACE);
+        answer_open_requests(&mut ui, &mut inbox, true);
+        let answer = std::fs::read(dir.join(format!("{later}.answer"))).unwrap();
+        assert_eq!(serde_json::from_slice::<Answer>(&answer).unwrap(), Answer::NotFound);
+        assert_eq!(inbox.waiting().count(), 0);
+    }
+
+    #[test]
+    fn a_request_the_layout_cannot_show_without_moving_focus_is_not_called_opened() {
+        use super::super::pane::Pane;
+        use super::super::requests::{Answer, Place};
+        let mut world = super::super::demo::world();
+        world.link = super::super::view::Link::Live;
+        let known = world.agents.items()[1].id.clone();
+        let mut ui = Ui::new(world);
+        ui.glasses = None;
+        let pane = || Pane::Agent(Some(known.clone()));
+        // The classic layout has no tabs or splits: only the list can show it, which moves focus.
+        let kept = ui.open_requested(pane(), Place::Tab, true, None);
+        assert_eq!(kept, Answer::NotShown);
+        let moved = ui.open_requested(pane(), Place::Tab, false, None);
+        assert_eq!(moved, Answer::Opened { focused: true });
+        // A name another process wrote cannot put control characters in the flash.
+        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        ui.show_focused();
+        ui.open_requested(pane(), Place::Right, false, Some("agent/x/bad\x1b[2Jname\n"));
+        let (shown, _) = ui.flash.clone().unwrap();
+        assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
+        assert!(shown.contains("bad[2Jname"), "{shown:?}");
+    }
 
     #[test]
     fn only_ctrl_r_reconnects_and_never_a_letter() {
@@ -3974,6 +4105,78 @@ mod tests {
                 "{reason}"
             ),
             other => panic!("expected one failure, not entries: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_conversation_hint_and_key_resubscribe_without_resending_messages() {
+        use super::super::{demo, glass, Hit};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        for (spaces, child) in [(false, false), (true, false), (true, true)] {
+            let mut ui = Ui::new(demo::world());
+            ui.live = true;
+            ui.tab = 1;
+            let selected = ui.selected_id().unwrap();
+            if spaces {
+                ui.glasses = Some(glass::Glasses::open(None, None));
+            }
+            let target = if child {
+                ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(
+                    "session/tester-child".into(),
+                )));
+                "session/tester-child".to_owned()
+            } else {
+                let target = selected;
+                if spaces {
+                    ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open(target.clone())));
+                }
+                target
+            };
+            let mut failed = BTreeMap::from([(target.clone(), "access refused".into())]);
+            let mut requested = HashSet::from([target.clone()]);
+            ui.world.conversations = conversations(
+                &Model::default(),
+                "person/ada",
+                &BTreeMap::new(),
+                &failed,
+                std::slice::from_ref(&target),
+            );
+            ui.effects.clear();
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+            let shown: String = terminal.backend().buffer().content.iter()
+                .map(ratatui::buffer::Cell::symbol).collect();
+            assert!(shown.contains("access refused"), "{shown}");
+            assert!(shown.contains("Ctrl+R · retry opening this conversation"), "{shown}");
+            assert!(!shown.contains("retrying") && !shown.contains("Trying again"), "{shown}");
+            assert!(ui.effects.is_empty(), "rendering a refusal never retries it");
+
+            ui.conversation_state.drafts.insert(target.clone(), "saved draft".into());
+            let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+            ui.editing = true;
+            ui.key(key);
+            assert!(ui.effects.is_empty(), "a draft owns Ctrl+R while the box is open");
+            assert!(matches!(ui.world.conversations[&target], Load::Failed(_)));
+            ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            ui.key(key);
+            let effects = std::mem::take(&mut ui.effects);
+            let [Effect::RetryConversation { target: reopened }] = effects.as_slice() else {
+                panic!("opening is distinct from message resend: {effects:?}");
+            };
+            assert_eq!(reopened, &target);
+            assert!(matches!(ui.world.conversations[&target], Load::Loading));
+            assert!(!ui.stalled.contains_key(&target));
+            assert_eq!(ui.conversation_state.drafts[&target], "saved draft");
+            let (commands, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+            retry_conversation_open(reopened.clone(), &mut failed, &mut requested, &commands);
+            assert!(matches!(incoming.try_recv().unwrap(), Command::Resubscribe { target: sent } if sent == target));
+            assert!(!failed.contains_key(&target));
+            assert!(!requested.contains(&target));
+            ui.key(key);
+            assert!(ui.effects.is_empty(), "loading does not queue another explicit retry");
+            assert!(incoming.try_recv().is_err(), "no automatic retry is sent");
         }
     }
 

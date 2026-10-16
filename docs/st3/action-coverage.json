@@ -2189,6 +2189,15 @@
       "verification": "CLI parser and real st ui under a PTY, raw kitty keys and isolated paired-only members"
     },
     {
+      "command": "st ui open",
+      "description": "Ask the person's open terminal interface on this machine to show an agent, mission or machine in a tab or split",
+      "tests": [
+        "crates/st3/tests/ui_open.rs::a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_interface",
+        "crates/st3/tests/ui_open.rs::an_alert_a_seat_raises_for_itself_shows_above_the_input_and_is_dismissed_there"
+      ],
+      "verification": "real terminal interface under a PTY against a real store; a seat process asks, the picture changes, a missing interface and an unknown subject are reported and nothing stays queued"
+    },
+    {
       "command": "st uninstall",
       "description": "Remove st3 from this machine: leave its fleet, then its services, state, and settings",
       "tests": [
@@ -2444,6 +2453,14 @@
     }
   ],
   "stui_effects": [
+    {
+      "effect": "RetryConversation",
+      "tests": [
+        "crates/stui/src/ui/mod.rs::conversation_open_retry_does_not_act_inside_a_draft_or_on_a_ready_conversation",
+        "crates/stui/src/ui/live.rs::failed_conversation_hint_and_key_resubscribe_without_resending_messages"
+      ],
+      "verification": "failed-conversation reducer and feed resubscription transport; explicit retry preserves drafts and sends no outgoing message"
+    },
     {
       "effect": "LoadContent",
       "tests": [
