@@ -651,9 +651,13 @@ pub async fn client_agents_detail(
     let subject = client_detail_id("agent", &id);
     let items = blocking_store(move || {
         let selected = BTreeSet::from([subject]);
-        let mut items = client_agent_resources_for(
-            &store, history, snapshot_index, Some(&selected),
+        let mut items = client_agent_resources_selected(
+            &store,
+            history,
+            snapshot_index,
+            Some((&selected, &[])),
         )?;
+        add_agent_todos(&store, &mut items, snapshot_index)?;
         overlay_agent_resources(&store, &mut items, &created_at)?;
         for item in &mut items {
             if let Some(subject) = item["id"].as_str()

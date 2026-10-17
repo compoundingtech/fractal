@@ -2671,16 +2671,22 @@ fn client_agent_resources_cached(
     history: bool,
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
-    client_agent_resources_for(store, history, snapshot_index, None)
+    store.cached_agent_resources(snapshot_index, history, |changed| {
+        let mut items = client_agent_resources_selected(store, history, snapshot_index, changed)?;
+        add_agent_todos(store, &mut items, snapshot_index)?;
+        Ok(items)
+    })
 }
 
-fn client_agent_resources_for(
+/// One agent's card for an exact agent selector, folded in its own projection rather than
+/// borrowed from the fleet roster.
+fn client_exact_agent_resources(
     store: &Store,
     history: bool,
     snapshot_index: u64,
-    selected: Option<&BTreeSet<String>>,
+    agent: &str,
 ) -> anyhow::Result<Vec<Value>> {
-    store.cached_agent_resources_for(snapshot_index, history, selected, |changed| {
+    store.cached_exact_agent_resources(snapshot_index, history, agent, |changed| {
         // A selected cold card needs only its own queue metadata, never roster refs.
         let metadata = changed.filter(|(_, previous)| previous.is_empty())
             .map(|(subjects, _)| agent_queue_metadata(store, subjects)).transpose()?;

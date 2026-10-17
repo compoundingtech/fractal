@@ -534,7 +534,7 @@ async fn collection_items_with_windows(
     let session = session.clone();
     let request = request.clone();
     let actor = request.actor.clone();
-    let selected_agents = request.agent.as_ref().map(|agent| BTreeSet::from([agent.clone()]));
+    let selected_agent = request.agent.clone();
     let subject = request.subject.clone();
     let status = request.status.clone();
     let collection = request.collection.clone();
@@ -560,7 +560,7 @@ async fn collection_items_with_windows(
         let session = session.clone();
         let request = request.clone();
         let actor = actor.clone();
-        let selected_agents = selected_agents.clone();
+        let selected_agent = selected_agent.clone();
         let subject = subject.clone();
         let status = status.clone();
         let collection = collection.clone();
@@ -610,11 +610,11 @@ async fn collection_items_with_windows(
                 let mut published = None;
                 let mut published_at = None;
                 let mut roster_path = "exact_cold";
-                let cached_agents = if collection == "agents" && selected_agents.is_some() {
+                let cached_agents = if collection == "agents" && let Some(agent) = &selected_agent {
                     if admitted {
                         None
                     } else {
-                        let Some(cards) = store.agent_resources_cached_at(index, false, selected_agents.as_ref())? else {
+                        let Some(cards) = store.exact_agent_resources_cached_at(index, false, agent)? else {
                             return Ok(Ok(None));
                         };
                         Some(cards)
@@ -831,12 +831,10 @@ async fn collection_items_with_windows(
                             // only its visible cards and gets has_more from shallow membership.
                             let keep = if status.is_none() { limit + 1 } else { usize::MAX };
                             match &cached_agents {
-                                Some(cards) => cards.iter().filter(|card| selected_agents.as_ref().is_none_or(
-                                    |selected| card["id"].as_str().is_some_and(|id| selected.contains(id)),
-                                )).take(keep).cloned().collect(),
-                                None if selected_agents.is_some() => {
+                                Some(cards) => cards.iter().take(keep).cloned().collect(),
+                                None if let Some(agent) = &selected_agent => {
                                     folded.set(true);
-                                    client_agent_resources_for(&store, false, index, selected_agents.as_ref())?
+                                    client_exact_agent_resources(&store, false, index, agent)?
                                 }
                                 None if status.is_none() => {
                                     folded.set(true);
@@ -13252,7 +13250,7 @@ mission "queue-parity" state="ready" {
             slots.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         assert!(absent.is_empty());
         assert!(!more);
-        for agent in ["z", "person/z", "agent/", "agent/bad id"] {
+        for agent in ["z", "person/example", "agent/", "agent/bad id"] {
             request.agent = Some(agent.into());
             let error = collection_items(&state, &session, &request,
                 slots.clone().acquire_owned().await.unwrap()).await.unwrap_err();
@@ -13340,7 +13338,8 @@ mission "queue-parity" state="ready" {
         let folded = writer.store.agent_resources_refolded_cards_for_test();
         let builds = writer.store.agent_resources_builds_for_test();
         if let Some(counts) = warmed_counts {
-            assert_eq!((folded, builds), counts, "the selected snapshot must borrow the warm fleet rows");
+            assert_eq!((folded, builds), (counts.0 + 1, counts.1 + 1),
+                "the selected snapshot folds only its own card and never borrows the warm fleet rows");
         }
         agent_selector_observe(&writer, "agent/a", "harness.observed",
             json!({"state":"working","driver":"codex","incarnation_id":"one"}));

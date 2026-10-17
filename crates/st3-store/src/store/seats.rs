@@ -240,14 +240,17 @@ impl Store {
     }
 
     /// An agents WS window inherits the queue deadline from its selected or complete projection;
-    /// an exact agent window only from one that covers its agent.
+    /// an exact agent window only from that agent's own projection, never the fleet's.
     pub fn agent_roster_valid_until(&self, index: u64, agent: Option<&str>) -> Option<u128> {
-        self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned").iter().rev()
-            .find(|entry| entry.index == index && !entry.history
-                && agent.is_none_or(|agent| {
-                    entry.covered.as_ref().is_none_or(|covered| covered.contains(agent))
-                }))
+        let Some(agent) = agent else {
+            return self.smalltalk.agent_resources_cache.lock()
+                .expect("agent resources cache poisoned").iter().rev()
+                .find(|entry| entry.index == index && !entry.history)
+                .and_then(|entry| entry.valid_until_unix_ms);
+        };
+        self.smalltalk.exact_agent_resources_cache.lock()
+            .expect("exact agent resources cache poisoned").iter().rev()
+            .find(|entry| entry.index == index && !entry.history && exact_agent_entry(entry, agent))
             .and_then(|entry| entry.valid_until_unix_ms)
     }
 
@@ -546,12 +549,39 @@ impl Store {
         self.cached_agent_resources_folding(index, history, Some(selected), true, build)
     }
 
+    /// One agent's card for an exact agent selector. It folds in its own small cache, keyed by
+    /// the agent: it never borrows, narrows or evicts a fleet publication, and a fleet read never
+    /// starts from it. Its deltas and queue deadline read only that agent's inputs.
+    pub fn cached_exact_agent_resources(
+        &self,
+        index: u64,
+        history: bool,
+        agent: &str,
+        build: impl FnOnce(Option<(&BTreeSet<String>, &[Value])>) -> Result<Vec<Value>>,
+    ) -> Result<Vec<Value>> {
+        let selected = BTreeSet::from([agent.to_owned()]);
+        self.fold_agent_resources(index, history, Some(&selected), false, Some(agent), build)
+    }
+
     pub fn cached_agent_resources_folding(
         &self,
         index: u64,
         history: bool,
         selected: Option<&BTreeSet<String>>,
         chunk: bool,
+        build: impl FnOnce(Option<(&BTreeSet<String>, &[Value])>) -> Result<Vec<Value>>,
+    ) -> Result<Vec<Value>> {
+        self.fold_agent_resources(index, history, selected, chunk, None, build)
+    }
+
+    /// `exact` folds one agent's card in the exact-agent cache; `None` folds in the roster cache.
+    fn fold_agent_resources(
+        &self,
+        index: u64,
+        history: bool,
+        selected: Option<&BTreeSet<String>>,
+        chunk: bool,
+        exact: Option<&str>,
         build: impl FnOnce(Option<(&BTreeSet<String>, &[Value])>) -> Result<Vec<Value>>,
     ) -> Result<Vec<Value>> {
         // Cold presentation reads current desired/queue tables even for historical status
@@ -570,8 +600,6 @@ impl Store {
             return Ok(items);
         }
         let now = now_ms();
-        let selected_agent = selected.filter(|names| names.len() == 1)
-            .and_then(BTreeSet::first).map(String::as_str);
         let valid = |entry: &&runtime::AgentResourcesEntry| {
             entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)
         };
@@ -586,11 +614,17 @@ impl Store {
             selected.is_none_or(|names| names.contains(item["id"].as_str().unwrap_or_default()))
         }).cloned().collect::<Vec<_>>();
         let fault_retries = self.agent_roster_fault_retries(history);
-        let cache = self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned");
-        if let Some(entry) = cache.iter().rev().filter(valid)
-            .find(|entry| agent_resources_entry_hits(entry, now, index, local, history, selected)
-                && selected.map_or(fault_retries.is_empty(), |names| names.is_disjoint(&fault_retries))) {
+        let resources = match exact {
+            Some(_) => &self.smalltalk.exact_agent_resources_cache,
+            None => &self.smalltalk.agent_resources_cache,
+        };
+        // The exact cache holds one entry per agent: only this agent's entries are its rows.
+        let own = |entry: &&runtime::AgentResourcesEntry| exact.is_none_or(|agent| exact_agent_entry(entry, agent));
+        let cache = resources.lock().expect("agent resources cache poisoned");
+        if let Some(entry) = cache.iter().rev().filter(valid).filter(own)
+            .find(|entry| entry.index == index && entry.local == local && entry.history == history)
+            && agent_resources_entry_hits(entry, now, index, local, history, selected)
+            && selected.map_or(fault_retries.is_empty(), |names| names.is_disjoint(&fault_retries)) {
             let items = Arc::clone(&entry.items);
             drop(cache);
             return crate::performance::task("roster/cache-hit", || {
@@ -601,24 +635,9 @@ impl Store {
         }
         // Expired entries are diff sources only, never hits: refreshing their queue metadata
         // is sufficient to discover the cards moved by a deadline without dropping the fleet.
-        let previous = cache.iter()
+        let previous = cache.iter().filter(own)
             .filter(|entry| entry.index <= index && entry.local <= local && entry.history == history)
-            // A selected read may borrow a matching fleet/superset projection, but its
-            // delta source must contain only selected rows before inspecting changes. A chunk
-            // of a roster being assembled instead extends whatever coverage the rows have.
-            .filter(|entry| chunk || selected.is_none_or(|names| entry.covered.as_ref()
-                .is_none_or(|covered| names.is_subset(covered))))
-            .max_by_key(|entry| (entry.index, entry.local,
-                !chunk && selected.is_some() && entry.covered.as_ref() == selected)).cloned()
-            .map(|mut entry| {
-                if !chunk
-                    && let Some(names) = selected
-                    && entry.covered.as_ref() != Some(names) {
-                    entry.items = Arc::new(select(&entry.items));
-                    entry.covered = Some(names.clone());
-                }
-                entry
-            });
+            .max_by_key(|entry| (entry.index, entry.local)).cloned();
         drop(cache);
         let entry = crate::performance::task("roster/build",
         || -> Result<runtime::AgentResourcesEntry> {
@@ -647,13 +666,9 @@ impl Store {
                 if delta.membership {
                     crate::otel::roster_phase("membership", || -> Result<()> {
                     let connection = self.readers.get();
-                    let names = if let Some(selected) = selected {
-                        selected.clone()
-                    } else {
-                        connection.prepare_cached(RANGE_SUBJECTS)?
-                            .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
-                            .collect::<rusqlite::Result<BTreeSet<_>>>()?
-                    };
+                    let names = connection.prepare_cached(RANGE_SUBJECTS)?
+                        .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                     let mut names = if history { names } else {
                         self.current_view_candidates(&connection, names, index, true)?
                     };
@@ -720,7 +735,7 @@ impl Store {
                         }
                     }
                     queue_metadata = Some(metadata);
-                    self.agent_queue_valid_until(now, selected_agent)?
+                    self.agent_queue_valid_until(now, exact)?
                 } else {
                     previous.valid_until_unix_ms
                 };
@@ -783,30 +798,38 @@ impl Store {
                 crate::otel::roster_attribute("st.roster.publication_cut", index as i64);
                 Ok(runtime::AgentResourcesEntry {
                     index, local, history, covered: selected.cloned(),
-                    valid_until_unix_ms: self.agent_queue_valid_until(now, selected_agent)?,
+                    valid_until_unix_ms: self.agent_queue_valid_until(now, exact)?,
                     items: Arc::new(items),
                     published_at_unix_ms: now_ms(),
                 })
             }
         }
         })?;
-        let mut cache = self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned");
-        // Roster windows hold admission; selected detail/internal readers may still race.
-        // Never replace an already published matching projection with a competing build.
-        let published = cache.iter().rev().filter(valid)
-            .find(|entry| agent_resources_entry_hits(entry, now, index, local, history, selected)
+        let mut cache = resources.lock().expect("agent resources cache poisoned");
+        // All endpoint callers hold admission. Direct internal readers may still race; never
+        // replace a complete published projection with a partial one.
+        let published = cache.iter().rev().filter(valid).filter(own)
+            .find(|entry| entry.index == index && entry.local == local && entry.history == history)
+            .filter(|entry| agent_resources_entry_hits(entry, now, index, local, history, selected)
                 && selected.map_or(fault_retries.is_empty(), |names| names.is_disjoint(&fault_retries)))
             .map(|entry| Arc::clone(&entry.items));
         let complete = entry.covered.is_none();
-        let items = if let Some(published) = published { published } else {
+        let items = if let Some(published) = published { published } else if exact.is_some() {
+            // An agent's newer card replaces its older ones; the least recently folded agent
+            // leaves first. No fleet publication lives here to protect.
+            cache.retain(|old| !(own(&old) && old.history == history
+                && (old.index, old.local) <= (index, local)));
+            let items = Arc::clone(&entry.items);
+            cache.push_back(entry);
+            if cache.len() > EXACT_AGENT_RESOURCES_CACHE {
+                cache.pop_front();
+            }
+            items
+        } else {
             // Fault retries can assemble partial chunks at the publication's exact cut.
-            // Keep that complete publication readable until the replacement is complete. A
-            // selected read, not a chunk, also keeps the other selections' projections at this
-            // cut; a complete publication replaces every projection of the cut.
+            // Keep that complete publication readable until the replacement is complete.
             cache.retain(|old| old.index != index || old.local != local || old.history != history
-                || (!complete && (old.covered.is_none()
-                    || (!chunk && old.covered.as_ref() != selected))));
+                || (!complete && old.covered.is_none()));
             let items = Arc::clone(&entry.items);
             cache.push_back(entry);
             if cache.len() > 8 {
@@ -840,6 +863,31 @@ impl Store {
         selected: Option<&BTreeSet<String>>,
     ) -> Result<Option<Arc<Vec<Value>>>> {
         Ok(self.agent_resources_published_at(index, history, selected)?.map(|(items, _)| items))
+    }
+
+    /// The warm pin for an exact agent selector: that agent's own card at this graph cut and
+    /// local frontier, from the exact-agent cache only. A fleet publication never answers it.
+    pub fn exact_agent_resources_cached_at(
+        &self,
+        index: u64,
+        history: bool,
+        agent: &str,
+    ) -> Result<Option<Arc<Vec<Value>>>> {
+        if self.agent_roster_fault_retries(history).contains(agent)
+            || index < current_index(&self.readers.get())? {
+            return Ok(None);
+        }
+        let now = now_ms();
+        let local = crate::performance::task("roster/frontier-read", || {
+            roster_local_frontier(&self.readers.get(), index)
+        })?;
+        let selected = BTreeSet::from([agent.to_owned()]);
+        Ok(self.smalltalk.exact_agent_resources_cache.lock()
+            .expect("exact agent resources cache poisoned").iter().rev()
+            .find(|entry| exact_agent_entry(entry, agent)
+                && entry.index == index && entry.local == local && entry.history == history)
+            .filter(|entry| agent_resources_entry_hits(entry, now, index, local, history, Some(&selected)))
+            .map(|entry| Arc::clone(&entry.items)))
     }
 
     /// The matching warm pin for page refs: membership, ordering and queue metadata for exactly
@@ -2126,6 +2174,14 @@ fn record_roster_counts(changed: usize, covered: usize, refolded: usize) {
     crate::otel::roster_attribute("st.roster.covered", covered as i64);
     crate::otel::roster_attribute("st.roster.refolded", refolded as i64);
     crate::otel::roster_attribute("st.roster.cards", covered as i64);
+}
+
+/// How many agents' exact-selector cards stay folded; each entry holds one card.
+pub(super) const EXACT_AGENT_RESOURCES_CACHE: usize = 64;
+
+/// Whether an exact-agent cache entry holds exactly `agent`'s card.
+fn exact_agent_entry(entry: &runtime::AgentResourcesEntry, agent: &str) -> bool {
+    entry.covered.as_ref().is_some_and(|covered| covered.len() == 1 && covered.contains(agent))
 }
 
 /// The run that one run still waits for: its `after` run, until its `after-run` step completes.

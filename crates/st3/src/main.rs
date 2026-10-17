@@ -67,6 +67,7 @@ mod change_cli;
 mod directive_note;
 mod completion;
 mod doctor_cli;
+mod fractal;
 #[cfg(test)]
 mod follow_tests;
 mod presentation;
@@ -788,9 +789,9 @@ async fn fleet_leave(
 
 /// What an instance's uninstall removes from its directory: every entry except the one that holds
 /// the work root. The work root can lie inside the instance but holds the person's work, so
-/// everything else goes and it stays.
+/// everything else goes, except a foreign replacement of the fractal command.
 fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
-    fs::read_dir(root)
+    let mut removals: Vec<PathBuf> = fs::read_dir(root)
         .map(|entries| {
             entries
                 .flatten()
@@ -798,8 +799,26 @@ fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
                 .filter(|path| !work.starts_with(path))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // An instance owns its directory, but a foreign replacement of the new program name
+    // does not become ours. Plan bin entries separately so deletion rechecks its symlink.
+    let bin = root.join("bin");
+    if fs::symlink_metadata(bin.join("fractal")).is_ok()
+        && let Some(index) = removals.iter().position(|path| path == &bin)
+    {
+        removals.swap_remove(index);
+        if let Ok(entries) = fs::read_dir(&bin) {
+            removals.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| fractal::may_remove(path)),
+            );
+        }
+    }
+    removals
 }
+
 
 #[derive(Args)]
 struct FleetModeArgs {
@@ -4213,7 +4232,10 @@ fn cli_main() -> ExitCode {
     if let Some(program) = st3::recorder::invoked_program() {
         st3::recorder::run(program);
     }
-    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    if fractal::dispatch(arguments.as_mut_slice()) == fractal::Dispatch::Web {
+        return fractal::web(&arguments);
+    }
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
             println!("{}", read_contract_inventory_json());
@@ -9422,18 +9444,24 @@ struct LocalEventFeed {
 
 impl LocalEventFeed {
     async fn read(&mut self, client: &Client, query: &str) -> Result<LocalEventPage> {
-        client
-            .get(&format!("/v1/events/page?{query}"))
-            .await
-            .map_err(|error| {
-                if st3::client::is_missing_route(&error) {
-                    anyhow::anyhow!(
-                        "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
-                    )
-                } else {
-                    event_cursor_error(error, query, self.trace)
-                }
-            })
+        match client.get(&format!("/v1/events/page?{query}")).await {
+            Ok(page) => Ok(page),
+            // A bare missing route is classified once through the health capability and never
+            // reads legacy history: a daemon without bounded continuation needs the upgrade, and
+            // one that advertises it but lacks the page route reports the unexpected response.
+            Err(error) if st3::client::is_missing_route(&error) => {
+                let health: Value = client.get("/v1/health").await?;
+                anyhow::ensure!(
+                    health
+                        .pointer("/features/bounded_legacy_events")
+                        .and_then(Value::as_u64)
+                        == Some(1),
+                    "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
+                );
+                Err(error)
+            }
+            Err(error) => Err(event_cursor_error(error, query, self.trace)),
+        }
     }
 }
 
@@ -18190,6 +18218,3 @@ mod tests;
 
 #[cfg(test)]
 mod terminal_ui_tests;
-
-#[cfg(test)]
-mod instance_uninstall_tests;
