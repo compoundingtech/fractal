@@ -174,7 +174,7 @@ impl Fixture {
         make_router: impl FnOnce(AppState) -> axum::Router,
     ) -> (Self, String) {
         let mission = matches!(shape, Shape::Mission | Shape::Step);
-        let root = tempfile::tempdir().unwrap();
+        let root = st3::test_support::canonical_tempdir();
         let store = Arc::new(Store::open(&root.path().join("graph.db"), "restart-test").unwrap());
         let notify = Arc::new(Notify::new());
         let runtime = Arc::new(Runtime::default());
@@ -265,6 +265,7 @@ impl Fixture {
         reconciler.reconcile_once().unwrap();
         reconciler.reconcile_once().unwrap();
         let state = AppState {
+            owning_person: None,
             store: store.clone(),
             notify,
             event_notify: watch::channel(0).0,
@@ -1173,7 +1174,7 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
         .0;
     let initial_token = fixture.store.selected_desired_token(&subject).unwrap().unwrap();
     let seats = agent_subjects(&fixture.store);
-    assert_eq!(seats, [subject.clone()]);
+    assert_eq!(seats, std::slice::from_ref(&subject));
     // Starting a running mission seat changes nothing and says how to relaunch it.
     let running = succeeded(
         &st(

@@ -15,7 +15,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = st3::test_support::canonical_tempdir();
         for dir in ["home/.config/st3", "run", "archive", "bin"] {
             fs::create_dir_all(root.path().join(dir)).unwrap();
         }
@@ -71,9 +71,7 @@ impl Fixture {
     }
 
     fn capture_pid(&mut self) -> u32 {
-        let pid = st3::startup::read(&self.path("run/st3.sock"))
-            .expect("setup started a live daemon")
-            .pid;
+        let pid = daemon_pid(&self.path("run/st3.sock")).expect("setup started a live daemon");
         self.daemon_pid = Some(pid);
         pid
     }
@@ -101,6 +99,35 @@ impl Drop for Fixture {
             }
         }
     }
+}
+
+/// The pid of the daemon serving `socket`. Linux daemons publish a startup receipt; the receipt
+/// does not exist on other platforms, where the socket's own peer is the daemon.
+fn daemon_pid(socket: &Path) -> Option<u32> {
+    if cfg!(target_os = "linux") {
+        return st3::startup::read(socket).map(|readiness| readiness.pid);
+    }
+    #[cfg(target_os = "macos")]
+    use std::os::fd::AsRawFd as _;
+    let stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+    let mut pid: libc::pid_t = 0;
+    let mut length = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    #[cfg(target_os = "macos")]
+    let status = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&mut pid as *mut libc::pid_t).cast(),
+            &mut length,
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
+    let status = {
+        let _ = (&stream, &mut pid, &mut length);
+        -1
+    };
+    (status == 0 && pid > 0).then_some(pid as u32)
 }
 
 fn success(output: &Output) -> String {
@@ -622,6 +649,13 @@ fn archive_setup_installs_st_and_starts_one_isolated_daemon_without_gh_or_harnes
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("not installed on the daemon's login PATH"));
     assert!(before.elapsed() < Duration::from_secs(5), "missing harness must fail before waiting for a seat");
+    // Socket readiness is not a roster publication; this fixture explicitly needs one.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(st3_client::Client::unix(fixture.path("run/st3.sock")).agents_list_after(None, None, false, 0))
+        .expect("the fixture must publish its initial roster");
     let agents = fixture.cli().args(["agents", "ls", "--json"]).output().unwrap();
     assert!(!success(&agents).contains("fixture-missing"), "missing binary must not publish a restarting seat");
     let output = fixture
@@ -711,8 +745,8 @@ fn plain_st_first_run_shows_the_setup_screen_starts_daemon_and_opens_home() {
             if let Ok(bytes) = receiver.recv_timeout(Duration::from_millis(100)) {
                 output.extend(bytes);
             }
-            if let Some(readiness) = st3::startup::read(&fixture.path("run/st3.sock")) {
-                fixture.daemon_pid = Some(readiness.pid);
+            if let Some(pid) = daemon_pid(&fixture.path("run/st3.sock")) {
+                fixture.daemon_pid = Some(pid);
             }
         }
         writer.write_all(answer.as_bytes()).unwrap();
@@ -755,6 +789,7 @@ async fn onboarding_api(
         st3::store::Store::open(&state_dir.join("claims.sqlite3"), "studio").unwrap(),
     );
     let state = st3::api::AppState {
+        owning_person: None,
         store: store.clone(),
         notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0_u64).0,
