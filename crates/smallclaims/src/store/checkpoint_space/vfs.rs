@@ -798,6 +798,7 @@ mod tests {
     use super::*;
     use crate::store::checkpoint_space::{allocated, sqlite_temp_dir};
     use std::fs;
+    use std::os::unix::ffi::OsStrExt as _;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
