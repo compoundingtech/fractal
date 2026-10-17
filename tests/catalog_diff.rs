@@ -11,7 +11,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 fn st2() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_st2"))
+    Command::new(test_env!("CARGO_BIN_EXE_st2"))
 }
 
 fn write_catalog(catalog: &Path, spec: &str) {
@@ -774,6 +774,7 @@ fn wait_for(path: &Path) {
     assert!(path.exists(), "timed out waiting for {}", path.display());
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn retained_prepared_capture_cannot_be_redirected_by_a_source_swap() {
     let (temp, catalog, prepared, root) = fixture();

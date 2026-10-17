@@ -1,29 +1,14 @@
-// The tabs everyone sees, as stui names them (crates/stui/src/ui/screens.rs). iOS shows five tabs
-// before folding the rest into a More screen, and Spaces takes the fifth, so stui's Usage tab
-// is a screen in Fleet here.
-export const TABS = ['Home', 'Agents', 'Missions', 'Fleet'] as const;
+// The four phone tabs. Earlier tab names and preferences are intentionally retired.
+export const TABS = ['Now', 'Resources', 'Fleet', 'Spaces'] as const;
 export type Tab = typeof TABS[number];
-
-/** What a tab is called on screen: Home reads as Now, as `st now` and stui name it
- * (Nathan, 2026-10-04); its id stays Home so stored orders and links keep working. */
-export const tabLabel = (tab: Tab): string => (tab === 'Home' ? 'Now' : tab);
-
-// Names earlier builds used, still accepted in links and stored preferences.
-const ALIASES: Record<string, Tab> = { now: 'Home', chat: 'Agents', control: 'Missions', usage: 'Fleet' };
-
-/** The tab a name means, in any case and under any earlier name, or null. */
+export const tabLabel = (tab: Tab): string => tab;
 export function tabNamed(name: string | null | undefined): Tab | null {
-  if (!name) return null;
-  const lower = name.trim().toLowerCase();
-  return TABS.find(tab => tab.toLowerCase() === lower) ?? ALIASES[lower] ?? null;
+  return TABS.find(tab => tab.toLowerCase() === name?.trim().toLowerCase()) ?? null;
 }
-
-/** A stored tab order: every tab once, in the stored order where it names them; else the default. */
 export function tabOrder(stored: unknown): Tab[] {
-  if (!Array.isArray(stored)) return [...TABS];
-  const named = stored.map(value => typeof value === 'string' ? tabNamed(value) : null).filter((tab): tab is Tab => !!tab);
-  const unique = [...new Set(named)];
-  return unique.length === TABS.length ? unique : [...unique, ...TABS.filter(tab => !unique.includes(tab))];
+  if (!Array.isArray(stored) || stored.length !== TABS.length) return [...TABS];
+  const named = stored.map(value => typeof value === 'string' ? tabNamed(value) : null);
+  return named.every((tab): tab is Tab => !!tab) && new Set(named).size === TABS.length ? named : [...TABS];
 }
 
 export type DevLink =
@@ -33,10 +18,10 @@ export type DevLink =
   | { kind: 'session'; id: string; terminal?: string }
   | { kind: 'agent'; id: string }
   | { kind: 'terminal'; id: string }
-  | { kind: 'tree'; on: boolean }
+  | { kind: 'attention'; id: string }
   | { kind: 'pair'; gateway: string; id: string; code: string };
 
-/** A Debug-only deep link, e.g. `com.compoundingtech.smalltalk.starter://tab/Agents`. */
+/** A Debug-only deep link, e.g. `com.compoundingtech.smalltalk.starter://tab/Resources`. */
 export function parseDevLink(link: string): DevLink | null {
   let parsed: URL;
   try { parsed = new URL(link); } catch { return null; }
@@ -52,7 +37,7 @@ export function parseDevLink(link: string): DevLink | null {
     }
     case 'agent': { const id = params.get('id'); return id?.startsWith('agent/') ? { kind: 'agent', id } : null; }
     case 'terminal': { const id = params.get('id'); return id?.startsWith('terminal/') ? { kind: 'terminal', id } : null; }
-    case 'tree': return { kind: 'tree', on: params.get('on') !== '0' };
+    case 'attention': { const id = params.get('id'); return id?.startsWith('attention/') ? { kind: 'attention', id } : null; }
     case 'pair': {
       const gateway = params.get('gateway'), id = params.get('id'), code = params.get('code');
       return gateway && id && code ? { kind: 'pair', gateway, id, code } : null;

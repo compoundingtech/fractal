@@ -27,6 +27,16 @@ Both peer routes pass through a TCP proxy whose drop closes existing connections
 and refuses new traffic. Cleanup stops reconciliation before closing the private
 PTY registry. Shared daemons and seats are never stopped or changed.
 
+A dedicated Linux guardian watches the launcher and its caller through pidfds and
+reaps the eval's entire descendant tree, including detached PTY servers, before
+returning. It also owns the private runtime and executable-copy directories and
+removes them after reaping, including after SIGTERM, SIGKILL, timeout, setup failure,
+or evidence collection failure. `--keep` explicitly retains those directories and
+prints their paths; processes are still killed. Normalized evidence in `OUT` is
+retained independently. Daemons, workers, helper commands and provider channels
+have private process groups. Provider exit kills its channel groups, and provider
+shutdown has a one-second deadline.
+
 Every case starts fresh nodes and proves a cross-node warmup before injecting the
 fault. Provider readiness and that warmup both use the setup deadline (60 seconds by
 default): a peer exchange can already be in its 30-second long poll when the warmup
@@ -77,7 +87,11 @@ handoff, one authoritative graph read within ten seconds of clearing, convergenc
 of the read receipt back to the sender, and no unexpected provider replacement.
 The runner also counts message files below inbox/archive directories in the private receiver state;
 any projection fails the no-files gate. It observes a fixed 25-second tail after clearing, even when the first read is fast,
-to catch duplicates and to outlast the delivery report's 20-second startup grace.
+to catch duplicates and to outlast the delivery report's 20-second startup grace by 5 seconds.
+`--startup-grace-seconds` runs the daemon with a shorter grace through the test-only
+`ST3_TEST_DELIVERY_STARTUP_GRACE_MS` cap (it can only shorten the grace, and is unset in production); the
+tail then only has to outlast that grace plus the same 5 seconds. The Rust tests use a 1-second grace and a
+6-second tail for every case but `daemon_restart` and `link_minutes`, which keep the real 20 and 25 seconds.
 Duplicates after that bounded observation window are not covered.
 
 Delivery and reporting are separate results: a working old channel that st reports
@@ -100,7 +114,8 @@ image at the same path. `--swap-binary` tests a real other build instead. `--cas
 selects cases for diagnosis. `--short-seconds`, `--long-seconds`,
 `--observe-seconds`, and `--ready-seconds` adjust durations without relaxing the
 ten-second read gate. The runner refuses a short outage below two seconds, a long
-outage below two minutes, or an observation tail below 25 seconds. It exits nonzero
+outage below two minutes, or an observation tail below the startup grace plus 5 seconds (25 seconds at
+the real grace). It exits nonzero
 for a failed gate or fixture error and writes partial results after each case.
 
 The oracle's negative controls run with:
@@ -109,6 +124,12 @@ The oracle's negative controls run with:
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
   -s scripts/st3-messaging-faults-eval -p 'test_*.py'
 ```
+
+Set `ST3_MFE_TEST_BINARY=/path/to/st3` to include the cleanup regression. It starts
+real isolated nodes and a native OMP provider/channel, then kills the controller or
+launcher and checks that all recorded PIDs and private directories disappear within
+five seconds. It also checks SIGTERM and explicit `--keep`. Cargo runs this proof
+as `messaging_faults::controller_death_cleanup` using its fixture binary.
 
 The Linux Cargo integration suite exposes every case as its own `messaging_faults::*` test,
 so the Namespace Linux gate runs the complete matrix in parallel and retries individual cases.
@@ -136,7 +157,7 @@ The real OMP 18.4.4 title bakeoff is reproducible without prompts, credentials o
 
 ```sh
 python3 scripts/st3-omp-labels-eval/run /path/to/omp-18.4.4 \
-  crates/st3/hooks/omp-channel.ts /tmp/omp-labels-result.json
+  crates/st3-daemon/hooks/omp-channel.ts /tmp/omp-labels-result.json
 ```
 
 It uses an isolated profile and a loopback-only dummy model. The actual extension receives full

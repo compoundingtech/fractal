@@ -166,14 +166,11 @@ Field rules:
   **never** occupancy. It is named for that distinction (HC-R16): a measured
   Codex session read 2,235,329 cumulative against a 258,400-token window, so a
   consumer dividing it by `windowTokens` reports >800%.
-- `costUsd` is the harness-reported cost, in the harness's own accounting and at
-  whatever scope that harness reports it, and no st2 path recomputes or
-  reconciles it. Claude and OpenCode report a session total; pi and omp report a
-  per-message figure and the record carries the last assistant message's — see
-  the producer table and
-  [`DELTA-005`](../.delta/DELTA-005-harness-context-cost-is-per-message-on-pi-and-omp.md),
-  which records that HC-R16 still says "session cost" and needs widening. Codex
-  reports none; the field is `null` there. A consumer comparing this field across
+- `costUsd` is the harness-reported cost at the scope the harness reports, in
+  the harness's own accounting; no st2 path recomputes or reconciles it. Claude
+  and OpenCode report session totals; pi and omp report the last assistant
+  message's per-message figure; the producer table names each source. Codex
+  reports none, so the field is `null`. A consumer comparing this field across
   harnesses must read the `harness` discriminator first.
 - `rateLimits` is harness-reported and account-scoped (HC-T06). It repeats
   across every agent runtime sharing an account. Absent windows are `null`.
@@ -222,7 +219,11 @@ Constants, deliberately not aliases of the presence or harness-state constants
 | `HARNESS_CONTEXT_FUTURE_SKEW` | 60 s | beyond this the clock is untrusted and the record reads absent |
 | `HARNESS_CONTEXT_BUCKET_PERCENT` | 1 | window fraction that defines a write bucket |
 | `HARNESS_CONTEXT_WARN_PERCENT` | 80 | at or above this reading Doctor emits an advisory; st2's own attention threshold, not a compaction prediction |
-| `HARNESS_CONTEXT_HEARTBEAT` | 300 s | maximum interval between writes while a reading is available; deliberately equal to `HARNESS_STATE_REFRESH`, so this record never re-stamps more often than the state record beside it |
+| `HARNESS_CONTEXT_HEARTBEAT` | 300 s | maximum interval between writes while a reading is available; independent of the categorical `HARNESS_STATE_REFRESH` cadence |
+
+An idle seat with unchanged numeric readings can show older “observed N s ago”
+values between these five-minute refreshes. Numeric bucket, account/reset,
+rate-limit and compaction changes still publish immediately.
 
 The 60-minute horizon is four times harness-state's 15-minute one on purpose: a
 categorical state that is an hour old is a dangerous claim about what an agent
@@ -434,8 +435,8 @@ listed is `null`, and no producer computes a fact its channel does not carry:
 | --- | --- | --- | --- | --- |
 | claude | `model.id` | `cost.total_cost_usd` | `rate_limits.{five_hour,seven_day}` | `null` — the payload's `total_*` keys describe the last response, not the session |
 | codex | `null` — the thread carries `modelProvider` only | `null` — Codex reports no cost | `account/rateLimits/updated`, `sevenDay` only — see below | `tokenUsage.total.totalTokens` |
-| pi | `ctx.model.id` | per-message `usage.cost.total` | `null` | `null` in v1 — only obtainable by summing every message's usage, which is a producer-side accumulator, not a free reading |
-| omp | `ctx.model.id` | per-message `usage.cost.total` | `null` | `null` in v1 — same reason as pi |
+| pi | `ctx.model.id` | last assistant message's per-message `usage.cost.total` | `null` | `null` in v1 — only obtainable by summing every message's usage, which is a producer-side accumulator, not a free reading |
+| omp | `ctx.model.id` | last assistant message's per-message `usage.cost.total` | `null` | `null` in v1 — same reason as pi |
 | opencode | `session.info.model`, written `providerID/modelID` | `session.info.cost` | `null` | `session.info.tokens` (cumulative, no `total` key — summed by the producer) |
 
 `sessionTotalTokens` is carried only where the channel already computes it. A
@@ -786,11 +787,10 @@ producer rather than only its constants:
   withheld value is never fabricated from a previous one — so a frame omitting
   the cost would *erase* the published one at the next turn boundary. The
   extension holds the last assistant `usage.cost.total` and restates it, which is
-  exactly what `costUsd` means for pi and omp. This is the one place where the
-  record's general field description ("the harness-reported session cost") and
-  the per-harness rule (a per-message figure) differ, and the per-harness rule
-  wins: summing to a session total would need the producer-side accumulator
-  HC-R16 refuses for `sessionTotalTokens` for the same reason. The hold is
+  exactly what pi and omp publish for `costUsd`. HC-R16 now permits this
+  harness-reported per-message scope, and the producer table names it explicitly.
+  Summing to a session total would need the producer-side accumulator HC-R16
+  refuses for `sessionTotalTokens` for the same reason. The hold is
   cleared on session replacement, so a `/new` session does not restate its
   predecessor's cost.
 

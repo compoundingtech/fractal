@@ -3,6 +3,9 @@
 
 export const API_VERSION = 'st3.client.v0' as const;
 
+/** Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043). */
+export const SIDEBAR_ARRANGEMENT_UUID = "00000000-0000-7000-8000-000000000001" as const;
+
 export type ActionCommon = {
   api_version: "st3.client.v0";
   fence: Fence;
@@ -11,12 +14,13 @@ export type ActionCommon = {
   parameters: {
 
 };
-  type: "custom.reply" | "attention.resolve" | "review.approve" | "review.reject" | "review.request-changes" | "message.send" | "message.read" | "message.close" | "launch.create" | "launch.revise" | "launch.preview" | "launch.approve" | "launch.cancel" | "mission.start" | "mission.revise" | "mission.approve-revision" | "mission.cancel-revision" | "mission.cancel" | "session.import" | "work.ask" | "work.done" | "work.cancel-ask" | "work.claim" | "work.renew" | "work.progress" | "work.complete" | "work.fail" | "work.release" | "work.retry" | "work.publish-mission" | "agent.create" | "agent.stop" | "agent.start" | "agent.suspend" | "agent.resume" | "terminal.create" | "terminal.end" | "agent.queue-move" | "lane.join" | "lane.leave" | "lane.move" | "lane.mark" | "lane.approve" | "runtime.stop" | "runtime.restart" | "runtime.reset" | "runtime.context-clear" | "runtime.signal" | "terminal.input" | "terminal.resize" | "terminal.attach" | "terminal.detach" | "pairing.revoke";
+  type: "arrangement.edit" | "custom.reply" | "prompt.respond" | "attention.resolve" | "review.approve" | "review.reject" | "review.request-changes" | "message.send" | "message.read" | "message.close" | "launch.create" | "launch.revise" | "launch.preview" | "launch.approve" | "launch.cancel" | "mission.start" | "mission.revise" | "mission.approve-revision" | "mission.cancel-revision" | "mission.cancel" | "session.import" | "work.ask" | "work.done" | "work.cancel-ask" | "work.claim" | "work.renew" | "work.progress" | "work.complete" | "work.fail" | "work.release" | "work.retry" | "work.publish-mission" | "agent.create" | "agent.stop" | "agent.retire" | "agent.start" | "agent.suspend" | "agent.resume" | "terminal.create" | "terminal.end" | "agent.queue-move" | "lane.join" | "lane.leave" | "lane.move" | "lane.mark" | "lane.approve" | "runtime.stop" | "runtime.restart" | "runtime.reset" | "runtime.context-clear" | "runtime.signal" | "terminal.input" | "terminal.resize" | "terminal.attach" | "terminal.detach" | "pairing.revoke";
 };
 
 export type ActionResult = {
   action_id: Id;
   affected_ids: Array<Id>;
+  arrangement_revision?: Revision;
   kind: "action-result";
   operation_id: Id;
   snapshot_id: Id;
@@ -28,12 +32,15 @@ export type ActorRef = string;
 
 export type Agent = ResourceHeader & {
   active_work_count?: number;
+  activity?: string | null;
   ask?: string | null;
   blocked_on?: string | null;
+  checkout?: (AgentCheckout | null);
   current_session_id?: string | null;
   current_work?: Array<WorkLabel>;
   current_work_ids?: Array<StepRunId>;
   delivery?: (AgentDelivery | null);
+  down_since?: (Timestamp | null);
   driver?: string | null;
   fault?: string | null;
   handoff?: (AgentHandoff | null);
@@ -44,11 +51,13 @@ export type Agent = ResourceHeader & {
   incarnation_id?: string | null;
   kind: "agent";
   last_activity_at?: (Timestamp | null);
+  lifecycle?: AgentLifecycle;
   name: string;
   next_work?: (WorkLabel | null);
   next_work_id?: (Id | null);
   observation?: "current" | "stale" | "missing";
   owner_run_id?: (MissionRunId | null);
+  presentation?: AgentPresentation;
   queued_work_count?: number;
   reachability: AgentReachability;
   reason?: string | null;
@@ -66,6 +75,13 @@ export type Agent = ResourceHeader & {
   upcoming_work?: Array<WorkLabel>;
   upcoming_work_ids?: Array<Id>;
   usage?: (UsageSummary | null);
+  workspace?: string | null;
+};
+
+export type AgentCheckout = {
+  base: string;
+  branch: string;
+  repository: string;
 };
 
 export type AgentCreateParameters = {
@@ -84,6 +100,7 @@ export type AgentCreateParameters = {
 };
 
 export type AgentDeclaration = {
+  accountable?: string;
   id: Id;
   kdl: string;
   revision: string;
@@ -110,6 +127,54 @@ export type AgentHandoff = {
 };
 
 export type AgentId = string;
+
+export type AgentLifecycle = ("standing" | "owner" | "bounded" | string);
+
+export type AgentMessageDay = {
+  calibrated_messages: number;
+  day_start_ms: number;
+  high_microusd: number;
+  high_percent?: number | null;
+  low_microusd: number;
+  low_percent?: number | null;
+  messages: number;
+  since_ms: number;
+  unpriced_tokens: number;
+  until_ms: number;
+  usage_cost_microusd: number;
+};
+
+export type AgentMessageEstimate = {
+  calibration?: string | null;
+  days: Array<AgentMessageDay>;
+  fallback_high_microusd: number;
+  fallback_low_microusd: number;
+  method: string;
+  source: string;
+};
+
+export type AgentPresentation = {
+  because: string | null;
+  group: "needs_you" | "needs_login" | "fault" | "working" | "idle" | "stopped" | "retired";
+  next: Array<AgentPresentationWork>;
+  now: (AgentPresentationNow | null);
+  queued: number;
+  state: "needs_you" | "needs_login" | "fault" | "working" | "compacting" | "idle" | "starting" | "down" | "stopped" | "retired" | "unknown";
+};
+
+export type AgentPresentationNow = AgentPresentationWork & {
+  goal?: string | null;
+  holder_down_since?: (Timestamp | null);
+  since: Timestamp;
+};
+
+export type AgentPresentationWork = {
+  label: string;
+  mission: Id;
+  path: string;
+  step: StepRunId;
+  title?: string | null;
+};
 
 export type AgentQueue = {
   agent_id: Id;
@@ -161,11 +226,16 @@ export type AgentResumeParameters = {
   host?: string;
 };
 
+export type AgentRetireParameters = {
+  agent: Id;
+  reason: string;
+};
+
 export type AgentStartParameters = {
   agent: Id;
 };
 
-export type AgentState = ("desired" | "starting" | "running" | "waiting" | "stopped" | "failed" | "suspended" | string);
+export type AgentState = ("desired" | "starting" | "running" | "waiting" | "down" | "stopped" | "failed" | "suspended" | "retired" | string);
 
 export type AgentStopParameters = {
   agent: Id;
@@ -220,6 +290,362 @@ export type AgentWorkspace = {
   workspace: string;
 };
 
+export type Arrangement = ResourceHeader & {
+  body: ArrangementBody;
+  deleted: false;
+  kind: "arrangement";
+  owner: ArrangementPerson;
+  resolved?: ArrangementResolved;
+};
+
+export type ArrangementBody = {
+  folders: {
+  [key: string]: ArrangementFolder;
+};
+  name: ArrangementNameRegister;
+  placements: {
+  [key: string]: ArrangementPlacementRegister;
+};
+  version: 1;
+};
+
+export type ArrangementEditParameters = {
+  operations: Array<ArrangementOperation>;
+  owner: ArrangementPerson;
+  subject: ArrangementId;
+};
+
+export type ArrangementFolder = {
+  name: ArrangementNameRegister;
+  position: ArrangementPositionRegister;
+  tombstone: (ArrangementTombstoneRegister | null);
+};
+
+export type ArrangementFolderId = string;
+
+export type ArrangementId = string;
+
+export type ArrangementKey = string;
+
+export type ArrangementName = string;
+
+export type ArrangementNameRegister = {
+  revision: Revision;
+  value: ArrangementName;
+};
+
+export type ArrangementOperation = ({
+  name: ArrangementName;
+  op: "create";
+} | {
+  name: ArrangementName;
+  op: "rename";
+} | {
+  id: ArrangementFolderId;
+  key: ArrangementKey;
+  name: ArrangementName;
+  op: "folder.create";
+  parent: (ArrangementFolderId | null);
+} | {
+  id: ArrangementFolderId;
+  name: ArrangementName;
+  op: "folder.rename";
+} | {
+  id: ArrangementFolderId;
+  key: ArrangementKey;
+  op: "folder.move";
+  parent: (ArrangementFolderId | null);
+} | {
+  id: ArrangementFolderId;
+  op: "folder.delete";
+} | {
+  folder: (ArrangementFolderId | null);
+  key: ArrangementKey;
+  op: "subject.place";
+  subject: ArrangementSubject;
+} | {
+  op: "retire";
+});
+
+export type ArrangementPage = {
+  collection: "arrangements";
+  filters: {
+  [key: string]: string;
+};
+  items: Array<Arrangement>;
+  kind: "page";
+  page: PageInfo;
+  replicated?: ReplicatedNotice;
+  sync?: SyncNotice;
+};
+
+export type ArrangementPerson = string;
+
+export type ArrangementPlacement = {
+  folder: (ArrangementFolderId | null);
+  key: ArrangementKey;
+};
+
+export type ArrangementPlacementRegister = {
+  revision: Revision;
+  value: ArrangementPlacement;
+};
+
+export type ArrangementPosition = {
+  key: ArrangementKey;
+  parent: (ArrangementFolderId | null);
+};
+
+export type ArrangementPositionRegister = {
+  revision: Revision;
+  value: ArrangementPosition;
+};
+
+export type ArrangementResolved = {
+  folders: {
+  [key: string]: (ArrangementFolderId | null);
+};
+  parents: {
+  [key: string]: (ArrangementFolderId | null);
+};
+};
+
+export type ArrangementSubject = string;
+
+export type ArrangementTombstoneRegister = {
+  revision: Revision;
+  value: true;
+};
+
+export type AssistantAgentItem = {
+  current_mission_id: string | null;
+  current_run_id: string | null;
+  id: Id;
+  lifecycle: ("standing" | "owner" | "bounded" | "unknown" | null);
+  runtime_state: "desired" | "starting" | "running" | "waiting" | "stopped" | "failed" | "suspended" | "unknown";
+  updated_at: (Timestamp | null);
+};
+
+export type AssistantAgentPage = {
+  collection: "assistant.agents";
+  filters: {
+
+};
+  items: Array<AssistantAgentItem>;
+  kind: "page";
+  page: PageInfo;
+  sync?: SyncNotice;
+};
+
+export type AssistantAttentionItem = {
+  agent_id: string | null;
+  attention_kind: "human-gate" | "launch-approval" | "revision-approval" | "unread-message" | "person-step" | "agent-request" | "fault" | "harness-login" | "harness-prompt" | "custom" | "unknown";
+  episode: string;
+  id: Id;
+  mission_id: string | null;
+  mission_run_id: string | null;
+  person_id: PersonId;
+  revision: Revision;
+  waiting_since: Timestamp;
+};
+
+export type AssistantAttentionPage = {
+  collection: "assistant.attention";
+  filters: {
+
+};
+  items: Array<AssistantAttentionItem>;
+  kind: "page";
+  page: PageInfo;
+  sync?: SyncNotice;
+};
+
+export type AssistantContentPage = (AssistantConversationContent | AssistantTerminalContent);
+
+export type AssistantContentRange = {
+  end: number;
+  start: number;
+};
+
+export type AssistantContentRequest = (AssistantConversationContentRequest | AssistantTerminalContentRequest);
+
+export type AssistantConversationContent = {
+  agent_id: AgentId;
+  end: number;
+  kind: "assistant-conversation-content";
+  next_range: (AssistantContentRange | null);
+  reference: string;
+  returned_bytes: number;
+  revision: Revision;
+  session_id: Id;
+  start: number;
+  text: string;
+  truncated: boolean;
+};
+
+export type AssistantConversationContentRequest = {
+  agent_id: AgentId;
+  end: number;
+  max_response_bytes?: AssistantResponseBytes;
+  reference: string;
+  revision: Revision;
+  session_id: Id;
+  start: number;
+};
+
+export type AssistantGrant = {
+  consent_evidence: string;
+  device_id: Id;
+  disclosure_consent: boolean;
+  expires_at: Timestamp;
+  id: Id;
+  issuer: PersonId;
+  key_id: string;
+  kind: "assistant-grant";
+  minimal_read_mode: AssistantMinimalReadMode;
+  policy_revision: number;
+  principal: AssistantPrincipal;
+  read_trust?: AssistantReadTrust;
+  recipient_allowlist: Array<string>;
+  revoked: boolean;
+  scopes: Array<AssistantScope>;
+  sender_class: AssistantSenderClass;
+  session_actor: string;
+};
+
+export type AssistantGrantPolicy = {
+  api_version: "st3.client.v0";
+  consent_evidence: string;
+  disclosure_consent: true;
+  expires_in_seconds?: number;
+  minimal_read_mode: AssistantMinimalReadMode;
+  recipient_allowlist?: Array<string>;
+  scopes: Array<AssistantScope>;
+};
+
+export type AssistantMinimalReadMode = "approval-once" | "caller-bound-allow";
+
+export type AssistantMissionItem = {
+  agent_ids: Array<string>;
+  blocked_count: number;
+  id: Id;
+  phase: "draft" | "ready" | "running" | "standing" | "blocked" | "completed" | "failed" | "cancelled" | "retired" | "unknown";
+  revision: string | null;
+  run_id: string | null;
+  step_counts: {
+  completed: number;
+  total: number;
+};
+  updated_at: Timestamp;
+};
+
+export type AssistantMissionPage = {
+  collection: "assistant.missions";
+  filters: {
+
+};
+  items: Array<AssistantMissionItem>;
+  kind: "page";
+  page: PageInfo;
+  sync?: SyncNotice;
+};
+
+export type AssistantPageRequest = {
+  cursor?: Cursor;
+  limit?: number;
+  max_response_bytes?: AssistantResponseBytes;
+};
+
+export type AssistantPairedSession = {
+  api_version: "st3.client.v0";
+  credential: string;
+  device_id: Id;
+  expires_at: Timestamp;
+  grant: AssistantGrant;
+  kind: "assistant-paired-session";
+  principal: AssistantPrincipal;
+  scopes: Array<AssistantScope>;
+  sender_class: AssistantSenderClass;
+  session_actor: string;
+};
+
+export type AssistantPairingBegin = {
+  api_version: "st3.client.v0";
+  assistant_id: AssistantPrincipal;
+  consent_evidence: string;
+  device_name: string;
+  disclosure_consent: true;
+  expires_in_seconds?: number;
+  minimal_read_mode?: AssistantMinimalReadMode;
+  scopes: Array<AssistantScope>;
+};
+
+export type AssistantPrincipal = "assistant/chatgpt";
+
+export type AssistantProjection = "summary" | "attention" | "missions" | "agents" | "conversation-content" | "terminal-content";
+
+export type AssistantReadTrust = {
+  attestor_public_key: Ed25519PublicKey;
+  default_response_bytes: number;
+  issuer: PersonId;
+  key_id: string;
+  max_response_bytes: number;
+  shim_public_key: Ed25519PublicKey;
+};
+
+export type AssistantReadTrustRequest = {
+  api_version: "st3.client.v0";
+  attestor_public_key: Ed25519PublicKey;
+  default_response_bytes?: number;
+  issuer: PersonId;
+  key_id: string;
+  max_response_bytes?: number;
+  shim_public_key: Ed25519PublicKey;
+};
+
+export type AssistantResponseBytes = number;
+
+export type AssistantScope = "read.assistant.summary" | "read.assistant.attention" | "read.assistant.missions" | "read.assistant.agents" | "read.assistant.conversation" | "read.assistant.terminal" | "write.assistant.messages" | "write.assistant.custom-reply";
+
+export type AssistantSenderClass = "external-assistant";
+
+export type AssistantSummary = {
+  as_of: Timestamp;
+  counts: {
+  agent_states: {
+  [key: string]: number;
+};
+  attention: number;
+  mission_states: {
+  [key: string]: number;
+};
+};
+  kind: "assistant-summary";
+};
+
+export type AssistantSummaryRequest = {
+  max_response_bytes?: AssistantResponseBytes;
+};
+
+export type AssistantTerminalContent = {
+  agent_id: AgentId;
+  incarnation_id: string;
+  kind: "assistant-terminal-content";
+  returned_bytes: number;
+  screen_revision: Revision;
+  terminal_id: TerminalId;
+  text: string;
+  truncated: boolean;
+};
+
+export type AssistantTerminalContentRequest = {
+  agent_id: AgentId;
+  incarnation_id: string;
+  max_response_bytes?: AssistantResponseBytes;
+  screen_revision: Revision;
+  terminal_id: TerminalId;
+};
+
 export type Attachment = {
   blob: string;
   media_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
@@ -239,10 +665,13 @@ export type Attention = ResourceHeader & {
   action_parameters?: {
 
 };
-  actions: Array<"custom.reply" | "work.done" | "review.approve" | "review.reject" | "review.request-changes" | "launch.approve" | "launch.cancel" | "mission.approve-revision" | "mission.cancel-revision" | "message.read">;
-  attention_kind: ("human-gate" | "launch-approval" | "revision-approval" | "unread-message" | "person-step" | "agent-request" | "fault" | string);
+  actions: Array<"custom.reply" | "prompt.respond" | "work.done" | "review.approve" | "review.reject" | "review.request-changes" | "launch.approve" | "launch.cancel" | "mission.approve-revision" | "mission.cancel-revision" | "message.read">;
+  alert?: boolean;
+  attention_kind: ("human-gate" | "launch-approval" | "revision-approval" | "unread-message" | "person-step" | "agent-request" | "fault" | "harness-login" | "harness-prompt" | string);
   because?: string;
   blocked?: AttentionBlocked;
+  conversation_id?: Id;
+  conversation_ids?: Array<Id>;
   custom_form?: {
 
 };
@@ -315,20 +744,38 @@ export type CanonicalNode = {
 export type Capabilities = {
   capabilities: Array<Capability>;
   event_cursor: Cursor;
+  grant_expires_at?: Timestamp;
+  grant_id?: Id;
+  grant_kind?: "person" | "assistant";
   kind: "capabilities";
   limits: {
+  default_assistant_response_bytes?: number;
+  max_arrangement_body_bytes?: number;
+  max_arrangement_folders?: number;
+  max_arrangement_key_bytes?: number;
+  max_arrangement_name_bytes?: number;
+  max_arrangement_operations?: number;
+  max_arrangement_placements?: number;
+  max_arrangement_resource_bytes?: number;
+  max_arrangements?: number;
+  max_assistant_response_bytes?: number;
   max_event_items: number;
   max_glass_body_bytes?: number;
   max_glass_depth?: number;
   max_glass_nodes?: number;
   max_glasses?: number;
+  max_message_bytes?: number;
   max_page_items: number;
   max_response_bytes: number;
   max_wait_ms: number;
 };
   machine_version?: string;
+  minimal_read_mode?: AssistantMinimalReadMode;
   oldest_event_cursor: Cursor;
+  policy_revision?: number;
+  principal?: AssistantPrincipal;
   schemas: Array<string>;
+  sender_class?: AssistantSenderClass;
   session_actor: Id;
   transport: "unix" | "fabric-loopback";
 };
@@ -361,13 +808,30 @@ export type ClientConnections = {
 };
 
 export type CollectionCommand = ({
+  actor?: null;
+  collection: "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  person?: string | null;
+  since_ms?: number;
+  status?: null;
+  until_ms?: number;
+} | {
   actor?: string | null;
-  collection: CollectionName;
+  collection: "missions" | "attention" | "agents" | "work" | "glasses" | "summary";
   id: string;
   kind: "subscribe";
   limit?: number;
   person?: string | null;
   status?: string | null;
+} | {
+  collection: "arrangements";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  person: ArrangementPerson;
+  subject?: ArrangementId;
 } | {
   capability: string;
   collection: "terminal";
@@ -411,6 +875,7 @@ export type CollectionFrame = ({
 } | {
   collection: "conversation";
   has_more?: boolean;
+  header?: ConversationHeader;
   id: string;
   items: Array<TimelineEntry>;
   kind: "conversation";
@@ -432,13 +897,64 @@ export type CollectionFrame = ({
   retryable?: boolean;
 });
 
-export type CollectionName = "missions" | "attention" | "agents" | "work" | "glasses";
+export type CollectionName = "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "summary" | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
+
+export type ConnectedClient = ResourceHeader & {
+  actor: string;
+  client?: string | null;
+  connected: boolean;
+  device_id?: string;
+  device_name?: string;
+  follows: Array<string>;
+  kind: "connected-client";
+  last_seen: Timestamp;
+  member: string;
+  person: string;
+  since: Timestamp;
+  streams: number;
+  via: "local" | "gateway" | "tailscale";
+};
 
 export type ConversationChanges = {
+  header?: unknown;
   items: Array<TimelineEntry>;
   kind: "conversation-changes";
   next_cursor: Cursor;
   session_id: Id;
+};
+
+export type ConversationContentChunk = {
+  data: string;
+  kind: "conversation-content-chunk";
+  media_type: string;
+  next_offset?: number | null;
+  offset: number;
+  ref: string;
+  size: number;
+};
+
+export type ConversationContentRef = {
+  media_type: string;
+  reason?: string;
+  ref: string;
+  size?: number;
+};
+
+export type ConversationHeader = {
+  ask?: ConversationHeaderField;
+  context?: ConversationHeaderField;
+  cost?: ConversationHeaderField;
+  jobs?: ConversationHeaderField;
+  model?: ConversationHeaderField;
+  subagents?: ConversationHeaderField;
+  todos?: ConversationHeaderField;
+  working?: ConversationHeaderField;
+};
+
+export type ConversationHeaderField = {
+  as_of: Timestamp;
+  source: "register" | "transcript";
+  value: unknown;
 };
 
 export type ConversationSearch = {
@@ -494,13 +1010,29 @@ export type DecisionResponse = ({
 
 export type Device = ResourceHeader & {
   expires_at: Timestamp;
+  grant_expires_at?: Timestamp;
+  grant_id?: Id;
+  grant_kind?: "person" | "assistant";
   kind: "device";
+  minimal_read_mode?: AssistantMinimalReadMode;
   name?: string | null;
-  person_id: Id;
+  person_id?: Id;
+  policy_revision?: number;
+  principal?: AssistantPrincipal;
   scopes: Array<string>;
+  sender_class?: AssistantSenderClass;
   session_actor: Id;
   state: "active" | "expired" | "revoked";
-};
+} & ({
+  grant_id?: never;
+  grant_kind?: "person";
+  person_id: Id;
+  principal?: never;
+  sender_class?: never;
+} | {
+  grant_kind: "assistant";
+  person_id?: never;
+});
 
 export type DeviceSignature = {
   chain: Array<string>;
@@ -520,25 +1052,43 @@ export type Diagnostic = {
   severity: "info" | "warning" | "error";
 };
 
+export type DirectiveNote = {
+  author: string;
+  expires_at?: (Timestamp | null);
+  person: string;
+  revision: string;
+  text: string;
+  time: Timestamp;
+};
+
+export type DirectiveNotes = {
+  notes: Array<DirectiveNote>;
+};
+
 export type DocumentContent = {
   bytes: Array<number>;
   reference: string;
 };
 
+export type Ed25519PublicKey = string;
+
 export type Envelope = {
   api_version: "st3.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (Capabilities | DocumentContent | SubjectDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog);
+  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
-export type ErrorCode = ("attention-migrated" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "internal" | string);
+export type ErrorCode = ("recipient-retired" | "lifecycle-unavailable" | "retirement-upgrade-required" | "attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "suspend-authored-session-selection" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "agent-roster-cut-not-ready" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "response-budget-exceeded" | "content-not-text" | "internal" | string);
 
 export type ErrorEnvelope = {
   api_version: "st3.client.v0";
+  applied?: "none" | "unknown";
   code: ErrorCode;
   details: {
-
+  applied?: "none" | "unknown";
+  refusal?: MessageSendRefusal;
+  [key: string]: unknown;
 };
   error_version: "st3.client.error.v0";
   message: string;
@@ -553,6 +1103,12 @@ export type EventPage = {
   kind: "event-page";
   oldest_cursor: Cursor;
   resume_cursor: Cursor;
+};
+
+export type ExchangeTransport = {
+  at: Timestamp;
+  carrier: string;
+  fabric_route?: string;
 };
 
 export type Fence = {
@@ -654,6 +1210,18 @@ export type HostRepositories = {
 };
 
 export type Id = string;
+
+export type JobSummary = {
+  duration_ms?: number;
+  ended_at?: Timestamp;
+  exit_code?: number;
+  id: string;
+  name?: string;
+  output_bytes?: number;
+  started_at?: Timestamp;
+  state: string;
+  type?: string;
+};
 
 export type Lane = ResourceHeader & {
   approver_id: (Id | null);
@@ -814,6 +1382,8 @@ export type MailBacklog = {
 
 export type Message = ResourceHeader & {
   attachments?: Array<Attachment>;
+  body_bytes?: number;
+  body_ref?: string;
   content: string;
   from: Id;
   in_reply_to?: (Id | null);
@@ -826,12 +1396,39 @@ export type Message = ResourceHeader & {
   to: Id;
 };
 
+export type MessageBody = {
+  bytes: number;
+  complete?: boolean;
+  message: string;
+  text: string;
+};
+
+export type MessageProvenance = {
+  device?: string;
+  key?: string;
+  reason?: string;
+  signer?: ParticipantRef;
+  verdict: "verified" | "unsigned" | "held" | "invalid";
+};
+
+export type MessageSendRefusal = ({
+  recipient: Id;
+  successor?: Id;
+  transfer?: string;
+  variant: "Retired";
+} | {
+  reason: "unavailable" | "conflict";
+  recipient: Id;
+  variant: "LifecycleUnavailable";
+});
+
 export type Mission = ResourceHeader & {
   active_runs?: number;
   id?: MissionId;
   kind: "mission";
   mission_revision: Revision;
   must_act?: MustAct;
+  presentation?: MissionPresentation;
   run_counts?: {
   [key: string]: number;
 };
@@ -842,13 +1439,49 @@ export type Mission = ResourceHeader & {
   runs: Array<MissionRunId>;
   runs_truncated?: boolean;
   state: MissionState;
+  system?: boolean;
   title: string;
   total_runs?: number;
   usage?: (UsageSummary | null);
   visualization?: (Visualization | null);
 };
 
+export type MissionActionOffer = {
+  action: string;
+  confirm: boolean;
+  id: "retry-step" | "restart-agent" | "cancel-run" | "chat";
+  target: Id;
+};
+
 export type MissionId = string;
+
+export type MissionPresentation = {
+  actions: Array<MissionActionOffer>;
+  card: ("what-you-can-do" | "nothing-to-do" | null);
+  last_progress: string | null;
+  progress: {
+  done: number;
+  total: number;
+};
+  queued_behind: (MissionQueuedBehind | null);
+  settled_at: (Timestamp | null);
+  steps: Array<MissionStepPresentation>;
+  stuck: (MissionStuck | null);
+  system: boolean;
+  who: PresentationActor;
+  word: "decision" | "stalled" | "unstaffed" | "unclaimed" | "queued" | "working" | "watching" | "held" | "idle" | "done" | "failed" | "cancelled" | "not_started";
+};
+
+export type MissionQueuedBehind = {
+  agent: AgentId;
+  busy_with?: ({
+  label: string;
+  mission: Id;
+  path: string;
+} | null);
+  label: string;
+  state?: string | null;
+};
 
 export type MissionRunId = string;
 
@@ -866,9 +1499,10 @@ export type MissionRunSummary = {
 
 } | null;
   current_steps: Array<{
-  assignee?: (AgentId | null);
-  claimant?: (AgentId | null);
+  assignee?: (ActorRef | null);
+  claimant?: (ActorRef | null);
   id: StepRunId;
+  progress_at?: (Timestamp | null);
   since: Timestamp;
   state: WorkState;
   title: string | null;
@@ -894,22 +1528,107 @@ export type MissionState = ("draft" | "ready" | "retired" | "running" | "standin
 
 export type MissionStep = {
   agentless?: boolean;
-  assignee?: (AgentId | null);
+  assignee?: (ActorRef | null);
   attempt: number;
   blocked_reason?: string | null;
   blockers?: Array<Id>;
-  claimant?: (AgentId | null);
+  claim_expires_at?: (Timestamp | null);
+  claimant?: (ActorRef | null);
   constraints?: Array<string>;
   goals?: Array<string>;
   id: Id;
+  keep_open?: boolean;
   last_progress?: string | null;
+  loop_max_rounds?: number | null;
+  loop_reason?: string | null;
+  loop_round?: number | null;
+  next_wake_at?: (Timestamp | null);
+  nudged_at?: (Timestamp | null);
   path: string;
+  progress_at?: (Timestamp | null);
   since: Timestamp;
   state: WorkState;
   title?: string | null;
+  wake?: (MissionWake | null);
+  wake_reason?: string | null;
+};
+
+export type MissionStepPresentation = {
+  attempts: number;
+  blockers: Array<string>;
+  id: StepRunId;
+  keep_open: boolean;
+  note?: string | null;
+  owner: PresentationActor;
+  path: string;
+  title?: string | null;
+  word: "needs_you" | "done" | "working" | "ready" | "waiting" | "cancelled" | "failed" | "pending";
+};
+
+export type MissionStuck = {
+  agent?: ({
+  id: AgentId;
+  label: string;
+  state: string;
+} | null);
+  attempts: number;
+  blockers: Array<string>;
+  step: StepRunId;
+  word: "needs_you" | "done" | "working" | "ready" | "waiting" | "cancelled" | "failed" | "pending";
+};
+
+export type MissionWake = {
+  acknowledged_by?: string | null;
+  assignee: ActorRef;
+  assignee_state: string;
+  attempts: number;
+  failure?: string | null;
+  incarnation_id: string;
+  last_attempt_at?: (Timestamp | null);
 };
 
 export type MustAct = ("you" | "agent" | "system" | "blocked" | "nobody" | string);
+
+export type ObservationAccepted = {
+  accepted: true;
+};
+
+export type ObservationLatency = {
+  buckets: Array<[number, number]>;
+  carrier: "fabric" | "tailscale" | "lan";
+  count: number;
+  interval_end: string;
+  interval_start: string;
+  kind: "latency";
+  max_ms: number;
+  over_target: number;
+  path?: "direct" | "relay";
+  target: "ios-open-to-live" | "ios-connect" | "ios-message-ack" | "ios-conversation-open" | "ios-terminal-open" | "ios-recover";
+};
+
+export type ObservationLiveShare = {
+  carrier: "fabric" | "tailscale" | "lan";
+  foreground_ms: number;
+  interval_end: string;
+  interval_start: string;
+  kind: "live-share";
+  live_ms: number;
+  path?: "direct" | "relay";
+  target: "ios-live-share";
+};
+
+export type ObservationReport = {
+  report_id: string;
+  samples: Array<ObservationSample>;
+};
+
+export type ObservationResponse = {
+  api_version: "st3.client.v0";
+  request_id: RequestId;
+  value: ObservationAccepted;
+};
+
+export type ObservationSample = (ObservationLatency | ObservationLiveShare);
 
 export type Observer = ResourceHeader & {
   kind: "observer";
@@ -982,19 +1701,7 @@ export type PageInfo = {
   next_cursor?: string | null;
 };
 
-export type PairedSession = {
-  credential: string;
-  device_id: Id;
-  device_key_chain?: Array<string>;
-  device_key_proofs?: Array<{
-
-}>;
-  expires_at: Timestamp;
-  kind: "paired-session";
-  person_id: string;
-  scopes: Array<string>;
-  session_actor: Id;
-};
+export type PairedSession = (PersonPairedSession | AssistantPairedSession);
 
 export type PairingAdvertisement = {
   api_version: "st3.client.v0";
@@ -1005,20 +1712,36 @@ export type PairingAdvertisement = {
 }>;
 };
 
-export type PairingBegin = {
-  api_version: "st3.client.v0";
-  device_name: string;
-  full_control?: boolean;
-  person_id: string;
-  scopes?: Array<"read.projections" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;
-};
+export type PairingBegin = (PersonPairingBegin | AssistantPairingBegin);
 
 export type PairingChallenge = {
   code: string;
   expires_at: Timestamp;
+  grant_expires_at?: Timestamp;
+  grant_id?: Id;
+  grant_kind?: "person" | "assistant";
   kind: "pairing-challenge";
+  minimal_read_mode?: AssistantMinimalReadMode;
   pairing_id: Id;
-};
+  person_root_fingerprint?: string;
+  policy_revision?: number;
+  principal?: AssistantPrincipal;
+} & ({
+  grant_expires_at?: never;
+  grant_id?: never;
+  grant_kind?: "person";
+  minimal_read_mode?: never;
+  policy_revision?: never;
+  principal?: never;
+} | {
+  grant_expires_at: Timestamp;
+  grant_id: Id;
+  grant_kind: "assistant";
+  minimal_read_mode: AssistantMinimalReadMode;
+  person_root_fingerprint?: never;
+  policy_revision: number;
+  principal: AssistantPrincipal;
+});
 
 export type PairingComplete = {
   api_version: "st3.client.v0";
@@ -1032,7 +1755,7 @@ export type ParticipantRef = string;
 export type PersonAnswer = {
   id?: string;
   label?: string;
-  outcome: "accept" | "decline" | "request_changes" | "selected" | "custom" | "feedback" | "read";
+  outcome: "accept" | "decline" | "request_changes" | "selected" | "custom" | "feedback" | "read" | "dismissed";
   text?: string;
   type: "decision" | "choice" | "feedback" | "update";
 };
@@ -1043,6 +1766,7 @@ export type PersonAnswerInput = {
 };
 
 export type PersonAnswerRecord = {
+  acted_for?: Id;
   answer?: PersonAnswer;
   answered_at_unix_ms: number;
   ask: Id;
@@ -1059,6 +1783,33 @@ export type PersonAskParameters = {
   request?: StructuredRequest;
   step_id?: Id;
   title: string;
+};
+
+export type PersonId = string;
+
+export type PersonPairedSession = {
+  credential: string;
+  device_id: Id;
+  device_key_chain?: Array<string>;
+  device_key_proofs?: Array<{
+
+}>;
+  expires_at: Timestamp;
+  kind: "paired-session";
+  person_id: string;
+  person_root_key_proof?: {
+
+};
+  scopes: Array<string>;
+  session_actor: Id;
+};
+
+export type PersonPairingBegin = {
+  api_version: "st3.client.v0";
+  device_name: string;
+  full_control?: boolean;
+  person_id: string;
+  scopes?: Array<"read.projections" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;
 };
 
 export type PersonStepParameters = {
@@ -1083,6 +1834,13 @@ export type PlannerConfig = {
   provider: "codex" | "claude" | "pi" | "omp" | "opencode";
 };
 
+export type PresentationActor = {
+  agent?: AgentId;
+  kind: "person" | "agent" | "st" | "nobody";
+  label?: string;
+  person?: Id;
+};
+
 export type ProjectionEvent = Omit<{
   body: {
 
@@ -1097,6 +1855,22 @@ export type ProjectionEvent = Omit<{
   timestamp: Timestamp;
   type: "upsert" | "delete" | "timeline.delta" | "terminal.available" | "capabilities.changed";
 }, 'type' | 'body'> & ({ type: "timeline.delta"; body: TimelineDelta });
+
+export type PromptRespondParameters = {
+  answer: string;
+  episode: string;
+  target_id: Id;
+};
+
+export type PublicationDefinition = {
+  declaration: {
+
+};
+  kind: "publication-definition";
+  revision: Revision;
+  subject: string;
+  token: string;
+};
 
 export type ReplicatedNotice = {
   complete: boolean;
@@ -1124,11 +1898,11 @@ export type RequestSubject = {
   url?: string;
 };
 
-export type Resource = (Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | OwnedSet);
+export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet);
 
 export type ResourceHeader = {
   id: Id;
-  kind: ("attention" | "message" | "launch" | "launch-variant" | "launch-decision" | "launch-approval" | "mission" | "work" | "agent" | "runtime" | "observer" | "subscription" | "lane" | "machine" | "device" | "operation" | "history" | "session" | "glass" | string);
+  kind: ("attention" | "message" | "launch" | "launch-variant" | "launch-decision" | "launch-approval" | "mission" | "work" | "agent" | "runtime" | "observer" | "subscription" | "lane" | "machine" | "device" | "operation" | "history" | "session" | "glass" | "arrangement" | "summary" | "connected-client" | "usage" | string);
   operational?: Operational;
   revision: Revision;
   updated_at: Timestamp;
@@ -1187,6 +1961,30 @@ export type Runtime = ResourceHeader & {
 
 export type RuntimeId = string;
 
+export type ScgReadAuthorization = {
+  payload: ScgReadAuthorizationPayload;
+  signature: string;
+};
+
+export type ScgReadAuthorizationPayload = {
+  approval_id: string;
+  assistant_id: AssistantPrincipal;
+  execution_id: string;
+  expires_at_unix_ms: number;
+  grant_id: Id;
+  identity: "chatgpt";
+  issuer: PersonId;
+  key_id: string;
+  max_response_bytes: AssistantResponseBytes;
+  nonce: string;
+  parameters: {
+  [key: string]: string;
+};
+  policy_revision: number;
+  projection: AssistantProjection;
+  request_digest: string;
+};
+
 export type Session = ResourceHeader & {
   ended_at?: (Timestamp | null);
   kind: "session";
@@ -1198,11 +1996,40 @@ export type Session = ResourceHeader & {
   usage?: (UsageSummary | null);
 };
 
+export type SloHistory = {
+  id: string;
+  samples: number;
+  since_ms: number;
+  steps: Array<number | null>;
+  until_ms: number;
+};
+
+export type SloList = {
+  as_of_unix_ms: number;
+  rows: Array<SloRow>;
+};
+
+export type SloRow = {
+  about: string;
+  account?: string;
+  current: string;
+  explain: string;
+  id: string;
+  kind: "objective" | "budget";
+  measured_at_unix_ms?: number;
+  remaining_percent: number | null;
+  resets_at_unix_ms?: number | null;
+  status: "met" | "missed" | "no-data" | "stale";
+  target: string;
+  window: string;
+};
+
 export type Snapshot = {
   created_at: Timestamp;
   host_id: HostId;
   id: SnapshotId;
   projection_version: "client-projection.v0";
+  published_at?: Timestamp;
   store_index: number;
 };
 
@@ -1237,6 +2064,7 @@ export type StructuredDiff = {
 
 export type StructuredRequest = {
   answers?: Array<RequestAnswerOption>;
+  attachments?: Array<Attachment>;
   custom?: boolean;
   question: string;
   reasons?: Array<string>;
@@ -1249,6 +2077,22 @@ export type StructuredRequest = {
   type: "decision" | "choice" | "feedback";
   version: 1;
   why_person: string;
+};
+
+export type SubagentSummary = {
+  agent?: string;
+  conversation?: {
+  session_id: Id;
+};
+  cost_usd?: number;
+  duration_ms?: number;
+  id: string;
+  name?: string;
+  requests?: number;
+  status: string;
+  task?: string;
+  tokens?: number;
+  tool_count?: number;
 };
 
 export type SubjectDefinition = {
@@ -1286,6 +2130,26 @@ export type SubscriptionSpec = {
   workspace?: string | null;
 };
 
+export type Summary = ResourceHeader & {
+  active_missions: number;
+  agents_as_of?: {
+  published_at: Timestamp;
+  store_index: number;
+};
+  alerts?: number;
+  kind: "summary";
+  machines: SummaryMachines;
+  needs_you: number;
+  person_id: string | null;
+  working_agents: number;
+};
+
+export type SummaryMachines = {
+  connected: number;
+  indirect: number;
+  offline: number;
+};
+
 export type SyncNotice = {
   peers: Array<SyncPeer>;
   state: "catching-up" | "diverged";
@@ -1296,6 +2160,8 @@ export type SyncPeer = {
   estimated_catch_up_seconds?: number | null;
   host_id: Id;
   last_exchange_at?: (Timestamp | null);
+  last_failed_exchange?: ExchangeTransport;
+  last_successful_exchange?: ExchangeTransport;
   local_only_envelopes: number;
   peer_only_envelopes: number;
 };
@@ -1420,11 +2286,48 @@ export type TerminalScreen = {
   truncated: boolean;
 };
 
-export type TimelineContentBody = (unknown | unknown);
+export type TimelineAskAnswer = {
+  custom?: string;
+  note?: string;
+  question: string;
+  selected: Array<string>;
+};
+
+export type TimelineAskQuestion = {
+  id: string;
+  multi: boolean;
+  options: Array<{
+  description?: string;
+  label: string;
+}>;
+  question: string;
+  recommended?: number;
+};
+
+export type TimelineBlock = {
+  continuation?: ConversationContentRef;
+  id: string;
+  kind: string;
+  metadata?: {
+
+};
+  payload: unknown;
+  source_type: string;
+  view?: unknown;
+  visibility?: string;
+};
+
+export type TimelineContentBody = {
+  attachment_id?: Id;
+  blocks?: Array<TimelineBlock>;
+  media_type: string;
+  text?: string;
+} & (unknown | unknown);
 
 export type TimelineDelta = {
   entry?: TimelineEntry;
   entry_id: Id;
+  header?: unknown;
   operation: "append" | "replace" | "finalize";
   revision: number;
 };
@@ -1445,6 +2348,7 @@ export type TimelineEntry = Omit<{
 export type TimelineEntryId = string;
 
 export type TimelineErrorBody = {
+  blocks?: Array<TimelineBlock>;
   code: string;
   details: {
 
@@ -1454,16 +2358,22 @@ export type TimelineErrorBody = {
 };
 
 export type TimelineMessageBody = {
+  assistant_grant_id?: string;
   attachments?: Array<Attachment>;
+  blocks?: Array<TimelineBlock>;
+  body_bytes?: number;
   from?: ParticipantRef;
   message_id: string;
+  provenance?: MessageProvenance;
   reply_to?: string | null;
+  sender_class?: "external-assistant";
   tags?: Array<string>;
   title?: string;
   to?: ParticipantRef;
 };
 
 export type TimelinePage = {
+  header?: unknown;
   items: Array<TimelineEntry>;
   kind: "timeline-page";
   page: PageInfo;
@@ -1471,6 +2381,7 @@ export type TimelinePage = {
 };
 
 export type TimelineRedactionBody = {
+  blocks?: Array<TimelineBlock>;
   reason: string;
   withheld_bytes: number;
   withheld_items?: number;
@@ -1479,17 +2390,25 @@ export type TimelineRedactionBody = {
 export type TimelineStatus = ("queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | string);
 
 export type TimelineStatusBody = {
+  blocks?: Array<TimelineBlock>;
   detail?: string;
   status: TimelineStatus;
 };
 
+export type TimelineTodoItem = {
+  content: string;
+  status: string;
+};
+
 export type TimelineToolCallBody = {
   arguments: unknown;
+  blocks?: Array<TimelineBlock>;
   call_id: string;
   name: string;
 };
 
 export type TimelineToolResultBody = {
+  blocks?: Array<TimelineBlock>;
   call_id: string;
   content: unknown;
   media_type: string;
@@ -1497,6 +2416,7 @@ export type TimelineToolResultBody = {
 };
 
 export type TimelineTruncationBody = {
+  blocks?: Array<TimelineBlock>;
   continuation_cursor?: Cursor;
   omitted_from_sequence: number;
   omitted_to_sequence: number;
@@ -1510,6 +2430,7 @@ export type TimelineUsageBody = {
   mission_run_id?: string | null;
   step_id?: string | null;
 };
+  blocks?: Array<TimelineBlock>;
   cache_write_tokens?: number;
   cached_tokens?: number;
   compactions?: number;
@@ -1529,10 +2450,280 @@ export type TimelineUsageBody = {
   turn_id?: string;
 };
 
+export type TimelineView = (TimelineViewBash | TimelineViewEdit | TimelineViewWrite | TimelineViewRead | TimelineViewSearch | TimelineViewTodo | TimelineViewAsk | TimelineViewTask | TimelineViewHub | TimelineViewEval | TimelineViewGeneric | TimelineViewIrc | TimelineViewJob | TimelineViewSkill | TimelineViewCompaction | TimelineViewAssistantError | TimelineViewModelChange | TimelineViewThinkingLevel | TimelineViewTitle | TimelineViewSessionExit | TimelineViewToolStart | TimelineViewResetBoundary | TimelineViewCredentialPin | TimelineViewOmpEvent | {
+  type: string;
+});
+
+export type TimelineViewAsk = {
+  answers?: Array<TimelineAskAnswer>;
+  call_id?: string;
+  intent?: string;
+  is_error?: boolean;
+  questions?: Array<TimelineAskQuestion>;
+  tool: string;
+  type: "ask";
+};
+
+export type TimelineViewAssistantError = {
+  api?: string;
+  error_id?: number;
+  is_error: boolean;
+  label: string;
+  message: string;
+  model?: string;
+  native?: {
+  [key: string]: unknown;
+};
+  presentation: "full" | "compact-recovered" | "none";
+  provider?: string;
+  retry?: {
+  attempt?: number;
+  kind?: string;
+  note?: string;
+  recovered_at?: Timestamp;
+  recovery?: string;
+  status?: string;
+  superseded_by?: {
+  model?: string;
+  provider?: string;
+  response_id?: string;
+  timestamp?: number;
+};
+};
+  status: "failed" | "recovered" | "superseded";
+  stop_reason?: string;
+  type: "assistant_error";
+};
+
+export type TimelineViewBash = {
+  background?: boolean;
+  call_id?: string;
+  command?: string;
+  cwd?: string;
+  env_keys?: Array<string>;
+  exit_code?: number;
+  intent?: string;
+  is_error?: boolean;
+  timed_out?: boolean;
+  timeout_s?: number;
+  tool: string;
+  type: "bash";
+  wall_ms?: number;
+};
+
+export type TimelineViewCompaction = {
+  method?: string;
+  short_summary?: string;
+  summary?: string;
+  tokens_after?: number;
+  tokens_before?: number;
+  type: "compaction";
+};
+
+export type TimelineViewCredentialPin = {
+  provider: string;
+  type: "credential_pin";
+};
+
+export type TimelineViewEdit = {
+  call_id?: string;
+  diff?: string;
+  first_changed_line?: number;
+  input_bytes?: number;
+  intent?: string;
+  is_error?: boolean;
+  ops?: number;
+  path?: string;
+  tool: string;
+  type: "edit";
+};
+
+export type TimelineViewEval = {
+  code?: string;
+  code_bytes: number;
+  intent?: string;
+  language: string;
+  reset?: boolean;
+  timeout_s?: number;
+  title?: string;
+  tool: string;
+  type: "eval";
+};
+
+export type TimelineViewGeneric = {
+  call_id?: string;
+  intent?: string;
+  is_error?: boolean;
+  name?: string;
+  tool: string;
+  type: "generic";
+  wall_ms?: number;
+};
+
+export type TimelineViewHub = {
+  call_id?: string;
+  intent?: string;
+  is_error?: boolean;
+  jobs?: Array<JobSummary>;
+  message?: string;
+  name?: string;
+  op: string;
+  state?: string;
+  target?: string;
+  timed_out?: boolean;
+  timeout_s?: number;
+  tool: string;
+  type: "hub";
+};
+
+export type TimelineViewIrc = {
+  from: string;
+  message: string;
+  message_id: string;
+  reply_to?: string;
+  type: "irc";
+};
+
+export type TimelineViewJob = {
+  jobs: Array<JobSummary>;
+  type: "job";
+};
+
+export type TimelineViewModelChange = {
+  fallback?: boolean;
+  model: string;
+  role?: string;
+  type: "model_change";
+};
+
+export type TimelineViewOmpEvent = {
+  attribution?: unknown;
+  content?: unknown;
+  details?: unknown;
+  kind: string;
+  type: "omp_event";
+};
+
+export type TimelineViewRead = {
+  intent?: string;
+  path: string;
+  range?: string;
+  tool: string;
+  type: "read";
+};
+
+export type TimelineViewResetBoundary = {
+  type: "reset_boundary";
+};
+
+export type TimelineViewSearch = {
+  call_id?: string;
+  case?: boolean;
+  engine: "grep" | "glob" | "web";
+  file_count?: number;
+  file_limit_reached?: number;
+  gitignore?: boolean;
+  hidden?: boolean;
+  intent?: string;
+  is_error?: boolean;
+  limit?: number;
+  match_count?: number;
+  path?: string;
+  pattern?: string;
+  per_file_limit_reached?: number;
+  query?: string;
+  skip?: number;
+  tool: string;
+  truncated?: boolean;
+  type: "search";
+  warning?: string;
+};
+
+export type TimelineViewSessionExit = {
+  kind: string;
+  reason: string;
+  type: "session_exit";
+};
+
+export type TimelineViewSkill = {
+  args?: unknown;
+  name: string;
+  path?: string;
+  type: "skill";
+};
+
+export type TimelineViewTask = {
+  agents?: Array<SubagentSummary>;
+  async?: boolean;
+  call_id?: string;
+  context?: string;
+  intent?: string;
+  is_error?: boolean;
+  tasks?: Array<{
+  agent?: string;
+  name?: string;
+  task: string;
+}>;
+  tool: string;
+  total_ms?: number;
+  type: "task";
+};
+
+export type TimelineViewThinkingLevel = {
+  configured?: boolean;
+  level: string;
+  type: "thinking_level";
+};
+
+export type TimelineViewTitle = {
+  previous?: string;
+  source?: string;
+  title: string;
+  type: "title";
+};
+
+export type TimelineViewTodo = {
+  call_id?: string;
+  intent?: string;
+  is_error?: boolean;
+  items?: Array<TimelineTodoItem>;
+  op?: string;
+  phase?: string;
+  phases?: Array<{
+  items: Array<TimelineTodoItem>;
+  name: string;
+}>;
+  task?: string;
+  tool: string;
+  type: "todo";
+};
+
+export type TimelineViewToolStart = {
+  call_id: string;
+  started_at: Timestamp;
+  tool: string;
+  type: "tool_start";
+};
+
+export type TimelineViewWrite = {
+  bytes: number;
+  content?: string;
+  intent?: string;
+  line_count?: number;
+  path: string;
+  tool: string;
+  type: "write";
+};
+
 export type Timestamp = string;
 
 export type UnknownResource = ResourceHeader & {
   kind?: string;
+};
+
+export type Usage = ResourceHeader & {
+  kind: "usage";
+  value: UsagePeriod;
 };
 
 export type UsageContext = {
@@ -1553,6 +2744,7 @@ export type UsageLimit = {
   five_hour_percent?: number;
   five_hour_resets_at_unix_ms?: number;
   host: string;
+  identified?: boolean;
   measured_at_unix_ms: number;
   measured_by: string;
   plan?: string;
@@ -1562,10 +2754,35 @@ export type UsageLimit = {
 };
 
 export type UsagePeriod = {
+  agent_messages?: AgentMessageEstimate;
   limits?: Array<UsageLimit>;
   rows: Array<UsageRow>;
   since_ms: number;
   until_ms: number;
+};
+
+export type UsagePricing = {
+  cache_write_1h_tokens: number;
+  cache_write_tokens: number;
+  cached_tokens: number;
+  cost_microusd: number;
+  cost_source: "provider_reported" | "computed" | "unpriced";
+  input_tokens: number;
+  output_tokens: number;
+  price_table_id?: string;
+  price_table_version?: string;
+  rates_usd_per_million_tokens?: UsagePricingRates;
+  reported_cost_microusd: number;
+  total_tokens: number;
+  unpriced_tokens: number;
+};
+
+export type UsagePricingRates = {
+  cache_read: number;
+  cache_write_1h: number;
+  cache_write_5m: number;
+  input: number;
+  output: number;
 };
 
 export type UsageRow = {
@@ -1579,8 +2796,10 @@ export type UsageRow = {
   input_tokens: number;
   mission_run?: Id;
   model?: string;
+  native_session_id?: string;
   output_tokens: number;
   pricing?: string;
+  pricing_provenance?: Array<UsagePricing>;
   reported_cost_microusd: number;
   step?: Id;
   total_tokens: number;
@@ -1693,10 +2912,13 @@ export type Work = ResourceHeader & {
   last_progress?: string | null;
   mission_id?: (Id | null);
   mission_run_id: Id;
+  nudged_at_unix_ms?: number | null;
   path: string;
   person_answers?: Array<PersonAnswerRecord>;
+  progress_at?: (Timestamp | null);
   readiness_epoch: number;
   state: WorkState;
+  submitted_incarnation?: string | null;
   timeout_ms?: number | null;
   title?: string | null;
   usage?: (UsageSummary | null);
@@ -1704,6 +2926,7 @@ export type Work = ResourceHeader & {
 
 export type WorkLabel = {
   goal?: string | null;
+  holder_down_since?: (Timestamp | null);
   id: Id;
   mission_id: MissionId;
   mission_run_id: MissionRunId;
@@ -1725,9 +2948,11 @@ export type ActionRequest =
   reason?: string;
 }; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.resume'; parameters: AgentResumeParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.retire'; parameters: AgentRetireParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.start'; parameters: AgentStartParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.stop'; parameters: AgentStopParameters; fence: Fence & Required<Pick<Fence, 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.suspend'; parameters: AgentSuspendParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.edit'; parameters: ArrangementEditParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.resolve'; parameters: {
   attention_id: Id;
   outcome: string;
@@ -1824,6 +3049,7 @@ export type ActionRequest =
   attachments?: Array<AttachmentInput>;
   content: string;
   in_reply_to?: Id;
+  kind?: "silent" | "wake";
   session_id?: Id;
   signature?: DeviceSignature;
   tags?: Array<string>;
@@ -1845,6 +3071,7 @@ export type ActionRequest =
   workspace: string;
 }; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'pairing.revoke'; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'prompt.respond'; parameters: PromptRespondParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.approve'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.reject'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.request-changes'; parameters: TargetParameters; fence: Fence }) |

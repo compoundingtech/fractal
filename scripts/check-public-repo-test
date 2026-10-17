@@ -13,7 +13,7 @@ class PublicRepositoryCheck(unittest.TestCase):
 
     def test_public_examples(self):
         self.assertEqual(self.findings(
-            'host/example-linux /home/example/src /Users/example/src '
+            'host/example-linux /home/example/src /Users/example/src /home/ada/work '
             'person/alex person%2Falex agent/example/worker agent%2Fexample%2Fworker '
             'agent/fleet/fixture-web/standing/web agent%2Ffleet%2Ffixture-web%2Fworker'
         ), [])
@@ -23,6 +23,10 @@ class PublicRepositoryCheck(unittest.TestCase):
                      '/home/' + 'unknown-fixture/src', '/Users/' + 'unknown-fixture/src']:
             with self.subTest(text=text):
                 self.assertTrue(self.findings(text))
+
+    def test_legacy_provider_templates_allow_only_invented_accounts(self):
+        self.assertEqual(self.findings('person/discord-{id} person/discord-404 person/discord-606'), [])
+        self.assertTrue(self.findings('person' + '/discord-123456789012345678'))
 
     def test_internal_namespace(self):
         for separator in ['/', '%2F', '%2f']:
