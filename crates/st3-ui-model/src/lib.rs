@@ -7,3 +7,4 @@
 pub mod agents;
 pub mod documents;
 pub mod missions;
+pub mod sidebar;
