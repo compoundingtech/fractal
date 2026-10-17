@@ -2064,6 +2064,7 @@ export type StructuredDiff = {
 
 export type StructuredRequest = {
   answers?: Array<RequestAnswerOption>;
+  attachments?: Array<Attachment>;
   custom?: boolean;
   question: string;
   reasons?: Array<string>;
