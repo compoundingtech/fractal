@@ -19,8 +19,8 @@ use super::{
     PreparedSetup, SetupArgs, capture, check_login_path, daemon_ready, ensure_claude_channel,
     install_binaries, merge_config, said, start_daemon, validate_name,
 };
-use crate::config::Config;
-use crate::environment::HARNESSES;
+use st3::config::Config;
+use st3::environment::HARNESSES;
 
 /// Everything the screen needs to know about this run of setup.
 pub(super) struct Start {
@@ -49,7 +49,7 @@ struct Result_ {
 
 pub(super) async fn run(start: Start) -> Result<PreparedSetup> {
     println!("Looking for your agents…");
-    let environment = crate::environment::snapshot()?;
+    let environment = st3::environment::snapshot()?;
     let mut form = form(&start, &environment);
     if let Some(requested) = &start.args.harness {
         for row in &mut form.rows {
@@ -72,8 +72,8 @@ pub(super) async fn run(start: Start) -> Result<PreparedSetup> {
         |run, reporter| work(&start, &shared, &config, &executable, run, reporter),
         hand_over,
         &|| {
-            crate::environment::refresh();
-            crate::environment::snapshot()
+            st3::environment::refresh();
+            st3::environment::snapshot()
                 .map(|environment| rows(&environment))
                 .unwrap_or_default()
         },
@@ -145,6 +145,11 @@ fn form(start: &Start, environment: &BTreeMap<String, String>) -> Form {
         login: start.args.service.unwrap_or(true),
         login_note,
         linger: lingering_offered(),
+        work_root: start
+            .config
+            .work_root()
+            .map(|root| root.display().to_string())
+            .unwrap_or_default(),
         rows,
         codex,
     }
@@ -368,7 +373,7 @@ fn sign_in_words(id: &str) -> &'static str {
 /// Run a harness's own first launch in this terminal, so the person can finish it, and return
 /// when they leave it.
 fn hand_over(id: &str) -> Result<(), String> {
-    let environment = crate::environment::snapshot().map_err(|error| format!("{error:#}"))?;
+    let environment = st3::environment::snapshot().map_err(|error| format!("{error:#}"))?;
     let program = st_runtime::resolve_executable(id, &environment).map_err(|error| format!("{error:#}"))?;
     let (arguments, note): (&[&str], &str) = match id {
         "claude" => (
@@ -493,13 +498,15 @@ async fn stages(
     next.node = form.machine.clone();
     next.codex_work_without_asking = form.codex;
     next.validate()?;
+    let should_start = !daemon_ready(&next).await && start.args.start.unwrap_or(true);
+    st3::service::preflight(form.login && should_start)?;
 
     reporter.step("Saving your name and this machine's name");
     merge_config(&start.path, &next)?;
     *config.lock().expect("config lock") = next.clone();
     shared.lock().expect("result lock").saved = true;
     said(format!("Saved {}", start.path.display()));
-    if let Some(kib) = crate::read_cache::override_kib() {
+    if let Some(kib) = st3::read_cache::override_kib() {
         said(format!("Read cache: {kib} KiB per reader."));
     }
 
@@ -511,7 +518,7 @@ async fn stages(
     };
     check_login_path(&executable);
 
-    if !daemon_ready(&next).await && start.args.start.unwrap_or(true) {
+    if should_start {
         reporter.step("Starting st");
         start_daemon(
             &next,
@@ -548,14 +555,15 @@ async fn stages(
     }
 
     // The Assistant starts while the screen is still up, once something is ready to run it.
-    let (harness, started) = {
+    let (harness, ready, started) = {
         let shared = shared.lock().expect("result lock");
-        (shared.ready.first().cloned(), shared.started_assistant)
+        (shared.ready.first().cloned(), shared.ready.clone(), shared.started_assistant)
     };
     if let (Some(harness), false) = (harness, started) {
         if daemon_ready(&next).await {
             reporter.step("Starting the Assistant");
-            let subject = crate::onboarding::start(&next, &harness, start.args.onboarding).await?;
+            let subject =
+                crate::onboarding::start(&next, &harness, &ready, start.args.onboarding).await?;
             let mut shared = shared.lock().expect("result lock");
             shared.started_assistant = true;
             shared.harness = Some(harness);
@@ -574,7 +582,7 @@ async fn stages(
 /// Set up one agent and say how it ended. Runs on its own thread: it starts programs and may hand
 /// the terminal to the person.
 fn set_up_row(id: &str, executable: &Path, reporter: &Reporter) -> Outcome {
-    let environment = match crate::environment::snapshot() {
+    let environment = match st3::environment::snapshot() {
         Ok(environment) => environment,
         Err(error) => return Outcome::Failed(format!("{error:#}")),
     };
@@ -611,7 +619,7 @@ fn set_up_row(id: &str, executable: &Path, reporter: &Reporter) -> Outcome {
     if needs_you(state) && matches!(id, "claude" | "codex" | "opencode") {
         reporter.facts(id, Facts { signed_in: state.signed_in, ..facts.clone() });
         reporter.handover(id);
-        crate::environment::refresh();
+        st3::environment::refresh();
         state = signin(id, &environment, &home);
     }
     facts.signed_in = state.signed_in;

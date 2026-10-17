@@ -16,7 +16,7 @@ changes it for a seat.
 
 | Setting | Linux | macOS |
 | --- | --- | --- |
-| `background` (default) | `nice -n 10` and IO class best-effort, level 7 | `taskpolicy -c utility` |
+| `background` (default) | `nice -n 10` and IO class best-effort, level 7 | `taskpolicy -b` |
 | `normal` | the daemon's own priority | the daemon's own priority |
 
 Only agent seats and what they start go to background: their harnesses, helpers, shells an agent
@@ -122,10 +122,12 @@ their harnesses.
 
 macOS has no cgroups. The daemon runs as a launchd agent with `ProcessType` `Interactive`, and the
 PTY servers it starts keep that agent's default QoS. st starts each harness, and each exec task,
-under `/usr/sbin/taskpolicy -c utility`. That clamps the program and every child it starts to the
-utility QoS class, which schedules below the default class and throttles its disk IO. The
-`background` clamp would confine builds to efficiency cores, so st does not use it. A seat at
-`normal` priority starts without the clamp.
+under `/usr/sbin/taskpolicy -b`. That runs the program and every child it starts with its resources
+throttled, below the daemon's default QoS. `nice` alone is not enough on macOS: on a
+10-core Mac, a test run at `nice 20` (13 processes, 226% CPU) took the load average to 54 and made
+the daemon answer slowly, and `taskpolicy -b` on the same processes brought it to 23 within a minute
+and 16 within five. The cost is that throttled builds can be confined to efficiency cores; set
+`normal` for a seat that needs more. A seat at `normal` priority starts without the policy.
 
 ## Stopping a session
 
@@ -149,6 +151,14 @@ runs. A stop ends that scope.
    runtime not running, when the session is removed, and before a restart launches the next
    incarnation. An exec task's record names its scope, and the same three moments end it. Each
    launch has a scope of its own, so ending an old one never reaches the next incarnation.
+
+A stop or a retirement of an agent root also stops every exec and PTY task declared under it
+(`exec/ROOT/TASK`), each through its own stop above, whether or not the root has a process of its
+own. Those tasks are not started or restarted while the root is stopped, whatever their restart
+policy, and the root is not recorded as stopped while one of them still runs on this host; a task
+whose stop fails keeps its own fault, and the root stays unsettled until it ends. A task of an
+earlier release could outlive a stop of its root; it no longer does. A task is stopped by the
+host it runs on. Starting the root again declares them again.
 
 A unit that is no longer loaded has ended: systemd collects a work scope once its last process
 exits. st never ends a PTY server's own scope, a service, or the unit it runs in.

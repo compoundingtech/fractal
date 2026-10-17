@@ -76,7 +76,7 @@ source inspection alone does not establish iOS viability.
 ## Member exposure and authorization
 
 Expose exactly the **paired-only** gateway socket, whose router is
-[`fabric_router`](../../crates/st3/src/api.rs) and whose configured path is
+[`fabric_router`](../../crates/st3-daemon/src/api.rs) and whose configured path is
 `client_gateway_socket` (normally `st3-client.sock`). Do not expose `st3.sock`:
 that is the privileged local API. A generic socket exposure is sufficient; no
 new server-side Rust service is needed.
@@ -439,6 +439,38 @@ On background/disable, stop accepting local connections and close carrier state
 with the app’s existing foreground lifecycle. On foreground, restart the adapter
 before opening the feed and refresh its ephemeral URL. No polling, fabricated
 HTTP replies, cached mutation queue, or secret logging is needed.
+
+## Several members: an ordered list
+
+The app saves an ordered list of members (at most eight), each with the name the person gave it,
+and walks it in the person's order; it never reorders the list by what worked last. Each member's
+dial, from `Endpoint.connect` to one unauthenticated `GET /v1/client/capabilities` through the
+bridge, has 4 seconds, and the whole walk 10 seconds. The bridge's listener answers before the
+member does, so that one read is what tells admitted, refused and unreachable apart. A member that
+was connected and dropped is redialed after 1, 2 and 5 seconds before the walk moves on to the
+members after it. When no member answers, the saved gateway takes over as it does after any fabric
+failure, and fabric is tried again later.
+
+A refusal is not a failure to reach. When a member refuses the phone (close code 403, or any typed
+refusal the bridge records), the walk stops at once and nothing after that member is dialed, then
+or later by itself. The screen names the member by its saved name, never a node ID or an address,
+and says what fabric refused in plain words: `peer_not_in_allow_list` as no fabric grant for this
+phone, `peer_not_permitted_for_service` as a grant that does not include the client service, and a
+refusal without a code (a member older than 0.2.41) as a refusal of fabric access. The saved gateway
+behaves as it does after a refusal today. The person can pick another member by hand.
+
+Each credential goes only to the member it was paired with. One member may use this device's own
+pairing: a single target an older app saved, the first member added to a phone paired over a
+gateway, or the member a phone paired with over fabric alone. Every other member is paired on its
+own, through fabric to that member, and keeps its own bearer, signing key and pin in its own Keychain
+entry. The walk dials only members this phone is paired with and skips the others. Pairing goes to
+the member alone, sends no credential, and leaves this device's own pairing, cache and gateway as
+they are.
+
+The list has its own key. The old single-target key keeps the member that uses this device's own
+pairing, written as an older app build wrote it, so an older build still reaches that member with
+the credential it already sends there; with no such member the key is removed and an older build
+uses its saved gateway. When an older build replaces or forgets that target, the new app follows it.
 
 ## What must be rechecked when fabric changes
 

@@ -130,7 +130,7 @@ A conversation is one more subscription too. Name an agent or a session:
 {"kind":"subscribe","id":"talk","collection":"conversation","conversation":"agent/ID"}
 ```
 
-An agent's conversation is its current session's timeline with the Smalltalk to or from the agent
+An agent's conversation is its current session's timeline with the Fractal to or from the agent
 joined in. The first `conversation` frame carries `id`, `collection` (`conversation`),
 `session_id`, `replace: true`, the newest page of timeline `items`, and `has_more`. Later frames
 carry `replace: false` and the entries that changed since; an entry revised in place arrives
@@ -184,7 +184,12 @@ send the existing `resync`/`error` frames, never inferred zero counts. Clients k
 behavior on older daemons.
 A daemon serves these counts from published rows. What no person changes (missions,
 working agents, machines) is computed once for every selection, at one cut, and again
-when the cut, the roster or the 30-second clock period changes. Each selection counts
+when the cut, the roster or the 30-second clock period changes. The machines they count
+are read again only when a claim about a host, or a run or generation that owns runtimes,
+arrives, when a runtime with new claims (other than its harness reports) starts on, stops
+on or moves to another host so that the set of runtime hosts changes, when operations
+conflict or fleet membership changes, and each clock period, when peers' replication
+successes are read again. Each selection counts
 its alerts from the published attention rows, the same rows its
 attention window shows. The row carries the shared counts' cut. A window that opens a
 new selection is served at once. Before the first publication, the window gets a
@@ -194,6 +199,13 @@ Equal count membership produces no upsert, including agent progress/usage
 updates and another person's attention changes. Core list/filter/get behavior
 is unchanged. Summary freshness is carried by its snapshot fence; equal counts
 retain their prior row timestamp so an unchanged count emits no delta.
+
+## Presentations
+
+Optional capability `presentation` version 1 says agent rows carry `presentation`: st's state
+word, list group, why the agent needs someone, and what it holds and has queued (see
+[the UI contract](../../clients/ui-contract.md#agent)). Older daemons omit both. A row that
+lacks it shows the state st reports, marked as coming from an older st; clients derive nothing.
 
 ## Screen inventories
 

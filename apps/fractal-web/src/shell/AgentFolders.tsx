@@ -36,7 +36,7 @@ import { fixtureFolders } from '../folders/fixture.ts'
 import { WfIcon } from '../icons/WfIcon.tsx'
 import { SubjectAddress } from '../resources/contract.ts'
 import { AgentUsageRow, AgentUsageSignals, openAgentUsage } from './AgentUsage.tsx'
-import { filterFolders, matchesRow, sortMembers, type SidebarRow } from './sidebar/filter.ts'
+import { filterFolders, matchesRow, parseSidebarQuery, sortMembers, type SidebarRow } from './sidebar/filter.ts'
 import { fixtureSidebarState, sidebarState } from './sidebar/state.ts'
 import type { SidebarFilters } from './sidebar/state.ts'
 import { StatusIcon, agentStatus, compactTime, type AgentStatus } from './sidebar/StatusIcon.tsx'
@@ -263,28 +263,30 @@ export const AgentFolders = React.memo(
             workspace,
             agent,
             status,
-            needsMe: status === 'waiting' || needsYou.has(workspace.id),
+            needsMe: needsYou.has(workspace.id),
           },
         ]
       }),
     )
+    const parsedQuery = parseSidebarQuery(filters.query)
     const visibleFolders = filterFolders({
       folders: view.folders,
       rows: rows,
       filters: filters,
       sort: filters.sort,
+      parsedQuery,
     })
     const visibleUnfiled = sortMembers({
       members: view.unfiled.filter((id) =>
-        matchesRow({ row: rows.get(id)!, filters: filters, context: 'Unfiled' }),
+        matchesRow({ row: rows.get(id)!, filters: filters, context: 'Unfiled', parsedQuery }),
       ),
       rows: rows,
       sort: filters.sort,
     })
-    const searching = filters.query.trim() !== ''
+    const searching = parsedQuery.query !== ''
     const highlight = (text: string) => {
       if (!searching) return text
-      const positions = matchPositions({ query: filters.query, text })
+      const positions = matchPositions({ query: parsedQuery.query, text })
       let sourceOffset = 0
       return [...text].map((character, index) => {
         const start = sourceOffset
@@ -361,7 +363,7 @@ export const AgentFolders = React.memo(
                 selection={selection}
                 dispatch={dispatch}
                 depth={depth + 1}
-                query={filters.query}
+                query={parsedQuery.query}
                 multipleHosts={multipleHosts}
               />
             )}

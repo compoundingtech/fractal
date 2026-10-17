@@ -1,8 +1,9 @@
-# Smalltalk binary releases
+# Fractal binary releases
 
 Every pushed Git tag runs **Smalltalk tag release**. Both native builds must pass before a
 GitHub release is published. A release is also published once a day when `main` changed since the
-last one (see [Daily releases](#daily-releases)). Each release contains:
+last one (see [Daily releases](#daily-releases)). A rolling `edge` pre-release follows every green
+`main` commit (see [Edge releases](#edge-releases)). Each release contains:
 
 - `smalltalk-x86_64-unknown-linux-gnu.tar.gz`: Linux x86_64, linked for glibc 2.35 or newer (Ubuntu 22.04+).
 - `smalltalk-aarch64-apple-darwin.tar.gz`: Apple Silicon, macOS 15 or newer. The executables are
@@ -31,11 +32,19 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compound
 The script detects Linux x86_64 or Apple Silicon macOS, downloads the archive and
 its SHA256 checksum, verifies it before installation, then runs `st`. It restores
 terminal input for the `curl | sh` form. To select an exact release or install
-without opening the interface (v0.3.18 below is an example; choose a published tag):
+without opening the interface (`vX.Y.Z` below is a placeholder; choose a published tag):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh -o install.sh
-sh install.sh --tag v0.3.18 --no-run
+sh install.sh --tag vX.Y.Z --no-run
+```
+
+To follow `main` instead, pass `--edge`; it is the same as `--tag edge` and cannot be combined with
+`--tag`. Without either option the installer still takes the latest versioned release, because
+GitHub's latest release never includes a pre-release:
+
+```sh
+sh install.sh --edge --no-run
 ```
 
 An extracted archive can also be installed with `./install.sh --bin-dir
@@ -103,8 +112,30 @@ to catch package breakage early.
 
 The st3 Nix check uses nextest to give each test its own process, including CPU-budget and
 delivery-presence fixtures. Python, Node, and the Linux process utilities are declared test inputs;
-the historical messaging binary is pinned in the lockfile and supplied before the sandbox starts.
+the st3 messaging compatibility binary is pinned by the `messaging-baseline` input in `flake.lock`
+and supplied through `ST3_MESSAGING_COMPAT_BIN` by the check’s `preCheck` inside the sandbox.
 The native runtime suite and documentation tests remain covered.
+
+## Edge releases
+
+After a `main` run of **Smalltalk tag release** passes every job, its last job (`release-publish-edge`)
+moves one GitHub pre-release, tagged `edge`, to that commit. It is a single release that is updated, not
+one release per commit. It builds nothing: it takes the run's `smalltalk-release` artifact, re-checks the
+checksums and the source recorded in each archive, then replaces the assets (both archives, their `.sha256`
+files, `SHA256SUMS` and `RELEASE.json`), rewrites the notes, and moves the tag. The notes give the exact
+source commit, a link to the run, and the merged pull request titles since the previous edge (at most 30).
+Archives carry no tag in `BUILD.json`; `source` identifies the commit.
+
+- Versioned releases and tags are unchanged. `edge` is marked as a pre-release and never as latest, so the
+  daily release, `latest/download` and the default installer ignore it.
+- Edge has no upgrade-impact section. Read the changes since the previous edge before installing it on a
+  store that holds work, and take a [claim backup](backups.md) first.
+- A run for a commit older than the current edge changes nothing, so a slow run cannot move edge
+  backwards. Runs are serialized. While assets are being replaced, a download can briefly pair a new
+  archive with an old checksum; the installer fails closed on the mismatch, so retry after a minute.
+- The `edge` tag is excluded from the tag trigger, and a tag moved with the workflow's token starts no workflow.
+- `scripts/release-smalltalk-edge --dry-run --source SHA --dist DIRECTORY` verifies a downloaded artifact
+  and prints the notes without publishing.
 
 ## Daily releases
 
