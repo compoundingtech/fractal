@@ -59,6 +59,8 @@ struct Data {
     self_test_hits: AtomicUsize,
     #[cfg(test)]
     simulate_unavailable: AtomicBool,
+    #[cfg(test)]
+    read_calls: AtomicUsize,
     window: Mutex<Window>,
 }
 
@@ -114,6 +116,8 @@ impl ProofVfs {
             self_test_hits: AtomicUsize::new(0),
             #[cfg(test)]
             simulate_unavailable: AtomicBool::new(false),
+            #[cfg(test)]
+            read_calls: AtomicUsize::new(0),
             window: Mutex::new(Window::default()),
         });
         data.vfs.zName = data.name.as_ptr();
@@ -534,7 +538,20 @@ macro_rules! forward_file {
         }
     };
 }
-forward_file!(read, xRead, (buf: *mut c_void, amt: c_int, offset: ffi::sqlite3_int64), c_int);
+unsafe extern "C" fn read(
+    file: *mut ffi::sqlite3_file,
+    buf: *mut c_void,
+    amt: c_int,
+    offset: ffi::sqlite3_int64,
+) -> c_int {
+    #[cfg(test)]
+    {
+        unsafe { &*wrapped(file).data }
+            .read_calls
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    unsafe { methods(file).xRead.unwrap()(inner(file), buf, amt, offset) }
+}
 forward_file!(sync, xSync, (flags: c_int), c_int);
 forward_file!(size, xFileSize, (out: *mut ffi::sqlite3_int64), c_int);
 forward_file!(lock, xLock, (mode: c_int), c_int);
@@ -1078,6 +1095,120 @@ mod tests {
             after_sort.6 > after_renumber.6,
             "SQLite temp writes bypassed the proof VFS"
         );
+        drop(db);
+        vfs.check_closed().unwrap();
+        owner.finish(&copy).unwrap();
+    }
+
+    #[test]
+    fn positive_mmap_control_is_zeroed_and_does_not_bypass_a_counted_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.sqlite3");
+        fs::write(&live, [0; 4096]).unwrap();
+        let scratch = dir.path().join("scratch");
+        let owner = ProofOwnership::acquire(&scratch).unwrap();
+        let guard = guard(&live, &scratch, 1024 * 1024);
+        let vfs = ProofVfs::register(&guard).unwrap();
+        let copy = scratch.join("proof-mmap-control.sqlite3");
+        owner.mark(&copy).unwrap();
+        let name = CString::new(copy.as_os_str().as_bytes()).unwrap();
+        let data = vfs.data.as_ref().unwrap();
+        // SAFETY: SQLite's allocator supplies an aligned szOsFile allocation. The wrapped
+        // xOpen initializes it; xClose runs before sqlite3_free.
+        let file = unsafe { ffi::sqlite3_malloc(data.vfs.szOsFile) as *mut ffi::sqlite3_file };
+        assert!(!file.is_null());
+        let mut out_flags = 0;
+        let rc = unsafe {
+            data.vfs.xOpen.unwrap()(
+                (&data.vfs as *const ffi::sqlite3_vfs).cast_mut(),
+                name.as_ptr(),
+                file,
+                ffi::SQLITE_OPEN_READ_WRITE | ffi::SQLITE_OPEN_CREATE | ffi::SQLITE_OPEN_MAIN_DB,
+                &mut out_flags,
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK);
+        let io = unsafe { &*(*file).pMethods };
+        let mut requested: ffi::sqlite3_int64 = 1024 * 1024 * 1024;
+        let rc = unsafe {
+            io.xFileControl.unwrap()(
+                file,
+                ffi::SQLITE_FCNTL_MMAP_SIZE,
+                (&mut requested as *mut ffi::sqlite3_int64).cast(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK);
+        assert_eq!(requested, 0);
+        let mut mapped = 1usize as *mut c_void;
+        let rc = unsafe { io.xFetch.unwrap()(file, 0, 4096, &mut mapped) };
+        assert_eq!(rc, ffi::SQLITE_OK);
+        assert!(mapped.is_null());
+        let bytes = [7u8; 4096];
+        let rc = unsafe { io.xWrite.unwrap()(file, bytes.as_ptr().cast(), 4096, 0) };
+        assert_eq!(rc, ffi::SQLITE_OK);
+        let window = data.window.lock().unwrap();
+        assert_eq!(window.data_writes, 1);
+        assert_eq!(window.scratch_pending, 4096);
+        drop(window);
+        assert_eq!(unsafe { io.xClose.unwrap()(file) }, ffi::SQLITE_OK);
+        unsafe { ffi::sqlite3_free(file.cast()) };
+        vfs.check_closed().unwrap();
+        owner.finish(&copy).unwrap();
+    }
+
+    #[test]
+    fn requested_mmap_reads_use_xread_after_the_guard_returns_no_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.sqlite3");
+        fs::write(&live, [0; 4096]).unwrap();
+        let scratch = dir.path().join("scratch");
+        let owner = ProofOwnership::acquire(&scratch).unwrap();
+        let copy = scratch.join("proof-mmap-read.sqlite3");
+        let guard = guard(&live, &scratch, 1024 * 1024);
+        let vfs = ProofVfs::register(&guard).unwrap();
+        owner.mark(&copy).unwrap();
+        {
+            let db = Connection::open_with_flags_and_vfs(
+                &copy,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+                vfs.name(),
+            )
+            .unwrap();
+            db.execute_batch(
+                "CREATE TABLE payload(bytes BLOB); INSERT INTO payload VALUES (zeroblob(16384));",
+            )
+            .unwrap();
+        }
+        let db = Connection::open_with_flags_and_vfs(
+            &copy,
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+            vfs.name(),
+        )
+        .unwrap();
+        db.execute_batch("PRAGMA mmap_size=1073741824;").unwrap();
+        let mmap: i64 = db
+            .query_row("PRAGMA mmap_size", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mmap, 0);
+        let before = vfs
+            .data
+            .as_ref()
+            .unwrap()
+            .read_calls
+            .load(Ordering::Relaxed);
+        let hex_len: i64 = db
+            .query_row("SELECT length(hex(bytes)) FROM payload", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(hex_len, 32768);
+        let after = vfs
+            .data
+            .as_ref()
+            .unwrap()
+            .read_calls
+            .load(Ordering::Relaxed);
+        assert!(after > before, "table read bypassed the VFS xRead");
         drop(db);
         vfs.check_closed().unwrap();
         owner.finish(&copy).unwrap();
