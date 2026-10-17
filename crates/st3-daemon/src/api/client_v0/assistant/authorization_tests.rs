@@ -35,6 +35,7 @@ async fn fixture(scopes: &[&str], pin_trust: bool) -> Fixture {
         fixture.revision=grant["policy_revision"].as_u64().unwrap();
     }
     crate::api::refresh_agent_roster(&fixture.state.store, false).unwrap();
+    fixture.state.store.start_attention_list_refresher().unwrap();
     crate::api::published_attention::refresh_attention_list(&fixture.state.store).unwrap();
     fixture
 }

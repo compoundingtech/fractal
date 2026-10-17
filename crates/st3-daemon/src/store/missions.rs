@@ -314,10 +314,10 @@ impl Store {
              ), projected AS (
                 SELECT CASE WHEN EXISTS (
                     SELECT 1 FROM ranked r WHERE r.mission_id=visible.mission_id AND r.rank<=3
-                    AND (SELECT json_extract(c.body,'$.fields.status') FROM claims c
-                         WHERE c.subject='mission-run/'||r.id AND c.kind='reconcile.fault'
-                           AND json_extract(c.body,'$.fields.scope')=?2
-                         ORDER BY CANONICAL_DESC(c) LIMIT 1)='faulted'
+                    AND (SELECT json_extract(claims.body,'$.fields.status') FROM claims
+                         WHERE claims.subject='mission-run/'||r.id AND claims.kind='reconcile.fault'
+                           AND json_extract(claims.body,'$.fields.scope')=?2
+                         ORDER BY CANONICAL_DESC(claims) LIMIT 1)='faulted'
                 ) THEN 'blocked' ELSE phase END AS state FROM visible
              )
              SELECT state,COUNT(*) FROM projected GROUP BY state",

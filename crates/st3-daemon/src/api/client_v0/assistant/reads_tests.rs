@@ -68,6 +68,7 @@ mission "reads-fixture-second" state="ready" {{ goal "{SECRET} {INJECTION}"; }}
         )
         .unwrap();
     crate::api::refresh_agent_roster(&state.store, false).unwrap();
+    state.store.start_attention_list_refresher().unwrap();
     crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
 }
 
@@ -104,6 +105,7 @@ async fn assistant_collection_read_timing_on_a_store_copy() {
         seed_assistant_timing_store(&state);
     }
     crate::api::refresh_agent_roster(&state.store, false).unwrap();
+    state.store.start_attention_list_refresher().unwrap();
     crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
     crate::api::client_v0::summary::refresh_published(&state, 0, false).unwrap();
 
