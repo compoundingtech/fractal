@@ -34,6 +34,14 @@ fn canonical_temp_base() -> PathBuf {
     std::fs::canonicalize(base).expect("canonical temporary directory")
 }
 
+/// Runs this process's client-facing clock `skew_ms` ahead of the wall clock (0 restores it), so a
+/// test can pass a real freshness horizon without sleeping. It is process-wide: use it only in a
+/// test that nextest runs in its own process, and restore the clock before asserting on new reports.
+#[cfg(feature = "test-support")]
+pub fn skew_client_clock(skew_ms: u64) {
+    crate::api::set_client_clock_skew_ms(skew_ms);
+}
+
 /// Called once, before threads start, exclusively by the fixture executable.
 #[cfg(feature = "test-support")]
 pub fn initialize_fixture() -> tempfile::TempDir {
@@ -98,6 +106,25 @@ pub fn command(binary: impl AsRef<std::ffi::OsStr>) -> Command {
 
 pub fn async_command(binary: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
     command(binary).into()
+}
+
+/// Whether this executable was built in the `release` profile (`<target dir>/release/deps/NAME`, or
+/// `<target dir>/<triple>/release/deps/NAME`). The benchmark and load tests measure time, so they
+/// skip in the unoptimized dev and test profiles. They used `cfg!(debug_assertions)` for that, which
+/// stops meaning "unoptimized" now that the dev and test profiles build without debug assertions.
+pub fn optimized_build() -> bool {
+    std::env::current_exe().is_ok_and(|path| built_in_release(&path))
+}
+
+/// Only the profile directory two levels above the executable counts, so a custom `CARGO_TARGET_DIR`
+/// (any path, even one with a `release` component) cannot change the answer, and a custom profile
+/// that merely inherits release gets its own directory name and is treated as not optimized.
+fn built_in_release(executable: &Path) -> bool {
+    executable
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .is_some_and(|profile| profile == "release")
 }
 
 /// Run a process-spawning integration test inside a Linux subreaper. The outer
@@ -311,4 +338,27 @@ pub fn fixture_mailbox_transport(store: &std::sync::Arc<crate::store::Store>, su
     mailbox_transports().lock().unwrap()
         .entry((std::sync::Arc::as_ptr(store) as usize, subject.into()))
         .or_insert_with(|| tokio::sync::watch::channel(false).0).subscribe()
+}
+
+#[cfg(test)]
+mod optimized_build_tests {
+    use super::built_in_release;
+    use std::path::Path;
+
+    #[test]
+    fn only_the_profile_directory_above_deps_counts() {
+        for (path, release) in [
+            ("/w/target/release/deps/t-1", true),
+            ("/w/target/x86_64-unknown-linux-gnu/release/deps/t-1", true),
+            ("/anywhere/else/release/deps/t-1", true),
+            ("/w/target/debug/deps/t-1", false),
+            ("/work/release/target/debug/deps/t-1", false),
+            ("/release/debug/deps/t-1", false),
+            ("/w/target/release-with-debuginfo/deps/t-1", false),
+            ("/w/target/debug/release", false),
+            ("t-1", false),
+        ] {
+            assert_eq!(built_in_release(Path::new(path)), release, "{path}");
+        }
+    }
 }
