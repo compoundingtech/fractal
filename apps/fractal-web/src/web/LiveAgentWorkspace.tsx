@@ -1,3 +1,4 @@
+import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
 import { sidebarRow } from './sidebarRow.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
@@ -148,7 +149,12 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
     const cancelPrefetch = afterNextPaint(prefetchConversationPane)
     return () => { cancelCapture?.(); cancelPrefetch() }
   }, [ux])
-  const rosterCommit = React.useCallback((node: HTMLElement | null) => node === null || !rosterObserved ? undefined : ux?.rosterCommitted(), [ux, rosterObserved])
+  const rosterCommit = React.useCallback((node: HTMLElement | null) => {
+    if (node === null || !rosterObserved) return
+    const cancelTiming = measureEnd('sidebar_interactive')
+    const cancelCapture = ux?.rosterCommitted()
+    return () => { cancelTiming(); cancelCapture?.() }
+  }, [ux, rosterObserved])
   const current = initialAgentFromUrl() ?? (storedAgent || agents[0]?.ref || '')
   const agent = agents.find((row) => row.ref === current)
   // A canonical subject address is not proof of a terminal. Keep the control disabled
@@ -177,7 +183,11 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
     window.dispatchEvent(new PopStateEvent('popstate'))
   }
   const select = (ref: string) => {
-    if (ref !== current) onSelectConversation?.(ref)
+    if (ref !== current) {
+      cancelMeasure('open_transcript')
+      markStart('switch_to_tail', { key: ref })
+      onSelectConversation?.(ref)
+    }
     setDiffOpen(false)
     setOpenedTool(undefined)
     navigate(ref)
