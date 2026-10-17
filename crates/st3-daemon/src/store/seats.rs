@@ -1533,12 +1533,14 @@ impl Store {
             let prepared = fence.prepare_with_actuals(self, |connection, serial| {
                 resource_preparation::inputs_with_actuals(
                     connection,
-                    observer,
-                    desired_revision,
-                    attempt,
-                    resource,
-                    &canonical_json_value(facts),
-                    subscriptions,
+                    resource_preparation::Observation {
+                        observer,
+                        desired_revision,
+                        attempt,
+                        resource,
+                        facts: &canonical_json_value(facts),
+                        subscriptions,
+                    },
                     &mut |subject| match serial {
                         Some(serial) => self.smalltalk.observer_actuals.read(connection, subject, serial),
                         None => latest_actual(connection, subject),

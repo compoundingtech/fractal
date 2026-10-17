@@ -294,6 +294,15 @@ pub(super) struct Inputs {
     pub(super) should_record: bool,
 }
 
+pub(super) struct Observation<'a> {
+    pub(super) observer: &'a str,
+    pub(super) desired_revision: &'a str,
+    pub(super) attempt: Option<&'a str>,
+    pub(super) resource: &'a str,
+    pub(super) facts: &'a Value,
+    pub(super) subscriptions: &'a [(String, SubscriptionSpec)],
+}
+
 pub(super) fn inputs(
     transaction: &Connection,
     observer: &str,
@@ -303,20 +312,17 @@ pub(super) fn inputs(
     facts: &Value,
     subscriptions: &[(String, SubscriptionSpec)],
 ) -> Result<Inputs, St3Error> {
-    inputs_with_actuals(transaction, observer, desired_revision, attempt, resource, facts,
-        subscriptions, &mut |subject| latest_actual(transaction, subject))
+    inputs_with_actuals(transaction, Observation {
+        observer, desired_revision, attempt, resource, facts, subscriptions,
+    }, &mut |subject| latest_actual(transaction, subject))
 }
 
 pub(super) fn inputs_with_actuals(
     transaction: &Connection,
-    observer: &str,
-    desired_revision: &str,
-    attempt: Option<&str>,
-    resource: &str,
-    facts: &Value,
-    subscriptions: &[(String, SubscriptionSpec)],
+    observation: Observation<'_>,
     actual: &mut dyn FnMut(&str) -> Result<Option<Value>>,
 ) -> Result<Inputs, St3Error> {
+    let Observation { observer, desired_revision, attempt, resource, facts, subscriptions } = observation;
     let mut active_subscriptions = Vec::new();
     for (subject, expected) in subscriptions {
         let Some(desired) = current_desired_row_tx(transaction, subject).map_err(internal)? else {

@@ -53,7 +53,10 @@ fn observer_actuals_does_not_publish_a_reduction_from_an_invalidated_snapshot() 
     read(&store);
     let fence = resource_preparation::Fence::new(&store);
     let stale = fence.prepare_with_actuals(&store, |connection, serial| {
-        append(&store, SUBJECT, 20, json!({"facts":{"state":"closed"}}));
+        std::thread::scope(|scope| {
+            scope.spawn(|| append(&store, SUBJECT, 20, json!({"facts":{"state":"closed"}})))
+                .join().unwrap();
+        });
         store.smalltalk.observer_actuals.read(connection, SUBJECT, serial.unwrap()).unwrap()
     });
     assert!(!fence.current(&store, &store.connection.write(), &stale));
@@ -264,4 +267,34 @@ fn observer_actuals_external_ddl_requires_verified_physical_coverage() {
     ).unwrap();
     assert!(read(&store).1 > 0);
     assert_eq!(read(&store).1, 0, "external recovery requires positive dispatcher verification");
+}
+
+#[test]
+fn observer_actuals_sealing_preserves_ranks_but_late_rank_changes_invalidate() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("store.db"), "alder").unwrap();
+    let first = append(&store, SUBJECT, 10, json!({"facts":{"state":"open"}}));
+    let second = {
+        let mut writer = store.connection.write();
+        let batch: String = writer.query_row(
+            "SELECT batch_id FROM claims WHERE id=?1", [&first], |row| row.get(0)).unwrap();
+        let transaction = writer.transaction().unwrap();
+        let claim = append_claim_tx(&transaction, &store.origin, SUBJECT, "resource.observed",
+            None, &json!({"fields":{"facts":{"state":"closed"}}}), &[], Some(&batch)).unwrap();
+        transaction.commit().unwrap();
+        claim.id
+    };
+    assert_eq!(read(&store).0.unwrap()["facts"]["state"], "closed");
+    store.seal_local_batches().unwrap();
+    assert_eq!(read(&store).1, 0, "equivalent explicit ranks must preserve the reduction");
+    // Synthetic canonical metadata, not admitted replication evidence: the second claim
+    // gets an earlier position than the first while the claim bodies remain unchanged.
+    store.connection.write().execute(
+        "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,
+             claim_id,updated_at_unix_ms)
+         VALUES('record/late-rank','fixture',1,'fixture',-1,X'','valid',?1,'0')",
+        [&second]).unwrap();
+    let changed = read(&store);
+    assert!(changed.1 > 0);
+    assert_eq!(changed.0.unwrap()["facts"]["state"], "open");
 }

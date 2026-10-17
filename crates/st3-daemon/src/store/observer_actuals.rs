@@ -19,6 +19,7 @@ struct State {
     serial: u64,
     native: Option<(i64, i64)>,
     frontier: i64,
+    record_frontier: i64,
     global: bool,
     coverage_failed: bool,
     pending: BTreeSet<(&'static str, i64)>,
@@ -73,6 +74,8 @@ impl Actuals {
         if state.entries.is_empty() {
             state.frontier = connection.query_row(
                 "SELECT COALESCE(MAX(store_index),0) FROM claims", [], |row| row.get(0))?;
+            state.record_frontier = connection.query_row(
+                "SELECT COALESCE(MAX(rowid),0) FROM replica_records", [], |row| row.get(0))?;
         }
         Ok(state.serial)
     }
@@ -126,6 +129,22 @@ fn value_bytes(value: &Value) -> usize {
     }
 }
 
+/// Sealing local batches adds explicit positions equal to their legacy canonical ranks.
+/// Only a changed effective rank invalidates an otherwise unchanged cached subject.
+fn record_rank_changed(connection: &Connection, rowid: i64, previous_frontier: i64) -> rusqlite::Result<bool> {
+    connection.prepare_cached(
+        "SELECT (SELECT MIN(position) FROM replica_records WHERE claim_id=claim.id)
+            IS NOT COALESCE(
+                (SELECT MIN(position) FROM replica_records
+                 WHERE claim_id=claim.id AND rowid<=?2),
+                (SELECT COUNT(*) FROM claims legacy_position
+                 WHERE legacy_position.batch_id=claim.batch_id
+                   AND legacy_position.store_index<claim.store_index))
+         FROM replica_records inserted JOIN claims claim ON claim.id=inserted.claim_id
+         WHERE inserted.rowid=?1"
+    )?.query_row(params![rowid, previous_frontier], |row| row.get(0))
+}
+
 impl WriterObserver for Actuals {
     fn tables(&self) -> &'static [(&'static str, &'static str)] {
         &[("main", "claims"), ("main", "batches"), ("main", "replica_records"),
@@ -148,6 +167,9 @@ impl WriterObserver for Actuals {
             _ => return,
         };
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        // Fence speculative readers immediately, including between commits in one writer loan.
+        // Publication can then compare final canonical metadata with the cached prefix safely.
+        state.serial = state.serial.wrapping_add(1);
         // Updates/deletions may have changed the old subject/claim identity; bulk work and
         // missing rows are deliberately global. Rollback notifications over-invalidate only.
         if action != rusqlite::hooks::Action::SQLITE_INSERT || state.pending.len() >= PENDING_LIMIT {
@@ -182,9 +204,16 @@ impl WriterObserver for Actuals {
         if !state.global && state.pending.is_empty() { return; }
         state.serial = state.serial.wrapping_add(1);
         let pending = std::mem::take(&mut state.pending);
+        let next_record_frontier = pending.iter()
+            .filter(|entry| entry.0 == "replica_records").map(|entry| entry.1)
+            .max().unwrap_or(state.record_frontier).max(state.record_frontier);
         let mut subjects = BTreeSet::new();
         if !state.global && !state.entries.is_empty() {
             for (table, rowid) in pending {
+                if table == "replica_records" && rowid <= state.record_frontier {
+                    state.global = true;
+                    break;
+                }
                 if table == "claims" {
                     if rowid <= state.frontier {
                         // Explicit insertion into an old arrival slot can move other subjects'
@@ -219,12 +248,25 @@ impl WriterObserver for Actuals {
                 };
                 match connection.prepare_cached(sql).and_then(|mut statement|
                     statement.query_row([rowid], |row| row.get::<_, String>(0)).optional()) {
-                    Ok(Some(subject)) => { subjects.insert(subject); }
+                    Ok(Some(subject)) => {
+                        if table == "replica_records" {
+                            if !state.entries.iter().any(|(key, _, _)| key == &subject) {
+                                continue;
+                            }
+                            match record_rank_changed(connection, rowid, state.record_frontier) {
+                                Ok(false) => continue,
+                                Ok(true) => {}
+                                Err(_) => { state.global = true; break; }
+                            }
+                        }
+                        subjects.insert(subject);
+                    }
                     Ok(None) if table == "replica_records" => {}
                     Ok(None) | Err(_) => { state.global = true; break; }
                 }
             }
         }
+        state.record_frontier = next_record_frontier;
         if state.global {
             state.clear();
             state.global = false;
