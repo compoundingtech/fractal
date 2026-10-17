@@ -69,8 +69,9 @@ macros. Other crates use a part of it:
   resolver ownership reason. `scripts/check-module-layers` enforces this exact
   namespace exception in `src/`, `tests/`, `benches/` and `examples/` of both crates;
   all other client API paths remain forbidden. Renaming `st3-client` in any
-  dependency table, including dev/build and target-specific dependencies, is
-  forbidden as well. Remove this edge and its resolver at contraction.
+  dependency table, including dev/build and target-specific dependencies resolved
+  through `[workspace.dependencies]`, is forbidden as well.
+  Remove this edge and its resolver at contraction.
   <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-state-dirs-fractal -->
 
 `scripts/check-module-layers` reports the first three.

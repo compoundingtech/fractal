@@ -243,8 +243,8 @@ def layers(edges):
 BINARY_SIDE_CRATES = ("stui", "st3-conversation-ui")
 
 
-def client_alias_findings(manifest_path):
-    """Reject renamed client dependencies, including target-specific dependency tables."""
+def client_alias_findings(manifest_path, workspace_dependencies):
+    """Reject renamed client dependencies after resolving workspace inheritance."""
     if not os.path.isfile(manifest_path):
         return []
     with open(manifest_path, "rb") as handle:
@@ -257,7 +257,10 @@ def client_alias_findings(manifest_path):
                 continue
             if key in ("dependencies", "dev-dependencies", "build-dependencies"):
                 for name, spec in value.items():
-                    if name != "st3-client" and isinstance(spec, dict) and spec.get("package") == "st3-client":
+                    resolved = workspace_dependencies.get(name, {}) \
+                        if isinstance(spec, dict) and spec.get("workspace") is True else spec
+                    package = resolved.get("package", name) if isinstance(resolved, dict) else name
+                    if name != "st3-client" and package == "st3-client":
                         section = ".".join((*location, key))
                         problems.append(
                             f"{manifest_path}: [{section}] aliases st3-client as {name}; "
@@ -273,9 +276,16 @@ def client_alias_findings(manifest_path):
 def client_boundary_findings(root):
     """The kernel and telemetry may not reach the standalone client's API."""
     problems = []
+    workspace_dependencies = {}
+    workspace_manifest = os.path.join(root, "Cargo.toml")
+    if os.path.isfile(workspace_manifest):
+        with open(workspace_manifest, "rb") as handle:
+            workspace_dependencies = tomllib.load(handle).get("workspace", {}).get("dependencies", {})
     for crate in ("st3-kernel", "st3-telemetry"):
         crate_directory = os.path.join(root, "crates", crate)
-        problems.extend(client_alias_findings(os.path.join(crate_directory, "Cargo.toml")))
+        problems.extend(client_alias_findings(
+            os.path.join(crate_directory, "Cargo.toml"), workspace_dependencies
+        ))
         for target in ("src", "tests", "benches", "examples"):
             for base, _, names in os.walk(os.path.join(crate_directory, target)):
                 for name in sorted(names):
