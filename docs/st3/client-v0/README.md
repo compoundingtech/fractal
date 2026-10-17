@@ -713,7 +713,7 @@ with its `target_id` and `episode`, and offers the typed action `prompt.respond`
 |---|---|---|
 | Claude permission (its own or a subagent's), Codex command, file change or permissions approval | `allow`, `deny` | the answer |
 | Claude plan approval (`ExitPlanMode`) | `approve`, `deny` | the answer |
-| Claude question (`AskUserQuestion`, single or multi-select) | `answer`, `deny` | `deny`, or the choices: a JSON object of each question's text to its chosen label, several comma-separated |
+| Claude question (`AskUserQuestion`, single or multi-select) | `answer`, `deny` | `deny`, or the choices as positions: a JSON object of each question's position in the pending call to the positions of the options chosen, such as `{"0":[1],"1":[0,2]}`; the questions and labels stay in the conversation, and the seat's hook turns positions into labels |
 | Claude's new-MCP-server dialog | `use`, `use-all`, `skip` | the answer |
 | Claude's or Codex's workspace trust dialog | `trust`, and `exit` or `quit` | the answer |
 
@@ -855,6 +855,16 @@ is the only remainder; if the payload or another open field also needs a continu
 the same ref fetches the complete original `/body`, including its unbounded blocks.
 The final per-entry size guard remains authoritative and can replace an entry with a
 `native-entry-too-large` error whose continuation fetches its original body.
+
+A timeline page is also bounded after preparation. An entry that alone still exceeds the response
+ceiling (the 1 MiB response cap minus 128,000 reserved bytes) does not fail the page: it is
+replaced in place by an `error` entry that keeps its `id` and `sequence`, with body
+`{code: "timeline-entry-too-large", message, retryable: false, details: {size}}`, and the page
+cursor continues after it. This applies to native keyset pages and cached offset pages alike. The
+code is an entry-level string in the open `error` body, not an HTTP error code. Native entries
+normally reach this limit through the `native-entry-too-large` guard above, so they keep its
+continuation; the `timeline-entry-too-large` entry carries only the entry's size and has no
+continuation.
 
 External process sessions remain listed even when st cannot identify a native transcript.
 Opening their timeline returns a non-retryable `unsupported-capability` error with
@@ -2023,6 +2033,21 @@ has it, and `working` comes only from the register. The full mapping tables live
 [conversation normalization design](../conversation-normalization-design.md). Generated
 clients model `view` and `header` as optional loose JSON; `timeline-views.json` is the
 wire fixture.
+
+Schema-integer typed duration projections round native fractional values to the nearest
+whole contract unit: milliseconds for `wall_ms`, `total_ms` and `duration_ms`, seconds
+for `timeout_s`. Open assistant metadata, including `ttft_ms` and `duration_ms`, and
+native payloads and tool-result detail metadata preserve their original number precision.
+Integer counts are projected only from nonnegative integers; signed exit codes remain signed.
+Job summaries require a native identity and use `unknown` when no state was supplied;
+jobs without an identity remain in the native payload rather than receiving invented IDs.
+Tool-start views use the record timestamp when `startedAt` is absent or invalid. If neither
+instant is available, the native record remains readable without a typed tool-start view.
+The optional thinking-level `configured` field is projected only from native boolean
+evidence. A native string such as `"high"` stays in the payload but is omitted from the
+typed view; its presence does not imply an explicit-configuration fact.
+Non-fetchable prefix notices express that fact in `reason` and omit a continuation cursor,
+without adding undeclared fields to the closed truncation body.
 
 The pre-approval parity audit adds these parsed contract fields explicitly:
 `TimelineViewTask.context`, `SubagentSummary.name` (OMP name, distinct from agent
