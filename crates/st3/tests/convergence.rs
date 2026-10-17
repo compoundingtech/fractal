@@ -1586,9 +1586,10 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. Seed 1597 is the one fixed seed
-/// whose schedule never reaches a trim; every other fixed seed must.
-const NEVER_TRIMS: &[u64] = &[1597];
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v3, seeds 5 and 34
+/// never reach a trim; every other fixed seed must. This list is tied to the corpus because
+/// claim generation consumes the same RNG as the schedule.
+const NEVER_TRIMS: &[u64] = &[5, 34];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
@@ -1798,7 +1799,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v2.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v3.json"
         }))
         .unwrap(),
     )
