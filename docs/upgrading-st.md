@@ -1,4 +1,4 @@
-# Upgrade Smalltalk safely
+# Upgrade Fractal safely
 
 Upgrade each machine in your own fleet to the **same release**. Keep the old archive and read the new release's **Upgrade impact** section before starting it against your state. Patch tags do not promise rollback or mixed-build compatibility; see the [0.x compatibility policy](st3/compatibility.md). For an initial installation, use [getting started](getting-started.md).
 
@@ -106,6 +106,28 @@ cat "${archive%.tar.gz}/BUILD.json"
 so an installed CLI and a running daemon can be compared. All versions use metadata baked at
 compile time, independent of the caller's directory or environment.
 
+## Config keys and clients on an old PATH
+
+After an install adds configuration keys, replace stale `st` clients on session PATHs and
+restart the affected sessions through the normal coordinated lifecycle. Compare `st --version --json` in the session with the installed build and the daemon version from `st doctor --json`.
+Replacing installed files does not update a session pinned to an older executable or Nix path.
+
+New clients ignore unknown top-level and nested config keys with one stderr warning that lists
+escaped key paths, never their values. This warning is once per process, including shell
+completion: at most 16 paths, each capped at 160 characters, with explicit truncation notices.
+`st doctor` lists the same bounded names and `--strict` fails on the warning. Known values
+still use the existing typed parser and validation. Daemon startup, replication, policy reloads
+and local configuration/state management (including fleet, uninstall, admission, service
+status and Fabric discovery) remain strict about unknown settings. Setup rejects unknown keys before rewriting; it keeps
+its existing raw-TOML merge, which can reformat comments/order rather than preserving the
+original text. New restrictive client-visible settings must not rely on older clients honoring
+them: those clients can ignore an unknown restriction with only this warning.
+
+This change cannot repair clients already deployed with the older strict parser: the next
+key-adding upgrade still breaks those old clients once. Any install that adds a key must call
+out that limit and include the session/PATH upgrade instruction. This is not a general promise
+that different daemon releases can run together, and no config-version field is introduced.
+
 ## Restart the services and verify
 
 Schedule one coordinated upgrade window for the whole fleet, with the target files ready on
@@ -127,6 +149,12 @@ st doctor --json
 st agents ls
 st replication status
 ```
+
+Ordinary `st agents ls` and `st agents tree` read the latest published roster without
+requesting a refresh. Immediately after starting or changing an agent they can show the
+earlier roster; after daemon startup the roster may still be being prepared. When you need
+to see your own write, pass its same-host receipt `store_index` as `min_cut` to the agents
+client read and check the served snapshot index. This is not a replicated or cross-host cut.
 
 `service install` refreshes executable paths and restarts the installed daemon and replication services. The daemon adopts live seats; supported drivers/channels follow its new binary. A provider's conversation can keep running through the deploy. Compare the installed CLI's
 `machine_version` with the responding daemon's `machine_version` in doctor; also compare both
