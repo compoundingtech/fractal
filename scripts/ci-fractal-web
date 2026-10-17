@@ -42,9 +42,17 @@ production_build() (
 
 
 kit_storybook() {
-  local start=$SECONDS
-  pnpm --filter @smalltalk/fractal-ui build-storybook
+  # The module graph proves every bundled repository file is a declared kit input. A function,
+  # not a subshell, so the build time reaches the strict-play receipts.
+  local start=$SECONDS stats_dir status=0
+  stats_dir=$(mktemp -d "${TMPDIR:-/tmp}/fractal-kit-stats.XXXXXX")
+  pnpm --filter @smalltalk/fractal-ui build-storybook --stats-json "$stats_dir" || status=$?
   export KIT_STORYBOOK_BUILD_SECONDS=$((SECONDS - start))
+  if [ "$status" -eq 0 ]; then
+    python3 scripts/ci-fractal-web-kit-graph "$stats_dir/preview-stats.json" || status=$?
+  fi
+  rm -rf "$stats_dir"
+  return "$status"
 }
 
 kit_plays() (
@@ -94,7 +102,7 @@ case "${KIT_INPUTS:-true}" in
       lane "UI kit context isolation controls" node packages/fractal-ui/scripts/kit-play-isolation.browser-test.mjs
       lane "UI kit gate set, a11y and budget controls" node --test packages/fractal-ui/scripts/kit-play-gate.browser-test.mjs
     fi
-    lane "UI kit Storybook" kit_storybook
+    lane "UI kit Storybook and module graph" kit_storybook
     lane "UI kit strict plays (440/1440 × dark/light)" kit_plays
     ;;
   false)

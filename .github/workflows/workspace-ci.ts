@@ -586,6 +586,11 @@ export const fractalWebJobs = {
           KIT_SHARD_INDEX: '${{ matrix.shard }}',
           KIT_SHARD_COUNT: String(kitShardCount),
           KIT_RECEIPT_DIRECTORY: '${{ runner.temp }}/kit-play-receipts',
+          // Pull requests run the stories tagged critical without axe, within the 7-minute budget;
+          // merge groups (observed and signed) and manual runs keep every story with axe.
+          KIT_PLAY_SET: "${{ github.event_name == 'pull_request' && 'critical' || 'all' }}",
+          KIT_PLAY_A11Y: "${{ github.event_name == 'pull_request' && 'off' || 'on' }}",
+          KIT_PLAY_MAX_SECONDS: "${{ github.event_name == 'pull_request' && '420' || '' }}",
           BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
           HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
         },

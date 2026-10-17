@@ -255,6 +255,9 @@ assert "github.event.pull_request.head.sha || github.event.merge_group.head_sha"
 assert "github.event.merge_group.base_sha || github.event.before" in changes
 assert "github.event.merge_group.head_sha || github.sha" in changes
 assert "KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}" in execution
+assert "KIT_PLAY_SET: ${{ github.event_name == 'pull_request' && 'critical' || 'all' }}" in execution, "PRs run the critical set"
+assert "KIT_PLAY_A11Y: ${{ github.event_name == 'pull_request' && 'off' || 'on' }}" in execution, "merge groups keep axe"
+assert "KIT_PLAY_MAX_SECONDS: ${{ github.event_name == 'pull_request' && '420' || '' }}" in execution, "the per-commit budget"
 assert "github.event.pull_request.draft == false" in changes and "(success())" in changes and "actions/checkout" not in changes, "ready PR detection runs on embedded source"
 assert "needs: [fractal-web-changes, genie-freshness]" in execution
 assert "needs.fractal-web-changes.outputs.relevant == 'true'" in execution
@@ -296,7 +299,7 @@ for required in (False, True):
         result = subprocess.run(["bash", "-c", harness], check=True, capture_output=True, text=True,
                                 env={**os.environ, "KIT_INPUTS": str(required).lower(),
                                      "BASE_SHA": "base", "HEAD_SHA": "head", "GITHUB_STEP_SUMMARY": str(summary)})
-        for name in ("UI kit play index contracts", "UI kit context isolation controls", "UI kit gate set, a11y and budget controls", "UI kit Storybook", "UI kit strict plays"):
+        for name in ("UI kit play index contracts", "UI kit context isolation controls", "UI kit gate set, a11y and budget controls", "UI kit Storybook and module graph", "UI kit strict plays"):
             assert (name in result.stdout) == required, result.stdout
         if not required:
             assert "skipped: no kit inputs changed (base..head)" in summary.read_text()
@@ -308,7 +311,7 @@ fake_lane = r'''lane() {
   printf '%s\n' "$1"
   case "$1" in
     "App unit tests") if [ "${FAIL_APP:-0}" -ne 0 ]; then return "$FAIL_APP"; fi ;;
-    "UI kit Storybook") if [ "${FAIL_BUILD:-0}" -ne 0 ]; then return "$FAIL_BUILD"; fi ;;
+    "UI kit Storybook"*) if [ "${FAIL_BUILD:-0}" -ne 0 ]; then return "$FAIL_BUILD"; fi ;;
     "UI kit play index contracts") if [ "${FAIL_INDEX:-0}" -ne 0 ]; then return "$FAIL_INDEX"; fi ;;
     "UI kit strict plays"*) if [ "${FAIL_KIT:-0}" -ne 0 ]; then return "$FAIL_KIT"; fi ;;
   esac
@@ -423,3 +426,27 @@ assert "actions/upload-artifact@v4" in execution
 assert "actions/download-artifact@v4" in gate_job
 assert "kit-play-shards.mjs" in gate_job
 print("passed: matrix shards preserve receipts and semantic gate validates complete coverage")
+
+# The kit module graph check: every bundled repository file must be a declared kit input.
+graph_check = root / "scripts/ci-fractal-web-kit-graph"
+detector_kit_paths = runpy.run_path(str(detector))["kit_paths"]
+assert detector_kit_paths(["apps/fractal-web/src/changelog/seen.ts"]), "changelog files the kit renders select kit plays"
+assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"
+with tempfile.TemporaryDirectory() as scratch:
+    def graph(*ids):
+        path = Path(scratch, "preview-stats.json")
+        path.write_text(json.dumps({"modules": [{"id": identifier} for identifier in ids]}))
+        return subprocess.run([str(graph_check), str(path)], capture_output=True, text=True)
+    covered = graph("./src/Composer.stories.tsx", "./.storybook/preview.ts?v=1", "./../../node_modules/react/index.js",
+                    "/virtual:/@storybook/builder-vite/vite-app.js", "./../../apps/fractal-web/src/changelog/ChangelogView.tsx")
+    assert covered.returncode == 0 and "3 repository files, 0 outside" in covered.stdout, covered
+    outside = graph("./src/Composer.stories.tsx", "./../../apps/fractal-web/src/alerts/AlertsPopover.tsx")
+    assert outside.returncode == 1 and "apps/fractal-web/src/alerts/AlertsPopover.tsx" in outside.stderr, outside
+    for ids in ((), ("./../../node_modules/react/index.js",), ("/virtual:/x",)):
+        empty = graph(*ids)
+        assert empty.returncode == 1 and "unreadable" in empty.stderr, empty
+    escaped = graph("./../../../outside-the-repository.ts")
+    assert escaped.returncode == 1 and "outside the repository" in escaped.stderr, escaped
+    Path(scratch, "preview-stats.json").write_text("{")
+    assert subprocess.run([str(graph_check), str(Path(scratch, "preview-stats.json"))], capture_output=True).returncode == 1
+print("passed: the kit module graph check accepts declared inputs and rejects files outside them, empty and malformed graphs")
