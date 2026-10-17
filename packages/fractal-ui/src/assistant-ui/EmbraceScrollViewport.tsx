@@ -69,6 +69,9 @@ class ViewportController {
   /** Prepending history is not a request to stop following or to move the reader. */
   readonly prepareMaterialize = () => {
     if (this.following) return
+    const moved = this.element !== null && Math.abs(this.element.scrollTop - this.lastTop) >= geometryNumbers.scrollEndTolerance
+    // Chunks already preserve this anchor. Re-hit-testing every chunk forces fresh PrePaint work.
+    if (this.captureFrame === undefined && !moved && this.anchor?.element.isConnected) return
     if (this.captureFrame !== undefined) cancelAnimationFrame(this.captureFrame)
     this.captureFrame = undefined
     this.capture()
@@ -375,8 +378,8 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
   const revealRow = React.useCallback((id: string, preservePosition = false) => {
     const index = items.findIndex(item => item.id === id)
     if (index === -1) return
-    if (preservePosition) controller.prepareMaterialize()
-    else controller.reveal()
+    if (!preservePosition) controller.reveal()
+    else if (index < startIndex) controller.prepareMaterialize()
     setRevealTarget(index < startIndex ? { key: stateKey, id } : undefined)
   }, [controller, items, stateKey, startIndex])
   React.useLayoutEffect(() => {

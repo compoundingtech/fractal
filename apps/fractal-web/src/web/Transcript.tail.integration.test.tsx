@@ -268,6 +268,7 @@ describe('tail-first transcript mounting', () => {
     }))
     await render(transcript(entries))
     await scrollUp(25)
+    const hitTest = vi.spyOn(document, 'elementFromPoint')
     const anchor = renderedRows(lane()).find(row => row.getBoundingClientRect().bottom > 0)!
     const top = anchor.getBoundingClientRect().top
     const button = container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!
@@ -295,6 +296,7 @@ describe('tail-first transcript mounting', () => {
       if (count > previousCount) chunks += 1
       expect(anchor.isConnected).toBe(true)
       expect(anchor.getBoundingClientRect().top).toBe(top)
+      expect(hitTest).not.toHaveBeenCalled()
       expect(document.activeElement).toBe(count === entries.length && action === 'Show all messages' ? lane() : focused)
       if (count < entries.length) {
         expect(controls.getAttribute('aria-busy')).toBe('true')
@@ -305,12 +307,43 @@ describe('tail-first transcript mounting', () => {
       previousCount = count
     })
     expect(chunks).toBeGreaterThan(100)
+    expect(hitTest).not.toHaveBeenCalled()
     expect(renderedRows(lane())).toHaveLength(entries.length)
     expect(container.querySelector('[data-item-id="long-prompt-0"]')?.textContent).toContain('Long history prompt 0')
     expect(controls.getAttribute('aria-busy')).toBe('false')
     expect(controls.textContent).toContain('Browser Find searches all loaded messages.')
     expect(controls.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('Find: all loaded')
   }, 30_000)
+
+  it('recaptures a new reader anchor after scrolling during preparation and reuses it for the remaining chunks', async () => {
+    await render(transcript())
+    await scrollUp(25)
+    const originalAnchor = renderedRows(lane()).find(row => row.getBoundingClientRect().bottom > 0)!
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!.click() })
+    await flushFrames(2)
+    const hitTest = vi.spyOn(document, 'elementFromPoint')
+    await act(async () => {
+      lane().dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
+      lane().scrollTop -= 100
+      lane().dispatchEvent(new Event('scroll'))
+    })
+    const anchor = renderedRows(lane()).find(row => row.getBoundingClientRect().bottom > 0)!
+    const top = anchor.getBoundingClientRect().top
+    expect(anchor).not.toBe(originalAnchor)
+    await flushFrames(2, () => {
+      expect(anchor.isConnected).toBe(true)
+      expect(anchor.getBoundingClientRect().top).toBe(top)
+    })
+    expect(hitTest).toHaveBeenCalled()
+    hitTest.mockClear()
+    await flushHistory(turns.length, () => {
+      expect(anchor.isConnected).toBe(true)
+      expect(anchor.getBoundingClientRect().top).toBe(top)
+      expect(hitTest).not.toHaveBeenCalled()
+    })
+    expect(renderedRows(lane())).toHaveLength(turns.length)
+    expect(anchor.getBoundingClientRect().top).toBe(top)
+  })
 
   it('exposes progressive preparation to viewport children until the last chunk commits', async () => {
     await render(<EmbraceScrollViewport items={rows} stateKey="progress" initialTailCount={2} data-testid="transcript-scroll">
@@ -346,6 +379,57 @@ describe('tail-first transcript mounting', () => {
     await flushHistory(turns.length)
     expect(renderedRows(lane())).toHaveLength(turns.length)
     expect(anchor.getBoundingClientRect().top).toBe(top)
+  })
+
+  it('pauses pending full-history preparation while inactive and retains streaming updates and the reading anchor on resume', async () => {
+    const streamingTurn = (text: string): TranscriptTurn => ({
+      ...turns.at(-1)!,
+      items: [{ _tag: 'Text', id: 'paused-streaming-answer', role: 'assistant', text, attachments: [], streaming: true, at: new Date(now).toISOString() }],
+    })
+    let entries: readonly TranscriptTurn[] = [...turns.slice(0, -1), streamingTurn('Before pausing')]
+    await render(transcript(entries))
+    await scrollUp(25)
+    const anchor = renderedRows(lane()).find(row => row.getBoundingClientRect().bottom > 0)!
+    const top = anchor.getBoundingClientRect().top
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!.click() })
+    await flushFrames(2)
+    expect(renderedRows(lane()).length).toBeLessThan(entries.length)
+    expect(container.querySelector('[data-testid="transcript-history-controls"]')?.getAttribute('aria-busy')).toBe('true')
+    await act(async () => root.render(transcript(entries, false)))
+    const pausedRows = renderedRows(lane())
+    await flushFrames(12)
+    expect(renderedRows(lane())).toEqual(pausedRows)
+    const appended: TranscriptTurn = { ...turns[0]!, id: 'paused-new-turn', prompt: { ...turns[0]!.prompt!, id: 'paused-new-prompt', text: 'Arrived while inactive' } }
+    entries = [
+      { ...turns[0]!, prompt: { ...turns[0]!.prompt!, text: 'Old prompt updated while inactive' } },
+      ...turns.slice(1, -1),
+      streamingTurn('An **inactive update**'),
+      appended,
+    ]
+    await act(async () => root.render(transcript(entries, false)))
+    await flushFrames(12)
+    expect(renderedRows(lane()).map(row => row.dataset.itemId)).toEqual([...pausedRows.map(row => row.dataset.itemId), appended.id])
+    expect(container.querySelector('[data-item-id="prompt-0"]')).toBeNull()
+    expect(anchor.isConnected).toBe(true)
+    expect(anchor.getBoundingClientRect().top).toBe(top)
+    await act(async () => root.render(transcript(entries, true)))
+    await flushFrames(2)
+    expect(renderedRows(lane()).length).toBeLessThan(entries.length)
+    expect(container.querySelector('[data-item-id="paused-streaming-answer"] strong')?.textContent).toBe('inactive update')
+    expect(container.querySelector('[data-item-id="paused-new-prompt"]')?.textContent).toContain('Arrived while inactive')
+    entries = [...entries.slice(0, -2), streamingTurn('An **active preparation update**'), appended]
+    await act(async () => root.render(transcript(entries)))
+    await flushHistory(entries.length, () => {
+      expect(anchor.isConnected).toBe(true)
+      expect(container.querySelector(`[data-testid="transcript-turn"][data-item-id="${anchor.dataset.itemId}"]`)).toBe(anchor)
+      expect(anchor.getBoundingClientRect().top).toBe(top)
+    })
+    expect(renderedRows(lane())).toHaveLength(entries.length)
+    expect(container.querySelector('[data-item-id="prompt-0"]')?.textContent).toContain('Old prompt updated while inactive')
+    expect(container.querySelector('[data-item-id="paused-streaming-answer"] strong')?.textContent).toBe('active preparation update')
+    expect(container.querySelector('[data-item-id="paused-streaming-answer"]')?.textContent).not.toContain('Before pausing')
+    expect(container.querySelector('[data-item-id="paused-new-prompt"]')?.textContent).toContain('Arrived while inactive')
+    expect(container.querySelector('[data-testid="transcript-history-controls"]')?.getAttribute('aria-busy')).toBe('false')
   })
 
   it('keeps following new rows after native Find is opened and cancelled without navigating', async () => {
@@ -398,6 +482,67 @@ describe('tail-first transcript mounting', () => {
     } finally {
       Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
     }
+  })
+
+  it.each([
+    ['removed', '', true],
+    ['invalid', '#%E0%A4%A', true],
+    ['nonmessage', '#conversation-settings', true],
+    ['removed without a hashchange event', '', false],
+  ])('cancels an old-message hash that is %s during progressive preparation', async (_description, replacement, dispatchHashChange) => {
+    const scrollIntoView = vi.mocked(HTMLElement.prototype.scrollIntoView)
+    await render(transcript())
+    await act(async () => {
+      window.history.replaceState(null, '', '#prompt-0')
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    await flushFrames(2)
+    expect(container.querySelector('[data-item-id="prompt-0"]')).toBeNull()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    await act(async () => {
+      window.history.replaceState(null, '', `${window.location.pathname}${replacement}`)
+      if (dispatchHashChange) window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    await flushFrames(2)
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!.click() })
+    await flushHistory(turns.length, () => {
+      expect(window.location.hash).toBe(replacement)
+      expect(scrollIntoView).not.toHaveBeenCalled()
+    })
+    expect(container.querySelector('[data-testid="user-message"][data-item-id="prompt-0"]')).not.toBeNull()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+
+  it('only scrolls to the replacement message hash and never the obsolete target when it later materializes', async () => {
+    const scrollIntoView = vi.mocked(HTMLElement.prototype.scrollIntoView)
+    await render(transcript())
+    await act(async () => {
+      window.history.replaceState(null, '', '#prompt-0')
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    await flushFrames(2)
+    expect(container.querySelector('[data-item-id="prompt-0"]')).toBeNull()
+    expect(container.querySelector('[data-item-id="prompt-4"]')).toBeNull()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    await act(async () => {
+      window.history.replaceState(null, '', '#prompt-4')
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    await flushHistory(turns.length, () => {
+      expect(window.location.hash).toBe('#prompt-4')
+      const target = container.querySelector('[data-testid="user-message"][data-item-id="prompt-4"]')
+      if (target === null) expect(scrollIntoView).not.toHaveBeenCalled()
+      else expect(scrollIntoView.mock.contexts.every(context => context === target)).toBe(true)
+    })
+    const replacement = container.querySelector('[data-testid="user-message"][data-item-id="prompt-4"]')
+    expect(replacement).not.toBeNull()
+    expect(scrollIntoView.mock.contexts).toEqual([replacement])
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!.click() })
+    await flushHistory(turns.length)
+    expect(container.querySelector('[data-testid="user-message"][data-item-id="prompt-0"]')).not.toBeNull()
+    expect(window.location.hash).toBe('#prompt-4')
+    expect(scrollIntoView.mock.contexts).toEqual([replacement])
   })
 })
 

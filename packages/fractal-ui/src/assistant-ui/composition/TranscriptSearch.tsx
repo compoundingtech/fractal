@@ -5,31 +5,45 @@ import type { TranscriptTurn } from './Transcript'
 export function TranscriptSearch({ turns, startIndex, revealRow, children, ...props }: React.HTMLAttributes<HTMLDivElement> & { readonly turns: readonly TranscriptTurn[]; readonly startIndex: number; readonly revealRow: (id: string, preservePosition?: boolean) => void }) {
   const root = React.useRef<HTMLDivElement>(null)
   const appliedHash = React.useRef<string | undefined>(undefined)
-  const pendingHash = React.useRef<{ readonly id: string; readonly turnId: string } | undefined>(undefined)
+  const hashGeneration = React.useRef(0)
+  const pendingHash = React.useRef<{ readonly id: string; readonly turnId: string; readonly hash: string; readonly generation: number } | undefined>(undefined)
   React.useEffect(() => {
     const element = root.current
     if (element === null) return
     const scrollPendingHash = () => {
       const pending = pendingHash.current
-      if (pending === undefined || element.closest('[aria-hidden="true"], [hidden]') !== null) return
+      if (pending === undefined) return
+      if (pending.generation !== hashGeneration.current || pending.hash !== window.location.hash) {
+        pendingHash.current = undefined
+        const first = turns[startIndex]
+        if (first !== undefined) revealRow(first.id, true)
+        return
+      }
+      if (element.closest('[aria-hidden="true"], [hidden]') !== null) return
       const row = element.querySelector<HTMLElement>(`[data-item-id="${CSS.escape(pending.id)}"]`)
       if (row === null) return
       pendingHash.current = undefined
       // Chunk commits preserved the old view. Actual target navigation now takes ownership.
       revealRow(pending.turnId)
-      row.scrollIntoView({ block: 'start' })
+      if (pending.generation === hashGeneration.current && pending.hash === window.location.hash && row.isConnected) row.scrollIntoView({ block: 'start' })
     }
     scrollPendingHash()
     const hash = () => {
+      const generation = ++hashGeneration.current
+      const previous = pendingHash.current
+      pendingHash.current = undefined
+      const currentHash = window.location.hash
+      appliedHash.current = currentHash
+      if (previous !== undefined && turns[startIndex] !== undefined) revealRow(turns[startIndex]!.id, true)
       if (element.closest('[aria-hidden="true"], [hidden]') !== null) return
       let id: string
-      try { id = decodeURIComponent(window.location.hash.slice(1)) } catch { return }
+      try { id = decodeURIComponent(currentHash.slice(1)) } catch { return }
       if (id === '') return
       const turn = turns.find(turn => turn.id === id || turn.prompt?.id === id || turn.items.some(item => item.id === id))
       if (turn === undefined) return
-      appliedHash.current = window.location.hash
-      pendingHash.current = { id, turnId: turn.id }
-      revealRow(turn.id)
+      pendingHash.current = { id, turnId: turn.id, hash: currentHash, generation }
+      // Preparing a cancellable link does not navigate until its current target is mounted.
+      revealRow(turn.id, true)
       scrollPendingHash()
     }
     const find = (event: KeyboardEvent) => {
