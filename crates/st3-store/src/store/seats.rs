@@ -1463,7 +1463,9 @@ impl Store {
         let Some(row) = desired_row_at(&connection, subject, at)?.filter(|row| row.kind == "agent") else {
             return Ok(Vec::new());
         };
-        desired_lineage_from_tx(&connection, row.claim_id, same_declared_launch)
+        // Replication can deliver a predecessor after its successor; the snapshot walks only the
+        // ancestry it held.
+        desired_lineage_from_at_tx(&connection, row.claim_id, same_declared_launch, at)
     }
 
     /// Suspension follows all non-launch edits, independently of process retry budgets.
