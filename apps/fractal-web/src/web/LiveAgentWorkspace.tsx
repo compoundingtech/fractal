@@ -17,7 +17,7 @@ import { SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, ThreadH
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
-import { useFleet, useSubjectList, useConnection, useNow, useFeedInterest, useDataSource } from '../data/react.tsx'
+import { useFleet, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
 import type { ResourcePanelState } from '../shell/state.ts'
@@ -39,17 +39,17 @@ import { SidebarEmptyState } from './SidebarEmptyState.tsx'
 const emptyAgents: readonly Agent[] = []
 const sidebarExtraSignals = [] as const
 
-/** Clock subscribers live below the collection: a tick updates rows, never tree layout. */
+/** Clock ticks reach SidebarTime leaves, never the Aria row or its collection. */
 const LiveSidebarAgentRow = React.memo((props: {
   readonly agent: Agent
   readonly stale: boolean
   readonly active: boolean
   readonly select: (ref: string) => void
 }) => {
-  const now = useNow()
+  const now = useNowSnapshot()
   const item = React.useMemo(() => sidebarRow({ agent: props.agent, stale: props.stale, now }), [props.agent, props.stale, now])
   const onOpen = React.useCallback(() => props.select(props.agent.ref), [props.select, props.agent.ref])
-  return <SidebarAgentRow inTree item={item} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={sidebarExtraSignals} active={props.active} onOpen={onOpen} />
+  return <SidebarAgentRow inTree item={item} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={sidebarExtraSignals} active={props.active} onOpen={onOpen} />
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 
@@ -164,7 +164,7 @@ const initialAgentFromUrl = () => {
 
 /** One authoritative agent thread per workspace; local geometry never grants backend authority. */
 export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void }) {
-  const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), now = useNow()
+  const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection()
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
   const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [scheme, setScheme] = useAtom(palette)
   const viewport = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
@@ -240,7 +240,6 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   openLatest.current = open
   const openDocument = React.useCallback((ref: string) => openLatest.current({ ref, presentation: 'detail' }), [])
   const stale = fleet._tag === 'Observed' && (fleet.freshness === 'stale' || connection._tag !== 'Live')
-  const headerRow = agent === undefined ? undefined : sidebarRow({ agent, stale, now })
   const folderSource = useDataSource()
   const sidebarSettings = (folderSource.mode === 'fixtures' ? fixtureSidebarState : sidebarState)(folderSource.gateway ?? folderSource.mode)
   const [filters, setFilters] = useAtom(sidebarSettings.filters)
@@ -256,7 +255,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   })
   const needsYou = React.useMemo(() => sidebarAttention({ agents, subjects }), [agents, subjects])
   // Filtering uses observed status, not wall time; ticking cannot change membership.
-  const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, filters: deferredFilters, stale, now: 0 }), [sidebarFolders.orderingTree, agents, needsYou, deferredFilters, stale])
+  const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, deferredFilters, stale])
   const agentsByRef = React.useMemo(() => new Map(agents.map(row => [row.ref, row])), [agents])
   const accessibleNames = React.useMemo(() => new Map(agents.map(agent => [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale, now: 0 }))] as const)), [agents, stale])
   const selectLatest = React.useRef(select)
@@ -330,7 +329,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
               </aside>
               <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
               <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-                <ThreadHeader terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={current === '' ? undefined : <ConversationHeaderActions key={current} agentRef={current} />} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} status={headerRow?.status} statusLabel={headerRow?.statusLabel} statusSince={headerRow?.statusSince} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} now={now} panelOpen={diffOpen} drawerOpen={selectedPane.includes('terminal/')} onTogglePanel={() => setDiffOpen((value) => !value)} onToggleDrawer={() => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }} />
+                <ClockedThreadHeader agent={agent} stale={stale} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={current === '' ? undefined : <ConversationHeaderActions key={current} agentRef={current} />} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={selectedPane.includes('terminal/')} onTogglePanel={() => setDiffOpen((value) => !value)} onToggleDrawer={() => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }} />
                 {visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
                     <Aria.Button aria-pressed={selectedPane === 'thread'} onPress={() => navigate(current)} {...stylex.props(styles.textButton)}>
@@ -376,6 +375,14 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
     {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} ux={ux} />, paneHost)}
   </>)
 }
+
+/** Only time-bearing surfaces subscribe to the wall clock, not the workspace providers. */
+function ClockedThreadHeader({ agent, stale, ...props }: Omit<React.ComponentProps<typeof ThreadHeader>, 'now' | 'status' | 'statusLabel' | 'statusSince'> & { readonly agent?: Agent; readonly stale: boolean }) {
+  const now = useNowSnapshot()
+  const row = agent === undefined ? undefined : sidebarRow({ agent, stale, now })
+  return <ThreadHeader {...props} status={row?.status} statusLabel={row?.statusLabel} statusSince={row?.statusSince} />
+}
+
 
 const assumedOnline = Atom.make({ _tag: 'Online' } as const)
 /** Decoded gateway sync, never the socket's raw lifecycle tag. */

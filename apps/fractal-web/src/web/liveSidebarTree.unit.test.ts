@@ -6,13 +6,13 @@ import { parseSidebarQuery } from '../shell/sidebar/filter.ts'
 import { liveSidebarTree } from './liveSidebarTree.ts'
 
 const tree: readonly SidebarNode[] = [{ _tag: 'Folder', id: 'product', label: 'Product', collapsed: true, children: searchAgents.map(agent => ({ _tag: 'Agent', id: agent.ref, subject: agent.ref, label: agent.name })) }]
-const project = (query = '', change: Partial<typeof defaultFilters> = {}) => liveSidebarTree({ tree, agents: searchAgents, needsYou: new Set(['agent/builder']), filters: { ...defaultFilters, query, ...change }, stale: false, now: 0 })
+const project = (query = '', change: Partial<typeof defaultFilters> = {}) => liveSidebarTree({ tree, agents: searchAgents, needsYou: new Set(['agent/builder']), filters: { ...defaultFilters, query, ...change }, stale: false })
 const ids = (nodes: readonly SidebarNode[]): string[] => nodes.flatMap(node => node._tag === 'Agent' ? [node.id] : ids(node.children))
 describe('live sidebar search bindings', () => {
   it('retains the canonical tree when membership, order and collapse are unchanged', () => {
     expect(project()).toBe(tree)
     const openTree: readonly SidebarNode[] = [{ _tag: 'Folder', id: 'product', label: 'Product', collapsed: false, children: tree[0]!._tag === 'Folder' ? tree[0]!.children : [] }]
-    const filter = (query: string) => liveSidebarTree({ tree: openTree, agents: searchAgents, needsYou: new Set(), filters: { ...defaultFilters, query }, stale: false, now: 0 })
+    const filter = (query: string) => liveSidebarTree({ tree: openTree, agents: searchAgents, needsYou: new Set(), filters: { ...defaultFilters, query }, stale: false })
     expect(filter('agent/')).toBe(openTree)
     expect(filter('agent/b')).not.toBe(openTree)
     expect(openTree[0]).toMatchObject({ collapsed: false })

@@ -25,7 +25,7 @@ const SearchSurface = ({ deep = false }: { readonly deep?: boolean }) => {
   const [filters, setFilters] = React.useState(defaultFilters)
   const deferredFilters = React.useDeferredValue(filters)
   const sourceTree = React.useMemo(() => deep ? [{ ...canonicalTree[0]!, children: agents.map(agent => ({ _tag: 'Agent' as const, id: agent.ref, subject: agent.ref, label: agent.name })) }] : canonicalTree, [deep, agents])
-  const tree = React.useMemo(() => liveSidebarTree({ tree: sourceTree, agents, needsYou, filters: deferredFilters, stale: false, now: 0 }), [sourceTree, agents, deferredFilters])
+  const tree = React.useMemo(() => liveSidebarTree({ tree: sourceTree, agents, needsYou, filters: deferredFilters, stale: false }), [sourceTree, agents, deferredFilters])
   const query = parseSidebarQuery(deferredFilters.query)
   return <section ref={surface} style={{ width: 300, height: 480, display: 'flex', flexDirection: 'column' }} {...stylex.props(assistantDarkTheme, liveLegacyTheme)}>
     <h2>Search agents</h2>

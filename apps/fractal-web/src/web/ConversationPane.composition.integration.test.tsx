@@ -20,6 +20,7 @@ import type * as KitComposer from '../../../../packages/fractal-ui/src/assistant
 import type { ConversationRuntimeOptions, TranscriptTurn } from '@smalltalk/fractal-ui/assistant-ui'
 import { Tracer } from 'effect'
 import { makeUxTelemetry, type UxTelemetry } from '../telemetry/ux.ts'
+import { HumanClockProvider } from '../../../../packages/fractal-ui/src/time/clock.tsx'
 
 // The kit compiles StyleX at build time; node tests stub only the CSS runtime, never data hooks.
 vi.mock('@stylexjs/stylex', () => ({
@@ -34,6 +35,7 @@ const source = vi.hoisted(() => ({
   feed: { _tag: 'Waiting' } as Feed<ConversationPage>,
   sync: undefined as FeedSyncObservation | undefined,
   now: 1000,
+  clockListeners: new Set<() => void>(),
   runtimeItems: [] as NonNullable<ConversationRuntimeOptions['messages']>[],
   transcriptTurns: [] as (readonly TranscriptTurn[])[],
   scrollToBottomKeys: [] as (string | undefined)[],
@@ -43,13 +45,18 @@ const source = vi.hoisted(() => ({
 vi.mock('../data/react.tsx', async () => {
   // Vitest hoists this factory before static imports are initialized.
   const Atom = await import('effect/reactivity/Atom')
+  const React = await import('react')
   const agents = Atom.make({ _tag: 'Observed' as const, freshness: 'live' as const, value: [] })
   return ({
   useConversation: () => source.feed,
   useConversationSync: () => source.sync,
   useDataSource: () => ({ agents, conversationInterest: undefined }),
   useFeedInterest: () => {},
-  useNow: () => source.now,
+  useNow: () => React.useSyncExternalStore(listener => {
+    source.clockListeners.add(listener)
+    return () => { source.clockListeners.delete(listener) }
+  }, () => source.now),
+  useNowSnapshot: () => source.now,
   useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', terminalInput: 'ungranted' }),
   })
 })
@@ -106,6 +113,7 @@ const container = document.createElement('div')
 
 beforeEach(() => {
   source.now = 1000
+  source.clockListeners.clear()
   source.runtimeItems = []
   source.transcriptTurns = []
   source.scrollToBottomKeys = []
@@ -133,9 +141,16 @@ afterEach(async () => {
 
 const opened: WorkLogCall[] = []
 
+const clock = {
+  now: () => source.now,
+  subscribe: (listener: () => void) => {
+    source.clockListeners.add(listener)
+    return () => { source.clockListeners.delete(listener) }
+  },
+}
 const mount = async (ux?: UxTelemetry) => {
   await act(async () => {
-    root!.render(<ConversationPane agentRef="agent/selected" agentName="Example Agent" onOpenTool={call => opened.push(call)} ux={ux} />)
+    root!.render(<HumanClockProvider clock={clock}><ConversationPane agentRef="agent/selected" agentName="Example Agent" onOpenTool={call => opened.push(call)} ux={ux} /></HumanClockProvider>)
   })
 }
 
@@ -338,6 +353,25 @@ describe('ConversationPane composition activation', () => {
     expect(source.scrollToBottomKeys.at(-1)).toBe(third.id)
     const changes = source.scrollToBottomKeys.filter((key, index, keys) => index === 0 || key !== keys[index - 1])
     expect(changes).toEqual([undefined, first.id, second.id, third.id])
+  })
+
+  it('updates clock labels without re-rendering the runtime or composer', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Requested', since: 0 }, observedAt: 0 }
+    await mount()
+    const runtimeRenders = source.runtimeItems.length
+    const composerRenders = source.composerProps.length
+    const transcriptRenders = source.transcriptTurns.length
+    for (let second = 1; second <= 10; second += 1) {
+      await act(async () => {
+        source.now += 1000
+        source.clockListeners.forEach(listener => listener())
+      })
+    }
+    expect(source.transcriptTurns).toHaveLength(transcriptRenders)
+    expect(source.runtimeItems).toHaveLength(runtimeRenders)
+    expect(source.composerProps).toHaveLength(composerRenders)
+    expect(text()).toContain('Loading conversation is taking longer than expected · 11s')
   })
 
   it('keeps runtime items and transcript turns stable for sixty idle clock, sync and no-op frame updates', async () => {

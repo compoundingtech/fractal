@@ -21,7 +21,6 @@ import {
   useAgent,
   useDataSource,
   useFleetSelection,
-  useNow,
   useSubjectSelection,
 } from '../data/react.tsx'
 import type { Feed, Fleet } from '../data/source.ts'
@@ -39,6 +38,7 @@ import { StatusIcon, agentStatus, compactTime, type AgentStatus } from './sideba
 import { SidebarToolbar } from './sidebar/Toolbar.tsx'
 import type { Workspace, WindowAction } from './workspaces.ts'
 import type { AgentFoldersProps, SidebarNode, SidebarMoveTarget } from '../folders/sidebarContract.ts'
+import { useClockLabel } from '../../../../packages/fractal-ui/src/time/clock.tsx'
 
 const unfiled = 'wf/unfiled'
 const styles = stylex.create({
@@ -797,7 +797,6 @@ const AgentFolderRow = React.memo(
     const feed = useAgent(workspace.id)
     const agent = feed._tag === 'Observed' ? feed.value : undefined
     const status = agentStatus({ agent, fleet: feed })
-    const now = useNow()
     const description = agent?.description?.trim() ?? ''
     const activityAt = agent?.lastActivityAt._tag === 'Known' ? agent.lastActivityAt.value : undefined
     const activate = () => {
@@ -843,15 +842,7 @@ const AgentFolderRow = React.memo(
                   {...stylex.props(styles.rowContent)}
                 >
                   <div {...stylex.props(styles.line)}>
-                    <span
-                      title={
-                        agent?.statusSince === undefined
-                          ? 'Status boundary unavailable; last activity is not time in status'
-                          : `Observed status since ${new Date(agent.statusSince).toLocaleString()} · ${compactTime({ at: agent.statusSince, now })} in status`
-                      }
-                    >
-                      <StatusIcon status={status} />
-                    </span>
+                    <FolderStatusTime status={status} since={agent?.statusSince} />
                     <span {...stylex.props(styles.nameSpace)}>
                       <span {...stylex.props(styles.nameSlot)}>
                         <span
@@ -872,13 +863,7 @@ const AgentFolderRow = React.memo(
                       </span>
                     ) : null}
                     {activityAt === undefined ? null : (
-                      <time
-                        dateTime={new Date(activityAt).toISOString()}
-                        title={`Last activity ${new Date(activityAt).toLocaleString()}`}
-                        {...stylex.props(styles.meta)}
-                      >
-                        {compactTime({ at: activityAt, now })}
-                      </time>
+                      <FolderActivityTime at={activityAt} />
                     )}
                   </div>
                   <div {...stylex.props(styles.secondLine)}>
@@ -906,6 +891,16 @@ const AgentFolderRow = React.memo(
     )
   },
 )
+
+function FolderStatusTime({ status, since }: { readonly status: AgentStatus; readonly since?: number }) {
+  const title = useClockLabel(now => since === undefined ? 'Status boundary unavailable; last activity is not time in status' : `Observed status since ${new Date(since).toLocaleString()} · ${compactTime({ at: since, now })} in status`)
+  return <span title={title}><StatusIcon status={status} /></span>
+}
+
+function FolderActivityTime({ at }: { readonly at: number }) {
+  const elapsed = useClockLabel(now => compactTime({ at, now }))
+  return <time dateTime={new Date(at).toISOString()} title={`Last activity ${new Date(at).toLocaleString()}`} {...stylex.props(styles.meta)}>{elapsed}</time>
+}
 
 /** Keyed feedback subscribes independently of the Tree's cached collection elements. */
 export const ArrangementEditFeedback = ({ target }: { readonly target: string }) => {

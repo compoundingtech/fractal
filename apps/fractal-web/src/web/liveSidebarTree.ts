@@ -5,16 +5,15 @@ import type { SidebarFilters } from '../shell/sidebar/state.ts'
 import { sidebarRow } from './sidebarRow.ts'
 
 /** View-only filtering keeps the canonical arrangement and its move fences untouched. */
-export const liveSidebarTree = ({ tree, agents, needsYou, filters, stale, now }: {
+export const liveSidebarTree = ({ tree, agents, needsYou, filters, stale }: {
   readonly tree: readonly SidebarNode[]
   readonly agents: readonly Agent[]
   readonly needsYou: ReadonlySet<string>
   readonly filters: SidebarFilters
   readonly stale: boolean
-  readonly now: number
 }): readonly SidebarNode[] => {
   const query = parseSidebarQuery(filters.query)
-  const rows = new Map<string, SidebarMatchRow>(agents.map(agent => [agent.ref, { workspace: { title: agent.name, host: agent.host }, agent, status: sidebarRow({ agent, stale, now }).status, needsMe: needsYou.has(agent.ref) }]))
+  const rows = new Map<string, SidebarMatchRow>(agents.map(agent => [agent.ref, { workspace: { title: agent.name, host: agent.host }, agent, status: sidebarRow({ agent, stale, now: 0 }).status, needsMe: needsYou.has(agent.ref) }]))
   const filtering = isSidebarFiltering(filters, query)
   const visit = (nodes: readonly SidebarNode[]): readonly SidebarNode[] => {
     const visible = nodes.flatMap((node): SidebarNode[] => {
