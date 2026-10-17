@@ -256,7 +256,7 @@ impl Store {
     }
     /// Owner-local projection counter, including retired and not-yet-created heads.
     /// It commits with the heads and is independent of claim admission indices.
-    pub(crate) fn arrangement_inventory_revision(&self, person: &str) -> Result<u64> {
+    pub fn arrangement_inventory_revision(&self, person: &str) -> Result<u64> {
         self.read_snapshot(|_| Ok(self.readers.get().query_row(
             "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta
              WHERE key='arrangement_inventory_revision_v1/'||?1),0)",

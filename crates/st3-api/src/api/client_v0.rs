@@ -1129,7 +1129,7 @@ async fn deliver_ivm_collection(
         Output::Window(window) => {
             let delivered = subscription.delivered;
             if candidate.replace { subscription.delivered = false; }
-            let result = deliver_collection(socket, subscription, Ok(window)).await;
+            let result = deliver_collection(socket, subscription, Ok((window.0, window.1, window.2, None))).await;
             if !matches!(result, Refreshed::Current) { subscription.delivered = delivered; }
             result
         }

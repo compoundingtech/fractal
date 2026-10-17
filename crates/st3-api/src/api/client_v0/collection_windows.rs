@@ -1431,9 +1431,9 @@ mod tests {
                     let mut query = request(collection);
                     query.limit = Some(n % 8 + 1);
                     barrier.wait().await;
-                    let (_, items, more) = collection_items_with_windows(&state, &session, &query,
+                    let (_, items, more, _) = collection_items_with_windows(&state, &session, &query,
                         slots.clone().acquire_owned().await.unwrap(), Some(windows)).await.unwrap();
-                    let (_, oracle, oracle_more) = collection_items_with_windows(&state, &session, &query,
+                    let (_, oracle, oracle_more, _) = collection_items_with_windows(&state, &session, &query,
                         slots.acquire_owned().await.unwrap(), None).await.unwrap();
                     assert_eq!(items, oracle, "{collection} subscriber {n}");
                     assert_eq!(more, oracle_more);
@@ -1445,7 +1445,7 @@ mod tests {
         let mut query = request("attention");
         let ada = ClientSession::local(Some("person/ada")).unwrap();
         let avery = ClientSession::local(Some("person/avery")).unwrap();
-        let (_, items, _) = collection_items_with_windows(&state, &avery, &query,
+        let (_, items, _, _) = collection_items_with_windows(&state, &avery, &query,
             slots.clone().acquire_owned().await.unwrap(), Some(windows.clone())).await.unwrap();
         assert!(items.is_empty(), "another person must not receive Ada's rows");
         query.person = Some("person/ada".into());
