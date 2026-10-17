@@ -70,9 +70,11 @@ pub fn discover_unix_endpoint(explicit: Option<PathBuf>) -> Result<PathBuf, Clie
         return Ok(PathBuf::from(runtime).join("st3.sock"));
     }
     let state_base = xdg_path("XDG_STATE_HOME", ".local/state")?;
-    Ok(product_dirs::resolve(state_base.join("st3"), state_base.join("fractal"))
-        .join("run")
-        .join("st3.sock"))
+    Ok(
+        product_dirs::resolve(state_base.join("st3"), state_base.join("fractal"))
+            .join("run")
+            .join("st3.sock"),
+    )
 }
 
 fn configured_socket(document: &str) -> Result<Option<PathBuf>, ClientError> {
