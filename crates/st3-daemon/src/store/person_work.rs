@@ -1037,19 +1037,11 @@ fn send_answer_tx(
     if let Some(run) = fields["owner_run"].as_str() {
         tags.push(Value::String(format!("mission-run:{run}")));
     }
-    let mut body = json!({"fields": {"from": "daemon/runtime", "to": requester, "content": content, "status": "sent",
+    let body = json!({"fields": {"from": "daemon/runtime", "to": requester, "content": content, "status": "sent",
         "title": format!("Answered: {title}"), "in_reply_to": null, "tags": tags}, "evidence": [response.id]});
     if let Some(authorization) = authorization {
-        body["fields"]["from"] = json!("assistant/chatgpt");
-        body["fields"]["assistant_owner"] = json!(authorization.owner);
-        body["fields"]["assistant_session_actor"] = json!(authorization.actor);
-        body["fields"]["sender_class"] = json!("external-assistant");
-        body["fields"]["assistant_grant_id"] = response.body["fields"]["assistant_grant_id"].clone();
-        // The answer's grant was authorized in this same writer transaction. Preserve its
-        // server-established provenance without entering the unverified generic writer.
-        super::retirements::admit_recipient(tx, Some(requester))?;
-        append_admitted_claim_tx(tx, origin, &subject, "message.sent", Some("assistant/chatgpt"), &body,
-            &[], None).map_err(claim_append_error)?;
+        append_claim_tx_with_assistant_answer(tx, origin, &subject, "message.sent", Some("assistant/chatgpt"), &body,
+            &[], None, Some(authorization)).map_err(claim_append_error)?;
         return Ok(());
     }
     append_claim_tx(tx, origin, &subject, "message.sent", Some("daemon/runtime"), &body,
