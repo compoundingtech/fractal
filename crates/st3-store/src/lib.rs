@@ -16,7 +16,7 @@ pub use st3_seats_base::*;
 pub use st3_delivery_base::*;
 pub use st3_missions_base::*;
 pub use st3_github_base::*;
-pub use smallclaims::{performance, profile};
+pub use smallclaims::{performance, profile, task_cpu};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

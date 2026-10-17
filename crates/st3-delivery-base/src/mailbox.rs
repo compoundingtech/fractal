@@ -92,7 +92,7 @@ impl Subscription {
         report["mailbox_replay_ack"] = serde_json::json!(true);
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let (report_tx, mut report_rx) = tokio::sync::watch::channel(report);
-        let task = tokio::spawn(async move {
+        let task = tokio::spawn(crate::task_cpu::account("mailbox.subscription", async move {
             let mut retry = crate::client::MailboxRetry::default();
             loop {
                 retry.begin_attempt();
@@ -147,7 +147,7 @@ impl Subscription {
                     tokio::time::sleep(retry.failed(&error)).await;
                 }
             }
-        });
+        }));
         Self {
             receiver,
             report: report_tx,
