@@ -183,7 +183,7 @@ export const SidebarToolbar = ({
       <div ref={search}>
         <Input
           aria-label="Search agents"
-          aria-description="Free text matches agent names and IDs. Use repo:, state:, or tool: to search other facts, and machine:dev3 or host:dev3,dev5 to filter host prefixes."
+          aria-description="Free text matches agent names and IDs. Use repo:, state:, or tool: to search other facts, and machine:synthetic-138/1 or host:synthetic-138/1,synthetic-138/2 to filter host prefixes."
           placeholder="Search… repo: state: tool:  /"
           size="sm"
           value={filters.query}

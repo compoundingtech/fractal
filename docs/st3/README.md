@@ -16,6 +16,7 @@ Use these documents for implementation details:
   runs the fleet may do, as itself, until principals and grants land.
 - [Person delegation](person-delegation.md): record a person's prior answer or instruction as
   the agent, with the person's allowed list, exact episode, and quoted evidence.
+- [External assistants](external-assistants.md): separate assistant principals, owner-issued expiring grants, and proof-bearing read boundaries.
 - [Schema registry](schema.md) lists the generated public subject, resource, and claim vocabulary.
 - [Typed custom subjects](custom-subjects.md) defines immutable registrations, generic reads and replies, and derived-state freshness,
   and the decision-tree manifest.
@@ -60,12 +61,16 @@ Use these documents for implementation details:
   stopping a seat ends every process the seat started, and what a host without systemd misses.
 - [Subagents](subagents.md) explains how st records the subagents a seat's harness runs as claims
   on the seat, with a lease, and ends them when their harness, session or seat goes away.
+- [Harness questions](harness-questions.md) explains how st records the questions a seat's harness
+  asks natively, as ids and option positions without text, retaining compact ended records forever.
 - [Model accounts](accounts.md) explains how a person declares several Claude and Codex accounts, how a
   seat binds one or a pool, and how a pooled seat at its limit restarts on another account.
 - [Instances](instances.md) explains `--instance NAME`: a second, fully separate st on one machine
   with its own state, sockets, service names and harness accounts, and the uninstall that removes it.
 - [Sekrets](sekrets.md) explains the opt-in gateway that runs any CLI with a credential no seat
   can read: profiles, policies, grants, how it tells a seat from its person, and its sandbox.
+- [Tiles](tiles.md) explains how root runs an agent as its own Unix user, in its own namespaces
+  and root-owned cgroup: the registry, launch, cleanup, the endpoint, and what the tests prove.
 - [Command recorder](command-recorder.md) explains how every `git` and `gh` call st starts is
   recorded, the log format, and what the recorder cannot see.
 - [Profiling the daemon](profiling.md) explains how the daemon accounts for its own time: waits
