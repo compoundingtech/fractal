@@ -1,8 +1,9 @@
 // Workshop-only composition: one React Aria dialog with virtual-focus autocomplete; no second command registry.
+// One list, agents first, then commands (RM1-Q5, decided).
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Autocomplete, Dialog, Header, Input, Keyboard, Label, Menu, MenuItem, MenuSection, Modal, ModalOverlay, SearchField } from 'react-aria-components'
-import { SidebarStatus, type DiscRefinement } from '../../assistant-ui/sidebar/SidebarStatus'
+import { StatusGlyph } from './MilestonePane'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
 import { Icon } from '../../assistant-ui/composition/Icons'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
@@ -12,21 +13,19 @@ export interface PaletteAgent { readonly row: Row; readonly folder: string }
 export interface MilestonePaletteProps {
   readonly isOpen: boolean
   readonly onOpenChange: (open: boolean) => void
-  readonly scope: 'mixed' | 'agents'
   readonly agents: readonly PaletteAgent[]
   readonly commands: readonly PaletteCommand[]
-  readonly glyphRefinement: DiscRefinement
+  /** The roster behind the palette is last-observed: glyphs go muted, as in the sidebar. */
+  readonly frozen?: boolean
   readonly onOpenAgent: (row: Row) => void
   readonly initialQuery?: string
 }
 
-export function MilestonePalette({ isOpen, onOpenChange, scope, agents, commands, glyphRefinement, onOpenAgent, initialQuery = '' }: MilestonePaletteProps) {
+export function MilestonePalette({ isOpen, onOpenChange, agents, commands, frozen = false, onOpenAgent, initialQuery = '' }: MilestonePaletteProps) {
   const [query, setQuery] = React.useState(initialQuery)
-  // In agents scope a leading ">" switches the list to commands, as in most editors.
-  const commandMode = scope === 'agents' && query.startsWith('>')
-  const needle = (commandMode ? query.slice(1) : query).trim().toLowerCase()
-  const shownAgents = commandMode ? [] : agents.filter(({ row, folder }) => `${row.title} ${folder} ${row.host}`.toLowerCase().includes(needle))
-  const shownCommands = scope === 'agents' && !commandMode ? [] : commands.filter(command => command.label.toLowerCase().includes(needle))
+  const needle = query.trim().toLowerCase()
+  const shownAgents = agents.filter(({ row, folder }) => `${row.title} ${folder} ${row.host}`.toLowerCase().includes(needle))
+  const shownCommands = commands.filter(command => command.label.toLowerCase().includes(needle))
   const close = () => { onOpenChange(false); setQuery('') }
   const onAction = (key: React.Key) => {
     const agent = agents.find(candidate => candidate.row.ref === key)
@@ -36,12 +35,12 @@ export function MilestonePalette({ isOpen, onOpenChange, scope, agents, commands
   }
   return <ModalOverlay isOpen={isOpen} onOpenChange={open => { if (open) onOpenChange(true); else close() }} isDismissable {...stylex.props(styles.overlay)}>
     <Modal {...stylex.props(styles.modal)}>
-      <Dialog aria-label="Command palette" data-palette-scope={scope} {...stylex.props(styles.dialog)}>
+      <Dialog aria-label="Command palette" {...stylex.props(styles.dialog)}>
         <Autocomplete inputValue={query} onInputChange={setQuery}>
           <SearchField autoFocus {...stylex.props(styles.search)}>
-            <Label {...stylex.props(styles.visuallyHidden)}>{scope === 'agents' ? 'Open an agent, or type > for commands' : 'Open an agent or run a command'}</Label>
+            <Label {...stylex.props(styles.visuallyHidden)}>Open an agent or run a command</Label>
             <Icon name="search" size={14} />
-            <Input placeholder={scope === 'agents' ? 'Open an agent…  (> for commands)' : 'Open an agent or run a command…'} {...stylex.props(styles.input)} />
+            <Input placeholder="Open an agent or run a command…" {...stylex.props(styles.input)} />
           </SearchField>
           {/* Virtual focus starts on the first result on open and after every query change, so Enter always opens the highlighted row.
               Remounting the menu per query re-applies autoFocus; the menu itself scrolls, so no wrapper takes a Tab stop. */}
@@ -49,7 +48,7 @@ export function MilestonePalette({ isOpen, onOpenChange, scope, agents, commands
             {shownAgents.length > 0 && <MenuSection>
               <Header {...stylex.props(styles.section)}>Agents</Header>
               {shownAgents.map(({ row, folder }) => <MenuItem key={row.ref} id={row.ref} textValue={row.title} {...stylex.props(styles.item)}>
-                <SidebarStatus status={row.status} statusLabel={row.statusLabel} variant="SG-1" discRefinement={glyphRefinement} freshness={row.freshness} iconOnly />
+                <StatusGlyph status={row.status} statusLabel={row.statusLabel} freshness={frozen ? 'stale' : row.freshness} frozen={frozen} />
                 <span {...stylex.props(styles.label)}>{row.title}</span>
                 <span {...stylex.props(styles.meta)}>{row.parentRef === undefined ? folder : 'subagent'}</span>
               </MenuItem>)}

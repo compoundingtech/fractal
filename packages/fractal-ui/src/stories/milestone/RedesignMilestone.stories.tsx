@@ -1,25 +1,21 @@
 /**
  * Redesign milestone 1 (RM1) — workshop only.
  *
- * Composes approved picks (SR-2, WF-1, RC-1, RC-3, SG-1) with new shell states: roster loading, empty, roster error,
- * thread unavailable, stale, no-match, an empty main area and a command palette. Everything new here is a proposal; open
- * questions carry stable IDs (RM1-Q5…Q7) and every option is a story arg. The composer is deliberately untouched.
+ * Composes approved picks (SR-2, WF-1, RC-1, RC-3, SG-1) and the decided layout calls (RM1-Q1…Q7) with new shell states:
+ * roster loading, empty, roster error, thread unavailable, stale, no-match, an empty main area and a command palette. No
+ * open question remains, so the only args are scheme and state. The composer is deliberately untouched.
  */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { RedesignMilestone, type RedesignMilestoneProps } from './RedesignMilestone'
-import { lockedDecisions, openQuestions } from './milestone-decisions'
+import { lockedDecisions } from './milestone-decisions'
 import { baselineTheme } from '../../assistant-ui/neutral-theme'
 import { lightTheme } from '../../assistant-ui/composition-theme'
 import { borderVars as border, spaceVars as sp, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
 
 type Args = Omit<RedesignMilestoneProps, 'persistKey'>
-const choice = (id: string) => {
-  const question = openQuestions.find(candidate => candidate.id === id)!
-  return { control: 'inline-radio' as const, options: question.options.map(option => option.value), description: `${id} · ${question.question}` }
-}
 
 const meta: Meta<Args> = {
   title: 'Fractal UI/Redesign milestone',
@@ -28,13 +24,12 @@ const meta: Meta<Args> = {
     // The diff rows belong to the shared DiffPanel, whose light gutter and literal colours sit just under 4.5:1; that is a
     // kit-wide token fix with its own review, so this story excludes only those rows and keeps every rule on everything it owns.
     a11y: { context: { include: ['body'], exclude: ['[data-diff-kind]'] } },
-    docs: { description: { component: `Workshop-only milestone. Locked: ${lockedDecisions.map(decision => decision.id).join(', ')}. Open: ${openQuestions.map(question => question.id).join(', ')}. Nothing here is the accepted live design.` } },
+    docs: { description: { component: `Workshop-only milestone. Decided: ${lockedDecisions.map(decision => decision.id).join(', ')}. Nothing here is the accepted live design.` } },
   },
-  args: { scheme: 'dark', state: 'slice', paletteScope: 'mixed', glyphRefinement: 'G3', sectionNav: 'footer' },
+  args: { scheme: 'dark', state: 'slice' },
   argTypes: {
     scheme: { control: 'inline-radio', options: ['dark', 'light'] },
     state: { control: 'select', options: ['slice', 'loading', 'empty-roster', 'empty-thread', 'no-match', 'roster-error', 'thread-unavailable', 'stale', 'navigation'] },
-    paletteScope: choice('RM1-Q5'), glyphRefinement: choice('RM1-Q6'), sectionNav: choice('RM1-Q7'),
   },
   // Initial state derives from args, so any arg change remounts with a fresh frame.
   render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...args} persistKey={`rm1-${context.id}`} />,
@@ -58,9 +53,34 @@ export const RosterError: Story = { args: { state: 'roster-error' } }
 export const RosterErrorLight = light(RosterError)
 export const ThreadUnavailable: Story = { args: { state: 'thread-unavailable' } }
 export const ThreadUnavailableLight = light(ThreadUnavailable)
-export const Stale: Story = { args: { state: 'stale' } }
+export const Stale: Story = {
+  args: { state: 'stale' },
+  play: async ({ canvasElement }) => {
+    const tail = await waitFor(() => { const element = canvasElement.querySelector<HTMLElement>('[data-last-seen]'); expect(element).not.toBeNull(); return element! })
+    // The live region reads only its sentence: the glyph beside it (and its hidden description) is decorative.
+    await expect(tail.querySelector('[role="img"]')?.closest('[aria-hidden="true"]')).not.toBeNull()
+    const announced = tail.cloneNode(true) as HTMLElement
+    announced.querySelectorAll('[aria-hidden="true"]').forEach(node => node.remove())
+    await expect(announced.textContent?.trim()).toMatch(/^Last seen working · 18 s ago\s*pnpm /)
+    // Narrow, the roster sits in the closed drawer and is not rendered.
+    if (canvasElement.querySelector('[data-roster-state="stale"]') === null) return
+    await expect(within(canvasElement).getByText(/^Last observed \d+ s ago$/)).toBeVisible()
+    // A last-observed roster has one glyph tone: nothing reads as live.
+    const tones = new Set([...canvasElement.querySelectorAll('[data-row-column="glyph"] svg')].map(svg => getComputedStyle(svg).color))
+    await expect(tones.size).toBe(1)
+  },
+}
 export const StaleLight = light(Stale)
-export const Navigation: Story = { args: { state: 'navigation' } }
+export const Navigation: Story = {
+  args: { state: 'navigation' },
+  play: async ({ canvasElement }) => {
+    // One status reads the same everywhere: the stale agent's glyph in Mod+K matches its sidebar glyph (muted, never danger).
+    const paletteGlyph = await waitFor(() => { const svg = within(canvasElement).getByRole('menuitem', { name: /Fix flaky interaction gate/ }).querySelector('svg'); expect(svg).not.toBeNull(); return svg! })
+    const sidebarRow = [...canvasElement.querySelectorAll('[data-testid="milestone-agent-row"][data-status="stale"]')][0]
+    if (sidebarRow === undefined) return
+    await expect(getComputedStyle(paletteGlyph).color).toBe(getComputedStyle(sidebarRow.querySelector('[data-row-column="glyph"] svg')!).color)
+  },
+}
 export const NavigationLight = light(Navigation)
 
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
@@ -134,20 +154,18 @@ export const ThreadRecovery: Story = {
   },
 }
 
-/** Decision sheet: what is locked, what is open, and the deep link for every option. */
+/** Decision sheet: every row is decided; rows settled by a decision request carry its question ID. */
 export const Decisions: Story = {
   args: { scheme: 'dark' },
   render: args => <article {...stylex.props(styles.sheet, ...baselineTheme, args.scheme === 'light' && lightTheme)}>
     <h1 {...stylex.props(styles.h1)}>Redesign milestone 1 — decisions</h1>
-    <h2 {...stylex.props(styles.h2)}>Locked (composed, not re-asked)</h2>
-    <table {...stylex.props(styles.table)}><tbody>{lockedDecisions.map(decision => <tr key={decision.id}><th scope="row" {...stylex.props(styles.cell, styles.id)}>{decision.id}</th><td {...stylex.props(styles.cell)}>{decision.summary}</td></tr>)}</tbody></table>
-    <h2 {...stylex.props(styles.h2)}>Open questions (first option is the default)</h2>
+    <h2 {...stylex.props(styles.h2)}>Decided (composed, not re-asked)</h2>
     <table {...stylex.props(styles.table)}>
-      <thead><tr><th scope="col" {...stylex.props(styles.cell, styles.head)}>ID</th><th scope="col" {...stylex.props(styles.cell, styles.head)}>Question</th><th scope="col" {...stylex.props(styles.cell, styles.head)}>Options · story args</th></tr></thead>
-      <tbody>{openQuestions.map(question => <tr key={question.id}>
-        <th scope="row" {...stylex.props(styles.cell, styles.id)}>{question.id}</th>
-        <td {...stylex.props(styles.cell)}>{question.question}</td>
-        <td {...stylex.props(styles.cell)}><ul {...stylex.props(styles.options)}>{question.options.map(option => <li key={option.value}>{option.label} <code {...stylex.props(styles.code)}>{question.arg}:{option.value}</code></li>)}</ul></td>
+      <thead><tr><th scope="col" {...stylex.props(styles.cell, styles.head)}>ID</th><th scope="col" {...stylex.props(styles.cell, styles.head)}>Decided by</th><th scope="col" {...stylex.props(styles.cell, styles.head)}>Decision</th></tr></thead>
+      <tbody>{lockedDecisions.map(decision => <tr key={decision.id}>
+        <th scope="row" {...stylex.props(styles.cell, styles.id)}>{decision.id}</th>
+        <td {...stylex.props(styles.cell, styles.id)}>{decision.question ?? '—'}</td>
+        <td {...stylex.props(styles.cell)}>{decision.summary}</td>
       </tr>)}</tbody>
     </table>
   </article>,
@@ -161,6 +179,4 @@ const styles = stylex.create({
   cell: { paddingBlock: sp.sm, paddingInlineEnd: sp.lg, textAlign: 'start', verticalAlign: 'top', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: border.border },
   head: { color: ink.fgMuted, fontWeight: t.weightMedium },
   id: { whiteSpace: 'nowrap', fontFamily: t.fontMono, fontWeight: t.weightRegular, color: ink.fgSoft },
-  options: { margin: 0, paddingInlineStart: sp.lg },
-  code: { fontFamily: t.fontMono, fontSize: t.denseSize, color: ink.fgMuted },
 })

@@ -12,7 +12,6 @@ import type { TranscriptTurn } from '../../assistant-ui/composition/Transcript'
 import type { WorkLogCall } from '../../assistant-ui/taste/work-log'
 import type { SyncStatus } from '../../assistant-ui/st3-views/sync-status'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
-import type { DiscRefinement } from '../../assistant-ui/sidebar/SidebarStatus'
 import { baselineTheme } from '../../assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from '../../assistant-ui/composition-theme'
 import { borderVars as border, elevationVars as elevation, geometryNumbers, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
@@ -28,9 +27,6 @@ type Phase = MilestoneState | 'roster-retry' | 'thread-retry'
 export interface RedesignMilestoneProps {
   readonly scheme: Scheme
   readonly state: MilestoneState
-  readonly paletteScope: 'mixed' | 'agents'
-  readonly glyphRefinement: DiscRefinement
-  readonly sectionNav: 'footer' | 'header'
   /** Device-local key for persisted panel sizes; stories pass a per-story key so screenshots stay deterministic. */
   readonly persistKey: string
 }
@@ -139,10 +135,10 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
   const roster = rosterState[phase]
   const sync = threadSync(phase)
   const renderInlineReference = React.useCallback((path: string) => {
-    if (path === reviewerCard.path) return <AgentResultCard tab={agentTab(reviewerRef, 'slice')} summary={reviewerCard.summary} refinement={props.glyphRefinement} onOpen={() => openAgent(rowFor(reviewerRef))} />
+    if (path === reviewerCard.path) return <AgentResultCard tab={agentTab(reviewerRef, 'slice')} summary={reviewerCard.summary} onOpen={() => openAgent(rowFor(reviewerRef))} />
     const resource = proseResources[path]
     return resource === undefined ? undefined : <ResourceChipV1 resource={resource} file={resource.files[0]!} />
-  }, [openAgent, props.glyphRefinement])
+  }, [openAgent])
 
   // Narrow: one pane, so Changes folds in as a tab. Docked: Changes is a resizable panel beside the thread.
   const paneKeys = narrow && changesOpen && !tabs.includes(changesKey) ? [...tabs, changesKey] : narrow ? tabs : tabs.filter(key => key !== changesKey)
@@ -170,8 +166,8 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
       composer={{ running, folder: 'fractal-web', branch: 'feat/metric-track', onSend: send, onSteer: send, draftKey: `${props.persistKey}.${key}` }} />
   }
 
-  const sidebar = <MilestoneSidebar state={roster} folders={phase === 'empty-roster' ? [] : rosterFolders} now={milestoneNow} activeRef={shownKey} query={query} onQueryChange={setQuery} searchRef={searchRef}
-    glyphRefinement={props.glyphRefinement} sectionNav={props.sectionNav} inboxCount={phase === 'empty-roster' ? 0 : inboxCount}
+  const sidebar = <MilestoneSidebar state={roster} folders={phase === 'empty-roster' ? [] : rosterFolders} now={milestoneNow} observedAt={roster === 'stale' ? lastSeen.at : undefined} activeRef={shownKey} query={query} onQueryChange={setQuery} searchRef={searchRef}
+    inboxCount={phase === 'empty-roster' ? 0 : inboxCount}
     onOpen={openAgent} onRetry={retryRoster} onOpenPalette={() => setPaletteOpen(true)} onCollapse={() => setCollapsed(true)} collapseLabel={narrow ? 'Close sidebar' : 'Hide sidebar'} modKey={modKey} />
   const commands: readonly PaletteCommand[] = [
     { id: 'toggle-sidebar', label: sidebarHidden ? 'Show sidebar' : 'Hide sidebar', shortcut: `${modKey}B`, run: () => setCollapsed(value => !value) },
@@ -205,7 +201,7 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
             </div>
           </div>
           : <div {...stylex.props(styles.panes)}>
-            <MilestonePane tabs={paneTabs} activeKey={shownKey} onSelectTab={setActiveKey} glyphRefinement={props.glyphRefinement}
+            <MilestonePane tabs={paneTabs} activeKey={shownKey} onSelectTab={setActiveKey}
               leading={sidebarHidden ? showSidebar : undefined} actions={narrow ? undefined : <ChangesToggle isSelected={changesOpen} onChange={setChangesOpen} />}>
               {shownKey === changesKey ? changes(true) : thread(shownKey)}
             </MilestonePane>
@@ -215,7 +211,7 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
             </>}
           </div>}
       </main>
-      <MilestonePalette isOpen={paletteOpen} onOpenChange={setPaletteOpen} scope={props.paletteScope} agents={agents} commands={commands} glyphRefinement={props.glyphRefinement} onOpenAgent={openAgent} />
+      <MilestonePalette isOpen={paletteOpen} onOpenChange={setPaletteOpen} agents={agents} commands={commands} frozen={roster === 'stale'} onOpenAgent={openAgent} />
     </ThemedPortal>
   </div>
 }

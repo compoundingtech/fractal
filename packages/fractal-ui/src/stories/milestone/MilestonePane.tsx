@@ -5,14 +5,13 @@ import * as stylex from '@stylexjs/stylex'
 import { Button, Tab, TabList, TabPanel, Tabs, ToggleButton } from 'react-aria-components'
 import { Transcript, type TranscriptProps } from '../../assistant-ui/composition/Transcript'
 import { Composer, type ComposerProps } from '../../assistant-ui/composition/Composer'
-import { SystemNotice } from '../../assistant-ui/composition/SystemState'
 import { TranscriptSkeleton } from '../../assistant-ui/composition/TranscriptSkeleton'
 import { EmbraceRuntimeProvider } from '../../assistant-ui/EmbraceRuntime'
 import { Icon } from '../../assistant-ui/composition/Icons'
-import { SidebarStatus, type DiscRefinement } from '../../assistant-ui/sidebar/SidebarStatus'
+import { SidebarStatus } from '../../assistant-ui/sidebar/SidebarStatus'
 import type { AgentStatus } from '../../assistant-ui/sidebar/model'
 import type { ThreadResource } from '../../assistant-ui/workbench/workbench-model'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, colorVars as palette, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
 
 /** A pane tab: an agent conversation carries a status glyph; a tool surface (Changes) does not. */
 export interface PaneTab { readonly key: string; readonly title: string; readonly status?: AgentStatus; readonly statusLabel?: string }
@@ -21,18 +20,44 @@ export interface PaneTab { readonly key: string; readonly title: string; readonl
 const tabMax = '240px'
 
 /** Stale is an observation gap, not a failure: the glyph uses the muted tone, never the danger red. */
-export const staleTone = stylex.createTheme(tone, { dangerFg: ink.fgMuted })
+const staleTone = stylex.createTheme(tone, { dangerFg: ink.fgMuted })
+/**
+ * A roster that is itself last-observed: no glyph may read as live, so every status tone goes muted, and so does the
+ * neutral glyph ink (idle, done), leaving one tone; the G3 shape still tells states apart.
+ */
+const frozenTone = stylex.createTheme(tone, { runningFg: ink.fgMuted, attention: ink.fgMuted, dangerFg: ink.fgMuted })
+// A StyleX theme redefines every var in its group (unlisted ones fall back to the dark defaults), so the text group is
+// re-pointed at the per-scheme palette, with fgSoft taking the muted value.
+const frozenInk = stylex.createTheme(ink, { fg: palette.fg, fgMuted: palette.fgMuted, fgSoft: palette.fgMuted, sidebarFgMuted: palette.sidebarFgMuted })
 
-export function PaneGlyph({ tab, refinement }: { readonly tab: PaneTab; readonly refinement: DiscRefinement }) {
+/**
+ * Every milestone status glyph goes through here, so a status reads the same in the roster, palette, pane tabs and cards.
+ * SG-1 with G3 shape cues (RM1-Q6, decided). Kit follow-up: fold the stale → muted mapping into `SidebarStatus` once its
+ * open PRs land; this wrapper then goes away.
+ */
+export function StatusGlyph({ status, statusLabel, freshness, frozen = false, decorative = false }: {
+  readonly status: AgentStatus
+  readonly statusLabel?: string
+  readonly freshness?: React.ComponentProps<typeof SidebarStatus>['freshness']
+  /** Part of a last-observed snapshot: mute every tone. */
+  readonly frozen?: boolean
+  /** Next to text that already says the status: hidden from assistive tech. */
+  readonly decorative?: boolean
+}) {
+  return <span aria-hidden={decorative || undefined} {...stylex.props(styles.glyph, status === 'stale' && staleTone, frozen && frozenTone, frozen && frozenInk)}>
+    <SidebarStatus status={status} statusLabel={statusLabel} variant="SG-1" discRefinement="G3" freshness={freshness} iconOnly />
+  </span>
+}
+
+export function PaneGlyph({ tab }: { readonly tab: PaneTab }) {
   if (tab.status === undefined) return null
-  return <span {...stylex.props(styles.glyph, tab.status === 'stale' && staleTone)}><SidebarStatus status={tab.status} statusLabel={tab.statusLabel} variant="SG-1" discRefinement={refinement} iconOnly /></span>
+  return <StatusGlyph status={tab.status} statusLabel={tab.statusLabel} />
 }
 
 export interface MilestonePaneProps {
   readonly tabs: readonly PaneTab[]
   readonly activeKey: string
   readonly onSelectTab: (key: string) => void
-  readonly glyphRefinement: DiscRefinement
   /** Sidebar toggle while the sidebar is hidden (collapsed, or the closed narrow drawer). */
   readonly leading?: React.ReactNode
   readonly actions?: React.ReactNode
@@ -40,12 +65,12 @@ export interface MilestonePaneProps {
 }
 
 /** Same anatomy with one tab or many: a lone tab is the title, several are a tab strip; actions sit at the end. */
-export function MilestonePane({ tabs, activeKey, onSelectTab, glyphRefinement, leading, actions, children }: MilestonePaneProps) {
+export function MilestonePane({ tabs, activeKey, onSelectTab, leading, actions, children }: MilestonePaneProps) {
   const active = tabs.find(tab => tab.key === activeKey) ?? tabs[0]!
   if (tabs.length === 1) return <section aria-label={active.title} data-milestone-pane={active.key} {...stylex.props(styles.pane)}>
     <header data-testid="milestone-pane-header" {...stylex.props(styles.header)}>
       {leading}
-      <span {...stylex.props(styles.identity)}><PaneGlyph tab={active} refinement={glyphRefinement} /><span title={active.title} {...stylex.props(styles.title)}>{active.title}</span></span>
+      <span {...stylex.props(styles.identity)}><PaneGlyph tab={active} /><span title={active.title} {...stylex.props(styles.title)}>{active.title}</span></span>
       <span {...stylex.props(styles.actions)}>{actions}</span>
     </header>
     <div {...stylex.props(styles.body)}>{children}</div>
@@ -54,7 +79,7 @@ export function MilestonePane({ tabs, activeKey, onSelectTab, glyphRefinement, l
     <header data-testid="milestone-pane-header" {...stylex.props(styles.header)}>
       {leading}
       <TabList aria-label="Open conversations" {...stylex.props(styles.tabs)}>
-        {tabs.map(tab => <Tab key={tab.key} id={tab.key} {...stylex.props(styles.tab, tab.status === undefined && styles.toolTab)}><PaneGlyph tab={tab} refinement={glyphRefinement} /><span title={tab.title} {...stylex.props(styles.tabLabel)}>{tab.title}</span></Tab>)}
+        {tabs.map(tab => <Tab key={tab.key} id={tab.key} {...stylex.props(styles.tab, tab.status === undefined && styles.toolTab)}><PaneGlyph tab={tab} /><span title={tab.title} {...stylex.props(styles.tabLabel)}>{tab.title}</span></Tab>)}
       </TabList>
       <span {...stylex.props(styles.actions)}>{actions}</span>
     </header>
@@ -89,7 +114,7 @@ export interface MilestoneThreadProps {
 export function MilestoneThread({ title, runtime, transcript, composer, view, now }: MilestoneThreadProps) {
   return <EmbraceRuntimeProvider options={runtime}>
     <div {...stylex.props(styles.frame)}>
-      {view._tag === 'Unavailable' && <div data-thread-unavailable {...stylex.props(styles.lane, styles.notice)}><SystemNotice kind="error" title={view.reason} detail={view.detail} onRetry={view.onRetry} /></div>}
+      {view._tag === 'Unavailable' && <div data-thread-unavailable {...stylex.props(styles.lane, styles.notice)}><UnavailableNotice title={view.reason} detail={view.detail} onRetry={view.onRetry} /></div>}
       {view._tag === 'Loading' && <div data-thread-loading {...stylex.props(styles.lane, styles.notice)}><TranscriptSkeleton sync={transcript.sync} now={now} observedAt={transcript.observedAt} /></div>}
       {(view._tag === 'Live' || view._tag === 'Stale') && <Transcript {...transcript} title={title} showHeader={false} />}
       {view._tag === 'Stale' && <LastSeen activity={view.lastSeen.activity} at={view.lastSeen.at} detail={view.lastSeen.detail} now={now} />}
@@ -100,11 +125,26 @@ export function MilestoneThread({ title, runtime, transcript, composer, view, no
   </EmbraceRuntimeProvider>
 }
 
+/**
+ * A thread that failed to load. The title carries the danger tone; the detail wraps to its own line in body ink, so the
+ * reassurance ("Your draft is unchanged") is never cut off; Retry is a real bordered button.
+ */
+function UnavailableNotice({ title, detail, onRetry }: { readonly title: string; readonly detail: string; readonly onRetry: () => void }) {
+  return <div data-system-state="error" {...stylex.props(styles.unavailable)}>
+    <p role="status" {...stylex.props(styles.unavailableText)}>
+      <span {...stylex.props(styles.unavailableTitle)}>{title}</span>
+      <span {...stylex.props(styles.unavailableDetail)}>{detail}</span>
+    </p>
+    <Button aria-label={`Retry: ${title}`} onPress={onRetry} {...stylex.props(styles.actionButton)}>Retry</Button>
+  </div>
+}
+
 /** q23: last-known activity is labelled as last seen, with no spinner and no running clock. */
 function LastSeen({ activity, at, detail, now }: { readonly activity: string; readonly at: number; readonly detail: string; readonly now: number }) {
   return <div {...stylex.props(styles.lane)}>
     <p role="status" data-last-seen {...stylex.props(styles.lastSeen)}>
-      <span {...stylex.props(styles.glyph, staleTone)}><SidebarStatus status="stale" statusLabel="Last seen" variant="SG-1" discRefinement="G3" iconOnly /></span>
+      {/* The sentence says "Last seen"; the glyph is decorative so the live region reads only the sentence. */}
+      <StatusGlyph status="stale" statusLabel="Last seen" decorative />
       <span>{`Last seen ${activity} · ${Math.round((now - at) / 1000)} s ago`}</span>
       <span aria-hidden="true" {...stylex.props(styles.sep)}>·</span>
       <code {...stylex.props(styles.code)}>{detail}</code>
@@ -113,10 +153,10 @@ function LastSeen({ activity, at, detail, now }: { readonly activity: string; re
 }
 
 /** RC-1 inside prose: phrasing content only (span + button), so the card is valid wherever the paragraph puts it. */
-export function AgentResultCard({ tab, summary, refinement, onOpen }: { readonly tab: PaneTab; readonly summary: string; readonly refinement: DiscRefinement; readonly onOpen: () => void }) {
+export function AgentResultCard({ tab, summary, onOpen }: { readonly tab: PaneTab; readonly summary: string; readonly onOpen: () => void }) {
   return <span data-resource-card="RC-1" {...stylex.props(styles.card)}>
     <Button onPress={onOpen} {...stylex.props(styles.cardButton)}>
-      <PaneGlyph tab={tab} refinement={refinement} />
+      <PaneGlyph tab={tab} />
       <span {...stylex.props(styles.cardTitle)}>{tab.title}</span>
       <span {...stylex.props(styles.cardSummary)}>{summary}</span>
       <span {...stylex.props(styles.cardMeta)}>{tab.statusLabel}</span>
@@ -138,6 +178,11 @@ const styles = stylex.create({
   // Tool tabs (Changes) have a short fixed label; agent titles give way first when the strip is tight.
   toolTab: { flexShrink: 0 },
   glyph: { display: 'inline-flex', flexShrink: 0 },
+  unavailable: { display: 'flex', alignItems: 'center', gap: s.md, minWidth: 0 },
+  unavailableText: { display: 'flex', flexDirection: 'column', gap: s.xs2, flex: '1 1 0', minWidth: 0, margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  unavailableTitle: { color: tone.dangerFg, fontWeight: t.weightMedium },
+  unavailableDetail: { color: ink.fgSoft, overflowWrap: 'anywhere' },
+  actionButton: { flexShrink: 0, height: g.controlSm, paddingInline: s.md, borderRadius: r.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.denseSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': focusRing },
   actions: { display: 'flex', alignItems: 'center', gap: s.xs2, marginInlineStart: 'auto', flexShrink: 0 },
   iconButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, height: g.controlSm, flexShrink: 0, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': focusRing },
   toggle: { ':is([data-selected])': { color: ink.fg, backgroundColor: surface.rowActive } },

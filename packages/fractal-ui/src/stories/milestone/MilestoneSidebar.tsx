@@ -4,26 +4,25 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Disclosure, DisclosurePanel, Input, Label, Popover, SearchField, Tree, TreeItem, TreeItemContent, type Key } from 'react-aria-components'
 import { AgentHoverCard, Highlight, sidebarRowAccessibleName } from '../../assistant-ui/sidebar/SidebarAgentRow'
-import { SidebarStatus, type DiscRefinement } from '../../assistant-ui/sidebar/SidebarStatus'
 import { SidebarTime } from '../../assistant-ui/sidebar/SidebarTime'
 import { SidebarDuration } from '../../assistant-ui/sidebar/SidebarDuration'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
 import { Icon } from '../../assistant-ui/composition/Icons'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
 import type { RosterFolder } from './milestone-fixtures'
-import { staleTone } from './MilestonePane'
+import { StatusGlyph } from './MilestonePane'
 
 export type RosterState = 'ready' | 'loading' | 'empty' | 'error' | 'stale'
 export interface MilestoneSidebarProps {
   readonly state: RosterState
   readonly folders: readonly RosterFolder[]
   readonly now: number
+  /** When the roster itself is stale: the moment it was last observed. Row times are measured against it and stop advancing. */
+  readonly observedAt?: number
   readonly activeRef?: string
   readonly query: string
   readonly onQueryChange: (query: string) => void
   readonly searchRef: React.RefObject<HTMLInputElement | null>
-  readonly glyphRefinement: DiscRefinement
-  readonly sectionNav: 'footer' | 'header'
   readonly inboxCount: number
   readonly onOpen: (row: Row) => void
   readonly onRetry: () => void
@@ -40,6 +39,8 @@ const matches = (row: Row, needle: string) => `${row.title} ${row.host} ${row.re
 
 export function MilestoneSidebar(props: MilestoneSidebarProps) {
   const { state, folders, query } = props
+  const frozen = state === 'stale' && props.observedAt !== undefined
+  const clock = frozen ? props.observedAt! : props.now
   const needle = query.trim().toLowerCase()
   // Filtering keeps a parent when a subagent matches, so a hit never loses its context.
   const visible = needle === '' ? folders : folders.map(folder => ({ ...folder, rows: folder.rows.flatMap(row => {
@@ -53,7 +54,8 @@ export function MilestoneSidebar(props: MilestoneSidebarProps) {
   const rows = React.useMemo(() => new Map(folders.flatMap(folder => folder.rows.flatMap(row => [[row.ref, row] as const, ...row.children.map(child => [child.ref, child] as const)]))), [folders])
   const hover = useHoverCard()
   const toggle = (key: Key) => setExpanded(current => { const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next })
-  const sections = <div data-section-nav={props.sectionNav} {...stylex.props(styles.sections, props.sectionNav === 'footer' ? styles.sectionsFooter : styles.sectionsHeader)}>
+  // One compact row under the agent list (RM1-Q7, decided).
+  const sections = <div data-section-nav="footer" {...stylex.props(styles.sections, styles.sectionsFooter)}>
     {/* Workshop labels: these sections have their own stories; here they only show where the row sits. */}
     <span {...stylex.props(styles.section)}>Inbox{props.inboxCount > 0 && <span aria-label={`${props.inboxCount} unread`} {...stylex.props(styles.count)}>{props.inboxCount}</span>}</span>
     <span {...stylex.props(styles.section)}>Missions</span>
@@ -74,9 +76,8 @@ export function MilestoneSidebar(props: MilestoneSidebarProps) {
       }} {...stylex.props(styles.searchInput)} />
       {query === '' ? <kbd aria-hidden="true" {...stylex.props(styles.kbd)}>/</kbd> : <Button aria-label="Clear filter" {...stylex.props(styles.clear)}><Icon name="x" size={12} /></Button>}
     </SearchField>
-    {props.sectionNav === 'header' && sections}
     <div data-roster-list data-testid="agent-sidebar" {...stylex.props(styles.list)}>
-      {state === 'stale' && <p role="status" data-roster-notice="stale" {...stylex.props(styles.notice)}><Icon name="clock" size={12} />Last observed list</p>}
+      {state === 'stale' && <p role="status" data-roster-notice="stale" {...stylex.props(styles.notice)}><Icon name="clock" size={12} />{frozen ? `Last observed ${Math.round((props.now - clock) / 1000)} s ago` : 'Last observed list'}</p>}
       {state === 'loading' && <>
         <p role="status" data-roster-notice="loading" {...stylex.props(styles.visuallyHidden)}>Loading agents…</p>
         <div aria-hidden="true" data-roster-skeleton>{[0.72, 0.54, 0.64, 0.46, 0.6, 0.5].map((share, index) => <div key={index} {...stylex.props(styles.skeletonRow)}><span {...stylex.props(styles.skeletonDisc)} /><span {...stylex.props(styles.skeletonLines)}><span {...stylex.props(styles.skeletonLine)} style={{ width: `${share * 100}%` }} /><span {...stylex.props(styles.skeletonLine, styles.skeletonMeta)} style={{ width: `${(share - 0.18) * 100}%` }} /></span></div>)}</div>
@@ -101,14 +102,14 @@ export function MilestoneSidebar(props: MilestoneSidebarProps) {
               <Button slot="chevron" excludeFromTabOrder {...stylex.props(styles.chevron)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} size={12} /></Button>
               <span {...stylex.props(styles.folderLabel)}>{folder.label}</span><span aria-hidden="true" {...stylex.props(styles.count)}>{folder.rows.length}</span>
             </div>}</TreeItemContent>
-            {folder.rows.map(row => <AgentItem key={row.ref} row={row} {...props} hover={hover} />)}
+            {folder.rows.map(row => <AgentItem key={row.ref} row={row} {...props} now={clock} hover={hover} />)}
           </TreeItem>)}
         </Tree>
       </div>}
     </div>
-    {props.sectionNav === 'footer' && sections}
+    {sections}
     <Popover isNonModal isOpen={hover.row !== undefined} onOpenChange={open => { if (!open) hover.close() }} triggerRef={hover.anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
-      {hover.row !== undefined && <AgentHoverCard row={hover.row} now={props.now} />}
+      {hover.row !== undefined && <AgentHoverCard row={hover.row} now={clock} />}
     </Popover>
   </aside>
 }
@@ -141,7 +142,7 @@ function AgentItem({ row, hover, ...props }: AgentItemProps) {
   const active = row.ref === props.activeRef
   return <TreeItem ref={element} id={row.ref} textValue={row.title} aria-label={`${sidebarRowAccessibleName(row)}${active ? ', open' : ''}`}
     onHoverStart={() => hover.start(row, element.current)} onHoverEnd={hover.end} {...stylex.props(styles.item)}>
-    <TreeItemContent>{({ hasChildItems, isExpanded, isFocusVisible, level }) => <MilestoneAgentRow row={row} level={level} active={active} focused={isFocusVisible} query={props.query} now={props.now} glyphRefinement={props.glyphRefinement} stale={props.state === 'stale'}
+    <TreeItemContent>{({ hasChildItems, isExpanded, isFocusVisible, level }) => <MilestoneAgentRow row={row} level={level} active={active} focused={isFocusVisible} query={props.query} now={props.now} stale={props.state === 'stale'}
       chevron={hasChildItems ? <Button slot="chevron" excludeFromTabOrder aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${row.children.length} subagents`} {...stylex.props(styles.chevron)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} size={12} /></Button> : null} />}</TreeItemContent>
     {row.children.map(child => <AgentItem key={child.ref} {...props} row={child} hover={hover} />)}
   </TreeItem>
@@ -151,17 +152,18 @@ function AgentItem({ row, hover, ...props }: AgentItemProps) {
  * SR-2 two-line row. Line 1: glyph · title · last turn · signal · chevron, each trailing column a fixed width so every
  * time ends on one edge and the title ellipsis keeps a 6px gap. Line 2: status word (unless working) · host · spend · duration.
  */
-export function MilestoneAgentRow({ row, level, active, focused, query, now, glyphRefinement, stale, chevron }: { readonly row: Row; readonly level: number; readonly active: boolean; readonly focused: boolean; readonly query: string; readonly now: number; readonly glyphRefinement: DiscRefinement; readonly stale: boolean; readonly chevron: React.ReactNode }) {
+export function MilestoneAgentRow({ row, level, active, focused, query, now, stale, chevron }: { readonly row: Row; readonly level: number; readonly active: boolean; readonly focused: boolean; readonly query: string; readonly now: number; readonly stale: boolean; readonly chevron: React.ReactNode }) {
   const fields: React.ReactNode[] = []
   if (row.status !== 'working') fields.push(<span key="status" data-row-field="status-label">{row.statusLabel}</span>)
   fields.push(<span key="host" data-row-field="host">{row.host}</span>)
   if (row.usage._tag === 'Known') fields.push(<span key="spend" data-row-field="spend" aria-label={`Spend including subagents: $${row.usage.usd}, ${row.usage.tokens} tokens`}>{spend.format(row.usage.usd)} · {tokens.format(row.usage.tokens)}</span>)
   if (row.duration._tag === 'Known') fields.push(<span key="duration" data-row-field="duration"><SidebarDuration duration={row.duration} /></span>)
   return <div data-testid="milestone-agent-row" data-status={row.status} data-level={level} {...stylex.props(styles.row, level > 2 && styles.nested, active && styles.active, focused && styles.focused)}>
-    <span data-row-column="glyph" {...stylex.props(styles.glyph, row.status === 'stale' && staleTone)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} variant="SG-1" discRefinement={glyphRefinement} freshness={stale ? 'stale' : row.freshness} iconOnly /></span>
+    {/* A stale roster is a last-observed snapshot: every glyph goes muted (shape still tells states apart) and times are frozen at the observation. */}
+    <span data-row-column="glyph" {...stylex.props(styles.glyph)}><StatusGlyph status={row.status} statusLabel={row.statusLabel} freshness={stale ? 'stale' : row.freshness} frozen={stale} /></span>
     <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
-    <span data-row-column="time" {...stylex.props(styles.time)}>{row.lastTurn._tag === 'Known' && <SidebarTime at={row.lastTurn.at} now={now} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} compact />}</span>
-    <span data-row-column="signal" {...stylex.props(styles.signal)}>{row.needsMe ? <span aria-label="Needs your attention" {...stylex.props(styles.needs)}>!</span> : (row.unread ?? 0) > 0 ? <span aria-label={`${row.unread} unread`} {...stylex.props(styles.unread)}>{row.unread}</span> : null}</span>
+    <span data-row-column="time" title={stale ? 'As of the last observation' : undefined} {...stylex.props(styles.time, stale && styles.frozenInk)}>{row.lastTurn._tag === 'Known' && <SidebarTime at={Math.min(row.lastTurn.at, now)} now={now} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} compact />}</span>
+    <span data-row-column="signal" {...stylex.props(styles.signal)}>{row.needsMe ? <span aria-label="Needs your attention" {...stylex.props(styles.needs, stale && styles.frozenInk)}>!</span> : (row.unread ?? 0) > 0 ? <span aria-label={`${row.unread} unread`} {...stylex.props(styles.unread, stale && styles.frozenInk)}>{row.unread}</span> : null}</span>
     <span data-row-column="chevron" {...stylex.props(styles.chevronSlot)}>{chevron}</span>
     <span data-row-column="line2" {...stylex.props(styles.line2)}>{fields.flatMap((field, index) => index === 0 ? [field] : [<span key={`sep-${index}`} aria-hidden="true" {...stylex.props(styles.sep)}>·</span>, field])}</span>
   </div>
@@ -195,6 +197,8 @@ const styles = stylex.create({
   signal: { gridColumn: '4', gridRow: '1', display: 'flex', justifyContent: 'center' },
   needs: { color: tone.attention, fontSize: t.denseSize, fontWeight: t.weightSemibold },
   unread: { color: accent.primary, fontSize: t.microSize, fontVariantNumeric: 'tabular-nums' },
+  // Last-observed values: neutral ink, no live accent. fgSoft (not fgMuted) so it still clears 4.5:1 on the active-row wash.
+  frozenInk: { color: ink.fgSoft },
   chevronSlot: { gridColumn: '5', gridRow: '1', display: 'flex', justifyContent: 'center' },
   line2: { gridColumn: '2 / -1', gridRow: '2', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgSoft, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
   sep: { paddingInline: s.xs, color: ink.fgMuted },
@@ -216,7 +220,6 @@ const styles = stylex.create({
   skeletonMeta: { height: s.sm, backgroundColor: surface.rowHover },
   sections: { display: 'flex', alignItems: 'center', gap: s.lg, flexShrink: 0, height: g.controlLg, paddingInline: s.lg, boxSizing: 'border-box', color: ink.sidebarFgMuted, fontSize: t.denseSize },
   sectionsFooter: { borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border },
-  sectionsHeader: { borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   section: { display: 'inline-flex', alignItems: 'center', gap: s.xs },
   hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', boxShadow: elevation.popover, outline: 'none' },
   visuallyHidden: { position: 'absolute', width: '1px', height: '1px', margin: '-1px', padding: 0, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', borderWidth: 0 },
