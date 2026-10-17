@@ -119,29 +119,6 @@ fn built_in_release(executable: &Path) -> bool {
         .is_some_and(|profile| profile == "release")
 }
 
-#[cfg(test)]
-mod optimized_build_tests {
-    use super::built_in_release;
-    use std::path::Path;
-
-    #[test]
-    fn only_the_profile_directory_above_deps_counts() {
-        for (path, release) in [
-            ("/w/target/release/deps/t-1", true),
-            ("/w/target/x86_64-unknown-linux-gnu/release/deps/t-1", true),
-            ("/anywhere/else/release/deps/t-1", true),
-            ("/w/target/debug/deps/t-1", false),
-            ("/work/release/target/debug/deps/t-1", false),
-            ("/release/debug/deps/t-1", false),
-            ("/w/target/release-with-debuginfo/deps/t-1", false),
-            ("/w/target/debug/release", false),
-            ("t-1", false),
-        ] {
-            assert_eq!(built_in_release(Path::new(path)), release, "{path}");
-        }
-    }
-}
-
 /// Run a process-spawning integration test inside a Linux subreaper. The outer
 /// test remains the guardian's liveness owner even when nextest kills it outright.
 /// Call first in the test body, before creating runtimes' tasks or fixture files.
@@ -368,4 +345,27 @@ pub fn admitted_mailbox_protocol_router(state: crate::api::AppState) -> axum::Ro
 #[cfg(feature = "test-support")]
 pub fn synthetic_mailbox_protocol_router(state: crate::api::AppState, subject: &str) -> axum::Router {
     crate::api::synthetic_mailbox_protocol_router(state, subject)
+}
+
+#[cfg(test)]
+mod optimized_build_tests {
+    use super::built_in_release;
+    use std::path::Path;
+
+    #[test]
+    fn only_the_profile_directory_above_deps_counts() {
+        for (path, release) in [
+            ("/w/target/release/deps/t-1", true),
+            ("/w/target/x86_64-unknown-linux-gnu/release/deps/t-1", true),
+            ("/anywhere/else/release/deps/t-1", true),
+            ("/w/target/debug/deps/t-1", false),
+            ("/work/release/target/debug/deps/t-1", false),
+            ("/release/debug/deps/t-1", false),
+            ("/w/target/release-with-debuginfo/deps/t-1", false),
+            ("/w/target/debug/release", false),
+            ("t-1", false),
+        ] {
+            assert_eq!(built_in_release(Path::new(path)), release, "{path}");
+        }
+    }
 }
