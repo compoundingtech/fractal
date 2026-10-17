@@ -38,12 +38,17 @@ fn repository_key(key: &str) -> Result<()> {
 }
 
 impl Store {
+    /// The domain state of type `T` kept on this store, created empty on first use.
+    pub fn extension<T: std::any::Any + Send + Sync + Default>(&self) -> Arc<T> {
+        self.smalltalk.extensions.get::<T>()
+    }
+
     pub fn install_git_change_registry(&self, registry: Arc<crate::changes::service::Registry>) -> Result<()> {
-        self.smalltalk.git_change_registry.set(registry).map_err(|_| anyhow::anyhow!("Git change registry already installed"))
+        self.extension::<crate::changes::service::GitChanges>().registry.set(registry).map_err(|_| anyhow::anyhow!("Git change registry already installed"))
     }
 
     pub fn git_change_registry(&self) -> Option<Arc<crate::changes::service::Registry>> {
-        self.smalltalk.git_change_registry.get().cloned()
+        self.extension::<crate::changes::service::GitChanges>().registry.get().cloned()
     }
 
     /// Call only after Git object/source/parent validation outside the writer. Immutable

@@ -117,6 +117,12 @@ impl ImportReport {
     }
 }
 
+/// What the git-change domain keeps on a `Store`, reached with `store.extension::<GitChanges>()`.
+#[derive(Default)]
+pub struct GitChanges {
+    pub registry: std::sync::OnceLock<Arc<Registry>>,
+}
+
 pub struct Registry {
     entries: BTreeMap<String, Arc<Entry>>,
 }

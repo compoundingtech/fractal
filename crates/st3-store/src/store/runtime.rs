@@ -11,7 +11,9 @@ pub struct SmalltalkRuntime {
     /// Committed launch-source invalidation, independent of append frontiers.
     pub publication_cache_epoch: Mutex<Option<(i64, bool)>>,
     pub publication_cache_observer: Mutex<Option<smallclaims::sqlite::CommitObserver>>,
-    pub git_change_registry: std::sync::OnceLock<Arc<crate::changes::service::Registry>>,
+    /// State a domain owns, keyed by its type, so a domain's caches and handles live with the
+    /// domain rather than as fields here. See [`Extensions`].
+    pub extensions: Extensions,
     /// One registry per graph. Registration alone does not certify source coverage.
     pub ivm_views: Option<Arc<smallclaims::ivm::Views>>,
     /// Receipt waits and collection sockets share this one commit observer. Publisher
@@ -99,6 +101,26 @@ pub struct SmalltalkRuntime {
     pub seat_lookups: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     pub last_seats_read: std::sync::Mutex<BTreeSet<String>>,
+}
+
+/// A type-keyed map of domain state, created empty at open. Each domain defines one `Default`
+/// struct for its caches and handles and reaches it with `store.extension::<ThatStruct>()`; the
+/// first use creates it, and every later use returns the same one.
+#[derive(Default)]
+pub struct Extensions {
+    map: std::sync::RwLock<HashMap<std::any::TypeId, Arc<dyn std::any::Any + Send + Sync>>>,
+}
+
+impl Extensions {
+    pub fn get<T: std::any::Any + Send + Sync + Default>(&self) -> Arc<T> {
+        let id = std::any::TypeId::of::<T>();
+        let found = self.map.read().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&id).cloned();
+        let any = found.unwrap_or_else(|| {
+            let mut map = self.map.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+            map.entry(id).or_insert_with(|| Arc::new(T::default())).clone()
+        });
+        any.downcast::<T>().unwrap_or_else(|_| unreachable!("an extension is stored under its own type"))
+    }
 }
 
 #[derive(Default)]
@@ -1111,5 +1133,31 @@ mod ivm_attachment_tests {
             current.availability.readiness,
             Readiness::Ready(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct First(std::sync::atomic::AtomicUsize);
+    #[derive(Default)]
+    struct Second(Mutex<Vec<u8>>);
+
+    #[test]
+    fn an_extension_is_created_once_per_type_and_shared() {
+        let store = Store::open_memory("fixture").unwrap();
+        store.extension::<First>().0.fetch_add(2, std::sync::atomic::Ordering::SeqCst);
+        store.extension::<Second>().0.lock().unwrap().push(7);
+        assert_eq!(store.extension::<First>().0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(*store.extension::<Second>().0.lock().unwrap(), vec![7]);
+        assert!(Arc::ptr_eq(&store.extension::<First>(), &store.extension::<First>()));
+    }
+
+    #[test]
+    fn no_git_change_registry_is_installed_on_a_fresh_store() {
+        let store = Store::open_memory("fixture").unwrap();
+        assert!(store.git_change_registry().is_none());
     }
 }
