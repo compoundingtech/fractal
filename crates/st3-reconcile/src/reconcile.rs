@@ -1098,7 +1098,7 @@ pub struct Reconciler<R = NativeRuntime> {
     cleanup_deadline: Duration,
     /// Unit tests fail a pass that raises a fault unless they opt in, so an isolated error
     /// cannot hide inside a test that expects a clean pass.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     raised_faults: Mutex<Option<Vec<String>>>,
     /// Publish during a unit test after the work feed was observed, before wake selection.
     #[cfg(any(test, feature = "test-support"))]
@@ -1235,7 +1235,7 @@ impl Reconciler<NativeRuntime> {
             screen_poll_every_ms: SCREEN_POLL_EVERY_MS,
             subagent_low_water: Mutex::new(0),
             cleanup_deadline: CLEANUP_DEADLINE,
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             raised_faults: Mutex::new(Some(Vec::new())),
             #[cfg(any(test, feature = "test-support"))]
             after_work_wake_observe: Mutex::new(None),
@@ -1379,7 +1379,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             screen_poll_every_ms: 0,
             subagent_low_water: Mutex::new(0),
             cleanup_deadline: CLEANUP_DEADLINE,
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             raised_faults: Mutex::new(Some(Vec::new())),
             #[cfg(any(test, feature = "test-support"))]
             after_work_wake_observe: Mutex::new(None),
@@ -1524,7 +1524,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Let passes raise faults, for a unit test of fault isolation itself.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub fn tolerating_faults(self) -> Self {
         *self.raised_faults.lock().unwrap() = None;
         self
@@ -2120,7 +2120,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             Ok(value) => (Some(value), Ok(())),
             Err(error) => (None, Err(error)),
         };
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         if let (Err(error), Some(raised)) = (&outcome, self.raised_faults.lock().unwrap().as_mut())
         {
             raised.push(format!("{subject} {scope}: {error:#}"));
@@ -3541,7 +3541,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // Each of these items was already skipped on its own and the pass carried on. Only
             // the record of its fault is missing, so the host is faulted, not unreachable.
             let reason = format!("unrecorded item faults: {}", diagnostic_errors.join("; "));
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             if let Some(raised) = self.raised_faults.lock().unwrap().as_mut() {
                 raised.push(reason.clone());
             }
@@ -3556,7 +3556,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ]),
             )?;
         }
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         if let Some(raised) = self.raised_faults.lock().unwrap().as_mut() {
             let raised = std::mem::take(raised);
             anyhow::ensure!(raised.is_empty(), "reconcile faults: {}", raised.join("; "));
