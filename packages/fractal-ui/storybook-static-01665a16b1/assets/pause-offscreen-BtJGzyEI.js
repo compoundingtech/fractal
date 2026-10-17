@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-vNrZSFDR.js";function t(e){if(!(typeof IntersectionObserver>`u`))return n??=new IntersectionObserver(e=>{for(let t of e)t.target.style.animationPlayState=t.isIntersecting?`running`:`paused`}),n.observe(e),()=>{n.unobserve(e),e.style.removeProperty(`animation-play-state`)}}var n,r=e((()=>{}));export{t as n,r as t};
