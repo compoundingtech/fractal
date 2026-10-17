@@ -227,7 +227,7 @@ mod tests {
             "id":"entry/one", "revision":3, "type":"content", "role":"assistant",
             "body":{"media_type":"text/plain","text":"ééé", "environment":"PRIVATE",
                 "blocks":[{"kind":"source_record","payload":{"cwd":"/PRIVATE"}},
-                    {"kind":"raw_text","source_type":"content","continuation":{"ref":"opaque"}}]},
+                    {"kind":"raw_text","source_type":"content","payload":{"body_ref":true},"continuation":{"ref":"opaque"}}]},
         }), 3);
         assert_eq!(projected["text"], "é");
         assert_eq!(projected["content"][0]["reference"], "opaque");
