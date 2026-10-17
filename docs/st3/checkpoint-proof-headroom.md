@@ -30,8 +30,11 @@ connections. It charges each requested `xWrite` before forwarding it, refuses re
 writes. Its 256 MiB margin covers at most 16 MiB of writes between checks plus one accepted
 16 MiB request, leaving 224 MiB for allocation rounding and concurrent activity. It guards
 allocation-capable truncate, shared-memory map and file-size hints as well. Every guarded
-connection sets `mmap_size=0`; an over-budget self-test write must be refused before the copy
-starts. SQLite temp writes are charged by requested bytes, including overwrites, so the guard
+connection sets `mmap_size=0`. SQLite's sorter separately requests a positive mmap limit for
+its temporary file, so the proof VFS forces that file's limit to zero and returns no mapping
+from `xFetch`; the sorter continues through wrapped `xRead` and guarded `xWrite`. An over-budget
+self-test write must be refused before the copy starts. SQLite temp writes are charged by
+requested bytes, including overwrites, so the guard
 may refuse a proof with physical headroom still available. On refusal the connection closes
 without more SQL and the disposable proof and sidecars
 are removed with checked errors. There is no atomic guarantee against another process consuming

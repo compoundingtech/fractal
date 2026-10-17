@@ -544,8 +544,22 @@ forward_file!(sector_size, xSectorSize, (), c_int);
 forward_file!(device_characteristics, xDeviceCharacteristics, (), c_int);
 forward_file!(shm_lock, xShmLock, (offset: c_int, n: c_int, flags: c_int), c_int);
 forward_file!(shm_unmap, xShmUnmap, (delete: c_int), c_int);
-forward_file!(fetch, xFetch, (offset: ffi::sqlite3_int64, amt: c_int, out: *mut *mut c_void), c_int);
 forward_file!(unfetch, xUnfetch, (offset: ffi::sqlite3_int64, ptr: *mut c_void), c_int);
+
+unsafe extern "C" fn fetch(
+    _file: *mut ffi::sqlite3_file,
+    _offset: ffi::sqlite3_int64,
+    _amt: c_int,
+    out: *mut *mut c_void,
+) -> c_int {
+    if out.is_null() {
+        return ffi::SQLITE_IOERR;
+    }
+    // A sorter temp file is not a SQL connection, so PRAGMA mmap_size=0 on guarded
+    // connections does not cover it. Never expose a mapping through the proof VFS.
+    unsafe { *out = ptr::null_mut() };
+    ffi::SQLITE_OK
+}
 
 unsafe extern "C" fn write(
     file: *mut ffi::sqlite3_file,
@@ -606,10 +620,22 @@ unsafe extern "C" fn file_control(
         if arg.is_null() {
             return ffi::SQLITE_IOERR;
         }
-        if unsafe { *(arg as *const ffi::sqlite3_int64) } > 0 {
-            return unsafe { &*wrapped.data }
-                .refuse("checkpoint proof VFS refused positive mmap_size".into());
+        // SQLite's sorter requests a positive mmap limit on its own temp file,
+        // even when every guarded SQL connection has mmap_size=0. Enforce zero
+        // on the wrapped file instead of latching a false disk-full refusal.
+        let mut zero: ffi::sqlite3_int64 = 0;
+        let rc = unsafe {
+            methods(file).xFileControl.unwrap()(
+                wrapped.inner,
+                op,
+                (&mut zero as *mut ffi::sqlite3_int64).cast(),
+            )
+        };
+        if rc != ffi::SQLITE_OK && rc != ffi::SQLITE_NOTFOUND {
+            return rc;
         }
+        unsafe { *(arg as *mut ffi::sqlite3_int64) = 0 };
+        return ffi::SQLITE_OK;
     }
     if op == ffi::SQLITE_FCNTL_CHUNK_SIZE {
         if arg.is_null() {
@@ -1000,14 +1026,24 @@ mod tests {
             after_renumber.5 > before.5,
             "renumber journal writes bypassed the proof VFS"
         );
-        if let Err(error) =
-            db.execute_batch("CREATE TEMP TABLE sorted AS SELECT body FROM claims ORDER BY body, id;")
+        if let Err(error) = db
+            .execute_batch("CREATE TEMP TABLE sorted AS SELECT body FROM claims ORDER BY body, id;")
         {
             eprintln!("selected SQLite temp directory: {}", guard.temp.display());
-            eprintln!("scratch device: {}; temp device: {}", guard.scratch_device, guard.temp_device);
+            eprintln!(
+                "scratch device: {}; temp device: {}",
+                guard.scratch_device, guard.temp_device
+            );
             #[cfg(target_os = "linux")]
-            eprintln!("observed SQLite temp files: {:?}", observed_temp_files.lock().unwrap());
-            eprintln!("VFS metrics before sort: {:?}; after error: {:?}", after_renumber, vfs.metrics());
+            eprintln!(
+                "observed SQLite temp files: {:?}",
+                observed_temp_files.lock().unwrap()
+            );
+            eprintln!(
+                "VFS metrics before sort: {:?}; after error: {:?}",
+                after_renumber,
+                vfs.metrics()
+            );
             let window = vfs.data.as_ref().unwrap().window.lock().unwrap();
             eprintln!(
                 "VFS accounting at refusal: max_requested_iAmt={} scratch_used={} scratch_pending={} temp_used={} temp_pending={} temp_cumulative_requested={} scratch_budget={} temp_budget={} refreshes={}",
@@ -1027,9 +1063,17 @@ mod tests {
                 filesystem(&guard.scratch).map(|fs| fs.available),
                 filesystem(&guard.temp).map(|fs| fs.available),
             );
-            panic!("sort failed: {}", guard.explain::<()>(Err(error.into())).unwrap_err());
+            panic!(
+                "sort failed: {}",
+                guard.explain::<()>(Err(error.into())).unwrap_err()
+            );
         }
         let after_sort = vfs.metrics();
+        #[cfg(target_os = "linux")]
+        eprintln!(
+            "observed SQLite temp files: {:?}",
+            observed_temp_files.lock().unwrap()
+        );
         assert!(
             after_sort.6 > after_renumber.6,
             "SQLite temp writes bypassed the proof VFS"
