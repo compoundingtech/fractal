@@ -1123,7 +1123,7 @@ mod tests {
                 (&data.vfs as *const ffi::sqlite3_vfs).cast_mut(),
                 name.as_ptr(),
                 file,
-                ffi::SQLITE_OPEN_READ_WRITE | ffi::SQLITE_OPEN_CREATE | ffi::SQLITE_OPEN_MAIN_DB,
+                ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE | ffi::SQLITE_OPEN_MAIN_DB,
                 &mut out_flags,
             )
         };
