@@ -1,4 +1,4 @@
-# Smalltalk feed
+# Fractal feed
 
 `st3-feed` owns the live collection subscriptions, member reconnects, snapshot model and private
 display cache used by stui. It depends on the generated `st3-client` and the conversation model;
@@ -87,7 +87,7 @@ versions, nonprivate files, future timestamps and snapshots older than seven day
 have the status `Cached · refreshing…`. They are display data: actions still require live
 snapshots and fresh fences; there is no offline mutation queue.
 
-Run `cargo test --locked -p st3-feed -p stui` to check the extracted feed, cursor-gap recovery,
+Run `cargo test --locked -p st3-feed -p stui -p st3-e2e` to check the extracted feed, cursor-gap recovery,
 cache and consumers. Server-backed tests run outside an st seat's `ST_AGENT` environment.
 
 Optional screen inventories use `Command::Inventories(Inventories { .. })`.
