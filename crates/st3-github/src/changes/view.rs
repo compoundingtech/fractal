@@ -3,8 +3,9 @@
 use super::discovery::Observation;
 use super::transport::{Advertisement, validate_advertisement};
 use super::{PREFIX, change_id, oid};
+use crate::GitChangesStore;
+use super::index::IndexedChange;
 use crate::store::Store;
-use crate::store::git_changes::IndexedChange;
 use anyhow::{Result, ensure};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,9 +82,7 @@ pub struct Detail {
     pub item: Change,
 }
 
-pub fn advertised_ids(
-    advertisement: &Advertisement,
-) -> Result<BTreeMap<String, Option<String>>> {
+pub fn advertised_ids(advertisement: &Advertisement) -> Result<BTreeMap<String, Option<String>>> {
     let mut ids = BTreeMap::new();
     ensure!(
         advertisement.refs.len() <= 5000,
@@ -246,7 +245,7 @@ fn join(
 mod tests {
     use super::*;
     use crate::changes::transport::markers;
-    use crate::store::git_changes::tests::revision;
+    use crate::changes::index::tests::revision;
 
     fn observation(refs: BTreeMap<String, String>) -> Observation {
         let mut observation = Observation::from_advertisement(Advertisement {

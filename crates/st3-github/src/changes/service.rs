@@ -3,6 +3,7 @@
 use super::config::{Config, Repository as RepositoryConfig};
 use super::discovery::{Observation, Owner, SyncAdmission, Transport};
 use super::transport::{Advertisement, Authentication, Repository};
+use crate::GitChangesStore;
 use crate::store::Store;
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;

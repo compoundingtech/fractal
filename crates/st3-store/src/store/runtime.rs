@@ -143,11 +143,18 @@ pub struct AgentResourcesEntry {
     pub published_at_unix_ms: u128,
 }
 
+impl Store {
+    /// The domain state of type `T` kept on this store, created empty on first use.
+    pub fn extension<T: std::any::Any + Send + Sync + Default>(&self) -> Arc<T> {
+        self.smalltalk.extensions.get::<T>()
+    }
+}
+
 impl SmalltalkRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
         migrate_mission_run_deadlines(connection)?;
-        connection.execute_batch(git_changes::SCHEMA)?;
+        connection.execute_batch(git_change_tables::SCHEMA)?;
         retirements::create_selection_triggers(connection)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
@@ -1153,11 +1160,5 @@ mod extension_tests {
         assert_eq!(store.extension::<First>().0.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(*store.extension::<Second>().0.lock().unwrap(), vec![7]);
         assert!(Arc::ptr_eq(&store.extension::<First>(), &store.extension::<First>()));
-    }
-
-    #[test]
-    fn no_git_change_registry_is_installed_on_a_fresh_store() {
-        let store = Store::open_memory("fixture").unwrap();
-        assert!(store.git_change_registry().is_none());
     }
 }
