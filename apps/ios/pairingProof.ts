@@ -153,7 +153,7 @@ export function pairingFabricNode(capabilities: Advertised, node: string): { fab
   return supported && /^[0-9a-f]{64}$/.test(node) ? { fabric_node_id: node } : {};
 }
 /** What to tell the person when pairing stood but the member could not grant this phone over Fabric. */
-export function fabricGrantProblem(grant: PairedSession['fabric_grant']): string {
+export function fabricGrantProblem(grant: PersonPairedSession['fabric_grant']): string {
   if (grant?.state !== 'failed') return '';
   return `Paired, but the member could not grant this phone its gateway over Fabric${grant.detail ? `: ${grant.detail.replace(/\.$/, '')}.` : '.'} Tailscale or LAN still reaches it.`;
 }
