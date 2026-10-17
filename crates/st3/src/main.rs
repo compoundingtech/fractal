@@ -3818,6 +3818,12 @@ struct MessageListArgs {
     #[arg(long = "from")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     sender: Option<String>,
+    /// Match this sender's subject text exactly (case-sensitive); requires --from.
+    #[arg(long, conflicts_with = "subject_prefix", requires = "sender")]
+    subject: Option<String>,
+    /// Match a literal, case-sensitive subject prefix within --from's messages.
+    #[arg(long, requires = "sender")]
+    subject_prefix: Option<String>,
 }
 
 #[derive(Args)]
@@ -12836,6 +12842,13 @@ async fn message_page(
     message_page_reporting(client, recipient, include_closed, cursor, None).await
 }
 
+#[derive(Clone, Copy, Default)]
+struct MessagePageFilters<'a> {
+    from: Option<&'a str>,
+    subject: Option<&'a str>,
+    subject_prefix: Option<&'a str>,
+}
+
 /// One mailbox page. A seat's delivery process passes its delivery report, which the daemon
 /// keeps in memory to tell a live, current delivery path from a stale one.
 async fn message_page_reporting(
@@ -12844,6 +12857,25 @@ async fn message_page_reporting(
     include_closed: bool,
     cursor: Option<&str>,
     report: Option<&str>,
+) -> Result<MessagePage> {
+    message_page_filtered(
+        client,
+        recipient,
+        include_closed,
+        cursor,
+        report,
+        MessagePageFilters::default(),
+    )
+    .await
+}
+
+async fn message_page_filtered(
+    client: &Client,
+    recipient: Option<&str>,
+    include_closed: bool,
+    cursor: Option<&str>,
+    report: Option<&str>,
+    filters: MessagePageFilters<'_>,
 ) -> Result<MessagePage> {
     let mut path = format!("/v1/messages/page?include_closed={include_closed}&limit=100");
     if let Some(recipient) = recipient {
@@ -12854,6 +12886,15 @@ async fn message_page_reporting(
     }
     if let Some(report) = report {
         path.push_str(&format!("&delivery={}", urlencoding::encode(report)));
+    }
+    for (name, value) in [
+        ("from", filters.from),
+        ("subject", filters.subject),
+        ("subject_prefix", filters.subject_prefix),
+    ] {
+        if let Some(value) = value {
+            path.push_str(&format!("&{name}={}", urlencoding::encode(value)));
+        }
     }
     client.get(&path).await
 }
@@ -16090,7 +16131,9 @@ async fn publish_claude_readiness_fallback(
         || !state
             .claude_readiness_fallback
             .initialized_at_ms
-            .is_some_and(|started| now_ms.saturating_sub(started) >= 15_000)
+            .is_some_and(|started| {
+                now_ms.saturating_sub(started) >= claude_readiness_grace_ms()
+            })
     {
         return Ok(false);
     }
@@ -16263,6 +16306,18 @@ fn claude_attachment_window() -> Duration {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|cap| *cap > 0);
     Duration::from_millis(cap.map_or(DEFAULT_MS, |cap| cap.min(DEFAULT_MS)))
+}
+
+/// How long an initialized Claude channel waits for a native hook before the driver publishes
+/// readiness without one. `ST3_CLAUDE_READINESS_GRACE_MS` can only shorten it, as
+/// `ST3_SUBAGENT_LEASE_MS` does a lease, so tests of the fallback need not wait out 15 s.
+fn claude_readiness_grace_ms() -> u64 {
+    const DEFAULT_MS: u64 = 15_000;
+    std::env::var("ST3_CLAUDE_READINESS_GRACE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|cap| *cap > 0)
+        .map_or(DEFAULT_MS, |cap| cap.min(DEFAULT_MS))
 }
 
 fn same_claude_attachment_binding(a: &st3::mailbox::Fence, b: &st3::mailbox::Fence) -> bool {

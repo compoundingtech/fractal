@@ -559,7 +559,12 @@ workflow-level path filters. `linux-gate` does not depend on them.
   App, UI kit, Storybook, browser and performance lanes join the script with the
   packages that add them. The detector separately emits `kit-inputs`: app-only changes
   skip kit play-index contracts, Storybook and strict browser plays; kit source,
-  its transitive workspace dependencies, lock/toolchain and CI-input changes run them.
+  its transitive workspace dependencies, the app changelog files the kit's Changelog
+  stories render (`apps/fractal-web/src/changelog/**`), lock/toolchain and CI-input
+  changes run them. The kit Storybook build writes its module graph, and
+  `scripts/ci-fractal-web-kit-graph` fails the lane when any bundled repository file is
+  outside the kit patterns, so a new import cannot make a change skip the plays that
+  render it.
   This selection is the same for PRs, merge groups and pushes. Main pushes currently
   run Main upkeep's dependency-cache warmer, not a duplicate Workspace CI execution.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
@@ -570,6 +575,18 @@ workflow-level path filters. `linux-gate` does not depend on them.
 
 `scripts/ci-fractal-web-test`, run by `genie-freshness`, covers detection, fail-closed
 paths, the gate truth table and generated job shape.
+
+`scripts/web-skip-proof` prints the signed-skip decision for the web checks in the
+selection design's format (`check=… decision=skip|run key=… proof=… inputs_sha256=…
+reason=…`): `fractal-web` (the lane, the detector's relevant paths) and `fractal-web-kit`
+(the kit plays, its kit paths). The key is `evidence-verify --project` over the check's
+inputs; a skip is only a trusted signed passing record with the same key, found by
+`evidence-verify` under the base skip policy. Inputs, detector, verifier and keys come
+from the base. Until the base policy declares a web check (and something signs it with
+input keys), every web decision is `run` with `reason=no-record`. `claims PATH…` and
+`inputs CHECK` print the plugin's path ownership and declared inputs.
+`scripts/web-skip-proof-test` (in `genie-freshness`) covers key stability, the app/kit
+split, base-pinned rules and the policy path.
 
 The strict kit play lane runs every indexed story at both 440/1440 widths and
 dark/light schemes, with up to six workers bounded by available CPUs. Each worker
@@ -585,7 +602,10 @@ animations at their end state for the a11y check instead of a fixed 100 ms sleep
 before waiting for them. A play that leaves UI opening after it returns (a hover
 card under the pointer) waits for that state itself rather than relying on the sleep.
 
-The gate takes three options, all unset in CI today (full set, a11y on, no budget).
+The gate takes three options. Pull requests run the stories tagged `critical` with a11y
+off and a 420-second budget; merge groups (observed and signed by Evidence observe) and
+manual runs keep every story with a11y on and no budget, so every tree that reaches main
+has had the full matrix and axe. Which stories are critical is the UI owners' choice.
 `KIT_PLAY_SET=critical` selects only stories tagged `critical` (an empty selection fails);
 `KIT_PLAY_A11Y=off` sets addon-a11y's own `a11y.manual` global so axe does not run, and
 each case must then carry no a11y report, while with a11y on each case must carry exactly
@@ -747,6 +767,34 @@ a fresh Cargo home and no compiler wrappers, stays offline, and prints Cargo std
 Cargo builds use the host's four-job limit. Workspace test shards explicitly use eight test
 threads, with the host's 14 GiB per-job memory limit. The repository variable `CI1_MIN_IDLE`
 can override admission; keep it at four when preserving CPU capacity for reserved lanes.
+
+### Debug assertions
+
+The workspace `dev` and `test` profiles build with `debug-assertions = false` and
+`overflow-checks = true` (root `Cargo.toml`), so CI, the signed full-gate runs and every seat build
+the same profile; `release` is unchanged. Measured on one tree, the assertions cost about 21% of
+compile CPU, 26% of a cold compile's wall time and about 14% of a debug-glue-heavy test's CPU (std's
+unsafe-precondition checks and `debug_assert!` in every crate). `assert!`, bounds checks and integer
+overflow checks stay on. The profile is part of the tree, so a signed note binds it.
+
+To build and test with the assertions (what the daily run does), set both lines:
+
+    CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true
+
+What only exists or only means something with them:
+
+- The `ST2_TEST_*` fault and pause seams of the st2 catalog, event, message and agent publish code
+  (`crates/st-drivers`, `src/`) are compiled under `cfg(debug_assertions)`. The st2 tests that drive
+  them carry `#[cfg_attr(not(debug_assertions), ignore = "...")]`: they are listed as ignored in the
+  default profile and run in the assertions profile (`tests/agent_presentation.rs`,
+  `tests/agent_publish.rs`, `tests/agent_resource.rs`, `tests/message_cli.rs`,
+  `tests/stream_authoring_cli.rs`, `tests/catalog_apply.rs`, `tests/catalog_diff.rs`,
+  `tests/event_e2e.rs`).
+- The daemon benchmark and load tests (`daemon_bench`, `first_sync`, `daemon_load`) skipped in any
+  build that was not optimized by testing `cfg!(debug_assertions)`; they now ask
+  `st3::test_support::optimized_build()` (the executable is under `target/release/`).
+- Tests already behind `#[cfg(debug_assertions)]` (`ding/tests.rs`, `empty_authority_guard.rs`)
+  run only in the assertions profile.
 
 ### Compiler-cache measurement
 
