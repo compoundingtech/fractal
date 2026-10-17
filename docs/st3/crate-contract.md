@@ -1,6 +1,6 @@
 # st3 crates: what is where and who may use what
 
-Five packages carry what used to be the single `st3` package and its end-to-end tests:
+Six packages carry what used to be the single `st3` package and its end-to-end tests:
 
 | package | path | holds |
 |---|---|---|
