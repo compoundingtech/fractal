@@ -631,10 +631,8 @@ pub fn pi_family_argv(
     resume_path: Option<&Path>,
 ) -> Result<Vec<String>, Refusal> {
     valid_id(id)?;
-    let authored = match authored_resume(driver, &argv)? {
-        Some((first, end, transcript)) => Some((first..end, transcript)),
-        None => None,
-    };
+    let authored = authored_resume(driver, &argv)?
+        .map(|(first, end, transcript)| (first..end, transcript));
     if driver == "omp"
         && let Some(path) = resume_path
     {
