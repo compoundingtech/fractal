@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Resource observations reuse bounded actual-state reductions for unchanged subjects instead of reading and parsing their claim histories on every observation; unrelated subject appends keep the reductions reusable",
+  "replay": {"status": "none", "detail": "No replay required; replay invalidates the in-memory reductions."},
+  "schema": {"status": "none", "detail": "No schema change or SQL triggers; native writer row notifications maintain process-local invalidation."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "The existing canonical actual-state fold remains authoritative. Affected subject writes invalidate its reduction; ambiguous mutations, bulk edits, replay, schema changes and external writes invalidate all reductions. Preparation still validates its native writer fence before use."},
+  "downtime": {"status": "none", "detail": "Normal daemon upgrade; reductions start empty after restart."},
+  "manual": {"status": "none", "detail": "No operator step."},
+  "recovery": {"status": "none", "detail": "Revert the commit; no persisted cache or migration."}
+}
