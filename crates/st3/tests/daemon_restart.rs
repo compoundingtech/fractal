@@ -31,10 +31,27 @@ struct Daemon {
 
 impl Daemon {
     fn new(root: &Path) -> Self {
+        // These APIs run in process. Subprocess daemon fixtures own their stdout log.
+        let log = std::fs::File::create(root.join("daemon.log")).unwrap();
+        let _ = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_env_filter("st3=debug")
+            .with_writer(std::sync::Mutex::new(log))
+            .try_init();
+        let store = Store::open(&root.join("daemon.sqlite3"), "restart-node").unwrap();
+        // `st up` copies WAL pages on its own checkpoint thread every five seconds, so its
+        // writer stays under SQLite's 1000-page automatic checkpoint. This daemon has no such
+        // thread: without this, a commit past 1000 pages copies the WAL on the writer and every
+        // queued receipt waits for that copy and its fsync. The WAL grows for the test instead.
+        store
+            .connection
+            .write()
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .unwrap();
         Self {
             root: root.to_path_buf(),
             socket: root.join("st3.sock"),
-            store: Arc::new(Store::open(&root.join("daemon.sqlite3"), "restart-node").unwrap()),
+            store: Arc::new(store),
             event_notify: watch::channel(0_u64).0,
             server: None,
             isolated_server: None,
@@ -54,6 +71,7 @@ impl Daemon {
 
     fn state(&self) -> AppState {
         AppState {
+            owning_person: None,
             store: self.store.clone(),
             notify: Arc::new(Notify::new()),
             event_notify: self.event_notify.clone(),
@@ -229,12 +247,21 @@ impl Drop for Daemon {
     }
 }
 
-async fn wait_until(what: &str, limit: Duration, mut condition: impl FnMut() -> bool) {
+async fn wait_until(what: &str, limit: Duration, condition: impl FnMut() -> bool) {
+    assert!(wait_until_for(limit, condition).await, "timed out waiting until {what}");
+}
+
+/// `wait_until`'s poll and limit, returning instead of panicking so the caller can print
+/// evidence that only exists after the wait has failed.
+async fn wait_until_for(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + limit;
     while !condition() {
-        assert!(Instant::now() < deadline, "timed out waiting until {what}");
+        if Instant::now() >= deadline {
+            return false;
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    true
 }
 
 /// A seat process launched with the environment the reconciler gives it, but with every home
@@ -302,6 +329,37 @@ fn stop(mut child: Child) -> String {
         let _ = pipe.read_to_string(&mut stderr);
     }
     stderr
+}
+
+/// What a channel that offered nothing leaves behind. The in-process daemon barely traces, so
+/// without this a failed wait says only "Timeout": print every claim since `mark` in commit
+/// order, the stopped channel's stderr, and the driver files that gate its offers.
+fn channel_evidence(daemon: &Daemon, root: &Path, mark: u64, channel: Child) -> String {
+    let claims = match daemon.store.events_after(mark, None) {
+        Ok(events) => events
+            .iter()
+            .map(|event| {
+                let body = event.body.to_string();
+                let body: String = body.chars().take(600).collect();
+                format!("{} {} {} {body}", event.store_index, event.kind, event.subject)
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(error) => format!("unreadable: {error:#}"),
+    };
+    let mut files = String::new();
+    for directory in ["claude-driver", "drivers"] {
+        for path in files_containing(&root.join(directory), "") {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let text: String = text.chars().take(2000).collect();
+            files.push_str(&format!("--- {}\n{text}\n", path.display()));
+        }
+    }
+    format!(
+        "\nclaims after store index {mark}:\n{claims}\nchannel stderr:\n{}\ndriver api log:\n{}\ndriver files:\n{files}",
+        stop(channel),
+        driver_log(root),
+    )
 }
 
 /// A failed assertion must also stop this test's provider process group.
@@ -414,7 +472,7 @@ async fn native_exit_stops_provider_and_driver_with_daemon_down() {
     }
     // Exercise both transient Unix-socket errors that previously retried forever.
     for missing_socket in [false, true] {
-        let root = tempfile::tempdir().unwrap();
+        let root = st3::test_support::evidence_tempdir();
         let root = root.path();
         let mut daemon = Daemon::new(root);
         let mut driver = native_exit_driver(root, &mut daemon).await;
@@ -466,7 +524,7 @@ async fn native_exit_retries_past_stop_budget_without_signal_and_reports_on_reco
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     let mut driver = native_exit_driver(root, &mut daemon).await;
@@ -514,7 +572,7 @@ async fn native_exit_signal_after_provider_end_bounds_an_in_flight_request() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     let mut driver = native_exit_driver(root, &mut daemon).await;
@@ -601,7 +659,7 @@ async fn a_quiet_idle_seat_ages_stale_and_recovers_new_evidence_after_daemon_res
     use sha2::{Digest as _, Sha256};
     use st_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
 
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/grove/quiet-cedar";
     let incarnation = "quiet-cedar:one";
@@ -692,9 +750,10 @@ time.sleep(300)
     assert_eq!(before["harness_state"], "idle", "{before}");
     assert_eq!(before["observation"], "current", "{before}");
     daemon.stop().await;
-    // Exceed the real client freshness horizon, not a test-only shortened timeout. Open a
-    // fresh Store too: the driver's spool and mailbox fence must survive real cache loss.
-    tokio::time::sleep(Duration::from_secs(95)).await;
+    // Pass the real 90 s client freshness horizon by running the client clock 95 s ahead, not by a
+    // test-only shortened timeout and not by sleeping through it. Open a fresh Store too: the
+    // driver's spool and mailbox fence must survive real cache loss.
+    st3::test_support::skew_client_clock(95_000);
     assert_alive(&mut driver, "the quiet driver");
     daemon.store = Arc::new(Store::open(&root.join("daemon.sqlite3"), "restart-node").unwrap());
     daemon.start_admitted_protocol().await;
@@ -707,6 +766,8 @@ time.sleep(300)
     assert!(daemon.has_diagnostic(seat, incarnation, "claude-channel-attached"));
     assert_alive(&mut driver, "the same quiet driver after daemon restart");
     assert_eq!(driver.id(), original_pid);
+    // New reports carry the real clock again: stop skewing before the transition below.
+    st3::test_support::skew_client_clock(0);
     // A provider transition bypasses the five-minute unchanged-evidence guard. Require the
     // fresh idle record to recover through the restarted daemon without restarting the seat.
     writer.observe(Observation::new(Activity::Active, BlockedOn::None, InputBuffer::Empty)).unwrap();
@@ -753,7 +814,7 @@ async fn title_fallback_converts_a_slash_seat_id_to_its_dot_pty_id() {
 async fn title_failure(pty_session: Option<&str>, expected_session: &str) {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/grove/title-cedar";
     let mut daemon = Daemon::new(root);
@@ -839,7 +900,7 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/restart-claude";
     let incarnation = "4242:2026-09-27T12:00:00.000Z";
@@ -967,7 +1028,7 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/restart-omp";
     let incarnation = "4343:2026-09-27T12:00:00.000Z";
@@ -1061,7 +1122,7 @@ async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_aft
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/restart-todo";
     let mut daemon = Daemon::new(root);
@@ -1171,7 +1232,7 @@ async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribu
         return;
     }
     use sha2::Digest as _;
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/drain-accounts";
     let incarnation = "account-runtime";
@@ -1239,7 +1300,7 @@ async fn an_omp_ask_clears_without_poisoning_the_next_incarnation() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/human-omp";
     let incarnation = "human-1";
@@ -1327,7 +1388,7 @@ fn a_cli_command_says_the_daemon_is_unreachable_and_never_to_start_it() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let socket = root.path().join("st3.sock");
     drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
     let started = Instant::now();
@@ -1355,7 +1416,7 @@ async fn a_cli_command_waits_out_a_daemon_restart() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.start().await;
@@ -1394,7 +1455,7 @@ async fn a_cli_command_tries_a_bound_listener_before_refusing_startup() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     let startup = st3::startup::Startup::begin(&daemon.socket).unwrap();
@@ -1431,7 +1492,7 @@ async fn doctor_reports_starting_without_failing_an_answering_api() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     fn response(value: Value) -> axum::Json<st3::model::ApiResponse<Value>> {
@@ -1510,7 +1571,7 @@ async fn native_read_mail_is_settled_before_and_after_reopening_the_daemon() {
     }
     for driver in ["omp", "pi"] {
         for transport in ["poll", "push"] {
-            let root = tempfile::tempdir().unwrap();
+            let root = st3::test_support::evidence_tempdir();
             let root = root.path();
             let seat = "agent/receipt-worker";
             let graph = root.join("graph.db");
@@ -1670,7 +1731,7 @@ async fn delivered_unread_mail_stays_in_the_mailbox_after_seat_restart() {
     }
     for driver in ["omp", "pi"] {
         for transport in ["push", "poll"] {
-            let root = tempfile::tempdir().unwrap();
+            let root = st3::test_support::evidence_tempdir();
             let root = root.path();
             let seat = "agent/replay-worker";
             let mut daemon = Daemon::new(root);
@@ -1906,7 +1967,7 @@ impl ClaudeChannelFixture {
 /// Force a native activity publication to commit while the real channel's startup
 /// claim is in flight. This is a publisher/Store ordering control, not a hook eval.
 async fn delayed_channel_initialization_preserves_activity(activity: &str, legacy: bool) {
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2102,11 +2163,14 @@ async fn delayed_channel_initialization_preserves_activity(activity: &str, legac
 }
 
 // Exercise the real provider wrapper, local hook spool, channel, API and Store.
-// The provider initializes MCP but deliberately has no SessionStart/Stop hooks.
+// The provider initializes MCP but deliberately has no SessionStart/Stop hooks. The driver's 15 s
+// readiness grace is shortened through its shorten-only override: the ordering is the property.
+const HOOKLESS_GRACE_MS: u64 = 5_000;
+
 async fn channel_readiness_without_start_hook(native_activity: Option<bool>, late: bool) {
     use sha2::{Digest as _, Sha256};
     use st_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/grove/hookless-cedar";
     let incarnation = "hookless-cedar:one";
@@ -2129,6 +2193,7 @@ time.sleep(300)
         seat_command(root, &daemon.socket)
             .env("ST_AGENT", seat)
             .env("ST3_MAILBOX_TRANSPORT", "push")
+            .env("ST3_CLAUDE_READINESS_GRACE_MS", HOOKLESS_GRACE_MS.to_string())
             .args([
                 "driver",
                 "claude",
@@ -2185,7 +2250,7 @@ time.sleep(300)
     if late || native_activity.is_none() {
         wait_until(
             "hookless channel becomes ready after the grace",
-            Duration::from_secs(22),
+            Duration::from_millis(HOOKLESS_GRACE_MS + 7_000),
             || {
                 daemon
                     .store
@@ -2224,7 +2289,7 @@ time.sleep(300)
         .await;
         // Cross the entire fallback grace for an early hook; late hooks only need
         // subsequent driver ticks to demonstrate there is no recurring readiness POST.
-        tokio::time::sleep(Duration::from_secs(if late { 3 } else { 16 })).await;
+        tokio::time::sleep(Duration::from_millis(if late { 3_000 } else { HOOKLESS_GRACE_MS + 1_000 })).await;
         assert_eq!(
             daemon.store.current_harness(seat).unwrap().unwrap().state,
             state
@@ -2296,7 +2361,7 @@ async fn initialized_claude_channel_preserves_legacy_readiness_key() {
 }
 
 async fn initialized_channel_still_rejects_a_foreign_binding(replace_token: bool) {
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2366,7 +2431,7 @@ async fn claude_mcp_rejects_resumed_incarnation_mismatch_before_binding() {
         return;
     }
     use std::sync::atomic::{AtomicBool, Ordering};
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2436,7 +2501,7 @@ async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_res
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2477,34 +2542,42 @@ async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_res
         received.try_recv().is_err(),
         "offline initialization offered mail"
     );
+    let mark = daemon.store.index().unwrap();
     daemon.start_admitted_protocol().await;
     daemon.send(
         "message/quartz-offline",
         "agent/quartz",
         "OFFLINE START PROBE",
     );
-    let notice = received
-        .recv_timeout(Duration::from_secs(10))
-        .expect("the same channel did not attach after daemon startup");
+    let notice = match received.recv_timeout(Duration::from_secs(10)) {
+        Ok(notice) => notice,
+        Err(error) => panic!(
+            "the same channel did not attach after daemon startup: {error:?}{}",
+            channel_evidence(&daemon, root, mark, channel)
+        ),
+    };
     assert_eq!(notice["method"], "notifications/claude/channel");
     let envelope = notice["params"]["content"].as_str().unwrap();
     fixture.append(
         root,
         json!({"type":"user","isMeta":true,"message":{"role":"user","content":envelope}}),
     );
-    wait_until(
-        "offline-start mail has native receipts",
-        Duration::from_secs(10),
-        || {
-            daemon
-                .store
-                .latest_claim("message/quartz-offline", Some("message.read"))
-                .unwrap()
-                .is_some()
-        },
-    )
-    .await;
+    if !wait_until_for(Duration::from_secs(10), || {
+        daemon
+            .store
+            .latest_claim("message/quartz-offline", Some("message.read"))
+            .unwrap()
+            .is_some()
+    })
+    .await
+    {
+        panic!(
+            "timed out waiting until offline-start mail has native receipts{}",
+            channel_evidence(&daemon, root, mark, channel)
+        );
+    }
     // A later daemon outage preserves the initialized stdio connection and its owner.
+    let mark = daemon.store.index().unwrap();
     daemon.stop().await;
     daemon.send(
         "message/quartz-reconnected",
@@ -2516,9 +2589,13 @@ async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_res
         "the initialized Claude channel during an outage",
     );
     daemon.start_admitted_protocol().await;
-    let notice = received
-        .recv_timeout(Duration::from_secs(10))
-        .expect("the initialized channel did not reconnect");
+    let notice = match received.recv_timeout(Duration::from_secs(10)) {
+        Ok(notice) => notice,
+        Err(error) => panic!(
+            "the initialized channel did not reconnect: {error:?}{}",
+            channel_evidence(&daemon, root, mark, channel)
+        ),
+    };
     assert!(
         notice["params"]["content"]
             .as_str()
@@ -2526,18 +2603,20 @@ async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_res
             .contains("message/quartz-reconnected")
     );
     fixture.append(root, json!({"type":"user","isMeta":true,"message":{"role":"user","content":notice["params"]["content"]}}));
-    wait_until(
-        "reconnected mail has native receipts",
-        Duration::from_secs(10),
-        || {
-            daemon
-                .store
-                .latest_claim("message/quartz-reconnected", Some("message.read"))
-                .unwrap()
-                .is_some()
-        },
-    )
-    .await;
+    if !wait_until_for(Duration::from_secs(10), || {
+        daemon
+            .store
+            .latest_claim("message/quartz-reconnected", Some("message.read"))
+            .unwrap()
+            .is_some()
+    })
+    .await
+    {
+        panic!(
+            "timed out waiting until reconnected mail has native receipts{}",
+            channel_evidence(&daemon, root, mark, channel)
+        );
+    }
     for message in ["message/quartz-offline", "message/quartz-reconnected"] {
         for kind in ["message.staged", "message.delivered", "message.read"] {
             assert_eq!(
@@ -2553,12 +2632,17 @@ async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_res
         "reconnection duplicated a native offer"
     );
     drop(input);
-    wait_until(
-        "Claude EOF ends the channel",
-        Duration::from_secs(5),
-        || channel.try_wait().unwrap().is_some(),
-    )
-    .await;
+    // wait_until's poll and limit, plus the evidence: CI run 38874839876 failed here.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while channel.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting until Claude EOF ends the channel{}",
+                channel_evidence(&daemon, root, mark, channel)
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     daemon.stop().await;
 }
 
@@ -2568,7 +2652,7 @@ async fn claude_mcp_answers_during_binding_retries_and_eof_cancels_attachment() 
         return;
     }
     use std::sync::atomic::{AtomicBool, Ordering};
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2660,7 +2744,7 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
     // The second POST either succeeds, or remains pending until EOF cancels the child.
     // Exercise the actual channel loop, rather than manually calling the POST twice.
     for recover in [true, false] {
-        let root = tempfile::tempdir().unwrap();
+        let root = st3::test_support::evidence_tempdir();
         let root = root.path();
         let mut daemon = Daemon::new(root);
         declare_claude(&daemon, "agent/quartz");
@@ -2793,7 +2877,7 @@ async fn claude_idle_staged_mail_recovers_startup_binding_and_both_native_receip
         return;
     }
     for mid_turn in [false, true] {
-        let root = tempfile::tempdir().unwrap();
+        let root = st3::test_support::evidence_tempdir();
         let root = root.path();
         let mut daemon = Daemon::new(root);
         daemon.observe_running("agent/quartz", "first");
@@ -2884,7 +2968,7 @@ async fn claude_staged_mail_receipted_after_restart_is_not_injected_on_second_re
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.observe_running("agent/quartz", "first");
@@ -2955,7 +3039,7 @@ async fn claude_preboot_mail_is_held_while_live_receipts_survive_outage() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.observe_running("agent/quartz", "previous");
@@ -3039,7 +3123,7 @@ async fn claude_delivered_unread_mail_from_an_old_ledger_is_held_in_a_fresh_sess
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.observe_running("agent/quartz", "replacement");
@@ -3111,3 +3195,4 @@ async fn claude_delivered_unread_mail_from_an_old_ledger_is_held_in_a_fresh_sess
     assert!(daemon.store.claims_for("message/unread", Some("message.read")).unwrap().is_empty());
     daemon.stop().await;
 }
+mod stop_escalation;

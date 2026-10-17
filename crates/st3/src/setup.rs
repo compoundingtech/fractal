@@ -13,36 +13,10 @@ use clap::Args;
 
 mod screen;
 
-use crate::client::{Client, Endpoint};
-use crate::config::Config;
+use st3::client::{Client, Endpoint};
+use st3::config::Config;
 
-type Sink = Box<dyn FnMut(String)>;
-
-thread_local! {
-    /// Where this thread's setup output goes instead of the terminal, while the setup screen
-    /// owns it. The caller prints what was said once the screen has gone.
-    static SINK: std::cell::RefCell<Option<Sink>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Say one line to the person: on the terminal, or into the sink when one is set.
-pub(crate) fn said(line: impl Into<String>) {
-    let line = line.into();
-    let unsent = SINK.with(|sink| match sink.borrow_mut().as_mut() {
-        Some(send) => {
-            send(line);
-            None
-        }
-        None => Some(line),
-    });
-    if let Some(line) = unsent {
-        println!("{line}");
-    }
-}
-
-/// Set (or clear) this thread's sink; returns the one it replaced.
-pub(crate) fn capture(sink: Option<Sink>) -> Option<Sink> {
-    SINK.with(|current| std::mem::replace(&mut *current.borrow_mut(), sink))
-}
+pub(crate) use crate::onboarding::{capture, said};
 
 macro_rules! say {
     ($($arg:tt)*) => { said(format!($($arg)*)) };
@@ -77,16 +51,19 @@ pub struct SetupArgs {
     /// Install the user-owned Claude channel (default: true; never installs policy).
     #[arg(long, action = clap::ArgAction::Set)]
     pub claude_channel: Option<bool>,
-    /// Start onboarding again, including a stopped built-in expert.
+    /// Start onboarding again, including a stopped built-in Smalltalk Assistant.
     #[arg(long)]
     pub onboarding: bool,
-    /// Start the built-in expert after setup (default: ask, with --yes: yes).
+    /// Start the built-in Smalltalk Assistant after setup (default: ask, with --yes: yes).
     #[arg(long, action = clap::ArgAction::Set)]
-    pub expert: Option<bool>,
+    pub assistant: Option<bool>,
 }
 
 pub struct PreparedSetup {
+    // Only the binary calls setup now, and it reads `initial_subject` alone; these were public library fields.
+    #[allow(dead_code)]
     pub config: Config,
+    #[allow(dead_code)]
     pub harness: Option<String>,
     pub initial_subject: Option<String>,
 }
@@ -117,7 +94,7 @@ pub fn prepare_plain_ui() -> Result<Option<String>> {
         .build()?
         .block_on(async {
             let mut config = Config::load_with_fleet(None)?;
-            crate::node_identity::resolve(&mut config)?;
+            st3::node_identity::resolve(&mut config)?;
             if config.person.is_none() {
                 return Ok(run(SetupArgs::default()).await?.initial_subject);
             } else if !daemon_ready(&config).await
@@ -154,11 +131,12 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     } else {
         Config {
             access_mode: Some(st_drivers::access::AccessMode::Auto),
+            seat_priority: None,
             ..Config::default()
         }
     };
     config.apply_fleet_file()?;
-    crate::node_identity::resolve(&mut config)?;
+    st3::node_identity::resolve(&mut config)?;
     let first_run = config.person.is_none();
     let previous_node = config.node.clone();
     let existing_store = config.state_dir.join("node-identity.json").exists()
@@ -233,6 +211,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
             true,
         )?
     };
+    st3::service::preflight(service && start)?;
     // Validate every answer before writing, including the persisted machine identity.
     merge_config(&path, &config)?;
     say!("Saved {}", path.display());
@@ -243,7 +222,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
         "Work folder: {}. Agents work in folders inside it, so none of them has to look through your home folder.",
         work_root.display()
     );
-    if let Some(kib) = crate::read_cache::override_kib() {
+    if let Some(kib) = st3::read_cache::override_kib() {
         say!("Read cache: {kib} KiB per reader.");
     }
     let current_exe = std::env::current_exe()?;
@@ -262,14 +241,20 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     let initial_subject = if let Some(harness) = &harness {
         if !first_run && !args.onboarding {
             println!(
-                "This setup already existed, so the built-in expert is not started on its own. Run st setup --onboarding to begin."
+                "This setup already existed, so the built-in Smalltalk Assistant is not started on its own. Run st setup --onboarding to begin."
             );
             None
         } else if daemon_ready(&config).await {
-            if confirm_expert(&config, harness, &args)? {
-                let started = crate::onboarding::start(&config, harness, args.onboarding).await?;
+            if confirm_assistant(&config, harness, &args)? {
+                let started = crate::onboarding::start(
+                    &config,
+                    harness,
+                    std::slice::from_ref(harness),
+                    args.onboarding,
+                )
+                .await?;
                 if started.is_some() {
-                    print_expert_summary(&config, harness)?;
+                    print_assistant_summary(&config, harness)?;
                 }
                 started
             } else {
@@ -315,15 +300,15 @@ async fn prepare_harness(
             Ok(found) => found,
             // A running daemon from before this route cannot answer; read the login PATH here.
             Err(error)
-                if crate::client::is_missing_route(&error) || crate::client::is_not_found(&error) =>
+                if st3::client::is_missing_route(&error) || st3::client::is_not_found(&error) =>
             {
                 println!("The running daemon is older than this st; checking the login PATH from here.");
-                crate::environment::available_harnesses()?
+                st3::environment::available_harnesses()?
             }
             Err(error) => return Err(error),
         }
     } else {
-        crate::environment::available_harnesses()?
+        st3::environment::available_harnesses()?
     };
     if let Some(requested) = &args.harness {
         anyhow::ensure!(
@@ -410,7 +395,7 @@ async fn prepare_harness(
 /// Make sure the st Claude channel is installed for this account; the error is the install
 /// command's own stderr, whole.
 pub(crate) fn ensure_claude_channel(executable: &Path) -> std::result::Result<(), String> {
-    let environment = crate::environment::snapshot().map_err(|error| format!("{error:#}"))?;
+    let environment = st3::environment::snapshot().map_err(|error| format!("{error:#}"))?;
     let status = Command::new(executable)
         .args(["claude-channel", "status"])
         .envs(&environment)
@@ -443,20 +428,20 @@ fn fallback_harness(found: &[String]) -> Option<String> {
     next
 }
 
-/// Ask before the built-in expert starts: it is an agent running on the person's own
+/// Ask before the built-in Smalltalk Assistant starts: it is an agent running on the person's own
 /// provider account. An explicit `--onboarding` already names the request.
-fn confirm_expert(config: &Config, harness: &str, args: &SetupArgs) -> Result<bool> {
+fn confirm_assistant(config: &Config, harness: &str, args: &SetupArgs) -> Result<bool> {
     if args.onboarding {
         return Ok(true);
     }
     println!(
-        "The built-in expert is an agent that runs on your own {harness} account, so it uses your {harness} usage and quota. It runs in {} access mode.",
+        "The built-in Smalltalk Assistant is an agent that runs on your own {harness} account, so it uses your {harness} usage and quota. It runs in {} access mode.",
         config.active_access_mode().as_str()
     );
     let start = ask_bool(
-        "Start the built-in expert now?",
-        "--expert",
-        args.expert,
+        "Start the built-in Smalltalk Assistant now?",
+        "--assistant",
+        args.assistant,
         args.yes,
         true,
     )?;
@@ -466,14 +451,14 @@ fn confirm_expert(config: &Config, harness: &str, args: &SetupArgs) -> Result<bo
     Ok(start)
 }
 
-/// Name what starting the expert created and how to stop it.
-fn print_expert_summary(config: &Config, harness: &str) -> Result<()> {
+/// Name what starting the Assistant created and how to stop it.
+fn print_assistant_summary(config: &Config, harness: &str) -> Result<()> {
     let person = config
         .person
         .as_deref()
         .context("setup needs a person")?;
     println!(
-        "Created: the agent agent/st/expert ({harness}, working in {}), the guide document doc/st/guide, and a run of mission/st/onboarding.\nStop it with: st agents stop agent/st/expert --as {person}",
+        "Created: the agent agent/st/assistant ({harness}, working in {}), the guide document doc/st/guide, and a run of mission/st/onboarding.\nStop it with: st agents stop agent/st/assistant --as {person}",
         crate::onboarding::workspace(config)?.display()
     );
     Ok(())
@@ -686,7 +671,7 @@ fn find_pty(executable: &Path) -> Result<PathBuf> {
     if sibling.is_file() {
         return Ok(sibling);
     }
-    let environment = crate::environment::snapshot()?;
+    let environment = st3::environment::snapshot()?;
     st_runtime::resolve_executable("pty", &environment)
         .context("pty is missing; unpack the complete st archive (st3, st and pty) before setup")
 }
@@ -694,10 +679,10 @@ fn find_pty(executable: &Path) -> Result<PathBuf> {
 fn install_binaries(executable: &Path) -> Result<PathBuf> {
     // An instance always gets its own copies, below its own directory, so removing the
     // directory removes them and the default install is never the one that runs.
-    let instance = crate::instance::current();
+    let instance = st3::instance::current();
     // Keep managed installations (including the signed macOS app bundle) in place.
     if instance.is_none()
-        && let Ok(environment) = crate::environment::snapshot()
+        && let Ok(environment) = st3::environment::snapshot()
         && st_runtime::resolve_executable("st", &environment)
             .ok()
             .is_some_and(|st| same_file(&st, executable))
@@ -759,7 +744,9 @@ fn record_installed_binaries(bin: &Path) -> Result<()> {
     let manifest = serde_json::json!({
         "version": 1,
         "source": "setup",
-        "files": [bin.join("st3"), bin.join("st"), bin.join("pty")],
+        "files": crate::fractal::installed_binaries(vec![
+            bin.join("st3"), bin.join("st"), bin.join("pty"),
+        ]),
     });
     let mut pending = tempfile::NamedTempFile::new_in(&data)?;
     pending.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
@@ -773,7 +760,7 @@ fn record_installed_binaries(bin: &Path) -> Result<()> {
 
 fn check_login_path(executable: &Path) {
     // An instance is run by name from its own directory; nothing belongs on the login PATH.
-    if let Some(instance) = crate::instance::current() {
+    if let Some(instance) = st3::instance::current() {
         println!(
             "This instance's commands are in {}. Run them with: {} --instance {}",
             instance.bin_dir().display(),
@@ -782,7 +769,7 @@ fn check_login_path(executable: &Path) {
         );
         return;
     }
-    match crate::environment::snapshot() {
+    match st3::environment::snapshot() {
         Ok(environment) => {
             if st_runtime::resolve_executable("st", &environment)
                 .ok()
@@ -815,7 +802,7 @@ fn try_linger() {
     let user = std::env::var("USER").ok().filter(|user| !user.is_empty());
     // Never allow a polkit/password conversation to open in setup.
     // Lingering belongs to the real user session, never to an instance's environment.
-    let mut command = crate::service::host_command("loginctl");
+    let mut command = st3::service::host_command("loginctl");
     command.args(["--no-ask-password", "enable-linger"]);
     if let Some(user) = &user {
         command.arg(user);
@@ -843,6 +830,7 @@ async fn start_daemon(
     service: bool,
     linger: bool,
 ) -> Result<()> {
+    st3::service::preflight(service)?;
     if daemon_ready(config).await {
         return Ok(());
     }
@@ -898,7 +886,7 @@ async fn start_daemon(
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
-    if let Some(kib) = crate::read_cache::override_kib() {
+    if let Some(kib) = st3::read_cache::override_kib() {
         command.env("SMALLCLAIMS_READ_CACHE_KIB", kib.to_string());
     }
     // SAFETY: setsid is async-signal-safe; no allocation or environment changes after fork.

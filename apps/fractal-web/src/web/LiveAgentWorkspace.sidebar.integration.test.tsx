@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { Agent, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@smalltalk/st3-client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import * as Option from 'effect/Option'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
@@ -12,7 +13,7 @@ import { initialFeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import { observed, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 
-vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const gateway = 'gateway.example.invalid'
 const agent = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })
@@ -67,7 +68,7 @@ const mount = async (width: number) => {
 }
 const sidebar = () => host.querySelector('aside[aria-label="Agents"]')!
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
-const footerStatus = () => sidebar().querySelector('footer [role="status"]')!
+const band = () => host.querySelector('[data-connection-state]')
 
 // Both the real data derivation and the kit's SidebarAgentRow DOM participate.
 describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
@@ -93,39 +94,104 @@ describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
     expect(roster().textContent).toContain(agent.name)
     expect(roster().textContent).toContain(other.name)
   })
-  it('shows connection wording instead of the raw gateway host while live or connecting', async () => {
+  it('keeps the connection out of the sidebar and shows a band only once the connection is lost', async () => {
     registry.set(agents, observed({ value: [agent] }))
     await mount(width)
     expect(roster().querySelectorAll('[data-testid="taste-agent-row"]')).toHaveLength(1)
     expect(roster().textContent).toContain(agent.name)
-    expect(footerStatus().textContent).not.toContain(gateway)
-    expect(footerStatus().textContent).toBe('Connected')
+    expect(band()).toBeNull()
+    expect(sidebar().querySelector('footer [role="status"]')).toBeNull()
     await act(async () => registry.set(gatewaySync, { status: { _tag: 'Connecting', attempt: 1, since: 0 }, observedAt: 0 }))
-    expect(footerStatus().textContent).toBe('Connecting · 5s')
-    expect(sidebar().textContent).not.toContain(gateway)
+    expect(band()).toBeNull()
+    await act(async () => registry.set(gatewaySync, { status: { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 2, nextAt: 7000, issue: 'socket closed' } }, observedAt: 0 }))
+    expect(band()?.getAttribute('data-connection-state')).toBe('reconnecting')
+    expect(sidebar().contains(band())).toBe(false)
+    expect(host.textContent).not.toContain(gateway)
   })
 
   it('removes the waiting notice and skeleton as soon as roster rows are published', async () => {
     await mount(width)
-    expect(sidebar().textContent).toContain('Waiting for the agent roster.')
+    expect(sidebar().querySelector('[data-system-state="loading"]')?.textContent).toBe('Loading agents')
     expect(roster().querySelectorAll('[data-testid="taste-agent-row"]')).toHaveLength(0)
     expect(roster().querySelector('[data-wf-roster-skeleton]')).not.toBeNull()
     await act(async () => registry.set(agents, { _tag: 'Observed', value: [agent], freshness: 'stale', coverage: { _tag: 'Partial' } }))
     expect(roster().querySelectorAll('[data-testid="taste-agent-row"]')).toHaveLength(1)
     expect(roster().textContent).toContain(agent.name)
-    expect(sidebar().textContent).not.toContain('Waiting for the agent roster.')
+    expect(sidebar().querySelector('[data-system-state="loading"]')).toBeNull()
     for (const node of host.querySelectorAll('[role="status"], [aria-live], [aria-label], [aria-description]')) {
-      expect(node.textContent).not.toContain('Waiting for the agent roster.')
-      expect(node.getAttribute('aria-label') ?? '').not.toContain('Waiting for the agent roster.')
-      expect(node.getAttribute('aria-description') ?? '').not.toContain('Waiting for the agent roster.')
+      expect(node.textContent).not.toContain('Loading agents')
+      expect(node.getAttribute('aria-label') ?? '').not.toContain('Loading agents')
+      expect(node.getAttribute('aria-description') ?? '').not.toContain('Loading agents')
     }
     expect(roster().querySelector('[data-wf-roster-skeleton]')).toBeNull()
-    expect(sidebar().textContent).toContain('Showing a partial roster · live updates pending')
+    expect(sidebar().querySelector('[data-system-state="stale"]')?.textContent).toBe('Partial roster')
     await act(async () => registry.set(agents, observed({ value: [agent] })))
-    expect(sidebar().textContent).not.toContain('Waiting for the agent roster.')
-    expect(sidebar().textContent).not.toContain('live updates pending')
+    expect(sidebar().querySelector('[data-system-state]')).toBeNull()
     await act(async () => registry.set(agents, observed({ value: [] })))
     expect(roster().querySelectorAll('[data-testid="taste-agent-row"]')).toHaveLength(0)
-    expect(sidebar().textContent).not.toContain('Waiting for the agent roster.')
+    expect(sidebar().querySelector('[data-system-state]')).toBeNull()
+  })
+})
+
+describe('shipped live sidebar machine query', () => {
+  it('applies typed hosts to the real roster and preserves substring text and stripped highlights', async () => {
+    const candidates: readonly Agent[] = [
+      { ...agent, id: 'agent/compiler', name: 'Compiler Alpha', host_id: Option.some('host/synthetic-138/1') },
+      { ...agent, id: 'agent/sidebar', name: 'Sidebar Beta', host_id: Option.some('host/SYNTHETIC-138/2') },
+      // Text looks like a matching host but must not satisfy a machine facet.
+      { ...agent, id: 'agent/decoy', name: 'Compiler synthetic-138/1 decoy', host_id: Option.some('host/laptop24') },
+    ]
+    registry.set(agents, observed({ value: candidates }))
+    await mount(1440)
+    const input = sidebar().querySelector<HTMLInputElement>('input')!
+    expect(input.getAttribute('aria-description')).toMatch(/machine:.*host:/)
+    const search = async (value: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+    }
+    const names = () => [...roster().querySelectorAll('[data-testid="taste-agent-row"]')].map(row => row.textContent)
+    expect(names()).toHaveLength(3)
+    for (const [query, expected] of [
+      ['machine:synthetic-138/1', ['Compiler Alpha']],
+      ['machine:synthetic-138/1,synthetic-138/2', ['Compiler Alpha', 'Sidebar Beta']],
+      ['HOST:SYNTHETIC-138', ['Compiler Alpha', 'Sidebar Beta']],
+      ['machine:synthetic-138 host:synthetic-138/1', ['Compiler Alpha']],
+      ['machine:synthetic-138/1 host:synthetic-138/2', []],
+      ['machine:synthetic-138/9', []],
+      ['machine: host:,,', ['Compiler Alpha', 'Sidebar Beta', 'Compiler synthetic-138/1 decoy']],
+      ['Alpha machine:SYNTHETIC-138', ['Compiler Alpha']],
+      ['cmp machine:synthetic-138', []],
+      ['synthetic-138/1', ['Compiler Alpha', 'Compiler synthetic-138/1 decoy']],
+      ['machine:host/synthetic-138/1', []],
+    ] as const) {
+      await search(query)
+      expect(names()).toHaveLength(expected.length)
+      expected.forEach(name => expect(roster().textContent).toContain(name))
+    }
+    await search('machine:synthetic-138/1')
+    expect(roster().querySelectorAll('mark')).toHaveLength(0)
+    await search('Alpha machine:synthetic-138/1')
+    expect([...roster().querySelectorAll('mark')].map(mark => mark.textContent).join('')).toContain('Alpha')
+    expect([...roster().querySelectorAll('mark')].some(mark => mark.textContent?.includes('machine:'))).toBe(false)
+  })
+})
+
+describe('workspace overlays', () => {
+  // Outside the themed root only the legacy document palette applies (the olive/teal menus).
+  it('portals a row actions menu into the themed workspace root, not document.body', async () => {
+    // React Aria's menu selection escapes keys with CSS.escape, which jsdom does not provide.
+    if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/[^\w-]/g, (char) => `\\${char}`) })
+    registry.set(agents, observed({ value: [agent] }))
+    await mount(1440)
+    const trigger = roster().querySelector<HTMLElement>('[data-agent-menu]')!
+    await act(async () => {
+      trigger.focus()
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    })
+    const menu = document.querySelector('[role="menu"]')
+    expect(menu).not.toBeNull()
+    expect(host.querySelector('[data-testid="live-agent-workspace"]')!.contains(menu)).toBe(true)
   })
 })

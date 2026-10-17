@@ -40,8 +40,25 @@ production_build() (
   pnpm --dir apps/fractal-web exec vite build --config vite.config.ts --configLoader runner --outDir "$out_dir"
 )
 
+
+kit_storybook() (
+  # The module graph proves every bundled repository file is a declared kit input.
+  local stats_dir
+  stats_dir=$(mktemp -d "${TMPDIR:-/tmp}/fractal-kit-stats.XXXXXX")
+  trap 'rm -rf "$stats_dir"' EXIT
+  pnpm --filter @smalltalk/fractal-ui build-storybook --stats-json "$stats_dir"
+  python3 scripts/ci-fractal-web-kit-graph "$stats_dir/preview-stats.json"
+)
+
+kit_plays() (
+  local receipt_dir
+  receipt_dir=$(mktemp -d "${TMPDIR:-/tmp}/fractal-kit-plays.XXXXXX")
+  trap 'rm -rf "$receipt_dir"' EXIT
+  node packages/fractal-ui/scripts/kit-play-gate.mjs packages/fractal-ui/storybook-static "$receipt_dir"
+)
 lane "Toolchain and Buck root" toolchain
 lane "Frozen install" pnpm install --frozen-lockfile
+lane "Changelog registry derives from its directory" bash -c 'node apps/fractal-web/scripts/changelog-registry.mjs && node apps/fractal-web/scripts/changelog-registry.mjs --check'
 lane "Dependency licenses" python3 scripts/ci-fractal-web-licenses --check
 lane "Buck typecheck" buck2 build //:typecheck
 lane "Scenario typecheck" pnpm --filter @smalltalk/st3-scenarios typecheck
@@ -61,4 +78,19 @@ lane "App unit tests" pnpm --filter fractal-web test
 lane "SDK unit tests" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.config.ts
 lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.perf.config.ts
 lane "UI kit typecheck" pnpm --filter @smalltalk/fractal-ui typecheck
-lane "UI kit Storybook" pnpm --filter @smalltalk/fractal-ui build-storybook
+case "${KIT_INPUTS:-true}" in
+  true)
+    lane "UI kit play index contracts" node --test packages/fractal-ui/scripts/kit-play-index.node-test.mjs
+    lane "UI kit context isolation controls" node packages/fractal-ui/scripts/kit-play-isolation.browser-test.mjs
+    lane "UI kit gate set, a11y and budget controls" node --test packages/fractal-ui/scripts/kit-play-gate.browser-test.mjs
+    lane "UI kit Storybook and module graph" kit_storybook
+    lane "UI kit strict plays (440/1440 × dark/light)" kit_plays
+    ;;
+  false)
+    printf 'UI kit plays skipped: no kit inputs changed (%s..%s)\n' "${BASE_SHA:?}" "${HEAD_SHA:?}" | tee -a "$summary"
+    ;;
+  *)
+    echo "::error::KIT_INPUTS must be true or false" >&2
+    exit 1
+    ;;
+esac

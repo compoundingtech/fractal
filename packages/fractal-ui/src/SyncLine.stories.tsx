@@ -66,16 +66,20 @@ const subscriptionLimitPlay: NonNullable<StoryObj<SyncArgs>['play']> = async ({ 
 const meta = {
   title: 'Fractal UI/Sync Line',
   render: StoryRender,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'Portable SyncStatus tagged union with epoch-ms timestamps and the syncLine vocabulary. Every status/stage, derived stalled observations, both themes, and fixed-height existing header/status slots. Last-known content remains present. Local and Server subscription-limit failures share plain vocabulary; only reported caps appear, including zero. HTTP Usage reads exclude subscription-limit failures and their actions. Dedicated dark/light stories cover those exclusions and the full transition sequence. No byte-progress or invented stage is shown.' } } },
+  parameters: { layout: 'fullscreen', docs: { description: { component: 'Portable SyncStatus tagged union with epoch-ms timestamps and the syncLine vocabulary. Every status/stage, derived stalled observations, both themes, and fixed-height existing header/status slots. The all-observations matrix stacks theme columns on narrow viewports so each row and its actions remain on their own theme surface. Last-known content remains present. Local and Server subscription-limit failures share plain vocabulary; only reported caps appear, including zero. HTTP Usage reads exclude subscription-limit failures and their actions. Dedicated dark/light stories cover those exclusions and the full transition sequence. No byte-progress or invented stage is shown.' } } },
   args: { scheme: 'dark', sequence: 0 }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, sequence: { control: { type: 'number', min: 0, max: syncObservations.length - 1 } } },
 } satisfies Meta<SyncArgs>
 export default meta
 type Story = StoryObj<SyncArgs>
-export const AllStates: Story = { render: AllStatesStory, play: async ({ canvasElement }) => {
+export const AllStates: Story = { tags: ['critical'], render: AllStatesStory, play: async ({ canvasElement }) => {
   const lines = canvasElement.querySelectorAll<HTMLElement>('[data-testid="sync-line"]')
   if (lines.length === 0) throw new Error('Expected the full synchronization state matrix')
   for (const line of lines) {
     if (/\bst\b|\bobservation\b/i.test(line.innerText)) throw new Error(`Synchronization copy is not user-facing: ${line.innerText}`)
+    const row = line.closest<HTMLElement>('[data-testid="sync-observation"]')!
+    const rowBounds = row.getBoundingClientRect()
+    const lineBounds = line.getBoundingClientRect()
+    if (lineBounds.width <= 0 || lineBounds.left < rowBounds.left || lineBounds.right > rowBounds.right + 1) throw new Error('Each sync line must fit inside its observation row and theme surface')
   }
 } }
 export const UnknownReason: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Stale · Unknown') } }
@@ -86,9 +90,9 @@ export const LocalFailureZeroCap: Story = { args: { sequence: syncObservations.f
 export const UnknownFailure: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Unknown') } }
 export const ServerFailure: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed') } }
 export const ServerFailureSubscriptionLimit: Story = { args: { sequence: syncObservations.findIndex(observation => observation.id === 'Failed · Server · subscription limit') } }
-export const SubscriptionLimitsDark: Story = { render: SubscriptionLimitsStory, args: { scheme: 'dark' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
-export const SubscriptionLimitsLight: Story = { render: SubscriptionLimitsStory, args: { scheme: 'light' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
-export const TransitionSequence: Story = {
+export const SubscriptionLimitsDark: Story = { tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'dark' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
+export const SubscriptionLimitsLight: Story = { tags: ['critical'], render: SubscriptionLimitsStory, args: { scheme: 'light' }, argTypes: { sequence: { control: false } }, play: subscriptionLimitPlay }
+export const TransitionSequence: Story = { tags: ['critical'],
   render: StoryRender,
   play: async ({ canvasElement }) => {
     const next = canvasElement.querySelector<HTMLButtonElement>('button')!
@@ -146,11 +150,11 @@ export const TransitionSequence: Story = {
     } finally { observer.disconnect() }
   },
 }
-export const TransitionSequenceLight: Story = { args: { scheme: 'light' }, play: TransitionSequence.play }
+export const TransitionSequenceLight: Story = { tags: ['critical'], args: { scheme: 'light' }, play: TransitionSequence.play }
 const styles = stylex.create({
   root: { height: '100vh', overflow: 'auto', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: s.md, padding: s.md, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading }, allRoot: { height: '100vh', overflow: 'auto', boxSizing: 'border-box', padding: s.md, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading }, title: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading }, heading: { display: 'flex', alignItems: 'center', gap: s.lg, minHeight: g.band, flexShrink: 0 },
   stateName: { width: g.tooltipMax, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   surface: { borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, minWidth: 0, flexShrink: 0 }, band: { height: g.band, display: 'flex', alignItems: 'center', gap: s.lg, paddingInline: s.lg, boxSizing: 'border-box', minWidth: 0 }, surfaceTitle: { width: g.statusWord, flexShrink: 0, textTransform: 'capitalize' }, slot: { flex: '1 1 0', minWidth: 0 }, retained: { height: g.footer, display: 'flex', alignItems: 'center', paddingInline: s.lg, color: ink.fgMuted, backgroundColor: surface.washSubtle }, statusBar: { height: g.footer, display: 'flex', alignItems: 'center', paddingInline: s.lg, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border, flexShrink: 0 },
-  button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.controlFill, color: ink.fg, borderRadius: r.sm, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, schemes: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: s.md, marginTop: s.md }, themeColumn: { minWidth: 0, backgroundColor: surface.canvas, color: ink.fg, padding: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm }, observation: { height: g.controlLg, display: 'flex', alignItems: 'center', gap: s.md, minWidth: 0 },
+  button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.controlFill, color: ink.fg, borderRadius: r.sm, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, schemes: { display: 'grid', gridTemplateColumns: { default: 'minmax(0, 1fr)', '@media (min-width: 48rem)': 'repeat(2, minmax(0, 1fr))' }, gap: s.md, marginTop: s.md }, themeColumn: { minWidth: 0, backgroundColor: surface.canvas, color: ink.fg, padding: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm }, observation: { height: g.controlLg, display: 'flex', alignItems: 'center', gap: s.md, minWidth: 0 },
   stateLabel: { width: g.fileMax, flexShrink: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' },
 })

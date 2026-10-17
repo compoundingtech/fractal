@@ -159,7 +159,7 @@ impl ExecRuntime {
             }
         };
         // Builds and tests run below the live path; see `crate::priority`.
-        let (program, arguments) = match crate::work_prefix().split_first() {
+        let (program, arguments) = match crate::work_prefix(env).split_first() {
             Some((prefix, prefix_arguments)) => (
                 OsString::from(prefix),
                 prefix_arguments
@@ -176,11 +176,10 @@ impl ExecRuntime {
             .iter()
             .map(OsString::as_os_str)
             .collect::<Vec<_>>();
-        let mut command = crate::wrap_isolated(&unit, program.as_os_str(), &argument_refs);
+        let mut command =
+            crate::isolate::wrap_in(&unit, program.as_os_str(), &argument_refs, Some(env));
         command
             .current_dir(cwd)
-            .env_clear()
-            .envs(env)
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log);
@@ -988,5 +987,47 @@ mod tests {
         runtime.end_leftovers("work").unwrap();
 
         assert_gone_soon(orphan);
+    }
+
+    /// What an exec's grandchild reports about its own priority: `sh -c nice` run by `sh`, so the
+    /// value is the one a build the seat starts would inherit.
+    #[cfg(target_os = "linux")]
+    fn inherited_nice(id: &str, priority: Option<&str>) -> String {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let mut environment = scope_environment();
+        if let Some(priority) = priority {
+            environment.insert(crate::PRIORITY_ENV.into(), priority.into());
+        }
+        runtime
+            .spawn(
+                id,
+                &crate::Launch::Shell("sh -c nice".into()),
+                root.path(),
+                &environment,
+            )
+            .unwrap();
+        wait_for_exit(&runtime, id);
+        runtime
+            .read_log(id)
+            .unwrap()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exec_starts_below_the_daemon_unless_its_seat_asks_for_normal() {
+        let base = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        assert_eq!(
+            inherited_nice("default", None),
+            (base + 10).min(19).to_string()
+        );
+        assert_eq!(
+            inherited_nice("explicit", Some("background")),
+            (base + 10).min(19).to_string()
+        );
+        assert_eq!(inherited_nice("normal", Some("normal")), base.to_string());
     }
 }

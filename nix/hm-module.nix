@@ -21,7 +21,9 @@ let
         postBuild = ''
           rm "$out/bin/st3" "$out/bin/pty" "$out/bin/st"
           cp ${cfg.package}/bin/st3 "$out/bin/st3"
+          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
           ln -s st3 "$out/bin/st"
+          # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
           ln -s ${cfg.ptyPackage}/bin/pty "$out/bin/pty"
         '';
       };
@@ -58,6 +60,7 @@ let
   applyCommands =
     map (file: [ "apply" "${file}" "--no-gate-check" "--as" cfg.person ]) cfg.declarations.seats
     ++ map (file: [ "apply" "${file}" "--as" cfg.person ]) cfg.declarations.missions;
+  # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk-apply.
   applyScript = pkgs.writeShellScript "smalltalk-apply" (
     ''set -eu
 ''
@@ -71,6 +74,11 @@ let
   hasDeclarations = applyCommands != [ ];
 in
 {
+  options.programs.smalltalk.fractalBinary.enable = mkEnableOption ''
+    the opt-in fractal alias in the Home Manager-owned Smalltalk stable bin directory.
+    Requires services.smalltalk.enable; ignored when services.smalltalk.binary.path is set
+  '';
+
   options.services.smalltalk = {
     enable = mkEnableOption "the smalltalk user daemon";
     package = mkOption {
@@ -98,6 +106,11 @@ in
       type = types.nullOr (types.enum [ "auto" "bypass" ]);
       default = null;
       description = "Managed harness access mode. Null preserves legacy bypass; select auto for new installations.";
+    };
+    seatPriority = mkOption {
+      type = types.nullOr (types.enum [ "background" "normal" ]);
+      default = null;
+      description = "How seats rank against the daemon for CPU and IO. Null means background; normal gives seats the daemon's priority.";
     };
     node = mkOption { type = types.nullOr types.str; default = null; description = "Daemon node name; null uses the daemon default."; };
     stateDir = mkOption {
@@ -172,19 +185,37 @@ in
               ${pkgs.coreutils}/bin/chmod 755 "$temporary"
               ${pkgs.coreutils}/bin/mv -f "$temporary" "$target"
             fi
+            # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
             ${pkgs.coreutils}/bin/ln -sfn st3 "$binDir/st"
+            ${if config.programs.smalltalk.fractalBinary.enable then ''
+              if [[ -L "$binDir/fractal" ]] && [[ "$(${pkgs.coreutils}/bin/readlink "$binDir/fractal")" == st3 ]]; then
+                : # Already points at the stable executable.
+              elif [[ ! -e "$binDir/fractal" && ! -L "$binDir/fractal" ]]; then
+                ${pkgs.coreutils}/bin/ln -s st3 "$binDir/fractal" ||
+                  echo "Could not create $binDir/fractal; kept the existing path. Smalltalk remains available as st." >&2
+              else
+                echo "Not replacing $binDir/fractal: it is not a Smalltalk alias. Move it yourself to opt in; use st meanwhile." >&2
+              fi
+            '' else ''
+              if [[ -L "$binDir/fractal" ]] && [[ "$(${pkgs.coreutils}/bin/readlink "$binDir/fractal")" == st3 ]]; then
+                ${pkgs.coreutils}/bin/rm "$binDir/fractal"
+              fi
+            ''}
+            # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
           )
         fi
       '');
     xdg.configFile."st3/config.toml".text =
       "person = ${builtins.toJSON cfg.person}\n"
       + lib.optionalString (cfg.accessMode != null) "access_mode = ${builtins.toJSON cfg.accessMode}\n"
+      + lib.optionalString (cfg.seatPriority != null) "seat_priority = ${builtins.toJSON cfg.seatPriority}\n"
       + lib.optionalString (cfg.node != null) "node = ${builtins.toJSON cfg.node}\n"
       + "state_dir = ${builtins.toJSON cfg.stateDir}\n"
       + lib.optionalString (cfg.ptyRoot != null) "pty_root = ${builtins.toJSON cfg.ptyRoot}\n"
       + lib.optionalString (cfg.socket != null) "socket = ${builtins.toJSON cfg.socket}\n"
       + lib.optionalString (cfg.clientGatewaySocket != null) "client_gateway_socket = ${builtins.toJSON cfg.clientGatewaySocket}\n";
 
+    # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk.service.
     systemd.user.services = mkIf pkgs.stdenv.hostPlatform.isLinux ({
       smalltalk = {
         Unit = {
@@ -213,6 +244,7 @@ in
         Install.WantedBy = [ "default.target" ];
       };
     } // lib.optionalAttrs (cfg.declarationsApply.enable && hasDeclarations) {
+      # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk-apply.
       smalltalk-apply = {
         Unit = {
           Description = "Apply smalltalk KDL declarations";
@@ -235,6 +267,7 @@ in
         $DRY_RUN_CMD mkdir -p ${lib.escapeShellArg "${cfg.stateDir}/logs"}
       ''
     );
+    # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain Home Manager launchd labels.
     launchd.agents = mkIf pkgs.stdenv.hostPlatform.isDarwin ({
       smalltalk = {
         enable = true;
@@ -253,6 +286,7 @@ in
         };
       };
     } // lib.optionalAttrs (cfg.declarationsApply.enable && hasDeclarations) {
+      # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain apply agent label.
       smalltalk-apply = {
         enable = true;
         config = {

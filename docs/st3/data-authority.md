@@ -1,7 +1,7 @@
 # st data authority
 
 This document classifies the claim store's SQLite tables. `every_persistent_table_has_a_projection_scope`
-(`crates/st3/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
+(`crates/st3-store/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
 are listed in `SHARED_TABLES` there and in the production projection digests. Replicated storage tables
 have their own logical authority digests; local physical fields and caches are outside those identities.
 
@@ -81,6 +81,15 @@ publishes a backlog. Admission binds the Unix peer to its seat and checks the pu
 inside the daemon's writer transaction. Source runtime, spool sequence, claim kind and usage
 semantics identify an exact retry; changed input is rejected. Graph-derived claim fields are
 persisted in the spool before the first HTTP attempt so retries preserve their original attribution.
+
+Authority reads reuse up to 128 harness-spool SQLite connections across the process, with
+at most 64 per thread. At either limit a thread evicts its least recently used connection;
+at the global limit a thread with no cached connection reads without caching. Atomic slot
+reservations bound retained connections without a global query lock, and closing a connection
+releases its slot, including on thread exit. Only connections are retained: each check opens
+a fresh read transaction and releases it before returning, so subsequent checks observe
+committed producer writes without retaining a WAL snapshot. Reads still validate the spool
+format and provider/runtime binding; replacing the spool inode invalidates its connection.
 
 The outbox is transport recovery state, not graph authority. The daemon retains each admitted
 observation under its existing local/latest/durable policy. Producer snapshots remain local
@@ -207,6 +216,7 @@ order from the same admitted claims.
 | `local_resource_projection_pending` | Local projection work queue | Resource subjects whose admitted observations changed in the current transaction; flushed before commit |
 | `local_seat_accounts` | Local operational fact | The account chosen for each pooled seat on this node; retained across restarts, never replicated |
 | `local_subscription_mission_deferrals` | Local | Local reconciler capacity backoff/retry scheduling. |
+| `local_stop_deferral_backfill` | Local cache | Trigger-maintained claim ids, subjects and recovered-failure references of retained-stop diagnostics, faults and recoveries, plus the ceiling and completion of the one-time copy of older claims. Rebuildable from claims; never replicated; excluded from shared projection digests. |
 | `local_usage_provenance` | Local | Pricing contributions for the local spend slots. |
 | `local_usage_responses` | Local | Counted provider response IDs and times; deduplicates replay across harness incarnations. |
 | `local_usage_spend` | Local | Cumulative token and cost buckets; retained across observation-log trimming. |
@@ -241,6 +251,7 @@ order from the same admitted claims.
 | `revision_proposals` | Shared projection | Shared candidate/source generation, reviewers/approvals, cutover/compatibility, status/preview/successor and durable timestamps. |
 | `run_generations` | Shared projection | Shared generation identity, revision, predecessor, actor/reason, status and durable timestamps. |
 | `step_runs` | Shared projection | Step definition, attempts, results, durable claimant/incarnation and readiness. Local lease_expires_at_unix_ms and updated_at_unix_ms overlays are excluded from projection digests. |
+| `stop_deferral_claims` | Local cache | Trigger-maintained claim ids, subjects and recovered-failure references of retained-stop diagnostics, faults and recoveries, plus the ceiling and completion of the one-time copy of older claims. Rebuildable from claims; never replicated; excluded from shared projection digests. |
 | `unread_mail` | Local cache | Rebuildable unread-message timestamp and prefix-count indexes, plus a deduplicated queue of changed messages, over this node's retained sent/read/closed claims. They accelerate current age counts, are not replicated, and do not add shared identities to projection digests. |
 | `unread_mail_pending` | Local cache | Rebuildable unread-message timestamp and prefix-count indexes, plus a deduplicated queue of changed messages, over this node's retained sent/read/closed claims. They accelerate current age counts, are not replicated, and do not add shared identities to projection digests. |
 | `unread_mail_prefixes` | Local cache | Rebuildable unread-message timestamp and prefix-count indexes, plus a deduplicated queue of changed messages, over this node's retained sent/read/closed claims. They accelerate current age counts, are not replicated, and do not add shared identities to projection digests. |

@@ -549,6 +549,10 @@ impl Ui {
                         hits: Vec::new(),
                     }),
             );
+            // Room between the title and what it says, as between what it says and its buttons:
+            // an alert is read in pieces, and a packed card read as one block (Nathan,
+            // 2026-10-12: "still too compact when I expand it").
+            rows.push(BandRow::text(Vec::new()));
             let mut buttons: Vec<(String, Color, Hit)> = Vec::new();
             match &item.kind {
                 AttentionKind::Prompt {
@@ -623,7 +627,9 @@ impl Ui {
                 theme::SURFACE2,
                 Hit::Alert(item.id.clone(), AlertTap::Open),
             ));
+            rows.push(BandRow::text(Vec::new()));
             rows.extend(BandRow::button_rows(buttons, width));
+            rows.push(BandRow::text(Vec::new()));
             // Each alert carries a bar down its left side in its own colour.
             for row in &mut rows[first_row..] {
                 row.line

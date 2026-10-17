@@ -3,6 +3,8 @@ import * as stylex from '@stylexjs/stylex'
 import { flushSync } from 'react-dom'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { Button } from 'react-aria-components'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
+import { EmbraceMarkdownPreview } from './assistant-ui/EmbraceToolPreview'
 import { Markdown, ResourceChip, completeStreamingTail, type InlineResource } from './assistant-ui/composition/Markdown'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
@@ -125,7 +127,7 @@ export const StreamingHeadingLight: Story = { ...StreamingHeading, args: { schem
 export const StreamingTableLight: Story = { ...StreamingTable, args: { scheme: 'light' } }
 export const StreamingTightListLight: Story = { ...StreamingTightList, args: { scheme: 'light' } }
 export const StreamingParagraphLight: Story = { ...StreamingParagraph, args: { scheme: 'light' } }
-export const RichText: Story = {
+export const RichText: Story = { tags: ['critical'],
   play: async ({ canvasElement }) => {
     const root = requireElement(canvasElement, '[data-testid="markdown"]')
     const title = requireElement<HTMLAnchorElement>(root, 'h1 a')
@@ -141,7 +143,7 @@ export const RichText: Story = {
     if (canvasElement.querySelector('[data-testid="opened-resource"]')?.textContent !== 'Opened src/model.ts') throw new Error('Resource chip lost its open callback')
   },
 }
-export const Languages: Story = {
+export const Languages: Story = { tags: ['critical'],
   args: { scenario: 'languages' },
   play: async ({ canvasElement }) => {
     const fences = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown-code-block"]')]
@@ -162,7 +164,7 @@ export const Light: Story = { ...RichText, args: { scheme: 'light' } }
 export const AllStates: Story = { args: { scenario: 'all' } }
 export const LanguagesLight: Story = { ...Languages, args: { scenario: 'languages', scheme: 'light' } }
 export const AllStatesLight: Story = { args: { scenario: 'all', scheme: 'light' } }
-export const StreamingControlsPersistence: Story = {
+export const StreamingControlsPersistence: Story = { tags: ['critical'],
   args: { scenario: 'streaming' },
   play: async ({ canvasElement }) => {
     await document.fonts.ready
@@ -184,6 +186,7 @@ export const StreamingControlsPersistence: Story = {
       flushSync(() => copy.click())
       await settle()
       if (fence.dataset.copyState !== 'copied' || copied[0] !== fence.querySelector('code')?.textContent) throw new Error('Copy did not write the raw rendered code')
+      if (String(copy.textContent) !== 'Copied' || copy.getAttribute('aria-label') !== 'Copied code') throw new Error('Copied feedback did not match the accessible control name')
       for (let stage = 1; stage < streamChunks.length; stage++) {
         flushSync(() => append.click())
         await settle()
@@ -194,6 +197,7 @@ export const StreamingControlsPersistence: Story = {
       flushSync(() => copy.click())
       await settle()
       if (copied.at(-1) !== fence.querySelector('code')?.textContent || copy.textContent !== 'Copied') throw new Error('Copy after streaming did not use the latest code')
+      if (copy.getAttribute('aria-label') !== 'Copied code') throw new Error('Copy after streaming did not update the accessible control name')
       const second = canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown-code-block"]')[1]
       if (second?.dataset.wrap !== 'false') throw new Error('A new fence inherited another fence’s local wrap state')
     } finally {
@@ -203,7 +207,7 @@ export const StreamingControlsPersistence: Story = {
   },
 }
 export const StreamingControlsPersistenceLight: Story = { ...StreamingControlsPersistence, args: { scenario: 'streaming', scheme: 'light' } }
-export const StreamingInlineMarkup: Story = {
+export const StreamingInlineMarkup: Story = { tags: ['critical'],
   args: { scenario: 'inline-streaming' },
   play: async ({ canvasElement }) => {
     const adversarial = '['.repeat(50_000)
@@ -242,7 +246,7 @@ export const StreamingInlineMarkup: Story = {
   },
 }
 
-export const CopyFailure: Story = {
+export const CopyFailure: Story = { tags: ['critical'],
   args: { scenario: 'streaming' },
   play: async ({ canvasElement }) => {
     const fence = requireElement<HTMLElement>(canvasElement, '[data-testid="markdown-code-block"]')
@@ -263,9 +267,37 @@ export const CopyFailure: Story = {
   },
 }
 
+/** C27/E04–E12: the input boundary forwards foreground ink, while default seat Prose stays soft. */
+function InputInkCanvas({ scheme = 'dark', narrow = false }: { scheme?: 'dark' | 'light'; narrow?: boolean }) {
+  const [foreground, setForeground] = React.useState(true)
+  const [revision, rerender] = React.useState(0)
+  return <main data-revision={revision} {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <div {...stylex.props(styles.toolbar)}><Button onPress={() => rerender(value => value + 1)}>Rerender input</Button><Button onPress={() => setForeground(false)}>Show soft control</Button><Button onPress={() => setForeground(true)}>Restore input</Button></div>
+    <section {...stylex.props(styles.lane, narrow && styles.inputNarrow)}><EmbraceMarkdownPreview tone={foreground ? 'foreground' : 'default'} markdown={'The input anchors this turn.\n\n- Review the retained snapshot.\n\n| Fact | Value |\n| --- | --- |\n| Snapshot | Retained |'} /></section>
+  </main>
+}
+export const InputForegroundDark1440: Story = { render: args => <InputInkCanvas scheme={args.scheme} />, play: async ({ canvasElement, args }) => {
+  const canvas = within(canvasElement)
+  await userEvent.click(canvas.getByRole('button', { name: 'Rerender input' }))
+  await waitFor(() => expect(canvasElement.querySelector('main')).toHaveAttribute('data-revision', '1'))
+  const expected = args.scheme === 'light' ? 'rgb(39, 39, 42)' : 'rgb(245, 245, 245)'
+  const paints = () => [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown"] p, [data-testid="markdown"] li, [data-testid="markdown"] table')].map(element => getComputedStyle(element).color)
+  await expect(paints()).toEqual([expected, expected, expected])
+  await userEvent.click(canvas.getByRole('button', { name: 'Show soft control' }))
+  await waitFor(() => expect(canvas.getByTestId('markdown')).toHaveAttribute('data-tone', 'default'))
+  await expect(paints().every(color => color !== expected)).toBe(true)
+  await userEvent.click(canvas.getByRole('button', { name: 'Restore input' }))
+  await waitFor(() => expect(canvas.getByTestId('markdown')).toHaveAttribute('data-tone', 'foreground'))
+  await expect(paints()).toEqual([expected, expected, expected])
+} }
+export const InputForegroundLight1440: Story = { ...InputForegroundDark1440, args: { scheme: 'light' } }
+export const InputForegroundDark440: Story = { ...InputForegroundDark1440, render: args => <InputInkCanvas scheme={args.scheme} narrow /> }
+export const InputForegroundLight440: Story = { ...InputForegroundDark440, args: { scheme: 'light' } }
+
 const styles = stylex.create({
   canvas: { minHeight: '100vh', boxSizing: 'border-box', padding: s.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
   lane: { width: '100%', maxWidth: g.lane, minWidth: 0, marginInline: 'auto' },
+  inputNarrow: { maxWidth: g.polishNarrow },
   toolbar: { display: 'flex', alignItems: 'center', gap: s.md, marginBlockEnd: s.lg },
   button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary }, ':disabled': { color: ink.fgMuted, cursor: 'default' } },
   heading: { marginBlock: s.lg, fontSize: t.headingSize, lineHeight: t.headingLeading },
