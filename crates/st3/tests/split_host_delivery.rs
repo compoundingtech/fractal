@@ -33,6 +33,7 @@ impl Host {
         let socket = root.join("st3.sock");
         let store = Arc::new(Store::open(&root.join("store.db"), name).unwrap());
         let state = AppState {
+            owning_person: None,
             store: store.clone(),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
@@ -195,6 +196,7 @@ async fn split_host_report_and_handoff_documents_known_limitation_3104() {
             let reports = host.store.messages(Some(BIRCH), true).unwrap();
             // The key hashes to one subject, so mailbox projection coalesces the two
             // independent sends. That is not a shared acceptance/delivery claim.
+            // Fixing #3104 is expected to change this two-origin acceptance assertion.
             assert_eq!(reports.len(), 1);
             assert_eq!(reports[0].content, report.content);
             let sends = host.store.claims_for_subject_kind_at(
