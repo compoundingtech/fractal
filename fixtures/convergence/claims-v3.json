@@ -143,6 +143,63 @@
     "projection": "agents",
     "wakes_reconciler": true
   },
+  "agent.retired": {
+    "kind": "agent.retired",
+    "subjects": [
+      "agent"
+    ],
+    "fields": {
+      "declaration": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "owner_host": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "reason": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "retired_by": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent",
+          "person",
+          "daemon"
+        ]
+      },
+      "successor": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent"
+        ]
+      },
+      "transfer": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "once",
+    "projection": "agents",
+    "wakes_reconciler": true
+  },
   "arrangement.edited": {
     "kind": "arrangement.edited",
     "subjects": [
@@ -1023,6 +1080,250 @@
     "projection": "fleet",
     "wakes_reconciler": false
   },
+  "gate.head-bound": {
+    "kind": "gate.head-bound",
+    "subjects": [
+      "gate-operation"
+    ],
+    "fields": {
+      "attempt": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "author": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent",
+          "person"
+        ]
+      },
+      "boundary": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true
+      },
+      "change": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "episode": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "generation": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "run-generation"
+        ]
+      },
+      "head": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "mission_revision": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "observation": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "owner": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true
+      },
+      "previous_binding": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "reason": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "request_operation": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "gate-operation"
+        ]
+      },
+      "review_targets": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "reviewer": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent",
+          "person"
+        ]
+      },
+      "scope": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "step_definition": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": "gates",
+    "wakes_reconciler": true,
+    "source_kdl": [
+      "gate"
+    ]
+  },
+  "gate.remediation-attached": {
+    "kind": "gate.remediation-attached",
+    "subjects": [
+      "gate-operation"
+    ],
+    "fields": {
+      "attempt_receipt": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "author_attempt": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "author_generation": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "run-generation"
+        ]
+      },
+      "author_step": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "step-run"
+        ]
+      },
+      "binding_claim": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "boundary_attempt": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "episode": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "evidence": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "finding_refs": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "gate_subject": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "gate-operation"
+        ]
+      },
+      "generation": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "run-generation"
+        ]
+      },
+      "request": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "reviewed_head": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "verdict": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": "gates",
+    "wakes_reconciler": true,
+    "source_kdl": [
+      "gate"
+    ]
+  },
   "gate.requested": {
     "kind": "gate.requested",
     "subjects": [
@@ -1035,8 +1336,24 @@
         "immutable": false,
         "reference": false
       },
+      "author": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent",
+          "person"
+        ]
+      },
       "baseline": {
         "value_type": "boolean",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "binding_claim": {
+        "value_type": "string",
         "required": false,
         "immutable": false,
         "reference": false
@@ -1053,14 +1370,56 @@
         "immutable": false,
         "reference": false
       },
+      "change": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "decisions": {
         "value_type": "array",
         "required": false,
         "immutable": false,
         "reference": false
       },
+      "delta_ref": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "episode": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "gate": {
         "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "gate_subject": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "gate-operation"
+        ]
+      },
+      "generation": {
+        "value_type": "subject-reference",
+        "required": false,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "run-generation"
+        ]
+      },
+      "head": {
+        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -1119,6 +1478,12 @@
       },
       "runner": {
         "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "scope": {
+        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -1253,6 +1618,235 @@
     },
     "additional_fields": false,
     "write_policy": "capability-holder",
+    "cardinality": "append",
+    "projection": "gates",
+    "wakes_reconciler": true,
+    "source_kdl": [
+      "gate"
+    ]
+  },
+  "gate.review-verdict": {
+    "kind": "gate.review-verdict",
+    "subjects": [
+      "gate-operation"
+    ],
+    "fields": {
+      "attempt": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "binding_claim": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "carry_forward_from": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "change": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "episode": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "evidence": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "finding_refs": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "gate_subject": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "gate-operation"
+        ]
+      },
+      "generation": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "run-generation"
+        ]
+      },
+      "request": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "review_targets": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "reviewed_head": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "reviewer": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent",
+          "person"
+        ]
+      },
+      "scope": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "source": {
+        "value_type": "object",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "verdict": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "approved",
+          "changes-requested",
+          "abstained"
+        ],
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "capability-holder",
+    "cardinality": "append",
+    "projection": "gates",
+    "wakes_reconciler": true,
+    "source_kdl": [
+      "gate"
+    ]
+  },
+  "gate.review-withdrawn": {
+    "kind": "gate.review-withdrawn",
+    "subjects": [
+      "gate-operation"
+    ],
+    "fields": {
+      "attempt": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "authorization_evidence": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "binding_claim": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "episode": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "gate_subject": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "gate-operation"
+        ]
+      },
+      "generation": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "run-generation"
+        ]
+      },
+      "previous_binding": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "reason": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "request": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "reviewer": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent",
+          "person"
+        ]
+      },
+      "verdict": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "withdrawing_actor": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent",
+          "person"
+        ]
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
     "cardinality": "append",
     "projection": "gates",
     "wakes_reconciler": true,
@@ -1928,6 +2522,12 @@
         "reference_families": [
           "agent"
         ]
+      },
+      "desired_token": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
       },
       "discovery_revision": {
         "value_type": "string",
@@ -3636,6 +4236,12 @@
       },
       "reason": {
         "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "reproduction": {
+        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
