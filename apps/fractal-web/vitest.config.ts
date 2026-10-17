@@ -12,6 +12,7 @@ const buildIdentity = {
 export default defineConfig({
   plugins: [buildIdentity],
   test: {
+    globalSetup: ['scripts/changelog-registry-setup.mjs'],
     setupFiles: ['src/testEnvironment.ts'],
     include: ['server/**/*.integration.test.ts', 'server/**/*.unit.test.ts', 'src/**/*.unit.test.ts', 'src/**/*.unit.test.tsx', 'src/**/*.integration.test.ts', 'src/**/*.integration.test.tsx'],
     // Node's own test runner owns these files; vitest finds no suite in them.

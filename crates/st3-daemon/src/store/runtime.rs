@@ -26,8 +26,9 @@ pub struct SmalltalkRuntime {
     pub(crate) conversation_owner_generation: std::sync::atomic::AtomicU64,
     pub(crate) conversation_owners: Mutex<VecDeque<(u64, Arc<conversation_reads::Owners>)>>,
     pub(crate) actual_cache: Mutex<HashMap<String, (u64, Option<Value>)>>,
+    pub(super) observer_actuals: Arc<observer_actuals::Actuals>,
     /// Immutable placement ancestry, keyed by the selected declaration claim.
-    pub(crate) placement_cache: Mutex<HashMap<String, Option<Arc<crate::placement::Fence>>>>,
+    pub(crate) placement_cache: Mutex<HashMap<String, Option<Arc<crate::model::PlacementFence>>>>,
     /// Per-subject status reductions and current-view answers, until their claims change.
     pub(crate) subject_cache: Mutex<SubjectCache>,
     pub(crate) message_cache: Mutex<HashMap<String, MessageCacheEntry>>,
@@ -178,6 +179,9 @@ impl SmalltalkRuntime {
 }
 
 impl Runtime for SmalltalkRuntime {
+    fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
+        Some(self.observer_actuals.clone())
+    }
     fn idempotency_response_in_use(&self, connection: &Connection, response: &str) -> Result<bool> {
         // Some local entries contain a digest, not JSON. They have no work lifetime to pin.
         let Ok(value) = serde_json::from_str::<Value>(response) else {
@@ -289,14 +293,7 @@ impl Runtime for SmalltalkRuntime {
             views.initialize_empty(transaction, cut)?;
             smallclaims::ivm::events::install(transaction, 4096)?;
         }
-        publication_facts::initialize(transaction)?;
-        custom::open(transaction)?;
-        resources::open(transaction)?;
-        glass_heads::open(transaction)?;
-        directive_notes::flush(transaction)?;
-        agent_messages::open(transaction)?;
-        arrangements::open(transaction)?;
-        limits::open_limits(transaction)?;
+        projectors::run_hooks(projectors::OPEN, transaction)?;
         if shared_memory {
             rebuild_operations_tx(transaction)?;
             rebuild_planning_tx(transaction)?;
@@ -428,16 +425,12 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn after_projection(&self, transaction: &Transaction<'_>) -> Result<(), St3Error> {
-        custom::flush(transaction).map_err(internal)?;
-        resources::flush(transaction).map_err(internal)?;
-        glass_heads::flush(transaction).map_err(internal)?;
-        directive_notes::flush(transaction).map_err(internal)?;
-        agent_messages::flush(transaction).map_err(internal)?;
-        limits::flush_limits(transaction).map_err(internal)?;
+        projectors::run_hooks(projectors::FLUSH, transaction).map_err(internal)?;
         reapply_local_work_lease_renewals_tx(transaction)
     }
 
     fn forget_views(&self) {
+        self.observer_actuals.invalidate();
         let mut cache = self
             .subject_cache
             .lock()

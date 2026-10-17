@@ -6,6 +6,16 @@ use serde_json::json;
 
 const MAX_ATTEMPTS: usize = 3;
 const RECHECK_BACKOFF_MS: u128 = 10_000;
+
+/// The first recheck backoff; later ones double it. `ST3_CLAUDE_CHANNEL_BACKOFF_MS` can only
+/// shorten it, so the boot canaries need not wait out the production schedule.
+fn recheck_backoff_ms() -> u128 {
+    std::env::var("ST3_CLAUDE_CHANNEL_BACKOFF_MS")
+        .ok()
+        .and_then(|value| value.parse::<u128>().ok())
+        .filter(|cap| *cap > 0)
+        .map_or(RECHECK_BACKOFF_MS, |cap| cap.min(RECHECK_BACKOFF_MS))
+}
 const RECOVERY: &str = "claude-channel-recovery";
 
 impl<R: RuntimeControl> Reconciler<R> {
@@ -112,7 +122,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             && (self
                 .store
                 .claude_channel_attached(&subject.subject, incarnation)?
-                || crate::api::claude_channel_attached(&self.store, &subject.subject, incarnation))
+                || crate::delivery_presence::claude_channel_attached(&self.store, &subject.subject, incarnation))
             && !self
                 .store
                 .observations_for(&subject.subject, "runtime.action.requested")?
@@ -155,7 +165,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         // The attachment report may be newer than the driver's diagnostic. Recheck the live
         // current delivery fence directly before charging a retry or parking the seat.
-        if crate::api::claude_channel_attached(&self.store, &subject.subject, incarnation) {
+        if crate::delivery_presence::claude_channel_attached(&self.store, &subject.subject, incarnation) {
             self.arm_restart(
                 &format!("channel-recovery:{}", subject.subject),
                 now + 1_000,
@@ -167,7 +177,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .saturating_add(if attempts.len() >= MAX_ATTEMPTS {
                 0
             } else {
-                RECHECK_BACKOFF_MS * (1_u128 << attempts.len())
+                recheck_backoff_ms() * (1_u128 << attempts.len())
             });
         if now < due {
             self.arm_restart(&format!("channel-recovery:{}", subject.subject), due);
