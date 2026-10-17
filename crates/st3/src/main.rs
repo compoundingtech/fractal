@@ -140,42 +140,44 @@ struct Cli {
 const DEFAULT_DAEMON_WAIT_SECS: u64 = 30;
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
-const CLI_ENVIRONMENT_NAMES: &[&str] = &[
-    "ST_INSTANCE",
-    "ST3_DAEMON_WAIT",
-    "ST3_TERMINAL_CAPABILITY",
-    "ST_AGENT",
-    "ST3_INCARNATION",
+const CLI_ENVIRONMENT_NAMES: [(&str, &str); 5] = [
+    ("ST_INSTANCE", "FRACTAL_INSTANCE"),
+    ("ST3_DAEMON_WAIT", "FRACTAL_DAEMON_WAIT"),
+    ("ST3_TERMINAL_CAPABILITY", "FRACTAL_TERMINAL_CAPABILITY"),
+    ("ST_AGENT", "FRACTAL_AGENT"),
+    ("ST3_INCARNATION", "FRACTAL_INCARNATION"),
 ];
 
-static AGENT_ENVIRONMENT_PRESENT: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-    std::env::var_os("FRACTAL_AGENT").is_some() || std::env::var_os("ST_AGENT").is_some()
-});
+fn cli_command() -> clap::Command {
+    // Resolve each family once, not once per argument, to warn once per conflict.
+    // Leave legacy bindings untouched unless the preferred alias is actually present.
+    let bindings = CLI_ENVIRONMENT_NAMES.map(|(old, new)| {
+        std::env::var_os(new).map(|_| {
+            (old, st_drivers::contracts::env(old).map(|_| new))
+        })
+    });
+    cli_command_with_bindings(Cli::command(), &bindings)
+}
 
-/// Normalize aliases before clap or instance selection reads the environment.
-///
-/// # Safety
-/// No other thread may exist while this changes the process environment.
-unsafe fn normalize_cli_environment() {
-    std::sync::LazyLock::force(&AGENT_ENVIRONMENT_PRESENT);
-    for &name in CLI_ENVIRONMENT_NAMES {
-        let new_name = st_drivers::contracts::fractal_env_name(name).unwrap();
-        let value = st_drivers::contracts::env(name);
-        // SAFETY: the caller guarantees single-threaded startup.
-        unsafe {
-            if let Some(value) = value {
-                std::env::set_var(name, &value);
-                std::env::set_var(new_name, value);
-            } else {
-                std::env::remove_var(name);
-                std::env::remove_var(new_name);
+fn cli_command_with_bindings(
+    command: clap::Command,
+    bindings: &[Option<(&'static str, Option<&'static str>)>],
+) -> clap::Command {
+    command
+        .mut_args(|mut arg| {
+            for &(old, new) in bindings.iter().flatten() {
+                if arg.get_env() == Some(std::ffi::OsStr::new(old)) {
+                    arg = arg.env(new);
+                    break;
+                }
             }
-        }
-    }
+            arg
+        })
+        .mut_subcommands(|command| cli_command_with_bindings(command, bindings))
 }
 
 fn agent_environment_present() -> bool {
-    *AGENT_ENVIRONMENT_PRESENT
+    std::env::var_os("FRACTAL_AGENT").is_some() || std::env::var_os("ST_AGENT").is_some()
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 
@@ -4247,8 +4249,6 @@ fn cli_main() -> ExitCode {
     if let Some(program) = st3::recorder::invoked_program() {
         st3::recorder::run(program);
     }
-    // SAFETY: no other thread exists yet; the async runtime starts later.
-    unsafe { normalize_cli_environment() };
     let arguments = std::env::args_os().collect::<Vec<_>>();
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
@@ -4272,7 +4272,7 @@ fn cli_main() -> ExitCode {
     }
     // A shell stub from `st completions` calls back with `COMPLETE=<shell>` on each TAB. Answer
     // before any config, runtime, or daemon work; this exits when the variable is set.
-    clap_complete::env::CompleteEnv::with_factory(Cli::command).complete();
+    clap_complete::env::CompleteEnv::with_factory(cli_command).complete();
     // A seat process asks a replacement binary which resume formats it reads before executing it.
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(st_drivers::reexec::PROBE_SUBCOMMAND))
@@ -4325,7 +4325,7 @@ fn cli_main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let json_version = arguments.iter().any(|arg| arg == "--json");
-    let matches = match Cli::command()
+    let matches = match cli_command()
         .override_help(cli_help::root_help(false))
         .try_get_matches_from(arguments)
     {
