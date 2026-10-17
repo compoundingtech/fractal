@@ -86,6 +86,11 @@ def _strings(value, what):
     return [item.lower() for item in value]
 
 
+def email_known(email, emails, noreply):
+    """Exact address (any case), or [ID+]LOGIN@users.noreply.github.com with a numeric ID, matched whole."""
+    return email.lower() in emails or any(pattern.fullmatch(email) for pattern in noreply)
+
+
 def check_authors(base, head, opener, *actors):
     """A pull request run signs only when its authors are the repository's own. The list is read from the BASE
     commit, so the pull request cannot widen it. Two kinds of check. GitHub authenticates the account that
@@ -107,9 +112,9 @@ def check_authors(base, head, opener, *actors):
         raise Refused(f'no usable author list at the base commit ({AUTHORS_FILE}): {error}')
 
     def known(email):
-        return email.lower() in emails or any(pattern.fullmatch(email) for pattern in noreply)
+        return email_known(email, emails, noreply)
 
-    for role, login in (('opened the pull request', opener), *(('started or re-ran this run', actor) for actor in actors if actor)):
+    for role, login in (('opened the pull request', opener), *(('started or re-ran this run', actor) for actor in actors)):
         if not login or login.lower() not in logins:
             raise Refused(f'refusing: {login or "an unknown account"!r}, who {role}, is not in the author list')
     for line in _git('log', '--no-merges', '--format=%H %ae %ce', f'{base}..{head}').splitlines():
@@ -165,6 +170,31 @@ def once(root, check):
         raise Refused(f'this job already signed {check!r}; a second signature for it is refused')
     signed.append(check)
     ledger.write_text(json.dumps(signed))
+
+
+def add_source_inputs(facts, check):
+    """Record the input key of the tested tree when the skip policy at the BASE commit declares inputs for CHECK.
+
+    The key is the git tree of the tested tree reduced to the declared paths, computed by evidence-verify
+    (--project) from the same base scripts the rest of the signing uses; a record signed with it can be found
+    by another tree whose declared paths are the same. No declaration, no base commit, a base whose
+    evidence-verify has no --project yet, or any error: no key, and the record stays an exact-tree record."""
+    base, repository = env('PROJECT_BASE_SHA'), env('GITHUB_REPOSITORY')
+    verify = Path(__file__).resolve().parent / 'evidence-verify'
+    if not (check and base and repository and verify.exists()):
+        return
+    clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    key = None
+    try:
+        done = subprocess.run([sys.executable, str(verify), '--project', '--check', check, '--revision', 'HEAD',
+                               '--policy-from', base, '--repository', repository],
+                              capture_output=True, text=True, env=clean, timeout=120)
+        if done.returncode == 0:
+            key = json.loads(done.stdout).get('source_inputs')
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        pass
+    if isinstance(key, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', key):
+        facts['inputs']['source_inputs'] = key
 
 
 def aggregate(path):
@@ -248,6 +278,7 @@ def stage_facts(path):
         },
     }
     facts['inputs'] = {k: v for k, v in facts['inputs'].items() if v}
+    add_source_inputs(facts, env('STAGE_JOB') or stage)
     Path(path).write_text(json.dumps(facts, sort_keys=True))
 
 
@@ -285,6 +316,7 @@ def step_facts(path):
         },
     }
     facts['inputs'] = {k: v for k, v in facts['inputs'].items() if v}
+    add_source_inputs(facts, check)
     Path(path).write_text(json.dumps(facts, sort_keys=True))
 
 

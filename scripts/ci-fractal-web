@@ -62,6 +62,7 @@ set +e
 (
   set -e
 if [ "${KIT_SHARD_INDEX:-0}" -eq 0 ]; then
+lane "Changelog registry derives from its directory" bash -c 'node apps/fractal-web/scripts/changelog-registry.mjs && node apps/fractal-web/scripts/changelog-registry.mjs --check'
 lane "Dependency licenses" python3 scripts/ci-fractal-web-licenses --check
 lane "Buck typecheck" buck2 build //:typecheck
 lane "Scenario typecheck" pnpm --filter @smalltalk/st3-scenarios typecheck
@@ -91,6 +92,7 @@ case "${KIT_INPUTS:-true}" in
     lane "UI kit play index contracts" node --test packages/fractal-ui/scripts/kit-play-index.node-test.mjs
     if [ "${KIT_SHARD_INDEX:-0}" -eq 0 ]; then
       lane "UI kit context isolation controls" node packages/fractal-ui/scripts/kit-play-isolation.browser-test.mjs
+      lane "UI kit gate set, a11y and budget controls" node --test packages/fractal-ui/scripts/kit-play-gate.browser-test.mjs
     fi
     lane "UI kit Storybook" kit_storybook
     lane "UI kit strict plays (440/1440 × dark/light)" kit_plays

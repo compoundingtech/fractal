@@ -135,7 +135,7 @@ with tempfile.TemporaryDirectory() as scratch:
     git(repo, "config", "user.email", "ci@example.invalid")
     git(repo, "config", "user.name", "ci")
     base = commit(repo, "base", write=["src/main.rs", "clients/typescript/st3-client/index.ts", "docs/guide.md"])
-    rust = commit(repo, "rust", write=["src/main.rs", "crates/st3/src/lib.rs"])
+    rust = commit(repo, "rust", write=["src/main.rs", "crates/st3-daemon/src/lib.rs"])
     git(repo, "checkout", "--quiet", "-b", "web", base)
     client = commit(repo, "client", write=["clients/typescript/st3-client/index.ts"])
     git(repo, "checkout", "--quiet", "-b", "schema", base)
@@ -296,7 +296,7 @@ for required in (False, True):
         result = subprocess.run(["bash", "-c", harness], check=True, capture_output=True, text=True,
                                 env={**os.environ, "KIT_INPUTS": str(required).lower(),
                                      "BASE_SHA": "base", "HEAD_SHA": "head", "GITHUB_STEP_SUMMARY": str(summary)})
-        for name in ("UI kit play index contracts", "UI kit context isolation controls", "UI kit Storybook", "UI kit strict plays"):
+        for name in ("UI kit play index contracts", "UI kit context isolation controls", "UI kit gate set, a11y and budget controls", "UI kit Storybook", "UI kit strict plays"):
             assert (name in result.stdout) == required, result.stdout
         if not required:
             assert "skipped: no kit inputs changed (base..head)" in summary.read_text()
@@ -338,6 +338,7 @@ print("passed: app/static lanes and controls run once; suite failures propagate 
 subprocess.run(["node", "--input-type=module", "-"], cwd=root, check=True, input=r'''
 import assert from 'node:assert/strict'
 import { shardNumber, shardStories, aggregateShards as aggregate, shardArtifactName } from './packages/fractal-ui/scripts/kit-play-shards.mjs'
+import { storyIdsFromIndex } from './packages/fractal-ui/scripts/kit-play-index.mjs'
 const provenance = { runId: '1234', runAttempt: 2, headSha: 'a'.repeat(40) }
 const aggregateShards = (receipts, count) => aggregate(receipts, count, provenance)
 const ids = Array.from({ length: 313 }, (_, i) => `story-${i}`).sort()
@@ -387,6 +388,25 @@ for (const count of [1, 2, 3]) {
     invalid(copy => { copy[1].fullIds = ids.slice(1) })
   }
 }
+// The selected-set inventory, not all stories, defines a critical run's union.
+const index = { v: 5, entries: Object.fromEntries(ids.map((id, i) => [id, {
+  id, type: 'story', importPath: './fixture.stories.ts', tags: i < 94 ? ['critical'] : [],
+}])) }
+const criticalIds = storyIdsFromIndex(index, { tag: 'critical' }).sort()
+assert.equal(criticalIds.length, 94)
+const criticalReceipts = [0, 1].map(shardIndex => ({
+  ...provenance, pass: true, set: 'critical', a11y: 'off', maxSeconds: 420,
+  fullIds: criticalIds, shardIndex, shardCount: 2,
+  rows: shardStories(criticalIds, shardIndex, 2).flatMap(id =>
+    ['dark', 'light'].flatMap(scheme => [440, 1440].map(width => ({ id, scheme, width, pass: true })))),
+}))
+assert.deepEqual(aggregateShards(criticalReceipts, 2), { stories: 94, cases: 376, shards: 2, pass: true })
+const missingCriticalCase = structuredClone(criticalReceipts)
+missingCriticalCase[0].rows.pop()
+assert.throws(() => aggregateShards(missingCriticalCase, 2))
+const wrongCriticalIndex = structuredClone(criticalReceipts)
+wrongCriticalIndex[1].fullIds = ids
+assert.throws(() => aggregateShards(wrongCriticalIndex, 2))
 assert.throws(() => shardStories(['story-0', 'story-0'], 0, 2))
 assert.throws(() => shardStories(['story-0', 'story-2'], 0, 2))
 assert.deepEqual(shardStories(['story-0'], 0, 2), [])
