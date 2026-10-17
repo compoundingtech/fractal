@@ -4983,6 +4983,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-delivery-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-drivers",
+ "st3-client",
+ "st3-delivery-base",
+ "st3-secrets",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+]
+
+[[package]]
 name = "st3-e2e"
 version = "0.1.0"
 dependencies = [
@@ -5193,6 +5214,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-seats-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "hex",
+ "libc",
+ "pty-client",
+ "pty-core",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "st-drivers",
+ "st3-client",
+ "st3-seats-base",
+ "st3-secrets",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "st3-secrets"
 version = "0.1.0"
 dependencies = [
@@ -5259,10 +5302,12 @@ dependencies = [
  "st-drivers",
  "st-runtime",
  "st3-client",
+ "st3-delivery-base",
  "st3-github-base",
  "st3-kernel",
  "st3-missions-base",
  "st3-schema",
+ "st3-seats-base",
  "st3-secrets",
  "st3-store",
  "st3-telemetry",
