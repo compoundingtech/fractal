@@ -12059,6 +12059,126 @@ fn native_mailbox_pages_use_exact_recipient_and_stable_created_cursors() {
     assert_eq!(closed[0].status, "closed");
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn filtered_message_pages_match_views_across_sender_and_lifecycle_boundaries(
+        entries in proptest::collection::vec((0usize..4, 0usize..3, 0usize..5, any::<bool>()), 24..72),
+        page_size in 1usize..8,
+        selected_sender in 0usize..4,
+        include_closed in any::<bool>(),
+    ) {
+        let store = Store::open_memory("node").unwrap();
+        let titles = ["topic", "topic_%*", "topic_%* child", "other", r"topic_\%*"];
+        for (index, (sender, lifecycle, title, archived)) in entries.iter().enumerate() {
+            let resource = format!("message/filter-{index}");
+            store.append_claim(&ClaimInput {
+                subject: resource.clone(),
+                kind: "message.sent".into(),
+                actor: Some(format!("agent/sender-{sender}")),
+                fields: BTreeMap::from([
+                    ("from".into(), json!(format!("agent/sender-{sender}"))),
+                    ("to".into(), json!("agent/worker")),
+                    ("title".into(), json!(titles[*title])),
+                    ("content".into(), json!("example")),
+                    ("status".into(), json!("sent")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("filter-send-{index}")),
+            }).unwrap();
+            if *lifecycle != 0 {
+                let (kind, status) = if *lifecycle == 1 {
+                    ("message.closed", "closed")
+                } else {
+                    ("message.read", "read")
+                };
+                store.append_claim(&ClaimInput {
+                    subject: resource.clone(),
+                    kind: kind.into(),
+                    actor: Some("agent/worker".into()),
+                    fields: BTreeMap::from([("status".into(), json!(status))]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("filter-state-{index}")),
+                }).unwrap();
+            }
+            if *archived && *lifecycle != 1 {
+                for status in ["delivered", "read", "closed"] {
+                    if *lifecycle == 2 && status != "closed" {
+                        continue;
+                    }
+                    store.append_claim(&ClaimInput {
+                        subject: resource.clone(),
+                        kind: format!("message.{status}"),
+                        actor: Some("agent/worker".into()),
+                        fields: BTreeMap::from([("status".into(), json!(status))]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: Some(format!("filter-archive-{index}-{status}")),
+                    }).unwrap();
+                }
+            }
+        }
+        let through = store.index().unwrap();
+        let sender = format!("sender-{selected_sender}");
+        let normalized_sender = format!("agent/{sender}");
+        let all = store.messages(Some("agent/worker"), true).unwrap();
+        let (recipient_only, _) = store.messages_page_filtered(
+            Some("worker"), None, None, Some("topic_%*"), include_closed,
+            None, through, entries.len(),
+        ).unwrap();
+        let mut expected_recipient_only: Vec<_> = all.iter().filter(|message| {
+            (include_closed || message.status != "closed")
+                && message.title.as_deref().is_some_and(|title| title.starts_with("topic_%*"))
+        }).map(|message| message.subject.clone()).collect();
+        let mut actual_recipient_only: Vec<_> = recipient_only.into_iter()
+            .map(|message| message.subject).collect();
+        expected_recipient_only.sort();
+        actual_recipient_only.sort();
+        prop_assert_eq!(actual_recipient_only, expected_recipient_only);
+        for (exact, prefix) in [
+            (None, None),
+            (Some("topic_%*"), None),
+            (None, Some("topic_%*")),
+            (Some("topic"), None),
+            (None, Some("")),
+            (None, Some("TOPIC")),
+            (Some(r"topic_\%*"), None),
+            (None, Some(r"topic_\")),
+        ] {
+            let mut expected: Vec<_> = all.iter().filter(|message| {
+                message.from == normalized_sender
+                    && (include_closed || message.status != "closed")
+                    && exact.is_none_or(|title| message.title.as_deref() == Some(title))
+                    && prefix.is_none_or(|prefix| message.title.as_deref().is_some_and(|title| title.starts_with(prefix)))
+            }).map(|message| (message.created_index, message.subject.clone())).collect();
+            expected.sort();
+            let mut actual = Vec::new();
+            let mut after = None;
+            loop {
+                let (page, next) = store.messages_page_filtered(
+                    Some("worker"), Some(&sender), exact, prefix, include_closed, after, through, page_size,
+                ).unwrap();
+                prop_assert!(page.len() <= page_size);
+                if next.is_some() {
+                    prop_assert_eq!(page.len(), page_size);
+                    prop_assert_eq!(next, page.last().map(|message| message.created_index));
+                    prop_assert!(next > after);
+                }
+                actual.extend(page.into_iter().map(|message| (message.created_index, message.subject)));
+                match next {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+                prop_assert!(actual.len() <= expected.len());
+            }
+            prop_assert_eq!(actual, expected);
+        }
+    }
+}
+
 #[test]
 fn reconciler_work_mailbox_keeps_closed_attempts_without_unrelated_messages() {
     let store = Store::open_memory("node").unwrap();
@@ -12221,6 +12341,7 @@ version 2
     from "requester"
     to "mix.sup"
     content "work"
+    title "topic_%* child"
   }
 
 "#,
@@ -12256,6 +12377,24 @@ version 2
     assert_eq!(page.len(), 1);
     assert_eq!(page[0].subject, messages[0].subject);
     assert!(next.is_none());
+    for (exact, prefix) in [
+        (Some("topic_%* child"), None),
+        (None, Some("topic_%*")),
+        (None, Some("")),
+    ] {
+        let (filtered, next) = store.messages_page_filtered(
+            Some("mix.sup"), Some("requester"), exact, prefix, false,
+            None, store.index().unwrap(), 1,
+        ).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].subject, messages[0].subject);
+        assert!(next.is_none());
+    }
+    let (filtered, _) = store.messages_page_filtered(
+        None, None, Some("topic_%* child"), None, false,
+        None, store.index().unwrap(), 1,
+    ).unwrap();
+    assert_eq!(filtered.len(), 1);
 }
 
 #[test]

@@ -355,6 +355,101 @@ impl Store {
         self.messages_page_inner(recipient, include_closed, after, through, limit, false)
     }
 
+    /// Filter the authoritative message view before applying the page size. The cursor is
+    /// a local creation-order position, not a replicated incremental-change watermark.
+    #[allow(clippy::too_many_arguments)]
+    pub fn messages_page_filtered(
+        &self,
+        recipient: Option<&str>,
+        sender: Option<&str>,
+        subject: Option<&str>,
+        subject_prefix: Option<&str>,
+        include_closed: bool,
+        after: Option<u64>,
+        through: u64,
+        limit: usize,
+    ) -> Result<(Vec<MessageView>, Option<u64>)> {
+        let recipient = recipient.map(normalize_message_party);
+        let sender = sender.map(normalize_message_party);
+        let connection = self.readers.get();
+        // Sender selection starts at the existing expression indexes, not the recipient's
+        // entire mailbox. Include legacy root fields and declarations, whose defaults and
+        // canonical party spelling are resolved by message_view_cached below.
+        let sql = if sender.is_some() {
+            "WITH candidates(subject) AS (
+                SELECT subject FROM claims INDEXED BY claims_message_from_index
+                WHERE kind='message.sent' AND json_extract(body,'$.fields.from') IN (?1,?2)
+                UNION
+                SELECT subject FROM claims INDEXED BY claims_message_legacy_from_index
+                WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
+                  AND json_extract(body,'$.from') IN (?1,?2)
+                UNION
+                SELECT desired.subject FROM desired
+                WHERE desired.kind='message' AND (
+                    EXISTS (SELECT 1 FROM json_each(desired.body,'$.children') child
+                            WHERE json_extract(child.value,'$.name')='from'
+                              AND json_extract(child.value,'$.arguments[0]') IN (?1,?2))
+                    OR (?1='requester' AND NOT EXISTS (
+                        SELECT 1 FROM json_each(desired.body,'$.children') child
+                        WHERE json_extract(child.value,'$.name')='from')))
+             )
+             SELECT message_index.subject, created_index FROM candidates
+             JOIN message_index ON message_index.subject=candidates.subject
+             WHERE created_index>?3 AND created_index<=?4
+             ORDER BY created_index, message_index.subject"
+        } else if recipient.is_some() {
+            concat!("WITH candidates(subject) AS (
+                SELECT subject FROM claims INDEXED BY claims_message_to_index
+                WHERE kind='message.sent' AND ", message_sent_recipient_match!(), "
+                UNION
+                SELECT subject FROM claims INDEXED BY claims_message_legacy_to_index
+                WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
+                  AND json_extract(body,'$.to') IN (?1,?2)
+                UNION
+                SELECT desired.subject FROM desired,
+                       json_each(desired.body,'$.children') child
+                WHERE desired.kind='message' AND ", message_desired_recipient_match!(), "
+             )
+             SELECT message_index.subject, created_index FROM candidates
+             JOIN message_index ON message_index.subject=candidates.subject
+             WHERE created_index>?3 AND created_index<=?4
+             ORDER BY created_index, message_index.subject")
+        } else {
+            "SELECT subject, created_index FROM message_index
+             WHERE (?1 IS NULL AND ?2 IS NULL) AND created_index>?3 AND created_index<=?4
+             ORDER BY created_index, subject"
+        };
+        let mut statement = connection.prepare_cached(sql)?;
+        let party = sender.as_deref().or(recipient.as_deref());
+        let bare_party = party.map(message_bare_recipient);
+        let mut rows = statement.query(params![
+            party, bare_party, after.unwrap_or(0), through,
+        ])?;
+        let mut output: Vec<MessageView> = Vec::new();
+        while let Some(row) = rows.next()? {
+            let resource: String = row.get(0)?;
+            let created_index = row.get(1)?;
+            let message = self.message_view_cached(&connection, &resource, created_index)?;
+            // Hydration selects canonical actual state and desired fallbacks. Filtering raw
+            // historical claim fields here would misclassify edited/declarative messages.
+            if recipient.as_deref().is_none_or(|to| message.to == to)
+                && sender.as_deref().is_none_or(|from| message.from == from)
+                && subject.is_none_or(|title| message.title.as_deref() == Some(title))
+                && subject_prefix.is_none_or(|prefix| {
+                    message.title.as_deref().is_some_and(|title| title.starts_with(prefix))
+                })
+                && (include_closed || message.status != "closed")
+            {
+                if output.len() == limit {
+                    let next = output.last().map(|message| message.created_index);
+                    return Ok((output, next));
+                }
+                output.push(message);
+            }
+        }
+        Ok((output, None))
+    }
+
     pub(crate) fn messages_page_for_delivery(
         &self,
         recipient: &str,
