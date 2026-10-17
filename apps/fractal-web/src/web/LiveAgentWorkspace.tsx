@@ -46,8 +46,9 @@ const LiveSidebarAgentRow = React.memo((props: {
   readonly select: (ref: string) => void
 }) => {
   const feed = useAgent(props.agentRef)
+  const connection = useConnection()
   const agent = feed._tag === 'Observed' ? feed.value : undefined
-  const stale = feed._tag === 'Observed' && feed.freshness === 'stale'
+  const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
   const item = React.useMemo(() => agent === undefined ? undefined : sidebarRow({ agent, stale }), [agent, stale])
   const onOpen = React.useCallback(() => props.select(props.agentRef), [props.select, props.agentRef])
   return item === undefined ? null : <SidebarAgentRow inTree item={item} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={sidebarExtraSignals} active={props.active} onOpen={onOpen} />

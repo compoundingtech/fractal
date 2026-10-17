@@ -17,6 +17,7 @@ import * as dataHooks from '../data/react.tsx'
 import * as rowProjection from './sidebarRow.ts'
 import * as treeProjection from './liveSidebarTree.ts'
 import * as folderComponents from '../shell/AgentFolders.tsx'
+import type { ConnectionState } from '@st3/sdk/effect'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
 
@@ -127,6 +128,30 @@ it('keeps tree render callbacks and unchanged rows stable when one agent receive
     rows.mockRestore()
     folders.mockRestore()
   }
+})
+
+it('marks retained live-feed rows stale on a connection-only transition', async () => {
+  const connection = Atom.make<ConnectionState>({ _tag: 'Live' })
+  source = { ...source, connection }
+  const retained = observed({ value: [agent] })
+  registry.set(agents, retained)
+  await mount(1440)
+  const row = () => roster().querySelector('[role="row"][data-wf-agent-ref="agent/example"]') ?? roster().querySelector('[data-wf-agent-ref="agent/example"]')!.closest('[role="row"]')!
+  const freshness = () => row().querySelector('[data-observation-freshness]')!.getAttribute('data-observation-freshness')
+  const status = () => row().querySelector('[data-row-field="status"] svg')!.getAttribute('aria-label')!
+  expect(freshness()).toBe('live')
+  expect(row().getAttribute('aria-label')).toContain('Example Agent, idle')
+  expect(status()).toContain('idle;')
+  await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 1 }))
+  expect(registry.get(agents)).toBe(retained)
+  expect(freshness()).toBe('stale')
+  expect(row().getAttribute('aria-label')).toContain('Example Agent, Last verified · idle')
+  expect(status()).toContain('Last verified · idle;')
+  expect(status()).toContain('stale observation')
+  await act(async () => registry.set(connection, { _tag: 'Live' }))
+  expect(freshness()).toBe('live')
+  expect(row().getAttribute('aria-label')).toContain('Example Agent, idle')
+  expect(status()).toContain('live observation')
 })
 
 it('refreshes sidebar activity labels at their exact second and minute boundaries', async () => {
