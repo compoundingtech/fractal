@@ -3818,6 +3818,12 @@ struct MessageListArgs {
     #[arg(long = "from")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     sender: Option<String>,
+    /// Match the message's subject text exactly (case-sensitive).
+    #[arg(long, conflicts_with = "subject_prefix")]
+    subject: Option<String>,
+    /// Match a literal, case-sensitive prefix of the message's subject text.
+    #[arg(long)]
+    subject_prefix: Option<String>,
 }
 
 #[derive(Args)]
@@ -12833,6 +12839,13 @@ async fn message_page(
     message_page_reporting(client, recipient, include_closed, cursor, None).await
 }
 
+#[derive(Clone, Copy, Default)]
+struct MessagePageFilters<'a> {
+    from: Option<&'a str>,
+    subject: Option<&'a str>,
+    subject_prefix: Option<&'a str>,
+}
+
 /// One mailbox page. A seat's delivery process passes its delivery report, which the daemon
 /// keeps in memory to tell a live, current delivery path from a stale one.
 async fn message_page_reporting(
@@ -12841,6 +12854,25 @@ async fn message_page_reporting(
     include_closed: bool,
     cursor: Option<&str>,
     report: Option<&str>,
+) -> Result<MessagePage> {
+    message_page_filtered(
+        client,
+        recipient,
+        include_closed,
+        cursor,
+        report,
+        MessagePageFilters::default(),
+    )
+    .await
+}
+
+async fn message_page_filtered(
+    client: &Client,
+    recipient: Option<&str>,
+    include_closed: bool,
+    cursor: Option<&str>,
+    report: Option<&str>,
+    filters: MessagePageFilters<'_>,
 ) -> Result<MessagePage> {
     let mut path = format!("/v1/messages/page?include_closed={include_closed}&limit=100");
     if let Some(recipient) = recipient {
@@ -12851,6 +12883,15 @@ async fn message_page_reporting(
     }
     if let Some(report) = report {
         path.push_str(&format!("&delivery={}", urlencoding::encode(report)));
+    }
+    for (name, value) in [
+        ("from", filters.from),
+        ("subject", filters.subject),
+        ("subject_prefix", filters.subject_prefix),
+    ] {
+        if let Some(value) = value {
+            path.push_str(&format!("&{name}={}", urlencoding::encode(value)));
+        }
     }
     client.get(&path).await
 }
