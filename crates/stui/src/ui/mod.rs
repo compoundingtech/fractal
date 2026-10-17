@@ -44,6 +44,7 @@ mod resource_sidebar;
 mod arrangement_keys;
 mod observed_resources;
 mod pty;
+pub mod requests;
 pub mod screens;
 pub mod text;
 pub mod theme;
@@ -278,6 +279,10 @@ pub enum Effect {
     /// Start a plain shell for the person; it opens in a new tab.
     CreateTerminal {
         name: String,
+    },
+    /// Explicitly reopen a failed conversation, independently of outgoing-message resend.
+    RetryConversation {
+        target: String,
     },
     /// Send a failed or unconfirmed message again, as the same request.
     Resend {
@@ -672,6 +677,27 @@ impl Ui {
         self.frame.borrow().read_messages.clone()
     }
 
+    /// Release the pixels of every image more than a screen away from what the last frame
+    /// showed, in every pane; an image in a tab not drawn is released too.
+    pub(crate) fn release_far_images(&mut self) {
+        let frame = self.frame.borrow();
+        let near = frame
+            .panes
+            .iter()
+            .flat_map(|pane| {
+                let height = pane.rect.height as usize;
+                let from = pane.top.saturating_sub(height + content::IMAGE_ROWS);
+                let to = pane.top.saturating_add(2 * height);
+                pane.images
+                    .iter()
+                    .filter(move |(_, line)| (from..to).contains(line))
+                    .map(|(key, _)| key.clone())
+            })
+            .collect();
+        drop(frame);
+        self.content.release_far(&near);
+    }
+
     /// Use the last presented viewport, not every row in the conversation.
     pub(crate) fn next_content_read(&mut self, reads: &mut content::Reads) -> Option<content::Key> {
         if reads.idle()
@@ -700,13 +726,14 @@ impl Ui {
             if pane.rect.width == 0 || pane.rect.height == 0 {
                 continue;
             }
-            if self.auto_images {
-                for (key, line) in &pane.images {
-                    if pane.entry_visible(*line, line.saturating_add(1), &frame.covers)
-                        && self.content.request_visible_image(key)
-                    {
-                        return Some(key.clone());
-                    }
+            for (key, line) in &pane.images {
+                // A terminal that draws images loads them as they come into view; anywhere, an
+                // image the person showed comes back after scrolling released it.
+                if (self.auto_images || self.content.shown_released(key))
+                    && pane.entry_visible(*line, line.saturating_add(1), &frame.covers)
+                    && self.content.request_visible_image(key)
+                {
+                    return Some(key.clone());
                 }
             }
             for (index, (entry, start)) in pane.entries.iter().enumerate() {
@@ -1061,14 +1088,16 @@ impl Ui {
         self.conversation_first == Some(true)
     }
 
-    /// Attach the terminal of an agent whose tab has been in front for a moment, unless this
-    /// device opens agents on their conversation. An agent without a terminal (a session st did
-    /// not start, a harness with none) stays on its conversation, and nothing is said.
+    /// Attach the terminal of an agent just opened whose tab has been in front for a moment,
+    /// unless this device opens agents on their conversation. An agent without a terminal (a
+    /// session st did not start, a harness with none) stays on its conversation, and nothing is
+    /// said; Ctrl+] decides the same way.
     pub(crate) fn step_default_view(&mut self) {
         let Some((id, at)) = &self.attach_when else {
             return;
         };
-        if at.elapsed() < ATTACH_DWELL {
+        // Until st has listed the agents, whether this one has a terminal is not known yet.
+        if at.elapsed() < ATTACH_DWELL || self.world.agents.ready().is_none() {
             return;
         }
         let id = id.clone();
@@ -1081,7 +1110,7 @@ impl Ui {
             .agents
             .items()
             .iter()
-            .any(|agent| agent.id == id && agent.terminal && !agent.unmanaged);
+            .any(|agent| agent.id == id && agent.terminal);
         if still_here && !attached && !self.editing && !self.conversation_first() && has_terminal {
             // The tab turns into the terminal, as Ctrl+] does; Ctrl+\ turns it back.
             self.open_terminal();
@@ -1205,6 +1234,19 @@ impl Ui {
 
     pub(crate) fn conversation_failed(&mut self, target: &str, error: &str) {
         self.stalled.insert(target.to_owned(), error.to_owned());
+    }
+
+    fn retry_conversation(&mut self) -> bool {
+        let Some(target) = self.content_conversation() else {
+            return false;
+        };
+        if !matches!(self.world.conversations.get(&target), Some(Load::Failed(_))) {
+            return false;
+        }
+        self.stalled.remove(&target);
+        self.world.conversations.insert(target.clone(), Load::Loading);
+        self.effects.push(Effect::RetryConversation { target });
+        true
     }
 
     /// What is on screen, as kinds and counts only, for a slow-turn note: which pane has focus,
@@ -2529,7 +2571,9 @@ impl Ui {
             Pane::Terminal(agent) => return self.draw_terminal(buf, area, agent),
             Pane::Home(id) => {
                 let drafts = self.drafts_for(id.as_deref().unwrap_or_default(), width);
-                screens::home_detail(&self.world, id.as_deref(), width, &drafts)
+                let mut doc = screens::home_detail(&self.world, id.as_deref(), width, &drafts);
+                self.content.expand_requests(&mut doc, width);
+                doc
             }
             Pane::NewMission => {
                 let empty = Default::default();
@@ -2548,7 +2592,10 @@ impl Ui {
                         .and_then(|id| self.mission_decision(id))
                         .map(|decision| {
                             let drafts = self.drafts_for(&decision, width);
-                            screens::home_detail(&self.world, Some(&decision), width, &drafts)
+                            let mut doc =
+                                screens::home_detail(&self.world, Some(&decision), width, &drafts);
+                            self.content.expand_requests(&mut doc, width);
+                            doc
                         });
                 screens::mission_detail(
                     &self.world,
@@ -2574,6 +2621,23 @@ impl Ui {
         self.pane(buf, &pane.key(), area, doc, false);
     }
 
+    fn conversation_failure(reason: &str, width: usize) -> Doc {
+        let mut doc = Doc::new();
+        doc.blank();
+        let mut inner = Doc::new();
+        inner.wrap(
+            &[text::run(reason, theme::soft())],
+            width.saturating_sub(4),
+        );
+        inner.blank();
+        inner.wrap(
+            &[text::run("Ctrl+R · retry opening this conversation", theme::fg(theme::ACCENT))],
+            width.saturating_sub(4),
+        );
+        doc.card("no conversation to show", theme::OVERLAY1, false, inner, width);
+        doc
+    }
+
     fn draw_agent(&self, buf: &mut Buffer, area: Rect, id: Option<&str>) {
         let width = area.width.saturating_sub(1) as usize;
         let Some(agent) = id.and_then(|id| {
@@ -2583,6 +2647,12 @@ impl Ui {
                 .iter()
                 .find(|agent| agent.id == id)
         }) else {
+            if let Some(target) = id
+                && let Some(Load::Failed(reason)) = self.world.conversations.get(target)
+            {
+                self.pane(buf, target, area, Self::conversation_failure(reason, width), false);
+                return;
+            }
             let message = if id.is_some_and(|id| id.starts_with("session/")) {
                 "Loading conversation…".into()
             } else {
@@ -2736,21 +2806,7 @@ impl Ui {
                 doc
             }
             Some(Load::Failed(reason)) => {
-                let mut doc = Doc::new();
-                doc.blank();
-                let mut inner = Doc::new();
-                inner.wrap(
-                    &[text::run(reason.clone(), theme::soft())],
-                    width.saturating_sub(4),
-                );
-                doc.card(
-                    "no conversation to show",
-                    theme::OVERLAY1,
-                    false,
-                    inner,
-                    width,
-                );
-                doc
+                Self::conversation_failure(reason, width)
             }
             Some(Load::Ready(entries)) if entries.is_empty() => {
                 let mut doc = Doc::new();
@@ -3166,17 +3222,26 @@ impl Ui {
             }
             if let Hit::InlineImage(key) = &target.hit
                 && target.line < top + height
-                && target.line + 12 > top
-                && let Some(picker) = &self.picker
+                && target.line + content::IMAGE_ROWS > top
             {
                 let start = target.line.max(top);
-                let end = (target.line + 12).min(top + height);
-                self.content.draw_image(picker, key, Rect {
-                    x: area.x + 2,
-                    y: area.y + (start - top) as u16,
-                    width: area.width.saturating_sub(3),
-                    height: (end - start) as u16,
-                }, buf);
+                let end = (target.line + content::IMAGE_ROWS).min(top + height);
+                // Two columns in from the line's own start: a card's frame stays visible.
+                let width = target
+                    .width
+                    .min(area.width.saturating_sub(3 + target.column));
+                self.content.draw_image(
+                    key,
+                    width,
+                    (start - target.line) as u16,
+                    Rect {
+                        x: area.x + 2 + target.column,
+                        y: area.y + (start - top) as u16,
+                        width,
+                        height: (end - start) as u16,
+                    },
+                    buf,
+                );
             }
         }
         if let Some(selection) = &self.conversation_state.selection
@@ -3845,6 +3910,7 @@ impl Ui {
                 ("wheel pgup pgdn ↑↓", "scroll the pane under the pointer"),
                 ("end", "jump to the newest message and follow it"),
                 ("ctrl+f", "find in this conversation"),
+                ("ctrl+r", "retry opening a failed conversation (outside the message box)"),
                 (
                     "ctrl+a",
                     "the agent's actions: restart, suspend, retire, terminal…",
@@ -4648,6 +4714,13 @@ impl Ui {
                 }
             }
             KeyCode::Char(letter @ ('r' | 'x')) if self.tab == 1 && self.live => {
+                if letter == 'r'
+                    && self.glasses.is_none()
+                    && key.modifiers == KeyModifiers::CONTROL
+                    && self.retry_conversation()
+                {
+                    return;
+                }
                 match self.undelivered() {
                     Some(entry) if letter == 'r' => self.effects.push(Effect::Resend { entry }),
                     Some(entry) => self.effects.push(Effect::Forget { entry }),
@@ -7007,6 +7080,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn conversation_open_retry_does_not_act_inside_a_draft_or_on_a_ready_conversation() {
+        let mut ui = Ui::new(demo::world());
+        ui.live = true;
+        ui.tab = 1;
+        let target = ui.selected_id().unwrap();
+        let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        ui.key(key);
+        assert!(ui.effects.is_empty(), "a ready conversation is not reopened");
+
+        ui.world.conversations.insert(target.clone(), Load::Failed("access refused".into()));
+        ui.conversation_failed(&target, "previous transient failure");
+        ui.conversation_state.drafts.insert(target.clone(), "saved draft".into());
+        ui.editing = true;
+        ui.key(key);
+        assert!(ui.effects.is_empty(), "the message box retains its editing keys");
+        assert!(matches!(ui.world.conversations[&target], Load::Failed(_)));
+        ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        ui.key(key);
+        assert_eq!(ui.effects, vec![Effect::RetryConversation { target: target.clone() }]);
+        assert!(!ui.stalled.contains_key(&target));
+        assert_eq!(ui.conversation_state.drafts[&target], "saved draft");
+    }
+
+    #[test]
     fn first_useful_conversation_requires_a_rendered_entry_not_a_placeholder() {
         let mut ui = Ui::new(demo::world());
         ui.tab = 1;
@@ -7326,6 +7423,7 @@ mod tests {
                 from_id: "agent/garden/seed".into(),
                 question: "selection (keep / discard)".into(),
                 structured: None,
+                images: Vec::new(),
             },
             actions: vec!["custom.reply".into()],
             related: vec![],
@@ -7387,6 +7485,18 @@ mod tests {
         edit_text(&mut lines, key(KeyCode::Char('w'), KeyModifiers::CONTROL));
         assert_eq!(lines, "first");
         assert!(!edit_text(&mut lines, key(KeyCode::Up, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn a_mission_between_steps_says_what_is_next_not_that_the_person_has_no_part() {
+        let mut ui = Ui::new(demo::world());
+        ui.open("mission/fleet/rekey");
+        let shown = frame(&ui, 140, 50).join("\n").to_lowercase();
+        assert!(shown.contains("up next"), "{shown}");
+        assert!(
+            !shown.contains("nothing for you to do"),
+            "a run that is moving never says that:\n{shown}"
+        );
     }
 
     fn frame(ui: &Ui, width: u16, height: u16) -> Vec<String> {
@@ -7543,6 +7653,7 @@ mod tests {
                 from_id: "agent/example/planner".into(),
                 question: "Answer yes and I land them.".into(),
                 structured: None,
+                images: Vec::new(),
             },
             actions: vec!["work.done".into()],
             related: Vec::new(),
@@ -7820,6 +7931,7 @@ mod tests {
                 },
             ],
             custom: true,
+            attachments: Vec::new(),
             ..Default::default()
         };
         let item = Attention {
@@ -7836,6 +7948,7 @@ mod tests {
                 from_id: "agent/example/cos".into(),
                 question: request.question.clone(),
                 structured: Some(Box::new(request)),
+                images: Vec::new(),
             },
             actions: vec!["work.done".into()],
             related: Vec::new(),
@@ -7898,6 +8011,7 @@ mod tests {
                 recommendation: None,
                 answers,
                 custom: false,
+                attachments: Vec::new(),
             };
             let item = Attention {
                 conversations: vec![],
@@ -7913,6 +8027,7 @@ mod tests {
                     from_id: "agent/example/cos".into(),
                     question: request.question.clone(),
                     structured: Some(Box::new(request)),
+                    images: Vec::new(),
                 },
                 actions: vec!["work.done".into()],
                 related: Vec::new(),
@@ -8030,6 +8145,7 @@ mod tests {
                 },
             ],
             custom: true,
+            attachments: Vec::new(),
         };
         let item = Attention {
             conversations: vec![],
@@ -8045,6 +8161,7 @@ mod tests {
                 from_id: "agent/example/cos".into(),
                 question: request.question.clone(),
                 structured: Some(Box::new(request)),
+                images: Vec::new(),
             },
             actions: vec!["work.done".into()],
             related: Vec::new(),
@@ -8112,6 +8229,7 @@ mod tests {
             subjects: Vec::new(),
             answers: vec![option("a", "Refresh"), option("b", "Shorten"), option("c", "Leave it")],
             custom: false,
+            attachments: Vec::new(),
         };
         let item = Attention {
             conversations: vec![],
@@ -8127,6 +8245,7 @@ mod tests {
                 from_id: "agent/example/cos".into(),
                 question: request.question.clone(),
                 structured: Some(Box::new(request)),
+                images: Vec::new(),
             },
             actions: vec!["work.done".into()],
             related: Vec::new(),
@@ -8202,6 +8321,7 @@ mod tests {
                 },
             ],
             custom: false,
+            attachments: Vec::new(),
         };
         let item = Attention {
             conversations: vec![],
@@ -8217,6 +8337,7 @@ mod tests {
                 from_id: "agent/example/cos".into(),
                 question: request.question.clone(),
                 structured: Some(Box::new(request)),
+                images: Vec::new(),
             },
             actions: vec!["work.done".into()],
             related: Vec::new(),
@@ -8295,6 +8416,7 @@ mod tests {
                 from_id: "agent/example/cos".into(),
                 question: "The proof needs a runner.".into(),
                 structured: None,
+                images: Vec::new(),
             },
             actions: vec!["work.done".into()],
             related: Vec::new(),
@@ -8578,6 +8700,7 @@ mod tests {
                         from_id: "agent/example/planner".into(),
                         question: "Name the runner.".into(),
                         structured: None,
+                        images: Vec::new(),
                     },
                     actions: vec!["work.done".into()],
                     related: Vec::new(),

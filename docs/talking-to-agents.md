@@ -6,6 +6,13 @@ Messages are durable conversation. Missions track work and its result; [human re
 
 Run `st`, open **Agents**, and select `garden/worker`. Click the conversation composer, type, and press **Enter** to send. In v0.3.4, **c** opens the composer from the conversation. **Ctrl+K** finds an agent or mission; **Ctrl+H** opens Home, and **Ctrl+Q** quits. The conversation shows your Smalltalk messages alongside the harness's transcript and tool calls.
 
+If a conversation fails to open, its error card offers **Ctrl+R** to retry opening it
+without closing the tab. Leave the message box with **Esc** first. On a failed-open
+card this retries only the focused conversation, never an outgoing message; otherwise
+**Ctrl+R** resends a message that was not sent. **Ctrl+Y** speaks into the message box.
+A permanent refusal is not retried automatically: after access or availability changes,
+use **Ctrl+R** to ask again. Your draft is kept.
+
 On the phone, open **Agents**, select the worker, and use its composer. [Build and run the iOS app](ios-app.md) covers local installation first. A phone reads and acts through a paired member; it does not become a replica or run a seat. To begin pairing on your daemon machine:
 
 ```sh
@@ -170,6 +177,8 @@ st work ask --for person/ada --title 'Review the garden README' \
   --new-run garden/readme-decision --request publish-decision.json \
   --idempotency-key garden-readme-decision --as "$ST_AGENT"
 ```
+
+To show the person an image with the question, add `--attach FILE` (up to four PNG, JPEG, GIF or WebP images of at most 10 MiB each): the person sees each on the card.
 
 Use `--step` for a currently claimed step instead of `--new-run`, as [missions in practice](missions-in-practice.md#ask-for-a-decision-that-comes-up-during-work) shows. Name why the person is needed and the exact subject/revision they are reviewing. The agent finishes all work it can do independently before asking.
 

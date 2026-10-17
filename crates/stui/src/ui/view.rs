@@ -261,6 +261,8 @@ pub enum AttentionKind {
         /// A structured ask's typed fields (#1010): summary, reasons, links, named answers and
         /// a recommendation. Absent on a free-text ask.
         structured: Option<Box<st3_client::StructuredRequest>>,
+        /// The images it carries, read from st through the ask.
+        images: Vec<st3_conversation_ui::MailImage>,
     },
     /// Information the person asked an agent for (`st work update`): it asks nothing, and it
     /// clears once they read it.
@@ -388,6 +390,10 @@ pub struct Agent {
     /// The subagents its harness runs now, oldest first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub subagents: Vec<Subagent>,
+    /// st's own state for an agent when this host's st is too old to serve its presentation.
+    /// The client shows it as reported and derives nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reported: Option<String>,
 }
 
 /// A subagent an agent's harness runs inside its own session. It belongs to the agent and is not
