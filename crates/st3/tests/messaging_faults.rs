@@ -2,10 +2,50 @@
 //! The provider API stand-in consumes native handoffs without making model calls.
 #![cfg(target_os = "linux")]
 
+#[test]
+fn controller_death_cleanup() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let repo = std::path::PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = st3::test_support::command("python3")
+        .args(["-m", "unittest", "discover", "-s"])
+        .arg(repo.join("scripts/st3-messaging-faults-eval"))
+        .args(["-p", "test_*.py"])
+        .env("ST3_MFE_TEST_BINARY", test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("run messaging cleanup, oracle, readiness and timing regressions");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The daemon's delivery-presence startup grace is 20 s. Every case but three keeps the real
+/// value and the 25 s tail: `daemon_restart`, which restarts the daemon inside the observation;
+/// `handoff_failed`, whose tail waits for the channel's retry backoff after a refused handoff
+/// to clear (a 6 s tail failed 11 of 20 runs, "delivery report is stale: the provider rejected a
+/// native handoff"), which is not the grace; and the optional `link_minutes`. The rest run the
+/// daemon with a 1 s grace through a test-only cap and observe for that grace plus the eval's
+/// 5 s margin. The assertions are the same; the clock is shorter.
+const FAST_GRACE_SECONDS: &str = "1";
+const FAST_OBSERVE_SECONDS: &str = "6";
+
 fn run_case(case: &str) {
+    run_case_at(case, false);
+}
+
+fn run_case_at_real_grace(case: &str) {
+    run_case_at(case, true);
+}
+
+fn run_case_at(case: &str, real_grace: bool) {
     use std::path::PathBuf;
 
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let old = match std::env::var_os("ST3_MESSAGING_COMPAT_BIN") {
         Some(path) => PathBuf::from(path),
         None => {
@@ -54,22 +94,29 @@ fn run_case(case: &str) {
     // artifact filesystem while the Python fixture keeps its Unix sockets in a short /tmp root.
     let scratch = tempfile::Builder::new()
         .prefix("messaging-fault-scratch-")
-        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .tempdir_in(test_env!("CARGO_TARGET_TMPDIR"))
         .unwrap();
     // Double-fork out of the CI seat's ancestry. A sender is person/eval; an st harness
     // must never impersonate that sender. Captured pipes stay open until the eval exits.
-    let output = st3::test_support::command("setsid")
-        .args(["-f", "env", "-u", "ST_AGENT", "python3"])
+    let mut eval = st3::test_support::command("setsid");
+    eval.args(["-f", "env", "-u", "ST_AGENT", "python3"])
         .arg(repo.join("scripts/st3-messaging-faults-eval/run"))
-        .arg(env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
         .arg(&evidence)
         .arg("--old-binary")
         .arg(old)
         .arg("--scratch")
         .arg(scratch.path())
-        .args(["--cases", case])
-        .output()
-        .expect("run the isolated messaging fault eval");
+        .args(["--cases", case]);
+    if !real_grace {
+        eval.args([
+            "--startup-grace-seconds",
+            FAST_GRACE_SECONDS,
+            "--observe-seconds",
+            FAST_OBSERVE_SECONDS,
+        ]);
+    }
+    let output = eval.output().expect("run the isolated messaging fault eval");
     let result = std::fs::read_to_string(evidence.join("result.json"));
     let passed = result
         .as_ref()
@@ -106,55 +153,89 @@ fn run_case(case: &str) {
 
 #[test]
 fn baseline() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("baseline");
 }
 
 #[test]
 fn daemon_restart() {
-    run_case("daemon-restart");
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    // The control: the real 20 s grace and the 25 s observation, across a daemon restart.
+    run_case_at_real_grace("daemon-restart");
 }
 
 #[test]
 fn binary_swap() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("binary-swap");
 }
 
 #[test]
 fn path_deploy() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("path-deploy");
 }
 
 #[test]
 fn link_seconds() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("link-seconds");
 }
 
 #[test]
 fn link_minutes() {
-    run_case("link-minutes");
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    run_case_at_real_grace("link-minutes");
 }
 
 #[test]
 fn receiver_down() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("receiver-down");
 }
 
 #[test]
 fn harness_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("harness-restart");
 }
 
 #[test]
 fn channel_killed() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("channel-killed");
 }
 
 #[test]
 fn old_channel() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("old-channel");
 }
 
 #[test]
 fn handoff_failed() {
-    run_case("handoff-failed");
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    run_case_at_real_grace("handoff-failed");
 }

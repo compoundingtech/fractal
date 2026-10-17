@@ -1,8 +1,12 @@
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
 use st3_client::*;
 use std::path::{Path, PathBuf};
 
 fn fixture(name: &str) -> Vec<u8> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let path = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/st3/client-v0/fixtures")
         .join(name);
     std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
@@ -10,6 +14,65 @@ fn fixture(name: &str) -> Vec<u8> {
 
 fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
     serde_json::from_slice(&fixture(name)).unwrap_or_else(|error| panic!("decode {name}: {error}"))
+}
+#[test]
+fn directive_notes_preserve_author_time_expiry_and_clear_as_empty() {
+    let wire: Envelope<DirectiveNotes> = decode("directive-notes.json");
+    let note = &wire.value.notes[0];
+    assert_eq!(note.person, "person/ada");
+    assert_eq!(note.author, note.person);
+    assert_eq!(note.time, "2026-10-10T09:00:00Z");
+    assert_eq!(note.expires_at.as_deref(), Some("2026-10-12T09:00:00Z"));
+    assert_eq!(note.revision, "claim/example");
+    let empty: DirectiveNotes = serde_json::from_value(serde_json::json!({"notes":[]})).unwrap();
+    assert!(empty.notes.is_empty());
+    let mut without_expiry = serde_json::to_value(note).unwrap();
+    without_expiry.as_object_mut().unwrap().remove("expires_at");
+    assert!(serde_json::from_value::<DirectiveNote>(without_expiry).unwrap().expires_at.is_none());
+}
+
+#[test]
+fn agent_lifecycle_future_value_keeps_the_roster_row() {
+    let row = serde_json::json!({
+        "kind": "agent", "id": "agent/example", "revision": "r1",
+        "updated_at": "2026-10-04T08:00:00Z", "name": "Example",
+        "state": "running", "reachability": "local", "runtime_ids": [],
+    });
+    for (value, expected) in [
+        ("standing", AgentLifecycle::Standing),
+        ("owner", AgentLifecycle::Owner),
+        ("bounded", AgentLifecycle::Bounded),
+        ("future-kind", AgentLifecycle::Unknown),
+    ] {
+        let mut declared = row.clone();
+        declared["lifecycle"] = serde_json::json!(value);
+        let page: Page = serde_json::from_value(serde_json::json!({
+            "kind": "page", "collection": "agents", "filters": {},
+            "items": [declared], "page": {"limit": 50, "has_more": false},
+        })).unwrap();
+        let [Resource::Agent(agent)] = page.items.as_slice() else {
+            panic!("lifecycle must not discard the agent row: {:?}", page.items);
+        };
+        assert_eq!(agent.header.id, "agent/example");
+        assert_eq!(agent.name, "Example");
+        assert_eq!(agent.lifecycle, Some(expected));
+    }
+    let absent: Agent = serde_json::from_value(row).unwrap();
+    assert_eq!(absent.lifecycle, None);
+    assert!(serde_json::to_value(absent).unwrap().get("lifecycle").is_none());
+}
+
+
+#[test]
+fn person_ask_mission_preserves_person_assignees_in_both_step_views_and_wake() {
+    let mission: Mission = decode("person-ask-mission.json");
+    let run = &mission.run_details[0];
+    assert_eq!(run.current_steps[0]["assignee"], "person/avery");
+    assert!(run.current_steps[0]["claimant"].is_null());
+    let step = &run.steps.as_ref().unwrap()[0];
+    assert_eq!(step.assignee.as_deref(), Some("person/avery"));
+    assert!(step.claimant.is_none());
+    assert_eq!(step.wake.as_ref().unwrap().assignee, "person/avery");
 }
 
 #[test]
@@ -146,8 +209,61 @@ fn generated_models_decode_every_stream_fixture() {
     assert_ne!(changed.value.revision, screen.value.revision);
     let ended: ErrorEnvelope = decode("terminal-stale-fence-error.json");
     assert_eq!(ended.code, ErrorCode::StaleFence);
-    let pairing: Envelope<PairedSession> = decode("pairing.json");
+    let pairing: Envelope<PersonPairedSession> = decode("pairing.json");
     assert!(pairing.value.credential.len() >= 32);
+}
+
+#[test]
+fn assistant_pairing_is_disjoint_from_person_delegation() {
+    let begin: PairingBegin = decode("assistant-pairing-begin.json");
+    let PairingBegin::Assistant(request) = begin else { panic!("assistant request decoded as person"); };
+    assert_eq!(request.assistant_id, AssistantPrincipal::Chatgpt);
+    let scopes = vec![
+        AssistantScope::Summary,
+        AssistantScope::Attention,
+        AssistantScope::Missions,
+        AssistantScope::Agents,
+    ];
+    assert_eq!(request.scopes, scopes);
+    assert!(request.disclosure_consent);
+    assert_eq!(request.consent_evidence, "axe decision ask recorded by the owning person");
+    assert_eq!(request.expires_in_seconds, Some(3600));
+    let policy: AssistantGrantPolicy = decode("assistant-grant-policy.json");
+    assert_eq!(policy.minimal_read_mode, AssistantMinimalReadMode::ApprovalOnce);
+    assert_eq!(policy.scopes, scopes);
+    assert!(policy.disclosure_consent);
+    assert_eq!(policy.consent_evidence, "axe decision ask recorded by the owning person");
+
+    let challenge: Envelope<PairingChallenge> = decode("assistant-pairing-challenge.json");
+    assert_eq!(challenge.value.grant_kind.as_deref(), Some("assistant"));
+    assert_ne!(challenge.value.grant_expires_at.as_deref(), Some(challenge.value.expires_at.as_str()));
+    assert!(challenge.value.person_root_fingerprint.is_none());
+
+    let paired: Envelope<PairedSession> = decode("assistant-pairing.json");
+    let PairedSession::Assistant(session) = paired.value else { panic!("assistant session decoded as person"); };
+    assert_eq!(session.sender_class, AssistantSenderClass::ExternalAssistant);
+    assert_eq!(session.grant.policy_revision, 1);
+    assert_eq!(session.grant.issuer, "person/operator");
+    assert_eq!(session.scopes, scopes);
+    assert_eq!(session.grant.scopes, scopes);
+    assert!(session.grant.disclosure_consent);
+    assert_eq!(session.grant.consent_evidence, "axe decision ask recorded by the owning person");
+    assert!(session.grant.recipient_allowlist.is_empty());
+    let public = serde_json::to_value(&session.grant).unwrap();
+    assert!(public.get("credential").is_none());
+    assert!(public.get("credential_digest").is_none());
+    assert!(public.get("person_id").is_none());
+    assert!(serde_json::from_slice::<Envelope<PersonPairedSession>>(&fixture("assistant-pairing.json")).is_err());
+    assert!(serde_json::from_slice::<Envelope<AssistantPairedSession>>(&fixture("pairing.json")).is_err());
+    let person: Envelope<PairedSession> = decode("pairing.json");
+    assert!(matches!(person.value, PairedSession::Person(_)));
+
+    let mut mixed: serde_json::Value = decode("assistant-pairing-begin.json");
+    mixed["person_id"] = serde_json::json!("person/operator");
+    assert!(serde_json::from_value::<PairingBegin>(mixed).is_err());
+    let mut broad: serde_json::Value = decode("assistant-pairing-begin.json");
+    broad["scopes"] = serde_json::json!(["control.messages"]);
+    assert!(serde_json::from_value::<PairingBegin>(broad).is_err());
 }
 
 #[test]
@@ -199,6 +315,8 @@ fn generated_resource_union_decodes_all_kinds() {
             _ => None,
         })
         .unwrap();
+    assert_eq!(agent.workspace.as_deref(), Some("/srv/example/release"));
+    assert_eq!(agent.checkout.as_ref().unwrap().branch, "release");
     assert_eq!(agent.current_work_ids, ["step-run/release/build"]);
     assert_eq!(
         agent.next_work_id.as_deref(),
@@ -233,7 +351,7 @@ fn generated_resource_union_decodes_all_kinds() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(device.person_id, "person/alex");
+    assert_eq!(device.person_id.as_deref(), Some("person/alex"));
     assert_eq!(device.state, "active");
 }
 
@@ -282,6 +400,61 @@ fn session_usage_context_decodes_through_flattened_resource() {
         Some(1_790_163_492_730)
     );
     assert_eq!(session.extra["new_session_field"]["preserved"], true);
+}
+
+#[test]
+fn timeline_tool_result_preserves_timing_metadata_and_decodes_legacy_results() {
+    let mut wire = serde_json::json!({
+        "id": "timeline-entry/tool-timing",
+        "sequence": 1,
+        "revision": 1,
+        "timestamp": "2026-10-05T12:00:00Z",
+        "role": "tool",
+        "type": "tool_result",
+        "final": true,
+        "body": {
+            "call_id": "call/timing",
+            "status": "success",
+            "media_type": "text/plain",
+            "content": "finished",
+            "blocks": [{
+                "id": "tool-timing/0",
+                "kind": "tool_output",
+                "source_type": "tool_result",
+                "payload": {"body_ref": true},
+                "metadata": {
+                    "wallTimeMs": 1250.5,
+                    "timeoutSeconds": 0,
+                    "future": {"unit": "ticks", "value": 0.125}
+                }
+            }]
+        }
+    });
+    let entry: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    let TimelineBody::ToolResult(body) = entry.body else {
+        panic!("tool result discriminator was not preserved");
+    };
+    assert_eq!(
+        body.blocks[0].metadata.as_ref(),
+        Some(&wire["body"]["blocks"][0]["metadata"])
+    );
+    assert_eq!(
+        serde_json::to_value(&body).unwrap()["blocks"][0]["metadata"],
+        wire["body"]["blocks"][0]["metadata"]
+    );
+
+    wire["body"]["blocks"][0].as_object_mut().unwrap().remove("metadata");
+    let untimed: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(
+        untimed.body,
+        TimelineBody::ToolResult(body) if body.blocks[0].metadata.is_none()
+    ));
+    wire["body"].as_object_mut().unwrap().remove("blocks");
+    let legacy: TimelineEntry = serde_json::from_value(wire).unwrap();
+    assert!(matches!(
+        legacy.body,
+        TimelineBody::ToolResult(body) if body.blocks.is_empty()
+    ));
 }
 
 #[test]
@@ -342,10 +515,7 @@ fn timeline_models_tolerate_future_discriminators() {
     .expect("a newer tool status must not break an older client");
     assert!(matches!(
         tool.body,
-        TimelineBody::ToolResult(TimelineToolResultBody {
-            status: TimelineToolStatus::Unknown,
-            ..
-        })
+        TimelineBody::ToolResult(result) if result.status == TimelineToolStatus::Unknown
     ));
 
     let usage: TimelineEntry = serde_json::from_value(entry(
@@ -384,7 +554,6 @@ fn generated_action_union_and_machine_manifest_stay_in_lockstep() {
         READ_OPERATIONS.len(),
         operations["reads"].as_array().unwrap().len()
     );
-    assert_eq!(CONTRACT_SHA256.len(), 64);
 }
 
 #[test]
@@ -466,5 +635,123 @@ fn a_kind_this_client_does_not_know_reads_as_unknown_and_the_page_still_reads() 
             "updated_at": "2026-10-04T08:00:00Z"
         }))
         .is_err()
+    );
+}
+
+#[test]
+fn relay_omission_fixture_round_trips_without_inventing_nonnullable_fields() {
+    let bytes = fixture("timeline-relay-omission.json");
+    let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let typed: Envelope<TimelinePage> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(serde_json::to_value(&typed).unwrap(), raw);
+    let changes = serde_json::json!({"kind":"conversation-changes", "session_id":raw["value"]["session_id"],
+        "items":raw["value"]["items"], "next_cursor":"conversation-cursor/relay/next"});
+    let typed: ConversationChanges = serde_json::from_value(changes.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(), changes);
+}
+
+/// Contract shape only: these fixtures carry placeholder pins and an intentionally invalid
+/// signature. Ed25519 verification, nonce replay and pin checks are exercised by the daemon tests.
+#[test]
+fn assistant_read_contract_decodes_fixtures_and_rejects_malformed_shapes() {
+    use sha2::Digest as _;
+
+    let trust: AssistantReadTrustRequest = decode("assistant-read-trust.json");
+    assert_eq!(trust.issuer, "person/operator");
+    assert_ne!(trust.attestor_public_key, trust.shim_public_key);
+    assert!(trust.default_response_bytes.unwrap() <= trust.max_response_bytes.unwrap());
+    let mut extra: serde_json::Value = decode("assistant-read-trust.json");
+    extra["shim_private_key"] = serde_json::json!("never");
+    assert!(serde_json::from_value::<AssistantReadTrustRequest>(extra).is_err());
+
+    let proof: ScgReadAuthorization = decode("assistant-read-authorization.json");
+    assert_eq!(proof.payload.identity, ScgReadIdentity::Chatgpt);
+    assert_eq!(proof.payload.assistant_id, AssistantPrincipal::Chatgpt);
+    assert_eq!(proof.payload.projection, AssistantProjection::ConversationContent);
+    assert_eq!(
+        proof.payload.parameters.get("max_response_bytes").map(String::as_str),
+        Some(proof.payload.max_response_bytes.to_string().as_str())
+    );
+    // The request digest is SHA-256 of canonical {method, parameters, path} over the decoded query.
+    let request = serde_json::json!({
+        "method": "GET",
+        "path": "/v1/client/assistant/conversation-content",
+        "parameters": proof.payload.parameters,
+    });
+    let canonical = smallclaims::hash::canonical_json_text(&request).unwrap();
+    assert_eq!(proof.payload.request_digest, hex::encode(sha2::Sha256::digest(canonical.as_bytes())));
+    // The query model a proof binds is the same disjoint request the SDK sends.
+    let query: AssistantConversationContentRequest = serde_json::from_value(serde_json::json!({
+        "agent_id": "agent/example", "session_id": "session/example", "reference": "content/example-0",
+        "revision": "r1", "start": 0, "end": 2048, "max_response_bytes": 8192,
+    }))
+    .unwrap();
+    assert_eq!(query.max_response_bytes, Some(proof.payload.max_response_bytes));
+
+    for (field, value) in [
+        ("identity", serde_json::json!("claude")),
+        ("assistant_id", serde_json::json!("assistant/other")),
+        ("projection", serde_json::json!("status")),
+        ("person_id", serde_json::json!("person/operator")),
+        ("parameters", serde_json::json!({"start": 0})),
+    ] {
+        let mut malformed: serde_json::Value = decode("assistant-read-authorization.json");
+        malformed["payload"][field] = value;
+        assert!(
+            serde_json::from_value::<ScgReadAuthorization>(malformed).is_err(),
+            "payload `{field}` must not decode"
+        );
+    }
+    let mut unsigned: serde_json::Value = decode("assistant-read-authorization.json");
+    unsigned.as_object_mut().unwrap().remove("signature");
+    assert!(serde_json::from_value::<ScgReadAuthorization>(unsigned).is_err());
+
+    let summary: Envelope<AssistantSummary> = decode("assistant-summary.json");
+    assert_eq!(summary.value.kind, "assistant-summary");
+    let mut owner_leak: serde_json::Value = decode("assistant-summary.json");
+    owner_leak["value"]["person_id"] = serde_json::json!("person/operator");
+    assert!(serde_json::from_value::<Envelope<AssistantSummary>>(owner_leak).is_err());
+    let attention: Envelope<AssistantAttentionPage> = decode("assistant-attention-page.json");
+    assert_eq!(attention.value.collection, "assistant.attention");
+    let missions: Envelope<AssistantMissionPage> = decode("assistant-mission-page.json");
+    assert_eq!(missions.value.items[0].step_counts.total, 3);
+    let agents: Envelope<AssistantAgentPage> = decode("assistant-agent-page.json");
+    assert!(agents.value.items[1].updated_at.is_none());
+    let conversation: Envelope<AssistantContentPage> = decode("assistant-conversation-content.json");
+    let AssistantContentPage::Conversation(text) = conversation.value else { panic!("conversation content decoded as terminal") };
+    assert_eq!(text.returned_bytes, text.text.len() as u64);
+    let terminal: Envelope<AssistantContentPage> = decode("assistant-terminal-content.json");
+    assert!(matches!(terminal.value, AssistantContentPage::Terminal(_)));
+
+    let mut mixed: serde_json::Value = decode("assistant-conversation-content.json");
+    mixed["value"]["terminal_id"] = serde_json::json!("terminal/example");
+    assert!(serde_json::from_value::<Envelope<AssistantContentPage>>(mixed).is_err());
+    let mut widened: serde_json::Value = decode("assistant-agent-page.json");
+    widened["value"]["items"][0]["runtime_ids"] = serde_json::json!([]);
+    assert!(serde_json::from_value::<Envelope<AssistantAgentPage>>(widened).is_err());
+    assert!(
+        serde_json::from_value::<AssistantContentRequest>(serde_json::json!({
+            "agent_id": "agent/example", "session_id": "session/example", "reference": "content/example-0",
+            "revision": "r1", "start": 0, "end": 1, "terminal_id": "terminal/example",
+        }))
+        .is_err()
+    );
+    assert!(serde_json::from_value::<AssistantPageRequest>(serde_json::json!({"person": "person/operator"})).is_err());
+    assert!(serde_json::from_value::<AssistantSummaryRequest>(serde_json::json!({"cursor": "c"})).is_err());
+}
+
+#[test]
+fn queued_mission_deadlines_decode_for_stui() {
+    let mut wire: serde_json::Value =
+        serde_json::from_slice(&fixture("person-ask-mission.json")).unwrap();
+    wire["run_details"][0]["after"] = serde_json::json!("mission-run/predecessor");
+    wire["run_details"][0]["deadline"] = serde_json::Value::Null;
+    let queued: Mission = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(queued.run_details[0].deadline, None);
+    wire["run_details"][0]["deadline"] = serde_json::json!("2026-09-20T11:05:00Z");
+    let admitted: Mission = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        admitted.run_details[0].deadline.as_deref(),
+        Some("2026-09-20T11:05:00Z")
     );
 }

@@ -12,13 +12,80 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
+import sys
 import time
 from urllib.parse import urlencode
 import uuid
 
 FORMAT = "st3.delivery-probes.v1"
 PREFIX = "doc/delivery-probes/"
+CHANNEL_STDERR_BYTES = 4096
+
+
+class ChannelStderr:
+    """Drain every byte, retaining only a bounded private tail and redacted CLI errors."""
+    def __init__(self):
+        self.tail = bytearray()
+        self.bytes = 0
+        self.incomplete = False
+        self.payload_at = None
+        self.scan_tail = b""
+        self.secrets = [value for key, value in os.environ.items() if value
+                        and re.search(r"TOKEN|SECRET|PASSWORD|API_?KEY|CREDENTIAL|AUTHORIZATION", key, re.I)]
+
+    async def drain(self, reader):
+        while True:
+            data = await reader.read(CHANNEL_STDERR_BYTES)
+            if not data:
+                return
+            if self.payload_at is None:
+                scan = self.scan_tail + data
+                payload = re.search(rb"<smalltalk-message|\{|\b(?:body|content|messages|prompt)\s*[:=]", scan, re.I)
+                if payload:
+                    self.payload_at = self.bytes - len(self.scan_tail) + payload.start()
+                self.scan_tail = scan[-64:]
+            self.bytes += len(data)
+            self.tail.extend(data)
+            del self.tail[:-CHANNEL_STDERR_BYTES]
+
+    def report(self):
+        tail = bytes(self.tail)
+        if self.payload_at is not None:
+            offset = self.payload_at - (self.bytes - len(tail))
+            tail = tail[:offset] + b"[payload omitted]" if offset >= 0 else b""
+        text = tail.decode("utf-8", errors="replace")
+        text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+        lines = []
+        # Discard a clipped first line: its missing prefix could conceal payload context.
+        if self.bytes > CHANNEL_STDERR_BYTES:
+            text = text.partition("\n")[2]
+        for line in text.splitlines():
+            # The CLI's error line is useful; trailing request, environment and native
+            # envelope dumps are not. A truncated partial line cannot pass this prefix.
+            line = line.strip()
+            payload = re.search(r"<smalltalk-message|\{|\b(?:body|content|messages|prompt)\s*[:=]", line, re.I)
+            if not line.startswith(("st:", "error:", "Error:")):
+                if payload:
+                    break
+                continue
+            line = re.sub(r"[\x00-\x1f\x7f]", "", line)
+            payload = re.search(r"<smalltalk-message|\{|\b(?:body|content|messages|prompt)\s*[:=]", line, re.I)
+            if payload:
+                line = line[:payload.start()] + "[payload omitted]"
+            for value in self.secrets:
+                line = line.replace(value, "[redacted]")
+            line = re.sub(r"(?i)(\b(?:authorization|cookie)\s*[:=]\s*).*", r"\1[redacted]", line)
+            line = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [redacted]", line)
+            line = re.sub(r"(https?://)[^/\s@]+@", r"\1[redacted]@", line)
+            line = re.sub(r"(?i)(\b(?:api[_-]?key|token|secret|password|credential)\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+                          r"\1[redacted]", line)
+            lines.append(line)
+            if payload:
+                break
+        return {"bytes": self.bytes, "truncated": self.bytes > CHANNEL_STDERR_BYTES,
+                "incomplete": self.incomplete, "diagnostic": "\n".join(lines)[-CHANNEL_STDERR_BYTES:]}
 
 
 def now_ms():
@@ -83,6 +150,11 @@ class Probe:
         if os.environ.get("ST_AGENT") != self.actor:
             raise ValueError("run this probe as its own declared ST_AGENT seat")
         self.source = config["host"]
+        self.alert_agent = config.get("alert_agent")
+        if "alert_agent" in config and (not isinstance(self.alert_agent, str)
+                                       or not self.alert_agent.startswith("agent/")
+                                       or not self.alert_agent[6:].strip()):
+            raise ValueError("alert_agent must be an agent identity")
         self.peers = {peer["agent"]: peer["host"] for peer in config["peers"]}
         if not self.peers or self.actor in self.peers or len(self.peers) != len(config["peers"]):
             raise ValueError("peers must be distinct other probe seats")
@@ -93,8 +165,10 @@ class Probe:
         # Replication status is one of the daemon's most expensive reads. Every route shares one
         # reading, at most this old, instead of asking for it once a second per peer.
         self.presence_ttl = int(config.get("presence_ttl_ms", 15_000))
-        # Each report is a replicated document write, which wakes every member's reconciler. A
-        # changed report publishes at once; an unchanged one only proves the probe is alive.
+        # Each report is a replicated document version, kept on every member, that wakes every
+        # member's reconciler. A changed outcome publishes at once; otherwise a heartbeat carries
+        # the newest latencies and proves the probe is alive. Each latency is a series point and
+        # stays in the local events log, not in a document version of its own.
         self.heartbeat = int(config.get("heartbeat_ms", 300_000))
         self.directory = Path(config["state_dir"])
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -106,17 +180,22 @@ class Probe:
         self.st3 = config.get("binary") or os.environ["ST3_BIN"]
         self.child = None
         self.last_publish = 0
-        self.changed = True
+        # What doctor read from the last published report: each route's outcome, and the routes
+        # it showed still in flight.
+        self.published = None
+        self.published_in_flight = set()
         self.presence_reading = None
+        self.alert_reading = None
         self.tasks = set()
         self.measuring = {}
 
     def persist(self):
         save(self.path, self.state)
-        self.changed = True
 
     def event(self, event, **fields):
-        with (self.directory / "events.jsonl").open("a") as output:
+        descriptor = os.open(self.directory / "events.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "a") as output:
+            os.fchmod(output.fileno(), 0o600)
             output.write(json.dumps({"at_unix_ms": now_ms(), "event": event, **fields}) + "\n")
 
     async def claims(self, subject):
@@ -175,17 +254,62 @@ class Probe:
                 child.stdin.write((json.dumps({"type": "failed", "meta": frame["meta"]}) + "\n").encode())
                 await child.stdin.drain()
 
+    async def channel_owner(self):
+        observed_at = now_ms()
+        try:
+            card = await asyncio.wait_for(self.api.get("/v1/client/agents/" + self.actor), 3)
+            if not isinstance(card, dict):
+                return {"observed_at_unix_ms": observed_at, "unavailable": True}
+            operational = card.get("operational") or {}
+            return {"observed_at_unix_ms": observed_at, "incarnation_id": card.get("incarnation_id"),
+                    "owner_run_id": card.get("owner_run_id"), "host_id": card.get("host_id"),
+                    "revision": card.get("revision"), "state": card.get("state"),
+                    "owner_generation": operational.get("owner_generation"),
+                    "runtime_incarnation": operational.get("runtime_incarnation")}
+        except Exception as error:
+            # The unavailable lookup must neither stop native delivery nor copy an API
+            # response (which can contain private data) into the diagnostic.
+            return {"observed_at_unix_ms": observed_at, "unavailable": True,
+                    "error_type": type(error).__name__}
+
     async def receiver(self):
         catalog = self.directory / "channel-catalog"
         catalog.mkdir(exist_ok=True)
         while True:
-            child = await asyncio.create_subprocess_exec(
-                self.st3, "--catalog", str(catalog), "driver", "omp-channel",
-                "--identity", self.actor[6:], stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                env={**os.environ, "ST3_ENDPOINT": self.api.socket})
+            context = {"channel_id": str(uuid.uuid4()), "agent": self.actor, "host": self.source,
+                       "probe_pid": os.getpid(), "binary": self.st3, "endpoint": self.api.socket,
+                       "inherited_incarnation": os.environ.get("ST3_INCARNATION"),
+                       "owner_run_id": os.environ.get("ST_MISSION_RUN"),
+                       "provider_runtime": os.environ.get("ST_OMP_CHANNEL_RUNTIME_ID"),
+                       "ownership_sequence": os.environ.get("ST_OMP_CHANNEL_SEQ")}
+            # Own the stderr read transport so a descendant's inherited descriptor
+            # can be closed after the drain deadline, rather than leaked across retries.
+            read_fd, write_fd = os.pipe()
+            pipe = os.fdopen(read_fd, "rb", buffering=0)
+            stderr_reader = asyncio.StreamReader()
+            stderr_transport = None
+            try:
+                stderr_transport, _ = await asyncio.get_running_loop().connect_read_pipe(
+                    lambda: asyncio.StreamReaderProtocol(stderr_reader), pipe)
+                child = await asyncio.create_subprocess_exec(
+                    self.st3, "--catalog", str(catalog), "driver", "omp-channel",
+                    "--identity", self.actor[6:], stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE, stderr=write_fd,
+                    env={**os.environ, "ST3_ENDPOINT": self.api.socket})
+            except BaseException:
+                if stderr_transport:
+                    stderr_transport.close()
+                else:
+                    pipe.close()
+                raise
+            finally:
+                os.close(write_fd)
             self.child = child
-            self.event("channel-started", pid=child.pid)
+            captured = ChannelStderr()
+            drain = asyncio.create_task(captured.drain(stderr_reader))
+            owner = asyncio.create_task(self.channel_owner())
+            hello_seen = False
+            self.event("channel-started", pid=child.pid, **context)
             try:
                 while True:
                     line = await child.stdout.readline()
@@ -193,6 +317,7 @@ class Probe:
                         break
                     frame = json.loads(line)
                     if frame.get("type") == "hello":
+                        hello_seen = True
                         child.stdin.write(b'{"type":"ready"}\n{"type":"state","state":"idle"}\n')
                         await child.stdin.drain()
                     elif frame.get("type") == "message":
@@ -200,10 +325,42 @@ class Probe:
                         self.tasks.add(task)
                         task.add_done_callback(self.finished)
             finally:
+                child.stdin.close()
                 if child.returncode is None:
-                    child.terminate()
-                await child.wait()
-                self.event("channel-exited", pid=child.pid, exit=child.returncode)
+                    try:
+                        child.terminate()
+                    except ProcessLookupError:
+                        pass
+                # Process.wait() also waits for inherited pipe EOF on some Python
+                # versions. The child watcher reaps the PID independently; inspect its
+                # return code so an unrelated descendant cannot hold up shutdown.
+                deadline = time.monotonic() + 3
+                while child.returncode is None and time.monotonic() < deadline:
+                    await asyncio.sleep(0.02)
+                if child.returncode is None:
+                    try:
+                        child.kill()
+                    except ProcessLookupError:
+                        pass
+                    deadline = time.monotonic() + 1
+                    while child.returncode is None and time.monotonic() < deadline:
+                        await asyncio.sleep(0.02)
+                # A descendant can inherit stderr after the channel exits. Its open pipe
+                # must not delay restart forever; cancellation leaves the captured tail.
+                try:
+                    await asyncio.wait_for(drain, 1)
+                except asyncio.TimeoutError:
+                    captured.incomplete = True
+                except Exception:
+                    captured.incomplete = True
+                finally:
+                    drain.cancel()
+                    await asyncio.gather(drain, return_exceptions=True)
+                    stderr_transport.close()
+                self.event("channel-exited", pid=child.pid, exit=child.returncode,
+                           hello_seen=hello_seen, stderr=captured.report(),
+                           observed_owner=await owner,
+                           observed_owner_at_exit=await self.channel_owner(), **context)
             await asyncio.sleep(1)
 
     def finished(self, task):
@@ -240,7 +397,7 @@ class Probe:
                 route = {"target": self.peers[target], "to": target, "status": "unstarted"}
                 self.state["routes"][target] = route
             if not route.get("waiting_for_member"):
-                await self.cancel_ask(route, "Member is last seen; delivery waits for a new exchange.", "absent")
+                await self.clear_alert(route, "Member is last seen; delivery waits for a new exchange.", "absent")
                 route["waiting_for_member"] = True
                 self.measuring.pop(target, None)
                 self.persist()
@@ -252,6 +409,9 @@ class Probe:
                 route.pop("previous_read", None)
                 self.measuring[target] = time.monotonic_ns()
             self.persist()
+        if route and route["status"] == "read" and self.has_notice(route):
+            # Finish a recovery whose response was lost before starting the next interval.
+            await self.withdraw(route)
         # A recipient that boots or reconnects holds all earlier mail. An accepted overdue
         # probe cannot prove recovery; send a fresh probe while retaining the original alert.
         refresh_overdue = (route and route.get("status") == "overdue"
@@ -261,7 +421,8 @@ class Probe:
             if route:
                 previous_read = ({key: route[key] for key in ("message", "latency_ms", "late")}
                                  if route.get("status") == "read" else route.get("previous_read"))
-            attention = route.get("attention") if route else None
+            alerts = {key: route[key] for key in ("attention", "agent_alert", "reviewer_alert", "alert_warning", "notice_episode")
+                      if route and key in route}
             nonce = str(uuid.uuid4())
             key = f"delivery-probe:{self.actor}:{target}:{nonce}"
             # Persist the send intent BEFORE a request that might commit then time
@@ -269,8 +430,7 @@ class Probe:
             route = {"target": self.peers[target], "to": target, "nonce": nonce,
                      "idempotency_key": key, "message": "message/" + hashlib.sha256(key.encode()).hexdigest()[:16],
                      "started_at_unix_ms": now_ms(), "status": "sending"}
-            if attention:
-                route["attention"] = attention
+            route.update(alerts)
             if previous_read:
                 route["previous_read"] = previous_read
             self.state["routes"][target] = route
@@ -291,7 +451,7 @@ class Probe:
                 route["error"] = str(error)[:1000]
                 self.persist()
         if route["status"] == "read":
-            if route.get("attention"):
+            if self.has_notice(route):
                 await self.withdraw(route)
             return
         try:
@@ -307,6 +467,9 @@ class Probe:
         if target in self.measuring:
             elapsed = (time.monotonic_ns() - self.measuring[target]) // 1_000_000
         if read:
+            episode = route.get("notice_episode") or {}
+            if episode.get("message") == route["message"]:
+                elapsed = max(elapsed, episode.get("overdue_latency_ms", 0))
             route.update(status="read", read_at_unix_ms=read["accepted_at_unix_ms"],
                          observed_read_at_unix_ms=now_ms(), latency_ms=elapsed,
                          next_at_unix_ms=now_ms() + self.interval)
@@ -317,40 +480,175 @@ class Probe:
             self.event("read-observed", message=route["message"], latency_ms=elapsed, late=route["late"])
             await self.withdraw(route)
         elif elapsed >= self.deadline:
+            route["overdue_latency_ms"] = elapsed
             # Keep replaying an unaccepted send intent even after its deadline.
             if route["status"] not in ("overdue", "sending"):
                 route["status"] = "overdue"
                 self.persist()
+            # Absence may have withdrawn active attention, but it did not end the
+            # outage episode. Only a qualifying recipient read can do that.
+            if (route.get("notice_episode") or {}).get("notified"):
+                return
             if not route.get("attention"):
-                attention = await self.api.post("/v1/work/ask", {
-                    "actor": self.actor, "person": self.config["reviewer"],
-                    "new_run": f"delivery-probe-{route['nonce']}",
-                    "title": f"Delivery probe {self.source} → {self.peers[target]} has no read receipt",
-                    "reason": f"{route['message']} was not read within {self.deadline // 1000}s. The native probe sends fresh probes after its interval; a real read cancels this person step automatically. Inspect the node's probe seat, replication and daemon.",
-                    "idempotency_key": f"delivery-probe-overdue:{route['message']}:{route['started_at_unix_ms']}",
-                })
-                route["attention"] = attention["subject"]
-                self.persist()
-                self.event("attention", message=route["message"], attention=route["attention"])
+                if route.get("agent_alert"):
+                    await self.send_alert(route)
+                    return
+                if not route.get("reviewer_alert") and self.alert_agent:
+                    problem = await self.alert_problem()
+                    if not problem:
+                        route.pop("alert_warning", None)
+                        await self.send_alert(route)
+                        return
+                    warning = f"Alert agent {self.alert_agent} is unavailable: {problem}."
+                    warning += (" Falling back to the configured reviewer person ask."
+                                if self.config.get("reviewer") else " No reviewer is configured; retaining the alert for retry.")
+                    if route.get("alert_warning") != warning:
+                        route["alert_warning"] = warning
+                        self.persist()
+                        self.event("alert-warning", message=route["message"], warning=warning)
+                        print(warning, file=sys.stderr, flush=True)
+                    if not self.config.get("reviewer"):
+                        return
+                await self.send_reviewer_alert(route)
 
-    async def cancel_ask(self, route, summary, key):
-        if route.get("attention"):
-            subject = route["attention"]
-            # Old versions stored legacy attention IDs. Those are historical audit data now.
-            if subject.startswith("step-run/"):
-                try:
-                    await self.api.post("/v1/work/cancel-ask", {
-                        "subject": subject, "actor": self.actor, "summary": summary,
-                        "idempotency_key": f"delivery-probe-{key}:{subject}",
-                    })
-                except ApiError as error:
-                    if error.code not in ("stale-fence", "missing-step-run"):
-                        raise
-            route.pop("attention", None)
+    async def alert_problem(self):
+        # Share one recipient inspection across routes while the reading is fresh.
+        reading = self.alert_reading
+        if reading is None or time.monotonic() - reading[0] >= self.presence_ttl / 1000:
+            reading = (time.monotonic(), asyncio.ensure_future(
+                self.api.get("/v1/client/agents/" + self.alert_agent)))
+            self.alert_reading = reading
+        try:
+            agent = await asyncio.shield(reading[1])
+        except Exception as error:
+            return f"cannot inspect recipient ({error})"
+        if not agent.get("driver"):
+            return "no live driver"
+        if agent.get("observation") in (None, "missing"):
+            return "observation is missing"
+        if agent.get("state") != "running" or agent.get("harness_state") not in ("ready", "working", "idle"):
+            return "driver is not running and ready"
+        return None
+
+    def has_notice(self, route):
+        return any(route.get(key) for key in
+                   ("attention", "agent_alert", "reviewer_alert", "notice_episode"))
+
+    def notice_episode(self, route):
+        # Lazy, route-local migration: retain one episode, not a notice history or
+        # a scan of graph messages. Already persisted ambiguous bodies stay exact.
+        if "notice_episode" not in route:
+            episode = {key: route[key] for key in ("message", "nonce", "started_at_unix_ms")}
+            episode["overdue_latency_ms"] = route.get("overdue_latency_ms", 0)
+            if route.get("attention"):
+                episode["attention"] = route["attention"]
+                episode["notified"] = True
+            if route.get("agent_alert"):
+                episode["agent_alert"] = route["agent_alert"]
+            route["notice_episode"] = episode
             self.persist()
+        return route["notice_episode"]
+
+    async def send_reviewer_alert(self, route):
+        episode = self.notice_episode(route)
+        if not route.get("reviewer_alert"):
+            route["reviewer_alert"] = {
+                "actor": self.actor, "person": self.config["reviewer"],
+                "new_run": f"delivery-probe-{episode['nonce']}",
+                "title": f"Delivery probe {self.source} → {route['target']} has no read receipt",
+                "reason": (f"{episode['message']} was not read within {self.deadline // 1000}s. "
+                           "The native probe sends fresh probes after its interval; a real read cancels this person step automatically. "
+                           "Inspect the node's probe seat, replication and daemon."
+                           + (" " + route["alert_warning"] if route.get("alert_warning") else "")),
+                "idempotency_key": f"delivery-probe-overdue:{episode['message']}:{episode['started_at_unix_ms']}",
+            }
+            self.persist()
+        attention = await self.api.post("/v1/work/ask", route["reviewer_alert"])
+        route["attention"] = attention["subject"]
+        episode.update(attention=route["attention"], notified=True)
+        route.pop("reviewer_alert")
+        self.persist()
+        self.event("attention", message=route["message"], attention=route["attention"])
+
+    async def send_alert(self, route):
+        episode = self.notice_episode(route)
+        if not route.get("agent_alert"):
+            route["agent_alert"] = {
+                "from": self.actor, "to": self.alert_agent,
+                "title": f"Delivery probe {self.source} → {route['target']} has no read receipt",
+                "content": (f"Route {self.actor} → {route['to']}; nonce {episode['nonce']}. "
+                            f"{episode['message']} was not read within {self.deadline // 1000}s. "
+                            "Report this route, nonce, message, missed deadline and any observed recovery to the alert owner. "
+                            "Reporting does not require st doctor --json to return. "
+                            "If Doctor timed out, report that timeout; do not repeat the call. "
+                            "A Doctor timeout does not establish that the daemon stopped. "
+                            "Fresh probes continue; a real recipient read sends a recovery note."),
+                "idempotency_key": f"delivery-probe-overdue:{episode['message']}:{episode['started_at_unix_ms']}",
+                "tags": ["delivery-probe-alert"],
+            }
+            # Save the exact body before sending: a timeout can hide a committed alert.
+            self.persist()
+        alert = route["agent_alert"]
+        await self.api.post("/v1/messages", alert)
+        route["attention"] = "message/" + hashlib.sha256(alert["idempotency_key"].encode()).hexdigest()[:16]
+        episode.update(attention=route["attention"], agent_alert=alert, notified=True)
+        self.persist()
+        self.event("attention", message=route["message"], attention=route["attention"])
+
+    async def clear_alert(self, route, summary, key):
+        if not self.has_notice(route):
+            route.pop("alert_warning", None)
+            return
+        episode = self.notice_episode(route)
+        if key == "absent" and episode.get("paused"):
+            return
+        if route.get("reviewer_alert"):
+            await self.send_reviewer_alert(route)
+        if route.pop("alert_warning", None):
+            self.persist()
+        if route.get("agent_alert"):
+            # Replay an uncertain alert before clearing it, even if recovery won the race.
+            if not route.get("attention"):
+                await self.send_alert(route)
+        subject = route.get("attention") or episode.get("attention")
+        alert = route.get("agent_alert") or episode.get("agent_alert")
+        # At most two exact clear intents per episode: paused and real-read recovery.
+        # Persist before POST so a changed clock, restart or flap cannot change a
+        # body whose response may have been lost after committing.
+        clears = episode.setdefault("clears", {})
+        if subject and key not in clears and alert:
+            clears[key] = {"path": "/v1/messages", "body": {
+                "from": self.actor, "to": alert["to"],
+                "title": f"Delivery probe {self.source} → {route['target']} " + ("recovered" if key == "recovered" else "paused"),
+                "content": f"Clears {subject}. {summary}",
+                "idempotency_key": f"delivery-probe-{key}:{subject}",
+                "tags": ["delivery-probe-recovery" if key == "recovered" else "delivery-probe-paused"],
+            }}
+            self.persist()
+        elif subject and key not in clears and subject.startswith("step-run/"):
+            clears[key] = {"path": "/v1/work/cancel-ask", "body": {
+                "subject": subject, "actor": self.actor, "summary": summary,
+                "idempotency_key": f"delivery-probe-{key}:{subject}",
+            }}
+            self.persist()
+        if key in clears:
+            request = clears[key]
+            # Old versions stored legacy attention IDs. Those are historical audit data now.
+            try:
+                await self.api.post(request["path"], request["body"])
+            except ApiError as error:
+                if request["path"] != "/v1/work/cancel-ask" or error.code not in ("stale-fence", "missing-step-run"):
+                    raise
+        for field in ("agent_alert", "reviewer_alert", "attention"):
+            route.pop(field, None)
+        if key == "absent":
+            episode["paused"] = True
+        else:
+            route.pop("notice_episode", None)
+        self.persist()
 
     async def withdraw(self, route):
-        await self.cancel_ask(route,
+        await self.clear_alert(route,
             f"The recipient read {route['message']}; observed latency {route['latency_ms']}ms.", "recovered")
 
     def report(self):
@@ -359,6 +657,49 @@ class Probe:
                 "deadline_ms": self.deadline, "members": sorted([self.source] + list(self.peers.values())),
                 "routes": [dict(self.state["routes"][target], status="last-seen") if self.state["routes"].get(target, {}).get("waiting_for_member") else self.state["routes"].get(target, {"target": host, "to": target, "status": "unstarted"})
                            for target, host in sorted(self.peers.items())]}
+
+    def coalesced(self, route, now):
+        """Whether a route's result is still in flight: a send within its deadline that raised no
+        alert. Past its deadline, or once alerted, a send that is still retrying is an outcome
+        doctor must see at once."""
+        alerted = route.get("attention") or route.get("agent_alert") or route.get("reviewer_alert")
+        return (route.get("status") in ("sending", "pending") and not alerted
+                and now - route.get("started_at_unix_ms", now) < self.deadline)
+
+    def outcomes(self, now):
+        """What doctor reports from each route, apart from which message it was and its latency.
+        A result in flight keeps the outcome last published, so an ordinary probe cycle (read, a
+        new send, read again) changes nothing."""
+        published = self.published or {}
+        outcomes = {}
+        for route in self.report()["routes"]:
+            target = route.get("to") or route.get("target")
+            if self.coalesced(route, now):
+                if target in published:
+                    outcomes[target] = published[target]
+                continue
+            status = route.get("status")
+            if status in ("sending", "pending") and now - route.get("started_at_unix_ms", now) >= self.deadline:
+                status = "overdue"
+            outcomes[target] = [status, bool(route.get("late")),
+                                bool((route.get("previous_read") or {}).get("late")),
+                                bool(route.get("attention") or route.get("agent_alert") or route.get("reviewer_alert"))]
+        return outcomes
+
+    def in_flight(self, now):
+        return {route.get("to") or route.get("target") for route in self.report()["routes"]
+                if self.coalesced(route, now)}
+
+    def publish_due(self, now):
+        if self.published is None or self.outcomes(now) != self.published:
+            return True
+        # Doctor counts a published send that is still waiting as overdue once its deadline
+        # passes, so a report that showed one is replaced as soon as it resolves.
+        if self.published_in_flight - self.in_flight(now):
+            return True
+        since = now - self.last_publish
+        # A heartbeat waits, for at most one deadline, until nothing is in flight.
+        return since >= self.heartbeat and (not self.in_flight(now) or since >= self.heartbeat + self.deadline)
 
     async def publish(self):
         report = self.report()
@@ -372,7 +713,8 @@ class Probe:
                             "bytes": list(data), "idempotency_key": "delivery-probe-report:" + hashlib.sha256(data).hexdigest()})
         save(self.directory / "latest.json", report)
         self.last_publish = now_ms()
-        self.changed = False
+        self.published = self.outcomes(self.last_publish)
+        self.published_in_flight = self.in_flight(self.last_publish)
 
     async def monitor(self):
         async def safely(operation):
@@ -384,23 +726,21 @@ class Probe:
             # One failed route cannot prevent the other deadlines or receipts.
             await asyncio.gather(*(safely(self.route(target)) for target in self.peers),
                                  *(safely(self.acknowledge(subject)) for subject in list(self.state["receipts"])))
-            if self.changed or now_ms() - self.last_publish >= self.heartbeat:
+            if self.publish_due(now_ms()):
                 await safely(self.publish())
             await asyncio.sleep(1)
 
     async def run(self):
         tasks = [asyncio.create_task(self.receiver()), asyncio.create_task(self.monitor())]
         try:
-            await asyncio.gather(*tasks)
+            # wait does not automatically cancel children when this parent is cancelled.
+            # Cancel them once below, allowing receiver's bounded diagnostic cleanup.
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:
+                task.result()
         finally:
             for task in tasks + list(self.tasks):
                 task.cancel()
-            if self.child and self.child.returncode is None:
-                try:
-                    self.child.terminate()
-                except ProcessLookupError:
-                    pass
-                await self.child.wait()
             await asyncio.gather(*(tasks + list(self.tasks)), return_exceptions=True)
 
 

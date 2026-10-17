@@ -12,6 +12,32 @@ pub fn bundle_id(first: &str) -> String {
     format!("bundle:{first}")
 }
 
+/// Only ordinary tool calls participate in simplified runs. Preview/error cards
+/// stay independent, both when drawing and when counting rows for history fill.
+pub(crate) fn bundles(body: &Body) -> bool {
+    // An image a person or an agent put in its turn is a row of its own, not a tool call.
+    matches!(body, Body::Tool { title, .. }
+        if !title.starts_with("write ")
+            && !title.starts_with("compaction")
+            && !title.starts_with("assistant error")
+            && !title.starts_with("image · "))
+}
+
+/// How many rows the person sees in the simplified conversation: each entry is one, and a run of
+/// tool calls is one for the whole run.
+pub fn display_rows(entries: &[Entry]) -> usize {
+    let mut rows = 0;
+    let mut in_run = false;
+    for entry in entries {
+        let tool = bundles(&entry.body);
+        if !(tool && in_run) {
+            rows += 1;
+        }
+        in_run = tool;
+    }
+    rows
+}
+
 /// Whether an entry folds until opened: tool calls, and mail the person is not part of.
 pub fn folds(body: &Body) -> bool {
     match body {
@@ -36,7 +62,8 @@ pub enum ToolState {
     Failed,
 }
 
-/// An image a message carries: st reads it by `sha256`, for a reader of `message`.
+/// An image a message carries: st reads it by `sha256`, for a reader of `message`. An image an
+/// ask carries names the ask's person step (`step-run/…`) there instead: st reads it the same way.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct MailImage {
     pub sha256: String,
@@ -68,6 +95,10 @@ pub enum Body {
         delivered: bool,
         /// Spoken and transcribed (st's `dictated` tag): it may hold transcription mistakes.
         dictated: bool,
+        /// Who signed it and whether that checks, as a person reads it ("✓ example phone (secure
+        /// enclave)"); set only for a message a person wrote.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signed: Option<String>,
         /// The images it carries; their bytes stay with st until a reader opens one.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         images: Vec<MailImage>,

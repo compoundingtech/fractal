@@ -45,7 +45,7 @@ impl Drop for Fleet {
 
 impl Fleet {
     fn st2(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_st2"));
+        let mut command = Command::new(test_env!("CARGO_BIN_EXE_st2"));
         command
             .arg("--catalog")
             .arg(&self.catalog)
@@ -170,9 +170,19 @@ fn generation(row: &serde_json::Value) -> (serde_json::Value, serde_json::Value)
     )
 }
 
+/// A temporary directory whose path is already canonical: macOS puts temporary directories below
+/// the `/var` and `/tmp` symlinks, and st2 resolves the catalog it is given, so a path built
+/// from the unresolved spelling is shorter and different from the one st2 uses.
+fn canonical_tempdir() -> tempfile::TempDir {
+    let parent = std::fs::canonicalize(std::env::temp_dir()).expect("canonical temporary directory");
+    tempfile::Builder::new()
+        .tempdir_in(parent)
+        .expect("temporary directory")
+}
+
 #[test]
 fn a_real_supervisor_parks_a_crash_looper_and_unpark_recovers_only_that_task() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = canonical_tempdir();
     let catalog = tmp.path().join("catalog");
     let state = tmp.path().join("state");
     std::fs::create_dir_all(&catalog).unwrap();
@@ -191,7 +201,7 @@ fn a_real_supervisor_parks_a_crash_looper_and_unpark_recovers_only_that_task() {
         ),
     );
 
-    let supervisor = Command::new(env!("CARGO_BIN_EXE_st2"))
+    let supervisor = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .arg("--catalog")
         .arg(&catalog)
         .args(["up", "--host", HOST, "--interval", "1"])

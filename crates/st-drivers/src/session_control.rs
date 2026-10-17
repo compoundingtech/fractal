@@ -7,21 +7,133 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Why new native input cannot be handed off, independently of mailbox liveness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryBlockReason {
+    ControlUnavailable,
+    HoldActive,
+    Idle,
+}
+
+impl DeliveryBlockReason {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::ControlUnavailable => {
+                "delivery-control-unavailable: new native handoffs are held until graph delivery control can be verified; the driver retries automatically"
+            }
+            Self::HoldActive => {
+                "delivery-hold-active: new native handoffs are held by graph delivery control"
+            }
+            Self::Idle => "delivery-idle: no native mail awaits handoff",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct Permit {
+    expires: Option<Instant>,
+    blocked: Option<DeliveryBlockReason>,
+}
+
 #[derive(Clone, Debug, Default)]
-pub struct DeliveryGate(Arc<Mutex<Option<Instant>>>);
+pub struct DeliveryGate(Arc<Mutex<Permit>>);
 
 impl DeliveryGate {
-    /// Update from a successful graph read. A hold closes the gate immediately.
-    pub fn update(&self, held: bool, lease: Duration) {
+    /// Empty mail needs no permission. This closes the gate without claiming a failed read.
+    pub fn idle(&self) {
         if let Ok(mut permit) = self.0.lock() {
-            *permit = (!held).then(|| Instant::now() + lease);
+            permit.expires = None;
+            permit.blocked = Some(DeliveryBlockReason::Idle);
         }
     }
 
+    /// Update from a successful graph read. A hold closes the gate immediately.
+    pub fn update(&self, held: bool, lease: Duration) {
+        if let Ok(mut permit) = self.0.lock() {
+            permit.expires = (!held).then(|| Instant::now() + lease);
+            permit.blocked = held.then_some(DeliveryBlockReason::HoldActive);
+        }
+    }
+
+    /// A failed read immediately withdraws any previous permission.
+    pub fn unavailable(&self) {
+        if let Ok(mut permit) = self.0.lock() {
+            permit.expires = None;
+            permit.blocked = Some(DeliveryBlockReason::ControlUnavailable);
+        }
+    }
+
+    pub fn blocked_reason(&self) -> Option<DeliveryBlockReason> {
+        self.0
+            .lock()
+            .map_or(Some(DeliveryBlockReason::ControlUnavailable), |permit| {
+                if permit
+                    .expires
+                    .is_some_and(|expires| Instant::now() < expires)
+                {
+                    None
+                } else {
+                    Some(
+                        permit
+                            .blocked
+                            .unwrap_or(DeliveryBlockReason::ControlUnavailable),
+                    )
+                }
+            })
+    }
+
     pub fn held(&self) -> bool {
-        self.0.lock().map_or(true, |permit| {
-            permit.is_none_or(|expires| Instant::now() >= expires)
-        })
+        self.blocked_reason().is_some()
+    }
+}
+
+/// Where a native prompt stands in st: still open, answered by the seat's person (and how), or
+/// gone. The same shape as the daemon's `GET /v1/harness-prompts/state`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum PromptAnswer {
+    Open,
+    Answered { answer: String },
+    Gone,
+}
+
+type PromptAnswerRead = dyn Fn(u64, u64) -> Option<PromptAnswer> + Send + Sync;
+
+/// How a native driver reads a person's answer to its prompt, named by the (ownership,
+/// transition) sequences of the state record observation the prompt wrote. The owning control
+/// plane supplies it; `None` means st could not say this time.
+#[derive(Clone)]
+pub struct PromptAnswers(Arc<PromptAnswerRead>, Option<Arc<PromptCallPublish>>);
+
+/// Records that the prompt shown as (ownership, transition) asks about the call with this id.
+type PromptCallPublish = dyn Fn(u64, u64, &str) + Send + Sync;
+
+impl PromptAnswers {
+    pub fn new(read: impl Fn(u64, u64) -> Option<PromptAnswer> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(read), None)
+    }
+
+    /// Also record which call each shown prompt asks about, so a client offers to allow only
+    /// that exact call.
+    pub fn with_call_publisher(mut self, publish: impl Fn(u64, u64, &str) + Send + Sync + 'static) -> Self {
+        self.1 = Some(Arc::new(publish));
+        self
+    }
+
+    pub(crate) fn read(&self, ownership: u64, transition: u64) -> Option<PromptAnswer> {
+        (self.0)(ownership, transition)
+    }
+
+    pub(crate) fn publish_call(&self, ownership: u64, transition: u64, call: &str) {
+        if let Some(publish) = &self.1 {
+            publish(ownership, transition, call);
+        }
+    }
+}
+
+impl std::fmt::Debug for PromptAnswers {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PromptAnswers")
     }
 }
 
@@ -59,6 +171,10 @@ mod tests {
         let gate = DeliveryGate::default();
         let control = SessionControl::Graph(gate.clone());
         assert!(control.held(&status));
+        assert_eq!(
+            gate.blocked_reason(),
+            Some(DeliveryBlockReason::ControlUnavailable)
+        );
         control.refresh(&status);
         assert!(!status.exists());
         crate::status::set_state(&status, crate::status::State::Dnd).unwrap();
@@ -69,7 +185,23 @@ mod tests {
         assert_eq!(std::fs::read(&status).unwrap(), before);
         gate.update(true, Duration::from_secs(10));
         assert!(control.held(&status));
+        assert_eq!(gate.blocked_reason(), Some(DeliveryBlockReason::HoldActive));
+        gate.unavailable();
+        assert_eq!(
+            gate.blocked_reason(),
+            Some(DeliveryBlockReason::ControlUnavailable)
+        );
         gate.update(false, Duration::ZERO);
         assert!(control.held(&status));
+        gate.idle();
+        assert!(control.held(&status));
+        assert_eq!(gate.blocked_reason(), Some(DeliveryBlockReason::Idle));
+        gate.update(false, Duration::from_secs(10));
+        assert!(!control.held(&status), "fresh mail needs a new graph permit");
+        gate.unavailable();
+        assert_eq!(
+            gate.blocked_reason(),
+            Some(DeliveryBlockReason::ControlUnavailable)
+        );
     }
 }

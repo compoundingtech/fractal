@@ -6,3 +6,8 @@ export * from './requestView.ts';
 export * from './deviceSigning.ts';
 export * from './clientName.ts';
 export * from './time.ts';
+export * from './conversationContent.ts';
+export * from './slo.ts';
+export * from './inventoryView.ts';
+export * from './sidebarView.ts';
+export * from './syncNotice.ts';

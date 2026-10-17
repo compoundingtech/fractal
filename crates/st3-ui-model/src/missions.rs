@@ -1,7 +1,7 @@
 //! stui's mission semantics, independent of its collection model and terminal UI.
 
 use st3_client::MissionStep;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One word naming who has to move, shared by every mission surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -29,6 +29,18 @@ pub enum Word {
 }
 
 impl Word {
+    /// Really running, or about to: an agent is doing a step now, or one waits its turn on a busy
+    /// agent. A count of "active missions" counts these and nothing else (Nathan, 2026-10-11:
+    /// "54 active", when most of them were stuck, paused or waiting on a person).
+    pub fn is_active(self) -> bool {
+        matches!(self, Word::Working | Word::Queued)
+    }
+
+    /// Open, and not moving: a step nobody takes or whose owner is not moving.
+    pub fn is_stuck(self) -> bool {
+        matches!(self, Word::Stalled | Word::Unstaffed | Word::Unclaimed)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Word::Decision => "needs you",
@@ -97,6 +109,18 @@ pub struct Step {
     pub blockers: Vec<String>,
 }
 
+/// Raw step facts, independent of state-specific blocker presentation and queue notes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct StepMetadata {
+    /// st retains the last reason even after a step moves on or ends.
+    pub blocked_reason: Option<String>,
+    pub last_progress: Option<String>,
+    /// How long ago st nudged the step's holder for idling while holding it with nothing set to
+    /// wake it, as an age label such as `40m`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nudged: Option<String>,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Mission {
     pub id: String,
@@ -106,6 +130,9 @@ pub struct Mission {
     pub host: String,
     pub goals: Vec<String>,
     pub steps: Vec<Step>,
+    /// Metadata for the same steps, keyed by stable step-run ID rather than display path.
+    /// Values are retained verbatim, regardless of state or display text policies.
+    pub step_metadata: BTreeMap<String, StepMetadata>,
     pub agents: Vec<String>,
     pub decision: Option<String>,
     pub worktree: Option<String>,
@@ -205,15 +232,76 @@ fn run_outcome(mission: &st3_client::Mission, now: &str, display: &Display<'_>) 
     ))
 }
 
-/// Whether an agentless step only holds its run open (so the run's observers keep watching).
-/// st does not say whether an agentless step waits on a flag or runs a command, so this goes
-/// by the names the fleet uses for keep-open steps; anything else counts as work.
-fn keeps_open(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    matches!(
-        name,
-        "keep-watch" | "retire" | "steward-intake" | "standing" | "keep-open"
-    ) || name.ends_with("-retirement")
+/// What st says of the agent whose queue holds a ready step.
+pub(crate) struct QueueOwner {
+    /// Stopped, failed or faulted: the step waits for an agent that cannot take it.
+    pub down: bool,
+}
+
+/// The mission word, first match wins: an open human gate on the mission (decision); no runs
+/// (not started); a blocked mission or step (stalled); completed (done); a failed mission or step
+/// (failed); cancelled; only keep-open steps still running (watching); a step in hand (working); a
+/// ready unclaimed step, unstaffed when its queue owner is down, queued when one queues it, and
+/// unclaimed otherwise; a waiting or pending step (held); standing, running, ready or draft (idle);
+/// otherwise done.
+pub(crate) fn word(
+    mission: &st3_client::Mission,
+    work: &[&MissionStep],
+    decision: bool,
+    queue_owner: impl Fn(&str) -> Option<QueueOwner>,
+) -> Word {
+    let states = work.iter().map(|step| step.state.as_str());
+    if decision {
+        Word::Decision
+    } else if mission.runs.is_empty() && mission.run_details.is_empty() && work.is_empty() {
+        Word::NotStarted
+    } else if mission.state == "blocked" || states.clone().any(|state| state == "blocked") {
+        Word::Stalled
+    } else if mission.state == "completed" {
+        // A run someone set to completed keeps the steps that failed.
+        Word::Done
+    } else if mission.state == "failed" || states.clone().any(|state| state == "failed") {
+        Word::Failed
+    } else if mission.state == "cancelled" {
+        Word::Cancelled
+    } else if !work.is_empty()
+        && work.iter().all(|step| {
+            step.state == "completed" || (in_hand(&step.state) && step.agentless && step.keep_open)
+        })
+        && work.iter().any(|step| step.state != "completed")
+    {
+        // Only st's own keep-open steps are running: an intake that watches.
+        Word::Watching
+    } else if states.clone().any(in_hand) {
+        Word::Working
+    } else if let Some(ready) = work
+        .iter()
+        .find(|step| step.state == "ready" && step.claimant.is_none())
+    {
+        // Who has this step queued decides whether a person is needed.
+        match queue_owner(&ready.id) {
+            Some(owner) if owner.down => Word::Unstaffed,
+            Some(_) => Word::Queued,
+            None => Word::Unclaimed,
+        }
+    } else if states
+        .clone()
+        .any(|state| matches!(state, "waiting" | "pending"))
+    {
+        Word::Held
+    } else if matches!(
+        mission.state.as_str(),
+        "standing" | "running" | "ready" | "draft"
+    ) {
+        Word::Idle
+    } else {
+        Word::Done
+    }
+}
+
+/// Whether a step state means an agent (or st) has it in hand.
+pub(crate) fn in_hand(state: &str) -> bool {
+    matches!(state, "claimed" | "working" | "running" | "verifying")
 }
 
 /// The agent whose queue holds this work, if st says.
@@ -266,6 +354,19 @@ pub fn adapt<'a>(
         .clone()
         .map(|mission| {
             let work = mission_steps(mission);
+            let step_metadata = work
+                .iter()
+                .map(|step| {
+                    (
+                        step.id.clone(),
+                        StepMetadata {
+                            blocked_reason: step.blocked_reason.clone(),
+                            last_progress: step.last_progress.clone(),
+                            nudged: step.nudged_at.as_deref().map(|at| display.age(at, now)),
+                        },
+                    )
+                })
+                .collect();
             let decision = attention
                 .clone()
                 .find(|item| {
@@ -273,66 +374,12 @@ pub fn adapt<'a>(
                         && item.mission_id.as_deref() == Some(mission.header.id.as_str())
                 })
                 .map(|item| item.header.id.clone());
-            let states = work.iter().map(|step| step.state.as_str());
-            let word = if decision.is_some() {
-                Word::Decision
-            } else if mission.runs.is_empty() && mission.run_details.is_empty() && work.is_empty() {
-                Word::NotStarted
-            } else if mission.state == "blocked" || states.clone().any(|state| state == "blocked") {
-                Word::Stalled
-            } else if mission.state == "completed" {
-                // A run someone set to completed keeps the steps that failed.
-                Word::Done
-            } else if mission.state == "failed" || states.clone().any(|state| state == "failed") {
-                Word::Failed
-            } else if mission.state == "cancelled" {
-                Word::Cancelled
-            } else if !work.is_empty()
-                && work.iter().all(|step| {
-                    step.state == "completed"
-                        || (matches!(
-                            step.state.as_str(),
-                            "claimed" | "working" | "running" | "verifying"
-                        ) && step.agentless
-                            && keeps_open(&step.path))
+            let word = word(mission, &work, decision.is_some(), |step| {
+                queued_for(agents.clone(), step).map(|agent| QueueOwner {
+                    down: matches!(agent.state.as_str(), "failed" | "stopped")
+                        || agent.fault.is_some(),
                 })
-                && work.iter().any(|step| step.state != "completed")
-            {
-                // Only st's own keep-open steps are running: an intake that watches.
-                Word::Watching
-            } else if states
-                .clone()
-                .any(|state| matches!(state, "claimed" | "working" | "running" | "verifying"))
-            {
-                Word::Working
-            } else if let Some(ready) = work
-                .iter()
-                .find(|step| step.state == "ready" && step.claimant.is_none())
-            {
-                // Who has this step queued decides whether a person is needed.
-                match queued_for(agents.clone(), &ready.id) {
-                    Some(agent)
-                        if matches!(agent.state.as_str(), "failed" | "stopped")
-                            || agent.fault.is_some() =>
-                    {
-                        Word::Unstaffed
-                    }
-                    Some(_) => Word::Queued,
-                    None => Word::Unclaimed,
-                }
-            } else if states
-                .clone()
-                .any(|state| matches!(state, "waiting" | "pending"))
-            {
-                Word::Held
-            } else if matches!(
-                mission.state.as_str(),
-                "standing" | "running" | "ready" | "draft"
-            ) {
-                Word::Idle
-            } else {
-                Word::Done
-            };
+            });
             let steps = work
                 .iter()
                 .map(|step| {
@@ -431,6 +478,7 @@ pub fn adapt<'a>(
                 host: String::new(),
                 goals: vec![],
                 steps,
+                step_metadata,
                 agents: active_agents,
                 kdl: None,
                 outcome: run_outcome(mission, now, display),
@@ -438,18 +486,17 @@ pub fn adapt<'a>(
                 decision,
                 worktree: None,
                 parent: None,
-                system: is_system_mission(&mission.header.id),
+                system: mission.system,
             }
         })
         .collect()
 }
 
-/// Plumbing the Missions tab folds away until `x` shows it: st's own loop rounds, and CI
-/// (a `ci` segment, as in `mission/fleet/smalltalk/ci/run`). The graph has no mark for this
-/// yet, so the name decides. What needs a person still reaches Home as attention.
-fn is_system_mission(id: &str) -> bool {
-    id.starts_with("mission/__st3/") || id.split('/').any(|segment| segment == "ci")
-}
+mod presentation;
+pub use presentation::{
+    Action, Actor, Card, Fleet, Gate, Offer, Presentation, Progress, QueuedBehind, Seat, SeatRef,
+    StepPresentation, Stuck, Work, present,
+};
 
 #[cfg(test)]
 mod tests;

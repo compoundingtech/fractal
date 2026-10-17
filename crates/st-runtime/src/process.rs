@@ -15,6 +15,19 @@ use sha2::{Digest as _, Sha256};
 
 const SCHEMA: &str = "st.runtime.exec-generation.v1";
 
+/// Positive producer evidence: this exact attempt returned before creating any child.
+/// Absence of a generation record after a child was created is not this proof.
+#[derive(Debug)]
+pub struct StartRejected {
+    pub operation: Option<String>,
+}
+impl std::fmt::Display for StartRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("launch rejected before producer creation")
+    }
+}
+impl std::error::Error for StartRejected {}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecGeneration {
@@ -33,6 +46,8 @@ pub struct ExecGeneration {
     pub isolation_mode: String,
     #[serde(default)]
     pub scope_unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_operation: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,6 +80,50 @@ impl ExecRuntime {
         launch: &crate::Launch,
         cwd: &Path,
         env: &BTreeMap<String, String>,
+    ) -> Result<ExecGeneration> {
+        self.spawn_guarded(id, launch, cwd, env, None)
+    }
+
+    pub fn spawn_checked(
+        &self,
+        id: &str,
+        launch: &crate::Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<ExecGeneration> {
+        self.spawn_guarded(id, launch, cwd, env, Some(guard))
+    }
+
+    fn spawn_guarded(
+        &self,
+        id: &str,
+        launch: &crate::Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        guard: Option<&dyn Fn() -> Result<()>>,
+    ) -> Result<ExecGeneration> {
+        let mut child_created = false;
+        self.spawn_inner(id, launch, cwd, env, guard, &mut child_created)
+            .map_err(|error| {
+                if child_created {
+                    error
+                } else {
+                    error.context(StartRejected {
+                        operation: env.get("ST3_START_OPERATION").cloned(),
+                    })
+                }
+            })
+    }
+
+    fn spawn_inner(
+        &self,
+        id: &str,
+        launch: &crate::Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        guard: Option<&dyn Fn() -> Result<()>>,
+        child_created: &mut bool,
     ) -> Result<ExecGeneration> {
         fs::create_dir_all(&self.state_dir)?;
         fs::create_dir_all(&self.log_dir)?;
@@ -100,7 +159,7 @@ impl ExecRuntime {
             }
         };
         // Builds and tests run below the live path; see `crate::priority`.
-        let (program, arguments) = match crate::work_prefix().split_first() {
+        let (program, arguments) = match crate::work_prefix(env).split_first() {
             Some((prefix, prefix_arguments)) => (
                 OsString::from(prefix),
                 prefix_arguments
@@ -117,11 +176,10 @@ impl ExecRuntime {
             .iter()
             .map(OsString::as_os_str)
             .collect::<Vec<_>>();
-        let mut command = crate::wrap_isolated(&unit, program.as_os_str(), &argument_refs);
+        let mut command =
+            crate::isolate::wrap_in(&unit, program.as_os_str(), &argument_refs, Some(env));
         command
             .current_dir(cwd)
-            .env_clear()
-            .envs(env)
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log);
@@ -134,7 +192,11 @@ impl ExecRuntime {
                 }
             });
         }
+        if let Some(guard) = guard {
+            guard()?;
+        }
         let child = command.spawn().context("spawn detached exec")?;
+        *child_created = true;
         let pid = child.id();
         let start_token = process_start_token(pid)?;
         let created_at_unix_ms = SystemTime::now()
@@ -153,6 +215,7 @@ impl ExecRuntime {
             group_exited: false,
             isolation_mode: isolation_name(crate::isolation_mode()).into(),
             scope_unit: (crate::isolation_mode() == crate::Isolation::Scope).then_some(unit),
+            start_operation: env.get("ST3_START_OPERATION").cloned(),
         };
         self.write_generation(id, &generation)?;
         self.owned_children
@@ -617,6 +680,7 @@ mod tests {
             group_exited: true,
             isolation_mode: "detached".into(),
             scope_unit: None,
+            start_operation: None,
         };
         fs::create_dir_all(&runtime.state_dir).unwrap();
         runtime.write_generation("completed", &generation).unwrap();
@@ -624,6 +688,31 @@ mod tests {
         assert_eq!(
             runtime.observe("completed").unwrap(),
             Some(ExecObservation::Exited(generation))
+        );
+    }
+
+    #[test]
+    fn launch_operation_is_bound_to_the_persisted_exec_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let mut environment = std::env::vars().collect::<BTreeMap<_, _>>();
+        environment.insert("ST3_START_OPERATION".into(), "operation-one".into());
+        let launched = runtime
+            .spawn(
+                "operation-proof",
+                &crate::Launch::Argv(vec!["sh".into(), "-c".into(), "exit 0".into()]),
+                root.path(),
+                &environment,
+            )
+            .unwrap();
+        assert_eq!(launched.start_operation.as_deref(), Some("operation-one"));
+        let exited = wait_for_exit(&runtime, "operation-proof");
+        assert_eq!(exited.generation_id, launched.generation_id);
+        assert_eq!(exited.start_operation, launched.start_operation);
+        let reopened = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        assert_eq!(
+            reopened.observe("operation-proof").unwrap(),
+            Some(ExecObservation::Exited(exited))
         );
     }
 
@@ -898,5 +987,47 @@ mod tests {
         runtime.end_leftovers("work").unwrap();
 
         assert_gone_soon(orphan);
+    }
+
+    /// What an exec's grandchild reports about its own priority: `sh -c nice` run by `sh`, so the
+    /// value is the one a build the seat starts would inherit.
+    #[cfg(target_os = "linux")]
+    fn inherited_nice(id: &str, priority: Option<&str>) -> String {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let mut environment = scope_environment();
+        if let Some(priority) = priority {
+            environment.insert(crate::PRIORITY_ENV.into(), priority.into());
+        }
+        runtime
+            .spawn(
+                id,
+                &crate::Launch::Shell("sh -c nice".into()),
+                root.path(),
+                &environment,
+            )
+            .unwrap();
+        wait_for_exit(&runtime, id);
+        runtime
+            .read_log(id)
+            .unwrap()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exec_starts_below_the_daemon_unless_its_seat_asks_for_normal() {
+        let base = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        assert_eq!(
+            inherited_nice("default", None),
+            (base + 10).min(19).to_string()
+        );
+        assert_eq!(
+            inherited_nice("explicit", Some("background")),
+            (base + 10).min(19).to_string()
+        );
+        assert_eq!(inherited_nice("normal", Some("normal")), base.to_string());
     }
 }

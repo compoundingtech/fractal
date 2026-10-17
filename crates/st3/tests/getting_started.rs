@@ -81,7 +81,7 @@ impl Newcomer {
     }
 
     fn command(root: &Path) -> Command {
-        let mut command = st3::test_support::command(env!("CARGO_BIN_EXE_st3-fixture"));
+        let mut command = st3::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
         command
             .env_clear()
             .env("PATH", Self::path(root))
@@ -132,6 +132,9 @@ impl Drop for Newcomer {
 
 #[test]
 fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let Some(pty) = pty() else {
         assert!(
             std::env::var_os("CI_RUN_ID").is_none(),
@@ -141,6 +144,13 @@ fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
         return;
     };
     let newcomer = Newcomer::start(&pty);
+    // Socket readiness is not a roster publication; this fixture explicitly needs one.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(st3_client::Client::unix(newcomer.root.path().join("run/st.sock")).agents_list_after(None, None, false, 0))
+        .expect("the fixture must publish its initial roster");
     for args in [
         &["now"][..],
         &["agents", "ls"],
@@ -148,13 +158,13 @@ fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
         &[
             "conversations",
             "send",
-            "person/ada",
+            "agent/garden/worker",
             "--from",
             "person/ada",
             "--body",
             "hello",
         ],
-        &["conversations", "ls", "person/ada"],
+        &["conversations", "ls", "agent/garden/worker"],
     ] {
         let output = newcomer
             .try_run(args)

@@ -15,18 +15,53 @@ use serde_json::{Value, json};
 use st3::client::Client;
 use st3::model::ClaimInput;
 
-const ST3: &str = env!("CARGO_BIN_EXE_st3-fixture");
+fn st3() -> &'static str {
+    test_env!("CARGO_BIN_EXE_st3-fixture")
+}
 const PERSON: &str = "person/fleet-tester";
 const NOTE: &str = "custom.fleet-test.note";
 
-/// A port for a node's listener. It comes from below every ephemeral range (Linux hands out
-/// 32768-60999 and macOS 49152-65535 to outgoing connections), so it is still free when a
-/// stopped node starts again.
+/// Reserve the port across independently executed tests, including when a node is stopped.
+/// Never unlink these files: a second inode would create a second reservation for the same port.
+fn reserve_port(directory: &Path, port: u16) -> Option<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(directory.join(port.to_string()))
+        .unwrap();
+    match file.try_lock() {
+        Ok(()) => Some(file),
+        Err(std::fs::TryLockError::WouldBlock) => None,
+        Err(error) => panic!("reserve fleet fixture port {port}: {error}"),
+    }
+}
+
+/// A port for a node's listener, below the ephemeral ranges used for outgoing connections.
+/// Keep a cross-process reservation for the whole test process: merely checking bind then
+/// closing the socket races another fixture's allocation, both before start and during restart.
 fn free_port() -> u16 {
+    use std::os::unix::fs::DirBuilderExt as _;
     use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::{Mutex, OnceLock};
     const LOW: u16 = 20_000;
     const SPAN: u16 = 12_000;
     static NEXT: AtomicU16 = AtomicU16::new(0);
+    static RESERVED: OnceLock<Mutex<Vec<fs::File>>> = OnceLock::new();
+    // All nextest processes on this host must use the same directory, rather than their own
+    // fixture roots. The UID separates users; mode 0700 keeps the lock domain private.
+    let directory = std::env::temp_dir().join(format!("st3-fleet-test-ports-{}", unsafe {
+        libc::geteuid()
+    }));
+    match fs::DirBuilder::new().mode(0o700).create(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("create fleet fixture port reservation directory: {error}"),
+    }
     let mut seed = [0_u8; 2];
     getrandom::fill(&mut seed).unwrap();
     let _ = NEXT.compare_exchange(
@@ -35,22 +70,59 @@ fn free_port() -> u16 {
         Ordering::AcqRel,
         Ordering::Acquire,
     );
-    loop {
+    for _ in 0..SPAN {
         let port = LOW + NEXT.fetch_add(1, Ordering::AcqRel) % SPAN;
+        let Some(reservation) = reserve_port(&directory, port) else {
+            continue;
+        };
         if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            RESERVED
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .push(reservation);
             return port;
         }
     }
+    panic!("no unreserved fleet fixture port in {LOW}..{}", LOW + SPAN);
+}
+
+#[test]
+fn fixture_port_reservation_excludes_other_processes_until_released() {
+    const PROBE: &str = "ST3_FLEET_PORT_RESERVATION_PROBE";
+    if let Some(directory) = std::env::var_os(PROBE) {
+        assert!(reserve_port(Path::new(&directory), 20_001).is_none());
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let reservation = reserve_port(directory.path(), 20_001).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "fleet::fixture_port_reservation_excludes_other_processes_until_released",
+            "--nocapture",
+        ])
+        .env(PROBE, directory.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    drop(reservation);
+    assert!(reserve_port(directory.path(), 20_001).is_some());
 }
 
 /// One isolated node: its own directories, daemon, and replication worker.
-struct Node {
+pub(super) struct Node {
     name: String,
     root: PathBuf,
     /// The st3 executable this node runs; an older release for compatibility tests.
     binary: PathBuf,
-    port: u16,
-    env: Vec<(String, String)>,
+    pub(super) port: u16,
+    pub(super) env: Vec<(String, String)>,
     daemon: Option<Child>,
     worker: Option<Child>,
     /// Every argument list this test passed to an st3 process on this node.
@@ -58,7 +130,7 @@ struct Node {
 }
 
 impl Node {
-    fn new(parent: &Path, name: &str) -> Self {
+    pub(super) fn new(parent: &Path, name: &str) -> Self {
         Self::named(parent, name, name)
     }
 
@@ -83,7 +155,7 @@ impl Node {
         }
         Self {
             name: name.into(),
-            binary: PathBuf::from(ST3),
+            binary: PathBuf::from(st3()),
             root,
             port: free_port(),
             env: Vec::new(),
@@ -130,6 +202,12 @@ impl Node {
         if let Some(shell) = std::env::var_os("SHELL") {
             command.env("SHELL", shell);
         }
+        if let Some(root) = std::env::var_os("SMALLTALK_FLEET_LEAVE_DIAGNOSTICS") {
+            command.env("RUST_LOG", "st3=trace,smallclaims=trace");
+            fs::write(Path::new(&root).join("command.json"), serde_json::to_vec(&json!({
+                "node": self.name, "operation": arguments.iter().take(2).collect::<Vec<_>>()
+            })).unwrap()).unwrap();
+        }
         for (key, value) in &self.env {
             command.env(key, value);
         }
@@ -160,7 +238,7 @@ impl Node {
         serde_json::from_str(&self.st_ok(&all)).unwrap()
     }
 
-    fn logs(&self) -> String {
+    pub(super) fn logs(&self) -> String {
         [
             "daemon.log",
             "daemon.stderr.log",
@@ -181,10 +259,10 @@ impl Node {
         .join("\n")
     }
 
-    async fn start(&mut self) {
+    pub(super) async fn start(&mut self) {
         let pty = self.root.join("bin/pty");
         let log = |name: &str| fs::File::create(self.root.join(name)).unwrap();
-        let up: Vec<&str> = if self.binary == Path::new(ST3) {
+        let up: Vec<&str> = if self.binary == Path::new(st3()) {
             vec!["up", "--pty-binary", pty.to_str().unwrap()]
         } else {
             vec!["up"]
@@ -231,14 +309,26 @@ impl Node {
         let legacy = fs::read_to_string(self.root.join("config/st3/config.toml"))
             .is_ok_and(|config| config.contains("fleet_id"));
         if legacy || self.state_dir().join("fleet/fleet.toml").exists() {
-            let worker = self
-                .command(&["replication-worker"])
+            self.start_worker();
+        }
+    }
+
+    fn start_worker(&mut self) {
+        assert!(self.worker.is_none());
+        self.worker = Some(
+            self.command(&["replication-worker"])
                 .stdin(Stdio::null())
-                .stdout(log("worker.log"))
-                .stderr(log("worker.stderr.log"))
+                .stdout(fs::File::create(self.root.join("worker.log")).unwrap())
+                .stderr(fs::File::create(self.root.join("worker.stderr.log")).unwrap())
                 .spawn()
-                .unwrap();
-            self.worker = Some(worker);
+                .unwrap(),
+        );
+    }
+
+    fn stop_worker(&mut self) {
+        if let Some(mut child) = self.worker.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 
@@ -271,7 +361,7 @@ impl Node {
     }
 
     /// Configure this node as a config-peer fleet node, the way the running fleet is today.
-    fn legacy_config(&self, fleet_id: &str, secret: &Path, peers: &[(&str, u16)]) {
+    pub(super) fn legacy_config(&self, fleet_id: &str, secret: &Path, peers: &[(&str, u16)]) {
         let mut config = format!(
             "node = \"{}\"\nperson = \"{PERSON}\"\nfleet_id = \"{fleet_id}\"\nshared_secret_file = \"{}\"\npeer_listen = \"127.0.0.1:{}\"\n",
             self.name,
@@ -388,7 +478,7 @@ impl Node {
         }
     }
 
-    async fn note(&self, text: &str) -> String {
+    pub(super) async fn note(&self, text: &str) -> String {
         self.note_as(text, PERSON).await
     }
 
@@ -470,7 +560,12 @@ where
     panic!("timed out waiting until {what}");
 }
 
-async fn wait_for_notes(node: &Node, expected: &BTreeSet<String>, seconds: u64, nodes: &[&Node]) {
+pub(super) async fn wait_for_notes(
+    node: &Node,
+    expected: &BTreeSet<String>,
+    seconds: u64,
+    nodes: &[&Node],
+) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     loop {
         let notes = node.notes().await;
@@ -523,6 +618,9 @@ async fn joined(root: &Path, sponsor: &Node, name: &str, extra: &[&str]) -> Node
 /// child finishes. Put the next real weekly tick close enough to exercise it in this daemon.
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduled_occurrence_survives_parent_reapply_revision_and_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let mut node = Node::new(root.path(), "orchard");
     node.start().await;
@@ -543,13 +641,9 @@ mission "harvest" state="ready" {{
                 .clone(),
         );
         fs::write(&child_file, source).unwrap();
-        node.st_ok(&[
-            "missions",
-            "publish",
-            child_file.to_str().unwrap(),
-            "--as",
-            PERSON,
-        ]);
+        node.st_ok(&["apply", child_file.to_str().unwrap(),
+        "--as",
+        PERSON,]);
     }
     let next = chrono::Utc::now() + chrono::Duration::seconds(30);
     let anchor =
@@ -576,13 +670,9 @@ mission "orchard/weekly" state="ready" {{
         )
     };
     fs::write(&parent_file, parent(&revisions[0])).unwrap();
-    node.st_ok(&[
-        "missions",
-        "publish",
-        parent_file.to_str().unwrap(),
-        "--as",
-        PERSON,
-    ]);
+    node.st_ok(&["apply", parent_file.to_str().unwrap(),
+    "--as",
+    PERSON,]);
     node.st_ok(&[
         "missions",
         "start",
@@ -603,13 +693,9 @@ mission "orchard/weekly" state="ready" {{
 
     for index in 0..4 {
         fs::write(&parent_file, parent(&revisions[index % 2])).unwrap();
-        node.st_ok(&[
-            "missions",
-            "publish",
-            parent_file.to_str().unwrap(),
-            "--as",
-            PERSON,
-        ]);
+        node.st_ok(&["apply", parent_file.to_str().unwrap(),
+        "--as",
+        PERSON,]);
         if index > 0 {
             node.st_ok(&[
                 "work",
@@ -673,16 +759,25 @@ mission "orchard/weekly" state="ready" {{
 /// A stopped origin's earlier running claims must not fence a seat placed on another host.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stopped_seat_is_reachable_after_a_cross_host_move() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     cross_host_seat_move(SeatMove::Stopped).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn placement_handoff_moves_a_running_seat_between_real_daemons() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     cross_host_seat_move(SeatMove::Running).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn placement_handoff_source_offline_retires_the_returning_real_daemon_runtime() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     cross_host_seat_move(SeatMove::SourceOffline).await;
 }
 
@@ -715,7 +810,7 @@ agent "move/worker" {
 "#,
     )
     .unwrap();
-    a.st_ok(&["agents", "apply", source.to_str().unwrap(), "--as", PERSON]);
+    a.st_ok(&["apply", "--no-gate-check", source.to_str().unwrap(), "--as", PERSON]);
     let status =
         |node: &Node| node.st_json(&["subject", "show", SUBJECT])["status"]["subjects"][0].clone();
     wait_until("amber runs the seat on both replicas", 30, || async {
@@ -741,7 +836,18 @@ agent "move/worker" {
         a.stop();
         b.st_ok(&["agents", "start", SUBJECT, "--host", "cobalt", "--source-offline", "--as", PERSON]);
     } else {
-        b.st_ok(&["agents", "start", SUBJECT, "--host", "cobalt", "--as", PERSON]);
+        let start = ["agents", "start", SUBJECT, "--host", "cobalt", "--as", PERSON];
+        let output = b.st(&start);
+        if !output.status.success() {
+            panic!(
+                "st3 {} on cobalt failed:\n{}{}\n{}\n{}",
+                start.join(" "),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+                desired_dump(&[&a, &b], SUBJECT).await,
+                b.logs()
+            );
+        }
     }
     wait_until("cobalt's running observation reaches both replicas", 30, || async {
         let replicas = if mode == SeatMove::SourceOffline { vec![&b] } else { vec![&a, &b] };
@@ -827,6 +933,37 @@ agent "move/worker" {
     }
 }
 
+/// What each node holds for a subject's declaration, so a start that stops on conflicting
+/// declarations says which unreferenced `intent.desired` heads it found and where they came from.
+async fn desired_dump(nodes: &[&Node], subject: &str) -> String {
+    let mut dump = String::new();
+    for node in nodes {
+        let status = node.st(&["--json", "subject", "show", subject]);
+        let status: Value = serde_json::from_slice(&status.stdout).unwrap_or(Value::Null);
+        let row = &status["status"]["subjects"][0];
+        dump.push_str(&format!(
+            "--- {} {subject}: desired_token {} conflicts {}\n",
+            node.name, row["desired_token"], row["conflicts"]
+        ));
+        for claim in node.claims().await {
+            if claim["subject"] != subject || claim["kind"] != "intent.desired" {
+                continue;
+            }
+            let body = claim["body"].to_string();
+            dump.push_str(&format!(
+                "intent.desired id {} store_index {} origin {} actor {} predecessors {} body {}\n",
+                claim["id"],
+                claim["store_index"],
+                claim["origin"],
+                claim["actor"],
+                claim["predecessors"],
+                body.chars().take(400).collect::<String>()
+            ));
+        }
+    }
+    dump
+}
+
 fn authority_digest(node: &Node) -> String {
     node.st_json(&["replication", "status"])["authority_digest"]
         .as_str()
@@ -836,6 +973,9 @@ fn authority_digest(node: &Node) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_populated_standalone_daemon_founds_a_fleet_with_verified_person_and_agent_claims() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let mut a = Node::new(root.path(), "studio");
     a.start().await;
@@ -921,7 +1061,178 @@ async fn a_populated_standalone_daemon_founds_a_fleet_with_verified_person_and_a
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg(target_os = "linux")]
+async fn invalid_admission_preserves_running_daemon_and_never_stops_services() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = Node::new(root.path(), "orchid");
+    let log = node.root.join("service-commands");
+    let manager = node.root.join("bin/systemctl");
+    fs::write(
+        &manager,
+        format!(r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+if [ "$2" != show ]; then exit 9; fi
+if [ "$3" = st3.service ]; then
+    printf '%s\n' 'LoadState=loaded' 'ActiveState=active' 'SubState=running'
+else
+    printf '%s\n' 'LoadState=not-found' 'ActiveState=inactive' 'SubState=dead'
+fi
+"#, log.display()),
+    ).unwrap();
+    fs::set_permissions(manager, fs::Permissions::from_mode(0o700)).unwrap();
+    node.env.push((
+        "PATH".into(),
+        format!(
+            "{}:{}",
+            node.root.join("bin").display(),
+            std::env::var("PATH").unwrap()
+        ),
+    ));
+    node.start().await;
+    async fn assert_refused(node: &Node, log: &Path, arguments: &[&str], message: &str) {
+        fs::write(log, "").unwrap();
+        let output = node.st(arguments);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(message),
+            "{output:?}"
+        );
+        let calls = fs::read_to_string(log).unwrap();
+        assert!(
+            calls.lines().all(|line| line.starts_with("--user show ")),
+            "admission preconditions may inspect services but must never mutate them: {calls}"
+        );
+        assert_eq!(
+            node.client().get::<Value>("/v1/health").await.unwrap()["node"],
+            node.name
+        );
+    }
+    assert_refused(
+        &node,
+        &log,
+        &["fleet", "create", "--name", "invalid/name"],
+        "cannot name a fleet member",
+    )
+    .await;
+    assert!(!node.state_dir().join("fleet/fleet.toml").exists());
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([42_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let fleet = "8f14e45f-ceea-467a-9a2b-5c3d6e7f8091";
+    let peer = [("fern", free_port())];
+    node.legacy_config(fleet, &secret, &peer);
+    assert_refused(
+        &node,
+        &log,
+        &["fleet", "migrate", "--anchor"],
+        "not bound to a fleet yet",
+    )
+    .await;
+    node.restart().await;
+    node.legacy_config("8f14e45f-ceea-467a-9a2b-5c3d6e7f8092", &secret, &peer);
+    assert_refused(
+        &node,
+        &log,
+        &["fleet", "migrate", "--anchor"],
+        "not the configured",
+    )
+    .await;
+    node.legacy_config(fleet, &secret, &peer);
+    node.stop();
+    node.migrate(&["--anchor"]);
+    // A native member no longer needs legacy fleet_id in config.toml. Create must
+    // reject saved membership without changing any service.
+    fs::write(
+        node.root.join("config/st3/config.toml"),
+        format!("node = \"{}\"\nperson = \"{PERSON}\"\n", node.name),
+    )
+    .unwrap();
+    node.start().await;
+    assert_refused(&node, &log, &["fleet", "create"], "already in a fleet").await;
+    assert_refused(
+        &node,
+        &log,
+        &["fleet", "migrate", "--anchor"],
+        "already has fleet membership settings",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn create_after_standalone_run_records_explicit_name_before_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = Node::new(root.path(), "orchid-computer");
+    node.start().await;
+    let pin = node.state_dir().join("node-identity.json");
+    assert_eq!(
+        serde_json::from_slice::<String>(&fs::read(&pin).unwrap()).unwrap(),
+        node.name
+    );
+    let blocked = node.st(&[
+        "fleet",
+        "create",
+        "--name",
+        "orchid",
+        "--no-service",
+        "--dial-out",
+    ]);
+    assert!(
+        !blocked.status.success(),
+        "a manual daemon must stop before admission"
+    );
+    assert!(!node.state_dir().join("fleet/fleet.toml").exists());
+    node.stop();
+    node.name = "orchid".into();
+    node.create();
+    assert_eq!(
+        serde_json::from_slice::<String>(&fs::read(&pin).unwrap()).unwrap(),
+        node.name
+    );
+    node.start().await;
+    assert_eq!(node.st_json(&["fleet", "status"])["node"], node.name);
+    node.wait_listening().await;
+    let peer = joined(root.path(), &node, "fern", &[]).await;
+    peer.st_ok(&["fleet", "wait", "--timeout", "90s"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saved_join_resumes_when_membership_was_saved_before_the_identity_pin() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let sponsor = anchor(root.path(), "orchid").await;
+    let mut node = Node::new(root.path(), "fern");
+    let code = sponsor.invite("fern", &[]);
+    assert!(node.join(&code, &[]).status.success());
+    // Isolated crash-boundary fixture: saved admission exists, but the previous pin remains.
+    let pin = node.state_dir().join("node-identity.json");
+    fs::write(&pin, "\"fern-before-admission\"\n").unwrap();
+    let refused = node.st(&["up"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("fleet membership pins"));
+    let resumed = node.join(&code, &[]);
+    assert!(resumed.status.success(), "{resumed:?}");
+    assert!(String::from_utf8_lossy(&resumed.stdout).contains("resumed"));
+    assert_eq!(
+        serde_json::from_slice::<String>(&fs::read(pin).unwrap()).unwrap(),
+        "fern"
+    );
+    node.start().await;
+    node.st_ok(&["fleet", "wait", "--timeout", "90s"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn invite_and_join_sync_full_history() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let mut expected = BTreeSet::new();
@@ -931,13 +1242,12 @@ async fn invite_and_join_sync_full_history() {
     }
 
     let b = joined(root.path(), &a, "b", &[]).await;
-    // A newcomer's first sync ends by checking that it projects its sponsor's graph.
+    // A newcomer's first sync ends once it holds and has admitted its sponsor's claims.
     let waited = b.st_ok(&["fleet", "wait", "--timeout", "90s"]);
     assert!(waited.contains("first sync verified"), "{waited}");
     let first = b.st_json(&["replication", "status"])["first_sync"].clone();
     assert_eq!(first["state"], "verified", "{first}");
-    assert_eq!(first["healed"], false, "{first}");
-    assert_eq!(first["graph_digest"], first["peer_graph_digest"], "{first}");
+    assert!(first.get("healed").is_none(), "{first}");
     wait_for_notes(&b, &expected, 60, &[&a, &b]).await;
     b.wait_listening().await;
     b.note("b-0").await;
@@ -1004,6 +1314,9 @@ async fn invite_and_join_sync_full_history() {
 /// must say it has no route rather than that it is temporarily unavailable.
 #[tokio::test(flavor = "multi_thread")]
 async fn members_read_each_others_owner_state_and_unreachable_owners_say_why() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let b = joined(root.path(), &a, "b", &[]).await;
@@ -1066,11 +1379,14 @@ fn peer_sync(node: &Node, peer: &str) -> Value {
 /// Two members can hold the same envelopes and still project different graphs, as when one of
 /// them lost claims it had admitted. No exchange fixes that, so neither may call the pair in
 /// sync: replication status says diverged, doctor fails, and every client page carries it.
-/// Then they heal: they find the claims one lacks and admit their envelopes again.
+/// Sync never repairs one member's claims or graph from the other.
 #[tokio::test(flavor = "multi_thread")]
-async fn members_with_the_same_envelopes_but_different_claims_report_divergence_and_heal() {
+async fn members_with_the_same_envelopes_but_different_claims_report_divergence() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
-    let mut a = anchor(root.path(), "a").await;
+    let a = anchor(root.path(), "a").await;
     let mut b = joined(root.path(), &a, "b", &[]).await;
     let mission = root.path().join("probe.kdl");
     fs::write(
@@ -1080,13 +1396,9 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence_
          step \"only\" { agentless }\n}\n",
     )
     .unwrap();
-    a.st_ok(&[
-        "missions",
-        "publish",
-        mission.to_str().unwrap(),
-        "--as",
-        PERSON,
-    ]);
+    a.st_ok(&["apply", mission.to_str().unwrap(),
+    "--as",
+    PERSON,]);
     wait_until(
         "both members hold the mission and call the pair in sync",
         90,
@@ -1101,16 +1413,6 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence_
         },
     )
     .await;
-
-    let in_sync_tables = a.st_json(&["replication", "status"])["projection_digests"].clone();
-    // Heals wait while the divergence is inspected.
-    let hold = (
-        "ST3_REPLICATION_HEAL_AFTER_MS".to_owned(),
-        "3600000".to_owned(),
-    );
-    a.env.push(hold.clone());
-    a.restart().await;
-    b.env.push(hold);
 
     // B loses the mission's claims but keeps their envelopes, so both inventories still match.
     b.stop();
@@ -1180,47 +1482,7 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence_
         );
     }
 
-    // Without the hold, the members heal soon after they find the graphs different.
-    for node in [&mut a, &mut b] {
-        node.env = vec![(
-            "ST3_REPLICATION_HEAL_AFTER_MS".to_owned(),
-            "1000".to_owned(),
-        )];
-        node.restart().await;
-    }
-    wait_until("the members heal", 120, || async {
-        a.st_json(&["replication", "status"])["graph_digest"]
-            == b.st_json(&["replication", "status"])["graph_digest"]
-            && [(&a, "b"), (&b, "a")]
-                .iter()
-                .all(|(node, peer)| peer_sync(node, peer)["diverged"] != true)
-    })
-    .await;
-    let restored_tables = b.st_json(&["replication", "status"])["projection_digests"].clone();
-    for (table, digest) in in_sync_tables.as_object().unwrap() {
-        // Restarts and healing append durable recovery claims and their retry operations.
-        // Both modern peers must agree on their complete maps above; materialized business
-        // tables must also recover the exact pre-fault contents.
-        if !matches!(table.as_str(), "claim_sources" | "operations") {
-            assert_eq!(
-                &restored_tables[table], digest,
-                "b restores the pre-fault shared table {table}"
-            );
-        }
-    }
-    let heals = [(&a, "b"), (&b, "a")]
-        .iter()
-        .filter_map(|(node, peer)| {
-            let heal = peer_sync(node, peer)["heal"].clone();
-            (!heal.is_null()).then_some((node.name.clone(), heal))
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        heals.iter().any(|(_, heal)| heal["healed"] == true
-            && heal["refetched"].as_u64().unwrap_or(0) + heal["pushed"].as_u64().unwrap_or(0) > 0),
-        "{heals:?}"
-    );
-    let restored = b
+    let lost = b
         .claims()
         .await
         .into_iter()
@@ -1231,23 +1493,14 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence_
                 .contains("divergence-probe")
         })
         .count();
-    assert!(restored > 0, "b admitted the mission's claims again");
-    for node in [&a, &b] {
-        let doctor = node.st(&["--json", "doctor"]);
-        let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
-        let check = report["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|check| check["name"] == "replication")
-            .cloned()
-            .unwrap();
-        assert_ne!(check["status"], "fail", "{check}");
-    }
+    assert_eq!(lost, 0, "sync does not admit the lost claims' envelopes again");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dial_out_member_is_caught_up_and_never_reported_down() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let mut laptop = joined(root.path(), &a, "laptop", &["--dial-out"]).await;
@@ -1298,6 +1551,9 @@ async fn a_dial_out_member_is_caught_up_and_never_reported_down() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_interrupted_join_resumes_with_the_same_code() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let mut a = Node::new(root.path(), "a");
     let marker = root.path().join("drop-one-join-answer");
@@ -1380,6 +1636,9 @@ async fn an_interrupted_join_resumes_with_the_same_code() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn expired_revoked_and_used_codes_are_refused() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let refusal = |output: Output| {
@@ -1425,6 +1684,9 @@ async fn expired_revoked_and_used_codes_are_refused() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_leaked_code_is_visible_and_can_be_revoked() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let m = joined(root.path(), &a, "m", &[]).await;
@@ -1508,6 +1770,9 @@ async fn a_leaked_code_is_visible_and_can_be_revoked() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_secret_never_leaves_its_file() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let b = joined(root.path(), &a, "b", &[]).await;
@@ -1584,11 +1849,131 @@ async fn the_secret_never_leaves_its_file() {
     let _ = json!({});
 }
 
+/// A rejoining member with tombstones from a different checkpoint lineage must still exchange
+/// later live claims in both directions (#1431). The tombstone rows model already-certified
+/// offline trims; this test does not manufacture certificates or transport tombstones.
+#[tokio::test(flavor = "multi_thread")]
+async fn rejoin_exchanges_live_claims_beyond_differing_checkpoint_tombstones() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    rejoin_tombstone_fixture(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rejoin_slow_exports_preserve_live_claims_and_show_overload_retry() {
+    if st3::test_support::supervise_test() { return; }
+    rejoin_tombstone_fixture(true).await;
+}
+
+async fn rejoin_tombstone_fixture(slow_export: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let mut birch = anchor(root.path(), "birch").await;
+    let mut cedar = joined(root.path(), &birch, "cedar", &[]).await;
+    birch.note("birch-shared").await;
+    cedar.note("cedar-shared").await;
+    let shared = BTreeSet::from([
+        "custom/fleet-test/birch-shared".into(),
+        "custom/fleet-test/cedar-shared".into(),
+    ]);
+    for node in [&birch, &cedar] {
+        wait_for_notes(node, &shared, 30, &[&birch, &cedar]).await;
+    }
+    birch.stop();
+    cedar.stop();
+    for node in [&birch, &cedar] {
+        let mut connection =
+            rusqlite::Connection::open(node.state_dir().join("claims.sqlite3")).unwrap();
+        let transaction = connection.transaction().unwrap();
+        for id in smallclaims::store::test_envelope_ids("alder-retired", 0..768, &node.name) {
+            transaction
+                .execute(
+                    "INSERT INTO checkpoint_envelopes VALUES (?1, ?2, ?3, 0, ?4)",
+                    rusqlite::params![
+                        id.writer,
+                        id.sequence,
+                        id.hash,
+                        format!("checkpoint/{}", node.name)
+                    ],
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+    // Publish on both sides with no replication listener open, then rejoin their workers.
+    birch.start().await;
+    birch.stop_worker();
+    cedar.start().await;
+    cedar.stop_worker();
+    let mut expected = shared;
+    for node in [&birch, &cedar] {
+        for index in 0..4 {
+            let text = format!("{}-partition-{index}", node.name);
+            node.note(&text).await;
+            expected.insert(format!("custom/fleet-test/{text}"));
+        }
+    }
+    assert_eq!(birch.notes().await.len(), 6);
+    assert_eq!(cedar.notes().await.len(), 6);
+    let before = [&birch, &cedar].map(|node| {
+        node.st_json(&["replication", "status"])["timings"]["exchanges"]
+            .as_u64()
+            .unwrap()
+    });
+    if slow_export {
+        // Restart only the isolated daemon with the fixture-only injection. Each response
+        // export takes 25 seconds, beyond the old caller's entire 20-second HTTP deadline.
+        cedar.env.push(("ST3_TEST_REPLICATION_EXPORT_DELAY_MS".into(), "25000".into()));
+        cedar.stop();
+        cedar.start().await;
+        cedar.stop_worker();
+    }
+    birch.start_worker();
+    cedar.start_worker();
+    if slow_export {
+        wait_until("signed overload exposes polling phase and retry", 90, || async {
+            let status = birch.st_json(&["replication", "status"]);
+            status["peers"].as_array().unwrap().iter().any(|peer| {
+                peer["worker"]["phase"] == "overload"
+                    && peer["worker"]["last_attempt_at_unix_ms"].as_u64().is_some()
+                    && peer["worker"]["next_retry_at_unix_ms"].as_u64().is_some()
+            })
+        }).await;
+        let text = birch.st_ok(&["replication", "status"]);
+        assert!(text.contains("worker overload"), "{text}");
+        assert!(text.contains("next retry in"), "{text}");
+    }
+    for (node, before) in [&birch, &cedar].into_iter().zip(before) {
+        wait_until("both rejoined workers exchange successfully", if slow_export { 180 } else { 15 }, || async {
+            node.st_json(&["replication", "status"])["timings"]["exchanges"]
+                .as_u64()
+                .unwrap() >= before + 4
+        }).await;
+        let status = node.st_json(&["replication", "status"]);
+        eprintln!("{} rejoin exchanges={} envelopes_received={}",
+            node.name, status["timings"]["exchanges"], status["timings"]["envelopes_received"]);
+    }
+    for node in [&birch, &cedar] {
+        wait_for_notes(node, &expected, if slow_export { 180 } else { 30 }, &[&birch, &cedar]).await;
+        let connection =
+            rusqlite::Connection::open(node.state_dir().join("claims.sqlite3")).unwrap();
+        let count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM checkpoint_envelopes", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 768, "no tombstone payloads replicate");
+    }
+}
+
 /// `st fleet wait` gates a restart (#1022). A first sync is verified once; after a restart
 /// far behind, the wait must also see an exchange since it began at which this node held
 /// everything its peer held, instead of returning at once with the old verdict.
 #[tokio::test(flavor = "multi_thread")]
 async fn fleet_wait_after_a_restart_waits_until_the_member_has_caught_up() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let mut b = joined(root.path(), &a, "b", &[]).await;
@@ -1625,6 +2010,9 @@ async fn fleet_wait_after_a_restart_waits_until_the_member_has_caught_up() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_removed_member_is_refused() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let b = joined(root.path(), &a, "b", &[]).await;
@@ -1739,6 +2127,9 @@ fn doctor_check(node: &Node, name: &str) -> Value {
 /// measurement stale with the envelopes written since it, and doctor warns.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_frozen_member_is_not_reported_up() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let b = joined(root.path(), &a, "b", &[]).await;
@@ -1810,21 +2201,173 @@ async fn a_frozen_member_is_not_reported_up() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn leave_drains_everything_before_it_leaves() {
+async fn leave_drains_the_refusal_settings_writer_before_removing_its_directory() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    refusal_settings_writer_across_leave("loaded").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_refusal_settings_writer_cannot_recreate_a_fleet_after_leave() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    refusal_settings_writer_across_leave("before-lock").await;
+}
+
+async fn refusal_settings_writer_across_leave(stage: &str) {
     let root = tempfile::tempdir().unwrap();
-    let mut a = anchor(root.path(), "a").await;
-    let b = joined(root.path(), &a, "b", &[]).await;
+    let a = anchor(root.path(), "alder").await;
+    let mut b = joined(root.path(), &a, "birch", &[]).await;
     b.wait_listening().await;
+    b.stop_worker();
+    let barrier = root.path().join("refusal-writer");
+    fs::create_dir(&barrier).unwrap();
+    fs::write(barrier.join("stage"), stage).unwrap();
+    b.env.push((
+        "ST3_TEST_REMOVAL_WRITE_BARRIER".into(),
+        barrier.to_str().unwrap().into(),
+    ));
+    // Write the durable leave, then let the real worker receive the peer's signed refusal.
+    for step in ["begin", "claim"] {
+        let _: Value = b
+            .client()
+            .post(
+                &format!("/v1/internal/fleet/leave/{step}"),
+                &json!({"person": PERSON}),
+            )
+            .await
+            .unwrap();
+    }
+    b.start_worker();
+    wait_until("the refusal writer reaches its barrier", 20, || async {
+        barrier.join("entered").exists()
+    })
+    .await;
+    assert_eq!(
+        fs::read_to_string(barrier.join("entered")).unwrap(),
+        b.worker.as_ref().unwrap().id().to_string(),
+        "the barrier must belong to this node's replication-worker"
+    );
+    // Offline finalization exercises the same cleanup without requiring the paused writer
+    // to publish its refusal as the online acknowledgement. The leave claim already exists.
+    let mut leave = b
+        .command(&[
+            "fleet",
+            "leave",
+            "--offline",
+            "--no-service",
+            "--wait",
+            "60s",
+            "--as",
+            PERSON,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_until("leave reaches settings cleanup", 20, || async {
+        b.state_dir().join("left-fleet.json").exists()
+    })
+    .await;
+    if stage == "before-lock" {
+        // Cleanup wins ownership while the signed refusal is pending. Resume the real
+        // writer only after leave succeeds: it must reload rather than recreate settings.
+        wait_until(
+            "leave finishes before the pending refusal writer",
+            20,
+            || {
+                let exited = leave.try_wait().unwrap().is_some();
+                async move { exited }
+            },
+        )
+        .await;
+        assert!(!b.state_dir().join("fleet").exists());
+    } else {
+        // An in-flight settings writer owns the directory until both renames finish.
+        // No service manager stops it on the CLI's behalf.
+        wait_until(
+            "the leave CLI contends with the active settings writer",
+            20,
+            || async { barrier.join("contended").exists() },
+        )
+        .await;
+        assert_eq!(
+            fs::read_to_string(barrier.join("contended")).unwrap(),
+            leave.id().to_string()
+        );
+    }
+    let completed_before_release = leave.try_wait().unwrap().is_some();
+    fs::write(barrier.join("release"), b"continue").unwrap();
+    wait_until("the refusal settings write finishes", 20, || async {
+        barrier.join("finished").exists()
+    })
+    .await;
+    wait_until("leave exits after the writer drains", 20, || {
+        let exited = leave.try_wait().unwrap().is_some();
+        async move { exited }
+    })
+    .await;
+    let output = leave.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        b.logs()
+    );
+    assert!(
+        !b.state_dir().join("fleet").exists(),
+        "the replication-worker recreated fleet settings after successful leave (completed before release: {completed_before_release})"
+    );
+    assert_eq!(
+        completed_before_release,
+        stage == "before-lock",
+        "leave must wait only for a writer that already owns the settings"
+    );
+    assert!(b.worker.as_mut().unwrap().try_wait().unwrap().is_none());
+    assert!(
+        a.claims()
+            .await
+            .iter()
+            .any(|claim| claim["subject"] == "host/birch" && claim["kind"] == "fleet.member-left")
+    );
+    b.note("local-after-refusal-drained").await;
+    b.restart().await;
+    assert!(!b.state_dir().join("fleet").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn leave_drains_everything_before_it_leaves() {
+    if supervise_leave_with_diagnostics() {
+        return;
+    }
+    let temporary_root = tempfile::tempdir().unwrap();
+    let root = std::env::var_os("SMALLTALK_FLEET_LEAVE_DIAGNOSTICS")
+        .map(PathBuf::from).unwrap_or_else(|| temporary_root.path().to_owned());
+    let phase = |stage: &str| fs::write(root.join("phase.txt"), stage).unwrap();
+    phase("create and start anchor a");
+    let mut a = anchor(&root, "a").await;
+    phase("invite, join and start b");
+    let b = joined(&root, &a, "b", &[]).await;
+    phase("wait for b listener");
+    b.wait_listening().await;
+    phase("stop anchor a");
     a.stop();
     let mut expected = BTreeSet::new();
     // Written while the anchor is away, and more than an older peer's exchange carries (512),
     // so the anchor comes back catching up and defers projecting what it receives.
     for index in 0..700 {
+        phase(&format!("write note {index}/700 on b"));
         b.note(&format!("b-{index}")).await;
         expected.insert(format!("custom/fleet-test/b-{index}"));
     }
+    phase("restart anchor a");
     a.start().await;
+    phase("wait for a listener");
     a.wait_listening().await;
+    phase("fleet leave CLI on b (existing --wait 2m)");
     b.st_ok(&[
         "fleet",
         "leave",
@@ -1835,7 +2378,9 @@ async fn leave_drains_everything_before_it_leaves() {
         PERSON,
     ]);
     // Everything b wrote reached a before the leave, and the leave ended b.
+    phase("wait for all notes on a");
     wait_for_notes(&a, &expected, 10, &[&a, &b]).await;
+    phase("read a fleet status and assert b left");
     let members = a.st_json(&["fleet", "status"])["view"]["members"].clone();
     assert!(
         members.as_array().unwrap().iter().any(|member| {
@@ -1846,11 +2391,55 @@ async fn leave_drains_everything_before_it_leaves() {
     assert!(!b.state_dir().join("fleet").exists());
     assert!(b.state_dir().join("left-fleet.json").exists());
     // While leaving, b refused new writes; now it accepts them again, locally.
+    phase("write local-after-leave on b");
     b.note("local-after-leave").await;
+    phase("stop fixture b");
+    drop(b);
+    phase("stop fixture a");
+    drop(a);
+    phase("complete");
+}
+
+/// The deadline lives outside Rust: a blocked synchronous CLI or runtime teardown
+/// cannot keep it from dumping evidence and failing. The existing guardian owns cleanup.
+fn supervise_leave_with_diagnostics() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Write as _;
+        let name = "fleet::leave_drains_everything_before_it_leaves";
+        if std::env::var("SMALLTALK_TEST_SUPERVISED").as_deref() == Ok(name) {
+            return false;
+        }
+        let scripts = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new("python3")
+            .arg(scripts.join("st3_test_process.py"))
+            .args(["--owner", &std::process::id().to_string(), "--", "python3"])
+            .arg(scripts.join("st3_fleet_leave_diagnostics.py"))
+            .args(["--seconds", "600", "--root"])
+            .arg(root.path())
+            .arg("--")
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--include-ignored"])
+            .env_remove("ST_AGENT")
+            .env_remove("ST3_SUBJECT")
+            .env("SMALLTALK_TEST_SUPERVISED", name)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .output().expect("launch bounded fleet leave guardian");
+        std::io::stdout().write_all(&output.stdout).unwrap();
+        std::io::stderr().write_all(&output.stderr).unwrap();
+        assert!(output.status.success(), "bounded fleet leave: {}", output.status);
+        true
+    }
+    #[cfg(not(target_os = "linux"))]
+    false
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "orchard").await;
     let b = joined(root.path(), &a, "meadow", &[]).await;
@@ -1912,16 +2501,25 @@ async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
     assert!(after.is_subset(&c.notes().await));
     assert!(after.is_disjoint(&a.notes().await));
     assert!(after.is_disjoint(&b.notes().await));
+    let mut settled_diff = None;
     wait_until(
-        "rejoining node compares the common envelope inventory",
+        "rejoining node compares the common inventory and settled projections",
         90,
-        || async {
+        || {
             let diff = c.st_json(&["replication", "diff", "orchard"]);
-            diff["authority"]["equal"] == true && diff["status"] == "up"
+            let settled = diff["authority"]["equal"] == true
+                && diff["status"] == "up"
+                && diff["graph"]["equal"].is_boolean();
+            if settled {
+                settled_diff = Some(diff);
+            }
+            async move { settled }
         },
     )
     .await;
-    let diff = c.st_json(&["replication", "diff", "orchard"]);
+    // Replication can advance between CLI calls and make coverage pending again. Assert
+    // against the settled comparison that satisfied the wait, including its table diff.
+    let diff = settled_diff.unwrap();
     let doctor = c.st(&["--json", "doctor"]);
     let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
     let admission = doctor["checks"]
@@ -1957,12 +2555,13 @@ async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
             .contains("admitted beyond high water"),
         "{admission}"
     );
+    // The wait compares no graphs; it refuses on the admissions themselves.
     assert!(
         !waited.status.success(),
         "fleet wait accepted retained fenced history"
     );
     assert!(
-        String::from_utf8_lossy(&waited.stderr).contains("projects a different graph"),
+        String::from_utf8_lossy(&waited.stderr).contains("beyond the writer's high water"),
         "{}",
         String::from_utf8_lossy(&waited.stderr)
     );
@@ -1970,6 +2569,9 @@ async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_leave_already_refused_as_left_finishes_when_run_again() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let b = joined(root.path(), &a, "b", &[]).await;
@@ -2034,6 +2636,9 @@ async fn a_leave_already_refused_as_left_finishes_when_run_again() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn uninstall_leaves_nothing_behind() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let mut b = joined(root.path(), &a, "b", &[]).await;
@@ -2115,6 +2720,9 @@ async fn uninstall_leaves_nothing_behind() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_flood_of_invalid_join_requests_does_not_block_a_valid_join() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let code = a.invite("b", &[]);
@@ -2162,6 +2770,9 @@ async fn down_observations(node: &Node, host: &str) -> usize {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_config_peer_fleet_migrates_to_membership() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let fleet_id = "8f14e45f-ceea-467a-9a2b-5c3d6e7f8091";
     let secret = root.path().join("fleet.secret");
@@ -2288,6 +2899,9 @@ async fn a_config_peer_fleet_migrates_to_membership() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_leaving_member_writes_nothing_after_it_begins_to_leave() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let b = joined(root.path(), &a, "b", &[]).await;
@@ -2356,6 +2970,9 @@ async fn a_leaving_member_writes_nothing_after_it_begins_to_leave() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_switches_between_listening_and_dial_out() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "a").await;
     let mut b = joined(root.path(), &a, "b", &[]).await;
@@ -2383,6 +3000,8 @@ async fn a_member_switches_between_listening_and_dial_out() {
     )
     .await;
     let port = b.port.to_string();
+    // Mode changes remain usable with a stopped daemon and a manual worker restart.
+    b.stop();
     b.st_ok(&[
         "fleet",
         "mode",
@@ -2391,13 +3010,16 @@ async fn a_member_switches_between_listening_and_dial_out() {
         &port,
         "--no-service",
     ]);
-    b.restart().await;
+    b.start().await;
     b.wait_listening().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the pinned baseline release"]
 async fn an_old_build_config_peer_replicates_with_new_members() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let old = PathBuf::from(
         std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"),
     );
@@ -2559,7 +3181,10 @@ fn backup_baseline_graph(old: &Node, directory: &Path) {
 
 #[test]
 fn fleet_workflows_have_no_path_filter() {
-    let workflows = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows");
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let workflows = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows");
     let compat = fs::read_to_string(workflows.join("fleet.yml")).unwrap();
     // The Linux gate runs the fleet compatibility stage from this script.
     let stages = fs::read_to_string(workflows.join("../../scripts/ci-linux")).unwrap();
@@ -2601,11 +3226,28 @@ me="{node}-fabric-id"
 echo "$me $*" >> "$registry/calls"
 key() {{ echo "$1.$(echo "$2" | tr '/' '_')"; }}
 case "$1" in
-  id) echo "$me" ;;
+  id) echo "{{\"id\":\"$me\"}}" ;;
   addr) epoch=$(cat "$registry/epoch" 2>/dev/null || echo 0); echo "{{\"addrs\":[\"$epoch\"]}}" ;;
-  expose) echo "$4" > "$registry/$(key "$me" "$2")" ;;
-  unexpose) rm -f "$registry/$(key "$me" "$2")" ;;
-  dial) f="$registry/$(key "$2" "$3")"; [ -f "$f" ] || {{ echo "no such exposure" >&2; exit 1; }}; cat "$f" ;;
+  expose) [ ! -f "$registry/fail-expose-$me" ] || {{ echo "exposure refused" >&2; exit 1; }}; echo "$4" > "$registry/$(key "$me" "$2")" ;;
+  unexpose)
+    if [ -f "$registry/status-socket-$me" ]; then
+      python3 - "$(cat "$registry/status-socket-$me")" "$me" <<'PY'
+import http.client, json, socket, sys
+connection = http.client.HTTPConnection('localhost')
+connection.sock = socket.socket(socket.AF_UNIX)
+connection.sock.connect(sys.argv[1])
+connection.request('GET', '/v1/internal/fleet/status')
+response = connection.getresponse()
+body = json.loads(response.read())
+assert response.status == 200, body
+status = body['value']
+member = next(row for row in status['view']['members'] if row['name'] + '-fabric-id' == sys.argv[2])
+assert not any(endpoint['transport'] == 'fabric' for endpoint in member['endpoints']), 'unexpose before withdrawal'
+PY
+      [ "$?" = 0 ] || exit 1
+    fi
+    rm -f "$registry/$(key "$me" "$2")" ;;
+  dial) f="$registry/$(key "$2" "$3")"; [ -f "$f" ] || {{ echo '{{"error":{{"code":"service_not_exposed","class":"fault","message":"no such exposure","peer":null,"service":null}}}}'; exit 69; }}; printf '{{"address":"%s"}}\n' "$(cat "$f")" ;;
   send-file) mkdir -p "$registry/home-$2/inbox/$me" && cp "$3" "$registry/home-$2/inbox/$me/$5" ;;
   probe) [ -f "$registry/$(key "$2" "$3")" ] ;;
   *) exit 1 ;;
@@ -2619,9 +3261,384 @@ esac
     shim
 }
 
+fn configured_file(node: &Node) -> st3::config::FleetFile {
+    st3::config::FleetFile::load(&node.state_dir())
+        .unwrap()
+        .unwrap()
+}
+
+fn member_has_fabric(status: &Value, name: &str) -> bool {
+    status["view"]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|member| {
+            member["name"] == name
+                && member["endpoints"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|endpoint| endpoint["transport"] == "fabric")
+        })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_member_adds_and_removes_fabric_without_rejoining() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut a = anchor(root.path(), "cedar").await;
+    let mut b = joined(root.path(), &a, "maple", &[]).await;
+    b.wait_listening().await;
+    let protocol = "st3/fleet/transport-fixture";
+    let registry = root.path().join("fabric-registry");
+    let mut identities = Vec::new();
+    for node in [&mut a, &mut b] {
+        // Only install the isolated Fabric executable; these are already admitted members
+        // configured with loopback. All transport changes below go through the new CLI.
+        node.stop_worker();
+        let mut file = configured_file(node);
+        file.fabric = Some(fabric_shim(root.path(), &node.name));
+        file.save(&node.state_dir()).unwrap();
+        identities.push((
+            file.clone(),
+            fs::read(file.node_key_path(&node.state_dir())).unwrap(),
+            fs::read(file.secret_path(&node.state_dir())).unwrap(),
+        ));
+        node.start_worker();
+        node.note(&format!("before-{}", node.name)).await;
+        node.st_ok(&[
+            "fleet",
+            "transports",
+            "add",
+            "fabric",
+            "--fabric-protocol",
+            protocol,
+            "--no-service",
+        ]);
+        let status = node.st_json(&["fleet", "status"]);
+        assert_eq!(status["transports"], json!(["loopback", "fabric"]));
+        assert_eq!(status["fabric_protocol"], protocol);
+        assert!(member_has_fabric(&status, &node.name));
+        assert!(
+            registry
+                .join(format!(
+                    "{}-fabric-id.st3_fleet_transport-fixture",
+                    node.name
+                ))
+                .exists()
+        );
+        assert!(
+            node.st_ok(&["fleet", "status"])
+                .contains(&format!("FABRIC-PROTOCOL  {protocol}"))
+        );
+        // Re-adding is a no-op, including a conflicting requested protocol.
+        let before = fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap();
+        node.st_ok(&[
+            "fleet",
+            "transports",
+            "add",
+            "fabric",
+            "--fabric-protocol",
+            "ignored",
+            "--no-service",
+        ]);
+        assert_eq!(
+            fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
+            before
+        );
+    }
+    // Withdraw the fixture's alternative route while testing actual Fabric sync. The
+    // selected transports still contain loopback, ready for the rollback below.
+    for node in [&mut a, &mut b] {
+        node.stop_worker();
+        let mut file = configured_file(node);
+        file.advertise_loopback = false;
+        file.save(&node.state_dir()).unwrap();
+        node.restart().await;
+        wait_until("only Fabric is advertised", 30, || async {
+            let status = node.st_json(&["fleet", "status"]);
+            let member = status["view"]["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|member| member["name"] == node.name)
+                .unwrap();
+            let endpoints = member["endpoints"].as_array().unwrap();
+            endpoints.len() == 1 && endpoints[0]["transport"] == "fabric"
+        })
+        .await;
+    }
+    a.wait_listening().await;
+    b.wait_listening().await;
+    let mut expected = BTreeSet::from([
+        "custom/fleet-test/before-cedar".to_owned(),
+        "custom/fleet-test/before-maple".to_owned(),
+    ]);
+    for node in [&a, &b] {
+        node.note(&format!("fabric-{}", node.name)).await;
+        expected.insert(format!("custom/fleet-test/fabric-{}", node.name));
+    }
+    for node in [&a, &b] {
+        wait_for_notes(node, &expected, 60, &[&a, &b]).await;
+    }
+    let calls = fs::read_to_string(registry.join("calls")).unwrap();
+    assert!(
+        calls.contains("dial cedar-fabric-id st3/fleet/transport-fixture")
+            || calls.contains("dial maple-fabric-id st3/fleet/transport-fixture"),
+        "{calls}"
+    );
+    // Losing only the Fabric declaration across an st restart is repaired from fleet.toml.
+    let exposure = registry.join("maple-fabric-id.st3_fleet_transport-fixture");
+    b.stop();
+    fs::remove_file(&exposure).unwrap();
+    b.start().await;
+    wait_until(
+        "saved Fabric protocol is re-exposed after restart",
+        30,
+        || async { exposure.exists() },
+    )
+    .await;
+
+    for node in [&mut a, &mut b] {
+        node.stop_worker();
+        let mut file = configured_file(node);
+        file.advertise_loopback = true;
+        file.save(&node.state_dir()).unwrap();
+        node.start_worker();
+        wait_until("rollback carrier is advertised", 30, || async {
+            let status = node.st_json(&["fleet", "status"]);
+            status["view"]["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|member| {
+                    member["name"] == node.name
+                        && member["endpoints"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|endpoint| endpoint["transport"] == "loopback")
+                })
+        })
+        .await;
+    }
+
+    // Remove during ongoing graph traffic, leaving the old worker alive. It may never
+    // restore its former Fabric endpoint or exposure while the operator arranges restart.
+    for index in 0..20 {
+        let note = format!("during-remove-{index}");
+        a.note(&note).await;
+        expected.insert(format!("custom/fleet-test/{note}"));
+    }
+    fs::write(
+        registry.join("status-socket-maple-fabric-id"),
+        b.socket().as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    b.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+    assert!(!exposure.exists());
+    assert!(!member_has_fabric(
+        &b.st_json(&["fleet", "status"]),
+        "maple"
+    ));
+    let calls_before_recovery = fs::read_to_string(registry.join("calls")).unwrap().len();
+    fs::write(registry.join("epoch"), "1").unwrap();
+    // Several accelerated worker maintenance cycles occur during this actual sync.
+    b.note("remaining-carrier").await;
+    expected.insert("custom/fleet-test/remaining-carrier".into());
+    for node in [&a, &b] {
+        wait_for_notes(node, &expected, 60, &[&a, &b]).await;
+    }
+    wait_until("peer receives Fabric endpoint removal", 30, || async {
+        !member_has_fabric(&a.st_json(&["fleet", "status"]), "maple")
+    })
+    .await;
+    wait_until(
+        "old worker has processed local recovery and maintenance cycles",
+        30,
+        || async {
+            fs::read_to_string(registry.join("calls")).unwrap()[calls_before_recovery..]
+                .matches("maple-fabric-id addr")
+                .count()
+                >= 3
+        },
+    )
+    .await;
+    assert!(!exposure.exists());
+    assert!(!member_has_fabric(
+        &b.st_json(&["fleet", "status"]),
+        "maple"
+    ));
+    b.restart().await;
+    b.wait_listening().await;
+    assert_eq!(
+        b.st_json(&["fleet", "status"])["transports"],
+        json!(["loopback"])
+    );
+    assert!(b.st_json(&["fleet", "status"])["fabric_protocol"].is_null());
+    b.note("after-remove-restart").await;
+    expected.insert("custom/fleet-test/after-remove-restart".into());
+    for (node, (before, key, secret)) in [&a, &b].into_iter().zip(identities) {
+        wait_for_notes(node, &expected, 60, &[&a, &b]).await;
+        let after = configured_file(node);
+        assert_eq!(after.fleet_id, before.fleet_id);
+        assert_eq!(after.node, before.node);
+        assert_eq!(
+            fs::read(after.node_key_path(&node.state_dir())).unwrap(),
+            key
+        );
+        assert_eq!(
+            fs::read(after.secret_path(&node.state_dir())).unwrap(),
+            secret
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = anchor(root.path(), "birch").await;
+    node.stop_worker();
+    let mut file = configured_file(&node);
+    file.fabric = Some(fabric_shim(root.path(), &node.name));
+    file.save(&node.state_dir()).unwrap();
+    node.start_worker();
+    let registry = root.path().join("fabric-registry");
+    fs::write(registry.join("fail-expose-birch-fabric-id"), "refuse").unwrap();
+    let before = fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap();
+    let endpoints = node.st_json(&["fleet", "status"])["view"].clone();
+    let absent = node.st(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+    assert!(!absent.status.success());
+    assert!(String::from_utf8_lossy(&absent.stderr).contains("not configured"));
+    let output = node.st(&["fleet", "transports", "add", "fabric", "--no-service"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("exposure failed"));
+    assert_eq!(
+        fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
+        before
+    );
+    assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
+    fs::remove_file(registry.join("fail-expose-birch-fabric-id")).unwrap();
+    node.st_ok(&["fleet", "transports", "add", "fabric", "--no-service"]);
+    // The default protocol is saved explicitly, with no new setting or key.
+    let mut file = configured_file(&node);
+    assert_eq!(
+        file.fabric_protocol.as_deref(),
+        Some(st3::fleet::transport::default_fabric_protocol(&file.fleet_id).as_str())
+    );
+    file.transports = vec!["fabric".into(), "tailscale".into()];
+    file.save(&node.state_dir()).unwrap();
+    let before = fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap();
+    let output = node.st(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("no remaining configured transport is usable")
+    );
+    assert_eq!(
+        fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
+        before
+    );
+    file.transports = vec!["fabric".into()];
+    file.save(&node.state_dir()).unwrap();
+    let before = fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap();
+    let output = node.st(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("last transport"));
+    assert_eq!(
+        fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
+        before
+    );
+    file.transports.push("loopback".into());
+    file.fabric = Some(root.path().join("absent-fabric"));
+    file.save(&node.state_dir()).unwrap();
+    let output = node.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+    assert!(output.contains("unexposure still needs cleanup"));
+    assert!(output.contains(&format!(
+        "run fabric unexpose {}",
+        file.fabric_protocol.as_deref().unwrap()
+    )));
+    assert_eq!(configured_file(&node).transports, ["loopback"]);
+    assert!(!member_has_fabric(
+        &node.st_json(&["fleet", "status"]),
+        "birch"
+    ));
+    file.fabric = Some(fabric_shim(root.path(), &node.name));
+    file.transports = vec!["loopback".into()];
+    file.save(&node.state_dir()).unwrap();
+    node.st_ok(&["fleet", "mode", "dial-out", "--no-service"]);
+    let before = fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap();
+    let output = node.st(&["fleet", "transports", "add", "fabric", "--no-service"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires a listening member"));
+    assert_eq!(
+        fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
+        before
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_settings_failure_fails_the_worker_and_repair_allows_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let a = anchor(root.path(), "spruce").await;
+    let mut b = joined(root.path(), &a, "willow", &[]).await;
+    b.wait_listening().await;
+    let path = st3::config::FleetFile::path(&b.state_dir());
+    let settings = configured_file(&b);
+    // This local defect must be visible as a failed worker, rather than leaving it alive
+    // forever with endpoint publication silently gone or adding local interval retries.
+    let unreadable = path.with_extension("unreadable");
+    std::os::unix::fs::symlink(&b.root, &unreadable).unwrap();
+    fs::rename(unreadable, &path).unwrap();
+    wait_until(
+        "local settings failure reaches the worker driver",
+        30,
+        || {
+            let exited = b.worker.as_mut().unwrap().try_wait().unwrap().is_some();
+            async move { exited }
+        },
+    )
+    .await;
+    let status = b.worker.as_mut().unwrap().wait().unwrap();
+    assert!(!status.success());
+    assert!(
+        fs::read_to_string(b.root.join("worker.stderr.log"))
+            .unwrap()
+            .contains("cannot verify fleet settings before endpoint publication")
+    );
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", b.port))
+            .await
+            .is_err()
+    );
+    settings.save(&b.state_dir()).unwrap();
+    b.stop_worker();
+    b.start_worker();
+    b.wait_listening().await;
+    b.note("after-settings-repair").await;
+    wait_for_notes(
+        &a,
+        &BTreeSet::from(["custom/fleet-test/after-settings-repair".to_owned()]),
+        30,
+        &[&a, &b],
+    )
+    .await;
+}
+
 /// Legacy helper ports must be unnecessary after membership advertises native Fabric routes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_legacy_helper_fleet_migrates_to_native_fabric_without_losing_history() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let fleet_id = "8f14e45f-ceea-467a-9a2b-5c3d6e7f8091";
     let secret = root.path().join("fleet.secret");
@@ -2793,6 +3810,9 @@ async fn a_legacy_helper_fleet_migrates_to_native_fabric_without_losing_history(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_fabric_transport_works_through_the_worker_alone() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let registry = root.path().join("fabric-registry");
     let no_tailscale = root.path().join("no-tailscale");
@@ -2930,6 +3950,9 @@ async fn the_fabric_transport_works_through_the_worker_alone() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_removed_members_writes_relayed_by_an_uninformed_member_are_refused() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let mut a = anchor(root.path(), "a").await;
     let mut c = joined(root.path(), &a, "c", &[]).await;
@@ -3005,6 +4028,9 @@ async fn a_removed_members_writes_relayed_by_an_uninformed_member_are_refused() 
 /// but its network accepts no inbound connection. Two servers keep syncing while it sleeps.
 #[tokio::test(flavor = "multi_thread")]
 async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alerts() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
     let root = tempfile::tempdir().unwrap();
     let fleet_id = "8a7c55c0-e0d4-41cb-8e8c-6ab134611650";
@@ -3064,7 +4090,7 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
             .is_err()
     );
 
-    for (label, sleep, age_ms) in [("minutes", 120, 120_000), ("hours", 2, 4 * 3_600_000)] {
+    for (label, sleep, age_ms) in [("minutes", 2, 120_000), ("hours", 2, 4 * 3_600_000)] {
         // Leave its local daemon alive so it can record work while the network worker sleeps.
         let mut worker = traveller.worker.take().unwrap();
         worker.kill().unwrap();
@@ -3077,8 +4103,10 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
         b.note(&format!("beacon-{label}")).await;
         expected.insert(format!("custom/fleet-test/beacon-{label}"));
         tokio::time::sleep(Duration::from_secs(sleep)).await;
-        // The minutes case uses real elapsed time. The hours case ages persistent evidence;
-        // virtual-clock worker tests separately exercise the full four-hour retry schedule.
+        // Both cases age persistent evidence instead of sleeping through the absence. The worker
+        // test isolated_outbound_only_node_converges_after_two_minutes_and_four_hours runs the
+        // real worker timers over both absences on a virtual clock, with its attempt bounds and
+        // the return through the servers' backoff.
         for node in [&a, &b] {
             let db = rusqlite::Connection::open(node.state_dir().join("claims.sqlite3")).unwrap();
             db.busy_timeout(Duration::from_secs(5)).unwrap();
@@ -3183,6 +4211,9 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
 /// leave the rest to the 30-second quiet window that follows the peer's last inbound exchange.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_backlog_of_several_pages_is_fetched_without_waiting_for_the_quiet_window() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     // Pages of 100 envelopes make a backlog of several pages cheap to write and to admit.
     const SETTINGS: [(&str, &str); 2] = [
         ("ST3_WORKER_INTERVAL_MS", "30000"),
@@ -3256,6 +4287,9 @@ async fn a_backlog_of_several_pages_is_fetched_without_waiting_for_the_quiet_win
 
 #[tokio::test(flavor = "multi_thread")]
 async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_restarts() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let mut amber = anchor(root.path(), "fixture-amber").await;
     let mut cobalt = joined(root.path(), &amber, "fixture-cobalt", &[]).await;
@@ -3391,6 +4425,9 @@ async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_re
 
 #[tokio::test(flavor = "multi_thread")]
 async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}", http.local_addr().unwrap());
@@ -3434,7 +4471,7 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
     node.start().await;
     let file = node.root.join("seat.kdl");
     fs::write(&file, format!("version 2\nagent \"example/watch\" {{ host \"fixture-watch\"; workspace {:?}; command \"true\"; restart \"never\" }}\n", node.root)).unwrap();
-    node.st_ok(&["agents", "apply", file.to_str().unwrap(), "--as", PERSON]);
+    node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
     let cli = |args: &[&str]| -> Value {
         let output = node.command(args).env("ST_AGENT", "agent/example/watch").output().unwrap();
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stderr), node.logs());
@@ -3479,6 +4516,8 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
     node.restart().await;
     let output = node.command(&["--json", "gh", "own", "https://github.com/fixture/app/pull/12#pullrequestreview-802", "--as", "agent/example/watch"]).env("ST_AGENT", "agent/example/watch").output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    // Store::open also initializes projections, so inspect without the daemon's writer.
+    node.stop();
     let store = st3::store::Store::open(&node.state_dir().join("claims.sqlite3"), "fixture-watch").unwrap();
     for (kind, id) in [("comment", 801), ("review", 802)] {
         let subject = st3::github_watch::github_post_subject("fixture/app", kind, id);
@@ -3487,6 +4526,7 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
     }
     assert_eq!(store.github_post_agent("fixture/app", "comment", 902).unwrap(), None);
     drop(store);
+    node.start().await;
     {
         let bodies = posts.lock().unwrap();
         assert_eq!(bodies.len(), 2);
@@ -3504,4 +4544,382 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
     assert_eq!(ended["state"], "ended");
     assert_eq!(ended["ended"], "unwatched");
     server.abort();
+}
+
+/// Real native drivers on two private fleet daemons: the source never launches after suspend,
+/// and the target launches only after receiving the Git workspace and the same native transcript.
+#[tokio::test(flavor = "multi_thread")]
+async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_conversation() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = st3::test_support::canonical_tempdir();
+    struct SeatCleanup {
+        pty: PathBuf,
+        roots: Vec<PathBuf>,
+    }
+    impl Drop for SeatCleanup {
+        fn drop(&mut self) {
+            for root in &self.roots {
+                let output = Command::new(&self.pty)
+                    .args(["list", "--json"])
+                    .env("PTY_ROOT", root)
+                    .output();
+                if let Ok(output) = output
+                    && let Ok(rows) = serde_json::from_slice::<Vec<Value>>(&output.stdout)
+                {
+                    for row in rows {
+                        if let Some(name) = row["name"].as_str() {
+                            let _ = Command::new(&self.pty)
+                                .args(["kill", name])
+                                .env("PTY_ROOT", root)
+                                .output();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    let pty = st_runtime::resolve_executable("pty", &std::env::vars().collect()).unwrap();
+    let node_program = st_runtime::resolve_executable("node", &std::env::vars().collect()).unwrap();
+    let mut cleanup = SeatCleanup { pty: pty.clone(), roots: Vec::new() };
+    let mut amber = anchor(root.path(), "fixture-move-amber").await;
+    let mut jade = joined(root.path(), &amber, "fixture-move-jade", &[]).await;
+    cleanup.roots = vec![amber.state_dir().join("pty"), jade.state_dir().join("pty")];
+    for node in [&mut amber, &mut jade] {
+        node.stop();
+        fs::write(
+            node.root.join("bin/pty"),
+            format!("#!/bin/sh\nexec '{}' \"$@\"\n", pty.display()),
+        )
+        .unwrap();
+        let stub = node.root.join("bin/omp");
+        fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nexec env STUB_HARNESS=omp '{}' '{}' \"$@\"\n",
+                node_program.display(),
+                repo.join("scripts/st3-boot-canaries/stub-pi-family.mjs")
+                    .display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        node.start().await;
+    }
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Canary")
+            .env("GIT_AUTHOR_EMAIL", "canary@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Canary")
+            .env("GIT_COMMITTER_EMAIL", "canary@example.invalid")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    fs::write(workspace.join("tracked"), "original\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "Original"]);
+    let head = git(&["rev-parse", "HEAD"]);
+    fs::write(workspace.join("tracked"), "changed\n").unwrap();
+    fs::write(workspace.join("untracked"), "copper workspace\n").unwrap();
+    let seat = "agent/canary/portable";
+    let declaration = root.path().join("seat.kdl");
+    fs::write(&declaration, format!("version 2\nagent \"canary/portable\" {{ host \"fixture-move-amber\"; workspace \"{}\"; harness \"omp\" {{}} }}", workspace.display())).unwrap();
+    amber.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(),
+    "--as",
+    PERSON,]);
+    let receipts = workspace.join("receipts-agent-canary-portable.jsonl");
+    wait_until("source native session becomes idle", 90, || async {
+        amber.st_json(&["agents", "show", seat])["value"]["harness_state"] == "idle"
+    })
+    .await;
+    amber.st_ok(&[
+        "conversations",
+        "send",
+        seat,
+        "--from",
+        PERSON,
+        "--subject",
+        "copper history",
+        "--body",
+        "Remember the copper orchard.",
+    ]);
+    wait_until("source reads the first message", 60, || async {
+        fs::read_to_string(&receipts)
+            .unwrap_or_default()
+            .contains("Remember the copper orchard")
+    })
+    .await;
+    let suspended = amber.st_json(&[
+        "agents",
+        "suspend",
+        seat,
+        "--as",
+        PERSON,
+        "--timeout",
+        "60s",
+    ]);
+    let native = suspended["suspension"]["native_session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let source_sessions =
+        st3::seat_snapshot::sessions(&amber.state_dir().join("drivers"), seat, "omp");
+    let transcript = st3::native_resume::pi_family_transcript(&source_sessions, &native).unwrap();
+    let before = fs::read(&transcript).unwrap();
+    assert!(String::from_utf8_lossy(&before).contains("Remember the copper orchard"));
+    wait_until("suspension replicates to target", 60, || async {
+        jade.st_json(&["agents", "show", seat])["value"]["suspension"]["phase"] == "suspended"
+    })
+    .await;
+    // Both daemons share this test's filesystem. An existing path represents an occupied target,
+    // and must refuse even when it happens to be the source's checkout.
+    let occupied = jade.st(&[
+        "agents",
+        "resume",
+        seat,
+        "--host",
+        "fixture-move-jade",
+        "--as",
+        PERSON,
+        "--timeout",
+        "60s",
+    ]);
+    assert!(!occupied.status.success());
+    assert!(
+        String::from_utf8_lossy(&occupied.stderr).contains("workspace-occupied"),
+        "{}\n{}",
+        String::from_utf8_lossy(&occupied.stderr),
+        jade.logs()
+    );
+    assert_eq!(git(&["rev-parse", "HEAD"]), head);
+    // Preserve the stopped source checkout elsewhere, modelling the target's independent disk
+    // with an unoccupied path at the exact same absolute cwd.
+    fs::rename(&workspace, root.path().join("preserved-source-workspace")).unwrap();
+    let resumed = jade.st_json(&[
+        "agents",
+        "resume",
+        seat,
+        "--host",
+        "fixture-move-jade",
+        "--as",
+        PERSON,
+        "--timeout",
+        "90s",
+    ]);
+    assert_eq!(resumed["id"], seat);
+    assert_eq!(resumed["suspension"]["phase"], "resumed");
+    assert_eq!(resumed["suspension"]["native_session_id"], native);
+    assert_eq!(
+        fs::read_to_string(workspace.join("tracked")).unwrap(),
+        "changed\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("untracked")).unwrap(),
+        "copper workspace\n"
+    );
+    assert_eq!(git(&["rev-parse", "HEAD"]), head);
+    let target_sessions =
+        st3::seat_snapshot::sessions(&jade.state_dir().join("drivers"), seat, "omp");
+    let target_transcript =
+        st3::native_resume::pi_family_transcript(&target_sessions, &native).unwrap();
+    assert!(fs::read(&target_transcript).unwrap().starts_with(&before));
+    jade.st_ok(&[
+        "conversations",
+        "send",
+        seat,
+        "--from",
+        PERSON,
+        "--subject",
+        "after move",
+        "--body",
+        "The copper orchard continued.",
+    ]);
+    wait_until(
+        "target reads mail in the resumed conversation",
+        60,
+        || async {
+            fs::read_to_string(&target_transcript)
+                .unwrap_or_default()
+                .contains("The copper orchard continued")
+        },
+    )
+    .await;
+    assert_eq!(
+        fs::read(&transcript).unwrap(),
+        before,
+        "source transcript changed after the move"
+    );
+    let source_ptys = Command::new(&pty).args(["list", "--json"])
+        .env("PTY_ROOT", amber.state_dir().join("pty")).output().unwrap();
+    let source_ptys: Vec<Value> = serde_json::from_slice(&source_ptys.stdout).unwrap();
+    assert!(source_ptys.iter().all(|row| row["status"] != "running"), "source still has a live PTY: {source_ptys:?}");
+    jade.st_ok(&[
+        "agents",
+        "suspend",
+        seat,
+        "--as",
+        PERSON,
+        "--timeout",
+        "60s",
+    ]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_TERMINALS_COMPAT_BIN: an st3 build before terminal owner filters"]
+async fn terminal_owner_filters_are_safe_across_mixed_builds() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut old = Node::new(root.path(), "terminal-legacy");
+    old.binary = PathBuf::from(std::env::var("ST3_TERMINALS_COMPAT_BIN").unwrap());
+    old.start().await;
+    let current_client = st3_client::Client::unix(old.socket());
+    current_client
+        .terminals_list(None, Some(50), false)
+        .await
+        .unwrap();
+    let error = current_client
+        .terminals_list_filtered(
+            None,
+            Some(1),
+            false,
+            Some("agent/lookup/unknown"),
+            Some("running"),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, st3_client::ClientError::Protocol(message) if message.contains("upgrade the server"))
+    );
+
+    let mut current = Node::new(root.path(), "terminal-current");
+    current.start().await;
+    let output = old
+        .command(&[
+            "--endpoint",
+            current.socket().to_str().unwrap(),
+            "--json",
+            "terminals",
+            "ls",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["value"]["collection"], "terminals");
+    assert_eq!(response["value"]["filters"], serde_json::json!({}));
+    assert_eq!(response["value"]["page"]["limit"], 50);
+}
+
+/// This narrower compatibility boundary needs a build that already knows today's mission
+/// format, but predates mission.provenance. The ancient fleet baseline is a different contract.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_PROVENANCE_COMPAT_BIN: a pre-provenance build with the current mission format"]
+async fn an_older_daemon_runs_a_provenance_revision_and_reads_its_sidecar_after_upgrade() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(
+        std::env::var("ST3_PROVENANCE_COMPAT_BIN").expect("pre-provenance st3 binary"),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let current = anchor(root.path(), "current").await;
+    let mut older = joined(root.path(), &current, "older", &[]).await;
+    older.stop();
+    older.binary = old;
+    older.start().await;
+    let file = current.root.join("provenance.kdl");
+    fs::write(
+        &file,
+        r#"version 2
+mission "orchard/release" state="ready" {
+  provenance {
+    reason "Approved release source."
+    source {
+      repository "https://example.invalid/orchard/missions"
+      commit "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      path "missions/release.kdl"
+      renderer "orchard-renderer-v1"
+    }
+    decision "decision/opaque-approved-scope"
+    evidence "doc/orchard/proof@opaque-reference"
+  }
+  goal "Prepare the release."
+  step "prepare" { goal "Prepare the release." }
+}
+"#,
+    )
+    .unwrap();
+    current.st_ok(&[
+        "apply",
+        file.to_str().unwrap(),
+        "--no-gate-check",
+        "--as",
+        PERSON,
+    ]);
+    let path = "/v1/missions/orchard%2Frelease";
+    wait_until(
+        "older daemon projects the provenance-bearing revision",
+        60,
+        || async { older.client().get::<Value>(path).await.is_ok() },
+    )
+    .await;
+    let plain: Value = older.client().get(path).await.unwrap();
+    let with: Value = current.client().get(path).await.unwrap();
+    assert_eq!(plain["revision"], with["revision"]);
+    assert!(
+        plain.get("provenance").is_none(),
+        "the binary must predate provenance: {plain}"
+    );
+    assert_eq!(with["provenance"]["reason"], "Approved release source.");
+    let started = older.st_json(&[
+        "missions",
+        "start",
+        "orchard/release",
+        "--id",
+        "orchard/older-run",
+        "--as",
+        PERSON,
+    ]);
+    let run = &started["mission_run"];
+    assert_eq!(run["revision"], plain["revision"]);
+    assert!(!run["steps"].as_array().unwrap().is_empty());
+    let status = older.st_json(&["replication", "status"]);
+    assert_eq!(status["invalid_records"], 0, "{status}");
+    assert!(
+        status["waiting_claims"].as_u64().unwrap_or(0) >= 1,
+        "{status}"
+    );
+    older.stop();
+    older.binary = PathBuf::from(st3());
+    older.start().await;
+    wait_until("upgraded daemon reads the retained sidecar", 60, || async {
+        older
+            .client()
+            .get::<Value>(path)
+            .await
+            .is_ok_and(|mission| mission["provenance"]["reason"] == "Approved release source.")
+    })
+    .await;
+    let shown = older.st_json(&["missions", "show", run["subject"].as_str().unwrap()]);
+    assert_eq!(shown["provenance"]["reason"], "Approved release source.");
 }
