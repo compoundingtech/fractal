@@ -514,6 +514,8 @@ pub(super) fn enrich_responses(
                 .get("assistant_grant_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            assistant_owner: fields.get("assistant_owner").and_then(Value::as_str).map(str::to_owned),
+            assistant_session_actor: fields.get("assistant_session_actor").and_then(Value::as_str).map(str::to_owned),
             ask,
             status: fields["status"].as_str().unwrap_or("completed").into(),
             summary: summary.into(),
@@ -659,11 +661,12 @@ impl Store {
             }
             // Checked after authority and fences below; a replay compares against it first.
             let resolved = resolve_answer(ask.as_ref(), input, cancel);
+            let response_actor = if authorization.is_some() { "assistant/chatgpt" } else { input.actor.as_str() };
             let kind = if cancel { "work.person-cancelled" } else { "work.person-done" };
             if let Some(existing) = tx.query_row(&canonical_sql("SELECT id, store_index, batch_id, subject, kind, origin,
                 actor, body, predecessors, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind=?2
                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"), params![subject, kind], claim_from_row).optional().map_err(internal)? {
-                if existing.body["fields"]["key"] == input.idempotency_key && existing.actor.as_deref() == Some(input.actor.as_str()) {
+                if existing.body["fields"]["key"] == input.idempotency_key && existing.actor.as_deref() == Some(response_actor) {
                     let Ok((answer, summary)) = &resolved else {
                         return Err(St3Error::new("idempotency-conflict", "this response key already has another answer"));
                     };
@@ -720,6 +723,9 @@ impl Store {
             if let Some(grant_id) = &assistant_grant_id {
                 body["fields"]["sender_class"] = json!("external-assistant");
                 body["fields"]["assistant_grant_id"] = json!(grant_id);
+                let authorization = authorization.expect("grant ID comes from authorization");
+                body["fields"]["assistant_owner"] = json!(authorization.owner);
+                body["fields"]["assistant_session_actor"] = json!(authorization.actor);
             }
             if let Some(proof) = &input.delegation {
                 if cancel { return Err(St3Error::new("delegation-refused", "cancelling another agent's ask is outside the delegation list")); }
@@ -729,7 +735,7 @@ impl Store {
                 super::delegation::add_evidence(tx, &mut response_evidence, proof)?;
                 body["evidence"] = json!(response_evidence);
             }
-            let claim = append_claim_tx(tx, &self.origin, &subject, kind, Some(&input.actor), &body, &evidence, None).map_err(claim_append_error)?;
+            let claim = append_claim_tx(tx, &self.origin, &subject, kind, Some(response_actor), &body, &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             if let Some(ask) = ask.as_ref().filter(|a| !cancel && a.body["fields"]["origin_step"].is_null() && !is_update(a)) {
                 send_answer_tx(tx, &self.origin, ask, &claim, &summary, answer.as_ref(), authorization)?;
@@ -1770,7 +1776,9 @@ mission "person-work" state="ready" {{
             for subject in [&origin.subject, &ask.subject] {
                 let view = store.step_run(subject).unwrap().unwrap();
                 let answer = &view.person_answers[0];
-                assert_eq!(answer.respondent, "person/avery");
+                assert_eq!(answer.respondent, "assistant/chatgpt");
+                assert_eq!(answer.assistant_owner.as_deref(), Some(authorization.owner.as_str()));
+                assert_eq!(answer.assistant_session_actor.as_deref(), Some(authorization.actor.as_str()));
                 assert_eq!(answer.sender_class.as_deref(), Some("external-assistant"));
                 assert_eq!(answer.assistant_grant_id.as_deref(), Some(grant_id));
                 let json = serde_json::to_value(&view).unwrap();

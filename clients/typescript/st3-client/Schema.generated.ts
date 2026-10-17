@@ -2469,6 +2469,10 @@ export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonAnswer = typeof PersonAnswer.Type
 export type PersonAnswerEncoded = typeof PersonAnswer.Encoded
 
+export const SenderRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|person|step)/[^\\s]+$", "u"), "agent", "assistant", "person", "step").annotate({ identifier: "SenderRef" }))()
+export type SenderRef = typeof SenderRef.Type
+export type SenderRefEncoded = typeof SenderRef.Encoded
+
 export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
   /** The person whose prior instruction the agent respondent recorded. */
   "acted_for": optionalKey(Id),
@@ -2477,8 +2481,13 @@ export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
   "ask": Id,
   /** The assistant grant that authorized the response. */
   "assistant_grant_id": optionalKey(Id),
+  /** Server-owned provenance naming the person who owns the assistant grant, not the respondent or delegated person authority. */
+  "assistant_owner": optionalKey(PersonId),
+  /** Server-owned grant-bound assistant session audit actor, separate from the answering principal. */
+  "assistant_session_actor": optionalKey(Schema.String).annotate({ description: "Server-owned grant-bound assistant session audit actor, separate from the answering principal." }),
   "evidence": optionalKey(Schema.Array(Id)),
-  "respondent": Id,
+  /** The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. */
+  "respondent": SenderRef,
   /** External assistant attribution when the response was submitted through an assistant grant. */
   "sender_class": optionalKey(Schema.String).annotate({ description: "External assistant attribution when the response was submitted through an assistant grant." }),
   "status": Schema.Literals(["completed","cancelled"]),

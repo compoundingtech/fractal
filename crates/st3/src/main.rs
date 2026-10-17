@@ -12676,6 +12676,12 @@ fn render_client_work_detail(work: &st3_client::Work) -> String {
         if let Some(grant) = &response.assistant_grant_id {
             let _ = writeln!(output, "  Assistant grant: {grant}");
         }
+        if let Some(owner) = &response.assistant_owner {
+            let _ = writeln!(output, "  Assistant owner: {owner}");
+        }
+        if let Some(session_actor) = &response.assistant_session_actor {
+            let _ = writeln!(output, "  Assistant session actor: {session_actor}");
+        }
     }
     if let Some(usage) = &work.usage {
         let _ = writeln!(output, "Usage: {}", render_usage(usage));

@@ -78,6 +78,17 @@ Paired sessions can send bounded disjoint UTC minute diagnostics with
 [`observations.report`](observations.md). This command has no action receipt, replication
 or snapshot fence. Live-share is typed foreground/live time, separate from latency histograms.
 
+### Person ask respondents
+
+Work `person_answers[].respondent` uses `SenderRef`: `agent/...`, `assistant/...`,
+`person/...`, or `step/...`. An assistant answer identifies `assistant/chatgpt` as
+the respondent, never the grant's owning person. Optional `sender_class`,
+`assistant_grant_id`, `assistant_owner`, and `assistant_session_actor` carry
+server-owned provenance separately; `assistant_owner` is a concrete `PersonId`.
+These fields do not confer person authority or replace an agent's `acted_for`
+delegation proof. `ActorRef`, `ParticipantRef`, and recipient contracts remain
+narrower; accepting an assistant respondent does not make assistants recipients.
+
 ### Mission run timing
 
 `GET /v1/client/missions/{id}` requires `read.projections`, like other projection reads.
