@@ -958,6 +958,31 @@ mod tests {
             vfs.name(),
         )
         .unwrap();
+        #[cfg(target_os = "linux")]
+        let observed_temp_files = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        #[cfg(target_os = "linux")]
+        {
+            let observed = observed_temp_files.clone();
+            db.progress_handler(
+                1000,
+                Some(move || {
+                    if let Ok(entries) = fs::read_dir("/proc/self/fd") {
+                        for entry in entries.flatten() {
+                            if let Ok(path) = fs::read_link(entry.path()) {
+                                let path = path.to_string_lossy();
+                                if path.contains("etilqs") {
+                                    let mut paths = observed.lock().unwrap();
+                                    if !paths.iter().any(|seen| seen == &*path) {
+                                        paths.push(path.into_owned());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    false
+                }),
+            );
+        }
         db.execute_batch("PRAGMA mmap_size=0; PRAGMA journal_mode=DELETE; PRAGMA temp_store=FILE; PRAGMA cache_size=1;").unwrap();
         let mmap: i64 = db
             .query_row("PRAGMA mmap_size", [], |row| row.get(0))
@@ -975,8 +1000,35 @@ mod tests {
             after_renumber.5 > before.5,
             "renumber journal writes bypassed the proof VFS"
         );
-        db.execute_batch("CREATE TEMP TABLE sorted AS SELECT body FROM claims ORDER BY body, id;")
-            .unwrap();
+        if let Err(error) =
+            db.execute_batch("CREATE TEMP TABLE sorted AS SELECT body FROM claims ORDER BY body, id;")
+        {
+            eprintln!("selected SQLite temp directory: {}", guard.temp.display());
+            eprintln!("scratch device: {}; temp device: {}", guard.scratch_device, guard.temp_device);
+            #[cfg(target_os = "linux")]
+            eprintln!("observed SQLite temp files: {:?}", observed_temp_files.lock().unwrap());
+            eprintln!("VFS metrics before sort: {:?}; after error: {:?}", after_renumber, vfs.metrics());
+            let window = vfs.data.as_ref().unwrap().window.lock().unwrap();
+            eprintln!(
+                "VFS accounting at refusal: max_requested_iAmt={} scratch_used={} scratch_pending={} temp_used={} temp_pending={} temp_cumulative_requested={} scratch_budget={} temp_budget={} refreshes={}",
+                window.max_request,
+                window.scratch_used,
+                window.scratch_pending,
+                window.temp_used,
+                window.temp_pending,
+                window.temp_total_requested,
+                guard.budget,
+                guard.temp_budget,
+                window.refreshes,
+            );
+            drop(window);
+            eprintln!(
+                "post-refusal statvfs: scratch_available={:?} temp_available={:?}",
+                filesystem(&guard.scratch).map(|fs| fs.available),
+                filesystem(&guard.temp).map(|fs| fs.available),
+            );
+            panic!("sort failed: {}", guard.explain::<()>(Err(error.into())).unwrap_err());
+        }
         let after_sort = vfs.metrics();
         assert!(
             after_sort.6 > after_renumber.6,
