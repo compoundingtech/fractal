@@ -71,6 +71,7 @@ impl Daemon {
 
     fn state(&self) -> AppState {
         AppState {
+            owning_person: None,
             store: self.store.clone(),
             notify: Arc::new(Notify::new()),
             event_notify: self.event_notify.clone(),
@@ -246,12 +247,21 @@ impl Drop for Daemon {
     }
 }
 
-async fn wait_until(what: &str, limit: Duration, mut condition: impl FnMut() -> bool) {
+async fn wait_until(what: &str, limit: Duration, condition: impl FnMut() -> bool) {
+    assert!(wait_until_for(limit, condition).await, "timed out waiting until {what}");
+}
+
+/// `wait_until`'s poll and limit, returning instead of panicking so the caller can print
+/// evidence that only exists after the wait has failed.
+async fn wait_until_for(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + limit;
     while !condition() {
-        assert!(Instant::now() < deadline, "timed out waiting until {what}");
+        if Instant::now() >= deadline {
+            return false;
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    true
 }
 
 /// A seat process launched with the environment the reconciler gives it, but with every home
@@ -740,9 +750,10 @@ time.sleep(300)
     assert_eq!(before["harness_state"], "idle", "{before}");
     assert_eq!(before["observation"], "current", "{before}");
     daemon.stop().await;
-    // Exceed the real client freshness horizon, not a test-only shortened timeout. Open a
-    // fresh Store too: the driver's spool and mailbox fence must survive real cache loss.
-    tokio::time::sleep(Duration::from_secs(95)).await;
+    // Pass the real 90 s client freshness horizon by running the client clock 95 s ahead, not by a
+    // test-only shortened timeout and not by sleeping through it. Open a fresh Store too: the
+    // driver's spool and mailbox fence must survive real cache loss.
+    st3::test_support::skew_client_clock(95_000);
     assert_alive(&mut driver, "the quiet driver");
     daemon.store = Arc::new(Store::open(&root.join("daemon.sqlite3"), "restart-node").unwrap());
     daemon.start_admitted_protocol().await;
@@ -755,6 +766,8 @@ time.sleep(300)
     assert!(daemon.has_diagnostic(seat, incarnation, "claude-channel-attached"));
     assert_alive(&mut driver, "the same quiet driver after daemon restart");
     assert_eq!(driver.id(), original_pid);
+    // New reports carry the real clock again: stop skewing before the transition below.
+    st3::test_support::skew_client_clock(0);
     // A provider transition bypasses the five-minute unchanged-evidence guard. Require the
     // fresh idle record to recover through the restarted daemon without restarting the seat.
     writer.observe(Observation::new(Activity::Active, BlockedOn::None, InputBuffer::Empty)).unwrap();
@@ -2150,7 +2163,10 @@ async fn delayed_channel_initialization_preserves_activity(activity: &str, legac
 }
 
 // Exercise the real provider wrapper, local hook spool, channel, API and Store.
-// The provider initializes MCP but deliberately has no SessionStart/Stop hooks.
+// The provider initializes MCP but deliberately has no SessionStart/Stop hooks. The driver's 15 s
+// readiness grace is shortened through its shorten-only override: the ordering is the property.
+const HOOKLESS_GRACE_MS: u64 = 5_000;
+
 async fn channel_readiness_without_start_hook(native_activity: Option<bool>, late: bool) {
     use sha2::{Digest as _, Sha256};
     use st_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
@@ -2177,6 +2193,7 @@ time.sleep(300)
         seat_command(root, &daemon.socket)
             .env("ST_AGENT", seat)
             .env("ST3_MAILBOX_TRANSPORT", "push")
+            .env("ST3_CLAUDE_READINESS_GRACE_MS", HOOKLESS_GRACE_MS.to_string())
             .args([
                 "driver",
                 "claude",
@@ -2233,7 +2250,7 @@ time.sleep(300)
     if late || native_activity.is_none() {
         wait_until(
             "hookless channel becomes ready after the grace",
-            Duration::from_secs(22),
+            Duration::from_millis(HOOKLESS_GRACE_MS + 7_000),
             || {
                 daemon
                     .store
@@ -2272,7 +2289,7 @@ time.sleep(300)
         .await;
         // Cross the entire fallback grace for an early hook; late hooks only need
         // subsequent driver ticks to demonstrate there is no recurring readiness POST.
-        tokio::time::sleep(Duration::from_secs(if late { 3 } else { 16 })).await;
+        tokio::time::sleep(Duration::from_millis(if late { 3_000 } else { HOOKLESS_GRACE_MS + 1_000 })).await;
         assert_eq!(
             daemon.store.current_harness(seat).unwrap().unwrap().state,
             state
@@ -2545,18 +2562,20 @@ async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_res
         root,
         json!({"type":"user","isMeta":true,"message":{"role":"user","content":envelope}}),
     );
-    wait_until(
-        "offline-start mail has native receipts",
-        Duration::from_secs(10),
-        || {
-            daemon
-                .store
-                .latest_claim("message/quartz-offline", Some("message.read"))
-                .unwrap()
-                .is_some()
-        },
-    )
-    .await;
+    if !wait_until_for(Duration::from_secs(10), || {
+        daemon
+            .store
+            .latest_claim("message/quartz-offline", Some("message.read"))
+            .unwrap()
+            .is_some()
+    })
+    .await
+    {
+        panic!(
+            "timed out waiting until offline-start mail has native receipts{}",
+            channel_evidence(&daemon, root, mark, channel)
+        );
+    }
     // A later daemon outage preserves the initialized stdio connection and its owner.
     let mark = daemon.store.index().unwrap();
     daemon.stop().await;
@@ -2584,18 +2603,20 @@ async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_res
             .contains("message/quartz-reconnected")
     );
     fixture.append(root, json!({"type":"user","isMeta":true,"message":{"role":"user","content":notice["params"]["content"]}}));
-    wait_until(
-        "reconnected mail has native receipts",
-        Duration::from_secs(10),
-        || {
-            daemon
-                .store
-                .latest_claim("message/quartz-reconnected", Some("message.read"))
-                .unwrap()
-                .is_some()
-        },
-    )
-    .await;
+    if !wait_until_for(Duration::from_secs(10), || {
+        daemon
+            .store
+            .latest_claim("message/quartz-reconnected", Some("message.read"))
+            .unwrap()
+            .is_some()
+    })
+    .await
+    {
+        panic!(
+            "timed out waiting until reconnected mail has native receipts{}",
+            channel_evidence(&daemon, root, mark, channel)
+        );
+    }
     for message in ["message/quartz-offline", "message/quartz-reconnected"] {
         for kind in ["message.staged", "message.delivered", "message.read"] {
             assert_eq!(

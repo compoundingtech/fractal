@@ -46,7 +46,9 @@ use st3_client::{
     API_VERSION as CLIENT_V0_API_VERSION, Client as GeneratedClient,
     ClientError as GeneratedClientError, Envelope as ClientEnvelope, ErrorCode as ClientErrorCode,
     EventPage as ClientEventPage, EventType as ClientEventType, Fence as ClientFence,
-    Page as ClientPage, PairingBegin, Resource as ClientResource,
+    Page as ClientPage, PairingBegin, PersonPairingBegin, AssistantGrantPolicy, AssistantReadTrustRequest,
+    AssistantMinimalReadMode, AssistantPairingBegin, AssistantPrincipal, AssistantScope,
+    Resource as ClientResource,
     TargetParameters as ClientTargetParameters, TerminalInputMode as ClientTerminalInputMode,
     TerminalInputParameters as ClientTerminalInputParameters,
     TerminalScreen as ClientTerminalScreen, TimelineBody as ClientTimelineBody,
@@ -65,6 +67,7 @@ mod change_cli;
 mod directive_note;
 mod completion;
 mod doctor_cli;
+mod fractal;
 #[cfg(test)]
 mod follow_tests;
 mod presentation;
@@ -536,10 +539,12 @@ fn fleet_person(actor: Option<String>, config: &Config) -> Result<String> {
         .context("set person in config.toml or pass --as person/NAME")
 }
 
-fn services_installed() -> bool {
-    st3::service::status()
-        .map(|report| report.services.iter().any(|service| service.installed))
-        .unwrap_or(false)
+fn services_installed() -> Result<bool> {
+    match st3::service::status() {
+        Ok(report) => Ok(report.services.iter().any(|service| service.installed)),
+        Err(error) if error.is::<st3::service::ConflictingServices>() => Err(error),
+        Err(_) => Ok(false), // A host without a user manager can run unmanaged.
+    }
 }
 
 #[derive(Args)]
@@ -784,9 +789,9 @@ async fn fleet_leave(
 
 /// What an instance's uninstall removes from its directory: every entry except the one that holds
 /// the work root. The work root can lie inside the instance but holds the person's work, so
-/// everything else goes and it stays.
+/// everything else goes, except a foreign replacement of the fractal command.
 fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
-    fs::read_dir(root)
+    let mut removals: Vec<PathBuf> = fs::read_dir(root)
         .map(|entries| {
             entries
                 .flatten()
@@ -794,8 +799,26 @@ fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
                 .filter(|path| !work.starts_with(path))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // An instance owns its directory, but a foreign replacement of the new program name
+    // does not become ours. Plan bin entries separately so deletion rechecks its symlink.
+    let bin = root.join("bin");
+    if fs::symlink_metadata(bin.join("fractal")).is_ok()
+        && let Some(index) = removals.iter().position(|path| path == &bin)
+    {
+        removals.swap_remove(index);
+        if let Ok(entries) = fs::read_dir(&bin) {
+            removals.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| fractal::may_remove(path)),
+            );
+        }
+    }
+    removals
 }
+
 
 #[derive(Args)]
 struct FleetModeArgs {
@@ -1753,19 +1776,36 @@ struct ActivityArgs {
 /// Observation-only device grant requested by `st devices pair --read-only`.
 const READ_ONLY_PAIRING_SCOPES: &[&str] = &["read.projections", "read.glasses", "terminal.read"];
 
+/// Grant lifetime when `--expires-in` is omitted; never renewed automatically.
+const ASSISTANT_GRANT_DEFAULT_SECONDS: u64 = 3_600;
+/// Hard maximum grant lifetime.
+const ASSISTANT_GRANT_MAX_SECONDS: u64 = 2_592_000;
+
 #[derive(Subcommand)]
 enum DevicesCommand {
     /// List paired devices visible to the authenticated person.
     Ls,
-    /// Begin local pairing for one named person and device.
+    /// Begin local pairing for one named person and device, or one assistant grant.
     Pair {
-        device_name: String,
+        /// Device name; optional only for `--assistant`, which defaults to the assistant name.
+        #[arg(required_unless_present = "assistant")]
+        device_name: Option<String>,
         /// Delegate every current client scope to this trusted device.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "assistant")]
         full_control: bool,
         /// Delegate only observation: projections, glasses frames, and terminal output.
-        #[arg(long, conflicts_with = "full_control")]
+        #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
+        /// Begin a revocable external-assistant grant instead of a person device.
+        #[arg(long, value_parser = parse_assistant_principal)]
+        assistant: Option<AssistantPrincipal>,
+        #[command(flatten)]
+        grant: AssistantGrantTerms,
+    },
+    /// Inspect, revoke, or change one assistant grant; trusted local Unix person only.
+    Grant {
+        #[command(subcommand)]
+        command: AssistantGrantCommand,
     },
     /// Complete a single-use pairing on this device; read the code privately from stdin.
     Complete {
@@ -1778,9 +1818,14 @@ enum DevicesCommand {
         /// Import a private mode-0600 DER PKCS#8 file; otherwise generate a key.
         #[arg(long)]
         key_file: Option<PathBuf>,
-        /// Credential and private-key profile, shared with stui by default.
+        /// Credential and private-key profile; person devices share stui's profile by default,
+        /// assistant grants use a separate assistant profile.
         #[arg(long)]
         profile: Option<PathBuf>,
+        /// Complete an assistant grant begun with `st devices pair --assistant`. Assistant
+        /// sessions carry no person-root proof and are stored apart from person devices.
+        #[arg(long, conflicts_with_all = ["fingerprint", "unpinned"])]
+        assistant: bool,
         /// Allow a public HTTP address only when it is already an encrypted path.
         #[arg(long)]
         allow_public_http: bool,
@@ -1797,6 +1842,67 @@ enum DevicesCommand {
         device: String,
         #[arg(long)]
         reason: Option<String>,
+    },
+}
+
+/// Grant terms sealed when the configured owning person begins or changes an assistant grant.
+#[derive(Args)]
+struct AssistantGrantTerms {
+    /// Positive grant lifetime such as 30m or 1h; at most 30d. Defaults to 1h.
+    #[arg(long, value_parser = parse_assistant_grant_expiry)]
+    expires_in: Option<u64>,
+    /// One exact assistant scope; repeat for each scope. Nothing is granted implicitly.
+    #[arg(long = "scope", value_parser = parse_assistant_scope)]
+    scopes: Vec<AssistantScope>,
+    /// Consent that every assistant read is disclosed to OpenAI.
+    #[arg(long)]
+    disclose_to_openai: bool,
+    /// Durable record of that consent decision, such as an axe decision ID.
+    #[arg(long)]
+    consent_evidence: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum AssistantGrantCommand {
+    /// Show one assistant grant: scopes, expiry, policy revision, consent; never the credential.
+    Inspect { grant: String },
+    /// Revoke exactly this grant; its session is denied from the next request.
+    Revoke { grant: String },
+    /// Replace the grant's scopes, expiry and consent; increments the policy revision.
+    Policy {
+        grant: String,
+        #[command(flatten)]
+        terms: AssistantGrantTerms,
+        /// Exact agent IDs permitted as low-risk assistant message recipients.
+        #[arg(long = "allow-recipient")]
+        recipients: Vec<String>,
+    },
+    /// Extend the grant with its current scopes; requires consent again and increments revision.
+    Renew {
+        grant: String,
+        /// Positive lifetime from now such as 1h; at most 30d. Defaults to 1h.
+        #[arg(long, value_parser = parse_assistant_grant_expiry)]
+        expires_in: Option<u64>,
+        #[arg(long)]
+        disclose_to_openai: bool,
+        #[arg(long)]
+        consent_evidence: Option<String>,
+    },
+    /// Pin an approval attestor independently from the shim signing key.
+    ReadTrust {
+        grant: String,
+        #[arg(long)]
+        issuer: String,
+        #[arg(long)]
+        key_id: String,
+        #[arg(long)]
+        attestor_public_key: String,
+        #[arg(long)]
+        shim_public_key: String,
+        #[arg(long, default_value_t = 4096)]
+        default_response_bytes: usize,
+        #[arg(long, default_value_t = 16384)]
+        max_response_bytes: usize,
     },
 }
 
@@ -3731,6 +3837,12 @@ struct MessageListArgs {
     #[arg(long = "from")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     sender: Option<String>,
+    /// Match this sender's subject text exactly (case-sensitive); requires --from.
+    #[arg(long, conflicts_with = "subject_prefix", requires = "sender")]
+    subject: Option<String>,
+    /// Match a literal, case-sensitive subject prefix within --from's messages.
+    #[arg(long, requires = "sender")]
+    subject_prefix: Option<String>,
 }
 
 #[derive(Args)]
@@ -4120,7 +4232,10 @@ fn cli_main() -> ExitCode {
     if let Some(program) = st3::recorder::invoked_program() {
         st3::recorder::run(program);
     }
-    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    if fractal::dispatch(arguments.as_mut_slice()) == fractal::Dispatch::Web {
+        return fractal::web(&arguments);
+    }
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
             println!("{}", read_contract_inventory_json());
@@ -4563,10 +4678,23 @@ async fn run(cli: Cli) -> Result<()> {
                 allow_public_http,
                 fingerprint,
                 unpinned,
+                assistant,
             }),
         ..
     }) = &cli.command
     {
+        if *assistant {
+            return run_devices_complete_assistant(
+                member_url,
+                pairing_id,
+                algorithm,
+                key_file.as_deref(),
+                profile.as_deref(),
+                *allow_public_http,
+                cli.json,
+            )
+            .await;
+        }
         return run_devices_complete(
             member_url,
             pairing_id,
@@ -4639,7 +4767,11 @@ async fn run(cli: Cli) -> Result<()> {
         st3::node_identity::resolve(&mut config)?;
         let mut telemetry =
             st3::otel::Telemetry::init(st3::otel::Unit::ReplicationWorker, Some(&config.node));
-        let result = st3::peer::run_worker(config).await;
+        let result = st3::task_cpu::account(
+            "replication.worker",
+            st3::peer::run_worker(config, st3::api::raw_terminal_owner_splice),
+        )
+        .await;
         telemetry.shutdown();
         return result;
     }
@@ -5015,6 +5147,11 @@ fn guard_mutating_cli_actor(
             GhCommand::Comment(args) => Some(args.actor.as_str()),
             GhCommand::Own(args) => Some(args.actor.as_str()),
             GhCommand::Ls(_) => None,
+        },
+        Command::Devices(args) => match args.command.as_ref() {
+            Some(DevicesCommand::Pair { assistant: Some(_), .. })
+            | Some(DevicesCommand::Grant { .. }) => Some(args.person.as_deref().unwrap_or("requester")),
+            _ => None,
         },
         _ => None,
     };
@@ -5521,8 +5658,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup_phases.install_hooks_ms = phase_elapsed_ms();
     startup.phase("open-store");
     startup_telemetry.phase("open-store");
-    let store = Arc::new(startup_telemetry.task("startup open-store", || {
-        Store::open(&config.state_dir.join("claims.sqlite3"), &config.node)
+    let store = Arc::new(startup_telemetry.task("startup.open_store", || {
+        st3::task_cpu::blocking("startup.open_store", || Store::open(&config.state_dir.join("claims.sqlite3"), &config.node))
     })?);
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
@@ -5543,30 +5680,31 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup_phases.open_store_ms = phase_elapsed_ms();
     startup.phase("judge-claims");
     startup_telemetry.phase("judge-claims");
-    startup_telemetry.task("startup judge-claims", || store.judge_claims(true))?;
+    startup_telemetry.task("startup.judge_claims", || st3::task_cpu::blocking("startup.judge_claims", || store.judge_claims(true)))?;
     startup_phases.judge_claims_ms = phase_elapsed_ms();
     startup.phase("validate-replication-backlog");
     startup_telemetry.phase("validate-replication-backlog");
-    let admission = startup_telemetry.task("startup validate-replication-backlog", || {
-        store.validate_replication_backlog()
+    let admission = startup_telemetry.task("startup.validate_replication_backlog", || {
+        st3::task_cpu::blocking("startup.validate_replication_backlog", || store.validate_replication_backlog())
     })?;
     startup_phases.validate_replication_backlog_ms = phase_elapsed_ms();
     startup.phase("apply-replication-repairs");
     startup_telemetry.phase("apply-replication-repairs");
-    startup_telemetry.task("startup apply-replication-repairs", || {
-        store.apply_replication_repairs()
+    startup_telemetry.task("startup.apply_replication_repairs", || {
+        st3::task_cpu::blocking("startup.apply_replication_repairs", || store.apply_replication_repairs())
     })?;
     startup_phases.apply_replication_repairs_ms = phase_elapsed_ms();
     startup.phase("settle-runs");
     startup_telemetry.phase("settle-runs");
-    for run in startup_telemetry.task("startup settle-runs", || {
-        store.settle_runs_for_canonical_replay()
+    for run in startup_telemetry.task("startup.settle_runs", || {
+        st3::task_cpu::blocking("startup.settle_runs", || store.settle_runs_for_canonical_replay())
     })? {
         eprintln!("st: mission run `{run}` stays over as this node's graph showed it");
     }
     startup.phase("project-replication-backlog");
     startup_telemetry.phase("project-replication-backlog");
-    let projected = startup_telemetry.task("startup project-replication-backlog", || {
+    let projected = startup_telemetry.task("startup.project_replication_backlog", || {
+        st3::task_cpu::blocking("startup.project_replication_backlog", || {
         store.project_replication_backlog_with_progress(
             "startup/project-replication-backlog",
             |progress| {
@@ -5574,6 +5712,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 startup.progress(progress);
             },
         )
+        })
     }).context("startup projection failed; stopping before daemon.started and runtime initialization")?;
     if !projected {
         eprintln!(
@@ -5632,7 +5771,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let login_environment = st3::environment::snapshot_at_startup()?;
     startup_phases.login_environment_ms = phase_elapsed_ms();
     let isolation_environment = login_environment.clone();
-    tokio::task::spawn_blocking(move || st_runtime::initialize_isolation(&isolation_environment))
+    tokio::task::spawn_blocking(move || st3::task_cpu::blocking("startup.isolation", || st_runtime::initialize_isolation(&isolation_environment)))
         .await
         .context("probe task isolation during daemon startup")?;
     let pty_binary = match args.pty_binary.clone() {
@@ -5643,12 +5782,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let recorder = install_recorder(&config, &login_environment);
     startup_phases.recorder_ms = phase_elapsed_ms();
     if let Some(person) = &config.person {
-        let _ = st3::sekrets::daemon::PERSON.set(person.clone());
+        let _ = st3::sekrets_daemon::PERSON.set(person.clone());
     }
     // Long message bodies this machine owns that no claim names any longer are removed.
     st3::store::message_bodies::spawn_reconciler(store.clone(), config.state_dir.clone());
     // Sekrets is opt-in: this records a gateway's calls once one listens on this host.
-    st3::sekrets::daemon::spawn_importer(
+    st3::sekrets_daemon::spawn_importer(
         store.clone(),
         config.node.clone(),
         config.state_dir.clone(),
@@ -5656,6 +5795,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     );
     store.install_git_change_registry(Arc::new(st3::changes::service::Registry::new(&config.changes, &config.node)?))?;
     let state = AppState {
+        owning_person: config.person.clone(),
         store: store.clone(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),
@@ -5691,68 +5831,71 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
     startup_telemetry.phase("start-services");
-    tokio::spawn(reconciler.clone().supervise());
-    tokio::spawn(st3::profile::watch_runtime_lag());
+    tokio::spawn(st3::task_cpu::account("reconcile.supervise", reconciler.clone().supervise()));
+    tokio::spawn(st3::task_cpu::account("profile.runtime_lag", st3::profile::watch_runtime_lag()));
     // The policy reads `[limits]` again on every pass, so an edit applies without a restart.
     st3::config::set_daemon_config(args_config.as_deref());
-    tokio::spawn(enforce_account_limits(store.clone(), config.limits.clone(), reconciler));
+    tokio::spawn(st3::task_cpu::account("account_limits.enforce", enforce_account_limits(store.clone(), config.limits.clone(), reconciler)));
     recycle_idle_wal(store.path.clone(), Arc::downgrade(&store));
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
-    tokio::spawn(convert_envelope_payloads(store.clone()));
-    tokio::spawn(migrate_event_payloads(store.clone()));
+    tokio::spawn(st3::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
+    tokio::spawn(st3::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
     if let Some(interval) = st3::maintenance::divergence_check_interval(
         std::env::var(st3::maintenance::DIVERGENCE_CHECK_ENV).ok().as_deref(),
     ) {
         tokio::spawn(st3::maintenance::check_projection_divergences(store.clone(), interval));
     }
-    tokio::spawn(catch_up_coordination_counts(store.clone()));
-    tokio::spawn(copy_stop_deferral_history(store.clone()));
     spawn_response_expiry(store.clone());
-    tokio::spawn(trim_local_observations(
+    tokio::spawn(st3::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),
         config.observations.clone(),
-    ));
-    tokio::spawn(catch_up_account_limits(store.clone(), notify.clone()));
+    )));
+    tokio::spawn(st3::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
     {
         let store = store.clone();
-        tokio::spawn(st3::slo_history::run(
+        tokio::spawn(st3::task_cpu::account("slo.history", st3::slo_history::run(
             st3::slo_history::dir(&config.state_dir),
             move || st3::api::slo_rows(&store),
-        ));
+        )));
     }
-    tokio::spawn(st3::recorder_receipts::run(
+    tokio::spawn(st3::task_cpu::account("recorder.receipts", st3::recorder_receipts::run(
         store.clone(),
         st3::recorder::receipt_path(&config.state_dir),
         notify.clone(),
         event_notify.clone(),
-    ));
+    )));
     if let Some(otlp) = &config.observations.otlp {
         let exporter = st3::otlp::OtlpExporter::new(otlp, &config.node)?;
         eprintln!(
             "st3: exporting local observations to OpenTelemetry at {}",
             otlp.endpoint
         );
-        tokio::spawn(st3::otlp::run(store.clone(), exporter));
+        tokio::spawn(st3::task_cpu::account("observations.export", st3::otlp::run(store.clone(), exporter)));
         // The live SLO windows go out as gauges, once a minute, on a timer of their own.
-        tokio::spawn(st3::otlp::run_slo(st3::otlp::OtlpExporter::new(otlp, &config.node)?));
+        tokio::spawn(st3::task_cpu::account("slo.export", st3::otlp::run_slo(
+            st3::otlp::OtlpExporter::new(otlp, &config.node)?,
+            st3::api::request_latency_target_windows,
+        )));
     }
     #[cfg(target_os = "macos")]
-    tokio::spawn(async {
+    tokio::spawn(st3::task_cpu::account("maintenance.malloc_relief", async {
         // Startup and replication can leave large, empty malloc zones resident on macOS.
         // Give the system a chance to reclaim those pages without making request handling wait.
         loop {
             tokio::time::sleep(Duration::from_secs(120)).await;
-            let _ = tokio::task::spawn_blocking(|| unsafe {
+            let _ = tokio::task::spawn_blocking(|| st3::task_cpu::blocking("maintenance.malloc_relief", || unsafe {
                 malloc_zone_pressure_relief(std::ptr::null_mut(), 0)
-            })
+            }))
             .await;
         }
-    });
+    }));
     // The first diagnostic report and delayed repair share one operation audit. Later reports
     // audit current state independently; no request waits for this startup report.
     if let Some(audit) = st3::api::start_operation_report(&state) {
         let store = store.clone();
-        tokio::spawn(async move {
+        tokio::spawn(st3::task_cpu::account("operations.repair_drift", async move {
             tokio::time::sleep(Duration::from_secs(30)).await;
             let drift = match audit.await {
                 Ok(Ok(drift)) => drift,
@@ -5765,9 +5908,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     return;
                 }
             };
-            match store.connection.write_workers().spawn_blocking(move || {
+            match store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("operations.repair_drift", || {
                 store.repair_operation_projection_drift_from_audit(&drift)
-            })
+            }))
             .await
             {
                 Ok(Ok(true)) => eprintln!("st3: rebuilt an operation projection that drifted"),
@@ -5775,7 +5918,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 Ok(Err(error)) => eprintln!("st3: operation projection check failed: {error:#}"),
                 Err(error) => eprintln!("st3: operation projection check stopped: {error}"),
             }
-        });
+        }));
     }
     // Nor does the first session list wait to read every native transcript's header.
     st3::api::start_native_session_discovery(&state);
@@ -5827,10 +5970,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
                         .clone()
                         .unwrap_or_else(|| "person/operator".into()),
                 });
-            tokio::spawn(async move {
+            tokio::spawn(st3::task_cpu::account("replication.activate", async move {
                 match activation_store.connection.write_workers().spawn_blocking({
                     let store = activation_store.clone();
-                    move || store.complete_replication_activation()
+                    move || st3::task_cpu::blocking("replication.activate", || store.complete_replication_activation())
                 })
                 .await
                 {
@@ -5845,9 +5988,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     }
                 }
                 if let Some(context) = checkpoint_context {
-                    run_checkpoints(activation_store, context).await;
+                    tokio::spawn(st3::task_cpu::account("maintenance.checkpoint", run_checkpoints(activation_store, context)));
                 }
-            });
+            }));
             spawn_publication_evidence(store.clone());
             startup_telemetry.serving();
             let ready_at = Instant::now();
@@ -7367,11 +7510,46 @@ async fn run_devices(
         }
         DevicesCommand::Pair {
             device_name,
+            assistant: Some(assistant),
+            grant,
+            // clap rejects --full-control and --read-only alongside --assistant.
+            ..
+        } => {
+            let terms = SealedAssistantGrantTerms::from_cli(&person, configured_person, grant)?;
+            let response = client
+                .pairing_begin(&PairingBegin::Assistant(AssistantPairingBegin {
+                    api_version: CLIENT_V0_API_VERSION.into(),
+                    device_name: device_name.unwrap_or_else(|| "ChatGPT".into()),
+                    assistant_id: assistant,
+                    scopes: terms.scopes,
+                    expires_in_seconds: Some(terms.expires_in_seconds),
+                    disclosure_consent: true,
+                    consent_evidence: terms.consent_evidence,
+                    minimal_read_mode: Some(AssistantMinimalReadMode::CallerBoundAllow),
+                }))
+                .await?;
+            print_client_value(&response, json_output)?;
+            if !json_output {
+                println!(
+                    "Complete on the assistant host before the code expires: `st devices complete MEMBER_URL PAIRING_ID --assistant`, then enter the code. Grant scopes and expiry are sealed; change them with `st devices --as {person} grant policy <grant>`."
+                );
+            }
+            Ok(())
+        }
+        DevicesCommand::Pair {
+            device_name,
             full_control,
             read_only,
+            assistant: None,
+            grant,
         } => {
+            anyhow::ensure!(
+                grant.is_empty(),
+                "--expires-in, --scope, --disclose-to-openai and --consent-evidence apply only to --assistant pairing"
+            );
+            let device_name = device_name.context("name the device to pair")?;
             let response = client
-                .pairing_begin(&PairingBegin {
+                .pairing_begin_person(&PersonPairingBegin {
                     api_version: CLIENT_V0_API_VERSION.into(),
                     device_name,
                     person_id: person.clone(),
@@ -7399,6 +7577,56 @@ async fn run_devices(
             }
             Ok(())
         }
+        DevicesCommand::Grant { command } => {
+            require_assistant_grant_owner(&person, configured_person)?;
+            let response = match command {
+                AssistantGrantCommand::Inspect { grant } => client.assistant_grant(&grant).await?,
+                AssistantGrantCommand::Revoke { grant } => {
+                    client.assistant_grant_revoke(&grant).await?
+                }
+                AssistantGrantCommand::Policy { grant, terms, recipients } => {
+                    let terms = SealedAssistantGrantTerms::from_cli(&person, configured_person, terms)?;
+                    let mut policy = terms.into_policy();
+                    policy.recipient_allowlist = Some(recipients);
+                    client.assistant_grant_policy(&grant, &policy).await?
+                }
+                AssistantGrantCommand::Renew {
+                    grant,
+                    expires_in,
+                    disclose_to_openai,
+                    consent_evidence,
+                } => {
+                    // Renewal keeps the exact current scopes; changing them is `grant policy`.
+                    let current = client.assistant_grant(&grant).await?;
+                    anyhow::ensure!(
+                        !current.value.revoked,
+                        "{grant} is revoked; begin a new grant with `st devices --as {person} pair --assistant`"
+                    );
+                    let terms = SealedAssistantGrantTerms::from_cli(
+                        &person,
+                        configured_person,
+                        AssistantGrantTerms {
+                            expires_in,
+                            scopes: current.value.scopes,
+                            disclose_to_openai,
+                            consent_evidence,
+                        },
+                    )?;
+                    let mut policy = terms.into_policy();
+                    policy.recipient_allowlist = Some(current.value.recipient_allowlist);
+                    client.assistant_grant_policy(&grant, &policy).await?
+                }
+                AssistantGrantCommand::ReadTrust { grant, issuer, key_id, attestor_public_key, shim_public_key, default_response_bytes, max_response_bytes } => {
+                    client.assistant_grant_read_trust(&grant, &AssistantReadTrustRequest {
+                        api_version: CLIENT_V0_API_VERSION.into(), issuer, key_id,
+                        attestor_public_key, shim_public_key,
+                        default_response_bytes: Some(default_response_bytes),
+                        max_response_bytes: Some(max_response_bytes),
+                    }).await?
+                }
+            };
+            print_client_value(&response, json_output)
+        }
         DevicesCommand::Revoke { device, reason } => {
             let capabilities = client.capabilities().await?;
             let nonce = uuid::Uuid::now_v7().simple().to_string();
@@ -7422,6 +7650,180 @@ async fn run_devices(
     }
 }
 
+impl AssistantGrantTerms {
+    fn is_empty(&self) -> bool {
+        self.expires_in.is_none()
+            && self.scopes.is_empty()
+            && !self.disclose_to_openai
+            && self.consent_evidence.is_none()
+    }
+}
+
+/// Assistant grant terms after local validation: issuer, explicit scopes, bounded expiry, and
+/// recorded OpenAI-disclosure consent. The daemon rechecks every term.
+struct SealedAssistantGrantTerms {
+    scopes: Vec<AssistantScope>,
+    expires_in_seconds: u64,
+    consent_evidence: String,
+}
+
+/// The selected local person must be the configured owner. The daemon independently checks
+/// its own owner configuration; a CLI `--as` flag cannot change the daemon's grant authority.
+fn require_assistant_grant_owner(person: &str, configured_person: Option<&str>) -> Result<()> {
+    let owner = configured_person.context(
+        "assistant grant management requires a configured owning person in the st config",
+    )?;
+    let owner = parse_person_subject(owner).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        person == owner,
+        "only the configured owning person {owner} may create or manage assistant grants"
+    );
+    Ok(())
+}
+
+impl SealedAssistantGrantTerms {
+    fn from_cli(
+        person: &str,
+        configured_person: Option<&str>,
+        terms: AssistantGrantTerms,
+    ) -> Result<Self> {
+        require_assistant_grant_owner(person, configured_person)?;
+        anyhow::ensure!(
+            !terms.scopes.is_empty(),
+            "name every assistant scope explicitly with --scope; nothing is granted by default"
+        );
+        anyhow::ensure!(
+            terms.disclose_to_openai,
+            "assistant reads are disclosed to OpenAI; pass --disclose-to-openai to consent"
+        );
+        let consent_evidence = terms
+            .consent_evidence
+            .filter(|evidence| !evidence.trim().is_empty())
+            .context("record the consent decision with --consent-evidence")?;
+        Ok(Self {
+            scopes: terms.scopes,
+            expires_in_seconds: terms.expires_in.unwrap_or(ASSISTANT_GRANT_DEFAULT_SECONDS),
+            consent_evidence,
+        })
+    }
+
+    fn into_policy(self) -> AssistantGrantPolicy {
+        AssistantGrantPolicy {
+            api_version: CLIENT_V0_API_VERSION.into(),
+            scopes: self.scopes,
+            expires_in_seconds: Some(self.expires_in_seconds),
+            disclosure_consent: true,
+            consent_evidence: self.consent_evidence,
+            minimal_read_mode: AssistantMinimalReadMode::CallerBoundAllow,
+            recipient_allowlist: None,
+        }
+    }
+}
+
+/// Decode one wire value of a generated string enum, rejecting values it would only accept as
+/// an unknown-variant fallback.
+fn parse_wire_enum<T: serde::Serialize + serde::de::DeserializeOwned>(
+    value: &str,
+    what: &str,
+) -> std::result::Result<T, String> {
+    let wire = Value::String(value.to_owned());
+    serde_json::from_value::<T>(wire.clone())
+        .ok()
+        .filter(|parsed| serde_json::to_value(parsed).ok().as_ref() == Some(&wire))
+        .ok_or_else(|| format!("unknown {what} `{value}`"))
+}
+
+fn parse_assistant_principal(value: &str) -> std::result::Result<AssistantPrincipal, String> {
+    parse_wire_enum(value, "assistant principal")
+}
+
+fn parse_assistant_scope(value: &str) -> std::result::Result<AssistantScope, String> {
+    parse_wire_enum(value, "assistant scope")
+}
+
+fn parse_assistant_grant_expiry(value: &str) -> std::result::Result<u64, String> {
+    let duration = parse_timeout(value).map_err(|error| error.to_string())?;
+    let seconds = duration.as_secs();
+    if duration.is_zero() || duration.subsec_nanos() != 0 {
+        return Err("a grant lifetime must be a positive whole number of seconds".into());
+    }
+    if seconds > ASSISTANT_GRANT_MAX_SECONDS {
+        return Err("a grant lifetime must be at most 30d".into());
+    }
+    Ok(seconds)
+}
+
+/// The completing device's private key: imported from a mode-0600 file or freshly generated.
+fn completion_signing_key(
+    algorithm: &str,
+    key_file: Option<&Path>,
+) -> Result<st3_client::device::SigningKey> {
+    use st3_client::device::{KeyAlgorithm, SigningKey};
+    let algorithm = match algorithm {
+        "ed25519" => KeyAlgorithm::Ed25519,
+        "p256" => KeyAlgorithm::P256,
+        _ => anyhow::bail!("Choose ed25519 or p256"),
+    };
+    match key_file {
+        Some(path) => SigningKey::import(algorithm, path),
+        None => SigningKey::generate(algorithm),
+    }
+}
+
+/// Complete an assistant grant. The session authenticates as the assistant principal, carries
+/// no person-root proof, and is saved only to the separate assistant profile.
+async fn run_devices_complete_assistant(
+    member_url: &str,
+    pairing_id: &str,
+    algorithm: &str,
+    key_file: Option<&Path>,
+    profile: Option<&Path>,
+    allow_public_http: bool,
+    json_output: bool,
+) -> Result<()> {
+    let key = completion_signing_key(algorithm, key_file)?;
+    let path = profile
+        .map(Path::to_path_buf)
+        .map(Ok)
+        .unwrap_or_else(st3_client::device::assistant_profile_path)?;
+    let code = st3_client::device::read_pairing_code()?;
+    let device = st3_client::device::complete_assistant(
+        &path,
+        member_url,
+        pairing_id,
+        &code,
+        key,
+        allow_public_http,
+    )
+    .await?;
+    let session = &device.session;
+    // Explicit safe fields only, including --json: the session contains a bearer credential.
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "kind": "assistant-paired", "device_id": session.device_id,
+                "principal": session.principal, "sender_class": session.sender_class,
+                "session_actor": session.session_actor, "grant_id": session.grant.id,
+                "scopes": session.scopes, "expires_at": session.expires_at,
+                "policy_revision": session.grant.policy_revision,
+                "minimal_read_mode": session.grant.minimal_read_mode,
+                "profile": path, "signing_key": device.signing_key.public_key()?,
+            }))?
+        );
+    } else {
+        println!(
+            "Paired {} as {} under grant {} until {}. Saved assistant credentials and signing key to {}.",
+            session.device_id,
+            session.session_actor,
+            session.grant.id,
+            session.expires_at,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 async fn run_devices_complete(
     member_url: &str,
     pairing_id: &str,
@@ -7431,17 +7833,8 @@ async fn run_devices_complete(
     options: st3_client::device::CompletionOptions<'_>,
     json_output: bool,
 ) -> Result<()> {
-    use st3_client::device::{KeyAlgorithm, SigningKey};
     options.validate()?;
-    let algorithm = match algorithm {
-        "ed25519" => KeyAlgorithm::Ed25519,
-        "p256" => KeyAlgorithm::P256,
-        _ => anyhow::bail!("Choose ed25519 or p256"),
-    };
-    let key = match key_file {
-        Some(path) => SigningKey::import(algorithm, path)?,
-        None => SigningKey::generate(algorithm)?,
-    };
+    let key = completion_signing_key(algorithm, key_file)?;
     let path = profile
         .map(Path::to_path_buf)
         .map(Ok)
@@ -7459,7 +7852,7 @@ async fn run_devices_complete(
                 "kind": "device-paired", "device_id": device.session.device_id,
                 "person_id": device.session.person_id, "scopes": device.session.scopes,
                 "expires_at": device.session.expires_at, "profile": path,
-                "signing_key": device.signing_key.as_ref().map(SigningKey::public_key).transpose()?,
+                "signing_key": device.signing_key.as_ref().map(st3_client::device::SigningKey::public_key).transpose()?,
                 "person_root_fingerprint": device.person_root_fingerprint,
             }))?
         );
@@ -8122,11 +8515,14 @@ fn render_product_page_headed(
                     item.session_actor,
                     item.scopes.len()
                 );
-                let _ = writeln!(
-                    output,
-                    "  action: st devices --as {} revoke {}",
-                    item.person_id, item.header.id
-                );
+                if let Some(person) = &item.person_id {
+                    let _ = writeln!(
+                        output, "  action: st devices --as {} revoke {}",
+                        person, item.header.id
+                    );
+                } else if let Some(grant) = &item.grant_id {
+                    let _ = writeln!(output, "  action: st devices grant revoke {grant}");
+                }
             }
             ClientResource::Session(item) => {
                 let _ = writeln!(
@@ -9055,18 +9451,24 @@ struct LocalEventFeed {
 
 impl LocalEventFeed {
     async fn read(&mut self, client: &Client, query: &str) -> Result<LocalEventPage> {
-        client
-            .get(&format!("/v1/events/page?{query}"))
-            .await
-            .map_err(|error| {
-                if st3::client::is_missing_route(&error) {
-                    anyhow::anyhow!(
-                        "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
-                    )
-                } else {
-                    event_cursor_error(error, query, self.trace)
-                }
-            })
+        match client.get(&format!("/v1/events/page?{query}")).await {
+            Ok(page) => Ok(page),
+            // A bare missing route is classified once through the health capability and never
+            // reads legacy history: a daemon without bounded continuation needs the upgrade, and
+            // one that advertises it but lacks the page route reports the unexpected response.
+            Err(error) if st3::client::is_missing_route(&error) => {
+                let health: Value = client.get("/v1/health").await?;
+                anyhow::ensure!(
+                    health
+                        .pointer("/features/bounded_legacy_events")
+                        .and_then(Value::as_u64)
+                        == Some(1),
+                    "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
+                );
+                Err(error)
+            }
+            Err(error) => Err(event_cursor_error(error, query, self.trace)),
+        }
     }
 }
 
@@ -10100,10 +10502,8 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
             let config = Config::load_unvalidated(None)?;
             let mut report = st3::service::status()?;
             if let Some(startup) = st3::startup::read(&config.client_socket()) {
-                for service in &mut report.services {
-                    if service.name == "st3.service" || service.name == "com.compoundingtech.st3" {
-                        service.state = format!("{} · {}", service.state, startup.summary());
-                    }
+                for service in report.services.iter_mut().take(1) {
+                    service.state = format!("{} · {}", service.state, startup.summary());
                 }
             }
             if json_output {
@@ -12476,6 +12876,13 @@ async fn message_page(
     message_page_reporting(client, recipient, include_closed, cursor, None).await
 }
 
+#[derive(Clone, Copy, Default)]
+struct MessagePageFilters<'a> {
+    from: Option<&'a str>,
+    subject: Option<&'a str>,
+    subject_prefix: Option<&'a str>,
+}
+
 /// One mailbox page. A seat's delivery process passes its delivery report, which the daemon
 /// keeps in memory to tell a live, current delivery path from a stale one.
 async fn message_page_reporting(
@@ -12484,6 +12891,25 @@ async fn message_page_reporting(
     include_closed: bool,
     cursor: Option<&str>,
     report: Option<&str>,
+) -> Result<MessagePage> {
+    message_page_filtered(
+        client,
+        recipient,
+        include_closed,
+        cursor,
+        report,
+        MessagePageFilters::default(),
+    )
+    .await
+}
+
+async fn message_page_filtered(
+    client: &Client,
+    recipient: Option<&str>,
+    include_closed: bool,
+    cursor: Option<&str>,
+    report: Option<&str>,
+    filters: MessagePageFilters<'_>,
 ) -> Result<MessagePage> {
     let mut path = format!("/v1/messages/page?include_closed={include_closed}&limit=100");
     if let Some(recipient) = recipient {
@@ -12494,6 +12920,15 @@ async fn message_page_reporting(
     }
     if let Some(report) = report {
         path.push_str(&format!("&delivery={}", urlencoding::encode(report)));
+    }
+    for (name, value) in [
+        ("from", filters.from),
+        ("subject", filters.subject),
+        ("subject_prefix", filters.subject_prefix),
+    ] {
+        if let Some(value) = value {
+            path.push_str(&format!("&{name}={}", urlencoding::encode(value)));
+        }
     }
     client.get(&path).await
 }
@@ -14459,14 +14894,17 @@ fn pi_family_message_frame(
     json!({
         "type": "message",
         "deliverAs": "steer",
-        "content": st_drivers::ding::with_tag_notices(st_drivers::ding::st3_notification_with_attachments(
+        "content": st_drivers::ding::with_tag_notices(st_drivers::ding::st3_notification_with_metadata(
             &message.subject,
             &message.from,
             &message.to,
             message.title.as_deref(),
             body,
             &st_drivers::ding::st3_body_sha256(body),
-            attachments,
+            st_drivers::ding::NotificationMetadata {
+                attachments,
+                assistant: message.assistant_metadata().as_ref(),
+            },
         ), &message.tags.iter().filter(|tag| tag.as_str() != st3::silent::SILENT_TAG || st3::silent::is_held(message)).cloned().collect::<Vec<_>>()),
         "meta": {
             "from": message.from,
@@ -15727,7 +16165,9 @@ async fn publish_claude_readiness_fallback(
         || !state
             .claude_readiness_fallback
             .initialized_at_ms
-            .is_some_and(|started| now_ms.saturating_sub(started) >= 15_000)
+            .is_some_and(|started| {
+                now_ms.saturating_sub(started) >= claude_readiness_grace_ms()
+            })
     {
         return Ok(false);
     }
@@ -15839,7 +16279,7 @@ async fn check_claude_attachment(
     let attached = checked.as_ref().is_ok_and(|attachment| attachment.attached);
     let phase = if attached {
         "attached"
-    } else if started.elapsed() >= Duration::from_secs(20)
+    } else if started.elapsed() >= claude_attachment_window()
         || state.claude_attachment_phase == "blocked"
     {
         "blocked"
@@ -15888,6 +16328,30 @@ fn finish_claude_attachment_publication(
         }
     }
     published
+}
+
+/// How long a Claude seat may start before an unattached channel is reported as blocked.
+/// `ST3_CLAUDE_ATTACH_WINDOW_MS` can only shorten it, as `ST3_SUBAGENT_LEASE_MS` does a lease, so
+/// the boot canaries need not wait out the production window.
+fn claude_attachment_window() -> Duration {
+    const DEFAULT_MS: u64 = 20_000;
+    let cap = std::env::var("ST3_CLAUDE_ATTACH_WINDOW_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|cap| *cap > 0);
+    Duration::from_millis(cap.map_or(DEFAULT_MS, |cap| cap.min(DEFAULT_MS)))
+}
+
+/// How long an initialized Claude channel waits for a native hook before the driver publishes
+/// readiness without one. `ST3_CLAUDE_READINESS_GRACE_MS` can only shorten it, as
+/// `ST3_SUBAGENT_LEASE_MS` does a lease, so tests of the fallback need not wait out 15 s.
+fn claude_readiness_grace_ms() -> u64 {
+    const DEFAULT_MS: u64 = 15_000;
+    std::env::var("ST3_CLAUDE_READINESS_GRACE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|cap| *cap > 0)
+        .map_or(DEFAULT_MS, |cap| cap.min(DEFAULT_MS))
 }
 
 fn same_claude_attachment_binding(a: &st3::mailbox::Fence, b: &st3::mailbox::Fence) -> bool {
@@ -16925,7 +17389,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: st3::config::Li
     loop {
         // A config file that is missing, cannot be read or does not validate keeps the last
         // good policy. The reason is logged when it changes, not on every pass.
-        let reloaded = tokio::task::spawn_blocking(st3::config::reload_daemon_policies)
+        let reloaded = tokio::task::spawn_blocking(|| st3::task_cpu::blocking("config.reload_policies", st3::config::reload_daemon_policies))
             .await
             .ok()
             .flatten();
@@ -16953,7 +17417,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: st3::config::Li
         };
         let pass = store.clone();
         match pass.connection.write_workers().spawn_blocking(move || {
-            st3::profile::task("task enforce-account-limits", || {
+            st3::task_cpu::profiled_blocking("account_limits.enforce", || {
                 let now = now_ms();
                 let check = pass.account_limits_check(now, policy.fresh_ms)?;
                 let outcome = pass.enforce_account_limits(&policy, now)?;
@@ -17047,7 +17511,7 @@ fn retry_projection_contention_observed(
     state_dir: PathBuf,
     mut on_poll: impl FnMut(bool) + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    tokio::spawn(st3::task_cpu::account("replication.retry_projection", async move {
         let mut schedule = ProjectionContentionRetry::default();
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -17060,9 +17524,9 @@ fn retry_projection_contention_observed(
             // Only this task schedules these attempts. The existing projection mutex also
             // serializes them with receive/wake passes. Store ownership ends at attempt return.
             let result = store.connection.write_workers().spawn_blocking(move || {
-                st3::profile::task("task replication-projection-retry", || {
-                    let result = store.project_replication_backlog_unless_catching_up();
-                    (result, store.projection_contention_generation(), store.replication_projection_deferred())
+                st3::task_cpu::profiled_blocking("replication.retry_projection", || {
+                let result = store.project_replication_backlog_unless_catching_up();
+                (result, store.projection_contention_generation(), store.replication_projection_deferred())
                 })
             })
             .await;
@@ -17117,7 +17581,7 @@ fn retry_projection_contention_observed(
                 );
             }
         }
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -17239,6 +17703,7 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                 // The connection is taken into the attempt and dropped on unwind; no
                 // potentially panic-damaged connection is reused by the next attempt.
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    st3::task_cpu::blocking("maintenance.wal_checkpoint", || {
                     let connection = match connection.take() {
                         Some(connection) => connection,
                         None => rusqlite::Connection::open(&path)
@@ -17246,6 +17711,7 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                     };
                     let result = store.checkpoint_idle_wal_report(&connection);
                     Ok::<_, anyhow::Error>((connection, result))
+                    })
                 }));
                 let result = match attempt {
                     Ok(Ok((returned, result))) => {
@@ -17263,6 +17729,7 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                 let now = Instant::now();
                 let duration_ms = started.elapsed().as_millis();
                 let report = result.as_ref().ok();
+                smallclaims::sqlite::telemetry::wal_checkpoint_observed(&store.readers, report);
                 let stuck = pin.observe(report);
                 let abnormal = abnormal_wal_checkpoint(report) || stuck >= WAL_PIN_REPORT_AFTER;
                 st3::otel::record_wal_checkpoint(trace_started, report, abnormal);
@@ -17312,7 +17779,7 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
 async fn convert_envelope_payloads(store: Arc<Store>) {
     loop {
         let store = store.clone();
-        let result = store.connection.write_workers().spawn_blocking(move || store.convert_envelope_payloads()).await;
+        let result = store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("maintenance.envelope_payloads", || store.convert_envelope_payloads())).await;
         match result {
             Ok(Ok(report)) if report.done => return,
             Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(50)).await,
@@ -17330,7 +17797,7 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
     loop {
         let page_store = store.clone();
         let result = page_store.connection.write_workers().spawn_blocking(move || {
-            st3::profile::task("task coordination-counts-catch-up", || {
+            st3::task_cpu::profiled_blocking("maintenance.coordination_counts", || {
                 page_store.advance_coordination_counts()
             })
         }).await;
@@ -17351,7 +17818,7 @@ async fn copy_stop_deferral_history(store: Arc<Store>) {
     loop {
         let scan_store = store.clone();
         let result = tokio::task::spawn_blocking(move || {
-            st3::profile::task("task stop-deferral-history", || {
+            st3::task_cpu::profiled_blocking("maintenance.stop_deferral_history", || {
                 scan_store.backfill_stop_deferral_history(|| {
                     std::thread::sleep(Duration::from_millis(10))
                 })
@@ -17378,12 +17845,12 @@ fn spawn_publication_evidence(store: Arc<Store>) {
             changed.send_replace(());
         }
     });
-    tokio::spawn(async move {
+    tokio::spawn(st3::task_cpu::account("publication.evidence", async move {
         let _observer = observer;
         loop {
             receiver.borrow_and_update();
             let read_store = store.clone();
-            match tokio::task::spawn_blocking(move || read_store.publication_evidence_ready()).await
+            match tokio::task::spawn_blocking(move || st3::task_cpu::blocking("publication.evidence_ready", || read_store.publication_evidence_ready())).await
             {
                 Ok(Ok(true)) => {
                     if receiver.changed().await.is_err() {
@@ -17392,9 +17859,9 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                 }
                 Ok(Ok(false)) => {
                     let page_store = store.clone();
-                    match page_store.connection.write_workers().spawn_blocking(move || {
+                    match page_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("publication.advance_evidence", || {
                         page_store.advance_publication_evidence()
-                    })
+                    }))
                     .await
                     {
                         Ok(Ok(_)) => tokio::task::yield_now().await,
@@ -17410,7 +17877,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                 }
             }
         }
-    });
+    }));
 }
 
 async fn migrate_event_payloads(store: Arc<Store>) {
@@ -17444,10 +17911,10 @@ fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
             changed.send_replace(());
         }
     });
-    tokio::spawn(async move {
+    tokio::spawn(st3::task_cpu::account("maintenance.response_expiry", async move {
         let _observer = observer;
         expire_completed_responses(store, receiver).await;
-    })
+    }))
 }
 
 async fn expire_completed_responses(
@@ -17462,7 +17929,7 @@ async fn expire_completed_responses(
         changed.borrow_and_update();
         let read_store = store.clone();
         let deadline =
-            match tokio::task::spawn_blocking(move || read_store.next_idempotency_expiry()).await {
+            match tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
                 Ok(Ok(deadline)) => deadline,
                 Ok(Err(error)) if maintenance_contention(&error) => {
                     eprintln!(
@@ -17499,9 +17966,9 @@ async fn expire_completed_responses(
             continue;
         }
         let clock_store = store.clone();
-        let clock_limit = match tokio::task::spawn_blocking(move || {
+        let clock_limit = match tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.response_expiry_clock", || {
             clock_store.idempotency_clock_limit()
-        })
+        }))
         .await
         {
             Ok(Ok(limit)) => limit,
@@ -17533,7 +18000,7 @@ async fn expire_completed_responses(
         clock_deferred = false;
         let clean_store = store.clone();
         match clean_store.connection.write_workers().spawn_blocking(move || {
-            st3::profile::task("task expire-completed-responses", || {
+            st3::task_cpu::profiled_blocking("maintenance.response_expiry", || {
                 clean_store.cleanup_idempotency(now)
             })
         })
@@ -17572,14 +18039,14 @@ async fn catch_up_account_limits(store: Arc<Store>, notify: Arc<Notify>) {
     loop {
         let page_store = store.clone();
         let more = page_store.connection.write_workers().spawn_blocking(move || {
-            st3::profile::task("task account-limits-catch-up", || {
+            st3::task_cpu::profiled_blocking("account_limits.catch_up", || {
                 page_store.catch_up_account_limits(st3::store::LIMITS_CATCH_UP_PAGE)
             })
         })
         .await;
         if !announced && matches!(more, Ok(Ok(_))) {
             let ready_store = store.clone();
-            let ready = tokio::task::spawn_blocking(move || ready_store.account_limits_ready())
+            let ready = tokio::task::spawn_blocking(move || st3::task_cpu::blocking("account_limits.ready", || ready_store.account_limits_ready()))
                 .await
                 .ok()
                 .and_then(|result| result.ok())
@@ -17609,7 +18076,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         let observation_store = store.clone();
         let max_per_subject_kind = observations.max_per_subject_kind;
         let trimmed = observation_store.connection.write_workers().spawn_blocking(move || {
-            st3::profile::task("task trim-local-observations", || {
+            st3::task_cpu::profiled_blocking("observations.trim", || {
                 observation_store.trim_local_observations(
                     now_ms().saturating_sub(u128::from(retention_ms)),
                     max_per_subject_kind,
@@ -17619,12 +18086,12 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         })
         .await;
         let usage_store = store.clone();
-        if let Ok(Err(error)) = usage_store.connection.write_workers().spawn_blocking(move || {
+        if let Ok(Err(error)) = usage_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.trim_usage_responses", || {
             usage_store.trim_usage_responses(
                 now_ms().saturating_sub(st3::store::USAGE_RESPONSE_HORIZON_MS),
                 LOCAL_OBSERVATION_TRIM_CHUNK,
             )
-        })
+        }))
         .await
         {
             eprintln!("st3: usage response trim failed: {error:#}");
@@ -17637,7 +18104,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         }
         // The database target's sample: after the trims, so it counts what they freed.
         let size_store = store.clone();
-        match size_store.connection.write_workers().spawn_blocking(move || size_store.record_database_size(now_ms())).await {
+        match size_store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("observations.database_size", || size_store.record_database_size(now_ms()))).await {
             Ok(Ok(size)) => st3::slo::note_database_size(&size),
             Ok(Err(error)) => eprintln!("st3: database size sample failed: {error:#}"),
             Err(error) => eprintln!("st3: database size sample stopped: {error}"),
@@ -17666,7 +18133,7 @@ async fn run_checkpoints(store: Arc<Store>, context: st3::store::CheckpointConte
             ..context.clone()
         };
         match store.connection.write_workers().spawn_blocking(move || {
-            st3::profile::task("task checkpoint", || store.checkpoint_step(&context))
+            st3::task_cpu::profiled_blocking("maintenance.checkpoint", || store.checkpoint_step(&context))
         })
         .await
         {
@@ -17760,6 +18227,3 @@ mod tests;
 
 #[cfg(test)]
 mod terminal_ui_tests;
-
-#[cfg(test)]
-mod instance_uninstall_tests;

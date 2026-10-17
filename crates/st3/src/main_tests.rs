@@ -256,6 +256,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         }).unwrap();
     };
     let state = st3::api::AppState {
+        owning_person: None,
         store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
         node: "todo-liveness".into(), state_dir: root.path().into(),
@@ -843,6 +844,161 @@ fn conversations_ls_accepts_the_read_spelling_of_its_mailbox() {
 }
 
 #[test]
+fn conversations_ls_accepts_sender_and_literal_subject_filters() {
+    for (flag, subject) in [
+        ("--subject", "Review: café & ready?"),
+        ("--subject-prefix", "Review_%"),
+        ("--subject", ""),
+        ("--subject-prefix", ""),
+    ] {
+        let cli = Cli::try_parse_from([
+            "st3",
+            "conversations",
+            "ls",
+            "agent/reader",
+            "--from",
+            "person/operator",
+            flag,
+            subject,
+            "--archive",
+            "--count",
+        ])
+        .unwrap();
+        let Command::Conversations {
+            command: MessageCommand::Ls(args),
+        } = cli.command
+        else {
+            panic!("conversations ls")
+        };
+        assert_eq!(args.sender.as_deref(), Some("person/operator"));
+        assert_eq!(
+            args.subject.as_deref(),
+            (flag == "--subject").then_some(subject)
+        );
+        assert_eq!(
+            args.subject_prefix.as_deref(),
+            (flag == "--subject-prefix").then_some(subject)
+        );
+        assert!(args.archive);
+        assert!(args.count);
+    }
+    assert!(
+        Cli::try_parse_from([
+            "st3",
+            "conversations",
+            "ls",
+            "agent/reader",
+            "--from",
+            "agent/ada",
+            "--subject",
+            "Review",
+            "--subject-prefix",
+            "Re",
+        ])
+        .is_err()
+    );
+    for flag in ["--subject", "--subject-prefix"] {
+        let error = Cli::try_parse_from([
+            "st3", "conversations", "ls", "agent/reviewer", flag, "Review",
+        ])
+        .err()
+        .expect("subject filters need a sender filter");
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert!(error.to_string().contains("--from"));
+    }
+}
+
+#[tokio::test]
+async fn message_pages_encode_filters_and_preserve_unfiltered_delivery_queries() {
+    use axum::{Json, Router, extract::Query, routing::get};
+
+    let queries = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let recorded = queries.clone();
+    let app = Router::new().route(
+        "/v1/messages/page",
+        get(move |Query(query): Query<BTreeMap<String, String>>| {
+            let recorded = recorded.clone();
+            async move {
+                recorded.lock().await.push(query);
+                Json(json!({"api_version": "st3.v1", "value": {
+                    "items": [], "has_more": false, "next_cursor": null, "limit": 100
+                }}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = Client::new(Endpoint::Http(format!("http://{address}")));
+    let filters = MessagePageFilters {
+        from: Some("person/operator"),
+        subject: Some("Review: café & ready?"),
+        subject_prefix: None,
+    };
+    for cursor in [None, Some("opaque+/=&cursor")] {
+        message_page_filtered(&client, Some("agent/reader"), true, cursor, None, filters)
+            .await
+            .unwrap();
+    }
+    message_page_filtered(
+        &client,
+        Some("agent/reader"),
+        false,
+        None,
+        None,
+        MessagePageFilters {
+            from: None,
+            subject: None,
+            subject_prefix: Some("Review_%/"),
+        },
+    )
+    .await
+    .unwrap();
+    message_page(&client, Some("agent/reader"), false, None)
+        .await
+        .unwrap();
+    message_page_reporting(
+        &client,
+        Some("agent/reader"),
+        false,
+        Some("delivery-cursor"),
+        Some("delivery/report"),
+    )
+    .await
+    .unwrap();
+
+    let queries = queries.lock().await;
+    assert_eq!(queries.len(), 5);
+    for (index, query) in queries[..2].iter().enumerate() {
+        assert_eq!(query["to"], "agent/reader");
+        assert_eq!(query["from"], "person/operator");
+        assert_eq!(query["subject"], "Review: café & ready?");
+        assert_eq!(query["include_closed"], "true");
+        assert_eq!(query["limit"], "100");
+        assert!(!query.contains_key("subject_prefix"));
+        assert!(!query.contains_key("delivery"));
+        assert_eq!(
+            query.get("cursor").map(String::as_str),
+            (index == 1).then_some("opaque+/=&cursor")
+        );
+    }
+    assert_eq!(queries[2]["subject_prefix"], "Review_%/");
+    assert!(!queries[2].contains_key("subject"));
+    assert!(!queries[2].contains_key("from"));
+    for query in &queries[3..] {
+        assert_eq!(query["to"], "agent/reader");
+        assert_eq!(query["include_closed"], "false");
+        assert!(!query.contains_key("from"));
+        assert!(!query.contains_key("subject"));
+        assert!(!query.contains_key("subject_prefix"));
+    }
+    assert!(!queries[3].contains_key("delivery"));
+    assert_eq!(queries[4]["cursor"], "delivery-cursor");
+    assert_eq!(queries[4]["delivery"], "delivery/report");
+    server.abort();
+}
+
+#[test]
 fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
     let message = st3::model::MessageView {
         subject: "message/0123456789abcdef".into(),
@@ -856,6 +1012,8 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
         body_ref: None,
         body_bytes: None,
         body_origin: None,
+        sender_class: None,
+        assistant_grant_id: None,
         created_index: 1,
         attachments: Vec::new(),
     };
@@ -892,6 +1050,8 @@ fn native_push_preserves_delivery_notices_and_person_signatures() {
         body_ref: None,
         body_bytes: None,
         body_origin: None,
+        sender_class: None,
+        assistant_grant_id: None,
         created_index: 1,
     };
     let queued = native_queued_message(&view, "body".into(), &[]);
@@ -1159,6 +1319,8 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
             body_ref: None,
             body_bytes: None,
             body_origin: None,
+            sender_class: None,
+            assistant_grant_id: None,
             created_index: 1,
             attachments: Vec::new(),
         };
@@ -1803,6 +1965,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             .unwrap();
     }
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -1895,6 +2058,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         })
         .collect::<Vec<_>>();
     let state = AppState {
+        owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -1970,6 +2134,7 @@ async fn trace_wait_starts_after_existing_events() {
             .store_index;
     }
     let state = AppState {
+        owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -2256,7 +2421,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         );
     }
 
-    let server_source = include_str!("../../st3-daemon/src/api.rs");
+    let server_source = include_str!("../../st3-api/src/api.rs");
     for handler in [
         "watch_resource",
         "unwatch_resource",
@@ -3198,6 +3363,14 @@ fn machine_and_device_renderers_have_exact_operational_output() {
             "  action: st devices --as person/alex revoke device/ios-release\n",
         )
     );
+    let mut assistant = fixture_product_page(&["device"], false);
+    let ClientResource::Device(device) = &mut assistant.items[0] else { panic!("device fixture"); };
+    device.person_id = None;
+    device.grant_id = Some("assistant-grant/0123456789abcdef01234567".into());
+    device.session_actor = "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567".into();
+    let shown = render_product_page("DEVICES", &assistant, "st devices");
+    assert!(shown.contains("action: st devices grant revoke assistant-grant/0123456789abcdef01234567"));
+    assert!(!shown.contains("--as person/"));
 }
 
 #[test]
@@ -4677,6 +4850,8 @@ fn message_replies_route_to_the_other_participant() {
         body_ref: None,
         body_bytes: None,
         body_origin: None,
+        sender_class: None,
+        assistant_grant_id: None,
         created_index: 1,
         attachments: Vec::new(),
     };
@@ -4848,6 +5023,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = AppState {
+        owning_person: None,
         store: Arc::new(Store::open_memory("message-read-state").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -5404,6 +5580,135 @@ fn full_control_device_pairing_is_an_explicit_cli_choice() {
         .is_err(),
         "read-only and full-control pairing must be mutually exclusive"
     );
+}
+
+#[test]
+fn assistant_read_trust_cli_pins_explicit_keys_and_downward_budgets() {
+    let cli = Cli::try_parse_from([
+        "st3", "devices", "--as", "person/operator", "grant", "read-trust",
+        "assistant-grant/fixture", "--issuer", "scg/approval-host", "--key-id",
+        "approval-key/fixture", "--attestor-public-key", "attestor-fixture",
+        "--shim-public-key", "shim-fixture", "--default-response-bytes", "1024",
+        "--max-response-bytes", "2048",
+    ]).unwrap();
+    assert!(guard_mutating_cli_actor(&cli.command, Some("agent/test"), None).is_err());
+    let Command::Devices(DevicesArgs { command: Some(DevicesCommand::Grant {
+        command: AssistantGrantCommand::ReadTrust { grant, issuer, key_id,
+            attestor_public_key, shim_public_key, default_response_bytes, max_response_bytes },
+    }), .. }) = cli.command else { panic!("expected assistant read trust"); };
+    assert_eq!(grant, "assistant-grant/fixture");
+    assert_eq!(issuer, "scg/approval-host");
+    assert_eq!(key_id, "approval-key/fixture");
+    assert_ne!(attestor_public_key, shim_public_key);
+    assert_eq!((default_response_bytes, max_response_bytes), (1024, 2048));
+}
+
+#[test]
+fn assistant_grant_cli_rejects_harness_person_impersonation() {
+    for argv in [
+        vec!["st3", "devices", "--as", "person/operator", "pair", "--assistant", "assistant/chatgpt"],
+        vec!["st3", "devices", "--as", "person/operator", "grant", "inspect", "assistant-grant/demo"],
+    ] {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        assert!(guard_mutating_cli_actor(&cli.command, Some("agent/test"), None).is_err());
+        assert!(guard_mutating_cli_actor(&cli.command, None, None).is_ok());
+    }
+}
+
+#[test]
+fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
+    let argv = |extra: &[&'static str]| {
+        let mut argv = vec![
+            "st3", "devices", "--as", "person/operator", "pair", "--assistant",
+            "assistant/chatgpt",
+        ];
+        argv.extend_from_slice(extra);
+        argv
+    };
+    let parsed = Cli::try_parse_from(argv(&[
+        "--expires-in",
+        "1h",
+        "--scope",
+        "read.assistant.summary",
+        "--scope",
+        "read.assistant.attention",
+        "--disclose-to-openai",
+        "--consent-evidence",
+        "axe decision ask recorded by the owning person",
+    ]))
+    .unwrap();
+    let Command::Devices(DevicesArgs {
+        command:
+            Some(DevicesCommand::Pair {
+                device_name,
+                assistant: Some(_),
+                grant,
+                ..
+            }),
+        ..
+    }) = parsed.command
+    else {
+        panic!("expected an assistant pairing command")
+    };
+    assert!(device_name.is_none());
+    assert_eq!(grant.expires_in, Some(3_600));
+    let sealed = SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), grant).unwrap();
+    assert_eq!(sealed.scopes.len(), 2);
+    assert_eq!(sealed.consent_evidence, "axe decision ask recorded by the owning person");
+
+    for rejected in [
+        argv(&["--expires-in", "0"]),
+        argv(&["--expires-in", "721h"]),
+        argv(&["--expires-in", "1500ms"]),
+        argv(&["--scope", "read.everything"]),
+        argv(&["--full-control"]),
+        argv(&["--read-only"]),
+        vec!["st3", "devices", "--as", "person/operator", "pair", "--assistant", "assistant/other"],
+    ] {
+        assert!(Cli::try_parse_from(&rejected).is_err(), "accepted {rejected:?}");
+    }
+
+    let terms = |scopes: Vec<AssistantScope>, consent: bool| AssistantGrantTerms {
+        expires_in: None,
+        scopes,
+        disclose_to_openai: consent,
+        consent_evidence: Some("axe decision ask recorded by the owning person".into()),
+    };
+    let summary = parse_assistant_scope("read.assistant.summary").unwrap();
+    assert!(SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), terms(vec![], true)).is_err());
+    assert!(
+        SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), terms(vec![summary.clone()], false))
+            .is_err()
+    );
+    assert!(
+        SealedAssistantGrantTerms::from_cli("person/other", Some("person/operator"), terms(vec![summary.clone()], true))
+            .is_err()
+    );
+    let defaulted =
+        SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), terms(vec![summary], true))
+            .unwrap();
+    assert_eq!(defaulted.expires_in_seconds, 3_600);
+    assert!(require_assistant_grant_owner("person/operator", None).is_err());
+    assert!(require_assistant_grant_owner("person/operator", Some("operator")).is_err());
+    assert!(require_assistant_grant_owner("person/operator", Some("person/operator")).is_ok());
+
+    let complete = |extra: &[&'static str]| {
+        let mut argv = vec![
+            "st3", "devices", "complete", "https://member.example", "pairing/demo", "--assistant",
+        ];
+        argv.extend_from_slice(extra);
+        Cli::try_parse_from(argv)
+    };
+    let Command::Devices(DevicesArgs {
+        command: Some(DevicesCommand::Complete { assistant, .. }),
+        ..
+    }) = complete(&[]).unwrap().command
+    else {
+        panic!("expected an assistant completion command")
+    };
+    assert!(assistant);
+    assert!(complete(&["--unpinned"]).is_err(), "assistant sessions carry no person root");
+    assert!(complete(&["--fingerprint", "sha256:demo"]).is_err());
 }
 
 #[test]
@@ -6635,6 +6940,7 @@ async fn serve_test_store(
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
