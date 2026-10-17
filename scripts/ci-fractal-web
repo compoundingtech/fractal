@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
 # The fractal-web execution lanes, run inside `nix develop .#web`. Each lane is timed into the
 # job summary. Packages that join the workspace add their lanes here.
+# FRACTAL_WEB_LANE selects checks or kit; unset runs both. FRACTAL_WEB_SHARD is
+# inherited by the kit play runner. Toolchain and install are shared by all lanes.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+execution_lane=${FRACTAL_WEB_LANE:-}
+case "$execution_lane" in
+  ''|checks|kit) ;;
+  *)
+    echo "::error::FRACTAL_WEB_LANE must be checks or kit (or unset for all)" >&2
+    exit 1
+    ;;
+esac
+
+selected_lane() {
+  [ -z "$execution_lane" ] || [ "$execution_lane" = "$1" ]
+}
 
 summary=${GITHUB_STEP_SUMMARY:-/dev/null}
 printf '| Lane | Elapsed |\n| --- | --- |\n' >> "$summary"
@@ -49,37 +64,41 @@ kit_plays() (
 )
 lane "Toolchain and Buck root" toolchain
 lane "Frozen install" pnpm install --frozen-lockfile
-lane "Dependency licenses" python3 scripts/ci-fractal-web-licenses --check
-lane "Buck typecheck" buck2 build //:typecheck
-lane "Scenario typecheck" pnpm --filter @smalltalk/st3-scenarios typecheck
-lane "Scenario tests" pnpm --filter @smalltalk/st3-scenarios test
-lane "Scenario freshness" pnpm --filter @smalltalk/st3-scenarios emit:check
-lane "Scenario decode" pnpm --filter @smalltalk/st3-scenarios decode
-lane "Scenario privacy" pnpm --filter @smalltalk/st3-scenarios scan
-lane "Measurement contracts" node --experimental-strip-types --test apps/fractal-web/src/telemetry/measurement/measurement.node-test.ts
-lane "Measurement bundle exclusion" bun apps/fractal-web/src/telemetry/measurement/check-bundles.mjs
-lane "Synthetic fixtures" bash apps/fractal-web/scripts/ci/fixtures-gate.sh
-lane "Extension registry" node --experimental-strip-types --test apps/fractal-web/src/extensions/registry.unit.test.ts
-lane "Folders core" node --test apps/fractal-web/src/folders/core.node-test.mjs
-lane "App typecheck" pnpm --filter fractal-web typecheck
-lane "CSS asset guard" node --test apps/fractal-web/scripts/vite-css-assets.node-test.mjs
-lane "App production build" production_build
-lane "App unit tests" pnpm --filter fractal-web test
-lane "SDK unit tests" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.config.ts
-lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.perf.config.ts
-lane "UI kit typecheck" pnpm --filter @smalltalk/fractal-ui typecheck
-case "${KIT_INPUTS:-true}" in
-  true)
-    lane "UI kit play index contracts" node --test packages/fractal-ui/scripts/kit-play-index.node-test.mjs
-    lane "UI kit context isolation controls" node packages/fractal-ui/scripts/kit-play-isolation.browser-test.mjs
-    lane "UI kit Storybook" pnpm --filter @smalltalk/fractal-ui build-storybook
-    lane "UI kit strict plays (440/1440 × dark/light)" kit_plays
-    ;;
-  false)
-    printf 'UI kit plays skipped: no kit inputs changed (%s..%s)\n' "${BASE_SHA:?}" "${HEAD_SHA:?}" | tee -a "$summary"
-    ;;
-  *)
-    echo "::error::KIT_INPUTS must be true or false" >&2
-    exit 1
-    ;;
-esac
+if selected_lane checks; then
+  lane "Dependency licenses" python3 scripts/ci-fractal-web-licenses --check
+  lane "Buck typecheck" buck2 build //:typecheck
+  lane "Scenario typecheck" pnpm --filter @smalltalk/st3-scenarios typecheck
+  lane "Scenario tests" pnpm --filter @smalltalk/st3-scenarios test
+  lane "Scenario freshness" pnpm --filter @smalltalk/st3-scenarios emit:check
+  lane "Scenario decode" pnpm --filter @smalltalk/st3-scenarios decode
+  lane "Scenario privacy" pnpm --filter @smalltalk/st3-scenarios scan
+  lane "Measurement contracts" node --experimental-strip-types --test apps/fractal-web/src/telemetry/measurement/measurement.node-test.ts
+  lane "Measurement bundle exclusion" bun apps/fractal-web/src/telemetry/measurement/check-bundles.mjs
+  lane "Synthetic fixtures" bash apps/fractal-web/scripts/ci/fixtures-gate.sh
+  lane "Extension registry" node --experimental-strip-types --test apps/fractal-web/src/extensions/registry.unit.test.ts
+  lane "Folders core" node --test apps/fractal-web/src/folders/core.node-test.mjs
+  lane "App typecheck" pnpm --filter fractal-web typecheck
+  lane "CSS asset guard" node --test apps/fractal-web/scripts/vite-css-assets.node-test.mjs
+  lane "App production build" production_build
+  lane "App unit tests" pnpm --filter fractal-web test
+  lane "SDK unit tests" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.config.ts
+  lane "SDK frame CPU budgets" pnpm --dir apps/fractal-web/packages/st3-sdk exec vitest run --config vitest.perf.config.ts
+  lane "UI kit typecheck" pnpm --filter @smalltalk/fractal-ui typecheck
+fi
+if selected_lane kit; then
+  case "${KIT_INPUTS:-true}" in
+    true)
+      lane "UI kit play index contracts" node --test packages/fractal-ui/scripts/kit-play-index.node-test.mjs packages/fractal-ui/scripts/kit-play-shard.node-test.mjs
+      lane "UI kit context isolation controls" node packages/fractal-ui/scripts/kit-play-isolation.browser-test.mjs
+      lane "UI kit Storybook" pnpm --filter @smalltalk/fractal-ui build-storybook
+      lane "UI kit strict plays (440/1440 × dark/light)" kit_plays
+      ;;
+    false)
+      printf 'UI kit plays skipped: no kit inputs changed (%s..%s)\n' "${BASE_SHA:?}" "${HEAD_SHA:?}" | tee -a "$summary"
+      ;;
+    *)
+      echo "::error::KIT_INPUTS must be true or false" >&2
+      exit 1
+      ;;
+  esac
+fi

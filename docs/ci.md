@@ -505,10 +505,14 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `.github/workflows/{fleet.yml*,workspace-ci.ts,main-upkeep.yml*,cache-audit.ts}`,
   and `.github/repo-settings.json*`.
 - `fractal-web-execution` runs only for relevant changes after successful detection
-  and `genie-freshness`, with a 25-minute timeout and no retries. It runs
-  `nix develop .#web -c bash scripts/ci-fractal-web`. Timed lanes check toolchain/Buck-root
-  identity, run `pnpm install --frozen-lockfile`, then `buck2 build //:typecheck`.
-  It restores the pnpm store with key
+  and `genie-freshness`, with a 25-minute timeout per matrix entry and no retries.
+  One `checks` entry runs the non-browser checks; three `kit` entries partition strict
+  play cases. `fail-fast: false` lets every entry report its result. Entries run
+  `nix develop .#web -c bash scripts/ci-fractal-web` with `FRACTAL_WEB_LANE=checks|kit`.
+  Toolchain/Buck-root identity and `pnpm install --frozen-lockfile` run in every entry;
+  `checks` owns dependency licensing, typechecks, unit tests and the app build.
+  Every entry restores the same pnpm store and uses the same read-only Nix binary caches,
+  without shard-specific cache keys. The pnpm key is
   `fractal-web-pnpm-<os>-pnpm12.7.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
   only Main upkeep's `warm-fractal-web` saves this cache. The app production build
   lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
@@ -527,15 +531,19 @@ workflow-level path filters. `linux-gate` does not depend on them.
   run Main upkeep's dependency-cache warmer, not a duplicate Workspace CI execution.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
   embedded `scripts/ci-fractal-web-gate` passes only when detection succeeded and
-  either no relevant paths changed and execution was skipped, or execution succeeded.
-  Failure, timeout, cancellation and unexpected skips fail the gate. It is not a required
-  check; the ruleset adds it only after successful PR and merge-group emissions.
+  either no relevant paths changed and execution was skipped, or every matrix entry
+  succeeded. Failure, timeout, cancellation and unexpected skips fail this aggregate
+  gate. It is not a required check; the ruleset adds the stable aggregate name only
+  after successful PR and merge-group emissions, never individual matrix names.
 
 `scripts/ci-fractal-web-test`, run by `genie-freshness`, covers detection, fail-closed
 paths, the gate truth table and generated job shape.
 
 The strict kit play lane runs every indexed story at both 440/1440 widths and
-dark/light schemes, with up to six workers bounded by available CPUs. Each worker
+dark/light schemes, partitioned by SHA-256 of the story ID, scheme and width.
+`FRACTAL_WEB_SHARD=i/N` is one-based; unset runs the complete inventory locally.
+Partitions are deterministic, disjoint and independent of index order or additions.
+Each shard has up to six workers bounded by available CPUs. Each worker
 reuses a Chromium context and its HTTP asset cache for the job's immutable build;
 each case still gets a fresh page. Before a new case, the worker closes all prior
 pages/popups, clears cookies and permissions, and clears every origin-storage type
@@ -548,8 +556,11 @@ the full play matrix. It exercises storage/service-worker/popup isolation, concu
 worker independence, retained HTTP asset caching, and failing-story/leaked-state
 negative controls against real Chromium. The matrix receipt retains story/case/worker
 counts and per-case seconds and adds reset, page-creation, guard, navigation-to-DOM,
-post-DOM readiness, assertion and close timings. The strict lifecycle assertions,
-story-identity checks, matrix size and job timeout are unchanged.
+post-DOM readiness, assertion and close timings. Receipts identify the shard, full
+inventory size, selected expected cases and actual cases; only complete selected
+coverage passes. Strict lifecycle assertions, story-identity checks and the job
+timeout are unchanged. New app-owned browser suites can join as another matrix
+lane without duplicating the ordinary checks or introducing a fixed execution job.
 
 Run SDK tests with their own `vitest.config.ts`, not the parent app's narrower test patterns.
 The rejected-mission diagnostic proof checks its fixture against the generated decoder:

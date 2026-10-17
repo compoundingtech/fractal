@@ -531,12 +531,25 @@ export const fractalWebJobs = {
     ],
   },
   'fractal-web-execution': {
-    name: 'fractal-web-execution',
     needs: ['fractal-web-changes', 'genie-freshness'],
     if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' }}",
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 25,
     permissions: { contents: 'read' },
+    // Keep checks independent of play inventory. App-owned plays can add another lane here.
+    // Three kit shards leave growth headroom below the unchanged 25-minute hard limit.
+    strategy: {
+      'fail-fast': false,
+      matrix: {
+        lane: ['checks'],
+        shard: [''],
+        include: [
+          { lane: 'kit', shard: '1/3' },
+          { lane: 'kit', shard: '2/3' },
+          { lane: 'kit', shard: '3/3' },
+        ],
+      },
+    },
     defaults: { run: { shell: 'bash' } },
     steps: [
       { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
@@ -546,6 +559,8 @@ export const fractalWebJobs = {
         ...nixDevelopStep({ name: 'Run the fractal-web lanes and dependency license check', flake: '.#web', command: ['bash', 'scripts/ci-fractal-web'] }),
         env: {
           ...pnpmStoreEnv,
+          FRACTAL_WEB_LANE: '${{ matrix.lane }}',
+          FRACTAL_WEB_SHARD: '${{ matrix.shard }}',
           KIT_INPUTS: '${{ needs.fractal-web-changes.outputs.kit-inputs }}',
           BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
           HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
@@ -556,7 +571,8 @@ export const fractalWebJobs = {
   'fractal-web': {
     name: 'fractal-web',
     needs: ['fractal-web-changes', 'fractal-web-execution'],
-    // A failed, cancelled or unexpectedly skipped execution must fail this check.
+    // The matrix needs result is successful only when every entry succeeds. Never fail-fast:
+    // a failed, cancelled or unexpectedly skipped shard must fail this stable aggregate check.
     if: 'always()',
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 1,

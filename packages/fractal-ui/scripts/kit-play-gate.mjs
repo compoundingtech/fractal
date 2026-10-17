@@ -6,6 +6,7 @@ import { strictStoryGuard } from './details-strict-story-guard.mjs'
 import { availableParallelism } from 'node:os'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
+import { parseWebShard, selectKitCases } from './kit-play-shard.mjs'
 
 // Own an ephemeral localhost server: missing assets remain real, standard 404s.
 const [buildDirectory, outputDirectory] = process.argv.slice(2)
@@ -41,7 +42,7 @@ const base = `http://127.0.0.1:${server.address().port}`
 const started = performance.now()
 const rows = []
 const workers = Math.min(6, availableParallelism())
-let ids = [], browser, fatalError
+let ids = [], cases = [], shard = null, browser, fatalError
 await mkdir(outputDirectory, { recursive: true })
 const writeReceipt = async () => {
   const elapsedSeconds = (performance.now() - started) / 1000
@@ -55,8 +56,9 @@ const writeReceipt = async () => {
   }
   const phaseMeanMilliseconds = Object.fromEntries([...phaseTotals].map(([name, { sum, count }]) => [name, sum / count]))
   const receipt = {
-    pass: !fatalError && ids.length > 0 && rows.length === ids.length * 4 && rows.every(row => row.pass),
-    stories: ids.length, expectedCases: ids.length * 4, cases: rows.length, workers,
+    pass: !fatalError && ids.length > 0 && rows.length === cases.length && rows.every(row => row.pass),
+    stories: ids.length, totalCases: ids.length * 4, expectedCases: cases.length, cases: rows.length, workers,
+    shard: shard ? { ...shard, expectedCases: cases.length, actualCases: rows.length } : null,
     isolation: 'reused-context-fresh-page-cleared-storage',
     elapsedSeconds, fatalError, rows: rows.toSorted((a, b) => a.id.localeCompare(b.id) || a.scheme.localeCompare(b.scheme) || a.width - b.width),
     effectiveWorkerSecondsPerCase: rows.length ? elapsedSeconds * workers / rows.length : null,
@@ -69,12 +71,15 @@ const writeReceipt = async () => {
   return receipt
 }
 try {
+  shard = parseWebShard(process.env.FRACTAL_WEB_SHARD)
   const response = await fetch(`${base}/index.json`)
   if (!response.ok) throw new Error(`Storybook index: HTTP ${response.status}`)
   ids = storyIdsFromIndex(await response.json())
-  const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
-  browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {})
-  const cases = ids.flatMap(id => ['dark', 'light'].flatMap(scheme => [440, 1440].map(width => ({ id, scheme, width }))))
+  cases = selectKitCases(ids, shard)
+  if (cases.length > 0) {
+    const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
+    browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {})
+  }
   let nextCase = 0
   const runCase = async (worker, { id, scheme, width }) => {
     const caseStarted = performance.now()
@@ -126,7 +131,7 @@ try {
       }
     }
   }
-  const results = await Promise.allSettled(Array.from({ length: workers }, async () => {
+  const results = await Promise.allSettled(Array.from({ length: Math.min(workers, cases.length) }, async () => {
     const worker = await createIsolatedKitWorker(browser, base)
     try {
       while (nextCase < cases.length) await runCase(worker, cases[nextCase++])
