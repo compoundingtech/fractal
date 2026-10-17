@@ -766,20 +766,38 @@ For each peer, the status view also reports when the last exchange happened and 
 two envelope sets were at that exchange:
 
 ```text
-sync	catching up: node-b has 124,384 envelopes this node lacks, caught up in about 15m
+sync	catching up: node-b has 124,384 envelopes this node lacks, caught up in about 15m (arrival only)
 peer	node-b	up
   last exchange 2s ago
   node-b has 124,384 envelopes this node lacks
   this node has 3 envelopes node-b lacks
-  receiving 142.5 envelopes/s, caught up in about 15m (measured 2s ago)
+  receiving 142.5 envelopes/s, closing at 140.0/s, caught up in about 15m (arrival only; measured 2s ago)
 ```
 
 Each node measures the difference from the inventory its peer already sends in every exchange, so
 the protocol does not change and a peer on an older build is measured too. A range both sides hold
 with different digests counts exactly once the peer lists it; until then its count is a lower
 bound. The estimate divides the remaining envelopes by how fast that number shrank over recent
-10-second windows, so a peer that keeps writing lengthens it. The measurements live in memory; the
-first exchange after a restart rebuilds them.
+10-second windows, so a peer that keeps writing lengthens it. It never divides by more than the
+rate envelopes arrive, and gives no estimate while either rate is unknown; the status shows that
+rate as `closing at`. That cap is a guard, not a proof: the number can also fall without a receipt,
+when a checkpoint drops envelopes or the comparison narrows, and when receipts coincide with such a
+drop the estimate can still be too short.
+A window in which the number did not shrink, or nothing arrived, leaves no forecast, and the status
+says `not catching up`; the next window then starts from its own rate rather than half of it. A gap
+of more than five minutes between measurements forgets both rates, and so does a change in what
+the count is compared against: the peer's advertised checkpoint, a change to this node's own
+inventory below its tail (which its checkpoints make), or a switch between range and full
+inventories. A peer on an older build advertises no checkpoint, and a narrowing within range
+comparison changes neither, so only the arrival cap guards those; a peer that starts advertising a
+checkpoint resets the window once. A measurement no exchange has renewed for 35 seconds is shown
+as stale, with its counts and time but no rates or estimate; when nothing was missing, the status
+says so of the last measurement and when it was taken, rather than "caught up". Zero envelopes missing means nothing
+the peer listed is missing here, at arrival: admission, projection and visibility can lag behind
+it.
+The estimate is for arrival only: claims admitted, projected and visible can lag behind it, and
+the clients' JSON field (`estimated_catch_up_seconds`) is absent in every case without a forecast.
+The measurements live in memory; the first exchange after a restart rebuilds them.
 
 The `timings` line shows where this daemon has spent replication time since it started:
 
@@ -831,6 +849,44 @@ wrongly. That defect is fixed in the build, with a test that fails without the f
 readmit envelopes a node already holds, does not replay its graph from nothing, and does not
 fetch a peer's projected rows. A member on an older build that still starts a heal gets an
 unsigned 404 from `/v1/peer/heal`, reports the heal as unavailable, and backs off.
+
+### A divergence is a P1 bug
+
+A divergence is a projection pure-function bug that needs a reproduction, never something to
+repair. Where the daemon's environment sets `ST3_DIVERGENCE_CHECK_INTERVAL_MS`, it looks for
+divergences at that interval, never more often than hourly; unset or zero, it never looks. The
+check is cheap by construction. Exchanges already compare digests; with the check on, a
+comparison that first finds a difference also keeps what a reproduction needs, with one pass over
+the inventory in memory, and a difference that lasts keeps the range it opened with. The check
+reads those comparisons in memory and, with one indexed read on the reader pool, every divergence
+fault and recovery on its own and its peers' daemon subjects, however old: an episode is open while
+a failure in it has no recovery that names it. That read goes through every `operational.failure`
+and `operational.recovered` claim ever recorded on those daemon subjects and keeps the divergence
+ones, so a daemon with a very large operational-fault history pays for all of it on each check. It skips a round while the store's writer or a
+write transaction ran over its target in the last minute, or replication is catching up or has put projection off, waiting a minute and
+then doubling. It writes only to open or end a fault.
+
+Each divergence is one `operational.failure` claim on the daemon subject (`daemon/NODE`) of the
+member that recorded it, with the condition `projection-divergence`, an episode starting
+`projection-divergence/` and severity `error`, so it shows as a high-priority fault for the
+fleet's fault agent. Its episode is one per member pair and projection, whichever member
+records it first. Its `reproduction` field names the projection, both members, the claim range
+(the inventory digest at the comparison that first found it and each writer's highest sequence
+in it), both members' digests for that projection, and both builds; a peer whose exchange does not
+say its build is recorded as `unknown`. Exchanges carry the sender's `build` for this; older peers
+leave it out. Nothing repairs the divergence. Its fault ends with an `operational.recovered`
+claim when the latest comparison with that peer, at the same envelopes, found the whole graph
+equal and no difference since. While another projection still differs with that peer, the
+episode stays open; that projection opens its own episode. The same pair and projection
+diverging again reopens the same episode. Comparisons are held in memory, so after a restart an
+open fault stays open until the next comparison that agrees.
+
+The `projection-divergence` objective in `slo/targets.toml` counts open divergence faults
+fleet-wide, with a target of none. A daemon that runs the check keeps the count its last check
+read, so `st doctor` (as `slo/projection-divergence`), `st slo` and the SLO history read no claims
+for it; a daemon that never checks shows neither the line nor the row. A miss is `info`, like any
+other target's: the fault goes to the fleet's fault agent, and while a peer still differs the
+replication check fails `st doctor` as above.
 
 ### First sync
 
