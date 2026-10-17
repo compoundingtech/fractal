@@ -130,7 +130,7 @@ A conversation is one more subscription too. Name an agent or a session:
 {"kind":"subscribe","id":"talk","collection":"conversation","conversation":"agent/ID"}
 ```
 
-An agent's conversation is its current session's timeline with the Smalltalk to or from the agent
+An agent's conversation is its current session's timeline with the Fractal to or from the agent
 joined in. The first `conversation` frame carries `id`, `collection` (`conversation`),
 `session_id`, `replace: true`, the newest page of timeline `items`, and `has_more`. Later frames
 carry `replace: false` and the entries that changed since; an entry revised in place arrives
@@ -199,6 +199,13 @@ Equal count membership produces no upsert, including agent progress/usage
 updates and another person's attention changes. Core list/filter/get behavior
 is unchanged. Summary freshness is carried by its snapshot fence; equal counts
 retain their prior row timestamp so an unchanged count emits no delta.
+
+## Presentations
+
+Optional capability `presentation` version 1 says agent rows carry `presentation`: st's state
+word, list group, why the agent needs someone, and what it holds and has queued (see
+[the UI contract](../../clients/ui-contract.md#agent)). Older daemons omit both. A row that
+lacks it shows the state st reports, marked as coming from an older st; clients derive nothing.
 
 ## Screen inventories
 
