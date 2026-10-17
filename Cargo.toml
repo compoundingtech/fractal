@@ -19,6 +19,11 @@ members = [
   "crates/st2-resource-wasip2",
   "crates/st-wire",
   "crates/st3",
+  "crates/st-chatgpt",
+  "crates/st3-daemon",
+  "crates/st3-e2e",
+  "crates/st3-kernel",
+  "crates/st3-telemetry",
   "crates/st3-client",
   "crates/st3-client-codegen",
   "crates/st3-conversation-ui",
@@ -39,6 +44,10 @@ default-members = [
   "crates/st-resource-protocol",
   "crates/st-wire",
   "crates/st3",
+  "crates/st3-daemon",
+  "crates/st3-e2e",
+  "crates/st3-kernel",
+  "crates/st3-telemetry",
   "crates/st3-client",
   "crates/st3-conversation-ui",
   "crates/st3-feed",
@@ -73,6 +82,62 @@ debug = 1
 
 [profile.test.package."*"]
 debug = 0
+
+# The st3-daemon library unit test is the largest rustc in the workspace; its debug info costs
+# about 2 GB of peak memory and a third of its executable. Backtraces keep function names.
+[profile.test.package.st3-daemon]
+debug = 0
+
+# Optimize hot third-party code in dev/test while preserving assertions and the
+# existing no-debug-info dependency policy. Workspace crates retain opt-level 0.
+
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.dev.package.sha2]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.dev.package.ring]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.dev.package.serde_json]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.libsqlite3-sys]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.sha2]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.ring]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.serde_json]
+opt-level = 3
+debug = 0
+debug-assertions = true
+overflow-checks = true
 
 [package]
 name = "st2"
