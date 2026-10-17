@@ -1111,7 +1111,10 @@ mod retry_tests {
                 },
             ));
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            urls.push(Route::Http(format!("http://{}", listener.local_addr().unwrap())));
+            urls.push(Route::Http(format!(
+                "http://{}",
+                listener.local_addr().unwrap()
+            )));
             servers.push(tokio::spawn(axum::serve(listener, app).into_future()));
         }
         // Socket readiness must not race Tokio's automatic clock advances.
@@ -1170,8 +1173,7 @@ mod retry_tests {
             notify.send_modify(|generation| *generation += 1);
             tick().await;
             let observed = attempts.lock();
-            if observed.len() > before && observed.last() == Some(&false)
-            {
+            if observed.len() > before && observed.last() == Some(&false) {
                 break;
             }
         }
@@ -1189,7 +1191,11 @@ mod retry_tests {
         }
         let observed = attempts.lock();
         assert!(observed.iter().filter(|&&route| route).count() > preferred_before);
-        assert_eq!(observed.last(), Some(&false), "repeat failure keeps fallback usable");
+        assert_eq!(
+            observed.last(),
+            Some(&false),
+            "repeat failure keeps fallback usable"
+        );
         drop(observed);
         dialer.abort();
         awake.abort();
