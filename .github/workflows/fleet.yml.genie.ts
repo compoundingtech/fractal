@@ -13,6 +13,7 @@ import {
   buildEnv,
   commonSetupSteps,
   fractalWebJobs,
+  genieSetupSteps,
   nixCacheStep,
   linuxRunner,
   linuxStageJob as namespaceStageJob,
@@ -30,6 +31,7 @@ import {
   pickRunnerJob,
   pickRunnerJobId,
   primaryTestRunsOn,
+  testBuildRunsOn,
   pnpmStoreEnv,
   supportingLinuxRunsOn,
   supportingStageRunsOn,
@@ -123,7 +125,12 @@ const linuxStageJob = ({
 // An existing step condition may be written as a whole `${{ ... }}`. Combining it with another term as text would
 // leave extra characters around the markers, which GitHub reads as a literal and always-true string (actionlint
 // reports it). Strip the markers first, then combine.
-const bareCondition = (condition: unknown) => String(condition).trim().replace(/^\$\{\{\s*|\s*\}\}$/g, '')
+const bareCondition = (condition: unknown) => {
+  const bare = String(condition).trim().replace(/^\$\{\{\s*|\s*\}\}$/g, '')
+  // Two separate markers joined by an operator would leave markers inside; refuse to guess how to combine them.
+  if (bare.includes('${{') || bare.includes('}}')) throw new Error(`step condition has markers inside it: ${String(condition)}`)
+  return bare
+}
 const gateSkip = (gate: string) => `needs.evidence-gate-${gate}.outputs.skip == 'true'`
 const gateRecord = (gate: string) => `\${{ needs.evidence-gate-${gate}.outputs.record }}`
 const jobSkips: Record<string, { gates: string[]; skip: string }> = Object.fromEntries(
@@ -143,6 +150,14 @@ const stepSkips: Record<string, { gates: string[]; skip: string }> = {
 const aggregateStages = ['linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries']
 const mergeShards = ['linux-tests-shard-3', 'linux-tests-shard-4']
 const skippablePositions = [...aggregateStages, ...mergeShards].flatMap((id, index) => (id === 'linux-test-build' || jobSkips[id] ? [index + 1] : []))
+// Each skippable position carries the stage's OWN skip rule, evaluated by the workflow: a stage may report `skipped`
+// under an evidence skip only when its own rule says skip, so a stage skipped for any other reason (a job-level
+// predicate, an upstream problem) fails the gate even when the aggregate's gate also decided to skip. Positions
+// that can never be covered carry a literal false.
+const stageSkipFlags = (buildSkip: string) =>
+  [...aggregateStages, ...mergeShards]
+    .map((id) => (id === 'linux-test-build' ? `\${{ ${buildSkip} }}` : jobSkips[id] ? `\${{ ${jobSkips[id].skip} }}` : 'false'))
+    .join(' ')
 const skipStepsWhen = (steps: readonly any[], rule: { gates: string[]; skip: string }) => [
   ...steps.map((step) =>
     String(step.uses ?? '').startsWith('actions/checkout') ? step : { ...step, if: step.if == null ? `!(${rule.skip})` : `(${bareCondition(step.if)}) && !(${rule.skip})` },
@@ -164,12 +179,18 @@ const wireEvidenceSkips = (jobs: Record<string, any>) => {
     skip: [...new Set(rules.map((rule) => `(${rule.skip})`))].join(' && '),
   }
   const withGates = (job: any, gates: string[]) => ({ ...job, needs: [...job.needs, ...gates.map((gate) => `evidence-gate-${gate}`)] })
+  // The aggregate reads the build's rule too, so it needs every gate that rule reads.
+  const withStageSkips = (job: any, rule: { gates: string[]; skip: string }) => ({
+    ...withGates(job, rule.gates.filter((gate) => !job.needs.includes(`evidence-gate-${gate}`))),
+    steps: job.steps.map((step: any) => (step.env?.GATE_SKIP ? { ...step, env: { ...step.env, STAGE_SKIPS: stageSkipFlags(rule.skip) } } : step)),
+  })
   const jobLevel = (job: any, rule: { gates: string[]; skip: string }) => {
     const predicate = String(job.if).trim().replace(/^\$\{\{\s*|\s*\}\}$/g, '')
     return { ...withGates(job, rule.gates), if: `\${{ (${predicate}) && !(${rule.skip}) }}` }
   }
   return Object.fromEntries(
     Object.entries(jobs).map(([id, job]) => {
+      if (id === 'linux-gate') return [id, withStageSkips(job, build)]
       if (id === 'linux-test-build') return [id, jobLevel(job, build)]
       if (jobSkips[id]) return [id, jobLevel(job, jobSkips[id])]
       if (stepSkips[id]) return [id, { ...withGates(job, stepSkips[id].gates), steps: skipStepsWhen(job.steps, stepSkips[id]) }]
@@ -234,6 +255,13 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
         HEAD_REPOSITORY: "${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}",
         EVENT_NAME: '${{ github.event_name }}',
         PR_NUMBER: '${{ github.event.pull_request.number }}',
+        // A pull request run may ask about the pull request HEAD's tree (scripts/ci-evidence-gate, choose_tree); these are
+        // the payload facts it checks that head and its authors against. All empty outside a pull request.
+        PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+        PR_USER: '${{ github.event.pull_request.user.login }}',
+        PR_DRAFT: '${{ github.event.pull_request.draft }}',
+        ACTOR: '${{ github.actor }}',
+        TRIGGERING_ACTOR: '${{ github.triggering_actor }}',
         RUN_ID: '${{ github.run_id }}',
         RUN_ATTEMPT: '${{ github.run_attempt }}',
       },
@@ -339,11 +367,10 @@ fi`,
       ],
     },
     // Watch queue refs on GitHub-hosted capacity, even when both workload pools are occupied.
-    // Manual runs retain the existing Namespace capacity report.
     'namespace-capacity': {
       name: 'namespace-capacity',
-      if: "github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group'",
-      'runs-on': `\${{ fromJSON(github.event_name == 'merge_group' && '["ubuntu-latest"]' || format('${JSON.stringify(linuxRunner).replaceAll('${{ github.run_id }}', '{0}').replaceAll("${{ github.event_name == 'merge_group' && 1 || 3 }}", '{1}')}', github.run_id, github.event_name == 'merge_group' && 1 || 3)) }}`,
+      if: "github.event_name == 'merge_group'",
+      'runs-on': 'ubuntu-latest',
       'timeout-minutes': 120,
       permissions: { contents: 'read', actions: 'write' },
       defaults: { run: { shell: 'bash' } },
@@ -361,26 +388,6 @@ fi`,
           // Embed trusted workflow source: this job never checks out or executes queued PR code.
           run: `python3 - <<'QUEUE_WATCH_PY'\n${readFileSync(new URL('../../scripts/ci-queue-watch', import.meta.url), 'utf8')}\nQUEUE_WATCH_PY`,
         },
-        {
-          name: 'Record Namespace platform capacity',
-          if: "github.event_name == 'workflow_dispatch'",
-          run: `nsc workspace concurrency --output json | jq '{concurrency: [.concurrency[] | {platforms, limits, activeConcurrency}]}' > "$RUNNER_TEMP/namespace-capacity.json"
-cat "$RUNNER_TEMP/namespace-capacity.json"
-printf 'Measured at %s\\n\\n' "$(date -u +%FT%TZ)" >> "$GITHUB_STEP_SUMMARY"
-printf '\\x60\\x60\\x60json\\n' >> "$GITHUB_STEP_SUMMARY"
-cat "$RUNNER_TEMP/namespace-capacity.json" >> "$GITHUB_STEP_SUMMARY"
-printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
-        },
-        {
-          name: 'Retain Namespace capacity evidence',
-          if: "github.event_name == 'workflow_dispatch'",
-          uses: 'actions/upload-artifact@v4',
-          with: {
-            name: 'namespace-capacity',
-            path: '${{ runner.temp }}/namespace-capacity.json',
-            'if-no-files-found': 'error',
-          },
-        },
       ],
     },
     'genie-freshness': {
@@ -392,7 +399,7 @@ printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
       'timeout-minutes': 20,
       ...evidenceStepJob(),
       steps: skipIfCovered('genie-freshness', [
-        ...commonSetupSteps.filter((step) => !('id' in step && step.id === 'cargo-cache') && step !== buildSnapshotPrepare && step !== buildSnapshotRestore),
+        ...genieSetupSteps,
         { ...nixDevelopStep({ name: 'Check license coverage, runner selection and generated files', flake: '.#genie', command: ['bash', 'scripts/ci-genie-freshness'] }), id: 'freshness' },
         { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
         ...evidenceStepSteps('genie-freshness', ['bash', 'scripts/ci-genie-freshness'], ['freshness']),
@@ -438,7 +445,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     'linux-test-build': {
       name: 'linux-test-build',
       ...afterPickRunner,
-      'runs-on': linuxStageRunsOn,
+      'runs-on': testBuildRunsOn,
       'timeout-minutes': 120,
       env: { ...buildEnv, CI_CACHE_DEV_SHELL: 'default' },
       outputs: {
@@ -453,7 +460,11 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
                 'restore-keys': step.with['restore-keys'].replaceAll('${{ github.job }}', 'linux-tests') } }
             : step),
         { ...nixDevelopStep({ name: 'Compile and archive each selected target group once',
-          command: ['python3', 'scripts/ci-test-archive', 'build'] }), id: 'archive' },
+          command: ['bash', '-c', 'python3 scripts/ci-build-memory before || echo "::warning::build memory baseline unavailable"; exec python3 scripts/ci-test-archive build'] }), id: 'archive' },
+        { name: 'Report test-build memory after success',
+          env: { BUILD_STEP_OUTCOME: '${{ steps.archive.outcome }}' },
+          run: 'python3 scripts/ci-build-memory after',
+          if: "${{ success() && steps.archive.outcome == 'success' }}", 'continue-on-error': true },
         {
           name: 'Publish this run attempt’s exact-source test archives', id: 'upload',
           uses: 'actions/upload-artifact@v4',
@@ -462,6 +473,14 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
             'compression-level': 0, 'retention-days': 3 },
         },
         ...buildSnapshotSave,
+        { name: 'Report test-build memory after failure',
+          env: { BUILD_STEP_OUTCOME: '${{ steps.archive.outcome }}' },
+          run: 'mkdir -p "$RUNNER_TEMP/ci-build-memory"; (free -m || echo "::warning::free unavailable") | tee "$RUNNER_TEMP/ci-build-memory/free.txt"; python3 scripts/ci-build-memory failure',
+          if: "${{ failure() && steps.archive.outcome == 'failure' }}", 'continue-on-error': true },
+        { name: 'Retain test-build memory evidence',
+          if: "${{ always() && (steps.archive.outcome == 'success' || steps.archive.outcome == 'failure') }}", 'continue-on-error': true,
+          uses: 'actions/upload-artifact@v4', with: { name: 'test-build-memory-${{ github.run_attempt }}',
+            path: '${{ runner.temp }}/ci-build-memory', 'if-no-files-found': 'warn', 'retention-days': 3 } },
       ],
     },
     // Four merge partitions (two for other events) reuse the one producer archive.
@@ -571,8 +590,10 @@ for result in $RESULTS; do
   position=$((position + 1))
   [ "$result" = success ] && continue
   # A stage the evidence gate skipped reports \`skipped\`: accepted only when this gate decided to skip, only
-  # in the positions of stages skipped at job level, and never for a failure or a cancellation.
-  if [ "\${GATE_SKIP:-}" = true ] && [ "$result" = skipped ]; then
+  # in the positions of stages skipped at job level, only when that stage's own skip rule says skip, and never
+  # for a failure or a cancellation.
+  flag=$(printf '%s\\n' "\${STAGE_SKIPS:-}" | cut -d' ' -f"$position")
+  if [ "\${GATE_SKIP:-}" = true ] && [ "$flag" = true ] && [ "$result" = skipped ]; then
     case "$position" in ${skippablePositions.join('|')}) continue ;; esac
   fi
   exit 1
