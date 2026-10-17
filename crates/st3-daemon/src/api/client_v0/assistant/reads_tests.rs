@@ -83,6 +83,109 @@ fn page_items<'a>(page: &'a Value, collection: &str) -> &'a Vec<Value> {
     page["items"].as_array().unwrap()
 }
 
+/// Compare assistant reads against one retained, deterministic synthetic store.
+/// The default scale is three times the historical busy-host mission/run/message counts
+/// documented in `crates/st3/tests/daemon_bench.rs`, not a current production measurement.
+/// Publications warm outside the measured calls; only counts and timings print.
+#[tokio::test]
+#[ignore = "assistant read timing; set ST_ASSISTANT_READ_STORE; run with --ignored --nocapture"]
+async fn assistant_collection_read_timing_on_a_store_copy() {
+    let database = std::env::var_os("ST_ASSISTANT_READ_STORE")
+        .map(std::path::PathBuf::from)
+        .expect("set ST_ASSISTANT_READ_STORE to a retained synthetic database path");
+    let seed = !database.exists();
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.store = std::sync::Arc::new(crate::store::Store::open(&database, "bench-host").unwrap());
+    if seed {
+        seed_assistant_timing_store(&state);
+    }
+    crate::api::refresh_agent_roster(&state.store, false).unwrap();
+    crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
+    crate::api::client_v0::summary::refresh_published(&state, 0, false).unwrap();
+
+    for projection in ["attention", "attention-rich", "missions", "missions-rich", "agents", "agents-rich"] {
+        let started = std::time::Instant::now();
+        let (snapshot, first) = project(&state, &new_client_snapshot(&state), projection,
+            &params(&[("limit", "1")]), MAX_RESPONSE_BYTES).await.unwrap();
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let rows = first["items"].as_array().expect("collection items").len();
+        println!("assistant read {projection} first: rows={rows} ms={ms:.3}");
+        let cursor = first["page"]["next_cursor"].as_str()
+            .expect("representative store must have a next collection page");
+        let started = std::time::Instant::now();
+        let (_, next) = project(&state, &snapshot, projection,
+            &params(&[("limit", "1"), ("cursor", cursor)]), MAX_RESPONSE_BYTES).await.unwrap();
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let rows = next["items"].as_array().expect("collection items").len();
+        println!("assistant read {projection} next: rows={rows} ms={ms:.3}");
+    }
+    let started = std::time::Instant::now();
+    let (_, summary) = project(&state, &new_client_snapshot(&state), "summary",
+        &BTreeMap::new(), MAX_RESPONSE_BYTES).await.unwrap();
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    let counts = &summary["counts"];
+    let attention = counts["attention"].as_u64().expect("attention count");
+    let count_states = |key: &str| counts[key].as_object().expect("state counts")
+        .values().map(|count| count.as_u64().expect("state count")).sum::<u64>();
+    println!("assistant read summary: rows=1 attention_rows={attention} mission_rows={} agent_rows={} ms={ms:.3}",
+        count_states("mission_states"), count_states("agent_states"));
+}
+
+fn seed_assistant_timing_store(state: &AppState) {
+    use std::fmt::Write as _;
+    let scale = std::env::var("ST_ASSISTANT_READ_SCALE").unwrap_or_else(|_| "3".into())
+        .parse::<usize>().expect("scale must be a positive integer");
+    assert!(scale > 0);
+    let missions = 355 * scale;
+    let runs = 1545 * scale;
+    let agents = 200 * scale;
+    let asks = 200 * scale;
+    let messages = 5000 * scale;
+    let mut source = String::from("version 2\n");
+    for number in 0..agents {
+        writeln!(source, "agent \"bench-host.worker-{number}\" {{ workspace \"/srv/assistant-timing\"; command \"true\"; restart always; }}").unwrap();
+    }
+    for number in 0..missions {
+        writeln!(source, "mission \"assistant-timing-{number}\" state=\"ready\" {{ goal \"Invented goal\"; concurrent-runs max=1000000").unwrap();
+        for step in 0..3 {
+            writeln!(source, "step \"step-{step}\" {{ assigned-to \"agent/bench-host.worker-{}\"; goal \"Invented work\"; }}", (number + step) % agents).unwrap();
+        }
+        source.push_str("}\n");
+    }
+    let intent = crate::graph::parse_internal_intent(&source, "bench-host").unwrap();
+    state.store.apply_internal(&intent, "assistant-timing-publication").unwrap();
+    for number in 0..runs {
+        state.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: format!("assistant-timing-{}", number % missions),
+            revision: None, workspace: "/srv/assistant-timing".into(),
+            requester: Some(OWNER.into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: format!("assistant-timing-run-{number}"),
+        }).unwrap();
+    }
+    for number in 0..asks {
+        state.store.ask_person(&serde_json::from_value(json!({
+            "person": OWNER, "actor": format!("agent/bench-host.worker-{}", number % agents),
+            "title": "Invented question", "reason": "Invented decision",
+            "new_run": format!("assistant-timing-ask-{number}"),
+            "idempotency_key": format!("assistant-timing-ask-{number}"),
+        })).unwrap()).unwrap();
+    }
+    for number in 0..messages {
+        state.store.append_claim(&crate::model::ClaimInput {
+            subject: format!("message/assistant-timing-{number}"), kind: "message.sent".into(),
+            actor: Some(OWNER.into()), fields: serde_json::from_value(json!({
+                "from": OWNER, "to": format!("agent/bench-host.worker-{}", number % agents),
+                "title": "Invented update", "content": "Invented conversational background",
+                "status": "sent",
+            })).unwrap(), evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(format!("assistant-timing-message-{number}")),
+        }).unwrap();
+    }
+    println!("assistant seed: mission_rows={missions} run_rows={runs} work_rows={} agent_rows={agents} attention_rows={asks} message_rows={messages}",
+        runs * 3);
+}
+
 #[tokio::test]
 async fn metadata_projections_carry_only_allowlisted_identifiers_enums_and_counts() {
     let root = tempfile::tempdir().unwrap();
