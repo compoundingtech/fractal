@@ -10,6 +10,8 @@ import { expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
+// This is a warm selection/paint test; lazy-loading behavior has its own integration suite.
+import './ConversationPane.tsx'
 import { cancelMeasure, workflows } from './perfMarks.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
@@ -49,9 +51,7 @@ it('sidebar selection through the real retained transcript produces exactly one 
   }
   try {
     await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
-    // Resolve the shell's intentional lazy boundary inside act, before paint assertions.
-    await act(async () => { await import('./ConversationPane.tsx'); await delay(20) })
-    expect(host.querySelector('[data-testid="transcript-empty"]')).not.toBeNull()
+    await vi.waitFor(() => expect(host.querySelector('[data-testid="transcript-empty"]')).not.toBeNull())
     for (let frame = 0; frame < 3; frame++) await flushPaint()
     expect(timing.getEntriesByName('fractal:switch_to_tail', 'measure')).toHaveLength(0)
     const second = [...host.querySelectorAll<HTMLElement>('nav [data-testid="taste-agent-row"]')].find(row => row.textContent?.includes('Second Agent'))!
