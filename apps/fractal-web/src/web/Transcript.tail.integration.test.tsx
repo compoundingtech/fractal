@@ -209,13 +209,13 @@ describe('tail-first transcript mounting', () => {
     expect(controls.closest('[data-testid="transcript-scroll"]')).toBeNull()
     expect(controls.contains(notice!)).toBe(true)
     const summary = controls.querySelector<HTMLElement>('[data-testid="transcript-history-summary"]')!
-    expect(summary.textContent).toContain('Find: shown turns only')
+    expect(summary.textContent).toContain('Find: shown only')
     expect(summary.hidden).toBe(false)
     expect(summary.closest('[hidden]')).toBeNull()
     expect(summary.getAttribute('aria-hidden')).toBe('true')
     expect(lane().scrollTop).toBe(lane().scrollHeight - lane().clientHeight)
-    const earlier = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show earlier messages')!
-    const all = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show all messages')!
+    const earlier = container.querySelector<HTMLButtonElement>('button[aria-label="Show earlier messages"]')!
+    const all = container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!
     expect(earlier).toBeDefined()
     expect(all).toBeDefined()
     expect(controls.contains(earlier)).toBe(true)
@@ -270,7 +270,7 @@ describe('tail-first transcript mounting', () => {
     await scrollUp(25)
     const anchor = renderedRows(lane()).find(row => row.getBoundingClientRect().bottom > 0)!
     const top = anchor.getBoundingClientRect().top
-    const button = [...container.querySelectorAll<HTMLButtonElement>('button')].find(node => node.textContent === 'Show all messages')!
+    const button = container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!
     const focused = action === 'Show all messages' ? button : lane()
     let previousCount = renderedRows(lane()).length
     await act(async () => {
@@ -285,7 +285,7 @@ describe('tail-first transcript mounting', () => {
     expect(controls.closest('[data-testid="transcript-scroll"]')).toBeNull()
     expect(controls.getAttribute('aria-busy')).toBe('true')
     expect(controls.textContent).toContain('Browser Find may miss earlier turns until this finishes.')
-    expect(controls.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('Find: incomplete until done')
+    expect(controls.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('Find: preparing')
     previousCount = renderedRows(lane()).length
     let chunks = 0
     await flushHistory(entries.length, () => {
@@ -300,7 +300,7 @@ describe('tail-first transcript mounting', () => {
         expect(controls.getAttribute('aria-busy')).toBe('true')
         expect(controls.querySelector('[data-testid="transcript-history-all"]')).toBe(button)
         expect(controls.textContent).toContain('Browser Find may miss earlier turns until this finishes.')
-        expect(controls.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('Find: incomplete until done')
+        expect(controls.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('Find: preparing')
       }
       previousCount = count
     })
@@ -309,7 +309,7 @@ describe('tail-first transcript mounting', () => {
     expect(container.querySelector('[data-item-id="long-prompt-0"]')?.textContent).toContain('Long history prompt 0')
     expect(controls.getAttribute('aria-busy')).toBe('false')
     expect(controls.textContent).toContain('Browser Find searches all loaded messages.')
-    expect(controls.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('Find: all loaded turns')
+    expect(controls.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('Find: all loaded')
   }, 30_000)
 
   it('exposes progressive preparation to viewport children until the last chunk commits', async () => {
@@ -468,7 +468,7 @@ describe('batched message measurements', () => {
   it('unregisters queued overflow work for retained inactive panes and refreshes measurements on reactivation', async () => {
     await render(transcript())
     await act(async () => {
-      [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show all messages')!.click()
+      container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!.click()
     })
     await flushHistory(turns.length)
     const messages = [...container.querySelectorAll<HTMLElement>('[data-testid="user-message"]')]

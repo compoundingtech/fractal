@@ -277,9 +277,9 @@ function HistoryRange({ total, startIndex, materializing, earlierId, firstId, re
   }
   return <div role="group" aria-label="Conversation history range" aria-describedby={statusId} aria-busy={materializing} data-testid="transcript-history-controls" data-state={complete ? 'complete' : showingAll ? 'materializing' : 'deferred'} onFocus={() => { focusWithin.current = true }} onBlur={event => { focusWithin.current = event.currentTarget.contains(event.relatedTarget) }} {...stylex.props(styles.historyBar)}>
     <span id={statusId} role="status" aria-live="polite" data-testid="transcript-history-range" {...stylex.props(styles.visuallyHidden)}>{status}</span>
-    <span aria-hidden="true" title={status} data-testid="transcript-history-summary" {...stylex.props(styles.historyNote, styles.historySummary)}>{complete ? 'Find: all loaded turns' : showingAll ? 'Find: incomplete until done' : 'Find: shown turns only'} · <span {...stylex.props(styles.historyCount)}>{complete ? `All ${total} turns shown` : `${shown}/${total} turns`}</span></span>
-    {!complete && <><Button data-testid="transcript-history-earlier" onPress={() => reveal('earlier')} {...stylex.props(styles.historyLoad)}>Show earlier messages</Button>
-      <Button data-testid="transcript-history-all" onPress={() => reveal('all')} {...stylex.props(styles.historyLoad)}>{showingAll ? 'Showing all…' : 'Show all messages'}</Button></>}
+    <span aria-hidden="true" title={status} data-testid="transcript-history-summary" {...stylex.props(styles.historyNote, styles.historySummary)}><span {...stylex.props(styles.historyLead)}>{complete ? 'Find: all loaded' : showingAll ? 'Find: preparing' : 'Find: shown only'}</span><span {...stylex.props(styles.historyCount)}> · {complete ? `All ${total} turns shown` : `${shown}/${total} turns`}</span></span>
+    {!complete && <><Button aria-label="Show earlier messages" data-testid="transcript-history-earlier" onPress={() => reveal('earlier')} {...stylex.props(styles.historyLoad)}>Earlier</Button>
+      <Button aria-label="Show all messages" data-testid="transcript-history-all" onPress={() => reveal('all')} {...stylex.props(styles.historyLoad)}>Show all</Button></>}
   </div>
 }
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
@@ -402,8 +402,9 @@ const styles = stylex.create({
   historyNote: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   // One line under the header with a fixed height: the Find limit leads, the count truncates first, actions never wrap.
   historyBar: { position: 'relative', display: 'flex', alignItems: 'center', gap: s.xs, height: g.controlMd, minHeight: g.controlMd, paddingInline: s.lg, flexShrink: 0, whiteSpace: 'nowrap', borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
-  historySummary: { flex: '1 1 0', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' },
-  historyCount: { fontVariantNumeric: 'tabular-nums' },
+  historySummary: { display: 'flex', flex: '1 1 0', minWidth: 0 },
+  historyLead: { flexShrink: 0 },
+  historyCount: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', fontVariantNumeric: 'tabular-nums' },
   visuallyHidden: { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
   historyLoad: { minHeight: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   unavailableAction: { minHeight: g.controlSm, marginTop: s.xs, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
