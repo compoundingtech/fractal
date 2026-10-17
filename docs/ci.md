@@ -552,14 +552,22 @@ workflow-level path filters. `linux-gate` does not depend on them.
   into a fresh temporary output directory, removed on exit. Build errors fail the
   execution job; build output is not cached. The config's `fractalCssAssets` plugin
   (`apps/fractal-web/scripts/vite-css-assets.mjs`) fails every production build that
-  emits a stylesheet without rules, or a chunk that loads a font file no `@font-face`
-  in its loaded stylesheets declares. The preceding CSS asset guard lane builds
-  fixtures that must trip both failures, and controls (quoted URLs with parentheses,
-  faces declared by the entry's stylesheet) that must pass.
+  emits a stylesheet without rules or with an unprocessed `@import`, a chunk that
+  loads a font file no `@font-face` in its loaded stylesheets declares, or a page
+  linking a stylesheet that is not a CSS asset of the bundle (such as the `data:` URL
+  Vite makes of a copied `<link media>`). The preceding CSS asset guard lane builds
+  fixtures that must trip these failures, and controls (quoted URLs with parentheses,
+  faces declared by the entry's stylesheet, the deferred processed app stylesheet)
+  that must pass.
   App, UI kit, Storybook, browser and performance lanes join the script with the
   packages that add them. The detector separately emits `kit-inputs`: app-only changes
   skip kit play-index contracts, Storybook and strict browser plays; kit source,
-  its transitive workspace dependencies, lock/toolchain and CI-input changes run them.
+  its transitive workspace dependencies, the app changelog files the kit's Changelog
+  stories render (`apps/fractal-web/src/changelog/**`), lock/toolchain and CI-input
+  changes run them. The kit Storybook build writes its module graph, and
+  `scripts/ci-fractal-web-kit-graph` fails the lane when any bundled repository file is
+  outside the kit patterns, so a new import cannot make a change skip the plays that
+  render it.
   This selection is the same for PRs, merge groups and pushes. Main pushes currently
   run Main upkeep's dependency-cache warmer, not a duplicate Workspace CI execution.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
@@ -597,7 +605,10 @@ animations at their end state for the a11y check instead of a fixed 100 ms sleep
 before waiting for them. A play that leaves UI opening after it returns (a hover
 card under the pointer) waits for that state itself rather than relying on the sleep.
 
-The gate takes three options, all unset in CI today (full set, a11y on, no budget).
+The gate takes three options. Pull requests run the stories tagged `critical` with a11y
+off and a 420-second budget; merge groups (observed and signed by Evidence observe) and
+manual runs keep every story with a11y on and no budget, so every tree that reaches main
+has had the full matrix and axe. Which stories are critical is the UI owners' choice.
 `KIT_PLAY_SET=critical` selects only stories tagged `critical` (an empty selection fails);
 `KIT_PLAY_A11Y=off` sets addon-a11y's own `a11y.manual` global so axe does not run, and
 each case must then carry no a11y report, while with a11y on each case must carry exactly
