@@ -802,6 +802,29 @@ run took (a branch the run did not execute is not seen); it must be repeated whe
 genie-freshness lane was not traced (its definition paths are wide on purpose); and a lane whose `unresolved_calls` is not 0 is not closed. Until
 every lane a gate relies on has a clean trace, a signed note still must not skip a queue lane on this alone.
 
+### The `signed-tree` shadow job
+
+`.github/workflows/signed-tree.yml` (source `signed-tree.yml.genie.ts`) runs `scripts/ci-signed-tree` on `pull_request_target` for same-repository,
+non-draft pull requests and prints one line, also written to the step summary:
+
+```
+signed-tree v1 decision=ok|would-reject|reject|skipped|error mode=shadow pr=N head=SHA tree=SHA base=SHA reason=... lanes=name:state,... seconds=S
+```
+
+It asks `evidence-verify --require-all --lanes-from BASE` whether the pull request's HEAD tree has a trusted signed note for every check whose policy
+says `require` (today `genie-freshness` and `typescript-client`, both `shadow`), with the reason per check (`no_record`, `stale_tree`, `wrong_definition`,
+`definition_changed`, ...). It is SHADOW ONLY: the job always passes (`continue-on-error`, the script exits 0 on every path), it is not a required
+check and no ruleset names it; `decision=reject` can only appear once a check's policy says `reject`, and even then it is reported, not enforced.
+
+How a pull request cannot edit or delete the job: `pull_request_target` always runs the workflow file of the BASE branch, so the pull request's copy
+of the workflow is never used, and the checkout is the base branch tip (no `ref`). The pull request's code is never checked out or executed:
+`ci-signed-tree` fetches `refs/pull/N/head` as git objects (and the evidence notes) and reads them with `git rev-parse` / `git ls-tree`; the verifier,
+key list, skip policy and lane file are the base checkout's. Permissions are `contents: read`, no secret is referenced, the checkout keeps no
+credentials, and the event fields reach the script only as environment variables (never interpolated into a command). A test runs a pull request
+that rewrites the script, the verifier, the policy and the lane file and shows that none of it runs and the base's rules decide. Forks and drafts are
+`skipped`. With no check requiring a note the job is a no-op that fetches nothing. A new `pull_request_target` workflow does not run for the pull
+request that adds it (the base does not have it yet), so its first runs are the next pull requests after it lands.
+
 ### Which tree a pull request run asks about
 
 A `pull_request` run checks out GitHub's merge of the head into the CURRENT base, a new tree whenever main moved, so a note for the tree an agent

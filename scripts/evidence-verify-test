@@ -1118,10 +1118,15 @@ class CommittedPolicy(unittest.TestCase):
             for path in rules['absent_paths']:
                 self.assertTrue(any(name == path or name.startswith(path + '/') for name in changed), (lane, path))
 
-    def test_no_committed_check_requires_a_signed_note_yet(self):
+    def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
         text = (ROOT / '.st/evidence-skip-policy.json').read_text()
-        for check in json.loads(text)['checks']:
-            self.assertEqual(evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'], 'off', check)
+        modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')['require'] for check in json.loads(text)['checks']}
+        self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'isolation-vm': 'off', 'genie-freshness': 'shadow',
+                                 'mail-redelivery-canaries': 'off'})
+        lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
+        for check, mode in modes.items():
+            if mode != 'off':
+                self.assertIn(check, lanes, f'{check} requires a note, so the lane file must define its lane')
 
     def test_declared_inputs_are_exactly_the_reviewed_list_and_all_exist(self):
         # Written out here: changing what a check depends on is a reviewed change to the policy AND to this list.
