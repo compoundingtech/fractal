@@ -2,7 +2,7 @@
 use super::*;
 
 fn cursor_fixture() -> Harness {
-    let h = Harness::new();
+    let mut h = Harness::new();
     h.ask("grant-cursor-first", "Private continuation question one");
     h.ask("grant-cursor-second", "Private continuation question two");
     let source = format!(r#"version 2
@@ -38,7 +38,65 @@ mission "cursor-mission-two" state="ready" {{
         }).unwrap();
         h.state.store.set_step_state(&run.steps[0].subject, "ready", None).unwrap();
     }
+    seed_native_conversation(&mut h);
+    for number in 1..=2 {
+        h.state.store.append_claim(&ClaimInput {
+            subject: format!("message/grant-cursor-{number}"), kind: "message.sent".into(),
+            actor: Some(AGENT.into()),
+            fields: serde_json::from_value(json!({
+                "from":AGENT, "to":OWNER, "content":format!("orchid cursor message {number}"), "status":"sent"
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
     h
+}
+
+fn seed_native_conversation(h: &mut Harness) {
+    let home = h.root.path().join("home");
+    let transcript = home.join(".codex/sessions/2026/10/11/assistant.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let native_id = "grant-cursor-native-thread";
+    let incarnation = "native-pty:grant-cursor";
+    let provider_incarnation = "grant-cursor-provider";
+    let mut records = vec![json!({
+        "type":"session_meta", "timestamp":"2026-10-11T12:00:00Z",
+        "payload":{"id":native_id, "cwd":h.root.path(), "source":"test"}
+    }).to_string()];
+    for number in 1..=3 {
+        records.push(json!({
+            "type":"response_item", "timestamp":format!("2026-10-11T12:00:0{number}Z"),
+            "payload":{"type":"message", "role":"assistant", "id":format!("answer-{number}"),
+                "content":[{"type":"output_text", "text":format!("Cursor chat answer {number}")}]}
+        }).to_string());
+    }
+    std::fs::write(transcript, format!("{}\n", records.join("\n"))).unwrap();
+    let directory = h.state.state_dir.join("drivers")
+        .join(&hex::encode(<sha2::Sha256 as sha2::Digest>::digest(AGENT.as_bytes()))[..24])
+        .join("state");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("runtime.json"), serde_json::to_vec(&json!({
+        "agent":AGENT.trim_start_matches("agent/"), "incarnation":provider_incarnation
+    })).unwrap()).unwrap();
+    std::fs::write(directory.join("binding.json"), serde_json::to_vec(&json!({
+        "agent":AGENT.trim_start_matches("agent/"), "runtimeIncarnation":provider_incarnation,
+        "threadId":native_id
+    })).unwrap()).unwrap();
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status":"running", "runtime_id":"grant-cursor-pty",
+            "incarnation_id":incarnation, "terminal":true})),
+        ("harness.observed", json!({"state":"working", "driver":"codex",
+            "incarnation_id":incarnation, "evidence_incarnation":provider_incarnation})),
+    ] {
+        h.state.store.append_claim(&ClaimInput {
+            subject: AGENT.into(), kind: kind.into(), actor: Some(AGENT.into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+    h.state.native_session_home = Some(home);
+    h.local = st3::api::router(h.state.clone());
+    h.fabric = st3::api::fabric_router(h.state.clone());
 }
 
 fn cursor_routes() -> Vec<(String, AssistantScope)> {
@@ -52,6 +110,8 @@ fn cursor_routes() -> Vec<(String, AssistantScope)> {
         ("work".into(), AssistantScope::Work),
         ("conversations".into(), AssistantScope::Conversation),
         (format!("agent-queue?agent_id={}", urlencoding::encode(AGENT)), AssistantScope::Agents),
+        (format!("conversation-timeline?agent_id={}", urlencoding::encode(AGENT)), AssistantScope::Conversation),
+        ("conversation-search?text=orchid".into(), AssistantScope::Conversation),
     ]
 }
 
