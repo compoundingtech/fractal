@@ -17,7 +17,7 @@ import { SendFailure, SendUnconfirmed, TranscriptEmptyContent, type TranscriptEm
 import { Icon } from './Icons'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
 import { readingColumnStyles } from '../reading-column.stylex'
-import { observeUserMessageOverflow } from './user-message-overflow'
+import { observeUserMessageOverflow, TranscriptActiveContext } from './user-message-overflow'
 import { TranscriptSearch } from './TranscriptSearch'
 
 export type LiveActivityState = { readonly _tag: 'Working' } | { readonly _tag: 'WaitingForAnswer' }
@@ -62,6 +62,8 @@ export interface TranscriptProps {
   readonly landmarkContext?: string
   /** C8/E14: preserve the current seat prose header until the turn-language pick; hosts may compare the headerless path. */
   readonly showSeatHeader?: boolean
+  /** False for a retained pane the host keeps mounted but hidden: viewport work and prompt measurement pause until it is shown again. */
+  readonly active?: boolean
 }
 const SenderCaption = React.createContext<string | undefined>(undefined)
 const SeatHeader = React.createContext(true)
@@ -84,15 +86,16 @@ const messageComponents = { Message: TranscriptMessage }
 export function UserMessage({ item }: { readonly item: TextItem & { readonly role: 'user' } }) {
   const onRetrySend = React.useContext(RetrySend)
   const [expanded, setExpanded] = React.useState(false)
+  const active = React.useContext(TranscriptActiveContext)
   const [overflows, setOverflows] = React.useState(false)
   const text = React.useRef<HTMLSpanElement>(null)
   const textId = React.useId()
   const long = item.text.length > 600 || item.text.split('\n').length > 8
   React.useLayoutEffect(() => {
     const element = text.current
-    if (element === null || expanded) return
+    if (element === null || expanded || !active) return
     return observeUserMessageOverflow(element, setOverflows)
-  }, [item.text, expanded])
+  }, [item.text, expanded, active])
   return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}{item.sendState?._tag === 'Unconfirmed' && <SendUnconfirmed state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
 }
 const messageTimeFormatter = new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit' })
@@ -242,8 +245,46 @@ export function LiveActivity({ state, startedAt, now }: { readonly state: LiveAc
 }
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
+/**
+ * The window of rendered turns, kept outside the scroll body so its warning and recovery stay visible at the tail.
+ * Browser Find only sees rendered turns, so the one-line summary leads with that limit (truncation only ever cuts the
+ * count) while a polite status carries the full range. Both actions stay mounted and focusable while turns are
+ * materializing (repeat presses are ignored). Once every turn is rendered the actions leave but the line keeps its
+ * height, so the viewport never resizes mid-prepend; focus that was on an action moves to the conversation history.
+ */
+function HistoryRange({ total, startIndex, materializing, earlierId, firstId, revealRow, scrollId }: { readonly total: number; readonly startIndex: number; readonly materializing: boolean; readonly earlierId: string; readonly firstId: string; readonly revealRow: (id: string, preservePosition?: boolean) => void; readonly scrollId: string }) {
+  const [request, setRequest] = React.useState<'earlier' | 'all'>()
+  const focusWithin = React.useRef(false)
+  const statusId = React.useId()
+  const complete = startIndex === 0 && !materializing
+  const showingAll = materializing && request !== 'earlier'
+  if (!materializing && request !== undefined) setRequest(undefined)
+  React.useLayoutEffect(() => {
+    if (!complete || !focusWithin.current) return
+    focusWithin.current = false
+    document.getElementById(scrollId)?.focus({ preventScroll: true })
+  }, [complete, scrollId])
+  const shown = total - startIndex
+  const status = complete
+    ? `All ${total} turns shown. Browser Find searches all loaded messages.`
+    : showingAll
+      ? `Showing all ${total} turns… Browser Find may miss earlier turns until this finishes.`
+      : `Latest ${shown} of ${total} turns shown. Browser Find misses ${startIndex} earlier ${startIndex === 1 ? 'turn' : 'turns'} until you choose Show all messages.`
+  const reveal = (next: 'earlier' | 'all') => {
+    if (materializing) return
+    setRequest(next)
+    revealRow(next === 'all' ? firstId : earlierId, true)
+  }
+  return <div role="group" aria-label="Conversation history range" aria-describedby={statusId} aria-busy={materializing} data-testid="transcript-history-controls" data-state={complete ? 'complete' : showingAll ? 'materializing' : 'deferred'} onFocus={() => { focusWithin.current = true }} onBlur={event => { focusWithin.current = event.currentTarget.contains(event.relatedTarget) }} {...stylex.props(styles.historyBar)}>
+    <span id={statusId} role="status" aria-live="polite" data-testid="transcript-history-range" {...stylex.props(styles.visuallyHidden)}>{status}</span>
+    <span aria-hidden="true" title={status} data-testid="transcript-history-summary" {...stylex.props(styles.historyNote, styles.historySummary)}>{complete ? 'Find: all loaded turns' : showingAll ? 'Find: incomplete until done' : 'Find: shown turns only'} · <span {...stylex.props(styles.historyCount)}>{complete ? `All ${total} turns shown` : `${shown}/${total} turns`}</span></span>
+    {!complete && <><Button data-testid="transcript-history-earlier" onPress={() => reveal('earlier')} {...stylex.props(styles.historyLoad)}>Show earlier messages</Button>
+      <Button data-testid="transcript-history-all" onPress={() => reveal('all')} {...stylex.props(styles.historyLoad)}>{showingAll ? 'Showing all…' : 'Show all messages'}</Button></>}
+  </div>
+}
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true }: TranscriptProps) {
+export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, active = true }: TranscriptProps) {
+  const scrollId = React.useId()
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
   // adopted messages a task later. Recording the snapshot after its commit is the adoption epoch.
@@ -304,24 +345,21 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
   const empty = committed.length === 0 && sync._tag === 'Live'
     ? <div aria-label="Empty conversation" data-testid="transcript-empty" {...stylex.props(styles.emptyBody)}><TranscriptEmptyContent emptyState={emptyState} /></div>
     : <div data-testid="transcript-placeholder" aria-label="Loading conversation" {...stylex.props(styles.placeholder)}><p role="status">Loading conversation…</p><SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} /><div aria-hidden="true" {...stylex.props(styles.turn)}><div {...stylex.props(styles.skeletonPrompt)} /><div {...stylex.props(styles.skeletonWork)} /><div {...stylex.props(styles.skeletonAnswer)} /></div></div>
-  return <SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
+  return <TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
     <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>
       {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
       {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} />}
       {running !== undefined && <><div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div><span data-testid="run-elapsed">Running{Number.isFinite(started) && started <= now ? ` · ${formatWorkDuration(now - started) || '<1s'}` : ''}</span></>}
     </header>
-    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} initialTailCount={2} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}>
-      {(startIndex, revealRow) => <>{history._tag === 'HasOlder' && startIndex === 0 && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
+    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} initialTailCount={2} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
+      renderHeader={(startIndex, revealRow, materializing) => committed.length > 2 && <HistoryRange total={committed.length} startIndex={startIndex} materializing={materializing} earlierId={committed[Math.max(0, startIndex - 4)]!.id} firstId={committed[0]!.id} revealRow={revealRow} scrollId={scrollId} />}>
+      {(startIndex, revealRow) => <>
+      {history._tag === 'HasOlder' && startIndex === 0 && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
       {committed.length === 0 ? empty : <TranscriptSearch turns={committed} startIndex={startIndex} revealRow={revealRow} {...stylex.props(styles.timeline)}>
-        {committed.length > 2 && <div data-testid="transcript-history-controls" {...stylex.props(styles.historyBoundary, styles.historyControls)}>
-          <span role="status" aria-live="polite" data-testid="transcript-history-range" {...stylex.props(styles.historyNote, styles.historyRange)}>{startIndex === 0 ? `All ${committed.length} turns shown.` : `Showing the latest ${committed.length - startIndex} of ${committed.length} turns. ${startIndex} earlier turns are not shown. Browser Find only searches shown messages; choose Show all messages for complete search.`}</span>
-          <Button isDisabled={startIndex === 0} onPress={() => revealRow(committed[Math.max(0, startIndex - 4)]!.id, true)} {...stylex.props(styles.historyLoad)}>Show earlier messages</Button>
-          <Button isDisabled={startIndex === 0} onPress={() => revealRow(committed[0]!.id, true)} {...stylex.props(styles.historyLoad)}>Show all messages</Button>
-        </div>}
         {committed.slice(startIndex).map(turn => <PreparedTurn key={turn.id} turn={turn} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}
       </TranscriptSearch>}</>}
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
-  </ThreadPrimitive.Root></RetrySend.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider>
+  </ThreadPrimitive.Root></RetrySend.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider>
 }
 const runSweep = stylex.keyframes({ from: { transform: 'translateX(0%)' }, to: { transform: 'translateX(300%)' } })
 const liveSpin = stylex.keyframes({ from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } })
@@ -362,8 +400,11 @@ const styles = stylex.create({
   emptyBody: { flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: s.sm, padding: s.xl, textAlign: 'center' },
   historyBoundary: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: s.md, minHeight: g.controlMd, flexShrink: 0 },
   historyNote: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
-  historyControls: { flexWrap: 'wrap' },
-  historyRange: { flexBasis: '100%', textAlign: 'center' },
+  // One line under the header with a fixed height: the Find limit leads, the count truncates first, actions never wrap.
+  historyBar: { position: 'relative', display: 'flex', alignItems: 'center', gap: s.xs, height: g.controlMd, minHeight: g.controlMd, paddingInline: s.lg, flexShrink: 0, whiteSpace: 'nowrap', borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  historySummary: { flex: '1 1 0', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' },
+  historyCount: { fontVariantNumeric: 'tabular-nums' },
+  visuallyHidden: { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
   historyLoad: { minHeight: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   unavailableAction: { minHeight: g.controlSm, marginTop: s.xs, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
   unavailableDetails: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: s.xs, maxWidth: g.lane },

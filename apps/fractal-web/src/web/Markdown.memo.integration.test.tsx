@@ -48,3 +48,21 @@ it('keeps unchanged message parsing stable across unrelated frames while referen
   expect(parses.count).toBe(2)
   expect(container.textContent).toContain('Changed message')
 })
+
+it('only parses newly prepended Markdown during progressive history chunks', async () => {
+  const messages = Array.from({ length: 24 }, (_, index) => ({ id: `history-${index}`, text: `Historical **answer ${index}**` }))
+  const history = (startIndex: number) => <div>
+    {messages.slice(startIndex).map(message => <section key={message.id} data-message={message.id}><Markdown text={message.text} /></section>)}
+  </div>
+  await act(async () => root.render(history(20)))
+  expect(parses.count).toBe(4)
+  const latest = container.querySelector('[data-message="history-23"]')
+  for (let startIndex = 16; startIndex >= 0; startIndex -= 4) {
+    const before = parses.count
+    await act(async () => root.render(history(startIndex)))
+    expect(parses.count - before).toBe(4)
+    expect(container.querySelector('[data-message="history-23"]')).toBe(latest)
+    expect(container.querySelectorAll('strong')).toHaveLength(messages.length - startIndex)
+  }
+  expect(parses.count).toBe(messages.length)
+})

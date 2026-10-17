@@ -220,6 +220,8 @@ class ViewportController {
     this.element = element
     this.lastWidth = element.clientWidth
     const manual = (event: Event) => {
+      // Focusing the lane itself does not navigate to a row or change the reader's position.
+      if (event.type === 'focusin' && event.target === element) return
       if (event instanceof KeyboardEvent && (navigationKeys[event.key] !== true || (event.target instanceof HTMLElement && event.target.closest('input,textarea,[contenteditable="true"]')))) return
       if (event.type === 'wheel' || event.type === 'touchmove' || event.type === 'keydown') this.pressedAnchor = undefined
       this.following = false
@@ -350,26 +352,41 @@ export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HT
   readonly scrollToBottomKey?: string
   /** Mount the tail first, then fill one extra viewport and prepend on upward navigation. */
   readonly initialTailCount?: number
-  readonly children?: React.ReactNode | ((startIndex: number, revealRow: (id: string, preservePosition?: boolean) => void) => React.ReactNode)
+  /** Retained hidden panes pause progressive materialization until they become active again. */
+  readonly active?: boolean
+  /** Persistent controls share the materialization state without becoming part of the scroll content. */
+  readonly renderHeader?: (startIndex: number, revealRow: (id: string, preservePosition?: boolean) => void, materializing: boolean) => React.ReactNode
+  readonly children?: React.ReactNode | ((startIndex: number, revealRow: (id: string, preservePosition?: boolean) => void, materializing: boolean) => React.ReactNode)
 }
 
-export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, children, contentProps, stateKey, scrollToBottomKey, initialTailCount, ...props }: EmbraceScrollViewportProps) {
+export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, children, contentProps, stateKey, scrollToBottomKey, initialTailCount, active = true, renderHeader, ...props }: EmbraceScrollViewportProps) {
   const store = React.useContext(ViewportStoreContext)
   const saved = stateKey === undefined ? undefined : store?.get(stateKey)
   const rememberedFirstId = saved?.following === false ? saved.firstRenderedId : undefined
   const [controller] = React.useState(() => new ViewportController(stateKey === undefined ? undefined : store?.get(stateKey)))
   const [window, setWindow] = React.useState(() => ({ key: stateKey, firstId: rememberedFirstId ?? items[initialTailCount === undefined ? 0 : Math.max(0, items.length - initialTailCount)]?.id }))
+  const [revealTarget, setRevealTarget] = React.useState<{ readonly key: string | undefined; readonly id: string }>()
   const savedFirstId = window.key === stateKey ? window.firstId : rememberedFirstId
   const savedIndex = savedFirstId === undefined ? -1 : items.findIndex(item => item.id === savedFirstId)
   const startIndex = initialTailCount === undefined ? 0 : savedIndex >= 0 ? savedIndex : Math.max(0, items.length - initialTailCount)
   const firstId = items[startIndex]?.id
+  const targetIndex = revealTarget?.key === stateKey ? items.findIndex(item => item.id === revealTarget?.id) : -1
+  const materializing = targetIndex >= 0 && targetIndex < startIndex
   const revealRow = React.useCallback((id: string, preservePosition = false) => {
     const index = items.findIndex(item => item.id === id)
     if (index === -1) return
     if (preservePosition) controller.prepareMaterialize()
     else controller.reveal()
-    setWindow({ key: stateKey, firstId: items[Math.min(index, startIndex)]?.id })
+    setRevealTarget(index < startIndex ? { key: stateKey, id } : undefined)
   }, [controller, items, stateKey, startIndex])
+  React.useLayoutEffect(() => {
+    if (!active || !materializing) return
+    const frame = requestAnimationFrame(() => {
+      controller.prepareMaterialize()
+      setWindow({ key: stateKey, firstId: items[Math.max(targetIndex, startIndex - 4)]?.id })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [active, controller, items, materializing, startIndex, stateKey, targetIndex])
   const previousItems = React.useRef(items)
   const previousKey = React.useRef(stateKey)
   const previousCommand = React.useRef(scrollToBottomKey)
@@ -394,11 +411,11 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
     const windowChanged = controller.firstRenderedId !== firstId
     controller.firstRenderedId = firstId
     if (window.key !== stateKey || window.firstId === undefined && firstId !== undefined) setWindow({ key: stateKey, firstId })
-    controller.loadEarlier = startIndex === 0 ? undefined : () => setWindow({ key: stateKey, firstId: items[Math.max(0, startIndex - 4)]?.id })
+    controller.loadEarlier = !active || materializing || startIndex === 0 ? undefined : () => setWindow({ key: stateKey, firstId: items[Math.max(0, startIndex - 4)]?.id })
     if (windowChanged) controller.settle()
     controller.schedule()
     return () => { controller.loadEarlier = undefined }
-  }, [controller, firstId, items, stateKey, startIndex, window.key, window.firstId])
+  }, [active, controller, firstId, items, materializing, stateKey, startIndex, window.key, window.firstId])
   // Every layout commit can insert above a pressed row, including runtime adoption without new items.
   React.useLayoutEffect(() => { controller.preservePress() })
   // Mutation-phase saves precede the owning surface's layout effect that removes closed keys.
@@ -406,7 +423,8 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
     if (previousKey.current !== undefined) store?.save(previousKey.current, controller.released())
   }, [controller, store])
   return <div {...stylex.props(styles.frame)}>
-    <div {...props} style={{ ...props.style, overflowAnchor: 'none' }} ref={controller.attach}><div {...contentProps}>{typeof children === 'function' ? children(startIndex, revealRow) : children}</div></div>
+    {renderHeader?.(startIndex, revealRow, materializing)}
+    <div {...props} style={{ ...props.style, overflowAnchor: 'none' }} ref={controller.attach}><div {...contentProps}>{typeof children === 'function' ? children(startIndex, revealRow, materializing) : children}</div></div>
     <Button ref={controller.attachJump} onPress={controller.jump} hidden {...stylex.props(styles.jump)}>New messages ↓</Button>
   </div>
 })

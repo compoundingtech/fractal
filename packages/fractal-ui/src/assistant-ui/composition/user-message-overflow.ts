@@ -1,3 +1,8 @@
+import * as React from 'react'
+
+/** Retained inactive transcript panes unregister measurements until shown again. */
+export const TranscriptActiveContext = React.createContext(true)
+
 /** Each frame reads a bounded prompt slice before publishing any overflow state. */
 const measurements = new Map<HTMLElement, (overflows: boolean) => void>()
 const pending = new Set<HTMLElement>()
