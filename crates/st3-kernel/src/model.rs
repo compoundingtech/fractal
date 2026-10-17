@@ -86,7 +86,7 @@ pub(crate) fn valid_word(word: &str) -> bool {
 }
 
 /// The fault scope of the scheduler's first-readiness fault (`reconcile`).
-pub(crate) const FIRST_READINESS_FAULT_SCOPE: &str = "scheduler/first-readiness";
+pub const FIRST_READINESS_FAULT_SCOPE: &str = "scheduler/first-readiness";
 
 /// The error code of a send or reply addressed to a person.
 pub const PERSON_HAS_NO_INBOX_CODE: &str = "person-has-no-inbox";
