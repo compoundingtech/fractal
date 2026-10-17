@@ -131,3 +131,108 @@ fn observer_actuals_lru_is_bounded() {
     assert_eq!(state.entries.len(), LIMIT);
     assert!(state.bytes <= BYTE_LIMIT);
 }
+
+#[test]
+fn observer_actuals_unsupported_coverage_stays_disabled_until_verified_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("store.db"), "alder").unwrap();
+    let id = append(&store, SUBJECT, 10, json!({"facts":{"state":"open"}}));
+    read(&store);
+    assert_eq!(read(&store).1, 0);
+    store.connection.write().execute_batch(
+        "DROP TABLE projection_digest_repaired_claims;
+         CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY) WITHOUT ROWID;"
+    ).unwrap();
+    assert!(read(&store).1 > 0);
+    assert!(read(&store).1 > 0, "seed must not clear failed native coverage");
+    store.connection.write().execute(
+        "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id]).unwrap();
+    let repaired = read(&store);
+    assert_eq!(repaired.0, None, "WITHOUT ROWID repairs must not reuse stale state");
+    assert!(repaired.1 > 0);
+    store.connection.write().execute_batch(
+        "DROP TABLE projection_digest_repaired_claims;
+         CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);"
+    ).unwrap();
+    assert!(read(&store).1 > 0);
+    assert_eq!(read(&store).1, 0, "supported coverage was positively reverified");
+}
+
+// SQLite does not report the implicit deletion of a replacing write to the update hook.
+// Production fold-source writers must therefore remain ordinary DML (including DO UPDATE).
+fn replaces_fold_source(source: &str) -> bool {
+    let watched = Actuals::default();
+    let is_watched = |name: &str| watched.tables().iter().any(|(_, table)| *table == name);
+    for statement in source.split(';') {
+        let words = statement.split(|character: char|
+            !character.is_ascii_alphanumeric() && character != '_')
+            .filter(|word| !word.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>();
+        for (position, pair) in words.windows(2).enumerate() {
+            if pair[0] == "replace" && pair[1] == "into" {
+                let mut target = position + 2;
+                if words.get(target).is_some_and(|word| matches!(word.as_str(), "main" | "temp")) {
+                    target += 1;
+                }
+                if words.get(target).is_some_and(|word| is_watched(word)) {
+                    return true;
+                }
+            }
+            if pair[0] == "create" && pair[1] == "table" {
+                let mut target = position + 2;
+                if words.get(target).is_some_and(|word| word == "if") {
+                    target += 3;
+                }
+                if words.get(target).is_some_and(|word| word == "main") {
+                    target += 1;
+                }
+                if words.get(target).is_some_and(|word| is_watched(word))
+                    && words[target..].windows(3).any(|clause|
+                        clause[0] == "on" && clause[1] == "conflict" && clause[2] == "replace")
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn observer_actuals_production_sources_forbid_implicit_replacement_deletes() {
+    // Exercise both replacing spellings and quoted/schema-qualified names without putting
+    // an actual replacing source-table SQL literal into the source being guarded.
+    for (_, table) in Actuals::default().tables() {
+        for prefix in [["INSERT", "OR", "REPLACE", "INTO"].join(" "), ["REPLACE", "INTO"].join(" ")] {
+            assert!(replaces_fold_source(&format!("{prefix} main.\"{table}\" VALUES(1)")));
+        }
+        assert!(replaces_fold_source(&format!(
+            "CREATE TABLE {table}(id TEXT UNIQUE ON CONFLICT REPLACE)"
+        )));
+        assert!(!replaces_fold_source(&format!(
+            "INSERT INTO {table}(id) VALUES(1) ON CONFLICT(id) DO UPDATE SET id=excluded.id"
+        )));
+    }
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut pending = vec![manifest.join("src"), manifest.parent().unwrap().join("smallclaims/src")];
+    while let Some(path) = pending.pop() {
+        for entry in std::fs::read_dir(&path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Adversarial mutation fixtures intentionally exercise unsupported SQL.
+            if name == "tests" || name == "tests.rs" || name.ends_with("_tests.rs") {
+                continue;
+            }
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let source = std::fs::read_to_string(&path).unwrap();
+                assert!(!replaces_fold_source(&source),
+                    "implicit replacement deletes on fold-source tables are unsupported: {}", path.display());
+            }
+        }
+    }
+}

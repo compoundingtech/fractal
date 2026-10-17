@@ -20,6 +20,7 @@ struct State {
     native: Option<(i64, i64)>,
     frontier: i64,
     global: bool,
+    coverage_failed: bool,
     pending: BTreeSet<(&'static str, i64)>,
     entries: VecDeque<(String, Option<Value>, usize)>,
     bytes: usize,
@@ -66,7 +67,7 @@ impl Actuals {
         }
         {
             let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-            if state.serial == serial
+            if !state.coverage_failed && state.serial == serial
                 && let Some(position) = state.entries.iter().position(|(key, _, _)| key == subject)
             {
                 let entry = state.entries.remove(position).expect("located entry");
@@ -79,7 +80,7 @@ impl Actuals {
         let bytes = subject.len() + value.as_ref().map_or(0, value_bytes);
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         // A concurrent resolution can invalidate the read's seed. Never install that answer.
-        if state.serial == serial && bytes <= BYTE_LIMIT {
+        if !state.coverage_failed && state.serial == serial && bytes <= BYTE_LIMIT {
             if let Some(position) = state.entries.iter().position(|(key, _, _)| key == subject) {
                 let (_, _, old_bytes) = state.entries.remove(position).expect("located entry");
                 state.bytes -= old_bytes;
@@ -144,7 +145,19 @@ impl WriterObserver for Actuals {
     }
 
     fn failed(&self, _: Arc<str>) {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).global = true;
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.coverage_failed = true;
+        state.clear();
+        state.serial = state.serial.wrapping_add(1);
+        state.global = true;
+    }
+
+    fn coverage_verified(&self) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.coverage_failed = false;
+        state.clear();
+        state.serial = state.serial.wrapping_add(1);
+        state.global = true;
     }
 
     fn published(&self, connection: &Connection) {

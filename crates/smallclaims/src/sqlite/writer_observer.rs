@@ -25,6 +25,8 @@ pub trait WriterObserver: Send + Sync {
     }
     fn unobserved(&self, database: &str, table: &str);
     fn failed(&self, error: Arc<str>);
+    /// Called only after native hook coverage and all watched physical tables validate.
+    fn coverage_verified(&self) {}
     fn published(&self, connection: &Connection);
 }
 
@@ -244,6 +246,7 @@ impl MutationState {
                     }
                     *previous = current;
                     *previous_generations = generations;
+                    self.observer.coverage_verified();
                 }
             }
         }
