@@ -235,6 +235,12 @@
           "--exclude"
           "st3"
           "--exclude"
+          "st3-daemon"
+          "--exclude"
+          "st3-kernel"
+          "--exclude"
+          "st3-telemetry"
+          "--exclude"
           "st3-client"
           "--exclude"
           "st3-client-codegen"
@@ -399,7 +405,7 @@
           # Embedded hooks are published into immutable runtime hook sets. The
           # sandbox has no /usr/bin/env; patch before compilation for package/check.
           postPatch = ''
-            for hook in crates/st3/hooks/claude-observe.sh crates/st3/hooks/claude-statusline.sh; do
+            for hook in crates/st3-daemon/hooks/claude-observe.sh crates/st3-daemon/hooks/claude-statusline.sh; do
               if [ ! -f "$hook" ]; then
                 echo "Missing embedded Claude hook: $hook" >&2
                 exit 1
@@ -432,6 +438,12 @@
             "-p"
             "st3"
             "-p"
+            "st3-daemon"
+            "-p"
+            "st3-kernel"
+            "-p"
+            "st3-telemetry"
+            "-p"
             "st3-client"
             "-p"
             "st3-client-codegen"
@@ -445,6 +457,8 @@
             "st3-schema"
             "-p"
             "stui"
+            "-p"
+            "st-chatgpt"
           ];
           # Every test gets its own process, as in the native gate. Shared-process Cargo tests
           # pollute CPU measurements and outlive the daemon delivery-presence startup grace.
@@ -550,6 +564,23 @@
         st3 = st3Check.overrideAttrs (_: {
           doCheck = false;
         });
+
+        stChatgpt = pkgs.rustPlatform.buildRustPackage {
+          pname = "st-chatgpt";
+          inherit version cargoDeps;
+          src = self;
+          cargoBuildFlags = [ "-p" "st-chatgpt" "--bin" "st-chatgpt" ];
+          # .cargo/config.toml links Linux targets with mold.
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
+          # The shared daemon check runs the adapter's Rust tests.
+          doCheck = false;
+          meta = {
+            description = "Standalone Small Talk ChatGPT MCP adapter";
+            homepage = "https://github.com/compoundingtech/smalltalk";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "st-chatgpt";
+          };
+        };
 
         st3Help = pkgs.runCommand "st3-help-${version}" {
           nativeBuildInputs = [ pkgs.bashInteractive pkgs.fish pkgs.zsh ];
@@ -846,6 +877,7 @@
         # The release target still links through the pinned Zig/glibc-baseline wrapper.
         packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
+        packages.st-chatgpt = stChatgpt;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
         packages.st2-wasm-resolver = st2WasmResolver;
@@ -1047,8 +1079,8 @@
           } ''
             cp -R ${self}/crates/st-drivers/hooks hooks
             chmod -R u+w hooks
-            cp ${self}/crates/st3/hooks/pi-channel.ts hooks/st-pi-channel.ts
-            cp ${self}/crates/st3/hooks/omp-channel.ts hooks/st-omp-channel.ts
+            cp ${self}/crates/st3-daemon/hooks/pi-channel.ts hooks/st-pi-channel.ts
+            cp ${self}/crates/st3-daemon/hooks/omp-channel.ts hooks/st-omp-channel.ts
 
             modules=hooks/typecheck/node_modules
             mkdir -p "$modules/@earendil-works/pi-coding-agent" "$modules/@types/node"
