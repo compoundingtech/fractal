@@ -12119,38 +12119,37 @@ proptest! {
                     ).unwrap();
                 }
             }
-            if *lifecycle != 0 {
-                let (kind, status) = if *lifecycle == 1 {
-                    ("message.closed", "closed")
-                } else {
-                    ("message.read", "read")
+            let target = if *archived || *lifecycle == 1 {
+                "closed"
+            } else if *lifecycle == 2 {
+                "read"
+            } else {
+                "sent"
+            };
+            let mut current = store.message(&resource).unwrap().expect("generated message");
+            prop_assert_eq!(current.status.as_str(), "sent");
+            while current.status != target {
+                // All sources follow the same admitted transport lifecycle. Do not skip
+                // delivery for agent recipients, even when the generated target is read.
+                let next = match current.status.as_str() {
+                    "sent" | "staged" => "delivered",
+                    "delivered" => "read",
+                    "read" => "closed",
+                    status => panic!("unexpected generated message status {status}"),
                 };
                 store.append_claim(&ClaimInput {
                     subject: resource.clone(),
-                    kind: kind.into(),
+                    kind: format!("message.{next}"),
                     actor: Some("agent/worker".into()),
-                    fields: BTreeMap::from([("status".into(), json!(status))]),
+                    fields: BTreeMap::from([("status".into(), json!(next))]),
                     evidence: Vec::new(),
                     expected_subject: None,
-                    idempotency_key: Some(format!("filter-state-{index}")),
+                    idempotency_key: Some(format!("filter-state-{index}-{next}")),
                 }).unwrap();
+                current = store.message(&resource).unwrap().expect("transitioned message");
+                prop_assert_eq!(current.status.as_str(), next);
             }
-            if *archived && *lifecycle != 1 {
-                for status in ["delivered", "read", "closed"] {
-                    if *lifecycle == 2 && status != "closed" {
-                        continue;
-                    }
-                    store.append_claim(&ClaimInput {
-                        subject: resource.clone(),
-                        kind: format!("message.{status}"),
-                        actor: Some("agent/worker".into()),
-                        fields: BTreeMap::from([("status".into(), json!(status))]),
-                        evidence: Vec::new(),
-                        expected_subject: None,
-                        idempotency_key: Some(format!("filter-archive-{index}-{status}")),
-                    }).unwrap();
-                }
-            }
+            prop_assert_eq!(current.status.as_str(), target);
         }
         let through = store.index().unwrap();
         let sender = format!("sender-{selected_sender}");
