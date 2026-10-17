@@ -163,13 +163,14 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
     let reader = state.clone();
     blocking_store(move || {
         reader.store.clone().read_snapshot(|index| {
+            let read = || -> Result<_, ApiError> {
             let snapshot = client_snapshot_at(&reader, index);
             let now = client_snapshot_time(&snapshot);
             let (_, _, attention) = published_assistant_attention_rows(&reader.store, index, &person)
-                .ok_or_else(|| anyhow::anyhow!("the attention view is still being prepared; retry shortly"))?;
+                .ok_or_else(|| published_view_not_ready("attention"))?;
             let Some((cut, agents, _)) = reader.store.published_agent_roster(index, false) else {
                 reader.store.request_agent_roster_refresh();
-                anyhow::bail!("the agents roster is still being prepared; retry shortly");
+                return Err(published_view_not_ready("agents"));
             };
             if cut < index {
                 reader.store.request_agent_roster_refresh();
@@ -207,7 +208,7 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
                 }
             }
             let mut mission_states = BTreeMap::<&str, u64>::new();
-            for (phase, count) in reader.store.assistant_mission_state_counts_at(now)? {
+            for (phase, count) in reader.store.assistant_mission_state_counts_at(now).map_err(ApiError::internal)? {
                 *mission_states.entry(closed(Some(&phase), MISSION_PHASES)).or_default() += count;
             }
             let value = json!({
@@ -220,9 +221,11 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
                 },
             });
             Ok((snapshot, value))
+            };
+            Ok(read())
         })
     })
-    .await
+    .await?
 }
 
 /// Translate one published native attention row; metadata never copies source prose.

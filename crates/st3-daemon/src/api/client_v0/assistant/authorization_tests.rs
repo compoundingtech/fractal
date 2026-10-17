@@ -34,6 +34,8 @@ async fn fixture(scopes: &[&str], pin_trust: bool) -> Fixture {
             AxumPath(fixture.grant.clone()),Json(fixture.trust_request())).await.unwrap();
         fixture.revision=grant["policy_revision"].as_u64().unwrap();
     }
+    crate::api::refresh_agent_roster(&fixture.state.store, false).unwrap();
+    crate::api::published_attention::refresh_attention_list(&fixture.state.store).unwrap();
     fixture
 }
 impl Fixture {
@@ -472,6 +474,8 @@ mission "projection-two" state="ready" { goal "PRIVATE mission two"; }
             "new_run":format!("projection-{id}"),"idempotency_key":format!("projection-{id}")
         })).unwrap()).unwrap();
     }
+    crate::api::refresh_agent_roster(&fixture.state.store, false).unwrap();
+    crate::api::published_attention::refresh_attention_list(&fixture.state.store).unwrap();
     projection_read_mode(&mut fixture,"caller-bound-allow").await;
     let mut cursors=Vec::new();
     for projection in ["missions","attention","agents"] {

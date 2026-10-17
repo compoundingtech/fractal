@@ -28,6 +28,7 @@ pub(super) async fn page(
             || cursor.snapshot.id != snapshot.id
             || cursor.snapshot.store_index != snapshot.store_index
             || limit.is_some_and(|limit| limit != cursor.limit)
+            || !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&cursor.limit)
             || cursor.expires_at_unix_ms < client_now_ms()
         {
             return Err(client_page_expired("the assistant cursor does not match this collection, grant, policy, or snapshot"));
@@ -70,7 +71,10 @@ fn read_page(
         let has_more = keys.len() > limit;
         keys.truncate(limit);
         let ids = keys.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
-        let cards = mission_list_cards_at(&state.store, &ids, now).map_err(ApiError::internal)?;
+        // Assistant rows do not expose must_act, so do not scan every human attention run
+        // merely to compute that unused native presentation field.
+        let cards = mission_list_cards_with(&state.store, &ids, now, &BTreeSet::new())
+            .map_err(ApiError::internal)?;
         after_key = keys.last().map(|(id, time)| (*time, id.clone()));
         (snapshot, mission_rows(&cards, rich).map_err(ApiError::internal)?, has_more, marker)
     } else if projection.starts_with("attention") {

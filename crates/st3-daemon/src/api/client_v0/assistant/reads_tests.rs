@@ -110,7 +110,7 @@ async fn assistant_collection_read_timing_on_a_store_copy() {
     for projection in ["attention", "attention-rich", "missions", "missions-rich", "agents", "agents-rich"] {
         let started = std::time::Instant::now();
         let (snapshot, first) = project(&state, &new_client_snapshot(&state), projection,
-            &params(&[("limit", "1")]), MAX_RESPONSE_BYTES).await.unwrap();
+            &params(&[("limit", "1")]), MAX_RESPONSE_BYTES, "timing:1").await.unwrap();
         let ms = started.elapsed().as_secs_f64() * 1000.0;
         let rows = first["items"].as_array().expect("collection items").len();
         println!("assistant read {projection} first: rows={rows} ms={ms:.3}");
@@ -118,14 +118,14 @@ async fn assistant_collection_read_timing_on_a_store_copy() {
             .expect("representative store must have a next collection page");
         let started = std::time::Instant::now();
         let (_, next) = project(&state, &snapshot, projection,
-            &params(&[("limit", "1"), ("cursor", cursor)]), MAX_RESPONSE_BYTES).await.unwrap();
+            &params(&[("limit", "1"), ("cursor", cursor)]), MAX_RESPONSE_BYTES, "timing:1").await.unwrap();
         let ms = started.elapsed().as_secs_f64() * 1000.0;
         let rows = next["items"].as_array().expect("collection items").len();
         println!("assistant read {projection} next: rows={rows} ms={ms:.3}");
     }
     let started = std::time::Instant::now();
     let (_, summary) = project(&state, &new_client_snapshot(&state), "summary",
-        &BTreeMap::new(), MAX_RESPONSE_BYTES).await.unwrap();
+        &BTreeMap::new(), MAX_RESPONSE_BYTES, "timing:1").await.unwrap();
     let ms = started.elapsed().as_secs_f64() * 1000.0;
     let counts = &summary["counts"];
     let attention = counts["attention"].as_u64().expect("attention count");
@@ -406,6 +406,30 @@ async fn collection_cursors_are_stable_and_bound_to_disclosure_grant_and_policy(
             assert_eq!(project(&state, &snapshot, projection, &wrong_limit, MAX_RESPONSE_BYTES, "grant-one:1")
                 .await.unwrap_err().code, "page-cursor-expired");
         }
+    }
+}
+
+#[tokio::test]
+async fn cold_agent_pages_fold_only_the_selected_cards() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let agents = (0..20).map(|number| format!(
+        "agent \"worker-{number}\" {{ workspace \"/tmp\"; command \"true\"; restart always; }}"
+    )).collect::<Vec<_>>().join("\n");
+    let intent = crate::graph::parse_internal_intent(&format!("version 2\n{agents}"), "reads-fixture").unwrap();
+    state.store.apply_internal(&intent, "cold-agent-page").unwrap();
+    let (snapshot, first) = project(&state, &new_client_snapshot(&state), "agents",
+        &params(&[("limit", "1")]), MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap();
+    assert_eq!(first["items"].as_array().unwrap().len(), 1);
+    let cursor = first["page"]["next_cursor"].as_str().unwrap();
+    let (_, second) = project(&state, &snapshot, "agents", &params(&[("cursor", cursor)]),
+        MAX_RESPONSE_BYTES, "test-grant:1").await.unwrap();
+    assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    assert_ne!(first["items"][0]["id"], second["items"][0]["id"]);
+    assert_eq!(state.store.agent_resources_largest_fold_for_test(), 1);
+    for projection in ["attention", "summary"] {
+        assert_eq!(read(&state, projection, &[], MAX_RESPONSE_BYTES).await.unwrap_err().status,
+            StatusCode::SERVICE_UNAVAILABLE);
     }
 }
 
