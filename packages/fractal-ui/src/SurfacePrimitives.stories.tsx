@@ -20,7 +20,7 @@ function SurfacePrimitivesStory({ scheme = 'dark', width = 440, selectionMode = 
     </Menu></Popover></MenuTrigger>
     <MenuTrigger><Button variant="outline">Thread actions</Button><Popover><Menu aria-label="Thread actions">
       <MenuItem id="rename">Rename</MenuItem>
-      <MenuItem id="archive" shortcut="⌘E">Archive</MenuItem>
+      <MenuItem id="archive" textValue="File away" shortcut="⌘E">Archive</MenuItem>
     </Menu></Popover></MenuTrigger>
     <Checkbox>Wrap long lines</Checkbox>
     <Checkbox defaultSelected>Follow new events</Checkbox>
@@ -135,6 +135,17 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(rename).toHaveFocus()
   await expect(rename.querySelector('span[aria-hidden="true"]')).toBeNull()
   await expect(getComputedStyle(rename).backgroundColor).toBe(reference.backgroundColor)
+  // String children retain typeahead despite the shared item's render-function wrapper.
+  await userEvent.keyboard('{End}')
+  await expect(canvas.getByRole('menuitem', { name: /Archive/ })).toHaveFocus()
+  await userEvent.keyboard('r')
+  await expect(rename).toHaveFocus()
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
+  await userEvent.keyboard('{ArrowDown}')
+  // An explicit textValue takes precedence over the visible string label.
+  await userEvent.keyboard('f')
+  await expect(canvas.getByRole('menuitem', { name: /Archive/ })).toHaveFocus()
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
   await waitFor(() => expect(actions).toHaveFocus())
