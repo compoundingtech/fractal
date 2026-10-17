@@ -109,6 +109,7 @@ export const HideChanges: Story = {
     const docked = () => canvas.queryByRole('separator', { name: 'Resize changes' })
     await userEvent.click((await canvas.findAllByRole('button', { name: /^Worked for/ }))[0]!)
     await userEvent.click(await waitFor(() => { const row = canvasElement.querySelector<HTMLElement>('[data-tool-status] > button'); expect(row).not.toBeNull(); return row! }))
+    await userEvent.click((await canvas.findAllByRole('button', { name: 'Show raw input/output' }))[0]!)
     await userEvent.click(await canvas.findByRole('button', { name: /^Open .+ tool detail$/ }))
     if (narrow) await waitFor(() => expect(changesTab()).toHaveAttribute('aria-selected', 'true'))
     else await waitFor(() => expect(docked()).not.toBeNull())
@@ -175,7 +176,7 @@ export const ErrorRecovery: Story = {
     await expect(canvas.queryByRole('alert')).toBeNull()
     rosterReload.settle()
     await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'ready'))
-    await expect(rows(canvasElement).length).toBeGreaterThan(3)
+    await waitFor(() => expect(rows(canvasElement).length).toBeGreaterThan(3))
   },
 }
 
