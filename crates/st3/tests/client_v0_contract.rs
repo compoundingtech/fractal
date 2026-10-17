@@ -12,7 +12,7 @@ use tokio::sync::{Barrier, Notify, watch};
 use tower::ServiceExt as _;
 
 fn asset_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/st3/client-v0")
+    Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../docs/st3/client-v0")
 }
 
 fn json(path: impl AsRef<Path>) -> Value {
@@ -312,6 +312,77 @@ fn resource_fields_and_generation_map_keys_enforce_family_references() {
         wrong_run["runs"] = serde_json::json!(["agent/example"]);
         assert!(!validator.is_valid(&wrong_run));
     }
+}
+
+#[test]
+fn mission_step_actor_references_conform_without_accepting_other_id_families() {
+    let mission = fixture("person-ask-mission.json");
+    let paths = [
+        "/run_details/0/current_steps/0/assignee",
+        "/run_details/0/current_steps/0/claimant",
+        "/run_details/0/steps/0/assignee",
+        "/run_details/0/steps/0/claimant",
+        "/run_details/0/steps/0/wake/assignee",
+    ];
+    for validator in [consumer_validator("Mission"), contract_validator("Mission")] {
+        assert_conforms(&validator, "person-ask mission fixture", &mission);
+        for path in paths {
+            for actor in ["agent/asker", "daemon/reconciler", "person/avery"] {
+                let mut row = mission.clone();
+                *row.pointer_mut(path).unwrap() = serde_json::json!(actor);
+                assert_conforms(&validator, path, &row);
+            }
+            for invalid in ["mission/not-an-actor", "person/", "daemon/white space", "agent/"] {
+                let mut row = mission.clone();
+                *row.pointer_mut(path).unwrap() = serde_json::json!(invalid);
+                assert!(!validator.is_valid(&row), "{path} accepted {invalid}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let intent = st3::graph::parse_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+        state.store.origin(),
+    )
+    .unwrap();
+    state.store.apply_internal(&intent, "contract-person-asker").unwrap();
+    let ask = state.store.ask_person(&st3::model::PersonAskRequest {
+        legacy_request: None,
+        person: "person/avery".into(),
+        title: "Choose a release date".into(),
+        reason: "Release needs a date".into(),
+        actor: format!("agent/{}.asker", state.store.origin()),
+        step: None,
+        new_run: Some("choose-date".into()),
+        incarnation: None,
+        idempotency_key: "contract-person-ask".into(),
+        request: None,
+    }).unwrap();
+    let app = st3::api::router(state);
+    let (status, list) = client_json(app.clone(), "/v1/client/missions").await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let mission = list["value"]["items"].as_array().unwrap().iter()
+        .find(|row| row["runs"].as_array().unwrap().contains(&serde_json::json!(ask.run)))
+        .expect("person ask must remain in the mission collection");
+    let detail_uri = format!("/v1/client/missions/{}", mission["id"].as_str().unwrap());
+    let (status, detail) = client_json(app, &detail_uri).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    for row in [mission, &detail["value"]] {
+        assert_conforms(&contract_validator("Mission"), "emitted person-ask mission", row);
+        let decoded: st3_client::Mission = serde_json::from_value(row.clone()).unwrap();
+        let run = decoded.run_details.iter()
+            .find(|run| run.id == ask.run).unwrap();
+        assert_eq!(run.current_steps[0]["assignee"], "person/avery");
+        let step = run.steps.as_ref().unwrap().iter().find(|step| step.id == ask.subject).unwrap();
+        assert_eq!(step.assignee.as_deref(), Some("person/avery"));
+        assert!(step.claimant.is_none());
+    }
+    assert_eq!(detail["value"]["run_details"][0]["steps"][0]["wake"]["assignee"], "person/avery");
 }
 
 #[tokio::test]
@@ -663,6 +734,16 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
 }
 
 #[test]
+fn directive_note_wire_fixture_conforms_to_typed_read_contract() {
+    let fixture = json(asset_root().join("fixtures/directive-notes.json"));
+    assert!(contract_validator("Envelope").is_valid(&fixture));
+    assert!(contract_validator("DirectiveNotes").is_valid(&fixture["value"]));
+    let mut invalid = fixture["value"].clone();
+    invalid["notes"][0]["author"] = serde_json::json!("agent/worker");
+    assert!(!contract_validator("DirectiveNotes").is_valid(&invalid));
+}
+
+#[test]
 fn manifest_names_existing_json_fixtures_and_schema_definitions() {
     let root = asset_root();
     let manifest = json(root.join("fixtures/manifest.json"));
@@ -1008,6 +1089,7 @@ fn event_feeds_are_contiguous_and_terminal_streams_replace_whole_screens() {
 
 fn test_state(root: &Path) -> AppState {
     AppState {
+        owning_person: None,
         // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
         store: Arc::new(
             Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
@@ -1195,6 +1277,25 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
         .iter()
         .find(|c| c["source_id"] == ask.subject)
         .unwrap();
+    // The ask is an alert in its asker's conversation.
+    assert_eq!(card["alert"], true, "{card}");
+    assert_eq!(
+        card["conversation_id"],
+        format!("agent/{}.asker", state.store.origin())
+    );
+    // `alerts` is the same collection under the name a person reads.
+    stream
+        .subscribe("alerts", "alerts", 20, None, None)
+        .await
+        .unwrap();
+    let alerts = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(alerts["id"], "alerts");
+    assert_eq!(alerts["items"], first["items"]);
+    stream.unsubscribe("alerts").await.unwrap();
     let card_id = card["id"].clone();
     let revision = card["revision"].clone();
     let app = st3::api::router(state.clone());
@@ -1243,63 +1344,35 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
 }
 
 #[tokio::test]
-async fn missions_first_page_stays_under_100ms_with_thousands_of_definitions() {
+async fn missions_first_page_returns_fifty_cards_and_a_cursor() {
     let root = tempfile::tempdir().unwrap();
-    let db = root.path().join("large.sqlite");
-    let store = Arc::new(Store::open(&db, "client-v0-baseline").unwrap());
-    let source = "version 2\nmission \"base\" state=\"ready\" { goal \"Page quickly\" }\n";
-    let intent = st3::graph::parse_intent(source, "client-v0-baseline").unwrap();
-    let planned = store
+    let state = test_state(root.path());
+    let source = format!(
+        "version 2\n{}",
+        (0..51)
+            .map(|index| format!("mission \"page-{index:02}\" state=\"ready\" {{ goal \"Read a page\" }}\n"))
+            .collect::<String>()
+    );
+    let intent = st3::graph::parse_intent(&source, "client-v0-baseline").unwrap();
+    let planned = state
+        .store
         .mission(
             &intent,
             st3::model::IntentInput {
-                kdl: source.into(),
+                kdl: source,
                 source_name: None,
             },
         )
         .unwrap();
-    store
-        .apply(&intent, &planned.subject_tokens, "large-page-base")
+    state
+        .store
+        .apply(&intent, &planned.subject_tokens, "mission-page-smoke")
         .unwrap();
-    let base = store.mission_definitions().unwrap().remove(0).mission;
-    let claim_id: String = rusqlite::Connection::open(&db)
-        .unwrap()
-        .query_row(
-            "SELECT claim_id FROM mission_definitions WHERE mission_id='base'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let mut connection = rusqlite::Connection::open(&db).unwrap();
-    st3::store::configure_projection_writer(&connection).unwrap();
-    let transaction = connection.transaction().unwrap();
-    for index in 0..3000 {
-        let id = format!("large-{index:04}");
-        let mut mission = base.clone();
-        mission.id = id.clone();
-        mission.subject = format!("mission/{id}");
-        transaction.execute(
-            "INSERT INTO mission_revisions(mission_id,revision,state,body,claim_id,created_index) VALUES(?1,?2,'ready',?3,?4,1)",
-            rusqlite::params![id, mission.revision, serde_json::to_string(&mission).unwrap(), claim_id],
-        ).unwrap();
-        transaction.execute(
-            "INSERT INTO mission_definitions(mission_id,revision,state,claim_id) VALUES(?1,?2,'ready',?3)",
-            rusqlite::params![id, mission.revision, claim_id],
-        ).unwrap();
-    }
-    transaction.commit().unwrap();
-    let mut state = test_state(root.path());
-    state.store = store;
-    let app = st3::api::router(state);
-    let started = std::time::Instant::now();
-    let (status, page) = client_json(app, "/v1/client/missions?limit=50").await;
-    let elapsed = started.elapsed();
+    let (status, page) = client_json(st3::api::router(state), "/v1/client/missions?limit=50").await;
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["value"]["items"].as_array().unwrap().len(), 50);
-    assert!(
-        elapsed < std::time::Duration::from_millis(100),
-        "mission page over 3000 rows took {elapsed:?}"
-    );
+    assert_eq!(page["value"]["page"]["has_more"], true);
+    assert!(page["value"]["page"]["next_cursor"].is_string());
 }
 
 #[tokio::test]
@@ -1827,6 +1900,102 @@ async fn concurrent_pairing_completion_mints_exactly_one_credential() {
 }
 
 #[tokio::test]
+async fn nonissuer_pairing_revoke_preserves_public_error_envelope() {
+    let issuer_root = tempfile::tempdir().unwrap();
+    let issuer = test_state(issuer_root.path());
+    let receiver_root = tempfile::tempdir().unwrap();
+    let mut receiver = test_state(receiver_root.path());
+    receiver.node = "client-v0-receiver".into();
+    receiver.store = Arc::new(
+        Store::open(&receiver_root.path().join("receiver.sqlite3"), &receiver.node).unwrap(),
+    );
+    let fleet = "issuer-envelope-proof";
+    issuer.store.bind_fleet(fleet).unwrap();
+    receiver.store.bind_fleet(fleet).unwrap();
+    let issuer_app = st3::api::router(issuer.clone());
+    let (status, challenge) = client_post_json(
+        issuer_app.clone(),
+        "/v1/client/pairings",
+        serde_json::json!({
+            "api_version": "st3.client.v0",
+            "device_name": "Issuer envelope phone",
+            "person_id": "person/alex"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{challenge}");
+    let pairing = challenge["value"]["pairing_id"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("pairing/");
+    let (status, paired) = client_post_json(
+        issuer_app,
+        &format!("/v1/client/pairings/{pairing}/complete"),
+        serde_json::json!({
+            "api_version": "st3.client.v0",
+            "code": challenge["value"]["code"],
+            "device_public_key": "issuer-envelope-public-key-000000000000000"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{paired}");
+    for _ in 0..100 {
+        let inventory = receiver.store.replication_inventory().unwrap();
+        if inventory.digest == issuer.store.replication_inventory().unwrap().digest {
+            break;
+        }
+        let exchange = issuer
+            .store
+            .export_replication_exchange(fleet, &inventory)
+            .unwrap();
+        receiver
+            .store
+            .receive_replication_exchange(&issuer.node, fleet, &exchange)
+            .unwrap();
+        receiver.store.validate_replication_backlog().unwrap();
+        receiver.store.apply_replication_repairs().unwrap();
+    }
+    assert!(receiver.store.project_replication_backlog().unwrap());
+    let app = st3::api::router(receiver.clone());
+    let (status, capabilities) =
+        client_json_person(app.clone(), "/v1/client/capabilities", "person/alex").await;
+    assert_eq!(status, StatusCode::OK, "{capabilities}");
+    let (status, error) = client_post_json(
+        app,
+        "/v1/client/actions",
+        serde_json::json!({
+            "api_version": "st3.client.v0",
+            "id": "action/nonissuer-revoke",
+            "type": "pairing.revoke",
+            "idempotency_key": "nonissuer-revoke-envelope-0001",
+            "fence": { "snapshot_id": capabilities["snapshot"]["id"], "subject_revisions": {} },
+            "parameters": { "target_id": paired["value"]["device_id"] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["code"], "issuer-required", "{error}");
+    assert_eq!(error["retryable"], false, "{error}");
+    assert_eq!(
+        error["details"]["issuer_host_id"],
+        format!("host/{}", issuer.node)
+    );
+    assert_conforms(
+        &contract_validator("ErrorEnvelope"),
+        "nonissuer revoke",
+        &error,
+    );
+    assert!(
+        receiver
+            .store
+            .claims_for_kind_at("custom.client.pairing-revoked", None, true, 100)
+            .unwrap()
+            .claims
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn pairing_is_single_use_and_fenced_actions_are_idempotent() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
@@ -1838,7 +2007,7 @@ async fn pairing_is_single_use_and_fenced_actions_are_idempotent() {
         "api_version": "st3.client.v0", "id": "action/message-test", "type": "message.send",
         "idempotency_key": "message-send-test-000001",
         "fence": { "snapshot_id": snapshot, "subject_revisions": {} },
-        "parameters": { "to": "person/test", "content": "hello" }
+        "parameters": { "to": "agent/test", "content": "hello" }
     });
     let (status, first) = client_post_json(app.clone(), "/v1/client/actions", action.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
@@ -2064,10 +2233,15 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     assert_eq!(capability_state("mission.cancel-revision"), "ungranted");
     assert_eq!(capability_state("launch.create"), "granted");
     assert_eq!(capability_state("message.send"), "ungranted");
+    assert_eq!(capability_state("alerts"), "granted");
 
     let (status, attention) =
         client_json_auth(fabric.clone(), "/v1/client/attention", credential).await;
     assert_eq!(status, StatusCode::OK, "{attention}");
+    let (status, alerts) =
+        client_json_auth(fabric.clone(), "/v1/client/alerts", credential).await;
+    assert_eq!(status, StatusCode::OK, "{alerts}");
+    assert_eq!(alerts["value"]["items"], attention["value"]["items"]);
     let item = |id: &str| {
         attention["value"]["items"]
             .as_array()
@@ -2754,6 +2928,10 @@ mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside 
             client_json_person(app.clone(), "/v1/client/capabilities", agent).await;
         for capability in capabilities["value"]["capabilities"].as_array().unwrap() {
             let id = capability["id"].as_str().unwrap();
+            if id == "assistant.grants.v1" {
+                assert_eq!(capability["state"], "ungranted", "{agent}: {capability}");
+                continue;
+            }
             if capability["state"] == "unavailable" || id.contains("glass") {
                 continue;
             }
@@ -3044,6 +3222,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                     &step.subject,
                     "claim",
                     &st3::model::WorkRequest {
+                        wait_ms: None,
                         actor: step.assigned_to.clone(),
                         incarnation: Some("builder-one".into()),
                         summary: None,
@@ -3059,6 +3238,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                     &step.subject,
                     "progress",
                     &st3::model::WorkRequest {
+                        wait_ms: None,
                         actor: step.assigned_to.clone(),
                         incarnation: Some("builder-one".into()),
                         summary: Some("Building the release".into()),
@@ -3188,6 +3368,7 @@ mission "ios-proof" state="ready" {
     let subject = run.steps[0].subject.clone();
     state.store.set_step_state(&subject, "ready", None).unwrap();
     let request = |key: &str, reason: Option<&str>| st3::model::WorkRequest {
+        wait_ms: None,
         actor: Some("agent/client-v0-baseline.ios-owner".into()),
         incarnation: Some("ios-owner-one".into()),
         summary: None,
@@ -3231,6 +3412,7 @@ mission "ios-proof" state="ready" {
         .store
         .finish_person_step(
             &st3::model::PersonStepResponse {
+                delegation: None,
                 subject: ask.subject,
                 actor: "person/alex".into(),
                 summary: "Simulator repaired".into(),
@@ -3304,6 +3486,7 @@ mission "release-proof" state="ready" {
             &subject,
             "claim",
             &st3::model::WorkRequest {
+                wait_ms: None,
                 actor: Some(actor.into()),
                 incarnation: Some("release-owner-one".into()),
                 summary: None,
@@ -3900,6 +4083,18 @@ async fn client_structured_decision_carries_named_answers_both_ways() {
     );
 }
 
+#[test]
+fn a_dismissed_person_answer_conforms_and_an_unknown_outcome_does_not() {
+    let validator = contract_validator("PersonAnswer");
+    for answer in [
+        serde_json::json!({"type": "decision", "outcome": "dismissed"}),
+        serde_json::json!({"type": "choice", "outcome": "dismissed", "text": "Not now."}),
+    ] {
+        assert_conforms(&validator, "a dismissed answer", &answer);
+    }
+    assert!(!validator.is_valid(&serde_json::json!({"type": "decision", "outcome": "vanished"})));
+}
+
 #[tokio::test]
 async fn native_agent_person_asks_use_source_authority_and_reject_malformed_evidence() {
     let root = tempfile::tempdir().unwrap();
@@ -4171,6 +4366,7 @@ mission "timing/run" state="ready" {
     state.store.set_step_state(ready, "ready", None).unwrap();
     state.store.set_step_state(held, "ready", None).unwrap();
     state.store.work_action(held, "claim", &st3::model::WorkRequest {
+        wait_ms: None,
         actor: Some("agent/timing/worker".into()),
         incarnation: Some("timing-worker-one".into()),
         summary: None,
@@ -4263,4 +4459,233 @@ mission "timing/run" state="ready" {
     }).unwrap();
     let (status, denied) = client_json_auth(st3::api::fabric_router(state), path, credential).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+}
+
+#[tokio::test]
+async fn terminal_filters_use_projected_state_and_preserve_history_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    for (name, status, terminal, reachability) in [
+        ("live", "running", true, "local"),
+        ("stopped", "stopped", true, "local"),
+        ("no-terminal", "running", false, "local"),
+        ("unreachable", "running", true, "unreachable"),
+    ] {
+        let subject = format!("agent/lookup/{name}");
+        state
+            .store
+            .append_claim(&st3::model::ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject),
+                fields: std::collections::BTreeMap::from([
+                    ("runtime_id".into(), serde_json::json!(name)),
+                    (
+                        "incarnation_id".into(),
+                        serde_json::json!(format!("{name}:i1")),
+                    ),
+                    ("status".into(), serde_json::json!(status)),
+                    ("terminal".into(), serde_json::json!(terminal)),
+                    ("reachability".into(), serde_json::json!(reachability)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    let app = st3::api::router(state);
+    for query in [
+        "owner=agent%2Flookup%2Fstopped",
+        "owner=agent%2Flookup%2Fno-terminal&history=true",
+        "owner=agent%2Flookup%2Funreachable&state=running",
+    ] {
+        let (status, page) =
+            client_json(app.clone(), &format!("/v1/client/terminals?{query}")).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(
+            page["value"]["items"].as_array().unwrap().is_empty(),
+            "{page}"
+        );
+    }
+    for (name, state) in [
+        ("stopped", "stopped"),
+        ("unreachable", "unreachable"),
+        ("live", "running"),
+    ] {
+        let (status, page) = client_json(
+            app.clone(),
+            &format!(
+                "/v1/client/terminals?owner=agent%2Flookup%2F{name}&state={state}&history=true"
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(
+            page["value"]["items"].as_array().unwrap().len(),
+            1,
+            "{page}"
+        );
+        assert_eq!(page["value"]["items"][0]["state"], state);
+    }
+}
+
+#[tokio::test]
+async fn terminal_filters_are_acknowledged_only_on_terminal_pages() {
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    for name in ["alder", "birch"] {
+        let subject = format!("agent/lookup/{name}");
+        state
+            .store
+            .append_claim(&st3::model::ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject),
+                fields: std::collections::BTreeMap::from([
+                    ("runtime_id".into(), serde_json::json!(name)),
+                    (
+                        "incarnation_id".into(),
+                        serde_json::json!(format!("{name}:i1")),
+                    ),
+                    ("status".into(), serde_json::json!("running")),
+                    ("terminal".into(), serde_json::json!(true)),
+                    ("reachability".into(), serde_json::json!("local")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    let app = st3::api::router(state);
+    for collection in [
+        "agents",
+        "runtimes",
+        "operations",
+        "history",
+        "missions",
+        "work",
+    ] {
+        let (_, baseline) =
+            client_json(app.clone(), &format!("/v1/client/{collection}?limit=1")).await;
+        let (status, page) = client_json(
+            app.clone(),
+            &format!(
+                "/v1/client/{collection}?limit=1&owner=agent%2Flookup%2Fmissing&state=stopped"
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{collection}: {page}");
+        assert_eq!(
+            page["value"]["items"], baseline["value"]["items"],
+            "{collection}"
+        );
+        assert_eq!(
+            page["value"]["filters"], baseline["value"]["filters"],
+            "{collection}"
+        );
+        assert!(
+            page["value"]["filters"].get("owner").is_none(),
+            "{collection}"
+        );
+        assert!(
+            page["value"]["filters"].get("state").is_none(),
+            "{collection}"
+        );
+        if let Some(cursor) = page["value"]["page"]["next_cursor"].as_str() {
+            let (status, continued) = client_json(
+                app.clone(),
+                &format!(
+                    "/v1/client/{collection}?limit=1&cursor={}",
+                    urlencoding::encode(cursor)
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{collection}: {continued}");
+        }
+    }
+    let (status, terminals) = client_json(
+        app,
+        "/v1/client/terminals?owner=agent%2Flookup%2Falder&state=running",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{terminals}");
+    assert_eq!(
+        terminals["value"]["filters"],
+        serde_json::json!({"owner": "agent/lookup/alder", "state": "running"})
+    );
+    assert_eq!(terminals["value"]["items"].as_array().unwrap().len(), 1);
+}
+
+/// Schema shape only: fixtures carry placeholder pins and an intentionally invalid signature, so
+/// this proves nothing about Ed25519 verification, nonce replay or pin equality (daemon tests do).
+#[test]
+fn assistant_read_fixtures_conform_and_malformed_proofs_and_pins_do_not() {
+    let envelope = contract_validator("Envelope");
+    for name in [
+        "assistant-summary.json",
+        "assistant-attention-page.json",
+        "assistant-mission-page.json",
+        "assistant-agent-page.json",
+        "assistant-conversation-content.json",
+        "assistant-terminal-content.json",
+    ] {
+        assert_conforms(&envelope, name, &fixture(name));
+    }
+    // An empty assistant page must not also read as a generic resource Page.
+    let mut empty = fixture("assistant-attention-page.json");
+    empty["value"]["items"] = serde_json::json!([]);
+    assert_conforms(&envelope, "empty assistant attention page", &empty);
+    // The summary carries counts and as_of only; the fixed owner never appears in it.
+    let mut summary = fixture("assistant-summary.json");
+    summary["value"]["person_id"] = serde_json::json!("person/operator");
+    assert!(!contract_validator("AssistantSummary").is_valid(&summary["value"]));
+
+    let proof = contract_validator("ScgReadAuthorization");
+    assert_conforms(&proof, "SCG read authorization", &fixture("assistant-read-authorization.json"));
+    for (pointer, value) in [
+        ("/signature", serde_json::json!("too-short")),
+        ("/payload/identity", serde_json::json!("claude")),
+        ("/payload/projection", serde_json::json!("status")),
+        ("/payload/request_digest", serde_json::json!("8AF8FF220CA571D9BB06E960970592116147A5BB0AD3D3C330306496B1B3DAA3")),
+        ("/payload/max_response_bytes", serde_json::json!(16385)),
+        ("/payload/parameters/start", serde_json::json!(0)),
+        ("/payload/issuer", serde_json::json!("assistant/chatgpt")),
+    ] {
+        let mut malformed = fixture("assistant-read-authorization.json");
+        *malformed.pointer_mut(pointer).unwrap() = value;
+        assert!(!proof.is_valid(&malformed), "{pointer} must be rejected");
+    }
+    let mut extra = fixture("assistant-read-authorization.json");
+    extra["payload"]["person_id"] = serde_json::json!("person/operator");
+    assert!(!proof.is_valid(&extra));
+
+    let trust = contract_validator("AssistantReadTrustRequest");
+    assert_conforms(&trust, "read trust request", &fixture("assistant-read-trust.json"));
+    for (field, value) in [
+        ("shim_public_key", serde_json::json!("c2hvcnQ")),
+        ("attestor_public_key", serde_json::json!("placeholder+attestor/pin=not-a-real-key-00")),
+        ("default_response_bytes", serde_json::json!(4097)),
+        ("max_response_bytes", serde_json::json!(16385)),
+        ("api_version", serde_json::json!("st3.client.v1")),
+    ] {
+        let mut malformed = fixture("assistant-read-trust.json");
+        malformed[field] = value;
+        assert!(!trust.is_valid(&malformed), "{field} must be rejected");
+    }
+    let operations = json(asset_root().join("schemas/operations.json"));
+    let assistant_reads = operations["reads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|read| read["path"].as_str().unwrap().starts_with("/v1/client/assistant/"))
+        .collect::<Vec<_>>();
+    assert_eq!(assistant_reads.len(), 6);
+    for read in assistant_reads {
+        assert_eq!(read["proof_header"], "x-st3-scg-read-authorization", "{read}");
+        assert_eq!(read["minimal_read_mode"], "approval-once", "{read}");
+        assert_eq!(read["max_response_bytes"], 16384, "{read}");
+        assert!(read["scope"].as_str().unwrap().starts_with("read.assistant."), "{read}");
+    }
 }

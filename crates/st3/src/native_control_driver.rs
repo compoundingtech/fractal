@@ -63,7 +63,7 @@ impl NativeControls {
             _ => Ok(false),
         }
     }
-    pub async fn flush(&mut self, client: &Client, fence: Option<&Fence>, stdout: &mut tokio::io::Stdout, dispatch: bool) -> Result<()> {
+    pub async fn flush(&mut self, client: &Client, fence: Option<&Fence>, stdout: &mut (impl tokio::io::AsyncWrite + Unpin), dispatch: bool) -> Result<()> {
         let Some(fence) = fence else { return Ok(()); };
         if let Some(dir) = &self.outbox {
             for entry in std::fs::read_dir(dir)? {

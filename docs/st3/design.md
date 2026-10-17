@@ -1,6 +1,6 @@
 # st architecture
 
-st is the Smalltalk claims-graph runtime. KDL declarations are its human authoring surface. Claims
+st is the Fractal claims-graph runtime. KDL declarations are its human authoring surface. Claims
 are its durable fact surface. Projections, process observations, and caches are derived state.
 
 This document defines the stable system shape. The linked technical documents define the complete
@@ -17,7 +17,6 @@ interfaces and edge cases.
 7. Invalid data remains visible. It cannot halt unrelated reads, writes, or replication.
 8. Every repair adds a replacement fact and retains the invalid source for inspection.
 9. Host placement is explicit. Cross-host replication is optional.
-10. The st2 and st control loops remain separate during migration.
 
 ## Durable graph
 
@@ -31,9 +30,9 @@ See [data authority](data-authority.md) for the authority classes. See [schema](
 public subject and claim vocabulary.
 
 The graph is its own crate, `crates/smallclaims`: the claim log and its batches, envelopes and
-their admission, the canonical order, projection digests, replication and heals between members,
+their admission, the canonical order, projection digests, replication between members,
 fleet membership, checkpoints, documents and blobs. It depends on nothing of smalltalk's, so agents,
-missions, seats, delivery, drivers, the CLI and stui stay out of it. smalltalk's store wraps the
+missions, seats, delivery, drivers, the CLI and the terminal UI stay out of it. smalltalk's store wraps the
 graph's and plugs in through `smallclaims::store::Runtime`: its tables and their migration, claim
 kind validation, local writes, projection and replay, cache invalidation, the digested tables, and
 the checkpoint rules and proof answers. A runtime may call the graph freely; the graph reaches a
@@ -136,16 +135,17 @@ on with every other item:
 A fault is recorded again only when its cause changes. The item's next success records its
 recovery.
 
-A fault that lasts two minutes asks `person/operator` once, naming the subject, the cause, and
-`st subject SUBJECT`. A new cause replaces that item, and the next success closes it. While whole
-passes fail or the reconciler panics, one item on `daemon/HOST` names `st doctor` and
-`st service restart`, and the next successful pass closes it.
+A fault that lasts two minutes becomes a fault item for its owning agent (see
+[Messages and attention](#messages-and-attention)). A new cause replaces that item, and the next
+success closes it. While whole passes fail or the reconciler panics, one item on `daemon/HOST`,
+"The reconciler is failing", names `st doctor` and `st service restart`, and the next successful
+pass closes it.
 
 The daemon also reads the free space of its state directory's filesystem and of each workspace on
 its host, every 30 seconds. When one has under 2 GiB or 2% left, one item on `daemon/HOST` names
 each such filesystem and how to free space. It closes once each has 4 GiB and 4% free, so a
-filesystem near the line does not raise and close items over and over. A person who closes the
-item early is not asked again until the space recovers. `st doctor` shows the free space of the
+filesystem near the line does not raise and close items over and over. An item closed early is not
+raised again until the space recovers. `st doctor` shows the free space of the
 state directory.
 
 Sometimes a fault cannot be recorded on its item, for example when a store write fails. The item
@@ -213,7 +213,7 @@ The daemon's other loops keep the same rule:
 
 ## Messages and attention
 
-Smalltalk messages are durable claims. Delivery is a separate lifecycle with sent, delivered,
+Fractal messages are durable claims. Delivery is a separate lifecycle with sent, delivered,
 read, and closed facts.
 
 The reconciler creates ready-work messages. A driver transports them and renews claimed work. This
@@ -222,10 +222,10 @@ split lets a ready step survive a daemon outage, a driver outage, and a failed d
 An agent notification only indicates that ready work or a message may exist. It does not authorize
 new work. The work queue and message record remain authoritative.
 
-`st attention ls --as person/NAME` lists only what waits on that person and no agent can resolve:
+`st alerts ls --as person/NAME` lists only what waits on that person and no agent can resolve:
 requests (person steps and agents' `st work ask`) and reviews (human gates, launch approvals and
 revision approvals). Human identity is required rather than inferred. The stable client-v0
-attention resource is the machine source for user interfaces, and stui's home and the phone show
+attention resource is the machine source for user interfaces, and the terminal UI's home and the phone show
 exactly this set.
 
 Messages never enter attention; they stay in conversations. An agent that waits on a person's
@@ -255,7 +255,7 @@ See [resource subscriptions](resource-subscriptions.md) for provider and intake 
 ## Replication
 
 One st node is a complete local system. Fleet nodes exchange authenticated claim envelopes and
-document bytes over loopback endpoints carried by Fabric or an equivalent transport.
+document bytes over loopback or tailnet HTTP, or a `fabric://NODE_ID/PROTOCOL` route.
 
 Replication compares immutable envelope inventories. Receipt order cannot change the deterministic
 winner. Invalid envelopes remain inspectable and do not halt later replication.
@@ -275,7 +275,8 @@ The session can pause on one machine and continue on another after replication.
 
 ## Security boundary
 
-The local API uses a Unix socket. Peer HTTP listeners and peer URLs must use loopback addresses.
+The local API uses a Unix socket. A peer listener binds a loopback or Tailscale address unless `--peer-listen-allow-plain-http` is
+set; peer URLs are loopback or tailnet `http://` URLs or `fabric://NODE_ID/PROTOCOL`.
 Fleet messages use a shared secret and request-bound signatures.
 
 Each member’s render transaction refuses symbolic-link escapes and conflicting file ownership.
@@ -286,13 +287,3 @@ without blocking other members; stopping a member does not require its render to
 
 Mission constraints describe required outcomes. They do not disable harness features or replace a
 future operating-system sandbox.
-
-## Migration boundary
-
-The st2 catalog remains a searchable archive. st does not import st2 inboxes, archived messages,
-runtime records, conversation history, or durable context.
-
-Move one agent at a time. Stop the st2 owner before starting an st mission that uses the same
-workspace. Keep the old declaration for rollback until the st run passes its checks.
-
-See [agent migration](agent-migration.md) for the complete sequence.

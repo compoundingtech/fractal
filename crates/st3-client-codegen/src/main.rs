@@ -1,6 +1,5 @@
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -29,13 +28,13 @@ fn main() -> Result<()> {
         .as_object()
         .context("actions object")?;
     let reads = operations["reads"].as_array().context("reads array")?;
-    let digest = hex_digest(&[&schema_bytes, &operations_bytes]);
+    let constants = contract_constants(&operations)?;
     let rust = format_rust(&rust_contract(
-        &digest,
         actions.keys().map(String::as_str),
         reads,
+        &constants,
     )?)?;
-    let swift = swift_contract(actions.keys().map(String::as_str), reads)?;
+    let swift = swift_contract(actions.keys().map(String::as_str), reads, &constants)?;
     let rust_models = format_rust(&render_marker(
         RUST_MODELS_TEMPLATE,
         "    // @st3-codegen:rust-action-constructors",
@@ -56,7 +55,7 @@ fn main() -> Result<()> {
         "    // @st3-codegen:swift-operation-methods",
         &swift_operation_methods(reads, actions)?,
     )?;
-    let typescript_models = typescript_models(&schema, &operations)?;
+    let typescript_models = typescript_models(&schema, &operations, &constants)?;
     let typescript_schema = rich::models(&schema)?;
     let typescript_client = render_marker(
         TYPESCRIPT_CLIENT_TEMPLATE,
@@ -159,6 +158,22 @@ fn action_method(action: &str) -> String {
     action.replace(['.', '-'], "_")
 }
 
+/// Assistant read operations: `(projection route suffix, query model, response model)`.
+/// Each one is a single proof-carrying GET; no generic page/list renderer may claim it.
+fn assistant_read(read: &Value) -> Result<Option<(&str, &str, &str)>> {
+    let path = read["path"].as_str().context("read path")?;
+    let Some(projection) = path.strip_prefix("/v1/client/assistant/") else {
+        return Ok(None);
+    };
+    let id = read["id"].as_str().context("read id")?;
+    if id != format!("assistant.{projection}") || read["proof_header"] != "x-st3-scg-read-authorization" {
+        bail!("assistant read `{id}` must be `assistant.<projection>` and carry the SCG read proof header");
+    }
+    let request = read["query_model"].as_str().with_context(|| format!("assistant read `{id}` has no query_model"))?;
+    let response = read["response"].as_str().context("read response")?;
+    Ok(Some((projection, request, response)))
+}
+
 fn rust_action_constructors(actions: &serde_json::Map<String, Value>) -> Result<String> {
     let mut out = String::new();
     for (action, definition) in actions {
@@ -211,7 +226,17 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn {method}(&self, id: &str, subject: &str) -> Result<Envelope<{response}>, ClientError> {{ self.get(&format!(\"{route}?subject={{}}\", percent_encode_segment(id), percent_encode_segment(subject))).await }}")?;
             continue;
         }
-        if id == "capabilities.get" {
+        if id == "arrangements.list" {
+            writeln!(out, "    pub async fn arrangements_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ArrangementPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
+            continue;
+        }
+        if id == "arrangements.get" {
+            writeln!(out, "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}")?;
+            continue;
+        }
+        if let Some((projection, request, response)) = assistant_read(read)? {
+            writeln!(out, "    pub async fn {method}(&self, params: &{request}, proof: &ScgReadAuthorization) -> Result<Envelope<{response}>, ClientError> {{ self.assistant_read(\"{projection}\", params, proof).await }}")?;
+        } else if id == "capabilities.get" {
             writeln!(
                 out,
                 "    pub async fn capabilities(&self) -> Result<Envelope<Capabilities>, ClientError> {{ self.capabilities_internal().await }}"
@@ -228,10 +253,19 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn subject_definition(&self, subject: &str, show_env_values: bool) -> Result<Envelope<SubjectDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/subject-definition?subject={{}}&show_env_values={{show_env_values}}\", percent_encode(subject))).await }}"
             )?;
+        } else if id == "notes.list" {
+            writeln!(out, "    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {{ self.get(\"/v1/client/notes\").await }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
                 "    pub async fn clients_list(&self) -> Result<Envelope<ClientConnections>, ClientError> {{ self.get(\"/v1/client/clients\").await }}"
+            )?;
+        } else if id == "slo.list" {
+            writeln!(out, "    pub async fn slo_list(&self) -> Result<Envelope<SloList>, ClientError> {{ self.get(\"/v1/client/slo\").await }}")?;
+        } else if id == "slo.history" {
+            writeln!(
+                out,
+                "    pub async fn slo_history(&self, id: &str, since_ms: Option<u64>, until_ms: Option<u64>, steps: Option<usize>) -> Result<Envelope<SloHistory>, ClientError> {{ let mut path = format!(\"/v1/client/slo/history?id={{}}\", percent_encode(id)); if let Some(since_ms) = since_ms {{ path.push_str(&format!(\"&since_ms={{since_ms}}\")); }} if let Some(until_ms) = until_ms {{ path.push_str(&format!(\"&until_ms={{until_ms}}\")); }} if let Some(steps) = steps {{ path.push_str(&format!(\"&steps={{steps}}\")); }} self.get(&path).await }}"
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    pub async fn mail_backlog_summary(&self) -> Result<Envelope<MailBacklog>, ClientError> {{ self.get(\"/v1/client/mail-backlog\").await }}")?;
@@ -265,11 +299,18 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn events(&self, after: Option<&str>, limit: Option<usize>, wait_ms: Option<u64>) -> Result<Envelope<EventPage>, ClientError> {{ self.events_internal(after, limit, wait_ms).await }}"
             )?;
+        } else if id == "conversation-content.chunk" {
+            writeln!(
+                out,
+                "    pub async fn conversation_content_chunk(&self, id: &str, reference: &str, offset: u64) -> Result<Envelope<ConversationContentChunk>, ClientError> {{ self.get(&format!(\"/v1/client/conversations/{{}}/content/{{}}/chunk?offset={{offset}}\", percent_encode_segment(id), percent_encode_segment(reference))).await }}"
+            )?;
         } else if id == "terminal.screen" {
             writeln!(
                 out,
                 "    pub async fn terminal_screen(&self, terminal_id: &str) -> Result<Envelope<TerminalScreen>, ClientError> {{ self.terminal_screen_internal(terminal_id).await }}"
             )?;
+        } else if id == "message-body.get" {
+            writeln!(out, "    pub async fn message_body_get(&self, id: &str) -> Result<Envelope<MessageBody>, ClientError> {{ self.get(&format!(\"/v1/client/message-bodies/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "status-history.get" {
             writeln!(out, "    pub async fn status_history_get(&self, id: &str) -> Result<Envelope<StatusHistory>, ClientError> {{ self.get(&format!(\"/v1/client/status-history/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "agent-queue.get" {
@@ -354,7 +395,17 @@ fn swift_operation_methods(
         let id = read["id"].as_str().context("read id")?;
         let path = read["path"].as_str().context("read path")?;
         let method = lower_camel(&pascal(id));
-        if matches!(
+        if id == "arrangements.list" {
+            writeln!(out, "    public func arrangementsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ArrangementPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/arrangements\", query: query) }}")?;
+            continue;
+        }
+        if id == "arrangements.get" {
+            writeln!(out, "    public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> {{ try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))\") }}")?;
+            continue;
+        }
+        if let Some((projection, request, response)) = assistant_read(read)? {
+            writeln!(out, "    public func {method}(_ params: {request}, proof: ScgReadAuthorization) async throws -> Envelope<{response}> {{ try await assistantRead(\"{projection}\", params, proof: proof) }}")?;
+        } else if matches!(
             id,
             "capabilities.get"
                 | "timeline.list"
@@ -372,15 +423,29 @@ fn swift_operation_methods(
             let response = read["response"].as_str().context("read response")?;
             let route = path.trim_start_matches('/').replace("{id}", "\\(routedID)");
             writeln!(out, "    public func {method}(id: String, subject: String) async throws -> Envelope<{response}> {{ let routedID = Self.encodedPathSegment(id); return try await get(\"{route}\", query: [.init(name: \"subject\", value: subject)]) }}")?;
+        } else if id == "conversation-content.chunk" {
+            writeln!(
+                out,
+                "    public func conversationContentChunk(id: String, reference: String, offset: UInt64 = 0) async throws -> Envelope<ConversationContentChunk> {{ try await get(\"v1/client/conversations/\\(Self.routedSessionID(id))/content/\\(Self.routedSessionID(reference))/chunk\", query: [.init(name: \"offset\", value: String(offset))]) }}"
+            )?;
         } else if id == "conversation.search" {
             writeln!(
                 out,
                 "    public func conversationSearch(text: String, agent: String? = nil, since: String? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ConversationSearch> {{ var query: [URLQueryItem] = [.init(name: \"text\", value: text)]; for (name, value) in [(\"agent\", agent), (\"since\", since), (\"cursor\", cursor)] {{ if let value {{ query.append(.init(name: name, value: value)) }} }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/conversations/search\", query: query) }}"
             )?;
+        } else if id == "notes.list" {
+            writeln!(out, "    public func notesList() async throws -> Envelope<DirectiveNotes> {{ try await get(\"v1/client/notes\") }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
                 "    public func clientsList() async throws -> Envelope<ClientConnections> {{ try await get(\"v1/client/clients\") }}"
+            )?;
+        } else if id == "slo.list" {
+            writeln!(out, "    public func sloList() async throws -> Envelope<SloList> {{ try await get(\"v1/client/slo\") }}")?;
+        } else if id == "slo.history" {
+            writeln!(
+                out,
+                "    public func sloHistory(id: String, sinceMS: UInt64? = nil, untilMS: UInt64? = nil, steps: Int? = nil) async throws -> Envelope<SloHistory> {{ var query: [URLQueryItem] = [.init(name: \"id\", value: id)]; if let sinceMS {{ query.append(.init(name: \"since_ms\", value: String(sinceMS))) }}; if let untilMS {{ query.append(.init(name: \"until_ms\", value: String(untilMS))) }}; if let steps {{ query.append(.init(name: \"steps\", value: String(steps))) }}; return try await get(\"v1/client/slo/history\", query: query) }}"
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    public func mailBacklogSummary() async throws -> Envelope<MailBacklog> {{ try await get(\"v1/client/mail-backlog\") }}")?;
@@ -399,6 +464,8 @@ fn swift_operation_methods(
                 out,
                 "    public func agentWorkspaceGet(id: String) async throws -> Envelope<AgentWorkspace> {{ try await get(\"v1/client/agent-workspaces/\\(id)\") }}"
             )?;
+        } else if id == "message-body.get" {
+            writeln!(out, "    public func messageBodyGet(id: String) async throws -> Envelope<MessageBody> {{ try await get(\"v1/client/message-bodies/\\(id)\") }}")?;
         } else if id == "status-history.get" {
             writeln!(out, "    public func statusHistoryGet(id: String) async throws -> Envelope<StatusHistory> {{ try await get(\"v1/client/status-history/\\(id)\") }}")?;
         } else if id == "agent-declaration.get" {
@@ -421,7 +488,7 @@ fn swift_operation_methods(
         } else if id == "custom-subjects.list" {
             writeln!(
                 out,
-                "    public func customSubjectsList(kind: String? = nil, version: Int? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<Page> {{ var query: [URLQueryItem] = []; if let kind {{ query.append(.init(name: \"kind\", value: kind)) }}; if let version {{ query.append(.init(name: \"version\", value: String(version))) }}; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/custom-subjects\", query: query) }}"
+                "    public func customSubjectsList(kind: String? = nil, version: Int? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> {{ var query: [URLQueryItem] = []; if let kind {{ query.append(.init(name: \"kind\", value: kind)) }}; if let version {{ query.append(.init(name: \"version\", value: String(version))) }}; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/custom-subjects\", query: query) }}"
             )?;
         } else if id == "resources.list" {
             writeln!(
@@ -531,6 +598,29 @@ fn validate_model(
     if model.is_null() {
         bail!("client schema has no `{definition}` definition");
     }
+    // Reference-only oneOf branches are untagged unions: their members own the
+    // existing wire shape, rather than acquiring a synthetic discriminator.
+    if let Some(branches) = model["oneOf"]
+        .as_array()
+        .filter(|branches| branches.iter().all(|branch| branch["$ref"].is_string()))
+    {
+        let rust_block = struct_block(rust, &format!("pub enum {rust_name} {{"))?;
+        let swift_block = struct_block(swift, &format!("public enum {swift_name}:"))?;
+        for branch in branches {
+            let member = branch["$ref"]
+                .as_str()
+                .and_then(|reference| reference.rsplit('/').next())
+                .with_context(|| format!("union `{definition}` requires named reference branches"))?;
+            // Large Rust members are boxed to keep the enum small.
+            let rust_member = rust_block.contains(&format!("({member})"))
+                || rust_block.contains(&format!("(Box<{member}>)"));
+            if !rust_member || !swift_block.contains(&format!("({member})")) {
+                bail!("union `{definition}` omits member `{member}`");
+            }
+            validate_model(schema, member, member, member, rust, swift)?;
+        }
+        return Ok(());
+    }
     let properties = schema_properties(model)
         .with_context(|| format!("client schema `{definition}` has no properties"))?;
     let rust_block = struct_block(rust, &format!("pub struct {rust_name} {{"))?;
@@ -628,17 +718,21 @@ fn validate_surfaces(
         bail!("KNOWN_RESOURCE_KINDS has {listed} kinds; the schema knows {}", known.len());
     }
     for definition in [
+        "DirectiveNote",
+        "DirectiveNotes",
         "ResourceObservation",
         "ResourcesFilter",
         "ResourcesPage",
         "AttentionBlocked",
         "AttentionTargetState",
         "DocumentContent",
+        "MessageBody",
         "AgentDeclaration",
         "AgentWorkspace",
         "StatusHistory",
         "StatusTransition",
         "AgentRepository",
+        "AgentCheckout",
         "HostRepositories",
         "CanonicalNode",
         "SubjectDefinition",
@@ -647,6 +741,9 @@ fn validate_surfaces(
         "AgentMessageEstimate",
         "AgentMessageDay",
         "MailBacklog",
+        "SloList",
+        "SloRow",
+        "SloHistory",
         "UsageRow",
         "UsagePricing",
         "UsagePricingRates",
@@ -662,13 +759,37 @@ fn validate_surfaces(
         "AgentQueueMove",
         "LaneEntry",
         "LaneChange",
+        "TimelineBlock",
+        "ConversationContentRef",
+        "ConversationContentChunk",
         "TimelineEntry",
         "TimelinePage",
         "ConversationChanges",
+        "ObservationReport",
+        "ObservationAccepted",
+        "ObservationResponse",
         "PairingBegin",
         "PairingChallenge",
         "PairingComplete",
         "PairedSession",
+        "AssistantGrant",
+        "AssistantGrantPolicy",
+        "AssistantReadTrust",
+        "AssistantReadTrustRequest",
+        "AssistantSummaryRequest",
+        "AssistantPageRequest",
+        "AssistantContentRequest",
+        "ScgReadAuthorization",
+        "ScgReadAuthorizationPayload",
+        "AssistantSummary",
+        "AssistantAttentionItem",
+        "AssistantMissionItem",
+        "AssistantAgentItem",
+        "AssistantAttentionPage",
+        "AssistantMissionPage",
+        "AssistantAgentPage",
+        "AssistantContentRange",
+        "AssistantContentPage",
         "TerminalAttachment",
         "TerminalScreen",
         "TerminalLine",
@@ -681,6 +802,7 @@ fn validate_surfaces(
         "SubscriptionSpec",
         "SyncNotice",
         "SyncPeer",
+        "ExchangeTransport",
         "StructuredDiff",
         "Visualization",
         "VisualizationNode",
@@ -697,6 +819,7 @@ fn validate_surfaces(
         validate_model(schema, definition, definition, definition, rust, swift)?;
     }
     for token in [
+        "pub async fn observations_report",
         "pub async fn pairing_begin",
         "pub async fn pairing_complete",
         "pub async fn terminal_stream",
@@ -713,6 +836,7 @@ fn validate_surfaces(
         "func timeline(",
         "cursor: String?",
         "func events(",
+        "func observationsReport(",
         "func beginPairing(",
         "func completePairing(",
         "func terminalScreen(",
@@ -832,15 +956,6 @@ fn output(path: &Path, contents: &str, check: bool) -> Result<()> {
     Ok(())
 }
 
-fn hex_digest(parts: &[&[u8]]) -> String {
-    let mut hash = Sha256::new();
-    for part in parts {
-        hash.update(part);
-    }
-    let digest = hash.finalize();
-    format!("{digest:x}")
-}
-
 fn pascal(value: &str) -> String {
     value
         .split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -855,19 +970,47 @@ fn pascal(value: &str) -> String {
         .collect()
 }
 
+/// A named value every generated client exposes, from the manifest's `constants`.
+struct Constant {
+    /// The manifest key, in snake case.
+    name: String,
+    value: String,
+    about: String,
+}
+
+fn contract_constants(operations: &Value) -> Result<Vec<Constant>> {
+    let Some(constants) = operations.get("constants") else {
+        return Ok(Vec::new());
+    };
+    constants
+        .as_object()
+        .context("constants object")?
+        .iter()
+        .map(|(name, constant)| {
+            Ok(Constant {
+                name: name.clone(),
+                value: constant["value"]
+                    .as_str()
+                    .with_context(|| format!("constant `{name}` value"))?
+                    .to_owned(),
+                about: constant["about"]
+                    .as_str()
+                    .with_context(|| format!("constant `{name}` about"))?
+                    .to_owned(),
+            })
+        })
+        .collect()
+}
+
 fn rust_contract<'a>(
-    digest: &str,
     actions: impl Iterator<Item = &'a str>,
     reads: &[Value],
+    constants: &[Constant],
 ) -> Result<String> {
     let actions = actions.collect::<Vec<_>>();
-    // The contract digest lives here alone: every generated file carrying it made any two
-    // schema changes conflict in each of them (#977).
+    // No digest of the schema is committed here: one line that every schema change rewrites made any
+    // two of them conflict. `--check` already fails when any generated file differs from its source.
     let mut out = String::from("// @generated by st3-client-codegen; do not edit.\n\n");
-    writeln!(
-        out,
-        "#[rustfmt::skip]\npub const CONTRACT_SHA256: &str = \"{digest}\";"
-    )?;
     writeln!(
         out,
         "#[rustfmt::skip]\npub const ACTION_NAMES: &[&str] = &["
@@ -888,12 +1031,22 @@ fn rust_contract<'a>(
         )?;
     }
     writeln!(out, "];")?;
+    for constant in constants {
+        writeln!(
+            out,
+            "/// {}\n#[rustfmt::skip]\npub const {}: &str = {:?};",
+            constant.about,
+            constant.name.to_ascii_uppercase(),
+            constant.value
+        )?;
+    }
     Ok(out)
 }
 
 fn swift_contract<'a>(
     actions: impl Iterator<Item = &'a str>,
     reads: &[Value],
+    constants: &[Constant],
 ) -> Result<String> {
     let actions = actions.collect::<Vec<_>>();
     let mut out = format!(
@@ -933,6 +1086,15 @@ fn swift_contract<'a>(
         )?;
     }
     writeln!(out, "]\n")?;
+    for constant in constants {
+        writeln!(
+            out,
+            "/// {}\npublic let st3{}: String = {:?}\n",
+            constant.about,
+            pascal(&constant.name),
+            constant.value
+        )?;
+    }
     Ok(out)
 }
 
@@ -945,6 +1107,9 @@ fn lower_camel(value: &str) -> String {
 }
 
 fn ts_type(value: &Value) -> Result<String> {
+    if let Some(allowed) = value.as_bool() {
+        return Ok(if allowed { "unknown" } else { "never" }.into());
+    }
     if let Some(reference) = value.get("$ref").and_then(Value::as_str) {
         return Ok(reference
             .rsplit('/')
@@ -964,14 +1129,16 @@ fn ts_type(value: &Value) -> Result<String> {
     }
     for union in ["oneOf", "anyOf"] {
         if let Some(items) = value.get(union).and_then(Value::as_array) {
-            return Ok(format!(
-                "({})",
-                items
-                    .iter()
-                    .map(ts_type)
-                    .collect::<Result<Vec<_>>>()?
-                    .join(" | ")
-            ));
+            let members = format!("({})", items.iter().map(ts_type).collect::<Result<Vec<_>>>()?.join(" | "));
+            if value.get("properties").is_some() || value.get("allOf").is_some() {
+                let mut base = value.clone();
+                base.as_object_mut().context("union schema")?.remove(union);
+                let base = ts_type(&base)?;
+                if base != "unknown" && !base.is_empty() {
+                    return Ok(format!("{base} & {members}"));
+                }
+            }
+            return Ok(members);
         }
     }
     if let Some(types) = value.get("type").and_then(Value::as_array) {
@@ -986,6 +1153,7 @@ fn ts_type(value: &Value) -> Result<String> {
         Some("integer" | "number") => "number".into(),
         Some("boolean") => "boolean".into(),
         Some("null") => "null".into(),
+        Some("array") if value.get("prefixItems").is_some() => format!("[{}]", value["prefixItems"].as_array().context("tuple items")?.iter().map(ts_type).collect::<Result<Vec<_>>>()?.join(", ")),
         Some("array") => format!("Array<{}>", ts_type(&value["items"])?),
         Some("object") => ts_object(value)?,
         Some(other) => bail!("unsupported TypeScript schema type `{other}`"),
@@ -1071,15 +1239,48 @@ fn ts_conditional_body(value: &Value) -> Result<Option<String>> {
     }
 }
 
-fn typescript_models(schema: &Value, operations: &Value) -> Result<String> {
+/// The typed `TimelineView` and `ConversationHeader` schemas serve schema consumers and docs;
+/// generated clients carry both as loose JSON, so the raw TypeScript model renders the named
+/// fields as `unknown` instead of projecting every definition.
+fn ts_loose_json_fields(definition: &Value, fields: &[&str]) -> Value {
+    let mut loose = definition.clone();
+    for field in fields {
+        if let Some(properties) = loose
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+            .and_then(|properties| properties.get_mut(*field))
+        {
+            *properties = Value::Object(serde_json::Map::new());
+        }
+    }
+    loose
+}
+
+fn typescript_models(schema: &Value, operations: &Value, constants: &[Constant]) -> Result<String> {
     let defs = schema["$defs"].as_object().context("schema definitions")?;
     let mut out = format!(
         "// @generated by st3-client-codegen; do not edit.\n// Source: docs/st3/client-v0/schemas/client-v0.schema.json\n\nexport const API_VERSION = 'st3.client.v0' as const;\n\n"
     );
+    for constant in constants {
+        writeln!(
+            out,
+            "/** {} */\nexport const {} = {:?} as const;\n",
+            constant.about,
+            constant.name.to_ascii_uppercase(),
+            constant.value
+        )?;
+    }
     for (name, definition) in defs {
         if name == "ActionRequest" {
             continue;
         }
+        let loose = match name.as_str() {
+            "TimelineBlock" => ts_loose_json_fields(definition, &["view"]),
+            "TimelinePage" | "ConversationChanges" | "TimelineDelta" => {
+                ts_loose_json_fields(definition, &["header"])
+            }
+            _ => definition.clone(),
+        };
         let shape = if name == "Resource" {
             // UnknownResource's open `kind: string` would defeat discriminant narrowing in the
             // raw union; like the Rust and Swift clients, raw TypeScript models known kinds only.
@@ -1089,7 +1290,7 @@ fn typescript_models(schema: &Value, operations: &Value) -> Result<String> {
             }
             ts_type(&known)?
         } else {
-            ts_conditional_body(definition)?.unwrap_or(ts_type(definition)?)
+            ts_conditional_body(&loose)?.unwrap_or(ts_type(&loose)?)
         };
         writeln!(out, "export type {name} = {shape};\n")?;
     }
@@ -1162,6 +1363,10 @@ fn typescript_operation_methods(
         if id == "capabilities.get" {
             continue;
         }
+        if let Some((projection, request, response)) = assistant_read(read)? {
+            writeln!(out, "    async {method}(params: {request}, proof: ScgReadAuthorization): Promise<EnvelopeOf<{response}>> {{ return this.assistantRead<{response}>('{projection}', params, proof); }}")?;
+            continue;
+        }
         let route = if matches!(id, "harness-queue.get" | "harness-models.get" | "harness-control-receipt.get") {
             path.replace("{id}", "${encodeURIComponent(id)}")
         } else if path.contains("{id}") {
@@ -1183,6 +1388,14 @@ fn typescript_operation_methods(
             )?;
             continue;
         }
+        if id == "arrangements.list" {
+            writeln!(out, "    async arrangementsList(person: string, options: PageOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }})); }}")?;
+            continue;
+        }
+        if id == "arrangements.get" {
+            writeln!(out, "    async arrangementsGet(personName: string, uuid: string): Promise<EnvelopeOf<Arrangement>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}`); }}")?;
+            continue;
+        }
         if id == "conversation.search" {
             writeln!(
                 out,
@@ -1193,10 +1406,19 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(options: EventOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), 'events'); }}"
             )?;
+        } else if id == "notes.list" {
+            writeln!(out, "    async notesList(): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes'); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
                 "    async {method}(): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}'); }}"
+            )?;
+        } else if id == "slo.list" {
+            writeln!(out, "    async sloList(): Promise<EnvelopeOf<SloList>> {{ return this.get('/v1/client/slo'); }}")?;
+        } else if id == "slo.history" {
+            writeln!(
+                out,
+                "    async sloHistory(id: string, options: {{ since_ms?: number; until_ms?: number; steps?: number }} = {{}}): Promise<EnvelopeOf<SloHistory>> {{ return this.get('/v1/client/slo/history' + query({{ id, ...options }})); }}"
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    async mailBacklogSummary(): Promise<EnvelopeOf<MailBacklog>> {{ return this.get('/v1/client/mail-backlog'); }}")?;
@@ -1236,6 +1458,11 @@ fn typescript_operation_methods(
             writeln!(
                 out,
                 "    async subjectDefinition(subject: string, showEnvValues = false): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ subject, show_env_values: showEnvValues }})); }}"
+            )?;
+        } else if id == "conversation-content.chunk" {
+            writeln!(
+                out,
+                "    async conversationContentChunk(id: string, reference: string, offset = 0): Promise<EnvelopeOf<ConversationContentChunk>> {{ return this.get(`/v1/client/conversations/${{encodeURIComponent(id)}}/content/${{encodeURIComponent(reference)}}/chunk` + query({{offset}})); }}"
             )?;
         } else if id == "conversation.changes" {
             writeln!(
@@ -1284,6 +1511,35 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[test]
+    fn untagged_union_validation_checks_every_named_member() {
+        let schema = serde_json::json!({ "$defs": {
+            "Pair": { "oneOf": [{ "$ref": "#/$defs/Person" }, { "$ref": "#/$defs/Assistant" }] },
+            "Person": { "type": "object", "properties": { "person_id": { "type": "string" } } },
+            "Assistant": { "type": "object", "properties": { "principal": { "type": "string" } } }
+        } });
+        let rust = "pub enum Pair { Person(Person), Assistant(Assistant) }\npub struct Person { pub person_id: String }\npub struct Assistant { pub principal: String }";
+        let swift = "public enum Pair: Codable { case person(Person), assistant(Assistant) }\npublic struct Person: Codable { let personID: String }\npublic struct Assistant: Codable { let principal: String }";
+        validate_model(&schema, "Pair", "Pair", "Pair", rust, swift).unwrap();
+        assert!(validate_model(&schema, "Pair", "Pair", "Pair", &rust.replace("pub principal:", "pub wrong:"), swift).is_err());
+    }
+
+    #[test]
+    fn typescript_inline_unions_retain_common_fields_and_forbidden_keys() {
+        let schema = serde_json::json!({
+            "type": "object", "required": ["kind"],
+            "properties": { "kind": { "type": "string" } },
+            "oneOf": [
+                { "properties": { "person_id": { "type": "string" } } },
+                { "properties": { "person_id": false } }
+            ]
+        });
+        let rendered = ts_type(&schema).unwrap();
+        assert!(rendered.contains("kind: string"));
+        assert!(rendered.contains("person_id?: never"));
+        assert!(rendered.contains(" & "));
+    }
+
     fn temporary_output(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1305,11 +1561,7 @@ mod tests {
         let schema: Value = serde_json::from_str(include_str!(
             "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
         ))?;
-        let digest = hex_digest(&[
-            include_bytes!("../../../docs/st3/client-v0/schemas/client-v0.schema.json"),
-            include_bytes!("../../../docs/st3/client-v0/schemas/operations.json"),
-        ]);
-        let ts_models = typescript_models(&schema, &operations)?;
+        let ts_models = typescript_models(&schema, &operations, &contract_constants(&operations)?)?;
         let ts_schema = rich::models(&schema)?;
         let ts_client = render_marker(
             TYPESCRIPT_CLIENT_TEMPLATE,
@@ -1326,7 +1578,21 @@ mod tests {
             "    // @st3-codegen:rust-operation-methods",
             &rust_operation_methods(reads, actions)?,
         )?)?;
+        let contract = format_rust(&rust_contract(
+            actions.keys().map(String::as_str),
+            reads,
+            &contract_constants(&operations)?,
+        )?)?;
+        assert!(
+            !contract.contains("SHA256"),
+            "no digest line that every schema change would rewrite"
+        );
         let cases = [
+            (
+                "contract.rs",
+                contract.as_str(),
+                contract.replacen("\"message.send\",", "", 1),
+            ),
             (
                 "generated.rs",
                 models.as_str(),

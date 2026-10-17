@@ -35,6 +35,7 @@ async fn provider_incarnation(
         })
         .unwrap();
     let state = AppState {
+        owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -72,7 +73,7 @@ async fn provider_incarnation(
     let socket_arg = socket.clone();
     let home = root.path().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
-        let mut command = st3::test_support::command(env!("CARGO_BIN_EXE_st3-fixture"));
+        let mut command = st3::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
         command
             .env_clear()
             .env("PTY_ROOT", home.join("pty"))

@@ -4,6 +4,8 @@
 //! scrolls off the top stays here to scroll back through.
 
 use super::theme;
+#[path = "pty_graphics.rs"]
+mod graphics;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line as GridLine, Point, Side};
@@ -14,13 +16,19 @@ use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape, CursorStyle, NamedColor, Processor,
 };
 use crossterm::cursor::SetCursorStyle;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use pty_client::connection::{SessionConnection, SessionEvent};
+use pty_terminal::{
+    Key as ProtocolKey, KeyAction, Mods, MouseAction, MouseButton as ProtocolButton, TerminalActor,
+};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -44,6 +52,7 @@ pub(crate) struct Asked {
     /// The title the program gave its window; `None` when it never did or reset it.
     pub(crate) title: Option<String>,
     pub(crate) bell: bool,
+    clipboard_reads: Vec<Vec<u8>>,
 }
 
 impl EventListener for Requests {
@@ -53,6 +62,7 @@ impl EventListener for Requests {
             // Only a copy: a program reading the person's clipboard is refused, as by default
             // in most terminals.
             Event::ClipboardStore(_, text) => asked.copied = Some(text),
+            Event::ClipboardLoad(_, format) => asked.clipboard_reads.push(format("").into_bytes()),
             Event::Title(title) => asked.title = Some(title),
             Event::ResetTitle => asked.title = None,
             Event::Bell => asked.bell = true,
@@ -84,8 +94,15 @@ struct Screen {
     parser: Processor,
     /// Why the session is over, once it is.
     ended: Option<String>,
-    /// When the stream dropped while the program still ran, so stui can attach again.
-    dropped_at: Option<Instant>,
+    /// Why the stream dropped while the program still ran, until it attaches again.
+    lost: Option<String>,
+    /// When stui next tries to attach again; `None` while a try is under way or nothing is lost.
+    retry_at: Option<Instant>,
+    /// Tries to attach again since the stream last stayed attached: each waits twice as long
+    /// as the one before, up to `RETRY_MAX`.
+    tries: u32,
+    /// When the stream last attached: one that stayed a while starts the waits over.
+    attached_at: Option<Instant>,
     /// Whether the first screen has arrived.
     attached: bool,
     /// When output last arrived, so stui can draw more often while it flows.
@@ -94,12 +111,16 @@ struct Screen {
     requests: Requests,
     /// Where the selection being dragged began.
     anchor: Option<Point>,
+    graphics: graphics::Frame,
 }
 
 impl Screen {
     fn new(size: Size, requests: Requests) -> Self {
         let config = Config {
             scrolling_history: HISTORY,
+            kitty_keyboard: true,
+            // Reads are handled with an empty response, never clipboard access.
+            osc52: alacritty_terminal::term::Osc52::CopyPaste,
             // A shape no program can ask for, so stui can tell when none did.
             default_cursor_style: UNASKED,
             ..Config::default()
@@ -108,11 +129,15 @@ impl Screen {
             term: Term::new(config, &size, requests.clone()),
             parser: Processor::new(),
             ended: None,
-            dropped_at: None,
+            lost: None,
+            retry_at: None,
+            tries: 0,
+            attached_at: None,
             attached: false,
             output_at: None,
             requests,
             anchor: None,
+            graphics: graphics::Frame::default(),
         }
     }
 
@@ -137,6 +162,11 @@ impl Screen {
 enum Input {
     Bytes(Vec<u8>),
     Resize(Size),
+    Key(pty_terminal::KeyEvent, bool),
+    Mouse(pty_terminal::MouseEvent, usize),
+    Focus(bool),
+    Reset,
+    Cell(pty_terminal::CellSize),
 }
 
 /// A terminal attached through its PTY session. Dropping it detaches.
@@ -148,6 +178,9 @@ pub(crate) struct NativeTerminal {
     size: Mutex<Size>,
     /// The incarnation attached to; attaching again after a drop is only ever to this one.
     pub(crate) incarnation: String,
+    presented: AtomicBool,
+    cell: Mutex<pty_terminal::CellSize>,
+    painter: Mutex<graphics::Painter>,
 }
 
 impl NativeTerminal {
@@ -172,33 +205,70 @@ impl NativeTerminal {
             input: Mutex::new(input),
             size: Mutex::new(size),
             incarnation,
+            presented: AtomicBool::new(false),
+            cell: Mutex::new(pty_terminal::CellSize::default()),
+            painter: Mutex::new(graphics::Painter::default()),
         }
     }
 
     /// Attach again over a new stream after the last one dropped, into the same screen, so
     /// what scrolled back stays.
     pub(crate) fn reconnect(&self, stream: UnixStream, name: &str) {
+        self.presented.store(false, Ordering::Relaxed);
         let size = *self.size.lock().unwrap_or_else(|error| error.into_inner());
         {
             let mut screen = self.lock();
             screen.ended = None;
-            screen.dropped_at = None;
+            screen.retry_at = None;
             screen.attached = false;
         }
         let input = start(stream, name, size, &self.screen);
         *self.input.lock().unwrap_or_else(|error| error.into_inner()) = input;
     }
 
-    /// When the stream dropped while the program still ran.
-    pub(crate) fn dropped(&self) -> Option<Instant> {
-        self.lock().dropped_at
+    /// Why the stream dropped while the program still ran, until it attaches again.
+    pub(crate) fn lost(&self) -> Option<String> {
+        self.lock().lost.clone()
+    }
+
+    /// How a lost stream is getting back: the tries so far, and when the next one is (`None`
+    /// while one is under way).
+    pub(crate) fn reconnecting(&self) -> Option<(u32, Option<Instant>)> {
+        let screen = self.lock();
+        screen.lost.as_ref()?;
+        Some((screen.tries, screen.retry_at))
+    }
+
+    /// Whether a lost stream's next try is due; it is then under way, and is not due again until
+    /// `reconnect` or `retry_failed` says how it went. Each try waits longer than the last, so a
+    /// link that stays down costs one try a while, never a loop.
+    pub(crate) fn take_reattach(&self) -> bool {
+        let mut screen = self.lock();
+        if screen.retry_at.is_some_and(|at| Instant::now() >= at) {
+            screen.retry_at = None;
+            screen.tries += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A try to attach again could not reach the session: wait longer, then try again.
+    pub(crate) fn retry_failed(&self, reason: String) {
+        let mut screen = self.lock();
+        if screen.ended.is_some() {
+            return;
+        }
+        screen.lost = Some(reason);
+        screen.retry_at = Some(Instant::now() + retry_delay(screen.tries));
     }
 
     /// The reconnect failed for good: say why, and stop trying.
     pub(crate) fn give_up(&self, reason: String) {
         let mut screen = self.lock();
         screen.ended = Some(reason);
-        screen.dropped_at = None;
+        screen.lost = None;
+        screen.retry_at = None;
     }
 
     fn send(&self, input: Input) {
@@ -253,26 +323,84 @@ impl NativeTerminal {
         }
     }
 
+    pub(crate) fn draw_graphics(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        picker: &ratatui_image::picker::Picker,
+    ) {
+        use ratatui_image::picker::ProtocolType;
+        let font = picker.font_size();
+        let cell = pty_terminal::CellSize {
+            width: u32::from(font.width),
+            height: u32::from(font.height),
+        };
+        let mut current = self.cell.lock().unwrap_or_else(|e| e.into_inner());
+        if picker.protocol_type() == ProtocolType::Kitty && *current != cell {
+            *current = cell;
+            self.send(Input::Cell(cell));
+        }
+        drop(current);
+        let frame = self.lock().graphics.clone();
+        self.painter
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .draw(&frame, buf, area, picker);
+    }
+
+    pub(crate) fn hide_graphics(&self) {
+        *self.painter.lock().unwrap_or_else(|e| e.into_inner()) = graphics::Painter::default();
+    }
+
     pub(crate) fn mode(&self) -> TermMode {
         *self.lock().term.mode()
     }
 
-    /// Scroll back (positive) or forward through the history, or hand a program that reads the
-    /// mouse its wheel instead.
-    pub(crate) fn wheel(&self, lines: i32) {
+    /// Send a semantic key; the session's terminal state chooses its protocol encoding.
+    pub(crate) fn key(&self, key: KeyEvent) {
+        if let Some(key) = protocol_key(key) {
+            self.lock().term.scroll_display(Scroll::Bottom);
+            self.lock().term.selection = None;
+            self.send(Input::Key(key, self.mode().contains(TermMode::APP_KEYPAD)));
+        }
+    }
+
+    pub(crate) fn mouse(&self, mouse: MouseEvent, column: u16, row: u16) {
+        if let Some(mouse) = protocol_mouse(mouse, column, row) {
+            self.send(Input::Mouse(mouse, 1));
+        }
+    }
+
+    pub(crate) fn focus(&self, gained: bool) {
+        self.send(Input::Focus(gained));
+    }
+
+    /// Reset the tab's input modes without sending reset bytes as shell input.
+    pub(crate) fn reset_modes(&self) {
+        let mut screen = self.lock();
+        if screen.term.mode().contains(TermMode::ALT_SCREEN) {
+            screen.feed(b"\x1b[<99u\x1b[?1049l");
+        }
+        screen.feed(pty_terminal::actor::RESET_INPUT_MODES);
+        screen.graphics = graphics::Frame::default();
+        drop(screen);
+        self.hide_graphics();
+        self.send(Input::Reset);
+    }
+
+    /// Scroll history, or send a wheel report at the actual pane-relative cell.
+    pub(crate) fn wheel(&self, lines: i32, mouse: MouseEvent, column: u16, row: u16, local: bool) {
         let mode = self.mode();
-        if mode.intersects(TermMode::MOUSE_MODE) && mode.contains(TermMode::ALT_SCREEN) {
-            let button = if lines > 0 { 64 } else { 65 };
-            let report = if mode.contains(TermMode::SGR_MOUSE) {
-                format!("\x1b[<{button};1;1M")
-            } else {
-                format!("\x1b[M{}!!", char::from(32 + button as u8))
-            };
-            self.send(Input::Bytes(
-                report.repeat(lines.unsigned_abs() as usize).into_bytes(),
-            ));
-        } else if mode.contains(TermMode::ALT_SCREEN) {
-            // A full-screen program without the mouse scrolls with its arrows, as terminals do.
+        if !local && mode.intersects(TermMode::MOUSE_MODE) {
+            if let Some(mouse) = protocol_mouse(mouse, column, row) {
+                self.send(Input::Mouse(mouse, lines.unsigned_abs() as usize));
+            }
+        } else if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+        ) {
+            // There is no horizontal history axis or DEC alternate-scroll equivalent.
+        } else if !local && mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
             let arrow = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
                 (true, true) => "\x1bOA",
                 (true, false) => "\x1b[A",
@@ -338,6 +466,15 @@ impl NativeTerminal {
         screen.term.selection = Some(selection);
     }
 
+    /// Copy a hyperlink destination without asking the outer terminal to own pane coordinates.
+    pub(crate) fn hyperlink(&self, column: u16, row: u16) -> Option<String> {
+        let screen = self.lock();
+        let point = screen.point(column, row)?;
+        screen.term.grid()[point]
+            .hyperlink()
+            .map(|link| link.uri().to_owned())
+    }
+
     /// The selected text as it would paste: a line the program's output wrapped stays one line.
     pub(crate) fn selected(&self) -> Option<String> {
         self.lock()
@@ -355,6 +492,7 @@ impl NativeTerminal {
             copied: asked.copied.take(),
             title: asked.title.clone(),
             bell: std::mem::take(&mut asked.bell),
+            clipboard_reads: Vec::new(),
         }
     }
 
@@ -383,8 +521,19 @@ impl NativeTerminal {
         self.lock().ended.clone()
     }
 
+    /// Read by quality accounting after drawing, without another screen lock.
+    pub(crate) fn presented(&self) -> bool {
+        self.presented.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn attached(&self) -> bool {
         self.lock().attached
+    }
+
+    #[cfg(test)]
+    pub(super) fn grid_size(&self) -> (usize, usize) {
+        let screen = self.lock();
+        (screen.term.screen_lines(), screen.term.columns())
     }
 
     /// Whether output arrived in the last moment, so stui draws more often.
@@ -398,6 +547,8 @@ impl NativeTerminal {
     /// is not drawn but returned, for the person's own terminal cursor to show it.
     pub(crate) fn draw(&self, buf: &mut Buffer, area: Rect, real_cursor: bool) -> Option<Cursor> {
         let screen = self.lock();
+        self.presented
+            .store(screen.attached && screen.ended.is_none(), Ordering::Relaxed);
         let grid = screen.term.grid();
         let offset = grid.display_offset() as i32;
         let rows = grid.screen_lines().min(usize::from(area.height));
@@ -420,6 +571,9 @@ impl NativeTerminal {
                     continue;
                 }
                 let mut style = cell_style(cell.fg, cell.bg, cell.flags);
+                if let Some(color) = cell.underline_color().and_then(paint) {
+                    style = style.underline_color(color);
+                }
                 if selection.is_some_and(|range| range.contains(Point::new(line, Column(column)))) {
                     style = style.bg(theme::SELECTION_BG);
                 }
@@ -518,10 +672,29 @@ fn start(
     input
 }
 
+/// The longest wait between tries to attach a lost stream again.
+const RETRY_MAX: Duration = Duration::from_secs(32);
+
+/// The wait before the try after `tries` tries: one second, then twice the last, up to
+/// `RETRY_MAX`.
+pub(crate) fn retry_delay(tries: u32) -> Duration {
+    Duration::from_secs(1 << tries.min(5)).min(RETRY_MAX)
+}
+
 /// The stream is gone but the program may still run: say so, and let stui attach again.
 fn dropped(screen: &mut Screen, reason: String) {
-    screen.ended = Some(format!("{reason}; attaching again…"));
-    screen.dropped_at = Some(Instant::now());
+    if screen.lost.is_none() {
+        super::slo::METRICS.add("dead_terminal_tabs", 1);
+    }
+    // A stream that attached and stayed is a new loss; one that dropped at once is the same one.
+    if screen
+        .attached_at
+        .is_some_and(|at| at.elapsed() >= RETRY_MAX)
+    {
+        screen.tries = 0;
+    }
+    screen.lost = Some(reason);
+    screen.retry_at = Some(Instant::now() + retry_delay(screen.tries));
 }
 
 /// The attach thread: ATTACH at `size`, then feed what the session sends into the screen and
@@ -538,6 +711,7 @@ fn run(
         lock().ended = Some(error.to_string());
         return;
     }
+    let mut control = stream.try_clone();
     let mut connection = match SessionConnection::attach_over(
         stream,
         name,
@@ -551,11 +725,16 @@ fn run(
             return;
         }
     };
+    let mut protocol = TerminalActor::new(size.rows, size.columns, HISTORY);
+    protocol.enable_graphics(pty_terminal::GraphicsOptions::default());
     {
         let mut screen = lock();
         let replay = connection.screen().to_vec();
+        protocol.write(&replay);
         screen.feed(&replay);
         screen.attached = true;
+        screen.lost = None;
+        screen.attached_at = Some(Instant::now());
     }
     loop {
         loop {
@@ -564,6 +743,36 @@ fn run(
                 Ok(Input::Resize(size)) => {
                     connection.resize(size.rows, size.columns);
                     lock().term.resize(size);
+                    protocol.resize(size.columns, size.rows);
+                }
+                Ok(Input::Key(key, keypad)) => {
+                    connection.write(&encode_key(&protocol, &key, keypad))
+                }
+                Ok(Input::Mouse(mouse, count)) => {
+                    if let Some(bytes) = protocol.encode_mouse(&mouse) {
+                        connection.write(&bytes.repeat(count));
+                    }
+                }
+                Ok(Input::Focus(gained)) => {
+                    if let Some(bytes) = protocol.encode_focus(gained) {
+                        connection.write(&bytes);
+                    }
+                }
+                Ok(Input::Reset) => {
+                    protocol.reset_input_modes();
+                    connection.reset_input_modes();
+                }
+                Ok(Input::Cell(cell)) => {
+                    use std::io::Write;
+                    protocol.set_cell_size(cell);
+                    if let Ok(control) = &mut control {
+                        let _ = control.write_all(&pty_core::protocol::encode_resize_with_cell(
+                            protocol.rows(),
+                            protocol.cols(),
+                            cell.width as u16,
+                            cell.height as u16,
+                        ));
+                    }
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -573,7 +782,10 @@ fn run(
             }
         }
         match connection.next_event(Some(Duration::from_millis(10))) {
-            Ok(Some(SessionEvent::Data(bytes))) => lock().feed(&bytes),
+            Ok(Some(SessionEvent::Data(bytes))) => {
+                protocol.write(&bytes);
+                lock().feed(&bytes);
+            }
             // A replay after a reconnect: the screen as it is now.
             Ok(Some(SessionEvent::Screen(bytes))) => {
                 let mut screen = lock();
@@ -582,18 +794,30 @@ fn run(
                     columns: screen.term.columns() as u16,
                 };
                 let requests = screen.requests.clone();
+                let (tries, attached_at) = (screen.tries, screen.attached_at);
+                let cell = protocol.cell_size();
+                protocol = TerminalActor::new(size.rows, size.columns, HISTORY);
+                protocol.enable_graphics(pty_terminal::GraphicsOptions {
+                    cell,
+                    ..Default::default()
+                });
+                protocol.write(&bytes);
                 *screen = Screen::new(size, requests);
+                screen.tries = tries;
+                screen.attached_at = attached_at;
                 screen.attached = true;
                 screen.feed(&bytes);
             }
             // The size every attached client shares, before the output drawn at it.
             Ok(Some(SessionEvent::Geometry { rows, cols })) => {
+                protocol.resize(cols.max(1), rows.max(1));
                 lock().term.resize(Size {
                     rows: rows.max(1),
                     columns: cols.max(1),
                 });
             }
             Ok(Some(SessionEvent::Exit(code))) => {
+                super::slo::METRICS.add("dead_terminal_tabs", 1);
                 lock().ended = Some(format!("the program exited ({code})"));
                 return;
             }
@@ -607,7 +831,23 @@ fn run(
                 return;
             }
         }
+        // The daemon owns replies; alacritty owns titles, bells and clipboard requests.
+        protocol.take_pty_replies();
+        protocol.take_events();
+        let requests = lock().requests.clone();
+        let clipboard_reads = std::mem::take(
+            &mut requests
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clipboard_reads,
+        );
+        for reply in clipboard_reads {
+            connection.write(&reply);
+        }
         let mut screen = lock();
+        let offset = screen.term.grid().display_offset();
+        screen.graphics.update(&protocol, offset);
         if screen
             .parser
             .sync_timeout()
@@ -666,140 +906,257 @@ fn cell_style(fg: AnsiColor, bg: AnsiColor, flags: Flags) -> Style {
     style
 }
 
-/// What a terminal reports to a program that asked for the mouse, for `mouse` at a cell of its
-/// screen (zero-based). `None` when the program did not ask, or for what it did not ask for.
-pub(crate) fn mouse_bytes(
-    mouse: crossterm::event::MouseEvent,
-    column: u16,
-    row: u16,
-    mode: TermMode,
-) -> Option<Vec<u8>> {
-    use crossterm::event::{MouseButton, MouseEventKind};
-    if !mode.intersects(TermMode::MOUSE_MODE) {
-        return None;
+/// Translate the outer decoder's semantics; protocol decisions stay in pty-terminal.
+fn protocol_mods(modifiers: KeyModifiers, state: KeyEventState) -> Mods {
+    let mut mods = Mods::empty();
+    for (flag, mode) in [
+        (KeyModifiers::SHIFT, Mods::SHIFT),
+        (KeyModifiers::ALT, Mods::ALT),
+        (KeyModifiers::CONTROL, Mods::CTRL),
+        (KeyModifiers::SUPER, Mods::SUPER),
+    ] {
+        mods.set(mode, modifiers.contains(flag));
     }
-    let button = |button: MouseButton| match button {
-        MouseButton::Left => 0,
-        MouseButton::Middle => 1,
-        MouseButton::Right => 2,
-    };
-    let (code, release) = match mouse.kind {
-        MouseEventKind::Down(which) => (button(which), false),
-        MouseEventKind::Up(which) => (button(which), true),
-        MouseEventKind::Drag(which)
-            if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) =>
-        {
-            (button(which) + 32, false)
-        }
-        _ => return None,
-    };
-    let modifiers = u8::from(mouse.modifiers.contains(KeyModifiers::SHIFT)) * 4
-        + u8::from(mouse.modifiers.contains(KeyModifiers::ALT)) * 8
-        + u8::from(mouse.modifiers.contains(KeyModifiers::CONTROL)) * 16;
-    let code = code + modifiers;
-    Some(if mode.contains(TermMode::SGR_MOUSE) {
-        format!(
-            "\x1b[<{code};{};{}{}",
-            column + 1,
-            row + 1,
-            if release { 'm' } else { 'M' }
-        )
-        .into_bytes()
-    } else {
-        // The old encoding: a release is button 3, and a cell past 223 cannot be said.
-        let code = if release { 3 + modifiers } else { code };
-        let cell = |value: u16| u8::try_from(value + 33).unwrap_or(255);
-        vec![0x1b, b'[', b'M', 32 + code, cell(column), cell(row)]
-    })
+    mods.set(Mods::CAPS_LOCK, state.contains(KeyEventState::CAPS_LOCK));
+    mods.set(Mods::NUM_LOCK, state.contains(KeyEventState::NUM_LOCK));
+    mods
 }
 
-/// The bytes a terminal sends for `key`, following the program's cursor-key mode.
-pub(crate) fn key_bytes(key: KeyEvent, mode: TermMode) -> Option<Vec<u8>> {
-    let control = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    // xterm's modifier parameter: 1 + shift + 2·alt + 4·control.
-    let modifier = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(control);
-    let application = mode.contains(TermMode::APP_CURSOR);
-    let cursor = |letter: char| -> Vec<u8> {
-        if modifier > 1 {
-            format!("\x1b[1;{modifier}{letter}").into_bytes()
-        } else if application {
-            format!("\x1bO{letter}").into_bytes()
-        } else {
-            format!("\x1b[{letter}").into_bytes()
-        }
-    };
-    let tilde = |number: u8| -> Vec<u8> {
-        if modifier > 1 {
-            format!("\x1b[{number};{modifier}~").into_bytes()
-        } else {
-            format!("\x1b[{number}~").into_bytes()
-        }
-    };
-    let bytes = match key.code {
-        KeyCode::Char(character) => {
-            let mut bytes = Vec::new();
-            if alt {
-                bytes.push(0x1b);
-            }
-            if control {
-                let upper = character.to_ascii_uppercase();
-                match upper {
-                    '@'..='_' => bytes.push(upper as u8 & 0x1f),
-                    ' ' | '2' => bytes.push(0),
-                    '3'..='7' => bytes.push(0x1b + (upper as u8 - b'3')),
-                    '8' | '?' => bytes.push(0x7f),
-                    _ => bytes.extend_from_slice(character.to_string().as_bytes()),
-                }
-            } else {
-                bytes.extend_from_slice(character.to_string().as_bytes());
-            }
-            bytes
-        }
-        KeyCode::Enter => {
-            if alt {
-                b"\x1b\r".to_vec()
-            } else {
-                b"\r".to_vec()
-            }
-        }
-        KeyCode::Tab => b"\t".to_vec(),
-        KeyCode::BackTab => b"\x1b[Z".to_vec(),
-        KeyCode::Backspace => {
-            if alt {
-                b"\x1b\x7f".to_vec()
-            } else if control {
-                b"\x08".to_vec()
-            } else {
-                b"\x7f".to_vec()
-            }
-        }
-        KeyCode::Esc => b"\x1b".to_vec(),
-        KeyCode::Up => cursor('A'),
-        KeyCode::Down => cursor('B'),
-        KeyCode::Right => cursor('C'),
-        KeyCode::Left => cursor('D'),
-        KeyCode::Home => cursor('H'),
-        KeyCode::End => cursor('F'),
-        KeyCode::Insert => tilde(2),
-        KeyCode::Delete => tilde(3),
-        KeyCode::PageUp => tilde(5),
-        KeyCode::PageDown => tilde(6),
-        KeyCode::F(number @ 1..=4) => {
-            let letter = (b'P' + number - 1) as char;
-            if modifier > 1 {
-                format!("\x1b[1;{modifier}{letter}").into_bytes()
-            } else {
-                format!("\x1bO{letter}").into_bytes()
-            }
-        }
-        KeyCode::F(number @ 5..=12) => {
-            tilde([15, 17, 18, 19, 20, 21, 23, 24][usize::from(number - 5)])
-        }
+fn protocol_key(key: KeyEvent) -> Option<pty_terminal::KeyEvent> {
+    use ProtocolKey as K;
+    let keypad = key.state.contains(KeyEventState::KEYPAD);
+    let logical = match key.code {
+        KeyCode::Char(c) if keypad => match c {
+            '0'..='9' => [
+                K::Numpad0,
+                K::Numpad1,
+                K::Numpad2,
+                K::Numpad3,
+                K::Numpad4,
+                K::Numpad5,
+                K::Numpad6,
+                K::Numpad7,
+                K::Numpad8,
+                K::Numpad9,
+            ][c as usize - '0' as usize],
+            '+' => K::NumpadAdd,
+            '-' => K::NumpadSubtract,
+            '*' => K::NumpadMultiply,
+            '/' => K::NumpadDivide,
+            '.' => K::NumpadDecimal,
+            ',' => K::NumpadComma,
+            '=' => K::NumpadEqual,
+            _ => K::Unidentified,
+        },
+        KeyCode::Char(c) => match c.to_ascii_lowercase() {
+            'a'..='z' => [
+                K::A,
+                K::B,
+                K::C,
+                K::D,
+                K::E,
+                K::F,
+                K::G,
+                K::H,
+                K::I,
+                K::J,
+                K::K,
+                K::L,
+                K::M,
+                K::N,
+                K::O,
+                K::P,
+                K::Q,
+                K::R,
+                K::S,
+                K::T,
+                K::U,
+                K::V,
+                K::W,
+                K::X,
+                K::Y,
+                K::Z,
+            ][c.to_ascii_lowercase() as usize - 'a' as usize],
+            '0'..='9' => [
+                K::Digit0,
+                K::Digit1,
+                K::Digit2,
+                K::Digit3,
+                K::Digit4,
+                K::Digit5,
+                K::Digit6,
+                K::Digit7,
+                K::Digit8,
+                K::Digit9,
+            ][c as usize - '0' as usize],
+            ' ' => K::Space,
+            '[' => K::BracketLeft,
+            ']' => K::BracketRight,
+            '\\' => K::Backslash,
+            '`' => K::Backquote,
+            ',' => K::Comma,
+            '.' => K::Period,
+            '/' => K::Slash,
+            ';' => K::Semicolon,
+            '\'' => K::Quote,
+            '=' => K::Equal,
+            '-' => K::Minus,
+            _ => K::Unidentified,
+        },
+        KeyCode::Enter if keypad => K::NumpadEnter,
+        KeyCode::Enter => K::Enter,
+        KeyCode::Tab | KeyCode::BackTab => K::Tab,
+        KeyCode::Backspace => K::Backspace,
+        KeyCode::Esc => K::Escape,
+        KeyCode::Up if keypad => K::NumpadUp,
+        KeyCode::Up => K::ArrowUp,
+        KeyCode::Down if keypad => K::NumpadDown,
+        KeyCode::Down => K::ArrowDown,
+        KeyCode::Left if keypad => K::NumpadLeft,
+        KeyCode::Left => K::ArrowLeft,
+        KeyCode::Right if keypad => K::NumpadRight,
+        KeyCode::Right => K::ArrowRight,
+        KeyCode::Home if keypad => K::NumpadHome,
+        KeyCode::Home => K::Home,
+        KeyCode::End if keypad => K::NumpadEnd,
+        KeyCode::End => K::End,
+        KeyCode::PageUp if keypad => K::NumpadPageUp,
+        KeyCode::PageUp => K::PageUp,
+        KeyCode::PageDown if keypad => K::NumpadPageDown,
+        KeyCode::PageDown => K::PageDown,
+        KeyCode::Insert if keypad => K::NumpadInsert,
+        KeyCode::Insert => K::Insert,
+        KeyCode::Delete if keypad => K::NumpadDelete,
+        KeyCode::Delete => K::Delete,
+        KeyCode::F(n @ 1..=25) => [
+            K::F1,
+            K::F2,
+            K::F3,
+            K::F4,
+            K::F5,
+            K::F6,
+            K::F7,
+            K::F8,
+            K::F9,
+            K::F10,
+            K::F11,
+            K::F12,
+            K::F13,
+            K::F14,
+            K::F15,
+            K::F16,
+            K::F17,
+            K::F18,
+            K::F19,
+            K::F20,
+            K::F21,
+            K::F22,
+            K::F23,
+            K::F24,
+            K::F25,
+        ][usize::from(n - 1)],
+        KeyCode::KeypadBegin => K::NumpadBegin,
+        KeyCode::Null => K::Space,
         _ => return None,
     };
-    Some(bytes)
+    let mut event = pty_terminal::KeyEvent::press(logical);
+    event.mods = protocol_mods(key.modifiers, key.state);
+    if key.code == KeyCode::Null {
+        event.mods.insert(Mods::CTRL);
+    }
+    if key.code == KeyCode::BackTab {
+        event.mods.insert(Mods::SHIFT);
+    }
+    event.action = match key.kind {
+        KeyEventKind::Press => KeyAction::Press,
+        KeyEventKind::Repeat => KeyAction::Repeat,
+        KeyEventKind::Release => KeyAction::Release,
+    };
+    if let KeyCode::Char(c) = key.code {
+        event.text = Some(c.to_string());
+        event.unshifted = Some(c.to_ascii_lowercase());
+    }
+    Some(event)
+}
+
+/// The VT keypad application mode needs SS3 forms even when the outer terminal
+/// reports keypad keys through kitty. libghostty's text-first fallback omits these.
+fn encode_key(actor: &TerminalActor, key: &pty_terminal::KeyEvent, keypad: bool) -> Vec<u8> {
+    use ProtocolKey as K;
+    if keypad && actor.kitty_flags() == 0 && key.action != KeyAction::Release {
+        let code = match key.key {
+            K::Numpad0 | K::NumpadInsert => Some('p'),
+            K::Numpad1 | K::NumpadEnd => Some('q'),
+            K::Numpad2 | K::NumpadDown => Some('r'),
+            K::Numpad3 | K::NumpadPageDown => Some('s'),
+            K::Numpad4 | K::NumpadLeft => Some('t'),
+            K::Numpad5 | K::NumpadBegin => Some('u'),
+            K::Numpad6 | K::NumpadRight => Some('v'),
+            K::Numpad7 | K::NumpadHome => Some('w'),
+            K::Numpad8 | K::NumpadUp => Some('x'),
+            K::Numpad9 | K::NumpadPageUp => Some('y'),
+            K::NumpadDecimal | K::NumpadDelete => Some('n'),
+            K::NumpadEnter => Some('M'),
+            K::NumpadAdd => Some('k'),
+            K::NumpadSubtract => Some('m'),
+            K::NumpadMultiply => Some('j'),
+            K::NumpadDivide => Some('o'),
+            K::NumpadComma => Some('l'),
+            K::NumpadEqual => Some('X'),
+            _ => None,
+        };
+        if let Some(code) = code {
+            let modifier = 1
+                + u8::from(key.mods.contains(Mods::SHIFT))
+                + 2 * u8::from(key.mods.contains(Mods::ALT))
+                + 4 * u8::from(key.mods.contains(Mods::CTRL));
+            return if modifier == 1 {
+                format!("\x1bO{code}").into_bytes()
+            } else {
+                format!("\x1b[1;{modifier}{code}").into_bytes()
+            };
+        }
+    }
+    let mut bytes = actor.encode_key(key);
+    // The key encoder follows Ghostty's macOS rule that Option composes characters, and
+    // pty-terminal does not tell it otherwise. The outer terminal has already decided what
+    // Alt meant by the time stui sees it, so an Alt press that came out as plain text still
+    // carries the Escape prefix a legacy child expects.
+    if cfg!(target_os = "macos")
+        && key.mods.contains(Mods::ALT)
+        && key.action != KeyAction::Release
+        && bytes.first().is_some_and(|byte| *byte != 0x1b)
+    {
+        bytes.insert(0, 0x1b);
+    }
+    bytes
+}
+
+fn protocol_mouse(mouse: MouseEvent, column: u16, row: u16) -> Option<pty_terminal::MouseEvent> {
+    use crossterm::event::MouseButton;
+    let button = |b| match b {
+        MouseButton::Left => ProtocolButton::Left,
+        MouseButton::Middle => ProtocolButton::Middle,
+        MouseButton::Right => ProtocolButton::Right,
+    };
+    let (action, which, pressed) = match mouse.kind {
+        MouseEventKind::Down(b) => (MouseAction::Press, Some(button(b)), true),
+        MouseEventKind::Up(b) => (MouseAction::Release, Some(button(b)), false),
+        MouseEventKind::Drag(b) => (MouseAction::Motion, Some(button(b)), true),
+        MouseEventKind::Moved => (MouseAction::Motion, None, false),
+        MouseEventKind::ScrollUp => (MouseAction::Press, Some(ProtocolButton::Four), false),
+        MouseEventKind::ScrollDown => (MouseAction::Press, Some(ProtocolButton::Five), false),
+        MouseEventKind::ScrollLeft => (MouseAction::Press, Some(ProtocolButton::Six), false),
+        MouseEventKind::ScrollRight => (MouseAction::Press, Some(ProtocolButton::Seven), false),
+    };
+    Some(pty_terminal::MouseEvent {
+        action,
+        button: which,
+        mods: protocol_mods(mouse.modifiers, KeyEventState::empty()),
+        col: column,
+        row,
+        any_button_pressed: pressed,
+    })
 }
 
 #[cfg(test)]
@@ -811,78 +1168,41 @@ mod tests {
     }
 
     #[test]
-    fn clicks_reach_a_program_that_asked_for_the_mouse_and_no_other() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        let event = |kind| MouseEvent {
-            kind,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
+    fn tries_to_attach_again_wait_longer_each_time_and_never_more_than_the_most() {
+        let waits: Vec<u64> = (0..8).map(|tries| retry_delay(tries).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 32, 32]);
+        assert_eq!(retry_delay(u32::MAX), RETRY_MAX);
+    }
+
+    #[test]
+    fn protocol_modes_control_key_encoding() {
+        let mut term = TerminalActor::new(24, 80, 0);
+        let encode = |term: &TerminalActor, code, modifiers| {
+            term.encode_key(&protocol_key(key(code, modifiers)).unwrap())
         };
-        let down = event(MouseEventKind::Down(MouseButton::Left));
-        let up = event(MouseEventKind::Up(MouseButton::Left));
-        assert_eq!(mouse_bytes(down, 4, 2, TermMode::empty()), None);
-        let sgr = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
-        assert_eq!(mouse_bytes(down, 4, 2, sgr).unwrap(), b"\x1b[<0;5;3M");
-        assert_eq!(mouse_bytes(up, 4, 2, sgr).unwrap(), b"\x1b[<0;5;3m");
-        let drag = event(MouseEventKind::Drag(MouseButton::Left));
-        assert_eq!(mouse_bytes(drag, 4, 2, sgr), None, "clicks only");
+        assert_eq!(encode(&term, KeyCode::Up, KeyModifiers::NONE), b"\x1b[A");
+        term.write(b"\x1b[?1h");
+        assert_eq!(encode(&term, KeyCode::Up, KeyModifiers::NONE), b"\x1bOA");
+        term.write(b"\x1b[>27u");
         assert_eq!(
-            mouse_bytes(drag, 4, 2, sgr | TermMode::MOUSE_DRAG).unwrap(),
-            b"\x1b[<32;5;3M"
+            encode(&term, KeyCode::Enter, KeyModifiers::SHIFT),
+            b"\x1b[13;2u"
         );
+        let mut release = key(KeyCode::Char('a'), KeyModifiers::NONE);
+        release.kind = KeyEventKind::Release;
         assert_eq!(
-            mouse_bytes(down, 4, 2, TermMode::MOUSE_REPORT_CLICK).unwrap(),
-            [0x1b, b'[', b'M', 32, 37, 35]
+            term.encode_key(&protocol_key(release).unwrap()),
+            b"\x1b[97;1:3u"
         );
     }
 
     #[test]
-    fn keys_are_the_bytes_a_terminal_sends() {
-        let normal = TermMode::empty();
-        let app = TermMode::APP_CURSOR;
-        let bytes = |code, modifiers, mode| key_bytes(key(code, modifiers), mode).unwrap();
-        assert_eq!(bytes(KeyCode::Char('x'), KeyModifiers::NONE, normal), b"x");
-        assert_eq!(
-            bytes(KeyCode::Char('c'), KeyModifiers::CONTROL, normal),
-            b"\x03"
-        );
-        assert_eq!(
-            bytes(KeyCode::Char('['), KeyModifiers::CONTROL, normal),
-            b"\x1b"
-        );
-        assert_eq!(
-            bytes(KeyCode::Char('b'), KeyModifiers::ALT, normal),
-            b"\x1bb"
-        );
-        assert_eq!(
-            bytes(KeyCode::Char('é'), KeyModifiers::NONE, normal),
-            "é".as_bytes()
-        );
-        assert_eq!(bytes(KeyCode::Up, KeyModifiers::NONE, normal), b"\x1b[A");
-        assert_eq!(bytes(KeyCode::Up, KeyModifiers::NONE, app), b"\x1bOA");
-        assert_eq!(
-            bytes(KeyCode::Left, KeyModifiers::CONTROL, app),
-            b"\x1b[1;5D"
-        );
-        assert_eq!(bytes(KeyCode::Enter, KeyModifiers::NONE, normal), b"\r");
-        assert_eq!(
-            bytes(KeyCode::Backspace, KeyModifiers::NONE, normal),
-            b"\x7f"
-        );
-        assert_eq!(
-            bytes(KeyCode::PageUp, KeyModifiers::NONE, normal),
-            b"\x1b[5~"
-        );
-        assert_eq!(bytes(KeyCode::F(1), KeyModifiers::NONE, normal), b"\x1bOP");
-        assert_eq!(
-            bytes(KeyCode::F(5), KeyModifiers::NONE, normal),
-            b"\x1b[15~"
-        );
-        assert_eq!(
-            bytes(KeyCode::BackTab, KeyModifiers::SHIFT, normal),
-            b"\x1b[Z"
-        );
+    fn alt_with_a_character_reaches_the_child_with_an_escape_prefix() {
+        let term = TerminalActor::new(24, 80, 0);
+        let alt_a = protocol_key(key(KeyCode::Char('a'), KeyModifiers::ALT)).unwrap();
+        assert_eq!(encode_key(&term, &alt_a, false), b"\x1ba");
+        let plain_a = protocol_key(key(KeyCode::Char('a'), KeyModifiers::NONE)).unwrap();
+        assert_eq!(encode_key(&term, &plain_a, false), b"a");
     }
 
     #[test]
@@ -923,18 +1243,41 @@ mod tests {
         wait(&|| shown(&terminal).contains("old 9"));
         // The stream drops; the program did not exit.
         drop(daemon);
-        wait(&|| terminal.dropped().is_some());
-        assert!(terminal.ended().unwrap().contains("attaching again"));
+        wait(&|| terminal.lost().is_some());
+        // Lost is not ended: the program still runs, and stui says it is getting back to it.
+        assert!(terminal.ended().is_none());
+        assert_eq!(terminal.reconnecting().unwrap().0, 0);
+        assert!(!terminal.take_reattach(), "the first try waits a second");
+        // A try that cannot reach the session waits twice as long before the next.
+        std::thread::sleep(retry_delay(0));
+        assert!(terminal.take_reattach());
+        assert!(!terminal.take_reattach(), "one try at a time");
+        terminal.retry_failed("unreachable".into());
+        let (tries, next) = terminal.reconnecting().unwrap();
+        assert_eq!(tries, 1);
+        assert!(next.unwrap() > Instant::now() + Duration::from_millis(1500));
+        assert_eq!(terminal.lost().as_deref(), Some("unreachable"));
         let (stui, mut daemon) = UnixStream::pair().unwrap();
         terminal.reconnect(stui, "test");
         let _ = daemon.read(&mut bytes).unwrap();
         daemon
             .write_all(&encode_packet(MessageType::Screen, b"new\r\n"))
             .unwrap();
-        wait(&|| shown(&terminal).contains("new") && terminal.ended().is_none());
-        assert!(terminal.dropped().is_none());
+        wait(&|| shown(&terminal).contains("new") && terminal.lost().is_none());
+        assert!(terminal.ended().is_none() && terminal.reconnecting().is_none());
         // What scrolled off before the drop is still there to scroll back to.
-        terminal.wheel(20);
+        terminal.wheel(
+            20,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            0,
+            0,
+            true,
+        );
         assert!(shown(&terminal).contains("old 0"), "{}", shown(&terminal));
     }
 
@@ -1018,6 +1361,7 @@ mod tests {
                 copied: None,
                 title: Some("build log".into()),
                 bell: false,
+                clipboard_reads: Vec::new(),
             }
         );
     }
@@ -1104,7 +1448,18 @@ mod tests {
                 .collect::<String>()
                 .contains("line 29")
         });
-        terminal.wheel(5);
+        terminal.wheel(
+            5,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            0,
+            0,
+            true,
+        );
         assert_eq!(terminal.scrolled(), 5);
         terminal.write(b"x".to_vec());
         assert_eq!(terminal.scrolled(), 0, "typing returns to the bottom");

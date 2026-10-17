@@ -10,6 +10,31 @@ use super::view::*;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+/// What Home says when nothing needs the person; setup's first-run test waits for it.
+pub const HOME_IDLE_TEXT: &str = "No alerts right now.";
+/// What Home and the alerts list say instead of "none" while the alerts they would show may be
+/// missing or old: st is catching up with a peer, or stopped serving the list or its live stream.
+pub const HOME_UNKNOWN_TEXT: &str = "No alerts known — this view is out of date.";
+
+/// Whether the alerts shown (or their absence) can be out of date, and why.
+fn alerts_out_of_date(world: &World) -> Option<String> {
+    let stale: Vec<&str> = world
+        .stale
+        .iter()
+        .map(String::as_str)
+        .filter(|why| why.starts_with("Attention") || why.starts_with("live stream"))
+        .collect();
+    if world.behind.is_empty() && stale.is_empty() {
+        return None;
+    }
+    let mut why = Vec::new();
+    if !world.behind.is_empty() {
+        why.push(format!("catching up: {}", world.behind.join("; ")));
+    }
+    why.extend(stale.iter().map(|why| (*why).to_owned()));
+    Some(why.join("; "))
+}
+
 /// The tabs everyone sees. Worktrees stays hidden until the graph models worktrees: its screens
 /// only have invented data to show (Nathan, 2026-09-28).
 pub const TABS: [&str; 5] = ["Now", "Agents", "Missions", "Fleet", "Usage"];
@@ -67,10 +92,21 @@ pub fn agent_glyph(state: AgentState, spinner: &'static str) -> (&'static str, C
         AgentState::NeedsLogin => ("⚿", theme::PERSON),
         AgentState::Fault => ("✕", theme::FAULT),
         AgentState::Working => (spinner, theme::WORKING),
+        AgentState::Compacting => ("◐", theme::SAPPHIRE),
         AgentState::Idle => ("●", theme::IDLE),
         AgentState::Starting => ("◌", theme::WAITING),
-        AgentState::Stopped => ("○", theme::QUIET),
+        AgentState::Down => ("⊘", theme::FAULT),
+        AgentState::Stopped | AgentState::Retired => ("○", theme::QUIET),
         AgentState::Unknown => ("?", theme::QUIET),
+    }
+}
+
+/// The word an agent row shows: st's state word, or, from an st too old to serve one, the state
+/// st reports, marked so.
+pub fn agent_shown_word(agent: &Agent) -> String {
+    match &agent.reported {
+        Some(state) => format!("{state} · older st"),
+        None => agent_word(agent.state).to_owned(),
     }
 }
 
@@ -80,9 +116,12 @@ pub fn agent_word(state: AgentState) -> &'static str {
         AgentState::NeedsLogin => "needs login",
         AgentState::Fault => "broken",
         AgentState::Working => "working",
+        AgentState::Compacting => "compacting",
         AgentState::Idle => "idle",
         AgentState::Starting => "starting",
+        AgentState::Down => "down",
         AgentState::Stopped => "stopped",
+        AgentState::Retired => "retired",
         AgentState::Unknown => "not managed",
     }
 }
@@ -124,7 +163,9 @@ pub fn attention_style(kind: &AttentionKind) -> (&'static str, Color) {
         | AttentionKind::Feedback { .. }
         | AttentionKind::Launch { .. }
         | AttentionKind::Revision { .. }
-        | AttentionKind::Request { .. } => ("◆", theme::PERSON),
+        | AttentionKind::Request { .. }
+        | AttentionKind::Prompt { .. } => ("◆", theme::PERSON),
+        AttentionKind::Login { .. } => ("⚿", theme::PERSON),
         AttentionKind::Fault { .. } => ("✕", theme::FAULT),
         AttentionKind::Message { .. } => ("✉", theme::SAPPHIRE),
         AttentionKind::Update { .. } => ("✦", theme::GREEN),
@@ -163,7 +204,11 @@ fn legend(entries: &[(&str, Color, &str)]) -> Vec<Line<'static>> {
 
 // --------------------------------------------------------------------- home
 
-pub fn home_list(world: &World, snoozed: &std::collections::HashSet<String>) -> Listing {
+pub fn home_list(
+    world: &World,
+    snoozed: &std::collections::HashSet<String>,
+    closed: &std::collections::HashSet<String>,
+) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
     let mut attention = world
@@ -172,21 +217,30 @@ pub fn home_list(world: &World, snoozed: &std::collections::HashSet<String>) -> 
         .iter()
         .filter(|item| !snoozed.contains(&item.id))
         .collect::<Vec<_>>();
-    attention.sort_by_key(|item| item.tier);
+    // What st closed while it was shown stays, in a section of its own below what needs you, so
+    // the two are never mistaken for each other (Nathan, 2026-10-07: "2 need you", 4 listed).
+    attention.sort_by_key(|item| (closed.contains(&item.id), item.tier));
     let mut current = None;
     for item in attention {
-        if current != Some(item.tier) {
-            current = Some(item.tier);
+        let is_closed = closed.contains(&item.id);
+        if current != Some((is_closed, item.tier)) {
+            current = Some((is_closed, item.tier));
             let count = world
                 .attention
                 .items()
                 .iter()
-                .filter(|other| other.tier == item.tier)
+                .filter(|other| {
+                    closed.contains(&other.id) == is_closed && (is_closed || other.tier == item.tier)
+                })
                 .count();
             items.push(Item::Header {
-                title: item.tier.title().into(),
+                title: if is_closed {
+                    "Recently closed: x clears each".into()
+                } else {
+                    item.tier.title().into()
+                },
                 count,
-                color: if item.tier == Tier::Stopped {
+                color: if !is_closed && item.tier == Tier::Stopped {
                     theme::PERSON
                 } else {
                     theme::OVERLAY1
@@ -229,8 +283,12 @@ pub fn home_list(world: &World, snoozed: &std::collections::HashSet<String>) -> 
         ids,
         state: state_of(
             &world.attention,
-            "Checking what needs you…",
-            "Nothing needs you.",
+            "Checking for alerts…",
+            if alerts_out_of_date(world).is_some() {
+                "No alerts known — out of date."
+            } else {
+                "No alerts."
+            },
         ),
         legend: legend(&[
             ("◆", theme::PERSON, "decide"),
@@ -248,6 +306,8 @@ pub struct Drafts<'a> {
     pub confirm: Option<char>,
     /// The named answer chosen on a structured request, before Enter sends it.
     pub answering: Option<usize>,
+    /// The chosen answer that needs the person's words, while they write them.
+    pub needs_words: Option<String>,
     /// "Chat about this": who it goes to, the draft, and the thread so far.
     pub chat: Option<Chat<'a>>,
 }
@@ -287,6 +347,16 @@ fn text_box(doc: &mut Doc, title: &str, drafts: &Drafts<'_>, placeholder: &str, 
         for runs in super::edit::lines(body, at, theme::text()) {
             inner.lines(text::wrap(&runs, width.saturating_sub(4), &[], &[], None));
         }
+        // What is wanted stays in view under the cursor until something is typed.
+        if body.is_empty() && !placeholder.is_empty() {
+            inner.lines(text::wrap(
+                &[text::run(placeholder.to_owned(), theme::dim())],
+                width.saturating_sub(4),
+                &[],
+                &[],
+                None,
+            ));
+        }
     }
     let start = doc.lines.len();
     doc.card(
@@ -320,6 +390,7 @@ fn structured_request(
     card: &mut Doc,
     from: &str,
     request: &st3_client::StructuredRequest,
+    images: &[st3_conversation_ui::MailImage],
     drafts: &Drafts<'_>,
     inner: usize,
 ) {
@@ -388,13 +459,38 @@ fn structured_request(
             card.lines(text::wrap(
                 &[
                     text::run(subject.label.clone(), theme::text()),
-                    text::run(format!("  {target}"), theme::fg(theme::ACCENT)),
+                    text::run(format!("  {target}"), theme::dim()),
                 ],
                 inner,
-                &[text::run(" ↗ ", theme::fg(theme::ACCENT))],
+                &[text::run("   ", theme::dim())],
                 &[text::run("   ", theme::dim())],
                 None,
             ));
+        }
+    }
+    // The images it carries: a line each that opens it; where stui keeps image state, the line
+    // also loads it inline (`Content::expand_requests`).
+    if !images.is_empty() {
+        card.blank();
+        for image in images {
+            card.targets.push(super::doc::Target {
+                line: card.lines.len(),
+                column: 0,
+                width: inner as u16,
+                hit: Hit::Pane(st3_conversation_ui::PaneIntent::Image(image.clone())),
+            });
+            card.line(Line::from(vec![
+                span(
+                    format!(
+                        "   ▣ {} · {} · {} KB  ",
+                        super::content::image_name(image),
+                        image.media_type,
+                        image.size.div_ceil(1024)
+                    ),
+                    theme::text(),
+                ),
+                span("open", theme::fg(theme::LAVENDER)),
+            ]));
         }
     }
     card.blank();
@@ -402,34 +498,70 @@ fn structured_request(
         .recommendation
         .as_ref()
         .map(|wanted| wanted.answer.as_str());
+    if !request.answers.is_empty() {
+        card.section("choose one", None, inner);
+    }
     for (index, answer) in request.answers.iter().enumerate() {
-        let chosen = drafts.answering == Some(index);
+        let chosen = drafts.answering == Some(index)
+            || drafts.needs_words.as_deref() == Some(answer.label.as_str());
+        // A radio row: the dot says it is a choice, the filled one is the choice, and the chosen
+        // row is lifted off the card so it cannot be missed.
+        let fill = |style: Style| {
+            if chosen {
+                style.bg(theme::SURFACE0)
+            } else {
+                style
+            }
+        };
         let mut head = vec![
             text::run(
-                if chosen { " ▸ " } else { "   " },
-                theme::strong(theme::ACCENT),
+                if chosen { " ◉ " } else { " ○ " },
+                fill(theme::strong(if chosen {
+                    theme::ACCENT
+                } else {
+                    theme::OVERLAY1
+                })),
             ),
             text::run(
                 answer.label.clone(),
-                if chosen {
+                fill(if chosen {
                     theme::strong(theme::ACCENT)
                 } else {
                     theme::strong(theme::TEXT)
-                },
+                }),
             ),
         ];
         if recommended == Some(answer.id.as_str()) {
-            head.push(text::run("  recommended", theme::fg(theme::GREEN)));
+            head.push(text::run("  recommended", fill(theme::fg(theme::GREEN))));
         }
-        head.push(text::run(format!("  {}", answer.consequence), theme::dim()));
+        if answer.outcome.as_deref() == Some("request_changes") {
+            head.push(text::run(
+                "  needs your words",
+                fill(theme::fg(theme::YELLOW)),
+            ));
+        }
+        head.push(text::run(
+            format!("  {}", answer.consequence),
+            fill(theme::dim()),
+        ));
         let from_line = card.lines.len();
-        card.lines(text::wrap(
+        let mut wrapped = text::wrap(
             &head,
             inner,
             &[],
-            &[text::run("   ", theme::dim())],
+            &[text::run("    ", fill(theme::dim()))],
             None,
-        ));
+        );
+        if chosen {
+            for line in &mut wrapped {
+                let used: usize = line.spans.iter().map(|span| span.width()).sum();
+                line.spans.push(Span::styled(
+                    " ".repeat(inner.saturating_sub(used)),
+                    Style::default().bg(theme::SURFACE0),
+                ));
+            }
+        }
+        card.lines(wrapped);
         card.targets.push(crate::ui::doc::Target {
             line: from_line,
             column: 0,
@@ -439,14 +571,50 @@ fn structured_request(
     }
     card.blank();
     if drafts.editing || drafts.text.is_some_and(|text| !text.is_empty()) {
-        text_box(card, &format!("answer {from}"), drafts, "", inner);
+        let hint = drafts.needs_words.as_ref().map(|label| {
+            format!("what should change? Enter sends it with “{label}” · Esc cancels")
+        });
+        card.section("in your own words", None, inner);
+        text_box(
+            card,
+            &format!("answer {from}"),
+            drafts,
+            hint.as_deref().unwrap_or(""),
+            inner,
+        );
         card.buttons(&[
             ("enter", "Send the answer", Hit::Enter, theme::ACCENT),
             ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
         ]);
     } else if drafts.answering.is_some() {
+        // An option that needs the person's words opens a box for them instead of sending.
+        let needs_words = drafts
+            .answering
+            .and_then(|index| request.answers.get(index))
+            .is_some_and(|answer| answer.outcome.as_deref() == Some("request_changes"));
+        // The box for them is on the card from the moment the option is chosen: typing starts it.
+        if needs_words {
+            let label = drafts
+                .answering
+                .and_then(|index| request.answers.get(index))
+                .map(|answer| answer.label.clone())
+                .unwrap_or_default();
+            card.section("in your own words", None, inner);
+            text_box(
+                card,
+                &format!("answer {from}"),
+                drafts,
+                &format!("what should change? Start typing; Enter sends it with “{label}”"),
+                inner,
+            );
+        }
         card.buttons(&[
-            ("enter", "Send this answer", Hit::Enter, theme::ACCENT),
+            (
+                "enter",
+                if needs_words { "Write your words" } else { "Send this answer" },
+                Hit::Enter,
+                theme::ACCENT,
+            ),
             ("↑↓", "Another", Hit::Key('a'), theme::OVERLAY1),
             ("esc", "Not now", Hit::Escape, theme::OVERLAY1),
         ]);
@@ -472,6 +640,13 @@ fn structured_request(
             buttons.push(("c", "Answer in words", Hit::Key('c'), theme::ACCENT));
         }
         card.buttons(&buttons);
+        // A person can always set a request aside, whatever its answers: the asker is told it
+        // was dismissed (Nathan, 2026-10-11). It asks first.
+        card.blank();
+        let label = format!("Dismiss this: tell {from} you set it aside without answering");
+        if !confirm_row(card, drafts, &label) {
+            card.buttons(&[("x", "Dismiss without answering", Hit::Key('x'), theme::OVERLAY1)]);
+        }
     }
     if !request.why_person.is_empty() {
         card.blank();
@@ -614,20 +789,28 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
     let Some(item) = id.and_then(|id| world.attention.items().iter().find(|item| item.id == id))
     else {
         match &world.attention {
-            Load::Loading => doc.line(Line::from(span("Checking what needs you…", theme::dim()))),
+            Load::Loading => doc.line(Line::from(span("Checking for alerts…", theme::dim()))),
             Load::Failed(error) => doc.wrap(
                 &[run(
-                    format!("Could not read what needs you: {error}"),
+                    format!("Could not read your alerts: {error}"),
                     theme::fg(theme::RED),
                 )],
                 width,
             ),
             Load::Ready(_) => {
                 doc.blank();
-                doc.line(Line::from(vec![
-                    span("✓ ", theme::strong(theme::GREEN)),
-                    span("Nothing needs you right now.", theme::bold()),
-                ]));
+                if let Some(why) = alerts_out_of_date(world) {
+                    doc.line(Line::from(vec![
+                        span("◐ ", theme::strong(theme::YELLOW)),
+                        span(HOME_UNKNOWN_TEXT, theme::bold()),
+                    ]));
+                    doc.wrap(&[run(why, theme::dim())], width);
+                } else {
+                    doc.line(Line::from(vec![
+                        span("✓ ", theme::strong(theme::GREEN)),
+                        span(HOME_IDLE_TEXT, theme::bold()),
+                    ]));
+                }
                 doc.blank();
                 doc.wrap(
                     &[run(
@@ -785,11 +968,19 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             ));
             card.card(subject, theme::OVERLAY1, false, preview, inner);
             if let Some(link) = link {
+                let url = link.starts_with("http://") || link.starts_with("https://");
                 card.line(Line::from(vec![
-                    span("open  ", theme::dim()),
+                    span(
+                        if url { "copy link  " } else { "reference  " },
+                        theme::dim(),
+                    ),
                     span(
                         link.clone(),
-                        theme::fg(theme::BLUE).add_modifier(Modifier::UNDERLINED),
+                        if url {
+                            theme::fg(theme::BLUE).add_modifier(Modifier::UNDERLINED)
+                        } else {
+                            theme::dim()
+                        },
                     ),
                 ]));
             }
@@ -1039,8 +1230,9 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
         AttentionKind::Request {
             from,
             structured: Some(request),
+            images,
             ..
-        } => structured_request(&mut card, from, request, drafts, inner),
+        } => structured_request(&mut card, from, request, images, drafts, inner),
         AttentionKind::Request { from, question, .. } => {
             let custom = item.actions.iter().any(|action| action == "custom.reply");
             card.line(Line::from(vec![
@@ -1108,6 +1300,55 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 inner,
             );
         }
+        AttentionKind::Prompt {
+            seat,
+            text: prompt,
+            answers,
+            ..
+        } => {
+            card.line(Line::from(vec![
+                span("waits  ", theme::dim()),
+                span(seat.clone(), theme::strong(theme::PERSON)),
+            ]));
+            card.blank();
+            card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
+            card.blank();
+            if answers.is_empty() {
+                card.wrap(
+                    &text::inline(
+                        "Answer it in the seat's terminal (Ctrl+]). This clears when the prompt is gone, however it was answered.",
+                        theme::dim(),
+                    ),
+                    inner,
+                );
+            } else {
+                card.wrap(
+                    &text::inline(
+                        "The call it would make is the pending one in the seat's conversation: open the conversation to read it in full, then allow or deny it there. This clears when the prompt is gone, however it was answered.",
+                        theme::dim(),
+                    ),
+                    inner,
+                );
+            }
+        }
+        AttentionKind::Login { text: login, seats } => {
+            card.lines(text::markdown(&spaced(login), inner, theme::text()));
+            if seats.len() > 1 {
+                card.blank();
+                card.section("seats that share this sign-in", Some(seats.len()), inner);
+                for seat in seats {
+                    link(&mut card, "         ", seat, seat);
+                }
+            }
+            card.blank();
+            card.wrap(
+                &text::inline(
+                    "One sign-in in the seat's terminal (Ctrl+]) fixes every seat; this clears when the next authenticated turn succeeds.",
+                    theme::dim(),
+                ),
+                inner,
+            );
+        }
         AttentionKind::Update {
             from,
             body,
@@ -1132,10 +1373,10 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 card.lines(text::wrap(
                     &[
                         text::run(label, theme::text()),
-                        text::run(format!("  {target}"), theme::fg(theme::ACCENT)),
+                        text::run(format!("  {target}"), theme::dim()),
                     ],
                     inner,
-                    &[text::run(" ↗ ", theme::fg(theme::ACCENT))],
+                    &[text::run("   ", theme::dim())],
                     &[text::run("   ", theme::dim())],
                     None,
                 ));
@@ -1234,6 +1475,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             cursor: chat.cursor,
             editing: chat.editing,
             answering: None,
+            needs_words: None,
             confirm: None,
             chat: None,
         };
@@ -1342,10 +1584,11 @@ fn agent_group(agent: &Agent) -> &'static str {
     match agent.state {
         AgentState::NeedsYou => "waiting on you",
         AgentState::NeedsLogin => "needs login",
-        AgentState::Fault => "broken",
-        AgentState::Working => "working",
+        AgentState::Fault | AgentState::Down => "broken",
+        AgentState::Working | AgentState::Compacting => "working",
         AgentState::Idle | AgentState::Starting => "idle",
         AgentState::Stopped | AgentState::Unknown => "stopped",
+        AgentState::Retired => "retired",
     }
 }
 
@@ -1381,6 +1624,9 @@ fn subagent_lines(agent: &Agent, indent: &str, width: usize) -> Vec<Line<'static
 pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
+    if world.inventory_partial.iter().any(|name| name == "sessions") {
+        items.push(Item::Note(Line::from(span(" More native sessions exist beyond this inventory window.", theme::dim()))));
+    }
     let agents = agent_order(world);
     let mut current = "";
     for agent in &agents {
@@ -1418,10 +1664,17 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
                 ),
                 span(format!(" {:>4}", agent.activity), theme::dim()),
             ],
-            second: vec![span(
-                format!("   {}", text::truncate(path, width.saturating_sub(4))),
-                theme::dim(),
-            )],
+            // What its step last reported leads; the path says who it is when nothing was said.
+            second: match &agent.details.progress {
+                Some(progress) => vec![span(
+                    format!("   {}", text::truncate(progress, width.saturating_sub(4))),
+                    theme::soft(),
+                )],
+                None => vec![span(
+                    format!("   {}", text::truncate(path, width.saturating_sub(4))),
+                    theme::dim(),
+                )],
+            },
             children: subagent_lines(agent, "   ", width),
         });
         ids.push(agent.id.clone());
@@ -1437,7 +1690,15 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
             ("✕", theme::FAULT, "broken"),
             ("○", theme::QUIET, "stopped"),
             ("?", theme::QUIET, "unmanaged"),
-        ]),
+        ])
+        .into_iter()
+        .chain(world.agents.items().iter().any(|agent| agent.reported.is_some()).then(|| {
+            Line::from(span(
+                "This host's st is older: agent states show as st reports them.",
+                theme::dim(),
+            ))
+        }))
+        .collect(),
     }
 }
 
@@ -1467,7 +1728,7 @@ pub fn agent_header(world: &World, agent: &Agent, width: usize, spinner: &'stati
     let mut first = vec![
         span(format!(" {glyph} "), theme::strong(color)),
         span(agent.name.clone(), theme::bold()),
-        span(format!("  {}", agent_word(agent.state)), theme::fg(color)),
+        span(format!("  {}", agent_shown_word(agent)), theme::fg(color)),
     ];
     // The model rides beside the harness, as the harness reported it.
     let model = agent
@@ -1516,6 +1777,15 @@ pub fn agent_header(world: &World, agent: &Agent, width: usize, spinner: &'stati
             None,
         ));
     }
+    if let Some(progress) = &agent.details.progress {
+        doc.lines(text::wrap(
+            &text::inline(progress, theme::text()),
+            width,
+            &[text::run("   ", theme::dim())],
+            &[text::run("   ", theme::dim())],
+            None,
+        ));
+    }
     if let (Some(mission), Some(step)) = (&agent.mission, &agent.step) {
         let title = world
             .missions
@@ -1543,14 +1813,46 @@ pub fn mission_order(world: &World, system: bool) -> Vec<&Mission> {
         .iter()
         .filter(|mission| system || !hidden_by_default(mission))
         .collect::<Vec<_>>();
-    missions.sort_by_key(|mission| (mission.word, mission.title.to_lowercase()));
+    missions.sort_by_key(|mission| (display_rank(mission.word), mission.title.to_lowercase()));
     missions
+}
+
+/// The order the list reads in: what is running first, then what waits on the person, then what
+/// is stuck, then what is paused, then what is finished (Nathan, 2026-10-11: the list was hard to
+/// navigate, with running work between stuck work and the paused).
+fn display_rank(word: Word) -> u8 {
+    match word {
+        Word::Working => 0,
+        Word::Queued => 1,
+        Word::Decision => 2,
+        Word::Stalled => 3,
+        Word::Unstaffed => 4,
+        Word::Unclaimed => 5,
+        Word::Watching => 6,
+        Word::Held => 7,
+        Word::Idle => 8,
+        Word::Failed => 9,
+        Word::Cancelled => 10,
+        Word::Done => 11,
+        Word::NotStarted => 12,
+    }
 }
 
 /// Missions a person rarely looks for: st's own, ones nobody has started, and failures from before
 /// today, which age out of the list (Nathan, 2026-10-02). `x` shows them.
 fn hidden_by_default(mission: &Mission) -> bool {
-    mission.system || mission.word == Word::NotStarted || failed_before_today(mission)
+    mission.system
+        || mission.word == Word::NotStarted
+        || failed_before_today(mission)
+        || finished_before_today(mission)
+}
+
+/// A mission that finished or was stopped before today: done is not news the next day.
+fn finished_before_today(mission: &Mission) -> bool {
+    matches!(mission.word, Word::Done | Word::Cancelled)
+        && chrono::DateTime::parse_from_rfc3339(&mission.updated_at).is_ok_and(|at| {
+            at.with_timezone(&chrono::Local).date_naive() < chrono::Local::now().date_naive()
+        })
 }
 
 /// A failed mission whose last change was before today, on this machine's clock. A failure with
@@ -1562,7 +1864,18 @@ fn failed_before_today(mission: &Mission) -> bool {
         })
 }
 
-pub fn missions_list(world: &World, spinner: &'static str, system: bool) -> Listing {
+/// What a step in hand last reported, on one line: the status of a run in progress.
+fn mission_progress(mission: &Mission) -> Option<String> {
+    mission
+        .steps
+        .iter()
+        .filter(|step| step.state == StepState::Working)
+        .find_map(|step| mission.step_metadata.get(&step.id)?.last_progress.as_deref())
+        .map(|progress| progress.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|progress| !progress.is_empty())
+}
+
+pub fn missions_list(world: &World, width: usize, spinner: &'static str, system: bool) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
     let missions = mission_order(world, system);
@@ -1602,14 +1915,21 @@ pub fn missions_list(world: &World, spinner: &'static str, system: bool) -> List
                 span(mission.title.clone(), theme::bold()),
             ],
             right,
-            second: vec![span(
-                format!(
-                    "   {} · {}",
-                    mission.id.trim_start_matches("mission/"),
-                    mission.age
-                ),
-                theme::dim(),
-            )],
+            // A run in progress says what its step last reported before where it lives.
+            second: match mission_progress(mission) {
+                Some(progress) => vec![span(
+                    format!("   {}", text::truncate(&progress, width.saturating_sub(4))),
+                    theme::soft(),
+                )],
+                None => vec![span(
+                    format!(
+                        "   {} · {}",
+                        mission.id.trim_start_matches("mission/"),
+                        mission.age
+                    ),
+                    theme::dim(),
+                )],
+            },
             children: Vec::new(),
         });
         ids.push(mission.id.clone());
@@ -1632,6 +1952,10 @@ pub fn missions_list(world: &World, spinner: &'static str, system: bool) -> List
             (
                 count(|mission| !mission.system && failed_before_today(mission)),
                 "failed before today",
+            ),
+            (
+                count(|mission| !mission.system && finished_before_today(mission)),
+                "finished before today",
             ),
         ]
         .into_iter()
@@ -1810,6 +2134,36 @@ pub fn mission_detail(
                 None,
             ));
         }
+        // A step in hand says what it last reported, the status a person reads first.
+        if step.state == StepState::Working
+            && let Some(progress) = mission
+                .step_metadata
+                .get(&step.id)
+                .and_then(|metadata| metadata.last_progress.as_deref())
+        {
+            steps.lines(text::wrap(
+                &text::inline(progress, theme::text()),
+                inner,
+                &[run("      ", theme::dim())],
+                &[run("      ", theme::dim())],
+                None,
+            ));
+        }
+        // A step whose holder sat idle with nothing set to wake it says when st nudged it.
+        if step.state == StepState::Working
+            && let Some(nudged) = mission
+                .step_metadata
+                .get(&step.id)
+                .and_then(|metadata| metadata.nudged.as_deref())
+        {
+            steps.line(Line::from(vec![
+                span("      ", theme::dim()),
+                span(
+                    format!("nudged {nudged} ago: idle holding it, nothing set to wake it"),
+                    theme::soft(),
+                ),
+            ]));
+        }
         if open {
             let pad = "      ";
             let mut field = |label: &str, values: &[String], style: Style| {
@@ -1854,7 +2208,7 @@ pub fn mission_detail(
             });
             agents.line(Line::from(vec![
                 span(label, theme::fg(color)),
-                span(format!("{:<11}", agent_word(agent.state)), theme::fg(color)),
+                span(format!("{:<11}", agent_shown_word(agent)), theme::fg(color)),
                 span(
                     format!("{:<8}", agent.harness.name()),
                     theme::fg(harness_color(agent.harness)),
@@ -1969,14 +2323,16 @@ fn what_you_can_do(
     let (title, color) = match mission.word {
         Word::Stalled | Word::Failed => ("what you can do", theme::FAULT),
         Word::Unstaffed => ("what you can do", theme::WAITING),
-        Word::Queued => ("nothing for you to do", theme::OVERLAY1),
+        // Between two steps the run is moving: say what is next, not that the person has no part.
+        Word::Queued => ("up next", theme::OVERLAY1),
         _ => return,
     };
     card.blank();
     if mission.word == Word::Queued {
         let note = stuck
             .and_then(|step| step.note.clone())
-            .unwrap_or_else(|| "It is waiting its turn.".into());
+            .or_else(|| stuck.map(|step| format!("{} is next.", step.name)))
+            .unwrap_or_else(|| "The next step is waiting its turn.".into());
         card.wrap(&text::inline(&note, theme::text()), inner);
         card.blank();
         card.wrap(
@@ -2055,6 +2411,12 @@ fn screens_word(state: AgentState) -> &'static str {
 pub fn fleet_list(world: &World) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
+    if world.inventory_supported == Some(false) {
+        items.push(Item::Note(Line::from(span(" This member’s inventories are read, not followed.", theme::dim()))));
+    }
+    if world.inventory_partial.iter().any(|name| ["clients", "machines", "devices", "sessions"].contains(&name.as_str())) {
+        items.push(Item::Note(Line::from(span(" This view is partial; more inventory rows exist beyond its window.", theme::dim()))));
+    }
     for machine in world.machines.items() {
         let (glyph, color) = reach_style(machine.reach);
         let agents = world
@@ -2377,7 +2739,7 @@ pub fn worktree_detail(
             });
             agents.line(Line::from(vec![
                 span(label, theme::fg(color)),
-                span(agent_word(agent.state), theme::fg(color)),
+                span(agent_shown_word(agent), theme::fg(color)),
             ]));
         }
     }
@@ -2457,15 +2819,16 @@ pub struct AgentAction {
 pub fn agent_actions(agent: &Agent) -> Vec<AgentAction> {
     let row = |key, label, what| AgentAction { key, label, what };
     let mut rows = Vec::new();
-    let running = !matches!(agent.state, AgentState::Stopped | AgentState::Unknown);
+    let retired = agent.state == AgentState::Retired;
+    let running = !matches!(agent.state, AgentState::Stopped | AgentState::Retired | AgentState::Unknown);
     if agent.state == AgentState::Working {
         rows.push(row('i', "Interrupt", "stop its current turn, as Esc does in its own screen"));
     }
     if running {
         rows.push(row('r', "Restart", "a new process for the same seat, on its declaration"));
         rows.push(row('p', "Suspend", "stop at a quiet moment, keeping its session to resume"));
-        rows.push(row('x', "Retire", "stop it and take it off the lists; start brings it back"));
-    } else {
+        rows.push(row('x', "Stop", "stop its process; start brings it back"));
+    } else if !retired {
         rows.push(row('s', "Start", "start it again on its declaration"));
         rows.push(row('u', "Resume", "resume a suspended seat on the same session"));
     }
@@ -2486,7 +2849,7 @@ pub fn agent_actions_doc(agent: &Agent, width: usize, spinner: &'static str) -> 
     doc.line(Line::from(vec![
         span(format!("{glyph} "), theme::strong(color)),
         span(agent.name.clone(), theme::bold()),
-        span(format!("  {}", agent_word(agent.state)), theme::fg(color)),
+        span(format!("  {}", agent_shown_word(agent)), theme::fg(color)),
         span(format!("  {} · {}", agent.harness.name(), agent.host), theme::dim()),
     ]));
     doc.blank();
@@ -2507,7 +2870,10 @@ pub fn agent_actions_doc(agent: &Agent, width: usize, spinner: &'static str) -> 
     }
     doc.blank();
     doc.wrap(
-        &text::inline("Restart, suspend and retire ask y first. Esc closes.", theme::dim()),
+        &text::inline(
+            "Interrupt, restart, suspend and retire ask y first. Esc closes.",
+            theme::dim(),
+        ),
         width,
     );
     doc
@@ -2526,7 +2892,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
         doc.line(Line::from(vec![
             span(format!("{glyph} "), theme::strong(color)),
             span(agent.name.clone(), theme::bold()),
-            span(format!("  {}", agent_word(agent.state)), theme::fg(color)),
+            span(format!("  {}", agent_shown_word(agent)), theme::fg(color)),
         ]));
         doc.line(Line::from(span(agent.id.clone(), theme::dim())));
         doc.blank();
@@ -2539,6 +2905,9 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
         doc.field("host", &agent.host, width, theme::soft());
         if let Some(tree) = &agent.worktree {
             doc.field("worktree", tree, width, theme::soft());
+        }
+        if let Some(progress) = &agent.details.progress {
+            doc.field("now", progress, width, theme::text());
         }
         if let (Some(mission), Some(step)) = (&agent.mission, &agent.step) {
             let title = world
@@ -2689,6 +3058,16 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
         doc.blank();
     }
     doc.section("now", None, width);
+    // What its step last reported is the status; the step and its goal say where it comes from.
+    if let Some(progress) = &details.progress {
+        doc.lines(text::wrap(
+            &text::inline(progress, theme::bold()),
+            width,
+            &[],
+            &[],
+            None,
+        ));
+    }
     match (&agent.mission, &agent.step) {
         (Some(mission), Some(step)) => {
             let title = world
@@ -2719,28 +3098,49 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
     }
     doc.blank();
     doc.section("next", Some(details.queued as usize), width);
+    // Each queued step opens its mission when clicked.
+    let open_mission = |doc: &mut Doc, lines: Vec<Line<'static>>, mission: Option<&String>| {
+        if let Some(mission) = mission.filter(|mission| !mission.is_empty()) {
+            for offset in 0..lines.len() {
+                doc.targets.push(super::doc::Target {
+                    line: doc.lines.len() + offset,
+                    column: 2,
+                    width: width.saturating_sub(2) as u16,
+                    hit: Hit::Open(mission.clone()),
+                });
+            }
+        }
+        doc.lines(lines);
+    };
     match &details.next {
-        Some(next) => doc.lines(text::wrap(
-            &[run(next.clone(), theme::text())],
-            width,
-            &[run("› ", theme::fg(theme::ACCENT))],
-            &[run("  ", theme::dim())],
-            None,
-        )),
+        Some(next) => open_mission(
+            &mut doc,
+            text::wrap(
+                &[run(next.clone(), theme::text())],
+                width,
+                &[run("› ", theme::fg(theme::ACCENT))],
+                &[run("  ", theme::dim())],
+                None,
+            ),
+            details.next_mission.as_ref(),
+        ),
         None => doc.line(Line::from(span("Nothing queued.", theme::dim()))),
     }
-    for item in details
-        .queue
-        .iter()
-        .filter(|item| Some(*item) != details.next.as_ref())
-    {
-        doc.lines(text::wrap(
-            &[run(item.clone(), theme::soft())],
-            width,
-            &[run("· ", theme::dim())],
-            &[run("  ", theme::dim())],
-            None,
-        ));
+    for (index, item) in details.queue.iter().enumerate() {
+        if Some(item) == details.next.as_ref() {
+            continue;
+        }
+        open_mission(
+            &mut doc,
+            text::wrap(
+                &[run(item.clone(), theme::soft())],
+                width,
+                &[run("· ", theme::dim())],
+                &[run("  ", theme::dim())],
+                None,
+            ),
+            details.queue_missions.get(index),
+        );
     }
     if !agent.subagents.is_empty() {
         doc.blank();
@@ -2764,7 +3164,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
     let (glyph, color) = agent_glyph(agent.state, spinner);
     doc.line(Line::from(vec![
         span(format!("{glyph} "), theme::fg(color)),
-        span(agent_word(agent.state), theme::fg(color)),
+        span(agent_shown_word(agent), theme::fg(color)),
     ]));
     let field = |doc: &mut Doc, label: &str, value: Option<&str>| {
         let mut spans = vec![span(format!("{label:<9}"), theme::dim())];
@@ -2776,6 +3176,11 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
     };
     field(&mut doc, "harness", Some(agent.harness.name()));
     field(&mut doc, "model", details.model.as_deref());
+    // Beside the model, only when the seat is configured with one: an unset effort is the
+    // harness's own default, which is not worth a row of "unknown".
+    if let Some(effort) = details.effort.as_deref() {
+        field(&mut doc, "effort", Some(effort));
+    }
     field(&mut doc, "state", details.harness_state.as_deref());
     field(&mut doc, "runtime", details.runtime.as_deref());
     field(&mut doc, "host", Some(&agent.host));
@@ -2963,13 +3368,200 @@ pub fn missions_tree(world: &World, spinner: &'static str, system: bool) -> List
         state_of(&world.missions, "Loading missions…", "No missions yet."),
         vec![],
     );
-    listing.legend = missions_list(world, spinner, system).legend;
+    listing.legend = missions_list(world, 40, spinner, system).legend;
     listing
+}
+
+
+// ------------------------------------------------------------- new mission
+
+pub const NEW_MISSION_FIELDS: [(&str, &str); 4] = [
+    ("title", "A short name, like 'Nightly dependency audit'"),
+    (
+        "what you want",
+        "Describe the outcome; the planner turns it into a mission",
+    ),
+    (
+        "mission id",
+        "Where it lives in the graph, like fleet/harbor/nightly-audit",
+    ),
+    ("workspace", "The directory the agents work in"),
+];
+
+/// The form behind Missions' New mission: it creates a launch, which a planner turns into a
+/// proposed mission on Home. Nothing runs until the person approves it there.
+/// `cursor` is where typing goes in the focused field.
+pub fn new_mission_form(fields: &[String; 4], focus: usize, cursor: usize, width: usize) -> Doc {
+    let mut inner = Doc::new();
+    let w = width.saturating_sub(4);
+    inner.blank();
+    inner.wrap(
+        &[run(
+            "Say what you want. A planner turns it into a proposed mission, which appears in Now for you to approve; nothing runs before that.",
+            theme::soft(),
+        )],
+        w,
+    );
+    inner.blank();
+    for (index, (label, hint)) in NEW_MISSION_FIELDS.iter().enumerate() {
+        let focused = index == focus;
+        let mut body = Doc::new();
+        let value = &fields[index];
+        if value.is_empty() && !focused {
+            body.line(Line::from(span(*hint, theme::dim())));
+        } else {
+            for runs in super::edit::lines(value, focused.then_some(cursor), theme::text()) {
+                body.lines(text::wrap(&runs, w.saturating_sub(4), &[], &[], None));
+            }
+        }
+        let start = inner.lines.len();
+        inner.card(
+            label,
+            if focused {
+                theme::ACCENT
+            } else {
+                theme::OVERLAY1
+            },
+            false,
+            body,
+            w,
+        );
+        for line in start..inner.lines.len() {
+            inner.targets.push(super::doc::Target {
+                line,
+                column: 0,
+                width: w as u16,
+                hit: Hit::Field(index),
+            });
+        }
+    }
+    inner.blank();
+    inner.buttons(&[
+        ("tab", "Next field", Hit::Key('\t'), theme::OVERLAY1),
+        ("enter", "Create the launch", Hit::Enter, theme::GREEN),
+        ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
+    ]);
+    inner.blank();
+    let mut doc = Doc::new();
+    doc.card("new mission", theme::ACCENT, false, inner, width);
+    doc
+}
+
+// ------------------------------------------------------------------ names
+
+/// A name nobody has to think of: `amber-otter`. The person can change it.
+pub fn random_name() -> String {
+    const FIRST: [&str; 16] = [
+        "amber", "brisk", "calm", "clever", "dusky", "eager", "gentle", "keen", "lucky", "merry",
+        "nimble", "quiet", "rapid", "steady", "sunny", "witty",
+    ];
+    const SECOND: [&str; 16] = [
+        "badger", "comet", "falcon", "fern", "harbor", "heron", "lantern", "maple", "otter",
+        "pebble", "quartz", "raven", "sparrow", "tide", "willow", "wren",
+    ];
+    let bits = uuid::Uuid::now_v7().as_u128();
+    // The low bits of a v7 id are random.
+    format!(
+        "{}-{}",
+        FIRST[(bits & 15) as usize],
+        SECOND[((bits >> 4) & 15) as usize]
+    )
+}
+
+// ------------------------------------------------------------------ devices
+
+pub fn devices_card(world: &World, width: usize) -> Doc {
+    let mut inner = Doc::new();
+    match &world.devices {
+        Load::Loading => inner.line(Line::from(span("Loading your devices…", theme::dim()))),
+        Load::Failed(error) => inner.wrap(
+            &[run(
+                format!("Could not read devices: {error}"),
+                theme::fg(theme::RED),
+            )],
+            width.saturating_sub(4),
+        ),
+        Load::Ready(devices) if devices.is_empty() => {
+            inner.line(Line::from(span("No paired devices.", theme::dim())))
+        }
+        Load::Ready(devices) => {
+            for device in devices {
+                inner.line(Line::from(vec![
+                    span(
+                        if device.state == "active" {
+                            "● "
+                        } else {
+                            "○ "
+                        },
+                        theme::fg(if device.state == "active" {
+                            theme::GREEN
+                        } else {
+                            theme::QUIET
+                        }),
+                    ),
+                    span(format!("{:<22}", device.name), theme::text()),
+                    span(format!("{:<24}", device.scopes.join(", ")), theme::soft()),
+                    span(format!("expires {}", device.expires), theme::dim()),
+                ]));
+                if device.state == "active" {
+                    inner.buttons(&[("", "Revoke", Hit::Revoke(device.id.clone()), theme::RED)]);
+                }
+            }
+        }
+    }
+    let mut doc = Doc::new();
+    doc.card("your devices", theme::OVERLAY1, false, inner, width);
+    doc
 }
 
 #[cfg(test)]
 mod tree_tests {
     use super::*;
+
+    #[test]
+    fn a_working_step_says_when_its_idle_holder_was_nudged() {
+        let mut world = crate::ui::demo::world();
+        let Load::Ready(missions) = &mut world.missions else {
+            panic!("the demo world has missions");
+        };
+        let mission = missions
+            .iter_mut()
+            .find(|mission| mission.steps.iter().any(|step| step.state == StepState::Working))
+            .unwrap();
+        let step = mission
+            .steps
+            .iter()
+            .find(|step| step.state == StepState::Working)
+            .unwrap()
+            .id
+            .clone();
+        let id = mission.id.clone();
+        let shown = |world: &World| {
+            mission_detail(world, Some(&id), 120, "", None, &Default::default())
+                .lines
+                .iter()
+                .map(text::plain)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(!shown(&world).contains("nudged"));
+        let Load::Ready(missions) = &mut world.missions else {
+            unreachable!()
+        };
+        missions
+            .iter_mut()
+            .find(|mission| mission.id == id)
+            .unwrap()
+            .step_metadata
+            .entry(step)
+            .or_default()
+            .nudged = Some("40m".into());
+        let detail = shown(&world);
+        assert!(
+            detail.contains("nudged 40m ago: idle holding it, nothing set to wake it"),
+            "{detail}"
+        );
+    }
 
     #[test]
     fn a_request_holding_a_json_report_shows_what_happened_and_folds_the_rest() {
@@ -3086,349 +3678,4 @@ mod tree_tests {
             "{kinds:#?}"
         );
     }
-}
-
-// ------------------------------------------------------------- new mission
-
-pub const NEW_MISSION_FIELDS: [(&str, &str); 4] = [
-    ("title", "A short name, like 'Nightly dependency audit'"),
-    (
-        "what you want",
-        "Describe the outcome; the planner turns it into a mission",
-    ),
-    (
-        "mission id",
-        "Where it lives in the graph, like fleet/harbor/nightly-audit",
-    ),
-    ("workspace", "The directory the agents work in"),
-];
-
-/// The form behind Missions' New mission: it creates a launch, which a planner turns into a
-/// proposed mission on Home. Nothing runs until the person approves it there.
-/// `cursor` is where typing goes in the focused field.
-pub fn new_mission_form(fields: &[String; 4], focus: usize, cursor: usize, width: usize) -> Doc {
-    let mut inner = Doc::new();
-    let w = width.saturating_sub(4);
-    inner.blank();
-    inner.wrap(
-        &[run(
-            "Say what you want. A planner turns it into a proposed mission, which appears in Now for you to approve; nothing runs before that.",
-            theme::soft(),
-        )],
-        w,
-    );
-    inner.blank();
-    for (index, (label, hint)) in NEW_MISSION_FIELDS.iter().enumerate() {
-        let focused = index == focus;
-        let mut body = Doc::new();
-        let value = &fields[index];
-        if value.is_empty() && !focused {
-            body.line(Line::from(span(*hint, theme::dim())));
-        } else {
-            for runs in super::edit::lines(value, focused.then_some(cursor), theme::text()) {
-                body.lines(text::wrap(&runs, w.saturating_sub(4), &[], &[], None));
-            }
-        }
-        let start = inner.lines.len();
-        inner.card(
-            label,
-            if focused {
-                theme::ACCENT
-            } else {
-                theme::OVERLAY1
-            },
-            false,
-            body,
-            w,
-        );
-        for line in start..inner.lines.len() {
-            inner.targets.push(super::doc::Target {
-                line,
-                column: 0,
-                width: w as u16,
-                hit: Hit::Field(index),
-            });
-        }
-    }
-    inner.blank();
-    inner.buttons(&[
-        ("tab", "Next field", Hit::Key('\t'), theme::OVERLAY1),
-        ("enter", "Create the launch", Hit::Enter, theme::GREEN),
-        ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
-    ]);
-    inner.blank();
-    let mut doc = Doc::new();
-    doc.card("new mission", theme::ACCENT, false, inner, width);
-    doc
-}
-
-// ------------------------------------------------------------------ new agent
-
-/// The harnesses st runs, the models each is known to take (the first, "default", leaves it to
-/// the harness), and the efforts. Fixed lists until st can say what each harness offers.
-pub const HARNESSES: [&str; 5] = ["claude", "codex", "omp", "pi", "opencode"];
-pub const EFFORTS: [&str; 5] = ["default", "low", "medium", "high", "xhigh"];
-
-pub fn models(harness: &str) -> &'static [&'static str] {
-    match harness {
-        "claude" => &[
-            "default",
-            "claude-opus-5-5",
-            "claude-sonnet-5-5",
-            "claude-haiku-4-5",
-            "claude-fable-5-1",
-        ],
-        "codex" => &["default", "gpt-6-sol"],
-        _ => &["default"],
-    }
-}
-
-/// The new agent form: what it should do (its first message), its name, and how it runs.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct AgentForm {
-    pub task: String,
-    pub name: String,
-    pub harness: usize,
-    pub model: usize,
-    pub effort: usize,
-    /// 0 is this machine; then the fleet's other machines in their list order.
-    pub host: usize,
-    pub focus: usize,
-}
-
-impl AgentForm {
-    pub const FIELDS: usize = 6;
-
-    pub fn new(task: String) -> Self {
-        Self {
-            task,
-            name: random_name(),
-            ..Self::default()
-        }
-    }
-
-    pub fn harness(&self) -> &'static str {
-        HARNESSES[self.harness % HARNESSES.len()]
-    }
-
-    pub fn model(&self) -> Option<&'static str> {
-        let models = models(self.harness());
-        Some(models[self.model % models.len()]).filter(|model| *model != "default")
-    }
-
-    pub fn effort(&self) -> Option<&'static str> {
-        Some(EFFORTS[self.effort % EFFORTS.len()]).filter(|effort| *effort != "default")
-    }
-
-    /// Step a choice field (2 harness, 3 model, 4 effort, 5 host) by one, either way.
-    pub fn cycle(&mut self, forward: bool, hosts: usize) {
-        let step = |value: &mut usize, count: usize| {
-            *value = if forward {
-                (*value + 1) % count.max(1)
-            } else {
-                (*value + count.max(1) - 1) % count.max(1)
-            }
-        };
-        match self.focus {
-            2 => {
-                step(&mut self.harness, HARNESSES.len());
-                self.model = 0;
-            }
-            3 => {
-                let count = models(self.harness()).len();
-                step(&mut self.model, count)
-            }
-            4 => step(&mut self.effort, EFFORTS.len()),
-            5 => step(&mut self.host, hosts + 1),
-            _ => {}
-        }
-    }
-}
-
-/// A name nobody has to think of: `amber-otter`. The person can change it.
-pub fn random_name() -> String {
-    const FIRST: [&str; 16] = [
-        "amber", "brisk", "calm", "clever", "dusky", "eager", "gentle", "keen", "lucky", "merry",
-        "nimble", "quiet", "rapid", "steady", "sunny", "witty",
-    ];
-    const SECOND: [&str; 16] = [
-        "badger", "comet", "falcon", "fern", "harbor", "heron", "lantern", "maple", "otter",
-        "pebble", "quartz", "raven", "sparrow", "tide", "willow", "wren",
-    ];
-    let bits = uuid::Uuid::now_v7().as_u128();
-    // The low bits of a v7 id are random.
-    format!(
-        "{}-{}",
-        FIRST[(bits & 15) as usize],
-        SECOND[((bits >> 4) & 15) as usize]
-    )
-}
-
-/// `cursors` are where typing goes in the prompt and the name.
-pub fn new_agent_form(
-    form: &AgentForm,
-    hosts: &[String],
-    cursors: [usize; 2],
-    width: usize,
-) -> Doc {
-    let mut inner = Doc::new();
-    let w = width.saturating_sub(4);
-    inner.blank();
-    inner.wrap(
-        &[run(
-            "The prompt is the agent's first message. st starts the agent and its conversation opens here.",
-            theme::soft(),
-        )],
-        w,
-    );
-    inner.blank();
-    let field = |inner: &mut Doc, index: usize, label: &str, body: Doc| {
-        let start = inner.lines.len();
-        inner.card(
-            label,
-            if form.focus == index {
-                theme::ACCENT
-            } else {
-                theme::OVERLAY1
-            },
-            false,
-            body,
-            w,
-        );
-        for line in start..inner.lines.len() {
-            inner.targets.push(super::doc::Target {
-                line,
-                column: 0,
-                width: w as u16,
-                hit: Hit::Field(index),
-            });
-        }
-    };
-    for (index, label, value, hint) in [
-        (
-            0,
-            "prompt",
-            &form.task,
-            "Fix the flaky login test, then open a PR.",
-        ),
-        (1, "name", &form.name, "a name"),
-    ] {
-        let mut body = Doc::new();
-        let focused = form.focus == index;
-        if value.is_empty() && !focused {
-            body.line(Line::from(span(hint, theme::dim())));
-        } else {
-            for runs in super::edit::lines(value, focused.then_some(cursors[index]), theme::text())
-            {
-                body.lines(text::wrap(&runs, w.saturating_sub(4), &[], &[], None));
-            }
-        }
-        // The prompt gets room to write in from the start (Nathan, 2026-10-01).
-        if index == 0 {
-            while body.lines.len() < 4 {
-                body.blank();
-            }
-        }
-        field(&mut inner, index, label, body);
-    }
-    let host = match form.host {
-        0 => "this machine".to_owned(),
-        index => hosts
-            .get(index - 1)
-            .cloned()
-            .unwrap_or_else(|| "this machine".into()),
-    };
-    for (index, label, value) in [
-        (2, "harness", form.harness().to_owned()),
-        (
-            3,
-            "model",
-            form.model().unwrap_or("the harness's default").to_owned(),
-        ),
-        (
-            4,
-            "effort",
-            form.effort().unwrap_or("the harness's default").to_owned(),
-        ),
-        (5, "host", host),
-    ] {
-        let focused = form.focus == index;
-        let mut body = Doc::new();
-        body.line(Line::from(vec![
-            span(if focused { "◂ " } else { "  " }, theme::fg(theme::ACCENT)),
-            span(
-                value,
-                if focused {
-                    theme::text()
-                } else {
-                    theme::soft()
-                },
-            ),
-            span(
-                if focused {
-                    " ▸   ← → to choose"
-                } else {
-                    ""
-                },
-                theme::dim(),
-            ),
-        ]));
-        field(&mut inner, index, label, body);
-    }
-    inner.blank();
-    inner.buttons(&[
-        ("tab", "Next field", Hit::Key('\t'), theme::OVERLAY1),
-        ("enter", "Start the agent", Hit::Enter, theme::GREEN),
-        ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
-    ]);
-    inner.blank();
-    let mut doc = Doc::new();
-    doc.card("new agent", theme::ACCENT, false, inner, width);
-    doc
-}
-
-// ------------------------------------------------------------------ devices
-
-pub fn devices_card(world: &World, width: usize) -> Doc {
-    let mut inner = Doc::new();
-    match &world.devices {
-        Load::Loading => inner.line(Line::from(span("Loading your devices…", theme::dim()))),
-        Load::Failed(error) => inner.wrap(
-            &[run(
-                format!("Could not read devices: {error}"),
-                theme::fg(theme::RED),
-            )],
-            width.saturating_sub(4),
-        ),
-        Load::Ready(devices) if devices.is_empty() => {
-            inner.line(Line::from(span("No paired devices.", theme::dim())))
-        }
-        Load::Ready(devices) => {
-            for device in devices {
-                inner.line(Line::from(vec![
-                    span(
-                        if device.state == "active" {
-                            "● "
-                        } else {
-                            "○ "
-                        },
-                        theme::fg(if device.state == "active" {
-                            theme::GREEN
-                        } else {
-                            theme::QUIET
-                        }),
-                    ),
-                    span(format!("{:<22}", device.name), theme::text()),
-                    span(format!("{:<24}", device.scopes.join(", ")), theme::soft()),
-                    span(format!("expires {}", device.expires), theme::dim()),
-                ]));
-                if device.state == "active" {
-                    inner.buttons(&[("", "Revoke", Hit::Revoke(device.id.clone()), theme::RED)]);
-                }
-            }
-        }
-    }
-    let mut doc = Doc::new();
-    doc.card("your devices", theme::OVERLAY1, false, inner, width);
-    doc
 }

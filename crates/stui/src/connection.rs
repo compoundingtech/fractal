@@ -1,33 +1,11 @@
 //! Pairing and private profile storage shared with `st devices complete`.
-use anyhow::Result;
-pub use st3_client::device::{Profile, profile_path, read_pairing_code as read_code};
-use std::path::Path;
-
-pub async fn pair(
-    path: &Path,
-    endpoint: &str,
-    pairing_id: &str,
-    code: &str,
-    allow_public_http: bool,
-) -> Result<String> {
-    let key = st3_client::device::SigningKey::generate(st3_client::device::KeyAlgorithm::P256)?;
-    let device = st3_client::device::complete_with_http_policy(
-        path,
-        endpoint,
-        pairing_id,
-        code,
-        key,
-        allow_public_http,
-    )
-    .await?;
-    Ok(device.session.person_id)
-}
+pub use st3_client::device::{Profile, profile_path};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use st3_client::{
-        PairedSession,
+        PersonPairedSession,
         device::{Device, validate_endpoint},
     };
     use std::{
@@ -40,8 +18,9 @@ mod tests {
             devices: vec![Device {
                 endpoint: "https://member.example".into(),
                 allow_public_http: false,
+                person_root_fingerprint: None,
                 signing_key: None,
-                session: PairedSession {
+                session: PersonPairedSession {
                     kind: "paired-session".into(),
                     device_id: "device/demo".into(),
                     person_id: "person/avery".into(),
@@ -51,6 +30,7 @@ mod tests {
                     expires_at: "2026-10-30T12:00:00Z".into(),
                     device_key_chain: Vec::new(),
                     device_key_proofs: Vec::new(),
+                    person_root_key_proof: None,
                 },
             }],
         }
