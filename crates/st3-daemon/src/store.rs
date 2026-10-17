@@ -80,6 +80,10 @@ mod roster_fresh_proof_tests;
 mod agents_window_deadline_tests;
 pub(crate) mod step_labels;
 mod operation_audit;
+mod mission_provenance;
+pub(crate) mod agent_queue_values;
+pub mod backup_format;
+pub mod message_bodies;
 mod projectors;
 #[cfg(test)]
 mod projectors_tests;
@@ -3983,7 +3987,7 @@ impl Store {
                     let mut body = serde_json::to_value(mission).map_err(internal)?;
                     if let Some(plan) = &owned_plan { body["owned_set"] = json!(plan.preview.set); }
                     if let Some(provenance) = intent.mission_provenance.get(&mission.id)
-                        && let Some(claim) = crate::provenance::record(transaction, &self.origin, mission, provenance, actor, &batch_id)? {
+                        && let Some(claim) = mission_provenance::record(transaction, &self.origin, mission, provenance, actor, &batch_id)? {
                         claim_ids.push(claim.id);
                     }
                     if !receipt_attached {

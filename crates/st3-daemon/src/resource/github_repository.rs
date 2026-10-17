@@ -334,14 +334,14 @@ fn github_subject(url: &str) -> Option<String> {
     };
     Some(format!(
         "{}/{segment}/{key}",
-        crate::github_watch::default_resource(&format!("{owner}/{repo}"))
+        crate::resource::default_resource(&format!("{owner}/{repo}"))
     ))
 }
 
 fn item_move(facts: &mut serde_json::Map<String, Value>, locator: &str, identity: &ItemIdentity) {
     let original = format!(
         "{}/{}/{}",
-        crate::github_watch::default_resource(locator),
+        crate::resource::default_resource(locator),
         if identity.pull {
             "pull-request"
         } else {
@@ -1535,7 +1535,7 @@ pub(super) async fn observe_at(
     {
         facts.insert(
             "moved_to".into(),
-            json!(crate::github_watch::default_resource(name)),
+            json!(crate::resource::default_resource(name)),
         );
     }
     let mut pulls = Vec::new();
