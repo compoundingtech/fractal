@@ -11,8 +11,16 @@ verified trace receipt; v1 rejects it until its predicate and verifier exist.
 ## Record and transport
 
 The record is an in-toto v1 statement with one subject: `name` is the observed
-full commit ID, and `digest.gitTree` is its exact Git tree ID. The predicate type
-is `https://smalltalk.dev/evidence/gate/v1`. Its fields are:
+full commit ID, and `digest.gitTree` is its exact Git tree ID. Rust and Python
+verifiers accept both predicate types:
+`https://compounding.tech/fractal/evidence/gate/v1` and
+`https://smalltalk.dev/evidence/gate/v1`. Acceptance of the old URI is the
+permanent signed-history decoder exception named in
+[#3032](https://github.com/compoundingtech/smalltalk/issues/3032); existing signed
+attestations are never rewritten. All other predicate URIs are rejected.
+The Rust observers and `scripts/evidence-sign` still write
+`https://smalltalk.dev/evidence/gate/v1`. The signer switches only in a later
+release, after this dual-URI verifier release is on main. Its fields are:
 
 | Field | Meaning |
 | --- | --- |
@@ -365,6 +373,22 @@ record as before. `scripts/evidence-publish` then also writes `refs/notes/eviden
 for every accepted record (pass or fail, one ref per record, never replaced) so a gate can find the records of
 another tree with the same inputs by one prefix fetch. The ref is only an index; a record is still accepted only
 by its signature, exact command, required inputs and tier.
+Signer launch controls (`scripts/evidence-sign`): each resolved git and ssh-keygen file must be a regular executable file owned
+by root and closed to group and others, in addition to the directory rules, and the signer runs that resolved file, not the
+link it found. git and ssh-keygen are the only programs the script starts itself; the helper programs git starts come from git's
+own installation, which the launcher's pinned git provides and this script does not enumerate, and the interpreter is the
+launcher's concern too. A file in the Nix store is judged like the store directory: it is content-addressed, so the rule is no write bit and not who
+owns it (inside a Nix build sandbox root-owned store files show as owned by nobody, and the first version of this rule failed the
+sandboxed genie-freshness check for exactly that reason). Outside the store the owner must be root. git and ssh-keygen receive only PATH (the
+signer's own), LC_ALL, HOME, TMPDIR and git settings the signer sets itself (no system or global git configuration; HOME
+and TMPDIR are passed as given, so for a privileged integration only the fixed trusted launcher or profile may supply them,
+and passing them proves nothing about an arbitrary inherited path; the "no global git configuration" setting needs Git 2.32 or
+newer, and the script does not check the version: the fixed launcher or install manifest that supplies the pinned git must);
+and the signer refuses to start when LD_PRELOAD, LD_AUDIT, DYLD_INSERT_LIBRARIES, GCONV_PATH, NLSPATH, PYTHONPATH,
+PYTHONSTARTUP or PYTHONHOME is set. The refusal is a tripwire, not a repair: the interpreter has started before the script
+runs. Scrubbing the environment, running a root-owned interpreter in isolated mode and fixing the ownership of the signer
+file and its directories belong to the launcher, and neither this change nor the CI helper does them. The same-user
+and passwordless-sudo gaps below are unchanged.
 
 Accepted gap: code under test in a job that holds the key can read it. That now includes every pull
 request from this repository: its author controls the workflow file the run executes, so a person or agent with
@@ -706,6 +730,40 @@ host-signed local note (its command is the `nix develop ...` line `scripts/st-te
 different command and extra inputs, while each signer is still held to exactly its own rule. The verifier reports the `events` that apply
 and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
 `host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only, with `enforce` false.
+
+### Requiring a signed note (`require`, shadow only so far)
+
+`require` is a second per-check switch in `.st/evidence-skip-policy.json`, separate from `enforce`: `off` (the default, also when absent),
+`shadow` or `reject` (anything else is an error). It is about REJECTING a change that has no trusted note, where `enforce` is about SKIPPING
+work that has one. `scripts/evidence-verify --require-all --tree T --keys-from BASE --policy-from BASE --repository OWNER/NAME` judges
+every check whose `require` is not `off`, each by exactly the rules of a single check, and prints one entry per check with its own reason
+(`no_record`, `stale_tree`, `bad_signature`, `untrusted_signer`, `untrusted_level`, `wrong_command`, `check_failed`, ...), so a missing lane is named.
+The overall `decision` is `reject` when a `reject` check is not satisfied, `would-reject` when only `shadow` checks are not, and `ok` otherwise
+(also when nothing requires anything). The exit code is 1 only for `reject`; `shadow` never fails; a verifier that could not decide (invalid or missing base policy, unreadable keys, any unexpected error) exits 2 with `decision: error`, so a consumer can tell an error from a reject. Every kind rule must declare its command (the policy refuses one that does not), so a lane is always held to the argv its kind records. With no check requiring anything the answer is `ok` with an empty `lanes`; a queue mode built on this must treat an empty required set as an error, and this switch never enables skipping (`enforce` does). The policy and the keys are read from the
+accepted base like everything else here. Nothing calls it yet and no check sets `require`: this adds the switch and the report, and a test
+asserts that every committed check is `off`. Making any check `reject` is a separate reviewed change, and making it a required status
+check is a repository ruleset change that is not made here. A pass for a tree is never evidence for the combined tree the merge queue tests.
+
+### Lane definitions (`.st/required-lanes.json`, nothing reads it yet)
+
+A note says a check passed; what the check RAN is decided by scripts that live in the tree under test, so an agent could change them and still hold a
+valid note. `.st/required-lanes.json` (read from the accepted base, strictly validated) names, per lane, the exact `argv`, the `definition_paths`
+(files or directories whose bytes decide what that argv does) and, for information, the `tree_inputs` the lane is meant to test. With
+`--lanes-from BASE` the verifier (single check or `--require-all`) holds a check to its lane: every blob at or below a definition path must be
+IDENTICAL in the verified tree and at BASE, otherwise `definition_changed` (the change edits its own checker, so the signed path is refused and CI
+runs); and the note must carry `lane_definition_sha256`, the digest of those blobs at BASE plus the argv, otherwise `wrong_definition`. A check with
+no lane entry is `no_lane`; a broken lane file or a definition path missing at the base is an error (exit 2 under `--require-all`), never a reject.
+The committed file lists the two lanes `scripts/st-test` can run today, with the same argv (a test pins that) and deliberately wide definition paths
+(all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` for genie-freshness): a change to any script then always runs in CI. They are to be tightened
+only with a read trace of the lane (a later change). No producer writes the digest yet, nothing passes `--lanes-from`, and no gate reads the file, so
+this changes no behaviour; when a gate does read it, `.st/required-lanes.json` must join that gate's protected paths.
+
+Producer half: `scripts/evidence-wrap --lanes-from BASE` (and `scripts/st-test`, which passes its base for every check the base's lane file defines)
+refuses any command that is not the lane's argv, refuses a tree whose lane definition differs from BASE (nothing is signed; CI runs the check, and the
+message names the paths), and records `lane_definition_sha256`, the digest the verifier recomputes from the same base. Without a lane file at the base
+nothing changes. Until the read-trace closure control exists a lane's `definition_paths` are a hand-declared list: a helper script it reads but the
+list omits is not covered. So this alone must never let a signed note skip a queue lane; shadow reporting and the pull-request signing path are the only
+uses until the trace and a mutation test per lane have passed (typescript-client's paths are narrow by design and need it first).
 
 ### Which tree a pull request run asks about
 
