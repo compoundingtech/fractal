@@ -1,5 +1,5 @@
 [package]
-name = "st3-github"
+name = "st3-github-base"
 version = "0.1.0"
 edition = "2024"
 description = "the GitHub leaf modules: authenticated transport, repository resources, watch subjects and checkouts, which name no store code"
@@ -30,6 +30,6 @@ urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
-st3_github_self = { package = "st3-github", path = ".", features = ["test-support"] }
+st3_github_self = { package = "st3-github-base", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }

@@ -46,7 +46,7 @@
       "clippy::if_same_then_else": 1,
       "clippy::too_many_arguments": 1
     },
-    "st3-github": {
+    "st3-github-base": {
       "clippy::type_complexity": 3
     },
     "st3-reconcile": {

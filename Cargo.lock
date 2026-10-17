@@ -5022,7 +5022,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "st3-github"
+name = "st3-github-base"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -5038,7 +5038,7 @@ dependencies = [
  "sha2",
  "smallclaims",
  "st-runtime",
- "st3-github",
+ "st3-github-base",
  "st3-secrets",
  "tempfile",
  "tokio",
@@ -5242,7 +5242,7 @@ dependencies = [
  "st-drivers",
  "st-runtime",
  "st3-client",
- "st3-github",
+ "st3-github-base",
  "st3-kernel",
  "st3-schema",
  "st3-secrets",

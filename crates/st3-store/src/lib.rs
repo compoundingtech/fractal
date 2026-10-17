@@ -12,7 +12,7 @@ mod ci_test_paths;
 pub use st3_kernel::*;
 pub use st3_telemetry::*;
 pub use st3_secrets::*;
-pub use st3_github::*;
+pub use st3_github_base::*;
 pub use smallclaims::{performance, profile};
 
 #[cfg(any(test, feature = "test-support"))]
