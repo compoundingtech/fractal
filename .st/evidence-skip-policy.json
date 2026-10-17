@@ -129,7 +129,8 @@
             }
           }
         }
-      }
+      },
+      "require": "shadow"
     },
     "isolation-vm": {
       "trust_levels": [
@@ -232,7 +233,8 @@
             }
           }
         }
-      }
+      },
+      "require": "shadow"
     },
     "mail-redelivery-canaries": {
       "trust_levels": [
