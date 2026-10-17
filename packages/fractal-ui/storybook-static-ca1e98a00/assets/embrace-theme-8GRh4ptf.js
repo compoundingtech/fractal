@@ -1,0 +1,1 @@
+import{n as e}from"./chunk-vNrZSFDR.js";var t,n=e((()=>{t={x2d1cp4:`x4e6qw0 x2d1cp4`,$$css:!0}}));export{n,t};
