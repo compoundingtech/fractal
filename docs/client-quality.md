@@ -158,8 +158,10 @@ type: 'measure', buffered: true })` or the browser Performance panel:
 
 Completion uses an animation frame followed by a task, not a compositor
 presentation timestamp. Transcript empty states count as real content; waiting
-and unavailable placeholders do not. Switching cancels an unfinished selection,
-and a restored reading position is not a tail sample until the tail is shown.
+and unavailable placeholders do not. Switching cancels an unfinished selection.
+Leaving the transcript for another workspace view also cancels pending direct-open
+and switch samples; returning to Thread does not resume the abandoned interval.
+A restored reading position is not a tail sample until the tail is shown.
 Rapid composer input coalesces while awaiting paint. Each workflow retains at
 most 100 measures, clearing its own buffer at the cap; live observers still
 receive every completed sample. Starts without completion produce no measure.

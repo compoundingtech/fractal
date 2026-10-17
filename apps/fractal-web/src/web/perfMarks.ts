@@ -7,9 +7,9 @@ const noop = () => {}
 const name = (workflow: Workflow) => `fractal:${workflow}`
 
 /** Replacing a start cancels the unfinished sample, including an already queued paint. */
-export const cancelMeasure = (workflow: Workflow): void => {
+export const cancelMeasure = (workflow: Workflow, key?: string): void => {
   const operation = active.get(workflow)
-  if (operation === undefined) return
+  if (operation === undefined || (key !== undefined && operation.key !== key)) return
   operation.cancelPaint?.()
   operation.performance.clearMarks(`${name(workflow)}:start`)
   active.delete(workflow)

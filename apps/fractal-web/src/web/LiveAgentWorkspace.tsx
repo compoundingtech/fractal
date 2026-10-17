@@ -370,6 +370,13 @@ export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool
   const [switched, setSwitched] = React.useState<{ readonly shown: string; readonly covered: string | undefined }>({ shown: current, covered: undefined })
   // The terminal is a drawer below the thread: the thread stays shown and usable beside it.
   const visible = current !== '' && (view._tag === 'Thread' || view._tag === 'Terminal')
+  React.useLayoutEffect(() => {
+    if (visible) return
+    // Abandon at the eager view boundary, even if the transcript module or data
+    // has not loaded. Effect cleanup only cancels paint (StrictMode can retry it).
+    cancelMeasure('switch_to_tail', current)
+    cancelMeasure('open_transcript', current)
+  }, [current, visible])
   const [visited, setVisited] = React.useState<readonly string[]>([])
   const rosterKeys = new Set(rosterRefs)
   const recent = visited.filter(ref => rosterKeys.has(ref))
