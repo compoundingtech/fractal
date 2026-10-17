@@ -67,6 +67,7 @@ mod change_cli;
 mod directive_note;
 mod completion;
 mod doctor_cli;
+mod fractal;
 #[cfg(test)]
 mod follow_tests;
 mod presentation;
@@ -538,10 +539,12 @@ fn fleet_person(actor: Option<String>, config: &Config) -> Result<String> {
         .context("set person in config.toml or pass --as person/NAME")
 }
 
-fn services_installed() -> bool {
-    st3::service::status()
-        .map(|report| report.services.iter().any(|service| service.installed))
-        .unwrap_or(false)
+fn services_installed() -> Result<bool> {
+    match st3::service::status() {
+        Ok(report) => Ok(report.services.iter().any(|service| service.installed)),
+        Err(error) if error.is::<st3::service::ConflictingServices>() => Err(error),
+        Err(_) => Ok(false), // A host without a user manager can run unmanaged.
+    }
 }
 
 #[derive(Args)]
@@ -786,9 +789,9 @@ async fn fleet_leave(
 
 /// What an instance's uninstall removes from its directory: every entry except the one that holds
 /// the work root. The work root can lie inside the instance but holds the person's work, so
-/// everything else goes and it stays.
+/// everything else goes, except a foreign replacement of the fractal command.
 fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
-    fs::read_dir(root)
+    let mut removals: Vec<PathBuf> = fs::read_dir(root)
         .map(|entries| {
             entries
                 .flatten()
@@ -796,8 +799,26 @@ fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
                 .filter(|path| !work.starts_with(path))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // An instance owns its directory, but a foreign replacement of the new program name
+    // does not become ours. Plan bin entries separately so deletion rechecks its symlink.
+    let bin = root.join("bin");
+    if fs::symlink_metadata(bin.join("fractal")).is_ok()
+        && let Some(index) = removals.iter().position(|path| path == &bin)
+    {
+        removals.swap_remove(index);
+        if let Ok(entries) = fs::read_dir(&bin) {
+            removals.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| fractal::may_remove(path)),
+            );
+        }
+    }
+    removals
 }
+
 
 #[derive(Args)]
 struct FleetModeArgs {
@@ -3816,6 +3837,12 @@ struct MessageListArgs {
     #[arg(long = "from")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     sender: Option<String>,
+    /// Match this sender's subject text exactly (case-sensitive); requires --from.
+    #[arg(long, conflicts_with = "subject_prefix", requires = "sender")]
+    subject: Option<String>,
+    /// Match a literal, case-sensitive subject prefix within --from's messages.
+    #[arg(long, requires = "sender")]
+    subject_prefix: Option<String>,
 }
 
 #[derive(Args)]
@@ -4205,7 +4232,10 @@ fn cli_main() -> ExitCode {
     if let Some(program) = st3::recorder::invoked_program() {
         st3::recorder::run(program);
     }
-    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    if fractal::dispatch(arguments.as_mut_slice()) == fractal::Dispatch::Web {
+        return fractal::web(&arguments);
+    }
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
             println!("{}", read_contract_inventory_json());
@@ -5844,7 +5874,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
         );
         tokio::spawn(st3::task_cpu::account("observations.export", st3::otlp::run(store.clone(), exporter)));
         // The live SLO windows go out as gauges, once a minute, on a timer of their own.
-        tokio::spawn(st3::task_cpu::account("slo.export", st3::otlp::run_slo(st3::otlp::OtlpExporter::new(otlp, &config.node)?)));
+        tokio::spawn(st3::task_cpu::account("slo.export", st3::otlp::run_slo(
+            st3::otlp::OtlpExporter::new(otlp, &config.node)?,
+            st3::api::request_latency_target_windows,
+        )));
     }
     #[cfg(target_os = "macos")]
     tokio::spawn(st3::task_cpu::account("maintenance.malloc_relief", async {
@@ -9418,18 +9451,24 @@ struct LocalEventFeed {
 
 impl LocalEventFeed {
     async fn read(&mut self, client: &Client, query: &str) -> Result<LocalEventPage> {
-        client
-            .get(&format!("/v1/events/page?{query}"))
-            .await
-            .map_err(|error| {
-                if st3::client::is_missing_route(&error) {
-                    anyhow::anyhow!(
-                        "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
-                    )
-                } else {
-                    event_cursor_error(error, query, self.trace)
-                }
-            })
+        match client.get(&format!("/v1/events/page?{query}")).await {
+            Ok(page) => Ok(page),
+            // A bare missing route is classified once through the health capability and never
+            // reads legacy history: a daemon without bounded continuation needs the upgrade, and
+            // one that advertises it but lacks the page route reports the unexpected response.
+            Err(error) if st3::client::is_missing_route(&error) => {
+                let health: Value = client.get("/v1/health").await?;
+                anyhow::ensure!(
+                    health
+                        .pointer("/features/bounded_legacy_events")
+                        .and_then(Value::as_u64)
+                        == Some(1),
+                    "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
+                );
+                Err(error)
+            }
+            Err(error) => Err(event_cursor_error(error, query, self.trace)),
+        }
     }
 }
 
@@ -10463,10 +10502,8 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
             let config = Config::load_unvalidated(None)?;
             let mut report = st3::service::status()?;
             if let Some(startup) = st3::startup::read(&config.client_socket()) {
-                for service in &mut report.services {
-                    if service.name == "st3.service" || service.name == "com.compoundingtech.st3" {
-                        service.state = format!("{} · {}", service.state, startup.summary());
-                    }
+                for service in report.services.iter_mut().take(1) {
+                    service.state = format!("{} · {}", service.state, startup.summary());
                 }
             }
             if json_output {
@@ -12839,6 +12876,13 @@ async fn message_page(
     message_page_reporting(client, recipient, include_closed, cursor, None).await
 }
 
+#[derive(Clone, Copy, Default)]
+struct MessagePageFilters<'a> {
+    from: Option<&'a str>,
+    subject: Option<&'a str>,
+    subject_prefix: Option<&'a str>,
+}
+
 /// One mailbox page. A seat's delivery process passes its delivery report, which the daemon
 /// keeps in memory to tell a live, current delivery path from a stale one.
 async fn message_page_reporting(
@@ -12847,6 +12891,25 @@ async fn message_page_reporting(
     include_closed: bool,
     cursor: Option<&str>,
     report: Option<&str>,
+) -> Result<MessagePage> {
+    message_page_filtered(
+        client,
+        recipient,
+        include_closed,
+        cursor,
+        report,
+        MessagePageFilters::default(),
+    )
+    .await
+}
+
+async fn message_page_filtered(
+    client: &Client,
+    recipient: Option<&str>,
+    include_closed: bool,
+    cursor: Option<&str>,
+    report: Option<&str>,
+    filters: MessagePageFilters<'_>,
 ) -> Result<MessagePage> {
     let mut path = format!("/v1/messages/page?include_closed={include_closed}&limit=100");
     if let Some(recipient) = recipient {
@@ -12857,6 +12920,15 @@ async fn message_page_reporting(
     }
     if let Some(report) = report {
         path.push_str(&format!("&delivery={}", urlencoding::encode(report)));
+    }
+    for (name, value) in [
+        ("from", filters.from),
+        ("subject", filters.subject),
+        ("subject_prefix", filters.subject_prefix),
+    ] {
+        if let Some(value) = value {
+            path.push_str(&format!("&{name}={}", urlencoding::encode(value)));
+        }
     }
     client.get(&path).await
 }
@@ -16093,7 +16165,9 @@ async fn publish_claude_readiness_fallback(
         || !state
             .claude_readiness_fallback
             .initialized_at_ms
-            .is_some_and(|started| now_ms.saturating_sub(started) >= 15_000)
+            .is_some_and(|started| {
+                now_ms.saturating_sub(started) >= claude_readiness_grace_ms()
+            })
     {
         return Ok(false);
     }
@@ -16205,7 +16279,7 @@ async fn check_claude_attachment(
     let attached = checked.as_ref().is_ok_and(|attachment| attachment.attached);
     let phase = if attached {
         "attached"
-    } else if started.elapsed() >= Duration::from_secs(20)
+    } else if started.elapsed() >= claude_attachment_window()
         || state.claude_attachment_phase == "blocked"
     {
         "blocked"
@@ -16254,6 +16328,30 @@ fn finish_claude_attachment_publication(
         }
     }
     published
+}
+
+/// How long a Claude seat may start before an unattached channel is reported as blocked.
+/// `ST3_CLAUDE_ATTACH_WINDOW_MS` can only shorten it, as `ST3_SUBAGENT_LEASE_MS` does a lease, so
+/// the boot canaries need not wait out the production window.
+fn claude_attachment_window() -> Duration {
+    const DEFAULT_MS: u64 = 20_000;
+    let cap = std::env::var("ST3_CLAUDE_ATTACH_WINDOW_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|cap| *cap > 0);
+    Duration::from_millis(cap.map_or(DEFAULT_MS, |cap| cap.min(DEFAULT_MS)))
+}
+
+/// How long an initialized Claude channel waits for a native hook before the driver publishes
+/// readiness without one. `ST3_CLAUDE_READINESS_GRACE_MS` can only shorten it, as
+/// `ST3_SUBAGENT_LEASE_MS` does a lease, so tests of the fallback need not wait out 15 s.
+fn claude_readiness_grace_ms() -> u64 {
+    const DEFAULT_MS: u64 = 15_000;
+    std::env::var("ST3_CLAUDE_READINESS_GRACE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|cap| *cap > 0)
+        .map_or(DEFAULT_MS, |cap| cap.min(DEFAULT_MS))
 }
 
 fn same_claude_attachment_binding(a: &st3::mailbox::Fence, b: &st3::mailbox::Fence) -> bool {
@@ -17631,6 +17729,7 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                 let now = Instant::now();
                 let duration_ms = started.elapsed().as_millis();
                 let report = result.as_ref().ok();
+                smallclaims::sqlite::telemetry::wal_checkpoint_observed(&store.readers, report);
                 let stuck = pin.observe(report);
                 let abnormal = abnormal_wal_checkpoint(report) || stuck >= WAL_PIN_REPORT_AFTER;
                 st3::otel::record_wal_checkpoint(trace_started, report, abnormal);
@@ -18128,6 +18227,3 @@ mod tests;
 
 #[cfg(test)]
 mod terminal_ui_tests;
-
-#[cfg(test)]
-mod instance_uninstall_tests;
