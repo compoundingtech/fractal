@@ -113,7 +113,7 @@ fn legacy_daemon_wait_preserves_invalid_empty_and_non_utf8_values() {
         let output = Command::new(test_env!("CARGO_BIN_EXE_st3"))
             .env_clear()
             .env("ST3_DAEMON_WAIT", value)
-            .args(["version"])
+            .args(["work", "start", "task", "--as", "person/explicit"])
             .output().unwrap();
         assert!(!output.status.success(), "{output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);

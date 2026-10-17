@@ -455,6 +455,10 @@ mod tests {
                 _ => panic!("unknown instance alias case: {case}"),
             };
             assert_eq!(requested(&["st".into()]).as_deref(), expected);
+            if case == "masked" {
+                assert_eq!(env::var(ENV).as_deref(), Ok("old"));
+                assert!(requested(&["st".into()]).is_none(), "empty preferred alias must ignore legacy instance");
+            }
             assert_eq!(current().as_ref().map(Instance::name), expected);
             if expected.is_none() {
                 assert!(service_environment().is_empty());
@@ -512,14 +516,16 @@ mod tests {
                 "{case}: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            if preferred.is_some() && legacy.is_some() {
-                assert!(
-                    String::from_utf8_lossy(&output.stderr).contains(
-                        "conflicting environment variables FRACTAL_INSTANCE and ST_INSTANCE; using the Fractal value"
-                    ),
-                    "{case}: expected alias conflict warning"
-                );
-            }
+            let expects_warning = preferred.zip(legacy).is_some_and(|(new, old)| {
+                !new.is_empty() && !old.is_empty() && new != old
+            });
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr).contains(
+                    "conflicting environment variables FRACTAL_INSTANCE and ST_INSTANCE; using the Fractal value"
+                ),
+                expects_warning,
+                "{case}: unexpected alias conflict warning outcome"
+            );
         }
     }
 }

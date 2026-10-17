@@ -25,7 +25,9 @@ fn cli_environment_aliases_are_normalized_before_parsing() {
         if case == "instance" {
             let arguments = vec![std::ffi::OsString::from("st")];
             assert_eq!(st3::instance::requested(&arguments).as_deref(), Some("alias-test"));
-            let matches = cli_command().try_get_matches_from(["st", "--instance", "flag-test", "version"]).unwrap();
+            let matches = cli_command().try_get_matches_from([
+                "st", "--instance", "flag-test", "work", "start", "task", "--as", "person/explicit",
+            ]).unwrap();
             let parsed = Cli::from_arg_matches(&matches).unwrap();
             assert_eq!(parsed.instance.as_deref(), Some("flag-test"));
         }
