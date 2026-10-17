@@ -43,8 +43,9 @@ export function MilestonePalette({ isOpen, onOpenChange, scope, agents, commands
             <Icon name="search" size={14} />
             <Input placeholder={scope === 'agents' ? 'Open an agent…  (> for commands)' : 'Open an agent or run a command…'} {...stylex.props(styles.input)} />
           </SearchField>
-          {/* Results use virtual focus, so the scroller itself takes Tab: keyboard users can still scroll a long list. */}
-          <div tabIndex={0} {...stylex.props(styles.results)}><Menu aria-label="Results" onAction={onAction} renderEmptyState={() => <p {...stylex.props(styles.empty)}>No matches for “{needle}”</p>} {...stylex.props(styles.menu)}>
+          {/* Virtual focus starts on the first result on open and after every query change, so Enter always opens the highlighted row.
+              Remounting the menu per query re-applies autoFocus; the menu itself scrolls, so no wrapper takes a Tab stop. */}
+          <Menu key={needle} autoFocus="first" aria-label="Results" onAction={onAction} renderEmptyState={() => <p {...stylex.props(styles.empty)}>No matches for “{needle}”</p>} {...stylex.props(styles.menu)}>
             {shownAgents.length > 0 && <MenuSection>
               <Header {...stylex.props(styles.section)}>Agents</Header>
               {shownAgents.map(({ row, folder }) => <MenuItem key={row.ref} id={row.ref} textValue={row.title} {...stylex.props(styles.item)}>
@@ -61,7 +62,7 @@ export function MilestonePalette({ isOpen, onOpenChange, scope, agents, commands
                 {command.shortcut !== undefined && <Keyboard {...stylex.props(styles.kbd)}>{command.shortcut}</Keyboard>}
               </MenuItem>)}
             </MenuSection>}
-          </Menu></div>
+          </Menu>
         </Autocomplete>
         <p aria-hidden="true" {...stylex.props(styles.footer)}><span>↑↓ move</span><span>↵ open</span><span>esc close</span></p>
       </Dialog>
@@ -75,14 +76,14 @@ const styles = stylex.create({
   dialog: { display: 'flex', flexDirection: 'column', overflow: 'hidden', borderRadius: r.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.raised, color: ink.fg, boxShadow: elevation.dialog, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, outline: 'none' },
   search: { display: 'flex', alignItems: 'center', gap: s.md, height: g.band, paddingInline: s.lg, boxSizing: 'border-box', color: ink.fgMuted, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   input: { flex: '1 1 0', minWidth: 0, padding: 0, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, outline: 'none', '::placeholder': { color: ink.fgMuted }, '::-webkit-search-cancel-button': { display: 'none' } },
-  results: { maxHeight: g.commandMaxHeight, overflowY: 'auto', outline: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } },
-  menu: { padding: s.xs, outline: 'none' },
+  menu: { maxHeight: g.commandMaxHeight, overflowY: 'auto', padding: s.xs, outline: 'none' },
   section: { paddingInline: s.md, paddingBlockStart: s.md, paddingBlockEnd: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
   item: { display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) auto`, alignItems: 'center', columnGap: s.md, height: g.menuRow, paddingInline: s.md, borderRadius: r.sm, cursor: 'pointer', outline: 'none', ':is([data-focused])': { backgroundColor: surface.rowActive }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } },
   glyphSlot: { display: 'inline-flex', justifyContent: 'center', color: ink.fgMuted },
   label: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, color: ink.fg },
-  meta: { color: ink.fgMuted, fontSize: t.denseSize, whiteSpace: 'nowrap' },
-  kbd: { fontFamily: t.fontSans, fontSize: t.denseSize, color: ink.fgMuted, paddingInline: s.xs, borderRadius: r.keyboard, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong },
+  // The first result is always highlighted, so row meta must clear 4.5:1 on the rowActive wash as well as the dialog surface.
+  meta: { color: ink.fgSoft, fontSize: t.denseSize, whiteSpace: 'nowrap' },
+  kbd: { fontFamily: t.fontSans, fontSize: t.denseSize, color: ink.fgSoft, paddingInline: s.xs, borderRadius: r.keyboard, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong },
   empty: { margin: 0, paddingInline: s.md, paddingBlock: s.lg, color: ink.fgMuted },
   footer: { display: 'flex', gap: s.lg, margin: 0, height: g.controlMd, alignItems: 'center', paddingInline: s.lg, color: ink.fgMuted, fontSize: t.denseSize, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border },
   visuallyHidden: { position: 'absolute', width: '1px', height: '1px', margin: '-1px', padding: 0, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap', borderWidth: 0 },

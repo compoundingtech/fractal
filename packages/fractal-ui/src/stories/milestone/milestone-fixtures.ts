@@ -20,6 +20,8 @@ const agent = (row: Omit<SidebarAgentRow, keyof typeof base | 'ref'> & Partial<S
 
 export const mainAgentRef = 'agent/metric-track'
 export const reviewerRef = 'agent/metric-track/subagent/reviewer'
+/** Empty-thread state opens an idle agent: an idle row never claims work the pane does not show. */
+export const idleAgentRef = 'agent/transcript-paging'
 
 const reviewer = agent({
   id: 'metric-track', ref: reviewerRef, parentRef: mainAgentRef, title: 'Review metric track diff', status: 'idle', statusLabel: 'Done', host: 'build-2',
@@ -86,16 +88,27 @@ const settledItems: readonly ConversationItem[] = [
   read('m/read-story', 'src/sidebar/roster.stories.tsx', 'Synthetic roster story: 100 rows, three layouts.', iso(396)),
   { _tag: 'ToolCall', id: 'm/edit', callId: 'm-edit', name: 'edit', input: { path: 'src/sidebar/row-fit.ts', oldString: 'const track = measure(rows)', newString: 'const track = Math.max(minTrack, measure(rows))' }, status: 'success', callSeen: true, at: iso(380), sender: worker, result: { content: rowsDiff, mediaType: 'text/x-diff', isError: false, at: iso(379) } },
   { _tag: 'ToolCall', id: 'm/check', callId: 'm-check', name: 'bash', input: { command: 'pnpm check:sidebar-fitting' }, status: 'success', callSeen: true, at: iso(360), sender: worker, result: { content: '100 rows · titles keep ≥60% of line 1 · 0 overlaps · 412 ms', isError: false, mediaType: 'text/plain', at: iso(352) } },
-  { _tag: 'Event', id: 'm/subagent-result', kind: 'subagent-result', title: 'Review complete', text: 'The shared track keeps every title edge aligned; no row loses its time column.', sender: subagent, data: { rows: 100, reviewedPaths: ['src/sidebar/row-fit.ts'] }, at: iso(150) },
-  text('m/result', 'assistant', 'Updated `src/sidebar/row-fit.ts` so every row in a cohort shares one metric track. The fitting check passes on all 100 rows and the reviewer confirmed the title edges line up. `src/sidebar/signals.tsx` needed no change.', iso(140), worker),
+  text('m/result', 'assistant', 'Updated `src/sidebar/row-fit.ts` so every row in a cohort shares one metric track. The fitting check passes on all 100 rows. `src/sidebar/signals.tsx` needed no change.\n\n`agent:metric-track/subagent/reviewer`', iso(140), worker),
 ]
 const settledWork: WorkLogTurn = workLogTurnFromItems(settledItems, { kindFor: name => name === 'read' ? 'read' : name === 'edit' ? 'edit' : 'run', running: false, failed: false, interrupted: false, durationMs: 272_000, startedAt: iso(412), completeHistory: true })
 const runningCall: ConversationItem = { _tag: 'ToolCall', id: 'm/running-check', callId: 'm-running', name: 'bash', input: { command: 'pnpm check:sidebar-fitting --narrow' }, status: 'running', callSeen: true, at: iso(30), sender: worker }
+const settledTurn: TranscriptTurn = { id: 'm/turn-1', prompt: text('m/prompt-1', 'user', 'Titles in the sidebar start at different x positions depending on the metric. Align them without losing the time column.', iso(412), operator) as TextItem & { role: 'user' }, items: settledItems, work: settledWork }
+const followUp = text('m/prompt-2', 'user', 'Also check the narrow sidebar width before you finish.', iso(40), operator) as TextItem & { role: 'user' }
 
 export const mainTurns: readonly TranscriptTurn[] = [
-  { id: 'm/turn-1', prompt: text('m/prompt-1', 'user', 'Titles in the sidebar start at different x positions depending on the metric. Align them without losing the time column.', iso(412), operator) as TextItem & { role: 'user' }, items: settledItems, work: settledWork },
-  { id: 'm/turn-2', prompt: text('m/prompt-2', 'user', 'Also check the narrow sidebar width before you finish.', iso(40), operator) as TextItem & { role: 'user' }, items: [runningCall], work: { calls: [{ id: runningCall.id, kind: 'run', title: 'bash', argsSummary: 'pnpm check:sidebar-fitting --narrow', status: 'running', startedAt: iso(30) }], durationMs: undefined, running: true, failed: false, interrupted: false, startedAt: iso(38), foldable: true } },
+  settledTurn,
+  { id: 'm/turn-2', prompt: followUp, items: [runningCall], work: { calls: [{ id: runningCall.id, kind: 'run', title: 'bash', argsSummary: 'pnpm check:sidebar-fitting --narrow', status: 'running', startedAt: iso(30) }], durationMs: undefined, running: true, failed: false, interrupted: false, startedAt: iso(38), foldable: true } },
 ]
+
+/** Stale (q23): the in-flight call is last-known, not live, so it leaves the work log and moves to the "Last seen" tail. */
+export const staleMainTurns: readonly TranscriptTurn[] = [
+  settledTurn,
+  { id: 'm/turn-2', prompt: followUp, items: [], work: { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false, foldable: true } },
+]
+export const lastSeen = { activity: 'working', at: milestoneNow - 18_000, detail: 'pnpm check:sidebar-fitting --narrow' } as const
+
+/** The subagent result folds into the parent answer as one RC-1 card; the reviewer's own thread opens on press. */
+export const reviewerCard = { path: 'agent:metric-track/subagent/reviewer', summary: 'The shared track keeps every title edge aligned; no row loses its time column.' } as const
 
 const reviewItems: readonly ConversationItem[] = [
   read('r/read-diff', 'src/sidebar/row-fit.ts', 'Synthetic diff: one shared track per cohort.', iso(170)),

@@ -1,9 +1,9 @@
 /**
  * Redesign milestone 1 (RM1) — workshop only.
  *
- * Composes already-approved picks (SR-2, WF-1, RC-1, RC-3, SG-1) with new shell states: roster loading, empty, error,
- * stale, no-match, an empty main area and a command palette. Everything new here is a proposal; open questions carry
- * stable IDs (RM1-Q1…Q7) and every option is a story arg. The composer is deliberately untouched.
+ * Composes approved picks (SR-2, WF-1, RC-1, RC-3, SG-1) with new shell states: roster loading, empty, roster error,
+ * thread unavailable, stale, no-match, an empty main area and a command palette. Everything new here is a proposal; open
+ * questions carry stable IDs (RM1-Q5…Q7) and every option is a story arg. The composer is deliberately untouched.
  */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
@@ -16,7 +16,10 @@ import { lightTheme } from '../../assistant-ui/composition-theme'
 import { borderVars as border, spaceVars as sp, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
 
 type Args = Omit<RedesignMilestoneProps, 'persistKey'>
-const choice = (id: string) => ({ control: 'inline-radio' as const, options: openQuestions.find(question => question.id === id)!.options.map(option => option.value), description: `${id} · ${openQuestions.find(question => question.id === id)!.question}` })
+const choice = (id: string) => {
+  const question = openQuestions.find(candidate => candidate.id === id)!
+  return { control: 'inline-radio' as const, options: question.options.map(option => option.value), description: `${id} · ${question.question}` }
+}
 
 const meta: Meta<Args> = {
   title: 'Fractal UI/Redesign milestone',
@@ -27,11 +30,10 @@ const meta: Meta<Args> = {
     a11y: { context: { include: ['body'], exclude: ['[data-diff-kind]'] } },
     docs: { description: { component: `Workshop-only milestone. Locked: ${lockedDecisions.map(decision => decision.id).join(', ')}. Open: ${openQuestions.map(question => question.id).join(', ')}. Nothing here is the accepted live design.` } },
   },
-  args: { scheme: 'dark', state: 'slice', rowAdaptive: '300', rosterLoading: 'skeleton', errorPlacement: 'sidebar', emptyMain: 'hints', paletteScope: 'mixed', glyphRefinement: 'G1', sectionNav: 'footer' },
+  args: { scheme: 'dark', state: 'slice', paletteScope: 'mixed', glyphRefinement: 'G3', sectionNav: 'footer' },
   argTypes: {
     scheme: { control: 'inline-radio', options: ['dark', 'light'] },
-    state: { control: 'select', options: ['slice', 'loading', 'empty-roster', 'empty-thread', 'no-match', 'error', 'stale', 'navigation'] },
-    rowAdaptive: choice('RM1-Q1'), rosterLoading: choice('RM1-Q2'), errorPlacement: choice('RM1-Q3'), emptyMain: choice('RM1-Q4'),
+    state: { control: 'select', options: ['slice', 'loading', 'empty-roster', 'empty-thread', 'no-match', 'roster-error', 'thread-unavailable', 'stale', 'navigation'] },
     paletteScope: choice('RM1-Q5'), glyphRefinement: choice('RM1-Q6'), sectionNav: choice('RM1-Q7'),
   },
   // Initial state derives from args, so any arg change remounts with a fresh frame.
@@ -52,8 +54,10 @@ export const EmptyThread: Story = { args: { state: 'empty-thread' } }
 export const EmptyThreadLight = light(EmptyThread)
 export const NoMatch: Story = { args: { state: 'no-match' } }
 export const NoMatchLight = light(NoMatch)
-export const ErrorState: Story = { args: { state: 'error' } }
-export const ErrorStateLight = light(ErrorState)
+export const RosterError: Story = { args: { state: 'roster-error' } }
+export const RosterErrorLight = light(RosterError)
+export const ThreadUnavailable: Story = { args: { state: 'thread-unavailable' } }
+export const ThreadUnavailableLight = light(ThreadUnavailable)
 export const Stale: Story = { args: { state: 'stale' } }
 export const StaleLight = light(Stale)
 export const Navigation: Story = { args: { state: 'navigation' } }
@@ -61,33 +65,36 @@ export const NavigationLight = light(Navigation)
 
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const chord = (key: string) => isMac ? `{Meta>}${key}{/Meta}` : `{Control>}${key}{/Control}`
+const rows = (root: HTMLElement) => root.querySelectorAll('[data-testid="milestone-agent-row"]')
 
-/** Mod+K palette, Escape, "/" filter, roving arrows, Mod+B sidebar — the keyboard path end to end, docked or as the narrow drawer. */
+/** Mod+K opens with the first result highlighted, so Enter opens it; "/" filter, tree arrows and Mod+B work end to end. */
 export const NavigationKeyboard: Story = {
   tags: ['critical'], args: { state: 'slice' },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const page = within(canvasElement.ownerDocument.body)
+    const active = () => canvasElement.ownerDocument.activeElement
     await waitFor(() => expect(canvas.getByRole('main', { name: 'Workspace' })).toBeVisible())
     await userEvent.click(canvas.getByRole('main', { name: 'Workspace' }), { skipHover: true })
     await userEvent.keyboard(chord('k'))
     const palette = await page.findByRole('dialog', { name: 'Command palette' })
     await userEvent.keyboard('hover')
     await waitFor(() => expect(within(palette).getAllByRole('menuitem')[0]).toHaveTextContent(/hover/i))
-    // First Escape clears the query, the second closes the palette.
-    await userEvent.keyboard('{Escape}')
-    await waitFor(() => expect(within(palette).getByRole('searchbox')).toHaveValue(''))
-    await userEvent.keyboard('{Escape}')
+    await userEvent.keyboard('{Enter}')
     await waitFor(() => expect(page.queryByRole('dialog', { name: 'Command palette' })).toBeNull())
+    await waitFor(() => expect(within(canvas.getByRole('tablist', { name: 'Open conversations' })).getByRole('tab', { selected: true })).toHaveTextContent('Hover card shows reported scopes'))
     await userEvent.keyboard('/')
     const search = await canvas.findByRole('searchbox', { name: 'Filter agents' })
     await waitFor(() => expect(search).toHaveFocus())
-    await waitFor(() => expect(canvas.getAllByTestId('taste-agent-row').length).toBeGreaterThan(3))
+    await waitFor(() => expect(rows(canvasElement).length).toBeGreaterThan(3))
+    // The roster is one tree: one Tab stop, arrows move between rows, ArrowUp from the first row returns to the filter.
     await userEvent.keyboard('{ArrowDown}')
-    await waitFor(() => expect(canvasElement.ownerDocument.activeElement?.matches('[data-roster-stop], [data-testid="taste-agent-row"] > button')).toBe(true))
-    const first = canvasElement.ownerDocument.activeElement
+    await waitFor(() => expect(active()?.getAttribute('role')).toBe('row'))
+    const first = active()
     await userEvent.keyboard('{ArrowDown}')
-    await waitFor(() => expect(canvasElement.ownerDocument.activeElement).not.toBe(first))
+    await waitFor(() => expect(active()).not.toBe(first))
+    await userEvent.keyboard('{ArrowUp}{ArrowUp}')
+    await waitFor(() => expect(search).toHaveFocus())
     await userEvent.keyboard(chord('b'))
     await waitFor(() => expect(canvas.queryByRole('searchbox', { name: 'Filter agents' })).toBeNull())
     await userEvent.keyboard(chord('b'))
@@ -95,19 +102,35 @@ export const NavigationKeyboard: Story = {
   },
 }
 
-/** Recovery actions stay reachable, details stay one disclosure away, and Retry walks loading back to a loaded roster. */
+/** A roster fault stays in the sidebar while the open thread keeps working; Retry walks loading back to a loaded roster. */
 export const ErrorRecovery: Story = {
-  tags: ['critical'], args: { state: 'error' },
+  tags: ['critical'], args: { state: 'roster-error' },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const alert = await canvas.findByRole('alert')
     await expect(alert).toHaveTextContent('Couldn’t load agents')
+    await expect(canvasElement.querySelector('[aria-label^="Transcript"]')).not.toBeNull()
     await userEvent.click(within(alert).getByRole('button', { name: 'Details' }))
     await waitFor(() => expect(alert).toHaveTextContent('HTTP 503'))
     await userEvent.click(within(alert).getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'loading'))
-    await waitFor(() => expect(canvas.getAllByTestId('taste-agent-row').length).toBeGreaterThan(3), { timeout: 3000 })
+    await waitFor(() => expect(rows(canvasElement).length).toBeGreaterThan(3), { timeout: 3000 })
     await expect(canvas.queryByRole('alert')).toBeNull()
+  },
+}
+
+/** A thread fault stays in its pane while the roster stays live; Retry loads that conversation only. */
+export const ThreadRecovery: Story = {
+  tags: ['critical'], args: { state: 'thread-unavailable' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(await canvas.findByRole('button', { name: 'Retry: Conversation unavailable' }))
+    await waitFor(() => expect(canvasElement.querySelector('[data-thread-loading]')).not.toBeNull())
+    // Docked, the roster stays loaded throughout; narrow, it sits in the closed drawer and is not rendered.
+    const roster = canvasElement.querySelector('[data-roster-state]')
+    if (roster !== null) await expect(roster).toHaveAttribute('data-roster-state', 'ready')
+    await waitFor(() => expect(canvasElement.querySelector('[data-thread-unavailable], [data-thread-loading]')).toBeNull(), { timeout: 3000 })
+    await expect(canvasElement.querySelector('[aria-label^="Transcript"]')).not.toBeNull()
   },
 }
 

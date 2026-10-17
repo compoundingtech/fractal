@@ -1,9 +1,9 @@
 /**
  * Redesign milestone 1 (RM1): locked decisions and open questions.
  *
- * Locked rows are already-approved picks this milestone composes; they are not re-asked.
+ * Locked rows are picks this milestone composes; they are not re-asked.
  * Question IDs are stable: a later revision may add IDs but never reuses or renumbers one.
- * Every option is a story arg, so each answer has its own deep link.
+ * Every open option is a story arg, so each answer has its own deep link.
  */
 
 export interface LockedDecision { readonly id: string; readonly summary: string }
@@ -16,44 +16,31 @@ export interface OpenQuestion<K extends string = string> {
 }
 
 export const lockedDecisions: readonly LockedDecision[] = [
-  { id: 'SR-2', summary: 'Sidebar agent row: 48px two-line row (title + status/time; host, spend, duration on line 2).' },
+  { id: 'SR-2', summary: 'Sidebar agent row: 48px two-line row. Line 1: status, title, last turn. Line 2: status word (when not working), host, spend, duration.' },
   { id: 'WF-1', summary: 'Work log: routine tool calls fold into one "Worked for" row; edits and failures stay visible.' },
-  { id: 'RC-1', summary: 'Resource card: 40px flat wash card that opens the resource in a split.' },
+  { id: 'RC-1', summary: 'Resource card: 40px flat wash card that opens the resource in a split. Composed here as the subagent result card in the parent answer.' },
   { id: 'RC-3', summary: 'File chips inside prose only (baseline-aligned, hover preview).' },
-  { id: 'SG-1', summary: 'Status glyph: 8px coloured disc in a fixed 16px column; no extra leading pip or dot.' },
+  { id: 'SG-1', summary: 'Status glyph: 8px disc in a fixed 16px column; no extra leading pip or dot.' },
+  { id: 'RM1-Q1', summary: 'Rows stay two lines at every sidebar width (no one-line fold).' },
+  { id: 'RM1-Q2', summary: 'Roster loading shows row-shaped placeholders at the real 48px row pitch.' },
+  { id: 'RM1-Q3', summary: 'A roster failure appears inside the sidebar, where the list would be.' },
+  { id: 'RM1-Q4', summary: 'With no agent open, the workspace shows one line plus keyboard hints.' },
   { id: 'Composer', summary: 'Not part of this milestone. The composer is the current one, visually unchanged, until its scope is revisited.' },
 ]
 
-export type QuestionArg = 'rowAdaptive' | 'rosterLoading' | 'errorPlacement' | 'emptyMain' | 'paletteScope' | 'glyphRefinement' | 'sectionNav'
+export type QuestionArg = 'paletteScope' | 'glyphRefinement' | 'sectionNav'
 
 export const openQuestions: readonly OpenQuestion<QuestionArg>[] = [
-  { id: 'RM1-Q1', arg: 'rowAdaptive', question: 'Below which sidebar width does SR-2 collapse to a one-line row? (The milestone sidebar opens at 304px; drag it to compare.)', options: [
-    { value: '300', label: 'One line below 300px (metrics line from 300px)' },
-    { value: '260', label: 'One line below 260px' },
-    { value: 'off', label: 'Always two lines' },
-  ] },
-  { id: 'RM1-Q2', arg: 'rosterLoading', question: 'How does the roster look before the first agent list arrives?', options: [
-    { value: 'skeleton', label: 'Row-shaped placeholders at real row height' },
-    { value: 'line', label: 'One status line, no placeholders' },
-  ] },
-  { id: 'RM1-Q3', arg: 'errorPlacement', question: 'Where does a roster or connection failure appear?', options: [
-    { value: 'sidebar', label: 'Inside the sidebar, where the list would be' },
-    { value: 'banner', label: 'One strip across the top of the workspace' },
-  ] },
-  { id: 'RM1-Q4', arg: 'emptyMain', question: 'What fills the workspace when no agent is open?', options: [
-    { value: 'hints', label: 'One line plus three keyboard hints' },
-    { value: 'line', label: 'One line only' },
-  ] },
   { id: 'RM1-Q5', arg: 'paletteScope', question: 'What does Mod+K search by default?', options: [
-    { value: 'mixed', label: 'Agents and commands together' },
+    { value: 'mixed', label: 'Agents first, then commands' },
     { value: 'agents', label: 'Agents only; type ">" for commands' },
   ] },
-  { id: 'RM1-Q6', arg: 'glyphRefinement', question: 'Which SG-1 refinement carries running and attention states?', options: [
+  { id: 'RM1-Q6', arg: 'glyphRefinement', question: 'Which SG-1 refinement tells states apart without colour?', options: [
+    { value: 'G3', label: 'States other than working and idle add a shape (needs you ?, stale clock, ended square)' },
     { value: 'G1', label: 'Plain discs' },
     { value: 'G2', label: 'Running disc gains a turning ring' },
-    { value: 'G3', label: 'Non-running states add a shape cue' },
   ] },
-  { id: 'RM1-Q7', arg: 'sectionNav', question: 'Where do Inbox, Missions and Resources live in the sidebar?', options: [
+  { id: 'RM1-Q7', arg: 'sectionNav', question: 'Where do Inbox, Missions and Resources sit in the sidebar?', options: [
     { value: 'footer', label: 'One compact row under the agent list' },
     { value: 'header', label: 'One compact row above the agent list' },
   ] },
