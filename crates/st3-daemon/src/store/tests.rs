@@ -12155,44 +12155,56 @@ proptest! {
         let through = store.index().unwrap();
         let sender = format!("sender-{selected_sender}");
         let normalized_sender = format!("agent/{sender}");
-        let all = store.messages(Some("agent/worker"), true).unwrap();
-        for (exact, prefix) in [
-            (None, None),
-            (Some("topic_%*"), None),
-            (None, Some("topic_%*")),
-            (Some("topic"), None),
-            (None, Some("")),
-            (None, Some("TOPIC")),
-            (Some(r"topic_\%*"), None),
-            (None, Some(r"topic_\")),
-        ] {
-            let mut expected: Vec<_> = all.iter().filter(|message| {
-                message.from == normalized_sender
-                    && (include_closed || message.status != "closed")
-                    && exact.is_none_or(|title| message.title.as_deref() == Some(title))
-                    && prefix.is_none_or(|prefix| message.title.as_deref().is_some_and(|title| title.starts_with(prefix)))
-            }).map(|message| (message.created_index, message.subject.clone())).collect();
-            expected.sort();
-            let mut actual = Vec::new();
-            let mut after = None;
-            loop {
-                let (page, next) = store.messages_page_filtered(
-                    Some("worker"), Some(&sender), exact, prefix, include_closed, after, through, page_size,
-                ).unwrap();
-                prop_assert!(page.len() <= page_size);
-                if next.is_some() {
-                    prop_assert_eq!(page.len(), page_size);
-                    prop_assert_eq!(next, page.last().map(|message| message.created_index));
-                    prop_assert!(next > after);
+        for recipient in [Some("worker"), None] {
+            // Keep the existing listing as the oracle for each discovery domain.
+            let all = store.messages(recipient, true).unwrap();
+            for (index, (_, _, _, _, flavor)) in entries.iter().enumerate() {
+                if *flavor == 1 {
+                    let resource = format!("message/filter-{index}");
+                    prop_assert_eq!(
+                        all.iter().any(|message| message.subject == resource),
+                        recipient.is_none(),
+                    );
                 }
-                actual.extend(page.into_iter().map(|message| (message.created_index, message.subject)));
-                match next {
-                    Some(next) => after = Some(next),
-                    None => break,
-                }
-                prop_assert!(actual.len() <= expected.len());
             }
-            prop_assert_eq!(actual, expected);
+            for (exact, prefix) in [
+                (None, None),
+                (Some("topic_%*"), None),
+                (None, Some("topic_%*")),
+                (Some("topic"), None),
+                (None, Some("")),
+                (None, Some("TOPIC")),
+                (Some(r"topic_\%*"), None),
+                (None, Some(r"topic_\")),
+            ] {
+                let mut expected: Vec<_> = all.iter().filter(|message| {
+                    message.from == normalized_sender
+                        && (include_closed || message.status != "closed")
+                        && exact.is_none_or(|title| message.title.as_deref() == Some(title))
+                        && prefix.is_none_or(|prefix| message.title.as_deref().is_some_and(|title| title.starts_with(prefix)))
+                }).map(|message| (message.created_index, message.subject.clone())).collect();
+                expected.sort();
+                let mut actual = Vec::new();
+                let mut after = None;
+                loop {
+                    let (page, next) = store.messages_page_filtered(
+                        recipient, Some(&sender), exact, prefix, include_closed, after, through, page_size,
+                    ).unwrap();
+                    prop_assert!(page.len() <= page_size);
+                    if next.is_some() {
+                        prop_assert_eq!(page.len(), page_size);
+                        prop_assert_eq!(next, page.last().map(|message| message.created_index));
+                        prop_assert!(next > after);
+                    }
+                    actual.extend(page.into_iter().map(|message| (message.created_index, message.subject)));
+                    match next {
+                        Some(next) => after = Some(next),
+                        None => break,
+                    }
+                    prop_assert!(actual.len() <= expected.len());
+                }
+                prop_assert_eq!(actual, expected);
+            }
         }
     }
 }

@@ -411,10 +411,33 @@ impl Store {
         let mut rows = statement.query(params![
             sender.as_deref(), bare_sender, after.unwrap_or(0), through,
         ])?;
+        let mut recipient_discovery = connection.prepare_cached(concat!(
+            "SELECT EXISTS (
+                SELECT 1 FROM claims
+                WHERE subject=?3 AND kind='message.sent'
+                  AND ", message_sent_recipient_match!(), "
+             ) OR EXISTS (
+                SELECT 1 FROM desired, json_each(desired.body, '$.children') child
+                WHERE desired.subject=?3 AND desired.kind='message'
+                  AND ", message_desired_recipient_match!(), "
+             )"
+        ))?;
         let mut output: Vec<MessageView> = Vec::new();
         while let Some(row) = rows.next()? {
             let resource: String = row.get(0)?;
             let created_index = row.get(1)?;
+            // Match the unfiltered recipient listing's discovery domain, not just the
+            // hydrated recipient. In particular, a root-body legacy send alone is not
+            // discovered by that endpoint; a matching declaration/native send can be.
+            if let Some(recipient) = recipient.as_deref() {
+                let discovered: bool = recipient_discovery.query_row(
+                    params![recipient, message_bare_recipient(recipient), &resource],
+                    |row| row.get(0),
+                )?;
+                if !discovered {
+                    continue;
+                }
+            }
             let message = self.message_view_cached(&connection, &resource, created_index)?;
             // Hydration selects canonical actual state and desired fallbacks. Filtering raw
             // historical claim fields here would misclassify edited/declarative messages.
