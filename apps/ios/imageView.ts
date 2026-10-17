@@ -96,5 +96,12 @@ export class ImageReads {
   }
 }
 
+/**
+ * The cache key of an image: the message (or ask step) it is read by, then its sha256. st decides
+ * per carrier whether the session may read a sha256, so bytes read through one carrier are never
+ * handed to another that names the same sha256, such as an attachment element typed into a prompt.
+ */
+export function imageKey(image: { sha256: string; message: string }): string { return `${image.message} ${image.sha256}`; }
+
 /** The phone's images read from st: up to 16 MB of them stay for when they are shown again. */
 export const IMAGES = new ImageReads(new ImageCache(16 * 1024 * 1024));

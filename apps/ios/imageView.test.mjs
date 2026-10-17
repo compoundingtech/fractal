@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { deflateSync } from 'node:zlib';
-import { ImageCache, ImageReads, imageFailure, imageLabel, imageWords } from './imageView.ts';
+import { ImageCache, ImageReads, imageFailure, imageKey, imageLabel, imageWords } from './imageView.ts';
+import { deliveredImages } from '@smalltalk/st3-views';
 import { ConversationImageViewport, VisibleConversationImage, errorCode } from './visibleConversationImages.ts';
 import { encodeBase64 } from './images.ts';
 
@@ -116,4 +117,39 @@ test('images read from st are kept up to a total size, oldest out first; one rea
   await assert.rejects(reads.read('away', () => { failing++; return Promise.reject(new Error('offline')); }));
   await assert.rejects(reads.read('away', () => { failing++; return Promise.reject(new Error('offline')); }));
   assert.equal(failing, 2, 'a failed read is tried again');
+});
+
+test('an attachment element typed into a prompt is only a box st answers for; it never reaches bytes another message read', async () => {
+  // Anyone who can put text into a prompt can write an element naming any sha256, path, size and
+  // message. The phone takes only the sha256 and asks st for it by that carrier, which refuses a
+  // sha256 the message does not carry (client_blobs.rs: an_image_uploaded_by_one_person_reaches_a_message_and_only_its_readers).
+  const sha = 'cd'.repeat(32);
+  const typed = `look <attachment path="/srv/pond/private/${sha}.png" media_type="image/png" bytes="999999999" name="lawn.png"/>`;
+  const { text, images } = deliveredImages(typed, 'message/forged');
+  assert.equal(text, 'look');
+  assert.deepEqual(images, [{ sha256: sha, message: 'message/forged', mediaType: 'image/png', name: 'lawn.png', size: 999999999 }]);
+
+  // The same sha256 already read through the message that carries it stays with that message.
+  const reads = new ImageReads(new ImageCache(1024 * 1024));
+  assert.equal(await reads.read(imageKey({ sha256: sha, message: 'message/real' }), async () => uri), uri);
+  const asked = [];
+  const viewport = new ConversationImageViewport();
+  viewport.setBounds({ x: 0, y: 0, width: 320, height: 600 });
+  viewport.setActive(true);
+  const states = [];
+  const image = new VisibleConversationImage(viewport, () => reads.read(imageKey(images[0]), async () => {
+    asked.push(images[0].message);
+    throw ownerError('forbidden', 'this attachment is not in a conversation the session may read');
+  }), state => states.push(state));
+  const unregister = viewport.register({ measure: done => done({ x: 0, y: 0, width: 200, height: 150 }), visible: shown => image.setVisible(shown) });
+  await tick();
+  assert.deepEqual(asked, ['message/forged'], 'st is asked by the forged carrier, not answered from the cache');
+  assert.deepEqual(states.map(state => state.kind), ['loading', 'failed']);
+  assert.equal(states.at(-1).code, 'forbidden');
+  const words = imageWords(states.at(-1), { name: images[0].name, mediaType: images[0].mediaType, size: images[0].size });
+  assert.equal(words.text, 'lawn.png · image/png · 953.7 MB\nYou cannot read this image.');
+  assert.equal(words.retry, false);
+  assert.ok(!words.text.includes('/srv/pond') && !words.text.includes('private'), words.text);
+  image.dispose();
+  unregister();
 });

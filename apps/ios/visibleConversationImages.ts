@@ -70,6 +70,7 @@ type PendingImageRead = { generation: number; phase: 'queued' | 'reading'; cance
 export class VisibleConversationImage<TImage> {
   private state: VisibleImageState<TImage> = { kind: 'closed' };
   private visible = false;
+  private held = false;
   private generation = 0;
   private disposed = false;
   private pending?: PendingImageRead;
@@ -87,11 +88,19 @@ export class VisibleConversationImage<TImage> {
       if (this.pending?.phase === 'queued') this.cancel();
       // A shown image leaves memory with the screen: its bytes are read again (or taken from
       // the bounded cache) when it comes back.
-      if (this.state.kind === 'loading' || this.state.kind === 'image') this.publish({ kind: 'closed' });
+      if (this.state.kind === 'loading' || (this.state.kind === 'image' && !this.held)) this.publish({ kind: 'closed' });
     } else if (this.state.kind === 'closed') {
       if (this.pending) this.publish({ kind: 'loading' });
       else this.enqueue();
     }
+  }
+
+  /** Keep a shown image while it is zoomed: the full-screen zoom covers its box, which may then
+   * measure as hidden. Letting go closes it if its box did leave the screen meanwhile. */
+  hold(held: boolean): void {
+    if (this.disposed) return;
+    this.held = held;
+    if (!held && !this.visible && this.state.kind === 'image') this.publish({ kind: 'closed' });
   }
 
   retry(): void { if (this.visible && this.state.kind === 'failed') this.enqueue(); }

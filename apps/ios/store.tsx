@@ -13,7 +13,7 @@ import { REPAIR_WARNING, validatePairingTrust, verifyPairing } from './pairingPr
 import { emptyData, encodeProjectionCache, hydrateProjectionForPairedDevice, PROJECTION_CACHE_KEY, type Data } from './projectionCache';
 import { listCollectionPages, mergedRows } from './collectionPages';
 import { rememberBounded } from './boundedCache';
-import { IMAGES } from './imageView';
+import { IMAGES, imageKey } from './imageView';
 import { wantsScreenSequence, withFreshTerminalFence, type TerminalFence } from './terminalControls';
 import { sendFences } from './sendFence';
 import { Feed } from './feed';
@@ -887,7 +887,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     /** An image a message carries, as a data URI; st reads it from the member that has it. */
     image(image: { sha256: string; message: string; mediaType: string }): Promise<string> {
-      return IMAGES.read(image.sha256, () => {
+      return IMAGES.read(imageKey(image), () => {
         if (!client || status !== 'online') return Promise.reject(new Error(status === 'online' ? 'not connected' : 'offline'));
         return client.blob(image.sha256, image.message).then(bytes => `data:${image.mediaType};base64,${encodeBase64(bytes)}`);
       });

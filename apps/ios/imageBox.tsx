@@ -20,7 +20,12 @@ export class ImageBox extends Component<Props, VisibleImageState<string> & { zoo
   state: VisibleImageState<string> & { zoomed?: boolean } = { kind: 'closed' };
   private box = createRef<View>();
   private unregister?: () => void;
-  private image = new VisibleConversationImage<string>(this.props.viewport, current => this.props.load(current), state => this.setState(state.kind === 'image' ? state : { ...state, zoomed: false }));
+  private image: VisibleConversationImage<string> = new VisibleConversationImage<string>(this.props.viewport, current => this.props.load(current), state => {
+    if (state.kind !== 'image') this.image.hold(false);
+    this.setState(state.kind === 'image' ? state : { ...state, zoomed: false });
+  });
+  // The zoom covers the screen, so the box under it may measure as hidden: hold the image open.
+  private zoom = (zoomed: boolean) => { this.image.hold(zoomed); this.setState({ zoomed }); };
 
   componentDidMount() {
     this.unregister = this.props.viewport.register({
@@ -38,7 +43,7 @@ export class ImageBox extends Component<Props, VisibleImageState<string> & { zoo
     return <View style={{ gap: 2 }}>
       <Pressable ref={this.box} collapsable={false} style={styles.box} onLayout={() => this.props.viewport.refresh()}
         accessibilityRole={state.kind === 'image' ? 'imagebutton' : undefined} accessibilityLabel={state.kind === 'image' ? `${label}, open` : words.text}
-        disabled={state.kind !== 'image'} onPress={() => this.setState({ zoomed: true })}>
+        disabled={state.kind !== 'image'} onPress={() => this.zoom(true)}>
         {state.kind === 'image'
           // React Native's iOS loader decodes the image at this box's size, not the file's.
           ? <Image source={{ uri: state.image }} style={StyleSheet.absoluteFill} resizeMode="contain" onError={() => this.image.fail('The image could not be displayed. Try again.')} />
@@ -46,7 +51,7 @@ export class ImageBox extends Component<Props, VisibleImageState<string> & { zoo
       </Pressable>
       {state.kind === 'image' ? <T dim style={{ fontSize: 11 }}>{label}  <T color={theme.accent} style={{ fontSize: 11 }}>tap to open</T></T> : null}
       {words.retry ? <Pressable accessibilityRole="button" onPress={() => this.image.retry()}><T color={theme.accent}>Retry loading image</T></Pressable> : null}
-      {state.kind === 'image' && state.zoomed ? <ImageZoom uri={state.image} label={label} onClose={() => this.setState({ zoomed: false })} /> : null}
+      {state.kind === 'image' && state.zoomed ? <ImageZoom uri={state.image} label={label} onClose={() => this.zoom(false)} /> : null}
     </View>;
   }
 }
