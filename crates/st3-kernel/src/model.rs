@@ -19,7 +19,7 @@ pub use smallclaims::replication::{
 pub const MAX_EVAL_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 
 /// The diagnostic code of a call Claude's auto mode classifier denied.
-pub(crate) const PERMISSION_DENIED_CODE: &str = "permission-denied";
+pub const PERMISSION_DENIED_CODE: &str = "permission-denied";
 pub const PLACEMENT_SOURCE_OFFLINE_KIND: &str = "agent.placement.source-offline";
 /// The former owners and declarations which can acknowledge their latest departure.
 /// Walk causal predecessors, never receiver-local indexes or receipt timestamps.
@@ -29,7 +29,7 @@ pub struct PlacementFence {
     pub sources: BTreeMap<String, BTreeSet<String>>,
 }
 
-pub(crate) fn canonical_child_string(value: &Value, name: &str) -> Option<String> {
+pub fn canonical_child_string(value: &Value, name: &str) -> Option<String> {
     value
         .get("children")?
         .as_array()?
@@ -42,7 +42,7 @@ pub(crate) fn canonical_child_string(value: &Value, name: &str) -> Option<String
         .map(str::to_owned)
 }
 
-pub(crate) fn new_request_id() -> String {
+pub fn new_request_id() -> String {
     let mut bytes = [0_u8; 16];
     if getrandom::fill(&mut bytes).is_err() {
         let fallback = format!(
