@@ -4639,7 +4639,7 @@ async fn run(cli: Cli) -> Result<()> {
         st3::node_identity::resolve(&mut config)?;
         let mut telemetry =
             st3::otel::Telemetry::init(st3::otel::Unit::ReplicationWorker, Some(&config.node));
-        let result = st3::peer::run_worker(config).await;
+        let result = st3::peer::run_worker(config, st3::api::raw_terminal_owner_splice).await;
         telemetry.shutdown();
         return result;
     }
