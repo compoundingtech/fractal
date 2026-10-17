@@ -15169,21 +15169,33 @@ impl<R: RuntimeControl> Reconciler<R> {
         let agent_workspaces = agent_workspaces.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
+                // `None` when the selected revision cannot be read, which is no declaration change.
+                let revision_current = || store.selected_desired_revision(&observer_subject).ok()
+                    .map(|selected| selected.as_deref() == Some(revision.as_str()));
+                // Whether an observer.state receipt wrote. A failed write records nothing, so the
+                // arm keeps its backoff deadline and its next poll writes the receipt again.
+                let write_state = |input: ClaimInput, current: &(dyn Fn() -> bool + Sync)| -> bool {
+                    #[cfg(any(test, feature = "test-support"))]
+                    if let Some(injection) = &completion_fault
+                        && injection.fault("observer-receipt-write", &observer_subject).is_some() {
+                        return false;
+                    }
+                    store.append_observer_state(&input, &revision, current).is_ok_and(|(_, wrote)| wrote)
+                };
                 loop {
                 let delay = next_check.saturating_sub(now_ms()).min(u64::MAX as u128) as u64;
                 tokio::time::sleep(Duration::from_millis(delay)).await;
-                if store
-                    .selected_desired_revision(&observer_subject)
-                    .ok()
-                    .flatten()
-                    .as_deref()
-                    != Some(revision.as_str())
-                {
+                let revision_state = revision_current();
+                if revision_state != Some(true) {
                     armed
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .remove(&operation);
-                    // The declaration change already has its own reconcile wake.
+                    // A declaration change already has its own reconcile wake. A failed read
+                    // is not one: wake a pass to decide rather than stop this observer silently.
+                    if revision_state.is_none() {
+                        signal_changed(&notify, &event_notify);
+                    }
                     return;
                 }
                 if !armed.lock().unwrap_or_else(PoisonError::into_inner).contains(&operation) { return; }
@@ -15208,14 +15220,22 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                     armed.lock().unwrap_or_else(PoisonError::into_inner).contains(&operation)
                 };
-                if !current()
-                    || store.selected_desired_revision(&observer_subject).ok().flatten().as_deref() != Some(revision.as_str()) {
+                let revision_state = revision_current();
+                if !current() || revision_state != Some(true) {
+                    let unknown = revision_state.is_none() && current();
                     armed.lock().unwrap_or_else(PoisonError::into_inner).remove(&operation);
+                    if unknown {
+                        signal_changed(&notify, &event_notify);
+                    }
                     return;
                 }
                 let mut completed_deadline = None;
                 let mut completed_cursor = None;
                 let mut durable_changed = false;
+                // A scheduled poll that recorded an error keeps its own backoff arm: identical
+                // repeats write nothing and wake nothing, so no pass would re-arm it. A permanent
+                // rejection is not polled again on this revision, so it still ends the arm.
+                let mut error_backoff = false;
                 match observed {
                     Ok(mut observation) => {
                         if spec.provider == "github.repository" {
@@ -15262,6 +15282,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             Err(error) => {
                                 let retry_at = now_ms().saturating_add(60_000);
                                 completed_deadline = Some(retry_at);
+                                error_backoff = !permanent_observation_error(error.code);
                                 let reason = error.to_string();
                                 let failure_hash = hex::encode(sha2::Sha256::digest(
                                     format!("{revision}:{}:{reason}", error.code).as_bytes(),
@@ -15284,7 +15305,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     ),
                                     None => format!("observer-rejected:{}", &failure_hash[..20]),
                                 };
-                                durable_changed = store.append_observer_state(&ClaimInput {
+                                durable_changed = write_state(ClaimInput {
                                     subject: observer_subject.clone(),
                                     kind: "observer.state".into(),
                                     actor: None,
@@ -15292,7 +15313,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     evidence: Vec::new(),
                                     expected_subject: None,
                                     idempotency_key: Some(key),
-                                }, &revision, &current).is_ok_and(|(_, wrote)| wrote);
+                                }, &current);
                             }
                         }
                     }
@@ -15304,6 +15325,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         );
                         let reason = error.to_string();
                         completed_deadline = Some(retry_at);
+                        error_backoff = true;
                         let previous = store.latest_actual_value(&observer_subject).ok().flatten();
                         let condition = ObserverCondition::of(&error, previous.as_ref());
                         let unchanged_failure = previous.as_ref().is_some_and(|actual| {
@@ -15338,7 +15360,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             if let Some(attempt) = &refresh_attempt {
                                 fields.insert("attempt".into(), Value::String(attempt.clone()));
                             }
-                            durable_changed = store.append_observer_state(&ClaimInput {
+                            durable_changed = write_state(ClaimInput {
                                 subject: observer_subject.clone(),
                                 kind: "observer.state".into(),
                                 actor: None,
@@ -15349,17 +15371,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     "observer-failure:{}",
                                     &failure_hash[..20]
                                 )),
-                            }, &revision, &current).is_ok_and(|(_, wrote)| wrote);
+                            }, &current);
                         }
                     }
                 }
                 // A cadence change or cancellation may retire this arm while its
                 // writer job waits. Publish only this still-current generation.
-                let revision_current = store.selected_desired_revision(&observer_subject)
-                    .ok().flatten().as_deref() == Some(revision.as_str());
-                let keep_polling = {
+                let revision_state = revision_current();
+                let (keep_polling, wake) = {
                     let mut active = armed.lock().unwrap_or_else(PoisonError::into_inner);
-                    let still_current = active.contains(&operation) && revision_current;
+                    let armed_now = active.contains(&operation);
+                    let still_current = armed_now && revision_state == Some(true);
                     if still_current {
                         if let Some(next_check) = completed_deadline {
                             deadlines.lock().unwrap_or_else(PoisonError::into_inner)
@@ -15371,19 +15393,23 @@ impl<R: RuntimeControl> Reconciler<R> {
                             cursor = next_cursor;
                         }
                     }
-                    // Retain this generation across idle polls: a full pass sees the same
-                    // arm, and cancellation/cadence changes can still retire it.
-                    let keep_polling = still_current && !durable_changed && completed_deadline.is_some();
+                    // Retain this generation across idle polls and error backoff: a full pass
+                    // sees the same arm, and cancellation/cadence changes can still retire it.
+                    // A failed receipt write leaves durable_changed false, so the arm keeps
+                    // its deadline and the next poll writes the receipt again.
+                    let keep_polling = still_current && completed_deadline.is_some()
+                        && (!durable_changed || (error_backoff && refresh_attempt.is_none()));
                     if !keep_polling {
                         active.remove(&operation);
                     }
-                    keep_polling
+                    // Ending a current arm on a failed read is no declaration change: wake a pass.
+                    (keep_polling, durable_changed || (armed_now && revision_state.is_none()))
                 };
                 #[cfg(any(test, feature = "test-support"))]
                 if let Some(injection) = &completion_fault {
                     injection.fault("observer-completion-finished", &observer_subject);
                 }
-                if durable_changed {
+                if wake {
                     signal_changed(&notify, &event_notify);
                 }
                 if !keep_polling {
@@ -33820,23 +33846,27 @@ observer "repo" {
   field "issues"
 }"#;
 
-    /// Run one observation now and wait until it has recorded its outcome.
+    /// Run one observation now and wait until it has recorded its outcome. An unchanged or
+    /// backing-off poll keeps its arm sleeping toward its own deadline, so retire that arm, as
+    /// a refresh would, and wait for the completion to publish its next deadline instead.
     async fn observe_now(reconciler: &Reconciler<FakeRuntime>, calls: &AtomicUsize) {
         let revision = reconciler
             .store
             .selected_desired_revision("observer/repo")
             .unwrap()
             .unwrap();
+        let key = format!("observer/repo:{revision}");
         let expected = calls.load(Ordering::SeqCst) + 1;
         reconciler
-            .observer_deadlines
+            .armed_observers
             .lock()
             .unwrap()
-            .insert(format!("observer/repo:{revision}"), 0);
+            .retain(|operation| !operation.starts_with("observer/repo:"));
+        reconciler.observer_deadlines.lock().unwrap().insert(key.clone(), 0);
         reconciler.reconcile_once().unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while calls.load(Ordering::SeqCst) < expected
-                || !reconciler.armed_observers.lock().unwrap().is_empty()
+                || reconciler.observer_deadlines.lock().unwrap().get(&key).is_none_or(|deadline| *deadline == 0)
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }

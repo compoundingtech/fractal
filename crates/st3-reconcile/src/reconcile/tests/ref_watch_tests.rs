@@ -847,3 +847,114 @@ async fn observer_refresh_replaces_the_idle_arm_and_wakes_for_its_receipt() {
     assert_eq!(provider.0.load(Ordering::SeqCst), 3);
     assert_eq!(*reconciler.event_notify.borrow(), generation + 1);
 }
+
+const BACKOFF_REF_OBSERVER: &str = "version 2\nresource \"ref\" { kind \"vcs.ref\" }\nobserver \"ref\" { resource \"resource/ref\"; provider \"github.ref\"; locator \"acme/garden@main\"; field \"head\" }";
+
+/// The first error receipt wakes once; identical repeats write and wake nothing, so the arm
+/// itself must keep polling at each backoff with no further reconcile pass.
+#[tokio::test(start_paused = true)]
+async fn identical_observer_failures_keep_polling_without_another_pass() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, BACKOFF_REF_OBSERVER, "ref");
+    let (send, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let reconciler = Reconciler::new(
+        store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+    ).with_resource_provider(Arc::new(CompletionProvider { requests: send }));
+    reconciler.reconcile_resource_observers(&store.desired_subjects().unwrap(), &[]).unwrap();
+    settle_observer_tasks().await;
+    requests.try_recv().unwrap().1.send(Err(anyhow::anyhow!("temporary failure"))).unwrap();
+    settle_observer_tasks().await;
+    assert_eq!(*reconciler.event_notify.borrow(), 1, "the first error receipt wakes once");
+    assert_eq!(store.latest_actual_value("observer/ref").unwrap().unwrap()["state"], "unreachable");
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(59)).await;
+        settle_observer_tasks().await;
+        assert!(requests.try_recv().is_err(), "the backoff is kept");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settle_observer_tasks().await;
+        requests.try_recv().expect("the observer stopped polling without a reconcile pass")
+            .1.send(Err(anyhow::anyhow!("temporary failure"))).unwrap();
+        settle_observer_tasks().await;
+        assert_eq!(*reconciler.event_notify.borrow(), 1);
+        assert_eq!(store.claims_for("observer/ref", Some("observer.state")).unwrap().len(), 1);
+        assert_eq!(reconciler.armed_observers.lock().unwrap_or_else(PoisonError::into_inner).len(), 1);
+    }
+}
+
+#[derive(Default)]
+struct FailReceiptWriteOnce(std::sync::atomic::AtomicBool);
+
+impl FaultInjection for FailReceiptWriteOnce {
+    fn fault(&self, scope: &str, subject: &str) -> Option<String> {
+        (scope == "observer-receipt-write" && subject == "observer/ref"
+            && !self.0.swap(true, Ordering::SeqCst))
+            .then(|| "injected observer.state write failure".into())
+    }
+}
+
+/// A receipt that fails to write records nothing and wakes nothing; the arm keeps its
+/// backoff and the next poll writes the receipt.
+#[tokio::test(start_paused = true)]
+async fn a_failed_observer_receipt_write_is_retried_by_the_next_poll() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, BACKOFF_REF_OBSERVER, "ref");
+    let (send, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let reconciler = Reconciler::new(
+        store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+    ).with_resource_provider(Arc::new(CompletionProvider { requests: send }))
+        .with_fault_injection(Arc::new(FailReceiptWriteOnce::default()));
+    reconciler.reconcile_resource_observers(&store.desired_subjects().unwrap(), &[]).unwrap();
+    settle_observer_tasks().await;
+    requests.try_recv().unwrap().1.send(Err(anyhow::anyhow!("temporary failure"))).unwrap();
+    settle_observer_tasks().await;
+    assert!(store.claims_for("observer/ref", Some("observer.state")).unwrap().is_empty());
+    assert_eq!(*reconciler.event_notify.borrow(), 0);
+    assert_eq!(reconciler.armed_observers.lock().unwrap_or_else(PoisonError::into_inner).len(), 1,
+        "a failed receipt write must not drop the arm");
+    tokio::time::advance(Duration::from_secs(61)).await;
+    settle_observer_tasks().await;
+    requests.try_recv().expect("the failed receipt was not retried")
+        .1.send(Err(anyhow::anyhow!("temporary failure"))).unwrap();
+    settle_observer_tasks().await;
+    let states = store.claims_for("observer/ref", Some("observer.state")).unwrap();
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].body["fields"]["state"], "unreachable");
+    assert_eq!(*reconciler.event_notify.borrow(), 1, "the written receipt wakes");
+}
+
+/// A declaration replaced while its provider call is in flight neither publishes the stale
+/// result nor keeps the old arm; the new revision's pass arms and publishes its own poll.
+#[tokio::test(start_paused = true)]
+async fn a_declaration_change_during_a_provider_call_drops_the_stale_result() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, BACKOFF_REF_OBSERVER, "ref");
+    let (send, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let reconciler = Reconciler::new(
+        store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+    ).with_resource_provider(Arc::new(CompletionProvider { requests: send }));
+    let observation = |head: &str| Ok(crate::resource::ProviderObservation {
+        facts: serde_json::json!({"head": head}),
+        cursor: Some(head.into()),
+        next_check_unix_ms: now_ms() + 300_000,
+    });
+    reconciler.reconcile_resource_observers(&store.desired_subjects().unwrap(), &[]).unwrap();
+    settle_observer_tasks().await;
+    let (_, stale) = requests.try_recv().unwrap();
+    let old = store.selected_desired_revision("observer/ref").unwrap().unwrap();
+    apply_source(&store, &BACKOFF_REF_OBSERVER.replace("field \"head\"", "field \"head\"; every \"1h\""), "slower");
+    assert_ne!(store.selected_desired_revision("observer/ref").unwrap().unwrap(), old);
+    stale.send(observation("stale")).unwrap();
+    settle_observer_tasks().await;
+    assert!(store.latest_actual_value("resource/ref").unwrap().is_none());
+    assert!(store.claims_for("observer/ref", Some("observer.state")).unwrap().is_empty());
+    assert!(reconciler.armed_observers.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+    assert_eq!(*reconciler.event_notify.borrow(), 0, "the declaration change has its own wake");
+    reconciler.reconcile_resource_observers(&store.desired_subjects().unwrap(), &[]).unwrap();
+    settle_observer_tasks().await;
+    let (request, fresh) = requests.try_recv().expect("the new revision arms its own poll");
+    assert_eq!(request.every_ms, Some(3_600_000));
+    fresh.send(observation("fresh")).unwrap();
+    settle_observer_tasks().await;
+    assert_eq!(store.latest_actual_value("resource/ref").unwrap().unwrap()["facts"]["head"], "fresh");
+    assert!(requests.try_recv().is_err());
+}
