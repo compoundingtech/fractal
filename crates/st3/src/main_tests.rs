@@ -1,35 +1,61 @@
 use super::*;
 
 #[test]
-fn cli_identity_defaults_prefer_fractal_and_keep_explicit_flags() {
-    for (old, new, expected) in [
-        (Some("agent/old"), None, Some("agent/old")),
-        (None, Some("agent/new"), Some("agent/new")),
-        (Some("agent/same"), Some("agent/same"), Some("agent/same")),
-        (Some("agent/old"), Some("agent/new"), None),
-        (Some("agent/old"), Some(""), None),
-    ] {
-        let get = |name: &str| match name {
-            "ST_AGENT" => old.map(str::to_owned),
-            "FRACTAL_AGENT" => new.map(str::to_owned),
+fn cli_environment_aliases_are_normalized_before_parsing() {
+    const CHILD: &str = "ST_TEST_CLI_ENV_CHILD";
+    if let Ok(case) = std::env::var(CHILD) {
+        // SAFETY: this isolated child has no other running tests or runtime threads.
+        unsafe { normalize_cli_environment() };
+        let expected = match case.as_str() {
+            "old" => Some("agent/old"),
+            "new" => Some("agent/new"),
+            "equal" => Some("agent/same"),
             _ => None,
         };
-        let default = st_drivers::contracts::env_with("ST_AGENT", &get);
-        assert_eq!(default.as_deref(), expected);
-        // Use the real argument schema, injecting values without mutating process env.
-        let command = WorkStartArgs::augment_args(clap::Command::new("start"))
-            .mut_arg("actor", |arg| arg.default_value(default));
-        let matches = command.clone().try_get_matches_from(["start", "task"]);
-        let parsed = matches.and_then(|matches| WorkStartArgs::from_arg_matches(&matches));
+        assert_eq!(agent_environment_present(), case != "instance");
+        let command = WorkStartArgs::augment_args(clap::Command::new("start"));
+        let parsed = command.clone().try_get_matches_from(["start", "task"])
+            .and_then(|matches| WorkStartArgs::from_arg_matches(&matches));
         assert_eq!(parsed.ok().map(|args| args.actor).as_deref(), expected);
         let matches = command.try_get_matches_from([
             "start", "task", "--as", "person/explicit",
         ]).unwrap();
-        assert_eq!(WorkStartArgs::from_arg_matches(&matches).unwrap().actor, "person/explicit");
-        assert_eq!(
-            agent_environment_present_with(|name| get(name).is_some()),
-            old.is_some() || new.is_some(),
-        );
+        let explicit = WorkStartArgs::from_arg_matches(&matches).unwrap();
+        assert_eq!(explicit.actor, "person/explicit");
+        if case == "instance" {
+            let arguments = vec![std::ffi::OsString::from("st")];
+            assert_eq!(st3::instance::requested(&arguments).as_deref(), Some("alias-test"));
+            let parsed = Cli::try_parse_from(["st", "--instance", "flag-test", "version"]).unwrap();
+            assert_eq!(parsed.instance.as_deref(), Some("flag-test"));
+        }
+        return;
+    }
+    for (case, old, new) in [
+        ("old", Some("agent/old"), None),
+        ("new", None, Some("agent/new")),
+        ("equal", Some("agent/same"), Some("agent/same")),
+        ("conflict", Some("agent/old"), Some("agent/new")),
+        ("empty", Some("agent/old"), Some("")),
+        ("instance", None, None),
+    ] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "tests::cli_environment_aliases_are_normalized_before_parsing", "--nocapture"])
+            .env(CHILD, case);
+        for &name in CLI_ENVIRONMENT_NAMES {
+            command.env_remove(name)
+                .env_remove(st_drivers::contracts::fractal_env_name(name).unwrap());
+            if let Some(legacy) = st_drivers::contracts::legacy_env_name(name) {
+                command.env_remove(legacy);
+            }
+        }
+        if let Some(value) = old { command.env("ST_AGENT", value); }
+        if let Some(value) = new { command.env("FRACTAL_AGENT", value); }
+        if case == "instance" { command.env("FRACTAL_INSTANCE", "alias-test"); }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{case}: {stderr}\n{}", String::from_utf8_lossy(&output.stdout));
+        assert_eq!(stderr.contains("conflicting environment variables"), case == "conflict", "{case}: {stderr}");
+        assert!(!stderr.contains("agent/old") && !stderr.contains("agent/new"), "{case}: {stderr}");
     }
 }
 

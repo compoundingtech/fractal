@@ -115,7 +115,7 @@ struct Cli {
     /// Run a second, fully separate st on this machine: its own state, config, sockets, node
     /// name, service names and harness accounts, all under ~/.st-instance/NAME. Same as the
     /// ST_INSTANCE environment variable.
-    #[arg(long, global = true, default_value = cli_env("ST_INSTANCE"), value_name = "NAME")]
+    #[arg(long, global = true, env = "ST_INSTANCE", value_name = "NAME")]
     instance: Option<String>,
     #[arg(long, global = true, hide = true)]
     catalog: Option<PathBuf>,
@@ -126,8 +126,9 @@ struct Cli {
     #[arg(
         long,
         global = true,
-        default_value = cli_env("ST3_DAEMON_WAIT").unwrap_or_else(|| DEFAULT_DAEMON_WAIT_SECS.to_string()),
-        value_name = "SECONDS"
+        env = "ST3_DAEMON_WAIT",
+        value_name = "SECONDS",
+        default_value_t = DEFAULT_DAEMON_WAIT_SECS
     )]
     daemon_wait: u64,
     #[command(subcommand)]
@@ -139,16 +140,42 @@ struct Cli {
 const DEFAULT_DAEMON_WAIT_SECS: u64 = 30;
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
-fn cli_env(name: &str) -> Option<String> {
-    st_drivers::contracts::env(name)
+const CLI_ENVIRONMENT_NAMES: &[&str] = &[
+    "ST_INSTANCE",
+    "ST3_DAEMON_WAIT",
+    "ST3_TERMINAL_CAPABILITY",
+    "ST_AGENT",
+    "ST3_INCARNATION",
+];
+
+static AGENT_ENVIRONMENT_PRESENT: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    std::env::var_os("FRACTAL_AGENT").is_some() || std::env::var_os("ST_AGENT").is_some()
+});
+
+/// Normalize aliases before clap or instance selection reads the environment.
+///
+/// # Safety
+/// No other thread may exist while this changes the process environment.
+unsafe fn normalize_cli_environment() {
+    std::sync::LazyLock::force(&AGENT_ENVIRONMENT_PRESENT);
+    for &name in CLI_ENVIRONMENT_NAMES {
+        let new_name = st_drivers::contracts::fractal_env_name(name).unwrap();
+        let value = st_drivers::contracts::env(name);
+        // SAFETY: the caller guarantees single-threaded startup.
+        unsafe {
+            if let Some(value) = value {
+                std::env::set_var(name, &value);
+                std::env::set_var(new_name, value);
+            } else {
+                std::env::remove_var(name);
+                std::env::remove_var(new_name);
+            }
+        }
+    }
 }
 
 fn agent_environment_present() -> bool {
-    agent_environment_present_with(|name| std::env::var_os(name).is_some())
-}
-
-fn agent_environment_present_with(present: impl Fn(&str) -> bool) -> bool {
-    present("FRACTAL_AGENT") || present("ST_AGENT")
+    *AGENT_ENVIRONMENT_PRESENT
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 
@@ -1517,7 +1544,7 @@ struct PtyStreamArgs {
     #[arg(long = "as", value_parser = parse_actor_subject)]
     person: Option<String>,
     /// The stream capability from `terminals attach-info`; can be set through the environment.
-    #[arg(long, default_value = cli_env("ST3_TERMINAL_CAPABILITY"), allow_hyphen_values = true)]
+    #[arg(long, env = "ST3_TERMINAL_CAPABILITY", allow_hyphen_values = true)]
     capability: String,
     #[arg(long)]
     incarnation: Option<String>,
@@ -2636,7 +2663,7 @@ struct ApplyArgs {
     confirm_retire: Option<String>,
     /// Complete person or agent subject authoring the publication.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", default_value = cli_env("ST_AGENT"), value_parser = parse_publication_actor)]
+    #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
     actor: String,
 }
 
@@ -2935,7 +2962,7 @@ struct AgentStopArgs {
 struct AgentRolloutArgs {
     #[arg(value_parser = parse_agent_start_identity)]
     subject: String,
-    #[arg(long = "as", default_value = cli_env("ST_AGENT"), value_parser = parse_publication_actor)]
+    #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
     actor: String,
     #[arg(long, default_value = "30m")]
     deadline: String,
@@ -3042,7 +3069,7 @@ struct GhCommentArgs {
     /// Post without watching the thread.
     #[arg(long)]
     no_watch: bool,
-    #[arg(long = "as", default_value = cli_env("ST_AGENT"))]
+    #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
 }
 
@@ -3050,7 +3077,7 @@ struct GhCommentArgs {
 struct GhOwnArgs {
     /// The comment's or review's URL: …#issuecomment-ID or …#pullrequestreview-ID.
     url: String,
-    #[arg(long = "as", default_value = cli_env("ST_AGENT"))]
+    #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
 }
 
@@ -3061,7 +3088,7 @@ struct GhWatchArgs {
     /// End after 14 days by default; use a duration such as 4h, an RFC 3339 time, or none for no deadline.
     #[arg(long)]
     until: Option<String>,
-    #[arg(long = "as", default_value = cli_env("ST_AGENT"))]
+    #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
 }
 
@@ -3072,7 +3099,7 @@ struct GhUnwatchArgs {
     /// The seat whose watch a person ends; a seat ends its own.
     #[arg(long)]
     agent: Option<String>,
-    #[arg(long = "as", default_value = cli_env("ST_AGENT"))]
+    #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
 }
 
@@ -3081,7 +3108,7 @@ struct GhLsArgs {
     /// Every seat's watches, not only this seat's.
     #[arg(long)]
     all: bool,
-    #[arg(long = "as", default_value = cli_env("ST_AGENT"))]
+    #[arg(long = "as", env = "ST_AGENT")]
     actor: Option<String>,
 }
 
@@ -3115,7 +3142,7 @@ struct HarnessDiagnosticArgs {
     severity: String,
     #[arg(long, default_value = "active")]
     status: String,
-    #[arg(long, default_value = cli_env("ST3_INCARNATION"))]
+    #[arg(long, env = "ST3_INCARNATION")]
     incarnation: Option<String>,
 }
 
@@ -3401,7 +3428,7 @@ enum WorkCommand {
 struct WorkStartArgs {
     /// What this spontaneous task is for.
     title: String,
-    #[arg(long = "as", default_value = cli_env("ST_AGENT"))]
+    #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
     /// Reuse a key after a timeout to recover the same run.
     #[arg(long)]
@@ -3411,9 +3438,9 @@ struct WorkStartArgs {
 #[derive(Args)]
 struct WorkHandoffArgs {
     subject: String,
-    #[arg(long = "as", default_value = cli_env("ST_AGENT"))]
+    #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
-    #[arg(long, default_value = cli_env("ST3_INCARNATION"))]
+    #[arg(long, env = "ST3_INCARNATION")]
     incarnation: Option<String>,
     #[arg(long)]
     to: String,
@@ -3428,7 +3455,7 @@ struct WorkHandoffArgs {
 #[derive(Args)]
 struct WorkAcknowledgeArgs {
     subject: String,
-    #[arg(long = "as", default_value = cli_env("ST_AGENT"))]
+    #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
     /// The message ID from the handoff note or work show.
     #[arg(long)]
@@ -3459,9 +3486,9 @@ struct WorkAskArgs {
     #[arg(long, conflicts_with = "step")]
     new_run: Option<String>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", default_value = cli_env("ST_AGENT"))]
+    #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
-    #[arg(long, default_value = cli_env("ST3_INCARNATION"))]
+    #[arg(long, env = "ST3_INCARNATION")]
     incarnation: Option<String>,
     #[arg(long)]
     idempotency_key: String,
@@ -3482,7 +3509,7 @@ struct WorkUpdateArgs {
     #[arg(long)]
     body: String,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", default_value = cli_env("ST_AGENT"))]
+    #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
     #[arg(long)]
     idempotency_key: String,
@@ -3576,7 +3603,7 @@ struct WorkExtendArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as")]
     actor: Option<String>,
-    #[arg(long, default_value = cli_env("ST3_INCARNATION"))]
+    #[arg(long, env = "ST3_INCARNATION")]
     incarnation: Option<String>,
     /// Time to add to this attempt's budget, such as 30m or 2h; at most 7d.
     #[arg(long)]
@@ -3593,7 +3620,7 @@ struct WorkWaitArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as")]
     actor: Option<String>,
-    #[arg(long, default_value = cli_env("ST3_INCARNATION"))]
+    #[arg(long, env = "ST3_INCARNATION")]
     incarnation: Option<String>,
     /// The longest the clock stays stopped, such as 30m or 4h; at most 12h.
     #[arg(long = "for")]
@@ -3610,7 +3637,7 @@ struct WorkActionArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as")]
     actor: Option<String>,
-    #[arg(long, default_value = cli_env("ST3_INCARNATION"))]
+    #[arg(long, env = "ST3_INCARNATION")]
     incarnation: Option<String>,
     #[arg(long)]
     summary: Option<String>,
@@ -3643,7 +3670,7 @@ struct WorkPublishMissionArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as")]
     actor: Option<String>,
-    #[arg(long, default_value = cli_env("ST3_INCARNATION"))]
+    #[arg(long, env = "ST3_INCARNATION")]
     incarnation: Option<String>,
 }
 
@@ -4011,7 +4038,7 @@ struct FeedbackReviewArgs {
 struct DriverArgs {
     #[arg(value_parser = ["claude", "claude-mcp", "codex", "pi", "pi-channel", "omp", "omp-channel", "opencode", "exec"])]
     driver: String,
-    #[arg(long, default_value = cli_env("ST_AGENT"))]
+    #[arg(long, env = "ST_AGENT")]
     subject: Option<String>,
     #[arg(long)]
     identity: Option<String>,
@@ -4220,6 +4247,8 @@ fn cli_main() -> ExitCode {
     if let Some(program) = st3::recorder::invoked_program() {
         st3::recorder::run(program);
     }
+    // SAFETY: no other thread exists yet; the async runtime starts later.
+    unsafe { normalize_cli_environment() };
     let arguments = std::env::args_os().collect::<Vec<_>>();
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
