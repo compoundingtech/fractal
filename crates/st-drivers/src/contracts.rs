@@ -53,6 +53,9 @@ fn env_with_warning(
     let Some(new) = get(&new_name) else {
         return old.filter(|value| !value.is_empty());
     };
+    if new.is_empty() {
+        return None;
+    }
     if old.as_ref().is_some_and(|old| old != &new) {
         let identity = identity_env(name);
         warn(format!(
@@ -63,7 +66,7 @@ fn env_with_warning(
             return None;
         }
     }
-    Some(new).filter(|value| !value.is_empty())
+    Some(new)
 }
 
 pub fn env(name: &str) -> Option<String> {
@@ -76,7 +79,7 @@ pub fn identity_conflict_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
         .into_iter().any(|name| {
             let old = get(name).or_else(|| legacy_env_name(name).and_then(|old| get(&old)));
             let new = fractal_env_name(name).and_then(|new| get(&new));
-            if old.zip(new).is_some_and(|(old, new)| old != new) {
+            if old.zip(new).is_some_and(|(old, new)| !new.is_empty() && old != new) {
                 let _ = env_with(name, get); // Keep the shared warning, which never prints values.
                 true
             } else {
@@ -156,6 +159,7 @@ mod tests {
         vars.insert("FRACTAL_SUBJECT".into(), "agent/other".into());
         assert!(conflict(&vars));
         vars.remove("FRACTAL_SUBJECT");
+        vars.insert("ST_AGENT".into(), "agent/seat".into());
         vars.insert("FRACTAL_AGENT".into(), String::new());
         assert!(!conflict(&vars));
         assert_eq!(env_with("ST_AGENT", &|name| vars.get(name).cloned()), None);
@@ -194,7 +198,7 @@ mod tests {
                 (Some("seat"), Some("seat"), Some("seat"), false),
                 (Some("old-secret"), Some("new-secret"),
                     if identity_env(name) { None } else { Some("new-secret") }, true),
-                (Some("seat"), Some(""), None, true),
+                (Some("seat"), Some(""), None, false),
                 (Some(""), None, None, false),
             ] {
                 let vars: BTreeMap<_, _> = [(name, old_value), (new.as_str(), new_value)]
