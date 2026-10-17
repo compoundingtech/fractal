@@ -143,7 +143,8 @@ fn timeline_item(item: &Value, snippet_bytes: usize) -> Value {
             result["text_truncated"] = json!(text.len() > snippet_bytes);
         }
         let content = item["body"]["blocks"].as_array().into_iter().flatten()
-            .filter(|block| block["kind"] == "raw_text" && block["source_type"] == "content")
+            .filter(|block| matches!(block["kind"].as_str(), Some("text" | "raw_text"))
+                && block["source_type"] == "content" && block["payload"]["body_ref"] == true)
             .filter_map(|block| {
                 let reference = block["continuation"]["ref"].as_str()?;
                 if reference.len() > REFERENCE_BYTES { return None; }
