@@ -19,7 +19,7 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 
-use st3::tiles::registry::{self, Registry};
+use st3::tile_registry::{self as registry, Registry};
 
 fn enabled() -> bool {
     if std::env::var_os("ST_TILES_ROOT_TEST").as_deref() != Some("1".as_ref()) {
@@ -1179,6 +1179,7 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
                 configured_peers: vec![],
                 client_relay: None,
                 native_session_home: None,
+                owning_person: None,
                 planner_default: st3::model::PlannerSpec::default(),
             },
             host.registry.clone(),
