@@ -8055,7 +8055,8 @@ async fn run_collection_watch(
             }
             Err(error) => return Err(error.into()),
         };
-        stream.subscribe("list", collection, limit, actor, status, None)
+        stream
+            .subscribe("list", collection, limit, actor, status)
             .await?;
         loop {
             let frame = match stream.next().await {

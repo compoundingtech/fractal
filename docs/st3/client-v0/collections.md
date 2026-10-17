@@ -36,7 +36,7 @@ of fleet ordering or the requested limit (which must still be 1–200). An absen
 historical agent starts empty; creation/current-state entry inserts it, and retirement
 or leaving current state removes it. `status` intersects the exact selector after
 live status overlays. Omitting `agent` retains the bounded fleet window. Other
-collections reject `agent`, and malformed IDs are refused. The selector does not
+collections reject `agent`, and malformed IDs or IDs longer than 256 bytes are refused. The selector does not
 grant authority: every read rechecks the same `read.projections` scope and pairing
 grant as a fleet subscription.
 
@@ -48,9 +48,14 @@ answers an exact window nor is narrowed or evicted by one.
 
 The existing HTTP `GET /v1/client/agents/{id}` detail read folds only that agent's card; it does
 not require a fleet list read first.
-An exact selector requires a daemon implementing this contract. Older daemons may
-ignore unknown fields and return a fleet window; do not rely on `agent` until the
-serving daemon has been upgraded.
+A daemon that serves exact selectors advertises capability
+`collection.agents.exact-selector` version 1 in `GET /v1/client/capabilities`. An older
+daemon ignores unknown fields and would answer with the fleet window, so a client sends
+`agent` only after the connected daemon granted that capability. The generated clients
+enforce this: Rust `Client::subscribe_agent`, TypeScript `CollectionStream.subscribeAgent`
+and Swift `agentsStream(agent:)` read the capabilities first and fail with an explicit
+error, sending nothing, when it is missing. TypeScript `subscribe` and Rust
+`CollectionStream::subscribe` never send `agent`.
 
 An arrangement window explicitly selects its owner:
 

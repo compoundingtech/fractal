@@ -160,7 +160,12 @@ public actor St3Client {
             }
         }
     }
-    /// Hold a fleet window, or the zero-or-one current card selected by its full agent ID.
+    /// Advertised in capabilities when an agents subscription may select one exact agent; an older
+    /// daemon ignores the selector and answers with the fleet.
+    public static let exactAgentSelectorCapability = "collection.agents.exact-selector"
+    /// Hold a fleet window, or the zero-or-one current card selected by its full agent ID. With an
+    /// `agent`, the stream first reads capabilities and fails, sending nothing, unless the daemon
+    /// grants `exactAgentSelectorCapability`.
     public func agentsStream(subscriptionID: String = "agents", limit: Int = 100, status: String? = nil, agent: String? = nil) -> AsyncThrowingStream<AgentCollectionFrame, Error> {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
@@ -171,6 +176,12 @@ public actor St3Client {
             task.resume()
             Task {
                 do {
+                    if agent != nil {
+                        let advertised = try await self.capabilities().value.capabilities
+                        guard advertised.contains(where: { $0.id == Self.exactAgentSelectorCapability && $0.version >= 1 && $0.state == "granted" }) else {
+                            throw NSError(domain: "St3Client", code: 0, userInfo: [NSLocalizedDescriptionKey: "This daemon does not advertise \(Self.exactAgentSelectorCapability); upgrade it before following one exact agent"])
+                        }
+                    }
                     var subscription: [String: Any] = ["kind":"subscribe", "id":subscriptionID, "collection":"agents", "limit":limit]
                     if let status { subscription["status"] = status }
                     if let agent { subscription["agent"] = agent }

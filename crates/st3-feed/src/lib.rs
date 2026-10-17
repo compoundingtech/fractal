@@ -550,7 +550,8 @@ async fn connected(
         .chain(granted.then_some(Window::Glasses))
         .chain(summary.then_some(Window::Summary))
     {
-        if let Err(error) = stream.subscribe(window.id(), window.id(), window.limit(), None, None, None)
+        if let Err(error) = stream
+            .subscribe(window.id(), window.id(), window.limit(), None, None)
             .await
         {
             return Ended::Dropped(error.to_string());
@@ -757,7 +758,7 @@ async fn connected(
                     }
                     *missions = follow;
                     if follow {
-                        if let Err(error) = stream.subscribe(Window::Missions.id(), Window::Missions.id(), Window::Missions.limit(), None, None, None).await {
+                        if let Err(error) = stream.subscribe(Window::Missions.id(), Window::Missions.id(), Window::Missions.limit(), None, None).await {
                             return Ended::Dropped(error.to_string());
                         }
                     } else {
@@ -859,7 +860,7 @@ async fn connected(
                             None => continue,
                         }
                     } else {
-                        stream.subscribe(window.id(), window.id(), window.limit(), None, None, None).await
+                        stream.subscribe(window.id(), window.id(), window.limit(), None, None).await
                     };
                     if let Err(error) = result {
                         return Ended::Dropped(error.to_string());

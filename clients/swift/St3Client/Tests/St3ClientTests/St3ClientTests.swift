@@ -286,6 +286,31 @@ final class St3ClientTests: XCTestCase {
         XCTAssertNil(resync.items)
     }
 
+    @MainActor
+    func testExactAgentStreamRefusesADaemonWithoutTheCapability() async throws {
+        let url = URL(string: "https://exact-\(UUID().uuidString.lowercased()).example/")!
+        let capture = TraceRequestCapture()
+        TraceHTTPRegistry.shared.register(capture, host: url.host!)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TraceHTTPProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            TraceHTTPRegistry.shared.remove(host: url.host!)
+        }
+        // The stub daemon's capabilities list is empty, as an older daemon's lacks the selector.
+        let client = St3Client(fabricLoopbackURL: url, session: session)
+        do {
+            for try await _ in await client.agentsStream(subscriptionID: "details", agent: "agent/example/worker") {
+                XCTFail("an older daemon must not be sent the selector")
+            }
+            XCTFail("the exact agent stream must fail")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains(St3Client.exactAgentSelectorCapability), error.localizedDescription)
+        }
+        XCTAssertTrue(capture.requests.contains { $0.url?.path == "/v1/client/capabilities" })
+    }
+
     func testRelayOmissionFixtureKeepsKnownBodiesAndOptionalValues() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }

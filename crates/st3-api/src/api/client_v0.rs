@@ -985,6 +985,12 @@ fn collection_window_label(collection: &str) -> &'static str {
     }
 }
 
+/// Advertised in `/v1/client/capabilities`: an agents subscription may select one exact agent.
+/// Clients send `agent` only to a daemon that grants it; an older one ignores the selector.
+pub const EXACT_AGENT_SELECTOR_CAPABILITY: &str = "collection.agents.exact-selector";
+/// The longest exact agent selector; it is part of the shared window key.
+const MAX_AGENT_SELECTOR_BYTES: usize = 256;
+
 fn validate_agent_selector(collection: &str, agent: Option<&str>) -> Result<(), ApiError> {
     if let Some(agent) = agent {
         if collection != "agents" {
@@ -994,6 +1000,11 @@ fn validate_agent_selector(collection: &str, agent: Option<&str>) -> Result<(), 
             || agent.chars().any(char::is_whitespace)
         {
             return Err(validation("agent must be a full agent ID"));
+        }
+        if agent.len() > MAX_AGENT_SELECTOR_BYTES {
+            return Err(validation(format!(
+                "agent must be at most {MAX_AGENT_SELECTOR_BYTES} bytes"
+            )));
         }
     }
     Ok(())
@@ -2945,6 +2956,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"slo", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"inventory-collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":EXACT_AGENT_SELECTOR_CAPABILITY, "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"custom-subjects", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"owned-sets", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"glasses", "version":2, "state":if glass_person(session, false).is_ok() && glass_person(session, true).is_ok() { "granted" } else { "ungranted" }}));
@@ -13263,6 +13275,147 @@ mission "queue-parity" state="ready" {
                 slots.clone().acquire_owned().await.unwrap()).await.unwrap_err();
             assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
         }
+    }
+
+    #[tokio::test]
+    async fn exact_agent_selector_cards_equal_fleet_window_cards_at_the_same_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let source = r#"
+version 2
+mission "differential" state="ready" {
+  concurrent-runs
+  goal "Give one agent a queue preview."
+  step "work" { assigned-to "agent/example/queued" }
+}
+"#;
+        let intent = crate::graph::parse_intent(source, &state.node).unwrap();
+        let planned = state.store.mission(&intent, IntentInput {
+            kdl: source.into(),
+            source_name: None,
+        }).unwrap();
+        state.store.apply(&intent, &planned.subject_tokens, "differential-fixture").unwrap();
+        for agent in ["agent/example/idle", "agent/example/usage", "agent/example/queued",
+            "agent/example/helpers", "agent/example/stopped"]
+        {
+            agent_selector_observe(&state, agent, "runtime.observed",
+                json!({"status":"running","runtime_id":agent,"incarnation_id":"one"}));
+            agent_selector_observe(&state, agent, "harness.observed",
+                json!({"state":"idle","driver":"codex","incarnation_id":"one"}));
+        }
+        agent_selector_observe(&state, "agent/example/usage", "harness.observed",
+            json!({"state":"working","driver":"codex","incarnation_id":"one"}));
+        agent_selector_observe(&state, "agent/example/usage", "harness.usage",
+            json!({"driver":"codex","semantics":"response","incarnation_id":"one",
+                "total_tokens":30,"input_tokens":20,"output_tokens":10}));
+        agent_selector_observe(&state, "agent/example/usage", "harness.usage",
+            json!({"driver":"codex","semantics":"context_occupancy","incarnation_id":"one",
+                "context_used_tokens":1200,"context_window_tokens":200000}));
+        agent_selector_observe(&state, "agent/example/stopped", "runtime.observed",
+            json!({"status":"stopped","runtime_id":"agent/example/stopped","incarnation_id":"one"}));
+        for index in 0..2 {
+            let run = state.store.create_mission_run(&MissionRunRequest {
+                mission: "differential".into(),
+                revision: None,
+                workspace: root.path().display().to_string(),
+                requester: Some("person/alex".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: format!("differential-run-{index}"),
+            }).unwrap();
+            if index == 0 {
+                state.store.set_step_state(&run.steps[0].subject, "ready", None).unwrap();
+            } else {
+                state.store.move_seat_queue_run(&crate::model::SeatQueueMoveRequest {
+                    agent: "agent/example/queued".into(),
+                    run: run.subject.clone(),
+                    placement: "top".into(),
+                    anchor: None,
+                    reason: Some("Give the queue preview a move.".into()),
+                    actor: "person/alex".into(),
+                    idempotency_key: "differential-move".into(),
+                }).unwrap();
+            }
+        }
+        // The single-agent overlay reads open_subagents(id) with an expiry filter; the fleet
+        // reads running_subagents(now). Running, lapsed and ended subagents must agree.
+        let now = client_now_ms() as u64;
+        for (id, lease) in [("running", now + 600_000), ("lapsed", now - 1), ("finished", now + 600_000)] {
+            agent_selector_observe(&state, "agent/example/helpers", "subagent.appeared", json!({
+                "subagent_id":id, "driver":"claude", "incarnation_id":"one",
+                "subagent_type":"Explore", "description":"map the code", "session_id":"session-1",
+                "started_at_unix_ms":1_790_931_600_000_u64, "lease_expires_at_unix_ms":lease,
+            }));
+        }
+        agent_selector_observe(&state, "agent/example/helpers", "subagent.ended",
+            json!({"subagent_id":"finished", "outcome":"completed"}));
+
+        let session = ClientSession::local(None).unwrap();
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let windows = collection_windows::Windows::attach(&state.store);
+        let read = |agent: Option<&str>| {
+            let request: CollectionSubscribe = serde_json::from_value(json!({
+                "kind":"subscribe","id":"differential","collection":"agents",
+                "agent":agent,"limit":CLIENT_MAX_PAGE_ITEMS,
+            })).unwrap();
+            let (state, session, slots, windows) = (state.clone(), session.clone(), slots.clone(), windows.clone());
+            async move {
+                let (_, items, more) = collection_items_with_windows(&state, &session, &request,
+                    slots.acquire_owned().await.unwrap(), windows).await.unwrap();
+                assert!(!more);
+                items
+            }
+        };
+        let index = state.store.index().unwrap();
+        let ids = ["agent/example/helpers", "agent/example/idle", "agent/example/queued",
+            "agent/example/usage"];
+        // Exact cards folded cold, before any fleet read, then again from their own cache.
+        let mut cold = Vec::new();
+        for id in ids {
+            cold.push(read(Some(id)).await);
+        }
+        let fleet = read(None).await;
+        let mut listed = fleet.iter().map(|card| card["id"].as_str().unwrap()).collect::<Vec<_>>();
+        listed.sort_unstable();
+        assert_eq!(listed, ids, "the fleet holds every current agent and not the stopped one");
+        let card = |id: &str| fleet.iter().find(|card| card["id"] == id).unwrap();
+        assert_eq!(card("agent/example/helpers")["subagents"].as_array().unwrap().len(), 1);
+        assert_eq!(card("agent/example/helpers")["subagents"][0]["id"], "running");
+        assert!(card("agent/example/queued")["next_work_id"].is_string());
+        assert!(card("agent/example/usage")["usage"].is_object(), "{}", card("agent/example/usage"));
+        assert_eq!(card("agent/example/usage")["harness_state"], "working");
+        for (id, cold) in ids.into_iter().zip(cold) {
+            assert_eq!(cold, [card(id).clone()], "cold exact card for {id}");
+            assert_eq!(read(Some(id)).await, [card(id).clone()], "warm exact card for {id}");
+        }
+        assert!(read(Some("agent/example/stopped")).await.is_empty());
+        assert_eq!(state.store.index().unwrap(), index, "every read saw the same snapshot");
+    }
+
+    #[tokio::test]
+    async fn exact_agent_selector_is_advertised_and_its_length_is_bounded() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let session = ClientSession::local(None).unwrap();
+        let advertised = capabilities(&state, &session).into_iter()
+            .filter(|capability| capability["id"] == EXACT_AGENT_SELECTOR_CAPABILITY)
+            .collect::<Vec<_>>();
+        assert_eq!(advertised, [json!({"id":EXACT_AGENT_SELECTOR_CAPABILITY, "version":1, "state":"granted"})]);
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let mut request: CollectionSubscribe = serde_json::from_value(json!({
+            "kind":"subscribe","id":"details","collection":"agents","limit":1,
+        })).unwrap();
+        let longest = format!("agent/{}", "a".repeat(MAX_AGENT_SELECTOR_BYTES - "agent/".len()));
+        request.agent = Some(longest.clone());
+        let (_, absent, more) = collection_items(&state, &session, &request,
+            slots.clone().acquire_owned().await.unwrap()).await.unwrap();
+        assert!(absent.is_empty());
+        assert!(!more);
+        request.agent = Some(format!("{longest}a"));
+        let error = collection_items(&state, &session, &request,
+            slots.clone().acquire_owned().await.unwrap()).await.unwrap_err();
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(error.message.contains("at most 256 bytes"), "{}", error.message);
     }
 
     #[tokio::test]

@@ -649,7 +649,9 @@ async fn a_terminal_rides_the_collection_socket_and_its_end_leaves_the_rest() {
         serve_terminal_state("client-collection-terminal", 24, 80).await;
     let attachment = attach_terminal(&client, "collection-terminal").await;
     let mut stream = client.collection_stream().await.unwrap();
-    stream.subscribe("agents", "agents", 20, None, None, Some("agent/terminal-demo"))
+    // The real daemon grants the exact selector, so the client sends it.
+    client
+        .subscribe_agent(&mut stream, "agents", "agent/terminal-demo", None)
         .await
         .unwrap();
     match next_collection_event(&mut stream, "the exact agent snapshot").await {
@@ -1662,7 +1664,8 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
             .is_err()
     );
     let mut collections = client.collection_stream().await.unwrap();
-    collections.subscribe("missions", "missions", 20, None, None, None)
+    collections
+        .subscribe("missions", "missions", 20, None, None)
         .await
         .unwrap();
     assert!(matches!(
