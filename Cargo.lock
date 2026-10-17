@@ -3349,7 +3349,7 @@ dependencies = [
 [[package]]
 name = "pty-client"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=1ae8c187301034d2b343b6ec638f2b74c009f92e#1ae8c187301034d2b343b6ec638f2b74c009f92e"
+source = "git+https://github.com/compoundingtech/pty?rev=f8388fe7a8617d973e720e29107e68ac5ea95987#f8388fe7a8617d973e720e29107e68ac5ea95987"
 dependencies = [
  "libc",
  "pty-core",
@@ -3360,7 +3360,7 @@ dependencies = [
 [[package]]
 name = "pty-core"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=1ae8c187301034d2b343b6ec638f2b74c009f92e#1ae8c187301034d2b343b6ec638f2b74c009f92e"
+source = "git+https://github.com/compoundingtech/pty?rev=f8388fe7a8617d973e720e29107e68ac5ea95987#f8388fe7a8617d973e720e29107e68ac5ea95987"
 dependencies = [
  "indexmap",
  "libc",
@@ -3368,13 +3368,14 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=1ae8c187301034d2b343b6ec638f2b74c009f92e#1ae8c187301034d2b343b6ec638f2b74c009f92e"
+source = "git+https://github.com/compoundingtech/pty?rev=f8388fe7a8617d973e720e29107e68ac5ea95987#f8388fe7a8617d973e720e29107e68ac5ea95987"
 dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",
@@ -4642,6 +4643,7 @@ dependencies = [
  "st3",
  "st3-client",
  "st3-conversation-ui",
+ "st3-daemon",
  "st3-schema",
  "st3-terminal-direct",
  "st3-ui-model",
@@ -4685,7 +4687,7 @@ dependencies = [
  "sha2",
  "signal-hook 0.3.18",
  "smallclaims",
- "st3",
+ "st3-daemon",
  "st3-schema",
  "tempfile",
  "thiserror 2.0.20",
@@ -4734,18 +4736,117 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-daemon"
+version = "0.1.0"
+dependencies = [
+ "agent-spec",
+ "alacritty_terminal",
+ "anyhow",
+ "assert_cmd",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "chrono-tz",
+ "ciborium",
+ "clap",
+ "clap_complete",
+ "data-encoding",
+ "flate2",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "image",
+ "jsonschema",
+ "kdl",
+ "libc",
+ "libghostty-vt",
+ "libghostty-vt-sys",
+ "notify",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "portable-pty",
+ "predicates",
+ "proptest",
+ "pty-client",
+ "pty-core",
+ "pty-terminal",
+ "reqwest",
+ "resvg",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-drivers",
+ "st-runtime",
+ "st3-client",
+ "st3-daemon",
+ "st3-kernel",
+ "st3-schema",
+ "st3-terminal-direct",
+ "st3-ui-model",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "toml 0.9.12+spec-1.1.0",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
 name = "st3-feed"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
  "serde_json",
- "st3",
  "st3-client",
  "st3-conversation-ui",
+ "st3-daemon",
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "st3-kernel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "hex",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-drivers",
+ "st-runtime",
+ "st3-schema",
+ "st3-terminal-direct",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]
@@ -4761,7 +4862,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "st-drivers",
- "st3",
+ "st3-daemon",
  "tempfile",
  "walkdir",
 ]
@@ -4789,6 +4890,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallclaims",
+ "tempfile",
  "tokio",
 ]
 
@@ -4875,9 +4977,9 @@ dependencies = [
  "sha2",
  "signal-hook 0.3.18",
  "smallclaims",
- "st3",
  "st3-client",
  "st3-conversation-ui",
+ "st3-daemon",
  "st3-feed",
  "st3-schema",
  "st3-terminal-direct",
