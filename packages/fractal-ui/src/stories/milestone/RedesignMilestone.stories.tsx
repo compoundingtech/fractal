@@ -105,7 +105,9 @@ export const HideChanges: Story = {
     const canvas = within(canvasElement)
     const page = within(canvasElement.ownerDocument.body)
     const narrow = canvasElement.querySelector('[data-narrow]') !== null
-    const changesTab = () => canvas.queryByRole('tab', { name: 'Changes' })
+    // Scoped to the pane strip: the DiffPanel carries its own "Changes" view tab.
+    const changesTab = () => { const strip = canvas.queryByRole('tablist', { name: 'Open conversations' }); return strip === null ? null : within(strip).queryByRole('tab', { name: 'Changes' }) }
+    await expect(await canvas.findByRole('tablist', { name: 'Open conversations' })).toBeVisible()
     const docked = () => canvas.queryByRole('separator', { name: 'Resize changes' })
     await userEvent.click((await canvas.findAllByRole('button', { name: /^Worked for/ }))[0]!)
     await userEvent.click(await waitFor(() => { const row = canvasElement.querySelector<HTMLElement>('[data-tool-status] > button'); expect(row).not.toBeNull(); return row! }))
