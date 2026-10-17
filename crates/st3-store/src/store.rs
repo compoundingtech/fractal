@@ -228,11 +228,11 @@ pub mod terminal_gate_evidence;
 #[cfg(test)]
 pub mod checkpoint_tests;
 #[cfg(test)]
-mod provenance_tests;
+pub mod provenance_tests;
 #[cfg(test)]
-mod mission_model_tests;
+pub mod mission_model_tests;
 #[cfg(test)]
-mod native_resume_tests;
+pub mod native_resume_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mailbox_tests;
 #[cfg(test)]
