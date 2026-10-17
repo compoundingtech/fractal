@@ -23,7 +23,10 @@ VERSIONS = {
 }
 # Where a version constant lived before the file moved; a release range may start before the move.
 LEGACY_PATHS = {
-    'crates/st3-store/src/store/checkpoint_rules.rs': ('crates/st3/src/store/checkpoint_rules.rs',),
+    'crates/st3-store/src/store/checkpoint_rules.rs': (
+        'crates/st3-daemon/src/store/checkpoint_rules.rs',
+        'crates/st3/src/store/checkpoint_rules.rs',
+    ),
 }
 FRAGMENTS = 'release-notes/'
 SHA = re.compile(r'[0-9a-f]{40}')
