@@ -1577,7 +1577,7 @@ pub use crate::model::new_request_id;
 static CLIENT_CLOCK_SKEW_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(feature = "test-support")]
-pub(crate) fn set_client_clock_skew_ms(skew_ms: u64) {
+pub fn set_client_clock_skew_ms(skew_ms: u64) {
     CLIENT_CLOCK_SKEW_MS.store(skew_ms, std::sync::atomic::Ordering::SeqCst);
 }
 
