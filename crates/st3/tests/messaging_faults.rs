@@ -24,11 +24,13 @@ fn controller_death_cleanup() {
     );
 }
 
-/// The daemon's delivery-presence startup grace is 20 s. Every case but the two that keep the
-/// real value (`daemon_restart`, which restarts the daemon inside the observation, and the
-/// optional `link_minutes`) runs the daemon with a 1 s grace through a test-only cap, and
-/// observes for that grace plus the eval's 5 s margin. The assertions are the same; the clock is
-/// shorter.
+/// The daemon's delivery-presence startup grace is 20 s. Every case but three keeps the real
+/// value and the 25 s tail: `daemon_restart`, which restarts the daemon inside the observation;
+/// `handoff_failed`, whose tail waits for the channel's retry backoff after a refused handoff
+/// to clear (a 6 s tail failed 11 of 20 runs, "delivery report is stale: the provider rejected a
+/// native handoff"), which is not the grace; and the optional `link_minutes`. The rest run the
+/// daemon with a 1 s grace through a test-only cap and observe for that grace plus the eval's
+/// 5 s margin. The assertions are the same; the clock is shorter.
 const FAST_GRACE_SECONDS: &str = "1";
 const FAST_OBSERVE_SECONDS: &str = "6";
 
@@ -235,5 +237,5 @@ fn handoff_failed() {
     if st3::test_support::supervise_test() {
         return;
     }
-    run_case("handoff-failed");
+    run_case_at_real_grace("handoff-failed");
 }
