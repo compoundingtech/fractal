@@ -18837,7 +18837,7 @@ pub fn step_execution_timing_at(
     ))
 }
 
-fn step_execution_clock_at(
+pub fn step_execution_clock_at(
     connection: &Connection,
     subject: &str,
     attempt: u32,
@@ -18869,6 +18869,7 @@ pub fn step_timing_lease_at(
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static STEP_TIMING_FOLD_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static STEP_TIMING_ROWS_PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A step's step and work events in canonical order, as its execution timing folds them.
@@ -18895,6 +18896,8 @@ fn step_timing_events(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    #[cfg(test)]
+    STEP_TIMING_ROWS_PARSED.with(|rows| rows.set(rows.get() + events.len()));
     Ok(events
         .into_iter()
         .map(|(kind, body, accepted)| {
@@ -20068,14 +20071,27 @@ fn mission_run_view_with_enrichment_tx(
     run_id: &str,
     presentation: bool,
 ) -> rusqlite::Result<MissionRunView> {
-    mission_run_view_and_definition_tx(connection, run_id, presentation).map(|(view, _)| view)
+    let enrichment = if presentation {
+        MissionRunEnrichment::Presentation
+    } else {
+        MissionRunEnrichment::Reconcile
+    };
+    mission_run_view_and_definition_tx(connection, run_id, enrichment).map(|(view, _)| view)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MissionRunEnrichment {
+    Presentation,
+    Reconcile,
+    Evaluation,
 }
 
 fn mission_run_view_and_definition_tx(
     connection: &Connection,
     run_id: &str,
-    presentation: bool,
+    enrichment: MissionRunEnrichment,
 ) -> rusqlite::Result<(MissionRunView, Option<MissionSpec>)> {
+    let presentation = enrichment == MissionRunEnrichment::Presentation;
     let mut view = mission_run_header_tx(connection, run_id)?;
     let mut statement = connection.prepare(
         "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
@@ -20105,19 +20121,29 @@ fn mission_run_view_and_definition_tx(
             }
             adhoc_work::enrich_handoff(connection, step, snapshot_unix_ms)?;
             person_work::enrich_responses(connection, step)?;
-            let timing = step_execution_clock_at(
-                connection,
-                &step.subject,
-                step.attempt,
-                now_ms(),
-                matches!(step.status.as_str(), "claimed" | "working"),
-            )?;
-            step.execution_started_at_unix_ms = timing.started;
-            step.execution_paused_until_unix_ms = timing.paused_until;
-            step.execution_waited_ms = timing.waited;
-            step.execution_elapsed_ms = timing.elapsed;
-            step.timeout_extension_ms =
-                step_timeout_extension_at(connection, &step.subject, step.attempt, now_ms())?;
+            // Untimed inactive steps cannot time out or have a clock-driven wake. Active
+            // steps still need their wait deadline for `incremental::step_due`, even without
+            // a timeout. A missing definition is not proof that the step is untimed.
+            if enrichment != MissionRunEnrichment::Evaluation
+                || mission.is_none()
+                || step.timeout_ms.is_some()
+                || matches!(step.status.as_str(), "claimed" | "working")
+            {
+                let timing = step_execution_clock_at(
+                    connection,
+                    &step.subject,
+                    step.attempt,
+                    snapshot_unix_ms,
+                    matches!(step.status.as_str(), "claimed" | "working"),
+                )?;
+                step.execution_started_at_unix_ms = timing.started;
+                step.execution_paused_until_unix_ms = timing.paused_until;
+                step.execution_waited_ms = timing.waited;
+                step.execution_elapsed_ms = timing.elapsed;
+                step.timeout_extension_ms = step_timeout_extension_at(
+                    connection, &step.subject, step.attempt, snapshot_unix_ms,
+                )?;
+            }
         }
     }
     view.provenance = crate::provenance::read(connection, &view.mission, &view.revision)
