@@ -17,7 +17,7 @@ export type MenuProps<T> = Omit<AriaMenuProps<T>, 'className' | 'style'> & { sty
 export function Menu<T extends object>({ style, ...props }: MenuProps<T>) {
   return <AriaMenu {...props} {...stylex.props(styles.menu, style)} />
 }
-export type MenuItemProps<T> = Omit<AriaMenuItemProps<T>, 'className' | 'style'> & { leading?: React.ReactNode; shortcut?: string; style?: stylex.StyleXStyles }
+export type MenuItemProps<T> = Omit<AriaMenuItemProps<T>, 'className' | 'style'> & { leading?: React.ReactNode; shortcut?: string; style?: stylex.StyleXStyles | stylex.StyleXStyles<{ outlineColor: { ':is([data-focus-visible])': string } }> }
 /** RAC owns checkbox/radio semantics. Selectable items and items with a leading glyph reserve the 16px slot, so selection never shifts the label. */
 export function MenuItem<T extends object>({ children, leading, shortcut, style, ...props }: MenuItemProps<T>) {
   return <AriaMenuItem {...props} {...stylex.props(styles.menuItem, style)}>{state => <>

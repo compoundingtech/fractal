@@ -92,11 +92,11 @@ function contrast(ink: string, ...layers: [string, ...string[]]) {
   const [high, low] = [luminance(composite(parseColor(ink), background)), luminance(background)].sort((a, b) => b - a) as [number, number]
   return (high + 0.05) / (low + 0.05)
 }
-/** Inline labels use inherited leading; text fragments reveal wrapping without assuming a block line box. */
+/** Ellipsis can expose multiple fragments on one line; distinct vertical positions measure wrapping. */
 function labelLineCount(label: HTMLElement) {
   const range = label.ownerDocument.createRange()
   range.selectNodeContents(label)
-  return range.getClientRects().length
+  return new Set([...range.getClientRects()].map(rect => rect.top)).size
 }
 async function assertOneLine(label: HTMLElement) {
   await expect(labelLineCount(label)).toBe(1)

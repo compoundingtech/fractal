@@ -3,6 +3,8 @@ export * from './EmbraceRuntime.tsx'
 export * from './EmbraceThread.tsx'
 export * from './EmbraceScrollViewport.tsx'
 export * from './composition/Transcript.tsx'
+export { TranscriptSkeleton } from './composition/TranscriptSkeleton.tsx'
+export type { TranscriptSkeletonProps } from './composition/TranscriptSkeleton.tsx'
 export * from './composition/TranscriptFeedback.tsx'
 export * from './EmbraceComposer.tsx'
 export * from './EmbraceToolCall.tsx'
@@ -37,6 +39,7 @@ export type { MenuProps, MenuItemProps, PopoverProps, CheckboxProps, TooltipProp
 /** Controlled sidebar row; the host owns clock and data. */
 export { SidebarAgentRow, AgentHoverCard, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
 export { SidebarStatus } from './sidebar/SidebarStatus.tsx'
+export { SystemNotice, ConnectionStatus, type SystemStateKind, type ConnectionState } from './composition/SystemState.tsx'
 export type { SidebarAgentRow as SidebarAgentRowData, SidebarUsage, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
 
 export { ResourceCardV1, ResourceChipV1 } from './resources/ResourceCardV1.tsx'
