@@ -10,7 +10,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConversationItem } from '../conversation/model.ts'
-import type { ConversationPage, Feed } from '../data/source.ts'
+import type { ConversationPage, DataSource, Feed } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 import { Markdown, type WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import type * as Kit from '@smalltalk/fractal-ui/assistant-ui'
@@ -28,6 +28,7 @@ const source = vi.hoisted(() => ({
   feed: { _tag: 'Waiting' } as Feed<ConversationPage>,
   sync: undefined as FeedSyncObservation | undefined,
   now: 1000,
+  attachments: undefined as DataSource['attachments'],
   runtimeItems: [] as NonNullable<ConversationRuntimeOptions['messages']>[],
   transcriptTurns: [] as (readonly TranscriptTurn[])[],
   scrollToBottomKeys: [] as (string | undefined)[],
@@ -42,10 +43,10 @@ vi.mock('../data/react.tsx', async () => {
   return ({
   useConversation: () => source.feed,
   useConversationSync: () => source.sync,
-  useDataSource: () => ({ agents, conversationInterest: undefined, agentControls: source.agentControls }),
+  useDataSource: () => ({ agents, conversationInterest: undefined, agentControls: source.agentControls, attachments: source.attachments }),
   useFeedInterest: () => {},
   useNow: () => source.now,
-  useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', terminalInput: 'ungranted' }),
+  useGrants: () => ({ actions: 'ungranted', messageSend: source.attachments === undefined ? 'ungranted' : 'granted', terminalInput: 'ungranted' }),
   useAttention: () => ({ _tag: 'Waiting' }),
   })
 })
@@ -107,6 +108,7 @@ beforeEach(() => {
   source.scrollToBottomKeys = []
   source.composerProps = []
   source.agentControls = undefined
+  source.attachments = undefined
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   // jsdom has no layout observers; the kit instantiates one while attaching scroll.
   // Test-environment sizing (react-aria renders every row) needs no measured entries.
@@ -687,7 +689,8 @@ describe('ConversationPane composition activation', () => {
     await act(async () => { stop()!.click() })
     expect(interrupt).toHaveBeenCalledExactlyOnceWith('agent/selected')
     expect(stop()?.getAttribute('aria-label')).toBe('Stopping run')
-    expect(stop()?.disabled).toBe(true)
+    expect(stop()?.getAttribute('aria-disabled')).toBe('true')
+    expect(stop()?.disabled).toBe(false)
     await act(async () => { answer({ _tag: 'Refused', detail: 'That agent has no terminal to stop its turn through.' }) })
     expect(stop()?.getAttribute('aria-label')).toBe('Stop run')
     expect(container.querySelector('[data-testid="composer-footer"] [role="status"]')?.textContent).toBe('That agent has no terminal to stop its turn through.')
@@ -696,6 +699,43 @@ describe('ConversationPane composition activation', () => {
     await mount()
     expect(stop()).toBeNull()
     expect(container.querySelector('[data-testid="composer-footer"] [role="status"]')).toBeNull()
+  })
+
+  it.each([true, false])('keeps Stop focused and inert while pending, then returns focus inside the composer (send granted: %s)', async sendGranted => {
+    const answer = Promise.withResolvers<{ readonly _tag: 'Sent' }>()
+    const interrupt = vi.fn((_agent: string) => answer.promise)
+    source.agentControls = { control: () => Promise.reject(new Error('not used')), interrupt }
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, { _tag: 'Status', id: 'run', status: 'running', at: at(2) }], hasOlder: false, observation: { empty: false } } }
+    if (sendGranted) source.attachments = { send: vi.fn(), upload: vi.fn(), chunk: vi.fn(), capabilities: vi.fn() }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    await mount()
+    const stop = container.querySelector<HTMLButtonElement>('[data-testid="run-stop"]')!
+    const message = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!
+    const composer = container.querySelector<HTMLFormElement>('form[aria-label="Message composer"]')!
+    expect(message.disabled).toBe(!sendGranted)
+    stop.focus()
+    expect(document.activeElement).toBe(stop)
+    // Use Stop's announced keyboard shortcut, including two presses before React commits.
+    await act(async () => {
+      stop.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      stop.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    })
+    expect(interrupt).toHaveBeenCalledExactlyOnceWith('agent/selected')
+    expect(stop.getAttribute('aria-disabled')).toBe('true')
+    expect(stop.disabled).toBe(false)
+    expect(document.activeElement).toBe(stop)
+    await act(async () => {
+      stop.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      stop.click()
+      answer.resolve({ _tag: 'Sent' })
+    })
+    expect(interrupt).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(stop)
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, { _tag: 'Status', id: 'run', status: 'cancelled', at: at(3) }], hasOlder: false, observation: { empty: false } } }
+    await mount()
+    expect(container.querySelector('[data-testid="run-stop"]')).toBeNull()
+    expect(document.activeElement).toBe(sendGranted ? message : composer)
+    expect(message.disabled).toBe(!sendGranted)
   })
 
   it('keeps a stop refusal to the run it answered and drops a late answer for an older run', async () => {
