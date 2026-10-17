@@ -238,6 +238,10 @@
           "--exclude"
           "st3-daemon"
           "--exclude"
+          "st3-kernel"
+          "--exclude"
+          "st3-telemetry"
+          "--exclude"
           "st3-client"
           "--exclude"
           "st3-client-codegen"
@@ -437,6 +441,10 @@
             "-p"
             "st3-daemon"
             "-p"
+            "st3-kernel"
+            "-p"
+            "st3-telemetry"
+            "-p"
             "st3-client"
             "-p"
             "st3-client-codegen"
@@ -450,6 +458,8 @@
             "st3-schema"
             "-p"
             "stui"
+            "-p"
+            "st-chatgpt"
           ];
           # Every test gets its own process, as in the native gate. Shared-process Cargo tests
           # pollute CPU measurements and outlive the daemon delivery-presence startup grace.
@@ -567,6 +577,23 @@
           ln -s ${st3}/bin/st3 $out/bin/fractal
           # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
         '';
+
+        stChatgpt = pkgs.rustPlatform.buildRustPackage {
+          pname = "st-chatgpt";
+          inherit version cargoDeps;
+          src = self;
+          cargoBuildFlags = [ "-p" "st-chatgpt" "--bin" "st-chatgpt" ];
+          # .cargo/config.toml links Linux targets with mold.
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
+          # The shared daemon check runs the adapter's Rust tests.
+          doCheck = false;
+          meta = {
+            description = "Standalone Small Talk ChatGPT MCP adapter";
+            homepage = "https://github.com/compoundingtech/smalltalk";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "st-chatgpt";
+          };
+        };
 
         st3Help = pkgs.runCommand "st3-help-${version}" {
           nativeBuildInputs = [ pkgs.bashInteractive pkgs.fish pkgs.zsh ];
@@ -865,6 +892,7 @@
         packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
         packages.fractal = fractal;
+        packages.st-chatgpt = stChatgpt;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
         packages.st2-wasm-resolver = st2WasmResolver;

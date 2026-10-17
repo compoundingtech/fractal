@@ -142,10 +142,7 @@ pub fn standing_observer(locator: &str) -> String {
     format!("observer/github/{}", locator.to_ascii_lowercase())
 }
 
-/// `resource/github/OWNER/REPO`.
-pub fn default_resource(locator: &str) -> String {
-    format!("resource/github/{}", locator.to_ascii_lowercase())
-}
+pub use crate::resource::default_resource;
 
 /// The repository a standing observer's subject names, as `owner/repo`.
 pub fn standing_locator(subject: &str) -> Option<String> {
@@ -1244,6 +1241,8 @@ mod tests {
             body_ref: None,
             body_bytes: None,
             body_origin: None,
+            sender_class: None,
+            assistant_grant_id: None,
             created_index: 1,
         };
         assert_eq!(
@@ -1328,6 +1327,8 @@ mod tests {
             body_ref: None,
             body_bytes: None,
             body_origin: None,
+            sender_class: None,
+            assistant_grant_id: None,
             created_index: 1,
         };
         let post = PostInFlight::begin("agent/example.planner", &thread);
