@@ -526,7 +526,8 @@ Anything else is `unsupported_kind`. An unsigned record at tier `degraded` is ne
 and is reported as `degraded`, not as a signature fault, because it is what the observer writes
 when its signer is unreachable. The latest
 trusted record for the tree and check decides, so a newer failure supersedes an older
-pass. Reasons: `no_record`, `stale_tree` (records exist only for other trees),
+pass; `observed_at` is the signer's own clock, so a pass replaces a failure only when it is dated MORE than two minutes after it (the same margin as
+`future_dated`): equal, inverted or within-the-margin dates leave the failure standing, whatever order the notes were created in. Reasons: `no_record`, `stale_tree` (records exist only for other trees),
 `wrong_check`, `bad_signature` (forged or unsigned), `untrusted_signer` (a valid
 signature from a key not on the list, or a principal that differs from the record's
 signer), `untrusted_tier`, `untrusted_level`, `wrong_runner`, `too_old`, `future_dated`, `degraded`, `unsupported_kind`, `check_failed`, `wrong_command`, `wrong_input` and

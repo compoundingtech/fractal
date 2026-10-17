@@ -595,10 +595,10 @@ class EndToEnd(unittest.TestCase):
     def test_a_newer_failure_or_a_conflicting_record_never_skips(self):
         base = self.commit_base()
         commit, tree = self.head()
-        self.note(commit, tree, seconds=0)
-        self.note(commit, tree, exit_code=1, seconds=1)
+        self.note(commit, tree, seconds=-600)
+        self.note(commit, tree, exit_code=1, seconds=-300)
         self.assertEqual(self.assertRuns(base)['outcome'], 'rejected')
-        self.note(commit, tree, seconds=2)  # a later pass supersedes the failure
+        self.note(commit, tree, seconds=0)  # a clearly later pass (more than the 2 minute margin) supersedes the failure
         self.assertEqual(self.run_gate(base)[0]['decision'], 'skip')
         self.note(commit, tree, exit_code=1, seconds=2)  # same instant: failure wins
         self.assertRuns(base)
@@ -1002,11 +1002,13 @@ class EndToEnd(unittest.TestCase):
         self.wrapper_note(commit, tree, lock, seconds=3 * 3600)
         self.assertEqual(self.assertRuns(base)['reason'], 'future_dated')
         base, commit, tree, lock = self.wrapper_scenario()
-        self.wrapper_note(commit, tree, lock, seconds=0)
+        self.wrapper_note(commit, tree, lock, seconds=-600)
         self.assertEqual(self.run_gate(base)[0]['decision'], 'skip')
-        self.wrapper_note(commit, tree, lock, seconds=1, exit_code=1)
+        self.wrapper_note(commit, tree, lock, seconds=-300, exit_code=1)
         self.assertEqual(self.assertRuns(base)['reason'], 'check_failed')
-        self.wrapper_note(commit, tree, lock, seconds=2)  # a later pass supersedes
+        self.wrapper_note(commit, tree, lock, seconds=-250)  # dated within the 2 minute margin of the failure: the failure stands
+        self.assertEqual(self.assertRuns(base)['reason'], 'check_failed')
+        self.wrapper_note(commit, tree, lock, seconds=0)  # clearly later: it supersedes
         self.assertEqual(self.run_gate(base)[0]['decision'], 'skip')
 
     def test_forks_and_manual_runs_never_skip_on_a_wrapper_note(self):
