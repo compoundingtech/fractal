@@ -249,6 +249,8 @@ struct ClientListQuery {
     /// when the latest roster refresh failed and none is in flight.
     #[serde(default)]
     fresh: bool,
+    /// Agents: wait for publication of this host-local mutation store_index, not the head.
+    min_cut: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1578,30 +1580,7 @@ fn record_request_latency(
     eprintln!("st3: slow request {path} took {} ms", elapsed.as_millis());
 }
 
-pub(crate) fn new_request_id() -> String {
-    let mut bytes = [0_u8; 16];
-    if getrandom::fill(&mut bytes).is_err() {
-        let fallback = format!(
-            "{}:{}:{:?}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-            std::thread::current().id()
-        );
-        bytes.copy_from_slice(&Sha256::digest(fallback.as_bytes())[..16]);
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-        u32::from_be_bytes(bytes[0..4].try_into().expect("four bytes")),
-        u16::from_be_bytes(bytes[4..6].try_into().expect("two bytes")),
-        u16::from_be_bytes(bytes[6..8].try_into().expect("two bytes")),
-        u16::from_be_bytes(bytes[8..10].try_into().expect("two bytes")),
-        u64::from_be_bytes([
-            0, 0, bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-        ])
-    )
-}
+pub(crate) use crate::model::new_request_id;
 
 fn client_now_ms() -> u128 {
     std::time::SystemTime::now()
@@ -1771,6 +1750,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "projection-detail-invalid-source"
         | "cursor-gap"
         | "page-cursor-expired"
+        | "agent-roster-cut-not-ready"
         | "rate-limited"
         | "runtime-not-local"
         | "runtime-authority-indeterminate"
@@ -5064,6 +5044,28 @@ fn agent_roster_not_ready() -> ApiError {
     }
 }
 
+/// A successful wait cannot certify a later page after a publication reset or replacement.
+fn checked_agent_roster_page(
+    page: Option<ClientPageResponse>,
+    min_cut: Option<u64>,
+) -> Result<Option<ClientPageResponse>, ApiError> {
+    if let Some(wanted) = min_cut
+        && page.as_ref().is_none_or(|page| page.0.0.store_index < wanted)
+    {
+        return Err(agent_roster_cut_not_ready(wanted));
+    }
+    Ok(page)
+}
+
+fn agent_roster_cut_not_ready(wanted: u64) -> ApiError {
+    ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "agent-roster-cut-not-ready".into(),
+        message: format!("the agents roster has not published cut {wanted}; retry shortly"),
+        details: Box::new(serde_json::Map::from_iter([("min_cut".into(), json!(wanted))])),
+    }
+}
+
 /// How many agents one short snapshot reduces while the refresher warms the roster.
 const AGENT_ROSTER_WARM_CHUNK: usize = 250;
 
@@ -5309,6 +5311,28 @@ fn record_roster_fresh_wait(
     );
 }
 
+/// Wait only for the caller's mutation cut. Concurrent writes never move the target.
+/// A failed refresh cannot satisfy read-after-write; retain the bounded publication wait.
+async fn wait_for_agent_roster_cut(store: &Arc<Store>, history: bool, wanted: u64) -> bool {
+    let published = |store: &Store| {
+        let index = store.index().ok()?;
+        store.published_agent_roster(index, history).map(|(cut, _, _)| cut).or_else(|| {
+            (!history).then(|| store.published_agent_roster_head(index, 1)).flatten()
+                .map(|(cut, _, _, _)| cut)
+        })
+    };
+    let mut publications = store.subscribe_agent_roster();
+    tokio::time::timeout(AGENT_ROSTER_READ_WAIT, async {
+        while published(store).is_none_or(|cut| cut < wanted) {
+            store.request_fresh_agent_roster(history);
+            if publications.changed().await.is_err() {
+                return false;
+            }
+        }
+        true
+    }).await.unwrap_or(false)
+}
+
 /// The snapshot of a roster published at `cut`: that cut, its time, and when it was folded.
 fn roster_snapshot(state: &AppState, cut: u64, published_at_unix_ms: u128) -> ClientSnapshot {
     ClientSnapshot {
@@ -5345,7 +5369,7 @@ fn client_agents_published_page(
                 return Ok(None);
             };
             store.request_agent_roster_refresh();
-            crate::otel::record_roster_read("published_head", requested, Some(index), query.fresh);
+            crate::otel::record_roster_read("published_head", requested, Some(index), query.fresh || query.min_cut.is_some());
             // A partial head is not the complete publication used by unchanged-through.
             let snapshot = roster_snapshot(state, index, published_at);
             let mut page =
@@ -5377,7 +5401,7 @@ fn client_agents_published_page(
         } else {
             "published_complete"
         };
-        crate::otel::record_roster_read(path, requested, Some(index), query.fresh);
+        crate::otel::record_roster_read(path, requested, Some(index), query.fresh || query.min_cut.is_some());
         if recording {
             served = Some((index, published_at, Arc::clone(&cards)));
         }
@@ -5745,7 +5769,7 @@ const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
 /// that a very cheap fold cannot turn fresh reads into many refreshes a second.
 const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
 
-/// How long a read asking for a fresh roster waits for one at or after its own cut: long enough
+/// How long a legacy fresh or named-cut read waits for publication: long enough
 /// for the refresher to finish a fold, pause as long, and fold again.
 const AGENT_ROSTER_READ_WAIT: Duration = Duration::from_secs(2);
 
