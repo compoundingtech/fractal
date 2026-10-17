@@ -19,8 +19,10 @@ members = [
   "crates/st2-resource-wasip2",
   "crates/st-wire",
   "crates/st3",
+  "crates/st-chatgpt",
   "crates/st3-daemon",
   "crates/st3-e2e",
+  "crates/st3-kernel",
   "crates/st3-client",
   "crates/st3-client-codegen",
   "crates/st3-conversation-ui",
@@ -43,6 +45,7 @@ default-members = [
   "crates/st3",
   "crates/st3-daemon",
   "crates/st3-e2e",
+  "crates/st3-kernel",
   "crates/st3-client",
   "crates/st3-conversation-ui",
   "crates/st3-feed",
@@ -76,6 +79,11 @@ debug = 0
 debug = 1
 
 [profile.test.package."*"]
+debug = 0
+
+# The st3-daemon library unit test is the largest rustc in the workspace; its debug info costs
+# about 2 GB of peak memory and a third of its executable. Backtraces keep function names.
+[profile.test.package.st3-daemon]
 debug = 0
 
 # Optimize hot third-party code in dev/test while preserving assertions and the

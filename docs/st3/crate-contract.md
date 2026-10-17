@@ -1,9 +1,10 @@
 # st3 crates: what is where and who may use what
 
-Three packages carry what used to be the single `st3` package and its end-to-end tests:
+Four packages carry what used to be the single `st3` package and its end-to-end tests:
 
 | package | path | holds |
 |---|---|---|
+| `st3-kernel` | `crates/st3-kernel` | the library's leaf modules, which name no store, api or reconcile code: `accounts`, `archive`, `boot`, `cli_output`, `conversation_header`, `conversation_search`, `disk`, `evidence`, `fleet`, `gate_kinds`, `gate_report`, `github_admission`, `harness_events`, `hooks`, `instance`, `lane`, `memory`, `model`, `native_views`, `pricing`, `projection`, `publication`, `read_cache`, `rules`, `seat_queue`, `skill`, `terminal_binding`. st3-daemon re-exports each one at its old path (`pub use st3_kernel::model;`), so `crate::model` and `st3::model` read the same |
 | `st3-daemon` | `crates/st3-daemon` | the library: the claims graph, store, API, reconciliation and every module the daemon runs, its `hooks/`, `fixtures/` and `proptest-regressions/` |
 | `st3` | `crates/st3` | the `st3` binary (`main.rs` and the modules only the binary uses: `cli_help`, `completion`, `directive_note`, `doctor_cli`, `change_cli`, `presentation`, `setup`, `onboarding`), the `st3-fixture` binary, `build.rs`, `tests/`, `examples/`, and an empty library target (`src/package_marker.rs`, see below) |
 | `st3-e2e` | `crates/st3-e2e` | tests only: the tests that start a real daemon and drive a client or the feed against it (st3-client's `device_signing` and `transports`, the st3-feed tests). `st3-client` and `st3-feed` no longer have a dev-dependency on `st3-daemon`; `st3-client` had one, which closed a cycle with the daemon. |
@@ -49,5 +50,9 @@ macros. Other crates use a part of it:
 - **The fixtures only the library's unit tests read moved with it**
   (`crates/st3-daemon/tests/fixtures/`). The binary's tests keep `crates/st3/tests/fixtures/`.
 - The nextest overrides select a library unit test by `package(st3)` or `package(st3-daemon)`.
+- **st3-kernel names nothing above it.** Its modules have no path to `store`, `api`, `reconcile` or
+  `test_support`; a kernel unit test that needs daemon code (intent parsing, a store constant) lives
+  in st3-daemon's `kernel_tests` and reaches the kernel through the re-exports. A module joins the
+  kernel once nothing it names (in production code or its tests) is outside the kernel.
 
 `scripts/check-module-layers` reports the first three.
