@@ -17,6 +17,8 @@ import { SendFailure, SendUnconfirmed, TranscriptEmptyContent, type TranscriptEm
 import { Icon } from './Icons'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
 import { readingColumnStyles } from '../reading-column.stylex'
+import { observeUserMessageOverflow } from './user-message-overflow'
+import { TranscriptSearch } from './TranscriptSearch'
 
 export type LiveActivityState = { readonly _tag: 'Working' } | { readonly _tag: 'WaitingForAnswer' }
 export interface TranscriptTurn {
@@ -89,14 +91,11 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
   React.useLayoutEffect(() => {
     const element = text.current
     if (element === null || expanded) return
-    const measure = () => setOverflows(element.scrollHeight > element.clientHeight)
-    const observer = new ResizeObserver(measure)
-    observer.observe(element)
-    measure()
-    return () => observer.disconnect()
+    return observeUserMessageOverflow(element, setOverflows)
   }, [item.text, expanded])
   return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}{item.sendState?._tag === 'Unconfirmed' && <SendUnconfirmed state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
 }
+const messageTimeFormatter = new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit' })
 /** Sender, time and Copy share one header line; Copy shows on pointer hover or keyboard focus. A prose run shows the header once. */
 export function SeatProse({ item, senderLine, continuation = false }: { readonly item: (TextItem & { readonly role: 'assistant' }) | MessageItem; readonly senderLine?: string; readonly continuation?: boolean }) {
   const streaming = item._tag === 'Text' && item.streaming
@@ -108,7 +107,7 @@ export function SeatProse({ item, senderLine, continuation = false }: { readonly
   return <MessagePrimitive.Root data-testid="agent-message" data-item-id={item.id} data-item-kind={item._tag} data-run-continuation={continuation || undefined} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} {...stylex.props(styles.answer)}>
     {header && <div data-testid="message-header" {...stylex.props(styles.answerHeader)}>
       {senderLine !== undefined && <p data-testid="message-sender" {...stylex.props(styles.sender)}>{senderLine}</p>}
-      {!streaming && <span {...stylex.props(styles.answerMeta)}>{runText === undefined ? <ActionBarPrimitive.Copy aria-label="Copy answer" {...stylex.props(styles.copy, hovered && styles.copyVisible)}><Icon name="copy" size={12} /></ActionBarPrimitive.Copy> : <RunCopy text={runText} visible={hovered} />}{Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{new Date(completed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</span>}
+      {!streaming && <span {...stylex.props(styles.answerMeta)}>{runText === undefined ? <ActionBarPrimitive.Copy aria-label="Copy answer" {...stylex.props(styles.copy, hovered && styles.copyVisible)}><Icon name="copy" size={12} /></ActionBarPrimitive.Copy> : <RunCopy text={runText} visible={hovered} />}{Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{messageTimeFormatter.format(completed)}</time>}</span>}
     </div>}
     {item._tag === 'Text' ? <Markdown text={item.text} streaming={item.streaming} /> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
   </MessagePrimitive.Root>
@@ -311,9 +310,9 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
       {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} />}
       {running !== undefined && <><div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div><span data-testid="run-elapsed">Running{Number.isFinite(started) && started <= now ? ` · ${formatWorkDuration(now - started) || '<1s'}` : ''}</span></>}
     </header>
-    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}>
-      {history._tag === 'HasOlder' && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
-      {committed.length === 0 ? empty : <div {...stylex.props(styles.timeline)}>{committed.map(turn => <PreparedTurn key={turn.id} turn={turn} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}</div>}
+    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} initialTailCount={2} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}>
+      {(startIndex, revealRow) => <>{history._tag === 'HasOlder' && startIndex === 0 && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
+      {committed.length === 0 ? empty : <TranscriptSearch turns={committed} startIndex={startIndex} revealRow={revealRow} {...stylex.props(styles.timeline)}>{committed.slice(startIndex).map(turn => <PreparedTurn key={turn.id} turn={turn} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}</TranscriptSearch>}</>}
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
   </ThreadPrimitive.Root></RetrySend.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider>
 }
