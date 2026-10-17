@@ -78,7 +78,7 @@ fn page_items<'a>(page: &'a Value, collection: &str) -> &'a Vec<Value> {
     let allowed = BTreeSet::from(["kind", "collection", "filters", "items", "page", "sync"]);
     assert!(keys(page).is_subset(&allowed), "{page}");
     assert_eq!(page["kind"], "page");
-    assert_eq!(page["collection"], collection);
+    assert_eq!(page["collection"], format!("{collection}:test-grant-policy"));
     assert_eq!(page["filters"], json!({}));
     page["items"].as_array().unwrap()
 }
