@@ -104,13 +104,6 @@ pub fn indexed_query() -> &'static str {
     &INDEXED_SQL
 }
 
-/// The pre-index query, without an index-readiness probe.
-pub fn original_latest(connection: &Connection, subject: &str, origin: &str) -> Result<Option<(String, String)>> {
-    Ok(connection.prepare_cached(&ORIGINAL_SQL)?.query_row(params![subject, origin], |row| {
-        Ok((row.get(0)?, row.get(1)?))
-    }).optional()?)
-}
-
 pub fn latest(connection: &Connection, subject: &str, origin: &str) -> Result<Option<(String, String)>> {
     let query = if ready(connection)? { indexed_query() } else { &ORIGINAL_SQL };
     Ok(connection.prepare_cached(query)?.query_row(params![subject, origin], |row| {

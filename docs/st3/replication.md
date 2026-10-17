@@ -67,7 +67,8 @@ For offline production-size evidence, build the aggregate-only
 `transport-bench` feature. Run `--store COPY --n 1000 --mode before`, then the
 same command with `--mode after`, using the same checkpointed disposable input.
 Both modes measure a private temporary copy; the before mode removes the helper
-objects and uses the original lookup without readiness probes. The after mode
+objects and uses main's identical SQL literal, per-call canonical expansion and
+uncached `query_row` preparation path, without readiness probes. The after mode
 executes every real bootstrap page with the daemon's 100 ms inter-page yield.
 The harness rejects open databases, SQLite sidecars and nearby daemon socket/lock
 artifacts; Linux write-lease support is required. Set `TMPDIR` to private local

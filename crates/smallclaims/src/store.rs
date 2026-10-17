@@ -7739,18 +7739,31 @@ impl Store {
         let now = now_ms();
         // Another member's observation of this peer cannot renew this node's evidence.
         #[cfg(feature = "transport-bench")]
-        let original = self.transport_bench_original_lookup.load(Ordering::Relaxed);
-        #[cfg(not(feature = "transport-bench"))]
-        let original = false;
-        let latest = if original {
-            transport_observation_index::original_latest(
-                &self.readers.get(), &subject, &self.origin,
-            )?
+        let latest = if self.transport_bench_original_lookup.load(Ordering::Relaxed) {
+            // Preserve main's uncached query_row path, including per-call SQL expansion.
+            let latest: Option<(String, String)> = self
+                .readers
+                .get()
+                .query_row(
+                    &canonical_sql(
+                        "SELECT body, accepted_at_unix_ms FROM claims
+                WHERE subject=?1 AND kind='transport.observed' AND origin=?2
+                ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+                    ),
+                    params![subject, self.origin],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            latest
         } else {
             transport_observation_index::latest(
                 &self.readers.get(), &subject, &self.origin,
             )?
         };
+        #[cfg(not(feature = "transport-bench"))]
+        let latest = transport_observation_index::latest(
+            &self.readers.get(), &subject, &self.origin,
+        )?;
         let already_current = latest.is_some_and(|(body, accepted_at)| {
             let body: Value = serde_json::from_str(&body).unwrap_or_default();
             let observed_at = body
