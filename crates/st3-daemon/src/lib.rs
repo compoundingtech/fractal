@@ -57,7 +57,7 @@ pub use st3_kernel::lane;
 pub use st3_store::mailbox;
 pub use st3_store::message_body;
 /// Bounded local maintenance workers shared by daemon startup and lifecycle fixtures.
-pub mod maintenance;
+pub use st3_store::maintenance;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub mod malloc_trim;
 pub(crate) use st3_kernel::memory;
@@ -68,7 +68,7 @@ pub use st3_kernel::model;
 pub use st3_store::native_resume;
 /// Durable seat-scoped first native launch outcomes.
 pub mod native_seed;
-pub mod node_identity;
+pub use st3_store::node_identity;
 pub mod objectives;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 pub mod omp_ask_resume;
@@ -76,7 +76,7 @@ pub mod omp_ask_resume;
 pub use st3_telemetry::otel;
 pub use st3_telemetry::otel_client_class;
 pub use st3_telemetry::otlp;
-pub mod peer;
+pub use st3_peer::peer;
 pub mod placement;
 pub use st3_store::person_request;
 pub use st3_kernel::pricing;
@@ -93,7 +93,7 @@ pub use st3_store::recorder_receipts;
 pub use st3_telemetry::recorder_report;
 /// Finds references a publication or the graph names that do not resolve.
 /// Attaches a local terminal to a terminal another fleet host owns.
-pub mod remote_terminal;
+pub use st3_store::remote_terminal;
 pub use st3_store::render;
 pub use st3_store::resource;
 pub use st3_store::rollout;
@@ -118,6 +118,8 @@ pub use st3_telemetry::telemetry;
 pub mod test_support;
 #[cfg(test)]
 mod kernel_tests;
+#[cfg(test)]
+mod peer_tests;
 #[cfg(test)]
 mod store_tests;
 #[cfg(test)]

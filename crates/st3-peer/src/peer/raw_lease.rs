@@ -92,7 +92,7 @@ fn verify(
     Ok((proof.body, sender))
 }
 
-pub(super) fn gateway_bridge<S>(
+pub fn gateway_bridge<S>(
     socket: WebSocketStream<S>,
     lease: Option<Arc<dyn RawTerminalLease>>,
     relay: ClientRelay,
@@ -219,7 +219,7 @@ where
     Ok((client, control))
 }
 
-pub(super) async fn receive_owner(
+pub async fn receive_owner(
     websocket: WebSocketUpgrade,
     state: PeerState,
     path: String,

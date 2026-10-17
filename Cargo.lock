@@ -4910,6 +4910,7 @@ dependencies = [
  "st3-client",
  "st3-daemon",
  "st3-kernel",
+ "st3-peer",
  "st3-schema",
  "st3-store",
  "st3-telemetry",
@@ -5015,6 +5016,37 @@ dependencies = [
  "st3-daemon",
  "tempfile",
  "walkdir",
+]
+
+[[package]]
+name = "st3-peer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "futures-util",
+ "hex",
+ "jsonschema",
+ "notify",
+ "pty-client",
+ "pty-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-client",
+ "st3-peer",
+ "st3-store",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tower",
+ "tracing",
+ "urlencoding",
+ "uuid",
 ]
 
 [[package]]
