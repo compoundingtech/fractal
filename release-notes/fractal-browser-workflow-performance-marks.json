@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Record browser-local Fractal workflow performance marks for opening, switching, typing, scrolling, and header actions.",
+  "replay": { "status": "none", "detail": "No replay or rebuild; instrumentation uses browser performance entries only." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and fleet coordination are unchanged." },
+  "compatibility": { "status": "none", "detail": "Browser-local instrumentation only; no protocol, harness contract, or persisted-state changes." },
+  "downtime": { "status": "none", "detail": "No service interruption." },
+  "manual": { "status": "none", "detail": "No manual upgrade steps; performance entries are available through normal browser tooling." },
+  "recovery": { "status": "none", "detail": "No persisted-state changes or recovery procedure." }
+}
