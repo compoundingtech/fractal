@@ -1,11 +1,11 @@
 //! Diagnose a sustained current eligibility fault without publishing another episode.
 use super::*;
 
-pub(crate) const THRESHOLD_MS: u128 = 5 * 60 * 1_000;
+pub const THRESHOLD_MS: u128 = 5 * 60 * 1_000;
 
 /// `items` is the existing live doctor attention/fault snapshot, not historical state at `now`.
 /// The clock controls admission age only; fault currentness remains the snapshot's live test.
-pub(crate) fn check(
+pub fn check(
     store: &Store,
     items: &[AttentionItemView],
     now: u128,

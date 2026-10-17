@@ -120,13 +120,13 @@ impl AgentsRead {
 
 /// Whether the request asked the agents list to be fresh: it waits for one roster refresh by
 /// design. A person still waits on it, so it has its own target rather than none.
-pub(super) fn is_fresh_agents_read(method: &Method, route: &str, query: Option<&str>) -> bool {
+pub fn is_fresh_agents_read(method: &Method, route: &str, query: Option<&str>) -> bool {
     AgentsRead::classify(method, route, query) == Some(AgentsRead::Fresh)
 }
 
 /// What a request waits for beyond its own work, which decides the target it counts toward.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Wait {
+pub enum Wait {
     /// Nothing: it counts toward the target of its own path.
     No,
     /// A change it asked to wait for, so its time is mostly that wait: it counts toward no target.
@@ -178,7 +178,7 @@ impl Sample {
 /// or from the log when none was kept, and its wait for roster admission; and a fresh read's
 /// wait for a publication at its cut and the page it then builds.
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) enum RosterStage {
+pub enum RosterStage {
     Refresh,
     RefreshCold,
     RefreshAdmission,
@@ -209,7 +209,7 @@ impl RosterStage {
 /// for a publication at its cut, a page served from a publication, and a page whose actor's
 /// order in that publication its read built. Descriptive only: no target of its own.
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) enum WorkStage {
+pub enum WorkStage {
     FreshWait,
     Page,
     ActorBuild,
@@ -236,7 +236,7 @@ impl WorkStage {
 const CLIENT_WORK: &str = "/v1/client/work";
 
 #[derive(Default)]
-pub(super) struct Meter {
+pub struct Meter {
     routes: BTreeMap<String, Sample>,
     // Independent of the general route cap: all seven known actions retain a
     // complete denominator even if the route table has already filled.
@@ -254,7 +254,7 @@ pub(super) struct Meter {
 
 /// How a completed sample is counted in the windows. Build it with [`Timed::resolve`] before
 /// taking the meter's lock: the key and the target lookup allocate and scan.
-pub(super) struct Timed {
+pub struct Timed {
     key: String,
     target: Option<usize>,
     remote: bool,
@@ -265,7 +265,7 @@ impl Timed {
     /// snapshot. `remote` says it read from another machine that owns it, through this daemon.
     /// What it `wait`ed for sets its key: a long poll is kept under `(long poll)` and counts
     /// toward no target, and a fresh agents list under `(fresh)` and its own target.
-    pub(super) fn resolve(path: &str, remote: bool, wait: Wait) -> Self {
+    pub fn resolve(path: &str, remote: bool, wait: Wait) -> Self {
         let key = match wait {
             Wait::No => path.to_owned(),
             Wait::LongPoll => format!("{path} (long poll)"),
@@ -284,7 +284,7 @@ impl Timed {
 }
 
 impl Meter {
-    pub(super) fn record(
+    pub fn record(
         &mut self,
         method: &Method,
         route: &str,
@@ -307,17 +307,17 @@ impl Meter {
     }
 
     /// Count one roster stage's duration.
-    pub(super) fn record_roster_stage(&mut self, stage: RosterStage, elapsed: Duration) {
+    pub fn record_roster_stage(&mut self, stage: RosterStage, elapsed: Duration) {
         self.roster_stages.entry(stage).or_default().record(elapsed);
     }
 
     /// Count one published current-work stage's duration.
-    pub(super) fn record_work_stage(&mut self, stage: WorkStage, elapsed: Duration) {
+    pub fn record_work_stage(&mut self, stage: WorkStage, elapsed: Duration) {
         self.work_stages.entry(stage).or_default().record(elapsed);
     }
 
     /// Count one sample in its path's windows and its target's.
-    pub(super) fn time(&mut self, now: Instant, timed: Timed, elapsed: Duration) {
+    pub fn time(&mut self, now: Instant, timed: Timed, elapsed: Duration) {
         self.cpu.note(now);
         let targets = crate::slo::targets();
         let Timed {
@@ -344,13 +344,13 @@ impl Meter {
     }
 
     /// Every target's windows, then every path's that has a sample in its last hour.
-    pub(super) fn windows(&mut self, now: Instant) -> Value {
+    pub fn windows(&mut self, now: Instant) -> Value {
         let rows = self.target_rows(now);
         json!({"targets": rows, "paths": self.path_rows(now)})
     }
 
     /// Only the targets' windows: what the collector gets, without every path's snapshot.
-    pub(super) fn targets_only(&mut self, now: Instant) -> Value {
+    pub fn targets_only(&mut self, now: Instant) -> Value {
         json!({"targets": self.target_rows(now)})
     }
 
@@ -421,11 +421,11 @@ impl Meter {
         paths
     }
 
-    pub(super) fn can_report(&self, now_ms: u64, samples: &[super::client_observations::Validated]) -> bool {
+    pub fn can_report(&self, now_ms: u64, samples: &[super::client_observations::Validated]) -> bool {
         samples.iter().filter(|s| Self::live_minute(now_ms, &s.minute)).all(|s| self.client_intervals.get(&s.key).is_none_or(|series| series.can_record(&s.minute)))
     }
 
-    pub(super) fn report(&mut self, now_ms: u64, samples: &[super::client_observations::Validated]) {
+    pub fn report(&mut self, now_ms: u64, samples: &[super::client_observations::Validated]) {
         for s in samples {
             if Self::live_minute(now_ms, &s.minute) {
                 self.client_intervals.entry(s.key.clone()).or_default().record(now_ms,&s.minute);
@@ -448,7 +448,7 @@ impl Meter {
         total.snapshot(now_ms,share)
     }
 
-    pub(super) fn snapshot(&self) -> Vec<Value> {
+    pub fn snapshot(&self) -> Vec<Value> {
         self.routes
             .iter()
             .map(|(route, sample)| sample.snapshot(route, "route"))

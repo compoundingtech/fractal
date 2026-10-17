@@ -96,7 +96,7 @@ async fn whole_text(
 
 /// The typed refusal for a body that aged out: `blob-expired`, which clients already read as
 /// "removed after its retention window; the message text remains".
-pub(super) fn expired_error(origin: &str) -> ApiError {
+pub fn expired_error(origin: &str) -> ApiError {
     blob_error(St3Error::new(
         "blob-expired",
         format!(
@@ -111,7 +111,7 @@ fn body_value(message: &MessageView, text: String, complete: bool) -> Value {
 
 /// `GET /v1/client/message-bodies/{id}`: the whole text of a message a session may read, asked
 /// of its owner. An owner that cannot be reached answers `remote-unavailable`.
-pub(super) async fn client_body(
+pub async fn client_body(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -141,7 +141,7 @@ pub(super) async fn client_body(
 /// `GET /v1/messages/body/{subject}`: the same text for the daemon's own readers, which act for
 /// the message's recipient. When the owner cannot give the text it answers the preview and says
 /// where the rest is, so a seat is still handed the message.
-pub(super) async fn body(
+pub async fn body(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {

@@ -1,7 +1,7 @@
 //! Pure public-card eligibility. All inputs must come from the same captured namespace.
 use crate::model::CurrentHarnessView;
 
-pub(crate) fn eligible(
+pub fn eligible(
     declared_provider: Option<&str>,
     runtime_incarnation: Option<&str>,
     observed: Option<CurrentHarnessView>,
@@ -18,7 +18,7 @@ pub(crate) fn eligible(
     })
 }
 
-pub(crate) fn availability(
+pub fn availability(
     mut observed: Option<CurrentHarnessView>,
     mailbox_fault: Option<&str>,
 ) -> Option<CurrentHarnessView> {

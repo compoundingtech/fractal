@@ -4,7 +4,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 mod lease;
 mod peek_capability;
-pub(crate) use lease::{Binding as LeaseBinding, Lease, ORIGIN_HEADER};
+pub use lease::{Binding as LeaseBinding, Lease, ORIGIN_HEADER};
 
 /// Run one lease query (revalidation, proof, or selected-use) as an admitted store read.
 /// A lease is a per-socket authority handle, so each query owns its own clone.
@@ -26,7 +26,7 @@ const CHUNK: usize = 16 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AttachmentRequest {
+pub struct AttachmentRequest {
     runtime_incarnation: String,
     mode: st3_client::RawTerminalMode,
 }
@@ -51,14 +51,14 @@ fn authorize(session: &ClientSession, mode: st3_client::RawTerminalMode) -> Resu
     Ok(())
 }
 
-pub(super) fn authorization_epoch(
+pub fn authorization_epoch(
     state: &AppState,
     session: &ClientSession,
 ) -> Result<String, ApiError> {
     lease::authorization_epoch(state, session)
 }
 
-pub(crate) async fn attachment(
+pub async fn attachment(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -133,12 +133,12 @@ pub(crate) async fn attachment(
 }
 
 #[derive(Deserialize)]
-pub(crate) struct StreamQuery {
+pub struct StreamQuery {
     incarnation: String,
     mode: st3_client::RawTerminalMode,
 }
 
-pub(crate) async fn stream(
+pub async fn stream(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
@@ -280,7 +280,7 @@ pub(crate) async fn stream(
 
 /// One bounded byte splice; closing either direction drops the persistent owner connection.
 /// A raw client may not use lifecycle/CAS/ancestry commands to escape terminal authority.
-pub(crate) async fn splice(
+pub async fn splice(
     socket: WebSocket,
     transport: UnixStream,
     mode: Option<st3_client::RawTerminalMode>,

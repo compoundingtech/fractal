@@ -2,7 +2,7 @@
 use super::*;
 use crate::store::custom::{RegistrationRequest, ReplyRequest};
 
-pub(super) async fn register(
+pub async fn register(
     State(state): State<AppState>,
     Json(request): Json<RegistrationRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -12,12 +12,12 @@ pub(super) async fn register(
     signal_changed(&state);
     Ok(Json(result))
 }
-pub(super) async fn registrations(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+pub async fn registrations(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(
         json!({"items":state.store.custom_registrations().map_err(ApiError::internal)?}),
     ))
 }
-pub(super) async fn reply(
+pub async fn reply(
     State(state): State<AppState>,
     Json(request): Json<ReplyRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -28,13 +28,13 @@ pub(super) async fn reply(
     Ok(Json(c))
 }
 #[derive(Default, Deserialize)]
-pub(super) struct ListQuery {
+pub struct ListQuery {
     kind: Option<String>,
     version: Option<u32>,
     cursor: Option<String>,
     limit: Option<usize>,
 }
-pub(super) async fn list(
+pub async fn list(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
     Query(query): Query<ListQuery>,
@@ -83,7 +83,7 @@ pub(super) async fn list(
     })?;
     Ok((Extension(snapshot), Json(page)))
 }
-pub(super) async fn read(
+pub async fn read(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -103,11 +103,11 @@ pub(super) async fn read(
     Ok((Extension(snapshot), Json(value)))
 }
 #[derive(Deserialize)]
-pub(super) struct BasisQuery {
+pub struct BasisQuery {
     subject: String,
     kinds: String,
 }
-pub(super) async fn basis(
+pub async fn basis(
     State(state): State<AppState>,
     Query(query): Query<BasisQuery>,
 ) -> Result<Json<Value>, ApiError> {

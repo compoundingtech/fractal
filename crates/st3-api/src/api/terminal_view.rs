@@ -23,10 +23,10 @@ use smallclaims::fifo::{Kind, Queue};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::watch;
 
-pub(super) const TERMINAL_MAX_LINES: usize = 200;
-pub(super) const TERMINAL_MAX_LINE_BYTES: usize = 4_096;
+pub const TERMINAL_MAX_LINES: usize = 200;
+pub const TERMINAL_MAX_LINE_BYTES: usize = 4_096;
 /// The fastest a changing terminal publishes screens after the first change.
-pub(super) const SCREEN_MIN_INTERVAL: Duration = Duration::from_millis(100);
+pub const SCREEN_MIN_INTERVAL: Duration = Duration::from_millis(100);
 /// A first change waits this long so one redraw written in several pieces arrives whole.
 const SCREEN_SETTLE: Duration = Duration::from_millis(4);
 /// How long a watcher keeps its PTY connection after its last viewer leaves.
@@ -36,14 +36,14 @@ const DEFAULT_COLUMNS: u16 = 80;
 
 /// What a watched terminal incarnation currently shows.
 #[derive(Clone, Debug)]
-pub(super) enum ViewState {
+pub enum ViewState {
     Connecting,
     Screen(Arc<Screen>),
     Ended(ViewEnd),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum ViewEnd {
+pub enum ViewEnd {
     /// The PTY session closed or its process exited.
     Exited,
     /// The PTY session could not be read.
@@ -55,25 +55,25 @@ pub(super) enum ViewEnd {
 /// One complete screen. `body` holds every field that depends only on the terminal, and
 /// `revision` digests it so equal screens are never published twice.
 #[derive(Debug)]
-pub(super) struct Screen {
+pub struct Screen {
     body: serde_json::Map<String, Value>,
     revision: String,
 }
 
 impl Screen {
-    pub(super) fn revision(&self) -> &str {
+    pub fn revision(&self) -> &str {
         &self.revision
     }
 
     /// An opaque screen fence that fits exactly in a JavaScript number. It is stable
     /// across watcher/daemon restarts and depends only on the observed screen; incarnation
     /// is fenced separately. Clients compare it for equality, never order it.
-    pub(super) fn sequence(&self) -> u64 {
+    pub fn sequence(&self) -> u64 {
         u64::from_str_radix(&self.revision[..13], 16).expect("screen revisions are SHA-256 hex")
     }
 
     /// The client `TerminalScreen` value for one viewer.
-    pub(super) fn value(&self, terminal_id: &str, incarnation: &str) -> Value {
+    pub fn value(&self, terminal_id: &str, incarnation: &str) -> Value {
         let mut value = serde_json::Map::with_capacity(self.body.len() + 5);
         value.insert("kind".into(), "terminal-screen".into());
         value.insert("terminal_id".into(), terminal_id.into());
@@ -86,7 +86,7 @@ impl Screen {
 
     /// The text of each screen line, borrowed from the shared screen, for a reader that
     /// returns only a bounded prefix and must not render the whole screen value.
-    pub(super) fn line_texts(&self) -> impl Iterator<Item = &str> {
+    pub fn line_texts(&self) -> impl Iterator<Item = &str> {
         self.body
             .get("lines")
             .and_then(Value::as_array)
@@ -103,7 +103,7 @@ static WATCHERS: LazyLock<Mutex<HashMap<WatchKey, Arc<watch::Sender<ViewState>>>
 
 /// Subscribe to the screens of one terminal incarnation, starting its watcher when none runs.
 /// The receiver's current value is the latest screen, so a new viewer starts from it.
-pub(super) fn subscribe(
+pub fn subscribe(
     pty_root: &Path,
     runtime_id: &str,
     incarnation: &str,
@@ -203,7 +203,7 @@ impl Drop for Registration {
 
 /// Wait for a screen whose revision differs from `after`, or for any screen when `after` is
 /// `None`. Returns the latest screen when `deadline` passes first, if there is one.
-pub(super) async fn next_screen(
+pub async fn next_screen(
     receiver: &mut watch::Receiver<ViewState>,
     after: Option<&str>,
     deadline: tokio::time::Instant,
@@ -394,7 +394,7 @@ const SYNC_END: &[u8] = b"\x1b[?2026l";
 
 /// libghostty, through pty-terminal: the emulator the pty daemon and Fractal run, so every client
 /// sees the same cells, widths, and modes. Its terminal is `!Send`; see [`EMULATION`].
-pub(super) struct Emulator {
+pub struct Emulator {
     actor: TerminalActor,
     render: Option<RefCell<RenderState<'static>>>,
     title: Title,

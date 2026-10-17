@@ -32,10 +32,10 @@ use crate::graph::{parse_intent, resolve_document_references};
 use crate::message_body;
 #[cfg(test)]
 use crate::model::AttentionRequest;
-pub(crate) use crate::client_values::{
+pub use crate::client_values::{
     client_attention_actions, client_attention_id, client_timestamp, client_work_state,
 };
-pub(crate) use crate::store::agent_queue_values::{
+pub use crate::store::agent_queue_values::{
     AGENT_QUEUE_FIELDS, agent_queue_fields, agent_queue_metadata,
 };
 use crate::model::ClientReplicated;
@@ -76,7 +76,7 @@ mod client_presence;
 mod client_v0;
 mod custom;
 use crate::delivery_presence;
-pub(crate) mod agent_harness;
+pub mod agent_harness;
 #[cfg(test)]
 mod harness_health_controls;
 #[cfg(test)]
@@ -86,14 +86,14 @@ mod github_watch;
 mod harness_events;
 mod mailbox;
 mod mail_backlog;
-pub(crate) mod mission_eligibility_doctor;
+pub mod mission_eligibility_doctor;
 mod read_deadline;
 mod response_body;
 mod owned_sets;
 mod published_attention;
 pub use published_attention::start_attention_list;
-#[cfg(test)]
-pub(crate) use published_attention::{published_attention_rows, refresh_attention_list};
+#[cfg(any(test, feature = "test-support"))]
+pub use published_attention::{published_attention_rows, refresh_attention_list};
 mod directive_notes;
 mod request_latency;
 mod client_observations;
@@ -150,7 +150,7 @@ use records::post_claim;
 #[cfg(test)]
 use replication::{replication_export, replication_receive, replication_wake};
 
-pub(crate) use client_v0::raw_terminal::splice as raw_terminal_splice;
+pub use client_v0::raw_terminal::splice as raw_terminal_splice;
 
 /// The owner side of a peer raw terminal route: the plain byte splice, with no lease or control
 /// channel. The daemon passes it to `peer::run_worker` as its `RawSplice`.
@@ -161,7 +161,7 @@ pub fn raw_terminal_owner_splice(
     Box::pin(raw_terminal_splice(socket, transport, None, None, None, None, None))
 }
 
-pub(crate) use crate::delivery_presence::claude_channel_attached;
+pub use crate::delivery_presence::claude_channel_attached;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -292,7 +292,7 @@ fn signal_changed(state: &AppState) {
 }
 
 /// The reconciler reads a message only when it is a work wake, tagged `st3-work:`.
-pub(crate) fn is_work_wake(tags: &[String]) -> bool {
+pub fn is_work_wake(tags: &[String]) -> bool {
     tags.iter().any(|tag| tag.starts_with("st3-work:"))
 }
 
@@ -300,7 +300,7 @@ pub(crate) fn is_work_wake(tags: &[String]) -> bool {
 /// message. Agents' and people's conversations and the delivery probes write five claims for each
 /// message, and each woke a reconcile pass on every member. Clients, mailboxes and peers still
 /// hear of every message.
-pub(crate) fn signal_message_changed(state: &AppState, kind: &str, work_wake: bool) {
+pub fn signal_message_changed(state: &AppState, kind: &str, work_wake: bool) {
     if work_wake {
         signal_claim_changed(state, kind);
     } else {
@@ -340,7 +340,7 @@ fn signal_visible_change(state: &AppState) {
 mod storage_contention_response_tests;
 
 #[derive(Debug)]
-pub(crate) struct ApiError {
+pub struct ApiError {
     status: StatusCode,
     code: String,
     message: String,
@@ -445,7 +445,7 @@ pub fn router(state: AppState) -> Router {
 /// Already-admitted snapshot/receipt transport fixtures only. There is no CLI/API switch
 /// into this router: real native custody controls and the daemon use `router`.
 #[cfg(feature = "test-support")]
-pub(crate) fn admitted_mailbox_protocol_router(state: AppState) -> Router {
+pub fn admitted_mailbox_protocol_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/mailbox/bind", post(mailbox::bind_admitted_fixture))
         .route("/v1/mailbox", get(mailbox::subscribe_admitted_fixture))
@@ -455,7 +455,7 @@ pub(crate) fn admitted_mailbox_protocol_router(state: AppState) -> Router {
 
 /// Synthetic private-store transport controls; never physical native admission.
 #[cfg(feature = "test-support")]
-pub(crate) fn synthetic_mailbox_protocol_router(state: AppState, subject: &str) -> Router {
+pub fn synthetic_mailbox_protocol_router(state: AppState, subject: &str) -> Router {
     assert!(subject.starts_with("agent/example/"));
     admitted_mailbox_protocol_router(state).layer(Extension(NativeDeliveryPeer {
         agent: subject.into(),
@@ -1427,8 +1427,8 @@ fn record_roster_stage(stage: request_latency::RosterStage, elapsed: Duration) {
 }
 
 /// Publication precedes the completed refresh timing; tests asserting timings wait here.
-#[cfg(test)]
-fn roster_stage_recorded() -> &'static tokio::sync::watch::Sender<()> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn roster_stage_recorded() -> &'static tokio::sync::watch::Sender<()> {
     static RECORDED: OnceLock<tokio::sync::watch::Sender<()>> = OnceLock::new();
     RECORDED.get_or_init(|| tokio::sync::watch::channel(()).0)
 }
@@ -1443,11 +1443,11 @@ pub fn request_latency_target_windows() -> Value {
 }
 
 /// Every target's live windows, and every path's: see `slo/targets.toml`.
-pub(crate) fn request_latency_windows() -> Value {
+pub fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
 
-pub(crate) use crate::peer::track_remote_reads;
+pub use crate::peer::track_remote_reads;
 
 /// A query that asks the daemon to wait for a change makes the request a long poll.
 fn asks_to_wait(query: &str) -> bool {
@@ -1466,7 +1466,7 @@ struct Served {
 }
 
 /// A client collections socket's subscription sent its first snapshot or screen.
-pub(crate) fn record_stream_latency(collection: &str, elapsed: Duration, remote: bool) {
+pub fn record_stream_latency(collection: &str, elapsed: Duration, remote: bool) {
     let timed = request_latency::Timed::resolve(
         &format!("stream {collection}"),
         remote,
@@ -1479,7 +1479,7 @@ pub(crate) fn record_stream_latency(collection: &str, elapsed: Duration, remote:
 }
 
 /// The most claims between two publications that one freshness sample reads.
-pub(crate) const PUBLISH_SAMPLE_CLAIMS: u64 = 10_000;
+pub const PUBLISH_SAMPLE_CLAIMS: u64 = 10_000;
 
 /// Whether a publication at `cut` after one at `previous` is a freshness sample: it advanced,
 /// by at most [`PUBLISH_SAMPLE_CLAIMS`] claims.
@@ -1487,9 +1487,9 @@ fn publish_sampled(previous: u64, cut: u64) -> bool {
     cut > previous && cut - previous <= PUBLISH_SAMPLE_CLAIMS
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn a_publication_far_behind_its_previous_one_is_not_a_freshness_sample() {
+pub fn a_publication_far_behind_its_previous_one_is_not_a_freshness_sample() {
     assert!(!publish_sampled(7, 7), "an unchanged cut");
     assert!(publish_sampled(7, 8));
     assert!(publish_sampled(7, 7 + PUBLISH_SAMPLE_CLAIMS));
@@ -1503,7 +1503,7 @@ fn a_publication_far_behind_its_previous_one_is_not_a_freshness_sample() {
 /// [`PUBLISH_SAMPLE_CLAIMS`] claims after the previous: finding its first local commit would scan
 /// them on the refresher's path, and a publication that far behind follows a catch-up, not a
 /// commit a person waits on.
-pub(crate) fn record_publish_latency(
+pub fn record_publish_latency(
     store: &Store,
     collection: &str,
     previous: u64,
@@ -1569,7 +1569,7 @@ fn record_request_latency(
     eprintln!("st3: slow request {path} took {} ms", elapsed.as_millis());
 }
 
-pub(crate) use crate::model::new_request_id;
+pub use crate::model::new_request_id;
 
 fn client_now_ms() -> u128 {
     std::time::SystemTime::now()
@@ -2357,8 +2357,8 @@ fn client_work_resources(
 /// One page of the work history, newest update first, and whether more follow. Rendering the
 /// whole history to show a page of it enriched every step the store had ever run: seconds on
 /// a busy host's store.
-#[cfg(test)]
-fn client_work_history_page(
+#[cfg(any(test, feature = "test-support"))]
+pub fn client_work_history_page(
     store: &Store,
     actor: Option<&str>,
     snapshot_unix_ms: u128,
@@ -2564,8 +2564,8 @@ fn client_work_values(
         .collect()
 }
 
-#[cfg(test)]
-fn aggregate_usage<'a>(
+#[cfg(any(test, feature = "test-support"))]
+pub fn aggregate_usage<'a>(
     store: &Store,
     subjects: impl Iterator<Item = &'a str>,
     at_index: Option<u64>,
@@ -2603,8 +2603,8 @@ fn aggregate_usage_values<'a>(
     aggregate
 }
 
-#[cfg(test)]
-fn aggregate_usage_for_step(
+#[cfg(any(test, feature = "test-support"))]
+pub fn aggregate_usage_for_step(
     store: &Store,
     desired: &[crate::model::DesiredSubject],
     step: &str,
@@ -2620,8 +2620,8 @@ fn aggregate_usage_for_step(
     )
 }
 
-#[cfg(test)]
-fn aggregate_usage_for_runs(
+#[cfg(any(test, feature = "test-support"))]
+pub fn aggregate_usage_for_runs(
     store: &Store,
     desired: &[crate::model::DesiredSubject],
     runs: &BTreeSet<&str>,
@@ -2850,7 +2850,7 @@ fn add_agent_todos(store: &Store, items: &mut [Value], index: u64) -> anyhow::Re
 
 /// The card's `reason` while rival hosts both claim a seat's runtime. A sentence, not a code:
 /// clients may print it as it is.
-pub(crate) const AUTHORITY_INDETERMINATE_REASON: &str =
+pub const AUTHORITY_INDETERMINATE_REASON: &str =
     "st cannot tell which host runs this agent; its processes may be running";
 
 /// Live presentation of already folded cards: freshness, delivery presence, subagents, and the
@@ -3052,8 +3052,8 @@ fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
     item["delivery"] = assessment.to_value();
 }
 
-#[cfg(test)]
-fn client_agent_resources_uncached(
+#[cfg(any(test, feature = "test-support"))]
+pub fn client_agent_resources_uncached(
     store: &Store,
     history: bool,
     snapshot_index: u64,
@@ -3843,7 +3843,7 @@ fn client_attention_resources(
     client_attention_resources_at(store, person, _history, client_now_ms())
 }
 
-pub(crate) fn client_attention_resources_at(
+pub fn client_attention_resources_at(
     store: &Store,
     person: Option<&str>,
     _history: bool,
@@ -4789,8 +4789,8 @@ fn published_work_pages() -> &'static Mutex<VecDeque<PublishedWorkPage>> {
 
 /// How many published work page entries a list's publications hold, for tests: the cache is
 /// shared by every store in the process.
-#[cfg(test)]
-fn published_work_pages_of(list: u64) -> usize {
+#[cfg(any(test, feature = "test-support"))]
+pub fn published_work_pages_of(list: u64) -> usize {
     published_work_pages()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -8170,7 +8170,7 @@ async fn publication_refusals(
 
 
 #[derive(Deserialize)]
-pub(crate) struct AgentSuspensionRequest {
+pub struct AgentSuspensionRequest {
     #[serde(default)]
     pub host: Option<String>,
     pub subject: String,
@@ -8265,7 +8265,7 @@ fn agent_subject(subject: String) -> String {
 
 /// The fence a client-v0 action carries: the seat's running incarnation, when it names one, and
 /// its selected declaration.
-pub(crate) struct SuspensionFence {
+pub struct SuspensionFence {
     pub incarnation: Option<String>,
     pub desired: String,
 }
@@ -8294,7 +8294,7 @@ fn check_suspension_fence(
     Ok(())
 }
 
-pub(crate) fn request_suspend(
+pub fn request_suspend(
     state: &AppState,
     request: AgentSuspensionRequest,
     fence: Option<SuspensionFence>,
@@ -8393,7 +8393,7 @@ pub(crate) fn request_suspend(
     Ok(claim)
 }
 
-pub(crate) fn request_resume(
+pub fn request_resume(
     state: &AppState,
     request: AgentSuspensionRequest,
     fence: Option<SuspensionFence>,
@@ -8854,8 +8854,8 @@ fn check_device_signature(
     Ok(())
 }
 
-#[cfg(test)]
-fn accept_message(
+#[cfg(any(test, feature = "test-support"))]
+pub fn accept_message(
     state: &AppState,
     request: MessageSendRequest,
     session_id: Option<String>,

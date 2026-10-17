@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn message_delivery(
+pub async fn message_delivery(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
@@ -20,14 +20,14 @@ pub(super) async fn message_delivery(
 }
 
 #[derive(Deserialize)]
-pub(super) struct MessageKeyQuery {
+pub struct MessageKeyQuery {
     key: String,
 }
 
 /// The message a send's idempotency key landed as, so a client whose send went unanswered can
 /// tell whether it was sent before it sends again. Only a message send or reply answers; any
 /// other key is `message-not-sent`.
-pub(super) async fn message_by_key(
+pub async fn message_by_key(
     State(state): State<AppState>,
     Query(query): Query<MessageKeyQuery>,
 ) -> Result<Json<MessageSendReceipt>, ApiError> {
@@ -68,11 +68,11 @@ pub(super) async fn message_by_key(
 }
 
 #[derive(Deserialize)]
-pub(super) struct SubscriptionRequestQuery {
+pub struct SubscriptionRequestQuery {
     subscription: String,
 }
 
-pub(super) async fn list_subscription_requests(
+pub async fn list_subscription_requests(
     State(state): State<AppState>,
     Query(query): Query<SubscriptionRequestQuery>,
 ) -> Result<Json<Vec<crate::model::SubscriptionRequestView>>, ApiError> {
@@ -88,7 +88,7 @@ pub(super) async fn list_subscription_requests(
 }
 
 /// Release a held subscription request or cancel an open one as a person.
-pub(super) async fn decide_subscription_request(
+pub async fn decide_subscription_request(
     State(state): State<AppState>,
     AxumPath((decision, request)): AxumPath<(String, String)>,
     Json(input): Json<crate::model::SubscriptionRequestDecision>,
@@ -101,7 +101,7 @@ pub(super) async fn decide_subscription_request(
     Ok(Json(response))
 }
 
-pub(super) async fn send_message(
+pub async fn send_message(
     State(state): State<AppState>,
     Json(request): Json<MessageSendRequest>,
 ) -> Result<Json<MessageSendReceipt>, ApiError> {
@@ -109,7 +109,7 @@ pub(super) async fn send_message(
 }
 
 #[derive(Deserialize)]
-pub(super) struct MessagesPageQuery {
+pub struct MessagesPageQuery {
     to: Option<String>,
     #[serde(default)]
     include_closed: bool,
@@ -128,7 +128,7 @@ struct MessagesPageCursor {
     limit: usize,
 }
 
-pub(super) async fn list_messages_page(
+pub async fn list_messages_page(
     State(state): State<AppState>,
     Query(query): Query<MessagesPageQuery>,
     peer: Option<Extension<NativeDeliveryPeer>>,
@@ -216,7 +216,7 @@ pub(super) async fn list_messages_page(
     }))
 }
 
-pub(super) async fn list_messages(
+pub async fn list_messages(
     State(state): State<AppState>,
     Query(query): Query<MessagesQuery>,
     peer: Option<Extension<NativeDeliveryPeer>>,
@@ -247,7 +247,7 @@ pub(super) async fn list_messages(
     .map(Json)
 }
 
-pub(super) async fn read_message(
+pub async fn read_message(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<MessageRead>, ApiError> {
@@ -278,7 +278,7 @@ pub(super) async fn read_message(
     }))
 }
 
-pub(super) async fn post_message_claim(
+pub async fn post_message_claim(
     State(state): State<AppState>,
     AxumPath(message_id): AxumPath<String>,
     Json(request): Json<MessageLifecycleRequest>,

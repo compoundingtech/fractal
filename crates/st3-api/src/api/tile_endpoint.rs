@@ -30,7 +30,7 @@ pub const SOCKET: &str = "st.sock";
 
 /// The tile behind a connection, as the kernel and root's registry name it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TileCaller {
+pub struct TileCaller {
     pub tile: String,
     pub agent: String,
     pub person: String,
@@ -39,7 +39,7 @@ pub(crate) struct TileCaller {
 
 /// What the endpoint asks the kernel about a caller. Tests stand in for it; the daemon reads
 /// `/proc`.
-pub(crate) trait Kernel: Send + Sync + 'static {
+pub trait Kernel: Send + Sync + 'static {
     fn cgroup(&self, pid: i32) -> Option<String>;
 }
 
@@ -52,7 +52,7 @@ impl Kernel for Proc {
 }
 
 /// The only routes a tile reaches.
-pub(crate) fn router(state: AppState) -> Router {
+pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/tile/whoami", get(whoami))
         .route("/v1/messages", get(list_messages).post(send_message))
@@ -179,7 +179,7 @@ fn identify(
 /// but the tile is closed before a byte is read. Every connection belongs to this future: when
 /// it is dropped, as when root's registry no longer names the tile, open connections close too,
 /// so none keeps acting for an identity the registry has withdrawn.
-pub(crate) async fn serve_listener(
+pub async fn serve_listener(
     state: AppState,
     registry: Arc<Registry>,
     name: String,

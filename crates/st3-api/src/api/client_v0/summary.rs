@@ -15,7 +15,7 @@ impl std::fmt::Display for RosterNotPublished {
 
 impl std::error::Error for RosterNotPublished {}
 
-pub(super) fn working(agent: &Value) -> bool {
+pub fn working(agent: &Value) -> bool {
     agent["state"] == "running"
         && agent["harness_state"] == "working"
         && agent["fault"].is_null()
@@ -23,11 +23,11 @@ pub(super) fn working(agent: &Value) -> bool {
 }
 /// A mission that is really running or about to: stuck, paused and finished runs, and ones that
 /// only wait on a person, are counted elsewhere.
-pub(super) fn active(mission: &st3_ui_model::missions::Mission) -> bool {
+pub fn active(mission: &st3_ui_model::missions::Mission) -> bool {
     !mission.system && mission.word.is_active()
 }
 
-pub(super) fn native(
+pub fn native(
     state: &AppState,
     session: &ClientSession,
     request: &CollectionSubscribe,
@@ -179,7 +179,7 @@ fn row(person: Option<&str>, alerts: usize, shared: &SummaryShared) -> anyhow::R
 
 /// What needs `person` (every person, for none) in published attention rows, counted as from
 /// the attention items they were made of: the alerts.
-pub(super) fn published_attention_alerts(rows: &[Value], person: Option<&str>) -> usize {
+pub fn published_attention_alerts(rows: &[Value], person: Option<&str>) -> usize {
     rows.iter()
         .filter(|row| person.is_none_or(|person| row["person_id"] == person))
         .filter(|row| row["alert"] == true)
@@ -190,7 +190,7 @@ pub(super) fn published_attention_alerts(rows: &[Value], person: Option<&str>) -
 /// shared counts' cut and publication time: what the refresher publishes for that selection.
 /// `None` until both are published. Memory only: a window that opens a selection is served at
 /// once, before the refresher publishes it.
-pub(in crate::api) fn published_row(
+pub fn published_row(
     store: &Store,
     person: Option<&str>,
 ) -> Option<(u64, u128, Value)> {
@@ -201,7 +201,7 @@ pub(in crate::api) fn published_row(
     Some((shared.cut, shared.published_at_unix_ms, row))
 }
 
-pub(super) fn machine_counts(
+pub fn machine_counts(
     machines: &[Value],
     agents: &[Value],
     gateway: &str,
@@ -239,7 +239,7 @@ pub(super) fn machine_counts(
     json!({"connected":counts[0],"indirect":counts[1],"offline":counts[2]})
 }
 
-pub(super) fn retain_timestamp(items: &mut [Value], previous: &BTreeMap<String, Value>) {
+pub fn retain_timestamp(items: &mut [Value], previous: &BTreeMap<String, Value>) {
     for item in items {
         if let Some(old) = item["id"].as_str().and_then(|id| previous.get(id))
             && old["revision"] == item["revision"]
@@ -268,7 +268,7 @@ const PUBLISHED_PERIOD_MS: u128 = 30_000;
 /// their windows read for themselves.
 /// With `waiting_only`, only the selections a window waits for, and the shared counts only if
 /// there are none yet. Returns whether any selection's counts changed.
-pub(in crate::api) fn refresh_published(
+pub fn refresh_published(
     state: &AppState,
     idle_ms: u64,
     waiting_only: bool,
@@ -390,7 +390,7 @@ pub(in crate::api) fn refresh_published(
 /// whichever runtimes those are. They are read again each clock `period` too, since a peer's replication
 /// successes change them with no claim, as do a new conflicting operation and the fleet's
 /// membership, compared each time.
-pub(in crate::api) fn published_machines(
+pub fn published_machines(
     state: &AppState,
     generation: u64,
     session: &ClientSession,

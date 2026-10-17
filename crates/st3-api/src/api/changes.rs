@@ -3,7 +3,7 @@ use crate::changes::{service::Entry, view};
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ReadQuery {
+pub struct ReadQuery {
     repository: String,
     #[serde(default)]
     offline: bool,
@@ -39,7 +39,7 @@ fn owner_diagnostics(entry: &Entry) -> Value {
         "shared_account_isolation":"not_established"})
 }
 
-pub(super) async fn list(
+pub async fn list(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
     Query(query): Query<ReadQuery>,
@@ -115,7 +115,7 @@ pub(super) async fn list(
     Ok(Json(value))
 }
 
-pub(super) async fn show(
+pub async fn show(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
     Query(query): Query<ReadQuery>,
@@ -146,11 +146,11 @@ pub(super) async fn show(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct SyncRequest {
+pub struct SyncRequest {
     repository: String,
 }
 
-pub(super) async fn sync(
+pub async fn sync(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
     Json(request): Json<SyncRequest>,

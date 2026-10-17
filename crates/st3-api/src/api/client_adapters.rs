@@ -60,7 +60,7 @@ fn adapter_route(state: &AppState, actor: &str) -> Result<(Vec<String>, String),
 }
 
 #[derive(Deserialize)]
-pub(super) struct DeliveryQuery {
+pub struct DeliveryQuery {
     #[serde(default)]
     after: u64,
     #[serde(default)]
@@ -69,7 +69,7 @@ pub(super) struct DeliveryQuery {
 
 /// Interim bounded watch: a durable local graph frontier, not a provider receipt.
 /// Subscribe before reading so a reply between the read and wait is never lost.
-pub(super) async fn deliveries(
+pub async fn deliveries(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Query(query): Query<DeliveryQuery>,
@@ -128,7 +128,7 @@ pub(super) async fn deliveries(
 
 /// Import as an external sender while retaining the adapter's own upload authority.
 /// The selected program-seat declaration binds an explicit account set to one destination.
-pub(super) async fn import_message(
+pub async fn import_message(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Json(mut request): Json<MessageSendRequest>,

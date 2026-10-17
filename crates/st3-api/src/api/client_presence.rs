@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};
 
 /// The header a client names itself with.
-pub(super) const CLIENT_HEADER: &str = "x-st3-client";
+pub const CLIENT_HEADER: &str = "x-st3-client";
 /// How long a client that only made requests stays in the list after its last one.
 const SEEN_FOR_MS: u128 = 5 * 60 * 1_000;
 /// Bound the memory a stream of distinct clients can take.
@@ -59,7 +59,7 @@ fn changes() -> &'static tokio::sync::broadcast::Sender<String> {
     CHANGES.get_or_init(|| tokio::sync::broadcast::channel(64).0)
 }
 
-pub(super) fn subscribe() -> tokio::sync::broadcast::Receiver<String> {
+pub fn subscribe() -> tokio::sync::broadcast::Receiver<String> {
     changes().subscribe()
 }
 
@@ -68,7 +68,7 @@ fn changed(member: &str) {
 }
 
 /// The client's own name for itself, bounded and printable, or none.
-pub(super) fn client_name(headers: &HeaderMap) -> Option<String> {
+pub fn client_name(headers: &HeaderMap) -> Option<String> {
     let name = headers.get(CLIENT_HEADER)?.to_str().ok()?.trim();
     let name: String = name
         .chars()
@@ -81,7 +81,7 @@ pub(super) fn client_name(headers: &HeaderMap) -> Option<String> {
 /// How the client reached this member: its own machine, or a paired device through the client
 /// gateway (a Tailscale forward or Fabric reach the same socket, so st can say only that,
 /// unless Tailscale Serve names itself).
-pub(super) fn via(session: &ClientSession, headers: &HeaderMap) -> &'static str {
+pub fn via(session: &ClientSession, headers: &HeaderMap) -> &'static str {
     if session.transport == "unix" {
         "local"
     } else if headers.contains_key("tailscale-user-login") {
@@ -101,7 +101,7 @@ fn key(member: &str, session: &ClientSession, client: Option<String>, via: &'sta
 }
 
 /// Note one client request.
-pub(super) fn note_request(
+pub fn note_request(
     member: &str,
     session: &ClientSession,
     headers: &HeaderMap,
@@ -129,10 +129,10 @@ pub(super) fn note_request(
 }
 
 /// An open stream, listed until it is dropped.
-pub(super) struct StreamGuard(u64);
+pub struct StreamGuard(u64);
 
 /// Note an open collection or terminal stream; it leaves the list when the guard drops.
-pub(super) fn open_stream(
+pub fn open_stream(
     member: &str,
     session: &ClientSession,
     headers: &HeaderMap,
@@ -159,7 +159,7 @@ pub(super) fn open_stream(
 
 impl StreamGuard {
     /// The stream now follows `what` under subscription `id`.
-    pub(super) fn follow(&self, id: &str, what: String) {
+    pub fn follow(&self, id: &str, what: String) {
         if let Ok(mut presence) = presence().lock()
             && let Some(stream) = presence.streams.get_mut(&self.0)
             && stream.follows.get(id) != Some(&what)
@@ -169,7 +169,7 @@ impl StreamGuard {
         }
     }
 
-    pub(super) fn unfollow(&self, id: &str) {
+    pub fn unfollow(&self, id: &str) {
         if let Ok(mut presence) = presence().lock()
             && let Some(stream) = presence.streams.get_mut(&self.0)
             && stream.follows.remove(id).is_some()
@@ -190,7 +190,7 @@ impl Drop for StreamGuard {
 }
 
 /// Capture expiry from the delivered rows: another reader may prune the shared source first.
-pub(super) fn next_expiry(rows: &[Value]) -> Option<u128> {
+pub fn next_expiry(rows: &[Value]) -> Option<u128> {
     rows.iter().filter(|row| row["connected"] == false)
         .filter_map(|row| row["last_seen"].as_str())
         .filter_map(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
@@ -200,7 +200,7 @@ pub(super) fn next_expiry(rows: &[Value]) -> Option<u128> {
 
 /// The clients connected to `member` now and those seen in the last few minutes, newest first:
 /// one row per client, person or agent, and way in.
-pub(super) fn list(member: &str, now_ms: u128) -> Vec<Value> {
+pub fn list(member: &str, now_ms: u128) -> Vec<Value> {
     let Ok(mut presence) = presence().lock() else {
         return Vec::new();
     };

@@ -19,15 +19,15 @@ type RowReader = dyn Fn(
     + Send
     + Sync;
 
-pub(super) struct Adapter {
-    pub(super) view: &'static str,
+pub struct Adapter {
+    pub view: &'static str,
     // Keys are hints, never proof that other retained rows are current. The adapter
     // selects bounded authorized IDs first and verifies every reused row's generation
     // at this boundary, then fetches only changed/new rows. Full window folding is forbidden.
-    pub(super) rows: Arc<RowReader>,
+    pub rows: Arc<RowReader>,
 }
 
-pub(super) struct Sources {
+pub struct Sources {
     store: Arc<Store>,
     bridge: Arc<IvmViewBridge<Store>>,
     adapters: BTreeMap<String, Arc<Adapter>>,
@@ -36,7 +36,7 @@ pub(super) struct Sources {
 impl Sources {
     /// Called on a blocking worker after the explicit Store installer. Receipt waits and
     /// sockets obtain the same runtime-held Arc; this path never attaches a publisher.
-    pub(super) fn from_store(
+    pub fn from_store(
         store: Arc<Store>,
         adapters: BTreeMap<String, Arc<Adapter>>,
     ) -> anyhow::Result<Option<Arc<Self>>> {
@@ -56,29 +56,29 @@ impl Sources {
         })))
     }
 
-    pub(super) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<events::Notice> {
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<events::Notice> {
         self.bridge.subscribe()
     }
 
-    pub(super) fn adapter(&self, collection: &str) -> Option<Arc<Adapter>> {
+    pub fn adapter(&self, collection: &str) -> Option<Arc<Adapter>> {
         self.adapters.get(collection).cloned()
     }
 }
 
 #[derive(Clone)]
-pub(super) struct Delivered {
+pub struct Delivered {
     boundary: events::Boundary,
     authority: String,
     continuation: Option<events::SnapshotVersion>,
 }
 
 #[derive(Default)]
-pub(super) struct Held {
-    pub(super) cursor: Option<Delivered>,
-    pub(super) rows: Arc<BTreeMap<String, Value>>,
+pub struct Held {
+    pub cursor: Option<Delivered>,
+    pub rows: Arc<BTreeMap<String, Value>>,
 }
 
-pub(super) enum Output {
+pub enum Output {
     Window(Window),
     /// Keep the last delivered rows stale until Ready or a client resubscription.
     Unavailable,
@@ -88,11 +88,11 @@ pub(super) enum Output {
     Silent,
 }
 
-pub(super) struct Candidate {
-    pub(super) output: Output,
-    pub(super) delivered: Option<Delivered>,
-    pub(super) again: bool,
-    pub(super) replace: bool,
+pub struct Candidate {
+    pub output: Output,
+    pub delivered: Option<Delivered>,
+    pub again: bool,
+    pub replace: bool,
 }
 
 fn authority(session: &ClientSession) -> String {
@@ -129,7 +129,7 @@ fn authorize(
 
 /// Read a candidate without changing any delivered cursor. The socket applies Candidate
 /// only after sending its snapshot/changes/resync successfully (or proving silence).
-pub(super) async fn read(
+pub async fn read(
     state: AppState,
     session: ClientSession,
     request: CollectionSubscribe,

@@ -3,12 +3,12 @@ use super::*;
 use crate::store::mission_list::MissionRows;
 use crate::store::published_list::{ListRead, Publication, PublicationId};
 
-pub(crate) const NOT_READY: &str = "mission-list-not-ready";
-pub(crate) const ENDED: &str = "mission-list-ended";
+pub const NOT_READY: &str = "mission-list-not-ready";
+pub const ENDED: &str = "mission-list-ended";
 
 type MissionPublication = (Arc<Publication<MissionRows>>, PublicationId);
 
-pub(crate) fn not_ready() -> ApiError {
+pub fn not_ready() -> ApiError {
     ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: NOT_READY.into(),
@@ -17,7 +17,7 @@ pub(crate) fn not_ready() -> ApiError {
     }
 }
 
-pub(super) fn current(store: &Store) -> Result<Option<MissionPublication>, ApiError> {
+pub fn current(store: &Store) -> Result<Option<MissionPublication>, ApiError> {
     let list = store.published_missions_list();
     match list.current() {
         ListRead::Served(publication, id) => Ok(Some((publication, id))),
@@ -51,7 +51,7 @@ fn contract(snapshot: &ClientSnapshot, query: &ClientListQuery, limit: usize) ->
         &query.owner_run, &query.status, query.native_only)).expect("a page contract serializes")
 }
 
-pub(in crate::api) fn page(
+pub fn page(
     state: &AppState,
     requested_snapshot: ClientSnapshot,
     query: &ClientListQuery,
@@ -143,7 +143,7 @@ pub(in crate::api) fn page(
     })))
 }
 
-pub(crate) fn register_metrics(store: &Arc<Store>) {
+pub fn register_metrics(store: &Arc<Store>) {
     if !crate::otel::metrics_enabled() { return; }
     let store = Arc::downgrade(store);
     opentelemetry::global::meter("st3.missions")
@@ -161,7 +161,7 @@ pub(crate) fn register_metrics(store: &Arc<Store>) {
         }).build();
 }
 
-pub(crate) fn record_rebuild(elapsed: Duration) {
+pub fn record_rebuild(elapsed: Duration) {
     if !crate::otel::metrics_enabled() { return; }
     static DURATION: std::sync::LazyLock<opentelemetry::metrics::Histogram<f64>> = std::sync::LazyLock::new(||
         opentelemetry::global::meter("st3.missions")

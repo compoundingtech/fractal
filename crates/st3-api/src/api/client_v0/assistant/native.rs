@@ -1,7 +1,7 @@
 //! Daemon-owned approval asks and transaction-bound assistant write provenance.
 use super::*;
 
-pub(in crate::api) async fn propose(State(state): State<AppState>, Extension(snapshot): Extension<ClientSnapshot>,
+pub async fn propose(State(state): State<AppState>, Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>, Json(request): Json<ActionRequest>) -> Result<Json<Value>, ApiError> {
     if !matches!(request.action_type.as_str(), "work.done" | "message.send" | "custom.reply") {
         return Err(forbidden("only typed person answers, custom replies and message sends may be proposed"));

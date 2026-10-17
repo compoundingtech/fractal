@@ -49,7 +49,7 @@ pub struct OwnRequest {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub(super) struct WatchesQuery {
+pub struct WatchesQuery {
     #[serde(default)]
     agent: Option<String>,
 }
@@ -151,7 +151,7 @@ fn watchable(thread: &ThreadRef, github: &Value) -> Result<(), ApiError> {
     ))
 }
 
-pub(super) async fn watch(
+pub async fn watch(
     State(state): State<AppState>,
     Json(request): Json<WatchRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -355,7 +355,7 @@ async fn read_object_at(
     Ok((object, login))
 }
 
-pub(super) async fn comment(
+pub async fn comment(
     State(state): State<AppState>,
     Json(request): Json<CommentRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -413,7 +413,7 @@ pub(super) async fn comment(
     Ok(Json(record))
 }
 
-pub(super) async fn own(
+pub async fn own(
     State(state): State<AppState>,
     Json(request): Json<OwnRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -457,7 +457,7 @@ pub(super) async fn own(
     Ok(Json(record))
 }
 
-pub(super) async fn unwatch(
+pub async fn unwatch(
     State(state): State<AppState>,
     Json(request): Json<UnwatchRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -494,7 +494,7 @@ pub(super) async fn unwatch(
     })))
 }
 
-pub(super) async fn watches(
+pub async fn watches(
     State(state): State<AppState>,
     Query(query): Query<WatchesQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {

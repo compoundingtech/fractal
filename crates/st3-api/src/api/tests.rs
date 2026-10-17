@@ -1773,7 +1773,7 @@ fn doctor_unread_counts_exclude_historical_recipients_and_people() {
     );
 }
 
-pub(super) fn state(root: &Path) -> AppState {
+pub fn state(root: &Path) -> AppState {
     AppState {
         owning_person: None,
         store: Arc::new(Store::open_memory("node").unwrap()),

@@ -86,7 +86,7 @@ impl<R> Drop for Withdraw<R> {
 /// The work list's refresher runs but has nothing current to serve: before its first
 /// publication, after it withdrew rows it could not keep current, or after a forget until its
 /// fold from nothing publishes. A reader never folds the list itself meanwhile.
-pub(crate) fn work_list_not_ready() -> ApiError {
+pub fn work_list_not_ready() -> ApiError {
     ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: WORK_LIST_NOT_READY.into(),
@@ -96,7 +96,7 @@ pub(crate) fn work_list_not_ready() -> ApiError {
 }
 
 /// A fresh read waited its whole bound and no publication reached the cut it froze.
-pub(crate) fn work_list_not_fresh(wanted_cut: u64, newest_cut: Option<u64>) -> ApiError {
+pub fn work_list_not_fresh(wanted_cut: u64, newest_cut: Option<u64>) -> ApiError {
     ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: WORK_LIST_NOT_FRESH.into(),
@@ -111,7 +111,7 @@ pub(crate) fn work_list_not_fresh(wanted_cut: u64, newest_cut: Option<u64>) -> A
 
 /// The work list's refresher stopped after it started: nothing publishes the list until the
 /// daemon restarts, and no reader folds it meanwhile. Not retryable.
-pub(crate) fn work_list_ended() -> ApiError {
+pub fn work_list_ended() -> ApiError {
     ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: WORK_LIST_ENDED.into(),
@@ -120,9 +120,9 @@ pub(crate) fn work_list_ended() -> ApiError {
     }
 }
 
-pub(crate) const WORK_LIST_NOT_READY: &str = "work-list-not-ready";
-pub(crate) const WORK_LIST_NOT_FRESH: &str = "work-list-not-fresh";
-pub(crate) const WORK_LIST_ENDED: &str = "work-list-ended";
+pub const WORK_LIST_NOT_READY: &str = "work-list-not-ready";
+pub const WORK_LIST_NOT_FRESH: &str = "work-list-not-fresh";
+pub const WORK_LIST_ENDED: &str = "work-list-ended";
 
 /// Grace periods and checkpoint waits move runs in and out of waiting on a person without a
 /// claim, so the missions list rereads them at least this often.
@@ -162,14 +162,14 @@ pub fn start_published_lists(state: &AppState) {
 
 /// Start only the work list's refresher, for tests that hold work windows beside windows read
 /// directly.
-#[cfg(test)]
-pub(crate) fn start_published_work(state: &AppState) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn start_published_work(state: &AppState) {
     spawn(state.store.clone(), |store| store.published_work_list(), "work", "work/refresh", fold_work, true, false);
 }
 
 /// Fold and publish the work list once, as its refresher does, for tests that drive it.
-#[cfg(test)]
-pub(crate) fn refresh_work_once(store: &Store) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn refresh_work_once(store: &Store) {
     let list = store.published_work_list();
     let (base, generation) = list.base();
     match fold_work(store, base.as_deref()).unwrap() {
@@ -676,7 +676,7 @@ fn valid_until(rows: &MissionRows, now: u128) -> u128 {
 
 /// A current missions window from a publication: its first `limit` cards, bounded as a page
 /// is, and whether more follow.
-pub(super) fn mission_window(rows: &MissionRows, limit: usize) -> anyhow::Result<(Vec<Value>, bool)> {
+pub fn mission_window(rows: &MissionRows, limit: usize) -> anyhow::Result<(Vec<Value>, bool)> {
     let mut has_more = rows.order.len() > limit;
     let mut items = rows
         .order
@@ -958,7 +958,7 @@ fn work_since(store: &Store, base: &Publication<WorkRows>) -> anyhow::Result<Adv
 /// A current work window from a publication: the first `limit` rows the actor, if any, sees,
 /// in the list's order, and whether more follow. An actor's ready work follows its seat queue's
 /// order at the publication's own cut.
-pub(super) fn work_window(rows: &WorkRows, actor: Option<&str>, limit: usize) -> (Vec<Value>, bool) {
+pub fn work_window(rows: &WorkRows, actor: Option<&str>, limit: usize) -> (Vec<Value>, bool) {
     match actor {
         None => rows.page_of(None, 0, limit),
         Some(actor) => {

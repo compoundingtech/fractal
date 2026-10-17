@@ -221,7 +221,7 @@ fn refresh_waiting_summary(state: &AppState, starting: bool) -> Option<anyhow::R
 /// attention reads changed since the newest publication, else a fold of every person's rows.
 /// A fold that comes out equal keeps the published rows, so windows have nothing to reread.
 /// The clock is read inside the snapshot: every local claim in it was accepted before then.
-pub(crate) fn refresh_attention_list(store: &Store) -> anyhow::Result<()> {
+pub fn refresh_attention_list(store: &Store) -> anyhow::Result<()> {
     let (generation, previous) = store.newest_attention_list();
     let clock = ATTENTION_LIST_CLOCK.as_millis();
     store.read_snapshot(|index| {
@@ -308,7 +308,7 @@ pub(crate) fn refresh_attention_list(store: &Store) -> anyhow::Result<()> {
 
 /// Publish every person's rows of `view` (glasses or arrangements) at the current cut in one
 /// short snapshot, reading again only the people whose rows may have changed.
-pub(crate) fn refresh_owner_list(store: &Store, view: OwnerView) -> anyhow::Result<()> {
+pub fn refresh_owner_list(store: &Store, view: OwnerView) -> anyhow::Result<()> {
     if store.refresh_owner_list(view, client_now_ms())? {
         store.publish_collection_view(view.collection());
     }
@@ -319,7 +319,7 @@ pub(crate) fn refresh_owner_list(store: &Store, view: OwnerView) -> anyhow::Resu
 /// publication, with its cut and publication time. `None` while a refresher runs but has
 /// published nothing yet; the refresher is woken either way when the publication is older than
 /// the window's snapshot at `index`.
-pub(crate) fn published_owner_rows(
+pub fn published_owner_rows(
     store: &Store,
     view: OwnerView,
     index: u64,
@@ -344,7 +344,7 @@ pub(crate) fn published_owner_rows(
 /// none), at most `keep` of them, with that publication's cut and publication time. `None`
 /// while a refresher runs but has published nothing yet; the refresher is woken either way
 /// when the publication is older than `index`.
-pub(crate) fn published_attention_rows(
+pub fn published_attention_rows(
     store: &Store,
     index: u64,
     person: Option<&str>,
@@ -368,7 +368,7 @@ pub(crate) fn published_attention_rows(
 }
 
 /// A window of a published view before its first publication: retry shortly.
-pub(super) fn published_view_not_ready(collection: &str) -> ApiError {
+pub fn published_view_not_ready(collection: &str) -> ApiError {
     ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         code: format!("{collection}-not-ready"),

@@ -13,7 +13,7 @@ use crate::message_body::BodyAttachment as _;
 
 /// An upload is checked against its own limit so a too-large one answers in the API's own error
 /// vocabulary; the route's body limit is just above it.
-pub(super) const UPLOAD_BODY_LIMIT: usize = MAX_BLOB_BYTES + 4096;
+pub const UPLOAD_BODY_LIMIT: usize = MAX_BLOB_BYTES + 4096;
 
 fn retention() -> Duration {
     std::env::var("ST3_BLOB_RETENTION_HOURS")
@@ -47,7 +47,7 @@ fn sweep_occasionally(state: &AppState) {
         .expire_blob_uploads(u64::try_from(window.as_millis()).unwrap_or(u64::MAX));
 }
 
-pub(super) fn blob_error(error: St3Error) -> ApiError {
+pub fn blob_error(error: St3Error) -> ApiError {
     let status = match error.code {
         "blob-too-large" => StatusCode::PAYLOAD_TOO_LARGE,
         "unsupported-media-type" => StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -69,7 +69,7 @@ fn blob_reply(value: Value) -> Json<Value> {
 }
 
 /// `POST /v1/client/blobs`: keep the bytes of one image on this member and answer their reference.
-pub(super) async fn upload(
+pub async fn upload(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     headers: HeaderMap,
@@ -109,7 +109,7 @@ pub(super) async fn upload(
 
 /// Whether a person may read a message's attachments: the people in the conversation, and
 /// anyone, under free mode, where an agent is a party.
-pub(super) fn person_reads_message(store: &Store, person: &str, message: &MessageView) -> bool {
+pub fn person_reads_message(store: &Store, person: &str, message: &MessageView) -> bool {
     let mut current = Some(message.clone());
     for _ in 0..16 {
         let Some(view) = current else {
@@ -217,7 +217,7 @@ fn blob_parts(id: &str) -> Result<String, ApiError> {
     })
 }
 
-pub(super) fn read_error(state: &AppState, host: &str, error: anyhow::Error) -> ApiError {
+pub fn read_error(state: &AppState, host: &str, error: anyhow::Error) -> ApiError {
     match error.downcast_ref::<ClientReadRejected>() {
         Some(rejected) if rejected.code != "remote-unavailable" => ApiError {
             status: StatusCode::from_u16(rejected.status).unwrap_or(StatusCode::BAD_GATEWAY),
@@ -231,7 +231,7 @@ pub(super) fn read_error(state: &AppState, host: &str, error: anyhow::Error) -> 
 
 /// Make the bytes local: fetch them from the member that took the upload, over the same peer
 /// route a relayed client read takes, and keep a copy. The hash is checked before keeping.
-pub(super) async fn ensure_local(
+pub async fn ensure_local(
     state: &AppState,
     session: &ClientSession,
     hash: &str,
@@ -322,7 +322,7 @@ pub(super) async fn ensure_local(
 }
 
 #[derive(Deserialize)]
-pub(super) struct BlobQuery {
+pub struct BlobQuery {
     message: Option<String>,
     offset: Option<u64>,
     /// Answer from this member's files only. A member asked on behalf of another sets it, so a
@@ -331,7 +331,7 @@ pub(super) struct BlobQuery {
 }
 
 /// `GET /v1/client/blobs/{sha256}?message=message/ID`: the bytes themselves.
-pub(super) async fn get(
+pub async fn get(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -385,7 +385,7 @@ pub(super) async fn get(
 /// `GET /v1/client/blobs/{sha256}/chunk?message=message/ID&offset=N`: up to 512 KiB of the
 /// bytes from `offset`, base64 in JSON, with the total size. Clients bound by the negotiated
 /// response size, and members carrying a file between them, read this way.
-pub(super) async fn chunk(
+pub async fn chunk(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -463,7 +463,7 @@ pub(super) async fn chunk(
 
 /// The attachments of a send, completed from this member's files: each must be an upload by
 /// the sender that is still held, of the type the sender names, and the message may carry few.
-pub(super) fn resolve_attachments(
+pub fn resolve_attachments(
     state: &AppState,
     sender: &str,
     inputs: &[AttachmentInput],

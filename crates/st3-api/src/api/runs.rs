@@ -2,7 +2,7 @@ use super::*;
 
 /// Start running each exec gate of a mission file once, the way a run would: `st missions check`.
 /// The answer lists every gate; poll `GET /v1/gate-checks/{id}` until it is finished.
-pub(super) async fn start_gate_check(
+pub async fn start_gate_check(
     State(state): State<AppState>,
     Json(request): Json<crate::model::GateCheckRequest>,
 ) -> Result<Json<crate::model::GateCheckView>, ApiError> {
@@ -40,7 +40,7 @@ pub(super) async fn start_gate_check(
     Ok(Json(view))
 }
 
-pub(super) async fn read_gate_check(
+pub async fn read_gate_check(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<crate::model::GateCheckView>, ApiError> {
     crate::api::read_deadline::spawn_blocking(move || crate::gate_check::poll(&id))
@@ -54,7 +54,7 @@ pub(super) async fn read_gate_check(
         })
 }
 
-pub(super) async fn start_eval(
+pub async fn start_eval(
     State(state): State<AppState>,
     Json(request): Json<EvalStartRequest>,
 ) -> Result<Json<EvalStartResponse>, ApiError> {
@@ -182,7 +182,7 @@ pub(super) async fn start_eval(
     }))
 }
 
-pub(super) async fn get_eval(
+pub async fn get_eval(
     State(state): State<AppState>,
     AxumPath(run): AxumPath<String>,
 ) -> Result<Json<EvalStatus>, ApiError> {
@@ -233,24 +233,24 @@ pub(super) async fn get_eval(
 }
 
 #[derive(Deserialize)]
-pub(super) struct MissionRunQuery {
+pub struct MissionRunQuery {
     root: Option<String>,
     mission: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(super) struct MissionRunTreeQuery {
+pub struct MissionRunTreeQuery {
     root: String,
     after: Option<String>,
     limit: Option<usize>,
 }
 
 #[derive(Deserialize)]
-pub(super) struct MissionOverviewQuery {
+pub struct MissionOverviewQuery {
     mission: String,
 }
 
-pub(super) async fn mission_overview(
+pub async fn mission_overview(
     State(state): State<AppState>,
     Query(query): Query<MissionOverviewQuery>,
 ) -> Result<Json<Value>, ApiError> {
@@ -264,7 +264,7 @@ pub(super) async fn mission_overview(
 }
 
 #[derive(Deserialize)]
-pub(super) struct OutcomeHistoryQuery {
+pub struct OutcomeHistoryQuery {
     collection: String,
     #[serde(default)]
     since: u64,
@@ -275,7 +275,7 @@ pub(super) struct OutcomeHistoryQuery {
     limit: Option<usize>,
 }
 
-pub(super) async fn outcome_history(
+pub async fn outcome_history(
     State(state): State<AppState>,
     Query(query): Query<OutcomeHistoryQuery>,
 ) -> Result<Json<Value>, ApiError> {
@@ -311,11 +311,11 @@ pub(super) async fn outcome_history(
     .map(Json)
 }
 
-pub(super) async fn performance_report() -> Json<Value> {
+pub async fn performance_report() -> Json<Value> {
     Json(crate::performance::snapshot())
 }
 
-pub(super) async fn list_mission_runs(
+pub async fn list_mission_runs(
     State(state): State<AppState>,
     Query(query): Query<MissionRunQuery>,
 ) -> Result<Json<Vec<MissionRunView>>, ApiError> {
@@ -340,7 +340,7 @@ pub(super) async fn list_mission_runs(
     }
 }
 
-pub(super) async fn list_mission_run_tree(
+pub async fn list_mission_run_tree(
     State(state): State<AppState>,
     Query(query): Query<MissionRunTreeQuery>,
 ) -> Result<Json<crate::model::MissionRunTreePage>, ApiError> {
@@ -392,7 +392,7 @@ fn annotate_stuck_gates(store: &Store, runs: &mut [MissionRunView]) -> anyhow::R
     Ok(())
 }
 
-pub(super) async fn get_mission_run(
+pub async fn get_mission_run(
     State(state): State<AppState>,
     AxumPath(run): AxumPath<String>,
 ) -> Result<Json<MissionRunView>, ApiError> {
@@ -410,7 +410,7 @@ pub(super) async fn get_mission_run(
     .ok_or_else(|| ApiError::not_found(format!("mission run `{run}` does not exist")))
 }
 
-pub(super) async fn revise_mission_run(
+pub async fn revise_mission_run(
     State(state): State<AppState>,
     AxumPath(run): AxumPath<String>,
     Json(request): Json<MissionRevisionRequest>,
@@ -567,7 +567,7 @@ pub(super) async fn revise_mission_run(
     Ok(Json(revised))
 }
 
-pub(super) async fn list_run_generations(
+pub async fn list_run_generations(
     State(state): State<AppState>,
     AxumPath(run): AxumPath<String>,
 ) -> Result<Json<Vec<RunGenerationView>>, ApiError> {
@@ -577,7 +577,7 @@ pub(super) async fn list_run_generations(
         .map(Json)
 }
 
-pub(super) async fn get_run_generation(
+pub async fn get_run_generation(
     State(state): State<AppState>,
     AxumPath(generation): AxumPath<String>,
 ) -> Result<Json<RunGenerationView>, ApiError> {
@@ -589,7 +589,7 @@ pub(super) async fn get_run_generation(
         .ok_or_else(|| ApiError::not_found(format!("run generation `{generation}` does not exist")))
 }
 
-pub(super) async fn get_run_revision_proposal(
+pub async fn get_run_revision_proposal(
     State(state): State<AppState>,
     AxumPath(run): AxumPath<String>,
 ) -> Result<Json<RevisionProposalView>, ApiError> {
@@ -606,7 +606,7 @@ pub(super) async fn get_run_revision_proposal(
 }
 
 /// A person or an agent sets a finished run's outcome.
-pub(super) async fn set_mission_run_outcome(
+pub async fn set_mission_run_outcome(
     State(state): State<AppState>,
     AxumPath(run): AxumPath<String>,
     Json(request): Json<MissionRunOutcomeRequest>,
@@ -640,7 +640,7 @@ pub(super) async fn set_mission_run_outcome(
 }
 
 /// A person or the run's requester changes who a running run reports to.
-pub(super) async fn set_mission_run_report(
+pub async fn set_mission_run_report(
     State(state): State<AppState>,
     AxumPath(run): AxumPath<String>,
     Json(request): Json<MissionRunReportRequest>,

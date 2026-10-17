@@ -1,7 +1,7 @@
 //! Person-owned arrangements use the shared register projection, never glass privacy or history folds.
 use super::*;
 
-pub(super) fn person(
+pub fn person(
     session: &ClientSession,
     requested: Option<&str>,
     write: bool,
@@ -22,7 +22,7 @@ pub(super) fn person(
 }
 
 /// Keep whole resources; byte bounds may shorten a count-bounded authoritative window.
-pub(crate) fn window_end(items: &[Value], offset: usize, end: usize) -> Result<usize, ApiError> {
+pub fn window_end(items: &[Value], offset: usize, end: usize) -> Result<usize, ApiError> {
     let budget = CLIENT_MAX_RESPONSE_BYTES - 128_000;
     let mut used = 0;
     let mut kept = offset;
@@ -40,7 +40,7 @@ pub(crate) fn window_end(items: &[Value], offset: usize, end: usize) -> Result<u
     Ok(kept)
 }
 
-pub(crate) async fn list(
+pub async fn list(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Extension(request_snapshot): Extension<ClientSnapshot>,
@@ -64,7 +64,7 @@ pub(crate) async fn list(
     Ok((Extension(snapshot), Json(page)))
 }
 
-pub(crate) async fn get(
+pub async fn get(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath((name, uuid)): AxumPath<(String, String)>,
@@ -92,7 +92,7 @@ struct Edit {
     operations: Vec<st3_schema::arrangements::Operation>,
 }
 
-pub(super) async fn edit(
+pub async fn edit(
     state: &AppState,
     session: &ClientSession,
     request: &ActionRequest,

@@ -12,11 +12,11 @@ fn forbidden(message: &str) -> ApiError {
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct NoteQuery {
+pub struct NoteQuery {
     actor: Option<String>,
 }
 
-pub(super) async fn read(
+pub async fn read(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
     Query(query): Query<NoteQuery>,
@@ -38,14 +38,14 @@ pub(super) async fn read(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct NoteWrite {
+pub struct NoteWrite {
     person: String,
     actor: String,
     text: Option<String>,
     expires_at: Option<String>,
 }
 
-pub(super) async fn write(
+pub async fn write(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<NoteWrite>,

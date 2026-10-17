@@ -6,8 +6,8 @@ use super::*;
 
 /// Default and ceiling of an assistant response, including its whole JSON envelope. The
 /// route enforces the envelope; content sources read no more than this many bytes.
-pub(super) const DEFAULT_RESPONSE_BYTES: usize = 4 * 1024;
-pub(super) const MAX_RESPONSE_BYTES: usize = 16 * 1024;
+pub const DEFAULT_RESPONSE_BYTES: usize = 4 * 1024;
+pub const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 
 const ATTENTION_KINDS: &[&str] = &[
     "human-gate", "launch-approval", "revision-approval", "unread-message", "person-step",
@@ -34,7 +34,7 @@ const TERMINAL_FIELDS: &[&str] = &[
 /// Project one assistant read with the snapshot its rows were read in. `parameters` are the
 /// exact decoded query parameters the read authorization names; the person is the
 /// configured owner, never a parameter. A cursor or content read keeps `snapshot`.
-pub(super) async fn project(
+pub async fn project(
     state: &AppState,
     snapshot: &ClientSnapshot,
     projection: &str,
@@ -549,4 +549,4 @@ async fn terminal(
 
 #[cfg(test)]
 #[path = "reads_tests.rs"]
-pub(super) mod tests;
+pub mod tests;

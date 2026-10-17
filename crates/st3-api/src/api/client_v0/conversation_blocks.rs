@@ -19,7 +19,7 @@ fn read_slots(_transcript: &std::path::Path) -> &'static tokio::sync::Semaphore 
 }
 
 #[cfg(test)]
-fn read_slots(transcript: &std::path::Path) -> std::sync::Arc<tokio::sync::Semaphore> {
+pub fn read_slots(transcript: &std::path::Path) -> std::sync::Arc<tokio::sync::Semaphore> {
     static SCOPES: crate::external_sessions::timeline_test_support::Scopes<tokio::sync::Semaphore> =
         LazyLock::new(Default::default);
     crate::external_sessions::timeline_test_support::scoped(&SCOPES, transcript, || {
@@ -28,7 +28,7 @@ fn read_slots(transcript: &std::path::Path) -> std::sync::Arc<tokio::sync::Semap
 }
 
 #[cfg(test)]
-fn read_slot(
+pub fn read_slot(
     slots: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
     slots.try_acquire_owned().map_err(|_| ApiError {
@@ -64,7 +64,7 @@ fn invalidated() -> ApiError {
         details: Box::new(serde_json::Map::from_iter([("full_resync".into(), json!(true))])) }
 }
 
-pub(super) fn source(state: &AppState, session_id: &str) -> Result<ExternalSession, ApiError> {
+pub fn source(state: &AppState, session_id: &str) -> Result<ExternalSession, ApiError> {
     let snapshot = new_client_snapshot(state);
     if let Some((owner, incarnation, origin)) =
         super::super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
@@ -109,7 +109,7 @@ pub(super) fn source(state: &AppState, session_id: &str) -> Result<ExternalSessi
 }
 
 /// Preserve transport/authorization codes while making conversation availability explicit.
-pub(in crate::api) fn availability(mut error: ApiError) -> ApiError {
+pub fn availability(mut error: ApiError) -> ApiError {
     if error.code == "remote-unavailable" {
         error
             .details
@@ -131,7 +131,7 @@ fn transcript_unavailable(reason: &str) -> ApiError {
     }
 }
 
-pub(super) fn basis(source: &ExternalSession) -> Result<String, ApiError> {
+pub fn basis(source: &ExternalSession) -> Result<String, ApiError> {
     let metadata = std::fs::metadata(&source.transcript)
         .map_err(|_| transcript_unavailable("the owner cannot inspect its transcript"))?;
     #[cfg(unix)]
@@ -326,7 +326,7 @@ fn bound(value: &mut Value) {
 
 /// Bound an open object's values without replacing its keys or its outer object.
 /// Callers attach a continuation to the original subtree, before this display-only edit.
-pub(crate) fn bound_open_value(value: &mut Value) -> bool {
+pub fn bound_open_value(value: &mut Value) -> bool {
     match value {
         Value::String(text) if text.len() > VALUE_BYTES => {
             *text = clipped(text);
@@ -505,7 +505,7 @@ fn image_refs(
 }
 
 /// Called before pagination: its held vectors contain only bounded display values and refs.
-pub(super) fn read(
+pub fn read(
     source: &ExternalSession,
     session: &ClientSession,
     session_id: &str,
@@ -528,15 +528,15 @@ pub(super) fn read(
     Ok(items)
 }
 
-pub(super) struct PreparedSlice {
-    pub(super) items: Vec<Value>,
-    pub(super) has_more: bool,
-    pub(super) basis: String,
+pub struct PreparedSlice {
+    pub items: Vec<Value>,
+    pub has_more: bool,
+    pub basis: String,
     /// Source content generation at this slice; moves on any non-append transcript change.
-    pub(super) generation: u64,
+    pub generation: u64,
 }
 
-pub(super) fn read_slice(
+pub fn read_slice(
     source: &ExternalSession,
     session: &ClientSession,
     session_id: &str,
@@ -573,7 +573,7 @@ pub(super) fn read_slice(
 }
 
 /// Called before pagination: its held vectors contain only bounded display values and refs.
-pub(super) fn prepare(
+pub fn prepare(
     source: &ExternalSession,
     session: &ClientSession,
     session_id: &str,
@@ -589,7 +589,7 @@ pub(super) fn prepare(
     Ok(items)
 }
 
-pub(super) fn prepare_one(
+pub fn prepare_one(
     source: &ExternalSession,
     session: &ClientSession,
     session_id: &str,
@@ -899,7 +899,7 @@ pub(super) fn prepare_one(
 }
 
 /// Keep negotiated data out of legacy relayed clients without changing their known enum.
-pub(in crate::api) fn legacy(value: &mut Value, session: &ClientSession) {
+pub fn legacy(value: &mut Value, session: &ClientSession) {
     if session.conversation_blocks {
         return;
     }
@@ -916,11 +916,11 @@ pub(in crate::api) fn legacy(value: &mut Value, session: &ClientSession) {
 }
 
 #[derive(Default, Deserialize)]
-pub(in crate::api) struct ChunkQuery {
+pub struct ChunkQuery {
     offset: Option<u64>,
 }
 
-pub(in crate::api) async fn chunk(
+pub async fn chunk(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath((id, reference)): AxumPath<(String, String)>,
@@ -965,7 +965,7 @@ pub(in crate::api) async fn chunk(
     .map(Json)
 }
 
-pub(super) async fn chunk_local(
+pub async fn chunk_local(
     state: &AppState,
     session: &ClientSession,
     session_id: &str,
@@ -1027,7 +1027,7 @@ pub(super) async fn chunk_local(
 /// revision its reference pins. The native record is read within `record_bytes`: a larger
 /// record is refused, never read whole. Attachments, images, tool payloads and other
 /// structured bodies are refused rather than rendered.
-pub(super) fn assistant_text(
+pub fn assistant_text(
     state: &AppState,
     session_id: &str,
     wanted: &str,
@@ -1280,7 +1280,7 @@ mod tests {
     use super::*;
     use crate::external_sessions::ExternalDriver;
 
-    pub(super) fn fixture(root: &std::path::Path, content: Value) -> ExternalSession {
+    pub fn fixture(root: &std::path::Path, content: Value) -> ExternalSession {
         let path = root.join(".omp/agent/sessions/example/native-test.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let header = json!({"type":"session","id":"native-test","cwd":"/work/example","timestamp":"2026-10-06T12:00:00Z"});

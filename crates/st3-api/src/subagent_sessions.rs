@@ -15,7 +15,7 @@ const CHILD_PREFIX: &str = "session/external-child-";
 /// The reversible id of a subagent conversation: the parent's external id and the task id,
 /// encoded together. It is stable for the same parent and task, and distinct from every other
 /// session id, because no inventoried id contains the `-child-` infix.
-pub(crate) fn child_session_id(parent: &ExternalSession, task_id: &str) -> String {
+pub fn child_session_id(parent: &ExternalSession, task_id: &str) -> String {
     format!(
         "{CHILD_PREFIX}{}",
         URL_SAFE_NO_PAD.encode(json!([parent.id, task_id]).to_string())
@@ -23,7 +23,7 @@ pub(crate) fn child_session_id(parent: &ExternalSession, task_id: &str) -> Strin
 }
 
 /// Split a child session id back into `(parent external id, task id)`.
-pub(crate) fn child_parts(session_id: &str) -> Option<(String, String)> {
+pub fn child_parts(session_id: &str) -> Option<(String, String)> {
     let encoded = session_id.strip_prefix(CHILD_PREFIX)?;
     let decoded = URL_SAFE_NO_PAD.decode(encoded).ok()?;
     let pair = serde_json::from_slice::<serde_json::Value>(&decoded).ok()?;
@@ -47,7 +47,7 @@ fn valid_task_id(task_id: &str) -> bool {
 /// The entry itself is never followed through a symlink: the harness writes it as a file, so a
 /// link there could only point a client at a file outside the session. The task directory may
 /// be a link, as st's managed seats link the companion directory to the original transcript's.
-pub(crate) fn child_transcript(parent: &ExternalSession, task_id: &str) -> Option<PathBuf> {
+pub fn child_transcript(parent: &ExternalSession, task_id: &str) -> Option<PathBuf> {
     if !valid_task_id(task_id) {
         return None;
     }
@@ -64,7 +64,7 @@ pub(crate) fn child_transcript(parent: &ExternalSession, task_id: &str) -> Optio
 /// Map a child session id back to its session. The parent must still resolve through normal
 /// discovery, with the same owner rules as any other native session, and the child transcript
 /// must exist beside it; otherwise the id names no conversation.
-pub(crate) fn resolve_child(
+pub fn resolve_child(
     home: Option<&Path>,
     session_id: &str,
 ) -> anyhow::Result<Option<ExternalSession>> {

@@ -4,10 +4,10 @@ use rusqlite::OptionalExtension as _;
 mod authorization;
 mod reads;
 mod native;
-pub(in crate::api) use native::propose;
-pub(in crate::api) use authorization::{ReadReceipt, finish as finish_read, pin as pin_read_trust, read as read_projection};
+pub use native::propose;
+pub use authorization::{ReadReceipt, finish as finish_read, pin as pin_read_trust, read as read_projection};
 
-pub(super) const PRINCIPAL: &str = "assistant/chatgpt";
+pub const PRINCIPAL: &str = "assistant/chatgpt";
 const BEGUN: &str = "custom.client.assistant.v1.begun";
 const GRANTED: &str = "custom.client.assistant.v1.granted";
 const POLICY: &str = "custom.client.assistant.v1.policy";
@@ -23,7 +23,7 @@ static TRANSITIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::api) struct AssistantPairingBegin {
+pub struct AssistantPairingBegin {
     api_version: String,
     device_name: String,
     assistant_id: String,
@@ -40,7 +40,7 @@ fn default_read_mode() -> String { "approval-once".into() }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::api) struct AssistantGrantPolicy {
+pub struct AssistantGrantPolicy {
     api_version: String,
     scopes: Vec<String>,
     #[serde(default = "default_expiry")]
@@ -57,7 +57,7 @@ fn owning_person(state: &AppState) -> Result<&str, ApiError> {
         .filter(|person| person.starts_with("person/") && person.matches('/').count() == 1 && person.len() > 7)
         .ok_or_else(|| forbidden("assistant grants require a configured concrete owning person"))
 }
-pub(super) fn trusted_issuer<'a>(state: &'a AppState, session: &ClientSession) -> Result<&'a str, ApiError> {
+pub fn trusted_issuer<'a>(state: &'a AppState, session: &ClientSession) -> Result<&'a str, ApiError> {
     let issuer = owning_person(state)?;
     if session.transport != "unix" || session.actor != issuer
         || session.authority_actor != issuer || session.pairing_grant.is_some() || session.local_peer {
@@ -132,14 +132,14 @@ fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
     Ok(())
 }
 
-pub(super) async fn begin(state: AppState, session: ClientSession,
+pub async fn begin(state: AppState, session: ClientSession,
                          request: AssistantPairingBegin) -> Result<Json<Value>, ApiError> {
     let result = begin_inner(state.clone(), session.clone(), request).await;
     let id = result.as_ref().ok().and_then(|Json(value)| value["grant_id"].as_str());
     audit(&state, "create", &session.actor, session.transport, id, &result)?;
     result
 }
-pub(super) async fn complete(state: &AppState, id: &str, request: &PairingComplete,
+pub async fn complete(state: &AppState, id: &str, request: &PairingComplete,
                             transport: &str) -> Result<Option<Json<Value>>, ApiError> {
     let result = complete_inner(state, id, request, transport).await;
     if !matches!(&result, Ok(None)) {
@@ -149,13 +149,13 @@ pub(super) async fn complete(state: &AppState, id: &str, request: &PairingComple
     }
     result
 }
-pub(in crate::api) async fn revoke(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
+pub async fn revoke(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                           AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
     let result = revoke_inner(State(state.clone()), Extension(session.clone()), AxumPath(id.clone())).await;
     audit(&state, "revoke", &session.actor, session.transport, Some(&id), &result)?;
     result
 }
-pub(in crate::api) async fn update_policy(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
+pub async fn update_policy(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                                  AxumPath(id): AxumPath<String>, Json(request): Json<AssistantGrantPolicy>)
     -> Result<Json<Value>, ApiError> {
     let result = update_policy_inner(State(state.clone()), Extension(session.clone()), AxumPath(id.clone()), Json(request)).await;
@@ -268,7 +268,7 @@ fn projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiError
     Ok(value)
 }
 
-pub(super) fn authenticate(state: &AppState, digest: &str, transport: &'static str)
+pub fn authenticate(state: &AppState, digest: &str, transport: &'static str)
     -> Result<Option<ClientSession>, ApiError> {
     let id: Option<String> = state.store.readers.get().query_row(
         "SELECT id FROM claims WHERE kind=?1 AND json_extract(body,'$.fields.credential_hash')=?2 ORDER BY store_index DESC LIMIT 1",
@@ -304,11 +304,11 @@ fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         conversation_blocks:false, local_peer:false, scopes })
 }
 
-pub(super) fn authorize_route(session: &ClientSession, request: &Request<Body>)
+pub fn authorize_route(session: &ClientSession, request: &Request<Body>)
     -> Result<(), ApiError> {
     authorization::route(session, request)
 }
-pub(in crate::api) async fn inspect(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
+pub async fn inspect(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                            AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
     trusted_issuer(&state, &session)?;
     let granted = latest(&state, &subject(&id)?, GRANTED)?
@@ -373,7 +373,7 @@ async fn update_policy_inner(State(state): State<AppState>, Extension(session): 
     Ok(Json(projection(&state, &granted)?))
 }
 
-pub(super) fn device_resources(state: &AppState, snapshot: &ClientSnapshot) -> Result<Vec<Value>, ApiError> {
+pub fn device_resources(state: &AppState, snapshot: &ClientSnapshot) -> Result<Vec<Value>, ApiError> {
     let mut claims = Vec::new();
     for kind in [GRANTED, POLICY, REVOKED] {
         let mut before = snapshot.store_index.checked_add(1);

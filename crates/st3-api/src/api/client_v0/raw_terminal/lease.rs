@@ -4,15 +4,15 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 use std::sync::{LazyLock, Mutex};
 use tokio::time::Instant;
 
-pub(crate) const IDLE: Duration = Duration::from_secs(60);
-pub(crate) const ABSOLUTE: Duration = Duration::from_secs(300);
-pub(crate) const WATCH: Duration = Duration::from_secs(5);
-pub(crate) use crate::peer::{RAW_ORIGIN_HEADER as ORIGIN_HEADER, RawLeaseBinding as Binding};
+pub const IDLE: Duration = Duration::from_secs(60);
+pub const ABSOLUTE: Duration = Duration::from_secs(300);
+pub const WATCH: Duration = Duration::from_secs(5);
+pub use crate::peer::{RAW_ORIGIN_HEADER as ORIGIN_HEADER, RawLeaseBinding as Binding};
 
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
-pub(crate) enum Control {
+pub enum Control {
     SelectedUse {
         sequence: u64,
     },
@@ -45,7 +45,7 @@ impl Clock {
     }
 }
 
-pub(crate) struct Lease {
+pub struct Lease {
     pub binding: Binding,
     owner_side: bool,
     snapshot: String,
@@ -151,7 +151,7 @@ fn authority(
     )
 }
 
-pub(super) fn authorization_epoch(
+pub fn authorization_epoch(
     state: &AppState,
     session: &ClientSession,
 ) -> Result<String, ApiError> {
@@ -309,7 +309,7 @@ fn snapshot(
 }
 
 impl Lease {
-    pub(super) fn register(
+    pub fn register(
         state: &AppState,
         session: &ClientSession,
         terminal: &str,
@@ -454,17 +454,17 @@ impl Lease {
         Ok(lease)
     }
 
-    pub(crate) fn owner_side(&self) -> bool {
+    pub fn owner_side(&self) -> bool {
         self.owner_side
     }
-    pub(crate) fn has_proof(&self) -> bool {
+    pub fn has_proof(&self) -> bool {
         self.clock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .proof_sequence
             > 0
     }
-    pub(crate) fn cancel(&self, code: &'static str) {
+    pub fn cancel(&self, code: &'static str) {
         self.cancelled.send_if_modified(|state| {
             if state.is_none() {
                 *state = Some(code);
@@ -475,7 +475,7 @@ impl Lease {
         });
     }
 
-    pub(crate) fn revalidate(&self) -> anyhow::Result<()> {
+    pub fn revalidate(&self) -> anyhow::Result<()> {
         self.check()?;
         let store = self
             .store
@@ -495,7 +495,7 @@ impl Lease {
         self.check()
     }
 
-    pub(crate) fn check(&self) -> anyhow::Result<()> {
+    pub fn check(&self) -> anyhow::Result<()> {
         if let Some(code) = *self.cancelled.borrow() {
             anyhow::bail!(code);
         }
@@ -513,7 +513,7 @@ impl Lease {
         Ok(())
     }
 
-    pub(crate) fn selected_use(&self, sequence: u64) -> anyhow::Result<()> {
+    pub fn selected_use(&self, sequence: u64) -> anyhow::Result<()> {
         self.revalidate()?;
         let mut clock = self
             .clock
@@ -537,7 +537,7 @@ impl Lease {
         Ok(())
     }
 
-    pub(crate) fn proof(&self, epoch: &str, sequence: u64) -> anyhow::Result<()> {
+    pub fn proof(&self, epoch: &str, sequence: u64) -> anyhow::Result<()> {
         self.revalidate()?;
         anyhow::ensure!(epoch == self.binding.gateway_epoch, "watch epoch changed");
         let mut clock = self
@@ -560,14 +560,14 @@ impl Lease {
     }
 
     /// The authority store this lease's queries run against, while it is still alive.
-    pub(crate) fn authority(&self) -> Option<Arc<Store>> {
+    pub fn authority(&self) -> Option<Arc<Store>> {
         self.store.upgrade()
     }
 
     /// This task is selected alongside both byte pumps, never behind a blocked byte write.
     /// It is pure local state: no store query, so clock and cancellation wake it directly
     /// even when every reader admission slot is busy.
-    pub(crate) async fn expired(&self) {
+    pub async fn expired(&self) {
         let mut cancelled = self.cancelled.subscribe();
         loop {
             if self.check().is_err() {

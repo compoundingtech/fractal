@@ -9,7 +9,7 @@ const ENTRIES: usize = 50_000;
 static REFRESHERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 #[derive(Clone, Default, Deserialize)]
-pub(in crate::api) struct SearchQuery {
+pub struct SearchQuery {
     text: String,
     agent: Option<String>,
     since: Option<String>,
@@ -537,7 +537,7 @@ fn refresh(
     Ok(())
 }
 
-pub(in crate::api) async fn search(
+pub async fn search(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Query(mut query): Query<SearchQuery>,

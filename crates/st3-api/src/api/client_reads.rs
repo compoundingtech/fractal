@@ -75,7 +75,7 @@ fn client_history_resource(claim: ClaimRecord) -> Value {
     })
 }
 
-pub(super) async fn client_work(
+pub async fn client_work(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Query(query): Query<ClientListQuery>,
@@ -389,7 +389,7 @@ async fn client_work_history(
     Ok((Extension(snapshot), Json(page)))
 }
 
-pub(super) async fn client_work_detail(
+pub async fn client_work_detail(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     AxumPath(id): AxumPath<String>,
@@ -417,7 +417,7 @@ pub(super) async fn client_work_detail(
     })
 }
 
-pub(super) async fn client_agents(
+pub async fn client_agents(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Query(query): Query<ClientListQuery>,
@@ -638,7 +638,7 @@ fn client_agents_page_at(
     Ok(Some((Extension(snapshot), Json(page))))
 }
 
-pub(super) async fn client_agents_detail(
+pub async fn client_agents_detail(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     AxumPath(id): AxumPath<String>,
@@ -686,7 +686,7 @@ pub(super) async fn client_agents_detail(
     client_detail(items, "agent", &id)
 }
 
-pub(super) async fn client_sessions(
+pub async fn client_sessions(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Query(query): Query<ClientListQuery>,
@@ -716,7 +716,7 @@ pub(super) async fn client_sessions(
     .await
 }
 
-pub(super) async fn client_sessions_detail(
+pub async fn client_sessions_detail(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<client_v0::ClientSession>,
@@ -809,7 +809,7 @@ fn remote_unavailable_because(host: &str, reason: &str, message: &str) -> ApiErr
     error
 }
 
-pub(super) async fn client_attention(
+pub async fn client_attention(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<client_v0::ClientSession>,
@@ -833,7 +833,7 @@ pub(super) async fn client_attention(
     .await
 }
 
-pub(super) async fn client_attention_detail(
+pub async fn client_attention_detail(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -846,7 +846,7 @@ pub(super) async fn client_attention_detail(
     client_detail(items, "attention", &id)
 }
 
-pub(super) async fn client_messages(
+pub async fn client_messages(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<client_v0::ClientSession>,
@@ -966,7 +966,7 @@ async fn relayed_messages_page(
     serde_json::from_value(value).map_err(ApiError::internal)
 }
 
-pub(super) async fn client_messages_detail(
+pub async fn client_messages_detail(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -981,7 +981,7 @@ pub(super) async fn client_messages_detail(
     )
 }
 
-pub(super) async fn client_launches(
+pub async fn client_launches(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Query(query): Query<ClientListQuery>,
@@ -990,7 +990,7 @@ pub(super) async fn client_launches(
     client_page(&state, &snapshot, "launches", items, &query).map(Json)
 }
 
-pub(super) async fn client_launches_detail(
+pub async fn client_launches_detail(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -1015,7 +1015,7 @@ pub(super) async fn client_launches_detail(
     Ok((Extension(snapshot), Json(value)))
 }
 
-pub(super) async fn client_launch_variants(
+pub async fn client_launch_variants(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     AxumPath(id): AxumPath<String>,
@@ -1033,7 +1033,7 @@ pub(super) async fn client_launch_variants(
     .map(Json)
 }
 
-pub(super) async fn client_launch_variant_detail(
+pub async fn client_launch_variant_detail(
     State(state): State<AppState>,
     AxumPath((id, variant)): AxumPath<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1045,7 +1045,7 @@ pub(super) async fn client_launch_variant_detail(
     )
 }
 
-pub(super) async fn client_launch_decisions(
+pub async fn client_launch_decisions(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     AxumPath(id): AxumPath<String>,
@@ -1064,7 +1064,7 @@ pub(super) async fn client_launch_decisions(
     .map(Json)
 }
 
-pub(super) async fn client_launch_decision_detail(
+pub async fn client_launch_decision_detail(
     State(state): State<AppState>,
     AxumPath((id, decision)): AxumPath<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1076,7 +1076,7 @@ pub(super) async fn client_launch_decision_detail(
     )
 }
 
-pub(super) async fn client_launch_approvals(
+pub async fn client_launch_approvals(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     AxumPath(id): AxumPath<String>,
@@ -1094,7 +1094,7 @@ pub(super) async fn client_launch_approvals(
     .map(Json)
 }
 
-pub(super) async fn client_launch_approval_detail(
+pub async fn client_launch_approval_detail(
     State(state): State<AppState>,
     AxumPath((id, approval)): AxumPath<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1106,7 +1106,7 @@ pub(super) async fn client_launch_approval_detail(
     )
 }
 
-pub(super) async fn client_history(
+pub async fn client_history(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Query(query): Query<ClientListQuery>,
@@ -1220,7 +1220,7 @@ pub(super) async fn client_history(
     }))
 }
 
-pub(super) async fn client_history_detail(
+pub async fn client_history_detail(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {

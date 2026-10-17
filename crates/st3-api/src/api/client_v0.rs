@@ -114,26 +114,26 @@ fn record_subscription_page(value: &Value, bytes: usize) {
 }
 use smallclaims::fifo::{Kind, Queue};
 
-pub(super) mod raw_terminal;
-pub(super) mod resources;
-pub(super) mod search;
-pub(super) mod arrangements;
-pub(super) mod conversation_blocks;
+pub mod raw_terminal;
+pub mod resources;
+pub mod search;
+pub mod arrangements;
+pub mod conversation_blocks;
 mod collection_windows;
 mod inventory;
-pub(super) mod published_missions;
+pub mod published_missions;
 #[cfg(test)]
 mod conversation_follow_tests;
 mod collection_ivm;
 #[cfg(test)]
 mod collection_refresh_tests;
-pub(in crate::api) mod summary;
-pub(super) mod assistant;
+pub mod summary;
+pub mod assistant;
 
 #[cfg(test)]
 mod stream_start_tests;
 #[cfg(test)]
-pub(super) mod observer_subscription_detail_tests;
+pub mod observer_subscription_detail_tests;
 #[cfg(test)]
 mod launch_detail_tests;
 #[cfg(test)]
@@ -143,9 +143,9 @@ const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
 const CONVERSATION_SUBPROTOCOL: &str = "st3.client.conversation.v0";
 const COLLECTION_SUBPROTOCOL: &str = "st3.client.collections.v0";
 const TERMINAL_CAPABILITY_PROTOCOL_PREFIX: &str = "st3.cap.";
-pub(super) const LOCAL_PERSON_HEADER: &str = "x-st3-person";
+pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
 
-pub(super) async fn request_latency(
+pub async fn request_latency(
     Extension(session): Extension<ClientSession>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
@@ -159,7 +159,7 @@ pub(super) async fn request_latency(
 // is a bounded window; history stays on the paged HTTP endpoints. A terminal is one
 // more subscription on the same socket: whole screens, the latest only.
 #[derive(Clone, Deserialize)]
-struct CollectionSubscribe {
+pub struct CollectionSubscribe {
     kind: String,
     id: String,
     #[serde(default, deserialize_with = "collection_name")]
@@ -319,7 +319,7 @@ fn collection_ignores(collection: &str, kind: &str) -> bool {
         || (kind == "harness.usage" && collection != "agents")
 }
 
-pub(super) async fn collection_stream(
+pub async fn collection_stream(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
@@ -427,8 +427,8 @@ impl CollectionReadAdmission {
 
 /// Read one bounded window. The whole read sees one SQLite snapshot, and the fence names
 /// that snapshot's index, so commits landing meanwhile never tear or delay it.
-#[cfg(test)]
-async fn collection_items(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn collection_items(
     state: &AppState,
     session: &ClientSession,
     request: &CollectionSubscribe,
@@ -1380,14 +1380,14 @@ async fn conversation_open_value(
     }).await.map_err(ApiError::internal)?
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static AFTER_CONVERSATION_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BEFORE_CONVERSATION_PAGE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
-fn conversation_open_local(
+#[cfg(any(test, feature = "test-support"))]
+pub fn conversation_open_local(
     state: &AppState, session: &ClientSession, session_id: &str,
 ) -> Result<(Value, Value), ApiError> {
     conversation_open_local_marked(state, session, session_id).map(|(start, page, _)| (start, page))
@@ -1486,9 +1486,9 @@ fn conversation_replay_gap(session_id: &str, reason: &str, message: &str) -> Api
 
 /// Follow a conversation with no subscription time. The collections socket calls
 /// [`follow_conversation_since`]; this form is for the tests that exercise the follower itself.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::too_many_arguments)]
-async fn follow_conversation(
+pub async fn follow_conversation(
     state: AppState,
     session: ClientSession,
     id: String,
@@ -1716,8 +1716,8 @@ async fn collection_stream_socket(
     .await;
 }
 
-#[cfg(test)]
-async fn collection_stream_socket_with_reader<F, Fut>(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn collection_stream_socket_with_reader<F, Fut>(
     socket: WebSocket,
     state: AppState,
     session: ClientSession,
@@ -1733,8 +1733,8 @@ async fn collection_stream_socket_with_reader<F, Fut>(
     collection_stream_socket_with_context(socket, state, session, presence, None, None, read).await;
 }
 
-#[cfg(test)]
-async fn collection_stream_socket_with_sources<F, Fut>(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn collection_stream_socket_with_sources<F, Fut>(
     socket: WebSocket,
     state: AppState,
     session: ClientSession,
@@ -2298,7 +2298,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
 }
 
 #[derive(Deserialize)]
-pub(super) struct AgentDeclarationQuery {
+pub struct AgentDeclarationQuery {
     revision: Option<String>,
     #[serde(default)]
     show_env_values: bool,
@@ -2306,7 +2306,7 @@ pub(super) struct AgentDeclarationQuery {
 
 /// A workspace belongs to the seat's declaration and host, not this API gateway's filesystem.
 /// Follow the same unambiguous stop predecessors that start uses, including one-shot retirement.
-pub(super) async fn agent_workspace(
+pub async fn agent_workspace(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -2372,7 +2372,7 @@ pub(super) async fn agent_workspace(
 }
 
 /// Both redacted and explicit environment-value reads require declaration scope.
-pub(super) async fn agent_declaration(
+pub async fn agent_declaration(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -2410,11 +2410,11 @@ pub(super) async fn agent_declaration(
 }
 
 #[derive(Deserialize)]
-pub(super) struct ClientDocumentQuery {
+pub struct ClientDocumentQuery {
     name: String,
 }
 
-pub(super) async fn document_get(
+pub async fn document_get(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Query(query): Query<ClientDocumentQuery>,
@@ -2443,7 +2443,7 @@ pub(super) async fn document_get(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ClientUsageQuery {
+pub struct ClientUsageQuery {
     since_ms: Option<u64>,
     until_ms: Option<u64>,
 }
@@ -2451,7 +2451,7 @@ pub(super) struct ClientUsageQuery {
 /// Token spend and its API-equivalent cost over a period (the last 24 hours unless asked), one
 /// row per agent, mission run, step, model, account and host, largest first. An identity st
 /// does not know (a standing seat has no mission run or step) is left out of its row.
-pub(super) async fn usage_period(
+pub async fn usage_period(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Query(query): Query<ClientUsageQuery>,
@@ -2473,7 +2473,7 @@ pub(super) async fn usage_period(
 
 /// Every objective and budget with what is left of each: the rows `st slo` prints. The text
 /// fields are this daemon's own display wording, not a contract.
-pub(super) async fn slo_list(
+pub async fn slo_list(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
 ) -> Result<Json<Value>, ApiError> {
@@ -2482,7 +2482,7 @@ pub(super) async fn slo_list(
 }
 
 /// What was left of one objective or budget across a period, from the daemon's local history.
-pub(super) async fn slo_history(
+pub async fn slo_history(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Query(query): Query<super::SloHistoryQuery>,
@@ -2493,7 +2493,7 @@ pub(super) async fn slo_history(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct SubjectDefinitionQuery {
+pub struct SubjectDefinitionQuery {
     subject: String,
     #[serde(default)]
     show_env_values: bool,
@@ -2502,7 +2502,7 @@ pub(super) struct SubjectDefinitionQuery {
 /// One agent's applied definition, reconstructed from its selected desired claim, not authored
 /// source. Missions are published as compiled revisions and keep no canonical declaration AST.
 /// Environment values are redacted unless the caller asks for them and holds declaration scope.
-pub(super) async fn subject_definition(
+pub async fn subject_definition(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Query(query): Query<SubjectDefinitionQuery>,
@@ -2568,12 +2568,12 @@ pub(super) async fn subject_definition(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PublicationDefinitionQuery {
+pub struct PublicationDefinitionQuery {
     subject: String,
 }
 
 /// Full canonical publication values can contain environment values or embedded declarations.
-pub(super) async fn publication_definition(
+pub async fn publication_definition(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Query(query): Query<PublicationDefinitionQuery>,
@@ -2759,27 +2759,27 @@ const AVAILABLE_ACTIONS: &[&str] = &[
 ];
 
 #[derive(Clone, Debug)]
-pub(super) struct ClientSession {
+pub struct ClientSession {
     /// The credential/session identity used for audit and idempotency isolation.
-    pub(super) actor: String,
+    pub actor: String,
     /// The concrete graph person whose explicitly delegated authority is exercised.
-    pub(super) authority_actor: String,
+    pub authority_actor: String,
     /// The exact pairing grant that authenticated this session. Two pairings of the same
     /// person and device key share an actor, so only this subject names the exact grant.
-    pub(super) pairing_grant: Option<String>,
+    pub pairing_grant: Option<String>,
     grant_expires_at: Option<u128>,
     assistant_write: Option<crate::store::assistant_write::AssistantWriteAuthorization>,
-    pub(super) transport: &'static str,
+    pub transport: &'static str,
     /// Server-established harness or local peer provenance, never a client header.
-    pub(super) local_peer: bool,
-    pub(super) custom_forms: bool,
-    pub(super) conversation_blocks: bool,
+    pub local_peer: bool,
+    pub custom_forms: bool,
+    pub conversation_blocks: bool,
     scopes: std::collections::BTreeSet<String>,
 }
 
 impl ClientSession {
-    #[cfg(test)]
-    pub(super) fn for_tests(actor: &str, authority_actor: &str, transport: &'static str) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests(actor: &str, authority_actor: &str, transport: &'static str) -> Self {
         Self {
             actor: actor.into(),
             authority_actor: authority_actor.into(),
@@ -2794,8 +2794,8 @@ impl ClientSession {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn for_tests_scoped(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests_scoped(
         actor: &str,
         authority_actor: &str,
         scopes: &[&str],
@@ -2806,7 +2806,7 @@ impl ClientSession {
         }
     }
 
-    pub(super) fn local(person: Option<&str>) -> Result<Self, ApiError> {
+    pub fn local(person: Option<&str>) -> Result<Self, ApiError> {
         let custom_forms = false;
         if person.is_some_and(|person| {
             !(person.starts_with("person/") && person.matches('/').count() == 1
@@ -2871,7 +2871,7 @@ impl ClientSession {
 
 /// Whether the session acts for a concrete person, or for a local agent seat. Within a fleet, an
 /// agent may do whatever the person who runs the fleet may do (free mode).
-pub(super) fn acting_party(session: &ClientSession) -> bool {
+pub fn acting_party(session: &ClientSession) -> bool {
     let actor = session.authority_actor.as_str();
     actor.starts_with("person/") && actor.matches('/').count() == 1
         || session.transport == "unix" && actor.starts_with("agent/")
@@ -2887,7 +2887,7 @@ fn session_claim_actor(session: &ClientSession) -> String {
     }
 }
 
-pub(super) fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
+pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     let mut capabilities = ALL_SCOPES
         .iter()
         .map(|scope| {
@@ -2943,11 +2943,11 @@ fn forbidden(message: impl Into<String>) -> ApiError {
     }
 }
 
-pub(super) fn fabric_boundary_forbidden() -> ApiError {
+pub fn fabric_boundary_forbidden() -> ApiError {
     forbidden("the client gateway exposes only the authenticated client-v0 boundary")
 }
 
-pub(super) fn validation(message: impl Into<String>) -> ApiError {
+pub fn validation(message: impl Into<String>) -> ApiError {
     ApiError {
         status: StatusCode::UNPROCESSABLE_ENTITY,
         code: "validation-failed".into(),
@@ -2970,13 +2970,13 @@ fn credential_digest(credential: &str) -> String {
 }
 
 /// Administrative reads must not inherit the general agent projection-read exemption.
-pub(super) fn administrative_get(request: &Request<Body>) -> bool {
+pub fn administrative_get(request: &Request<Body>) -> bool {
     request.method() == axum::http::Method::GET
         && (request.uri().path().starts_with("/v1/client/assistant/grants/")
             || request.uri().path() == "/v1/client/devices")
 }
 
-pub(super) fn authenticate(
+pub fn authenticate(
     state: &AppState,
     request: &Request<Body>,
     transport: &'static str,
@@ -3137,7 +3137,7 @@ fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<Clien
     Ok(current)
 }
 
-pub(super) fn require_scope(session: &ClientSession, scope: &str) -> Result<(), ApiError> {
+pub fn require_scope(session: &ClientSession, scope: &str) -> Result<(), ApiError> {
     if session.allows(scope) {
         Ok(())
     } else {
@@ -3147,7 +3147,7 @@ pub(super) fn require_scope(session: &ClientSession, scope: &str) -> Result<(), 
     }
 }
 
-pub(super) fn person_filter(
+pub fn person_filter(
     session: &ClientSession,
     requested: Option<&str>,
 ) -> Result<Option<String>, ApiError> {
@@ -3206,7 +3206,7 @@ fn mission_visualization(
     })))
 }
 
-pub(super) fn mission_resources(
+pub fn mission_resources(
     store: &Store,
     snapshot_index: u64,
     history: bool,
@@ -3252,7 +3252,7 @@ fn mission_list_cards_at(
 
 /// [`mission_list_cards_at`] with the runs that wait on a person already read, as the published
 /// missions list keeps them.
-pub(super) fn mission_list_cards_with(
+pub fn mission_list_cards_with(
     store: &Store,
     ids: &[String],
     at_unix_ms: u128,
@@ -3329,7 +3329,7 @@ pub(super) fn mission_list_cards_with(
     }).collect()
 }
 
-pub(super) fn bound_mission_cards(items: &mut Vec<Value>) -> anyhow::Result<bool> {
+pub fn bound_mission_cards(items: &mut Vec<Value>) -> anyhow::Result<bool> {
     // Reserve room for the envelope, continuation cursor and fleet sync notice.
     let budget = CLIENT_MAX_RESPONSE_BYTES.saturating_sub(128_000);
     let mut used = 0;
@@ -3797,8 +3797,8 @@ fn terminal_resources_for_owner(
     runtime_resources_from_status(state, snapshot, session, status)
 }
 
-#[cfg(test)]
-static RUNTIME_DETAIL_SUBJECT_COUNTS: std::sync::Mutex<BTreeMap<String, usize>> =
+#[cfg(any(test, feature = "test-support"))]
+pub static RUNTIME_DETAIL_SUBJECT_COUNTS: std::sync::Mutex<BTreeMap<String, usize>> =
     std::sync::Mutex::new(BTreeMap::new());
 
 fn runtime_resources_from_status(
@@ -4139,7 +4139,7 @@ async fn observer_subscription_detail(
     Ok((Extension(snapshot), Json(value)))
 }
 /// Every open lane, or every declared lane with history, in client form.
-pub(super) async fn lanes(
+pub async fn lanes(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -4155,7 +4155,7 @@ pub(super) async fn lanes(
     client_page(&state, &snapshot, "lanes", items, &query).map(Json)
 }
 
-pub(super) async fn lane_detail(
+pub async fn lane_detail(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -4169,7 +4169,7 @@ pub(super) async fn lane_detail(
 }
 
 /// One lane as a client resource: its declaration, its entries in order, and recent changes.
-pub(super) fn lane_resource(lane: &crate::model::LaneView) -> Value {
+pub fn lane_resource(lane: &crate::model::LaneView) -> Value {
     let prefix = lane.entries_prefix.as_deref();
     let timestamp = |at: Option<u128>| at.map(client_timestamp);
     json!({
@@ -4217,7 +4217,7 @@ pub(super) fn lane_resource(lane: &crate::model::LaneView) -> Value {
     })
 }
 
-pub(super) async fn observers(
+pub async fn observers(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -4229,7 +4229,7 @@ pub(super) async fn observers(
     client_page(&state, &snapshot, "observers", items, &query).map(Json)
 }
 
-pub(super) async fn observer_detail(
+pub async fn observer_detail(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -4238,7 +4238,7 @@ pub(super) async fn observer_detail(
     observer_subscription_detail(state, "observer", id).await
 }
 
-pub(super) async fn subscriptions(
+pub async fn subscriptions(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -4250,7 +4250,7 @@ pub(super) async fn subscriptions(
     client_page(&state, &snapshot, "subscriptions", items, &query).map(Json)
 }
 
-pub(super) async fn subscription_detail(
+pub async fn subscription_detail(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -4620,7 +4620,7 @@ fn operation_reports() -> std::sync::MutexGuard<'static, BTreeMap<usize, Operati
 
 /// Start the first diagnostic report off the request path and hand its operation audit to the
 /// startup repair. Only this first report shares its audit; refreshes inspect current state.
-pub(super) fn start_operation_report(
+pub fn start_operation_report(
     state: &AppState,
 ) -> Option<tokio::sync::oneshot::Receiver<anyhow::Result<Vec<String>>>> {
     let key = Arc::as_ptr(&state.store) as usize;
@@ -4804,7 +4804,7 @@ fn read_mission_page(
     })
 }
 
-pub(super) async fn missions(
+pub async fn missions(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -4923,7 +4923,7 @@ pub(super) async fn missions(
 }
 
 /// A single read of the projections used by mission show, agent tree, and seat queues.
-pub(super) async fn missions_tree(
+pub async fn missions_tree(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -4937,7 +4937,7 @@ pub(super) async fn missions_tree(
 }
 
 /// Preserve the latest accepted observation even after its session or incarnation changes.
-pub(super) fn agent_todo_value(
+pub fn agent_todo_value(
     claim: Option<&ClaimRecord>,
     session: Option<&ClaimRecord>,
     incarnation: Option<&str>,
@@ -4967,8 +4967,8 @@ pub(super) fn agent_todo_value(
     })
 }
 
-#[cfg(test)]
-fn agent_todo(
+#[cfg(any(test, feature = "test-support"))]
+pub fn agent_todo(
     store: &Store,
     subject: &str,
     incarnation: Option<&str>,
@@ -5138,7 +5138,7 @@ fn missions_tree_value_within(
         "truncated": truncated }))
 }
 
-pub(super) async fn mission_detail(
+pub async fn mission_detail(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -5165,7 +5165,7 @@ pub(super) async fn mission_detail(
     client_detail(items, "mission", &id)
 }
 
-pub(super) async fn runtimes(
+pub async fn runtimes(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -5183,7 +5183,7 @@ pub(super) async fn runtimes(
     .await
 }
 
-pub(super) async fn terminals(
+pub async fn terminals(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -5221,7 +5221,7 @@ pub(super) async fn terminals(
     .await
 }
 
-pub(super) async fn runtime_detail(
+pub async fn runtime_detail(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -5236,7 +5236,7 @@ pub(super) async fn runtime_detail(
     client_detail(items, "runtime", &id)
 }
 
-pub(super) async fn operations(
+pub async fn operations(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -5250,7 +5250,7 @@ pub(super) async fn operations(
     .await
 }
 
-pub(super) async fn now(
+pub async fn now(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -5292,7 +5292,7 @@ pub(super) async fn now(
     .await
 }
 
-pub(super) async fn machines(
+pub async fn machines(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -5310,7 +5310,7 @@ pub(super) async fn machines(
     .await
 }
 
-pub(super) async fn host_repositories(
+pub async fn host_repositories(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -5432,7 +5432,7 @@ fn device_resources(
 
 /// The clients connected to this member now and those seen in the last few minutes, newest
 /// first, with the paired device each person's session belongs to. Visibility only.
-pub(super) async fn clients_list(
+pub async fn clients_list(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -5472,7 +5472,7 @@ fn client_connection_items(state: &AppState, snapshot: &ClientSnapshot) -> Resul
     Ok(items)
 }
 
-pub(super) async fn devices(
+pub async fn devices(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -5498,7 +5498,7 @@ pub(super) async fn devices(
 }
 
 /// Bounded observed transitions; pairing uses the same projection scope as agent reads.
-pub(super) async fn status_history(
+pub async fn status_history(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Extension(snapshot): Extension<ClientSnapshot>,
@@ -5512,7 +5512,7 @@ pub(super) async fn status_history(
 }
 
 /// One seat's current claim, its queued mission runs in order, and recent moves.
-pub(super) async fn agent_queue(
+pub async fn agent_queue(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
@@ -5562,7 +5562,7 @@ fn agent_queue_value(queue: &crate::model::SeatQueueView) -> Value {
     })
 }
 
-pub(super) async fn operation_detail(
+pub async fn operation_detail(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -5659,7 +5659,7 @@ fn session_message_belongs(
 /// device the signing key was granted to, by the label the person gave it when it paired. A
 /// message an agent wrote carries none: its key is the node's, and only people's words need
 /// their provenance shown.
-pub(super) fn message_provenance(state: &AppState, claim: &ClaimRecord) -> Option<Value> {
+pub fn message_provenance(state: &AppState, claim: &ClaimRecord) -> Option<Value> {
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
     if !fields
         .get("from")
@@ -5956,7 +5956,7 @@ fn native_timeline_order(
     })
 }
 
-pub(super) const NATIVE_PAGE_CURSOR_PREFIX: &str = "page/native/";
+pub const NATIVE_PAGE_CURSOR_PREFIX: &str = "page/native/";
 
 /// All stateless cursor authority is authenticated, including expiry, the source basis, and
 /// the source's content generation. A process restart changes the key, invalidating these
@@ -6020,7 +6020,7 @@ fn decode_native_page_cursor(encoded: &str) -> Result<NativePagePosition, ApiErr
     Ok(cursor.position)
 }
 
-pub(super) fn native_page_cursor_snapshot(encoded: &str) -> Result<ClientSnapshot, ApiError> {
+pub fn native_page_cursor_snapshot(encoded: &str) -> Result<ClientSnapshot, ApiError> {
     decode_native_page_cursor(encoded).map(|position| position.snapshot)
 }
 
@@ -6277,15 +6277,15 @@ fn canonical_native_slice(
 #[cfg(not(test))]
 const NATIVE_ECHO_SCAN_ITEMS: usize = 4096;
 #[cfg(test)]
-const NATIVE_ECHO_SCAN_ITEMS: usize = 256;
+pub const NATIVE_ECHO_SCAN_ITEMS: usize = 256;
 
 /// The most a timeline page's entries may serialize to, leaving room under a peer's 1 MiB cap on
 /// a remote client read for the envelope and the page header.
-pub(super) const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
+pub const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
 
 /// Replace a timeline entry that alone exceeds the response ceiling with a visible error entry
 /// that keeps its identity and place, so the page it is on still opens and continues past it.
-pub(super) fn cut_oversized_timeline_entry(item: &mut Value, size: usize) {
+pub fn cut_oversized_timeline_entry(item: &mut Value, size: usize) {
     item["type"] = json!("error");
     item["role"] = json!("system");
     item["body"] = json!({
@@ -6832,7 +6832,7 @@ fn external_conversation_items(
     }
 }
 
-pub(super) fn timeline_value(
+pub fn timeline_value(
     state: &AppState,
     snapshot: &ClientSnapshot,
     session: &ClientSession,
@@ -7369,7 +7369,7 @@ fn timeline_first_page(
 }
 
 #[derive(Default, Deserialize)]
-pub(super) struct ConversationQuery {
+pub struct ConversationQuery {
     after: Option<String>,
     wait_ms: Option<u64>,
 }
@@ -7398,7 +7398,7 @@ fn conversation_cursor(state: &AppState, session_id: &str, position: Conversatio
     )
 }
 
-pub(super) fn conversation_session_id(state: &AppState, id: &str) -> Result<String, ApiError> {
+pub fn conversation_session_id(state: &AppState, id: &str) -> Result<String, ApiError> {
     if id.starts_with("agent/") {
         let frontier = state.store.index().map_err(ApiError::internal)?;
         let owners = state.store.conversation_owners_at(frontier).map_err(ApiError::internal)?;
@@ -7749,16 +7749,16 @@ fn issued_transcript(cursor: &str) -> Option<TranscriptSeen> {
 }
 
 /// Conversation owners and transcripts found, by session, counted by the work-budget tests.
-#[cfg(test)]
-fn conversation_marks_resolved() -> &'static std::sync::Mutex<HashMap<String, u64>> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn conversation_marks_resolved() -> &'static std::sync::Mutex<HashMap<String, u64>> {
     static RESOLVED: std::sync::OnceLock<std::sync::Mutex<HashMap<String, u64>>> =
         std::sync::OnceLock::new();
     RESOLVED.get_or_init(Default::default)
 }
 
 /// First-page builds for initial OPEN and reactive changes, counted by the work-budget tests.
-#[cfg(test)]
-fn timeline_rebuilds() -> &'static std::sync::Mutex<HashMap<String, u64>> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn timeline_rebuilds() -> &'static std::sync::Mutex<HashMap<String, u64>> {
     static REBUILDS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, u64>>> =
         std::sync::OnceLock::new();
     REBUILDS.get_or_init(Default::default)
@@ -7948,7 +7948,7 @@ async fn conversation_changes_local_marked(
     }
 }
 
-pub(super) async fn conversation_changes(
+pub async fn conversation_changes(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -8008,7 +8008,7 @@ pub(super) async fn conversation_changes(
     .map(Json)
 }
 
-pub(super) async fn conversation_stream(
+pub async fn conversation_stream(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
@@ -8153,7 +8153,7 @@ async fn conversation_stream_socket(
 }
 
 #[derive(Default, Deserialize)]
-pub(super) struct EventsQuery {
+pub struct EventsQuery {
     after: Option<String>,
     limit: Option<usize>,
     wait_ms: Option<u64>,
@@ -8263,8 +8263,8 @@ impl EventPageLookups {
     }
 }
 
-#[cfg(test)]
-fn safe_event_projection(state: &AppState, record: &EventRecord) -> (String, Vec<String>, Value) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn safe_event_projection(state: &AppState, record: &EventRecord) -> (String, Vec<String>, Value) {
     safe_event_projection_with(state, record, &EventPageLookups::read(state, [record]))
 }
 
@@ -8370,7 +8370,7 @@ fn safe_event_projection_with(
     )
 }
 
-pub(super) async fn events(
+pub async fn events(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Query(query): Query<EventsQuery>,
@@ -8583,7 +8583,7 @@ fn feed_events_tail(store: &Store, limit: usize) -> anyhow::Result<Vec<FeedEvent
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PairingBegin {
+pub struct PairingBegin {
     api_version: String,
     device_name: String,
     person_id: String,
@@ -8594,12 +8594,12 @@ pub(super) struct PairingBegin {
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-pub(super) enum PairingBeginRequest {
+pub enum PairingBeginRequest {
     Person(PairingBegin),
     Assistant(assistant::AssistantPairingBegin),
 }
 
-pub(super) async fn pairing_begin(
+pub async fn pairing_begin(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Json(request): Json<PairingBeginRequest>,
@@ -8703,7 +8703,7 @@ pub(super) async fn pairing_begin(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PairingComplete {
+pub struct PairingComplete {
     api_version: String,
     code: String,
     device_public_key: String,
@@ -8752,7 +8752,7 @@ fn pairing_root_proof(state: &AppState, person: &str) -> Result<Option<Value>, A
 /// A device's signing key, when its public key is one: `p256:` and the base64url of an
 /// uncompressed P-256 point, or a bare base64url Ed25519 key. Anything else is a legacy device
 /// that pairs without signing.
-pub(super) fn device_signing_key(public_key: &str) -> Option<&str> {
+pub fn device_signing_key(public_key: &str) -> Option<&str> {
     let decode = |text: &str| {
         base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(text.as_bytes())
@@ -8798,7 +8798,7 @@ impl Drop for PreparedDeviceGrant<'_> {
 // request has consumed the same code. All checks and store writes follow this serialization.
 static PAIRING_COMPLETIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-pub(super) async fn pairing_complete(
+pub async fn pairing_complete(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -9156,7 +9156,7 @@ async fn terminal_screen_value(
 }
 
 #[derive(Default, Deserialize)]
-pub(super) struct TerminalScreenQuery {
+pub struct TerminalScreenQuery {
     after: Option<String>,
     wait_ms: Option<u64>,
     /// Also return the owner's best-effort session facts.
@@ -9218,7 +9218,7 @@ async fn terminal_facts(state: &AppState, id: &str) -> Option<Value> {
     .flatten()
 }
 
-pub(super) async fn terminal_screen(
+pub async fn terminal_screen(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -9305,11 +9305,11 @@ pub(super) async fn terminal_screen(
 }
 
 #[derive(Default, Deserialize)]
-pub(super) struct TerminalStreamQuery {
+pub struct TerminalStreamQuery {
     incarnation: Option<String>,
 }
 
-pub(super) async fn terminal_stream(
+pub async fn terminal_stream(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
@@ -10253,7 +10253,7 @@ async fn terminal_stream_socket(
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Fence {
+pub struct Fence {
     snapshot_id: String,
     #[serde(default)]
     subject_revisions: BTreeMap<String, String>,
@@ -10269,7 +10269,7 @@ pub(super) struct Fence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ActionRequest {
+pub struct ActionRequest {
     api_version: String,
     id: String,
     #[serde(rename = "type")]
@@ -10327,9 +10327,9 @@ fn parameter_string(parameters: &Value, key: &str) -> Result<String, ApiError> {
         .ok_or_else(|| validation(format!("action parameters require `{key}`")))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn message_kinds_default_to_wake_and_replies_do_not_inherit_silence() {
+pub fn message_kinds_default_to_wake_and_replies_do_not_inherit_silence() {
     assert!(message_send_tags(&json!({})).unwrap().is_empty());
     assert!(
         message_send_tags(&json!({"kind":"wake", "in_reply_to":"message/silent"}))
@@ -12171,7 +12171,7 @@ fn validate_action_admission(
     Ok(())
 }
 
-pub(super) async fn action(
+pub async fn action(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
@@ -15540,7 +15540,7 @@ mission "queue-parity" state="ready" {
         assert!(!report.to_string().contains("person/operator"));
     }
 
-    pub(super) fn test_state_named(root: &Path, node: &str) -> AppState {
+    pub fn test_state_named(root: &Path, node: &str) -> AppState {
         AppState {
             owning_person: Some("person/operator".into()),
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -24134,7 +24134,7 @@ fn glass_subject(person: &str, id: &str) -> Result<String, ApiError> {
     Ok(format!("glass/{person}/{id}"))
 }
 
-pub(super) async fn glasses_list(
+pub async fn glasses_list(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Extension(snapshot): Extension<ClientSnapshot>,
@@ -24154,7 +24154,7 @@ pub(super) async fn glasses_list(
     )?))
 }
 
-pub(super) async fn glass_get(
+pub async fn glass_get(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Extension(snapshot): Extension<ClientSnapshot>,
@@ -24176,14 +24176,14 @@ pub(super) async fn glass_get(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct GlassPut {
+pub struct GlassPut {
     body: Value,
     #[serde(deserialize_with = "glass_base_revision")]
     base_revision: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct GlassDelete {
+pub struct GlassDelete {
     #[serde(deserialize_with = "glass_base_revision")]
     base_revision: Option<String>,
 }
@@ -24244,7 +24244,7 @@ async fn glass_write(
     ))
 }
 
-pub(super) async fn glass_put(
+pub async fn glass_put(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
@@ -24261,7 +24261,7 @@ pub(super) async fn glass_put(
     )
     .await
 }
-pub(super) async fn glass_delete(
+pub async fn glass_delete(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,

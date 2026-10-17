@@ -1,7 +1,7 @@
 use super::*;
 
 /// A work acknowledgement needs the selected seat's hierarchy, not the fleet's desired graph.
-pub(super) fn enrich_under(store: &Store, response: &mut StepRunView) -> Result<(), St3Error> {
+pub fn enrich_under(store: &Store, response: &mut StepRunView) -> Result<(), St3Error> {
     let Some(assignee) = response
         .claimant
         .as_ref()

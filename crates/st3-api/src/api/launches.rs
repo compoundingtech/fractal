@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn start_planning_session(
+pub async fn start_planning_session(
     State(state): State<AppState>,
     Json(request): Json<PlanningSessionStartRequest>,
 ) -> Result<Json<PlanningSessionView>, ApiError> {
@@ -203,7 +203,7 @@ pub(super) async fn start_planning_session(
     Ok(Json(session))
 }
 
-pub(super) async fn get_planning_session(
+pub async fn get_planning_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<PlanningSessionView>, ApiError> {
@@ -215,7 +215,7 @@ pub(super) async fn get_planning_session(
         .ok_or_else(|| ApiError::not_found(format!("launch `{id}` does not exist")))
 }
 
-pub(super) async fn submit_planning_candidate(
+pub async fn submit_planning_candidate(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<PlanningCandidateSubmitRequest>,
@@ -223,7 +223,7 @@ pub(super) async fn submit_planning_candidate(
     submit_planning_variant(state, id, "default".into(), request).await
 }
 
-pub(super) async fn submit_named_planning_candidate(
+pub async fn submit_named_planning_candidate(
     State(state): State<AppState>,
     AxumPath((id, variant)): AxumPath<(String, String)>,
     Json(request): Json<PlanningCandidateSubmitRequest>,
@@ -336,14 +336,14 @@ async fn submit_planning_variant(
     preview_planning_variant(state, id, variant).await
 }
 
-pub(super) async fn preview_planning_candidate(
+pub async fn preview_planning_candidate(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<PlanningSessionView>, ApiError> {
     preview_planning_variant(state, id, "default".into()).await
 }
 
-pub(super) async fn preview_named_planning_candidate(
+pub async fn preview_named_planning_candidate(
     State(state): State<AppState>,
     AxumPath((id, variant)): AxumPath<(String, String)>,
 ) -> Result<Json<PlanningSessionView>, ApiError> {
@@ -453,7 +453,7 @@ async fn preview_planning_variant(
     Ok(Json(response))
 }
 
-pub(super) async fn compare_planning_variants(
+pub async fn compare_planning_variants(
     State(state): State<AppState>,
     AxumPath((id, left, right)): AxumPath<(String, String, String)>,
 ) -> Result<Json<Value>, ApiError> {
@@ -475,7 +475,7 @@ pub(super) async fn compare_planning_variants(
     })))
 }
 
-pub(super) async fn propose_planning_variant(
+pub async fn propose_planning_variant(
     State(state): State<AppState>,
     AxumPath((id, variant)): AxumPath<(String, String)>,
     Json(request): Json<PlanningProposalRequest>,
@@ -604,7 +604,7 @@ fn validate_planning_variant(variant: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-pub(super) async fn revise_planning_session(
+pub async fn revise_planning_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<PlanningRevisionRequest>,
@@ -661,7 +661,7 @@ pub(super) async fn revise_planning_session(
     Ok(Json(response))
 }
 
-pub(super) async fn approve_planning_session(
+pub async fn approve_planning_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<PlanningApprovalRequest>,
@@ -842,7 +842,7 @@ pub(super) async fn approve_planning_session(
     Ok(Json(response))
 }
 
-pub(super) async fn start_approved_launch(
+pub async fn start_approved_launch(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<LaunchStartRequest>,
@@ -883,7 +883,7 @@ pub(super) async fn start_approved_launch(
     Ok(Json(response))
 }
 
-pub(super) async fn approve_and_start_launch(
+pub async fn approve_and_start_launch(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<LaunchApproveAndStartRequest>,
@@ -917,7 +917,7 @@ pub(super) async fn approve_and_start_launch(
     }))
 }
 
-pub(super) async fn request_launch_decision(
+pub async fn request_launch_decision(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<LaunchDecisionRequest>,
@@ -1013,7 +1013,7 @@ pub(super) async fn request_launch_decision(
     Ok(Json(value))
 }
 
-pub(super) async fn answer_launch_decision(
+pub async fn answer_launch_decision(
     State(state): State<AppState>,
     AxumPath((id, decision)): AxumPath<(String, String)>,
     Json(request): Json<LaunchDecisionAnswerRequest>,
@@ -1112,7 +1112,7 @@ pub(super) async fn answer_launch_decision(
     Ok(Json(value))
 }
 
-pub(super) async fn cancel_planning_session(
+pub async fn cancel_planning_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<PlanningCancelRequest>,
@@ -1344,7 +1344,7 @@ fn stop_planning_agent(state: &AppState, planner: &str, key: &str) -> Result<(),
     Ok(())
 }
 
-pub(super) async fn mission(
+pub async fn mission(
     State(state): State<AppState>,
     Json(request): Json<MissionRequest>,
 ) -> Result<Json<MissionResponse>, ApiError> {
@@ -1413,7 +1413,7 @@ fn ignored_authority_warnings(
         .collect())
 }
 
-pub(super) async fn apply_with_bound(
+pub async fn apply_with_bound(
     State(state): State<AppState>,
     bound: Option<Extension<BoundAgent>>,
     Json(request): Json<ApplyRequest>,
@@ -1421,7 +1421,7 @@ pub(super) async fn apply_with_bound(
     apply_with_authority(state, request, bound.as_ref().map(|bound| bound.0.0.as_str())).await
 }
 
-pub(super) async fn get_mission(
+pub async fn get_mission(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
@@ -1445,7 +1445,7 @@ pub(super) async fn get_mission(
 }
 
 /// A person or an agent retires a mission.
-pub(super) async fn retire_mission(
+pub async fn retire_mission(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<MissionRetireRequest>,

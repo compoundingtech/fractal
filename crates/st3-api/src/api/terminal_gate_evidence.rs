@@ -5,7 +5,7 @@ use rusqlite::{Transaction, params};
 use smallclaims::ivm::install::Installer;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Evidence {
+pub enum Evidence {
     Unknown,
     Fenced {
         reason: String,
@@ -20,7 +20,7 @@ pub(crate) enum Evidence {
 /// Caller supplies a pinned read. Four indexed statements on a ready nonempty fixture;
 /// no full count, source decode, mutation, refresher or fallback. Root/cut is only the
 /// fixture installer's readiness, not certification of native authority dependencies.
-pub(crate) fn read(tx: &Transaction<'_>, installer: &Installer) -> Result<Evidence> {
+pub fn read(tx: &Transaction<'_>, installer: &Installer) -> Result<Evidence> {
     let root = match installer.root(tx, VIEW) {
         Ok(root) => root,
         Err(error) => {

@@ -16,20 +16,20 @@ use smallclaims::{
 };
 use tokio::sync::broadcast;
 
-pub(crate) struct IvmViewBridge<S = Store> {
+pub struct IvmViewBridge<S = Store> {
     store: Arc<S>,
     views: Arc<Views>,
     publisher: Arc<events::Publisher>,
 }
 
-pub(crate) struct OpenView<T> {
+pub struct OpenView<T> {
     pub notices: broadcast::Receiver<events::Notice>,
     pub boundary: events::Boundary,
     /// None means output is not ready. Boundary still carries current availability.
     pub snapshot: Option<T>,
 }
 
-pub(crate) enum ViewWake {
+pub enum ViewWake {
     Committed(events::CommitFrontiers),
     /// A dropped notice is recovered by checking the indexed journal and its floor.
     Lagged,
@@ -41,7 +41,7 @@ pub(crate) enum ViewWake {
 /// Both streams are read at the same database cut. The caller applies a Changes page
 /// before retaining either returned cursor; a failed delivery leaves both old cursors
 /// available for the next attempt. This page carries invalidations, not row contents.
-pub(crate) enum ViewPage<T> {
+pub enum ViewPage<T> {
     Changes {
         /// The callback receives raw view-global keys, but only its authorized result
         /// can leave this bridge. It must refresh the bounded window when readiness
@@ -66,7 +66,7 @@ impl<S: Borrow<Store>> IvmViewBridge<S> {
     /// Use the runtime owner's one publisher for this exact graph Store. The installer
     /// owns the journal and both receipt waits and socket consumers share this publisher.
     /// Construction does no SQL and attaches no additional commit observer.
-    pub(crate) fn from_shared(
+    pub fn from_shared(
         store: Arc<S>,
         views: Arc<Views>,
         publisher: Arc<events::Publisher>,
@@ -79,14 +79,14 @@ impl<S: Borrow<Store>> IvmViewBridge<S> {
     }
 
     /// Register one socket before any of its authorized view captures.
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<events::Notice> {
+    pub fn subscribe(&self) -> broadcast::Receiver<events::Notice> {
         self.publisher.subscribe()
     }
 
     /// Register for commits before reading authorization, output and both cursors in one
     /// short snapshot. Authorization runs before exposing availability or a boundary.
     /// The caller must release `OpenView`'s snapshot work before awaiting.
-    pub(crate) fn subscribe_snapshot<T>(
+    pub fn subscribe_snapshot<T>(
         &self,
         view: &str,
         authorize: impl FnOnce(&Connection) -> Result<()>,
@@ -119,7 +119,7 @@ impl<S: Borrow<Store>> IvmViewBridge<S> {
     /// diagnostics remain in the returned boundary. A continuation passes the previous
     /// page's snapshot version; the first page after a commit passes None. Expiry or
     /// provider replacement requires a fresh authorized output snapshot.
-    pub(crate) fn page_with_rows<T>(
+    pub fn page_with_rows<T>(
         &self,
         keys: &events::ChangeCursor,
         status: &events::ChangeCursor,
@@ -186,7 +186,7 @@ impl<S: Borrow<Store>> IvmViewBridge<S> {
         })
     }
 
-    pub(crate) async fn next_notice(
+    pub async fn next_notice(
         receiver: &mut broadcast::Receiver<events::Notice>,
     ) -> ViewWake {
         match receiver.recv().await {

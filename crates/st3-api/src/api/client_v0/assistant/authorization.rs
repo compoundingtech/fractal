@@ -22,7 +22,7 @@ const ROUTES: &[(&str, &str)] = &[
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ReadTrust {
+pub struct ReadTrust {
     issuer: String,
     key_id: String,
     attestor_public_key: String,
@@ -34,7 +34,7 @@ pub(super) struct ReadTrust {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::api) struct ReadTrustRequest {
+pub struct ReadTrustRequest {
     api_version: String,
     issuer: String,
     key_id: String,
@@ -71,7 +71,7 @@ struct ReadAuthorization {
 }
 /// Carried to the enclosing response: never stores or publishes private projection bytes.
 #[derive(Clone, Debug)]
-pub(in crate::api) struct ReadReceipt {
+pub struct ReadReceipt {
     subject: String,
     consumed_claim: String,
     grant_subject: String,
@@ -79,7 +79,7 @@ pub(in crate::api) struct ReadReceipt {
     transport: &'static str,
     policy_revision: u64,
     proof_expiry: u64,
-    pub(in crate::api) max_response_bytes: usize,
+    pub max_response_bytes: usize,
 }
 
 fn key(value: &str) -> Result<Vec<u8>, ApiError> {
@@ -101,7 +101,7 @@ fn validate_trust(trust: &ReadTrust) -> Result<(), ApiError> {
     }
     Ok(())
 }
-pub(in crate::api) async fn pin(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
+pub async fn pin(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                        AxumPath(id): AxumPath<String>, Json(request): Json<ReadTrustRequest>)
     -> Result<Json<Value>, ApiError> {
     let issuer = trusted_issuer(&state, &session)?;
@@ -131,7 +131,7 @@ pub(in crate::api) async fn pin(State(state): State<AppState>, Extension(session
     Ok(Json(projection(&state, &granted)?))
 }
 
-pub(super) fn route(session: &ClientSession, request: &Request<Body>) -> Result<(), ApiError> {
+pub fn route(session: &ClientSession, request: &Request<Body>) -> Result<(), ApiError> {
     if request.uri().path() == "/v1/client/assistant/propose" && request.method() == axum::http::Method::POST {
         return Ok(());
     }
@@ -235,7 +235,7 @@ fn verify(state: &AppState, session: &ClientSession, path: &str, parameters: &BT
     Ok((granted,receipt))
 }
 
-pub(in crate::api) async fn read(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
+pub async fn read(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                                Extension(snapshot): Extension<ClientSnapshot>, OriginalUri(uri): OriginalUri,
                                headers: HeaderMap) -> Result<(Extension<ReadReceipt>,Extension<ClientSnapshot>,Json<Value>),ApiError> {
     let result=read_inner(State(state.clone()),Extension(session.clone()),Extension(snapshot),OriginalUri(uri),headers).await;
@@ -302,7 +302,7 @@ async fn read_inner(State(state): State<AppState>, Extension(session): Extension
     Ok((Extension(receipt),Extension(snapshot),Json(value)))
 }
 
-pub(in crate::api) async fn finish(state: &AppState, receipt: &ReadReceipt, bytes: &[u8],
+pub async fn finish(state: &AppState, receipt: &ReadReceipt, bytes: &[u8],
                           within_budget: bool) -> Result<(),ApiError> {
     let _transition=TRANSITIONS.lock().await;
     // The consumed approval remains authoritative even if the grant expires or is revoked

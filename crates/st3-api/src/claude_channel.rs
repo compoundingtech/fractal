@@ -488,7 +488,7 @@ fn unprepared_fifo_head(
 }
 
 
-pub(crate) const PREPARATION_WAIT_REASON: &str =
+pub const PREPARATION_WAIT_REASON: &str =
     "waiting for Claude to prepare this message or an earlier FIFO head; body or attachment preparation is unavailable, and durable mail is retained and retried in arrival order";
 async fn preparation_diagnostic(
     client: &Client,

@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Deserialize)]
-pub(super) struct AgentRolloutRequest {
+pub struct AgentRolloutRequest {
     subject: String,
     actor: String,
     expected_desired: String,
@@ -10,7 +10,7 @@ pub(super) struct AgentRolloutRequest {
     idempotency_key: String,
 }
 
-pub(super) async fn rollout_agent(
+pub async fn rollout_agent(
     State(state): State<AppState>,
     Json(request): Json<AgentRolloutRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -52,7 +52,7 @@ pub(super) async fn rollout_agent(
 }
 
 #[derive(Deserialize)]
-pub(super) struct AgentRestartRequest {
+pub struct AgentRestartRequest {
     subject: String,
     actor: String,
     idempotency_key: String,
@@ -61,7 +61,7 @@ pub(super) struct AgentRestartRequest {
     now: bool,
 }
 
-pub(super) async fn restart_agent(
+pub async fn restart_agent(
     State(state): State<AppState>,
     Json(request): Json<AgentRestartRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -190,7 +190,7 @@ pub(super) async fn restart_agent(
 }
 
 #[derive(Deserialize)]
-pub(super) struct MissionSeatStartRequest {
+pub struct MissionSeatStartRequest {
     subject: String,
     actor: String,
     /// The selected stop the caller read, when it read one.
@@ -200,7 +200,7 @@ pub(super) struct MissionSeatStartRequest {
 }
 
 /// Record an operator's source-offline exception for one exact placement.
-pub(super) async fn override_placement_source(
+pub async fn override_placement_source(
     State(state): State<AppState>,
     Json(mut request): Json<crate::placement::SourceOfflineRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -216,7 +216,7 @@ pub(super) async fn override_placement_source(
 }
 
 /// Start a stopped mission seat on the declaration its run gave it, as `st agents start` does.
-pub(super) async fn start_mission_seat(
+pub async fn start_mission_seat(
     State(state): State<AppState>,
     Json(request): Json<MissionSeatStartRequest>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
@@ -238,7 +238,7 @@ pub(super) async fn start_mission_seat(
 /// Ask the seat's owner to suspend it. The seat must be running and quiet now: its driver reports
 /// the harness quiescent, it holds no claimed step and runs no subagent, and its driver has bound
 /// a native session to resume. The owner checks again before it stops anything.
-pub(super) async fn suspend_agent(
+pub async fn suspend_agent(
     State(state): State<AppState>,
     Json(request): Json<AgentSuspensionRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -246,7 +246,7 @@ pub(super) async fn suspend_agent(
 }
 
 #[derive(Deserialize, Serialize)]
-pub(crate) struct SnapshotReadRequest {
+pub struct SnapshotReadRequest {
     pub subject: String,
     pub suspend_operation: String,
     pub resume_operation: String,
@@ -254,7 +254,7 @@ pub(crate) struct SnapshotReadRequest {
     pub offset: u64,
 }
 
-pub(super) async fn seat_snapshot_chunk(
+pub async fn seat_snapshot_chunk(
     State(state): State<AppState>,
     Json(request): Json<SnapshotReadRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -303,7 +303,7 @@ pub(super) async fn seat_snapshot_chunk(
 }
 
 /// Ask the seat's owner to resume a suspended seat on the native session it suspended.
-pub(super) async fn resume_agent(
+pub async fn resume_agent(
     State(state): State<AppState>,
     Json(request): Json<AgentSuspensionRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -311,7 +311,7 @@ pub(super) async fn resume_agent(
 }
 
 #[derive(Deserialize)]
-pub(super) struct NativeSessionReport {
+pub struct NativeSessionReport {
     #[serde(default)]
     account_ref: Option<String>,
     subject: String,
@@ -327,7 +327,7 @@ pub(super) struct NativeSessionReport {
 
 /// A seat's driver reports the native session its harness bound for one incarnation. Only the
 /// seat itself reports its own session.
-pub(super) async fn report_native_session(
+pub async fn report_native_session(
     State(state): State<AppState>,
     Json(request): Json<NativeSessionReport>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -386,14 +386,14 @@ pub(super) async fn report_native_session(
 }
 
 #[derive(Deserialize)]
-pub(super) struct AgentRenameRequest {
+pub struct AgentRenameRequest {
     subject: String,
     name: Option<String>,
     actor: String,
     idempotency_key: String,
 }
 
-pub(super) async fn rename_agent(
+pub async fn rename_agent(
     State(state): State<AppState>,
     Json(request): Json<AgentRenameRequest>,
 ) -> Result<Json<ApplyResponse>, ApiError> {

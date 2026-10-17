@@ -5,7 +5,7 @@ use crate::mailbox::{Fence, Frame, Receipt};
 
 mod authority;
 
-pub(super) async fn subscribe(
+pub async fn subscribe(
     State(state): State<AppState>,
     Query(fence): Query<Fence>,
     peer: Option<Extension<NativeDeliveryPeer>>,
@@ -38,7 +38,7 @@ pub(super) async fn subscribe(
     Ok(websocket.on_upgrade(move |socket| stream(state, fence, socket, peer, native)))
 }
 
-pub(super) async fn bind(
+pub async fn bind(
     State(state): State<AppState>,
     peer: Option<Extension<NativeDeliveryPeer>>,
     Json(request): Json<Fence>,
@@ -62,7 +62,7 @@ pub(super) async fn bind(
 // Explicit already-admitted protocol fixtures lack a physical PTY/provider lease.
 // Selected Rust integration fixtures use these routes; the installed API router cannot.
 #[cfg(feature = "test-support")]
-pub(super) async fn bind_admitted_fixture(
+pub async fn bind_admitted_fixture(
     State(state): State<AppState>,
     peer: Option<Extension<NativeDeliveryPeer>>,
     Json(request): Json<Fence>,
@@ -73,7 +73,7 @@ pub(super) async fn bind_admitted_fixture(
 }
 
 #[cfg(feature = "test-support")]
-pub(super) async fn subscribe_admitted_fixture(
+pub async fn subscribe_admitted_fixture(
     State(state): State<AppState>,
     Query(fence): Query<Fence>,
     peer: Option<Extension<NativeDeliveryPeer>>,
@@ -85,7 +85,7 @@ pub(super) async fn subscribe_admitted_fixture(
     Ok(websocket.on_upgrade(move |socket| stream_with_reader(state, fence, socket, raw_snapshot)))
 }
 
-pub(super) async fn attachment(
+pub async fn attachment(
     State(state): State<AppState>,
     Query(fence): Query<Fence>,
     peer: Option<Extension<NativeDeliveryPeer>>,
@@ -131,7 +131,7 @@ fn authorize(fence: &Fence, peer: Option<&NativeDeliveryPeer>) -> Result<(), Api
     Ok(())
 }
 
-pub(super) async fn receipt(
+pub async fn receipt(
     State(state): State<AppState>,
     peer: Option<Extension<NativeDeliveryPeer>>,
     Json(request): Json<Receipt>,
@@ -314,7 +314,7 @@ fn retain_live_mail(
 
 /// Older drivers poll instead of subscribing. Preserve a recent message admitted
 /// by this boot while its current staging attempt finishes; older attempts stay held.
-pub(super) fn hold_pre_boot_mail(
+pub fn hold_pre_boot_mail(
     store: &Store,
     peer: Option<&NativeDeliveryPeer>,
     recipient: Option<&str>,
@@ -375,8 +375,8 @@ fn raw_snapshot(store: &Store, binding: &Fence) -> anyhow::Result<Snapshot> {
     })
 }
 
-#[cfg(test)]
-fn snapshot(store: &Store, binding: &Fence) -> anyhow::Result<Snapshot> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn snapshot(store: &Store, binding: &Fence) -> anyhow::Result<Snapshot> {
     let (seat, mut messages) = raw_snapshot(store, binding)?;
     let _ = filter_messages(store, binding, &mut messages, &mut Default::default(), &mut None)?;
     Ok((seat, messages))
@@ -713,19 +713,19 @@ async fn stream_with_timers<F, S, H>(
 
 struct StreamControl {
     peer: Option<NativeDeliveryPeer>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     dirty_gate: Option<Arc<FixtureDirtyGate>>,
 }
 impl StreamControl {
     fn new(peer: Option<NativeDeliveryPeer>) -> Self {
-        Self { peer, #[cfg(test)] dirty_gate: None }
+        Self { peer, #[cfg(any(test, feature = "test-support"))] dirty_gate: None }
     }
 }
 
 // Unit controls can pause snapshot processing while the real subscription and
 // incoming-report handler remain live. Installed servers never have this gate.
-#[cfg(test)]
-struct FixtureDirtyGate {
+#[cfg(any(test, feature = "test-support"))]
+pub struct FixtureDirtyGate {
     allowed: std::sync::atomic::AtomicBool,
     notifications: std::sync::atomic::AtomicUsize,
     replay_proofs: std::sync::atomic::AtomicUsize,
@@ -1030,8 +1030,8 @@ fn record_admitted_report(fence: &Fence, report: &str) -> bool {
     recorded
 }
 
-#[cfg(test)]
-fn record_checked_report(store: &Store, fence: &Fence, report: &str) -> bool {
+#[cfg(any(test, feature = "test-support"))]
+pub fn record_checked_report(store: &Store, fence: &Fence, report: &str) -> bool {
     if store.check_mailbox(fence).is_err() {
         return false;
     }

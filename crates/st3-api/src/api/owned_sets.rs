@@ -1,7 +1,7 @@
 use super::*;
 use crate::store::owned_sets::{self as sets, Request as SetRequest};
 
-pub(super) async fn preview(
+pub async fn preview(
     State(state): State<AppState>,
     Json(request): Json<SetRequest>,
 ) -> Result<Json<sets::Preview>, ApiError> {
@@ -45,7 +45,7 @@ pub(super) async fn preview(
     Ok(Json(preview))
 }
 
-pub(super) async fn apply(
+pub async fn apply(
     State(state): State<AppState>,
     Json(request): Json<SetRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -158,7 +158,7 @@ fn resource(state: &AppState, view: sets::View) -> anyhow::Result<Value> {
     Ok(value)
 }
 
-pub(super) async fn list(
+pub async fn list(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
     Extension(snapshot): Extension<ClientSnapshot>,
@@ -177,11 +177,11 @@ pub(super) async fn list(
 }
 
 #[derive(Default, Deserialize)]
-pub(super) struct DetailQuery {
+pub struct DetailQuery {
     sha: Option<String>,
 }
 
-pub(super) async fn get(
+pub async fn get(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
     AxumPath(id): AxumPath<String>,

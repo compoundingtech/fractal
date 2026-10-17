@@ -1,7 +1,7 @@
 use super::*;
 use crate::harness_events::Publication;
 
-pub(super) async fn publish(
+pub async fn publish(
     State(state): State<AppState>,
     peer: Option<Extension<NativeDeliveryPeer>>,
     Json(request): Json<Publication>,
@@ -29,7 +29,7 @@ pub(super) async fn publish(
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct PromptStateQuery {
+pub struct PromptStateQuery {
     agent: String,
     /// The hook's own observation: its state record's ownership and transition sequences.
     ownership: u64,
@@ -38,7 +38,7 @@ pub(super) struct PromptStateQuery {
 
 /// Where a waiting prompt hook's prompt stands: open, answered by a person (and how), or gone.
 /// The hook asks its own host's daemon, which holds the person's answer once it replicates.
-pub(super) async fn prompt_state(
+pub async fn prompt_state(
     State(state): State<AppState>,
     Query(query): Query<PromptStateQuery>,
 ) -> Result<Json<crate::store::NativePromptState>, ApiError> {
@@ -53,7 +53,7 @@ pub(super) async fn prompt_state(
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct PromptAnswerQuery {
+pub struct PromptAnswerQuery {
     agent: String,
     /// The claim that raised the prompt or denial.
     episode: String,
@@ -61,7 +61,7 @@ pub(super) struct PromptAnswerQuery {
 
 /// The person's answer to a prompt or denial the seat's hook raised, once recorded. A hook asks
 /// its own host's daemon, which holds the answer once it replicates.
-pub(super) async fn prompt_answer(
+pub async fn prompt_answer(
     State(state): State<AppState>,
     Query(query): Query<PromptAnswerQuery>,
 ) -> Result<Json<crate::store::PromptAnswer>, ApiError> {
@@ -90,9 +90,9 @@ mod tests {
         http::Request,
     };
 
-    pub(super) const SEAT: &str = "agent/example/native-wake";
+    pub const SEAT: &str = "agent/example/native-wake";
 
-    pub(super) fn runtime(state: &AppState, incarnation: &str) {
+    pub fn runtime(state: &AppState, incarnation: &str) {
         state
             .store
             .append_claim(&ClaimInput {
@@ -110,7 +110,7 @@ mod tests {
             .unwrap();
     }
 
-    pub(super) fn event(sequence: u64, state: &str) -> Publication {
+    pub fn event(sequence: u64, state: &str) -> Publication {
         Publication {
             runtime_incarnation: "native-one".into(),
             sequence,
@@ -130,7 +130,7 @@ mod tests {
         }
     }
 
-    pub(super) async fn post(
+    pub async fn post(
         state: &AppState,
         event: &Publication,
         agent: &str,
@@ -163,7 +163,7 @@ mod tests {
         (status, value)
     }
 
-    pub(super) async fn notified(state: &AppState) -> bool {
+    pub async fn notified(state: &AppState) -> bool {
         tokio::time::timeout(Duration::from_millis(20), state.notify.notified())
             .await
             .is_ok()

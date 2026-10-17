@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn replication_status(
+pub async fn replication_status(
     State(state): State<AppState>,
 ) -> Result<Json<ReplicationStatus>, ApiError> {
     let store = state.store.clone();
@@ -18,12 +18,12 @@ pub(super) async fn replication_status(
 }
 
 #[derive(Deserialize)]
-pub(super) struct ReplicationRecordsQuery {
+pub struct ReplicationRecordsQuery {
     #[serde(default = "default_true")]
     unresolved: bool,
 }
 
-pub(super) async fn replication_records(
+pub async fn replication_records(
     State(state): State<AppState>,
     Query(query): Query<ReplicationRecordsQuery>,
 ) -> Result<Json<Vec<ReplicaRecordView>>, ApiError> {
@@ -33,7 +33,7 @@ pub(super) async fn replication_records(
         .map(Json)
 }
 
-pub(super) async fn replication_record(
+pub async fn replication_record(
     State(state): State<AppState>,
     AxumPath(record): AxumPath<String>,
 ) -> Result<Json<ReplicaRecordView>, ApiError> {
@@ -50,7 +50,7 @@ pub(super) async fn replication_record(
         .ok_or_else(|| ApiError::not_found(format!("replica record `{record}` does not exist")))
 }
 
-pub(super) async fn checkpoint_plan(
+pub async fn checkpoint_plan(
     State(state): State<AppState>,
     Json(request): Json<crate::store::CheckpointPlanRequest>,
 ) -> Result<Json<crate::store::CheckpointPlanView>, ApiError> {
@@ -69,7 +69,7 @@ pub(super) async fn checkpoint_plan(
         .await?.map(Json).map_err(ApiError::internal)
 }
 
-pub(super) async fn checkpoint_status(
+pub async fn checkpoint_status(
     State(state): State<AppState>,
 ) -> Result<Json<crate::store::CheckpointStatusView>, ApiError> {
     let store = state.store.clone();
@@ -79,7 +79,7 @@ pub(super) async fn checkpoint_status(
         .map(Json)
 }
 
-pub(super) async fn checkpoint_excuse(
+pub async fn checkpoint_excuse(
     State(state): State<AppState>,
     Json(request): Json<crate::store::CheckpointExcuseRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -91,7 +91,7 @@ pub(super) async fn checkpoint_excuse(
     Ok(Json(claim))
 }
 
-pub(super) async fn checkpoint_resume(
+pub async fn checkpoint_resume(
     State(state): State<AppState>,
     Json(request): Json<crate::store::CheckpointResumeRequest>,
 ) -> Result<Json<crate::store::CheckpointStatusView>, ApiError> {
@@ -105,7 +105,7 @@ pub(super) async fn checkpoint_resume(
         .map(Json)
 }
 
-pub(super) async fn repair_replication_record(
+pub async fn repair_replication_record(
     State(state): State<AppState>,
     Json(request): Json<ReplicationRepairRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -123,7 +123,7 @@ pub(super) async fn repair_replication_record(
     Ok(Json(claim))
 }
 
-pub(super) async fn replication_export(
+pub async fn replication_export(
     State(state): State<AppState>,
     Json(request): Json<ReplicationExportRequest>,
 ) -> Result<Json<ReplicationExportResponse>, ApiError> {
@@ -156,7 +156,7 @@ pub(super) async fn replication_export(
 }
 
 /// One page of a checkpoint's manifest, for the replication worker to answer a peer with.
-pub(super) async fn replication_checkpoint_manifest(
+pub async fn replication_checkpoint_manifest(
     State(state): State<AppState>,
     Json(request): Json<crate::store::CheckpointManifestRequest>,
 ) -> Result<Json<crate::store::CheckpointManifestPage>, ApiError> {
@@ -167,7 +167,7 @@ pub(super) async fn replication_checkpoint_manifest(
 }
 
 /// The newest stable checkpoint this node needs a peer's manifest for, if any.
-pub(super) async fn replication_checkpoint_need(
+pub async fn replication_checkpoint_need(
     State(state): State<AppState>,
 ) -> Result<Json<Option<crate::store::CheckpointManifestNeed>>, ApiError> {
     let store = state.store.clone();
@@ -177,7 +177,7 @@ pub(super) async fn replication_checkpoint_need(
 }
 
 /// Adopt a checkpoint from the manifest the replication worker fetched from a peer.
-pub(super) async fn replication_checkpoint_adopt(
+pub async fn replication_checkpoint_adopt(
     State(state): State<AppState>,
     Json(manifest): Json<crate::store::CheckpointManifest>,
 ) -> Result<Json<Vec<crate::store::CheckpointAction>>, ApiError> {
@@ -189,7 +189,7 @@ pub(super) async fn replication_checkpoint_adopt(
     Ok(Json(actions))
 }
 
-pub(super) async fn replication_receive(
+pub async fn replication_receive(
     State(state): State<AppState>,
     Json(request): Json<ReplicationReceiveRequest>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
@@ -316,7 +316,7 @@ pub(super) async fn replication_receive(
     Ok(Json(response))
 }
 
-pub(super) async fn replication_peer_failure(
+pub async fn replication_peer_failure(
     State(state): State<AppState>,
     Json(request): Json<ReplicationPeerFailureRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -366,7 +366,7 @@ pub(super) async fn replication_peer_failure(
     Ok(Json(json!({ "recorded": true, "changed": changed })))
 }
 
-pub(super) async fn replication_wake(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+pub async fn replication_wake(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
     let (admission, repairs, projection_attempted, projected, was_deferred) =
         blocking_store(move || {

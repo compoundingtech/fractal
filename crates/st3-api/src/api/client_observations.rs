@@ -7,7 +7,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub(super) const MAX_BODY_BYTES: usize = 65_536;
+pub const MAX_BODY_BYTES: usize = 65_536;
 const MAX_SAMPLES: usize = 32;
 const MAX_BUCKETS: usize = 64;
 const MAX_COUNT: u64 = 1_000_000;
@@ -22,7 +22,7 @@ type Key = (String, String, Option<String>);
 
 use st3_client::{ObservationReport, ObservationSample};
 
-pub(super) struct Validated {
+pub struct Validated {
     pub key: Key,
     pub minute: MinuteSummary,
 }
@@ -233,7 +233,7 @@ impl Drop for Ticket {
     }
 }
 
-pub(super) async fn report(
+pub async fn report(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     body: Result<Json<ObservationReport>, axum::extract::rejection::JsonRejection>,

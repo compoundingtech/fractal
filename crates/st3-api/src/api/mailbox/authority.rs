@@ -17,7 +17,7 @@ fn source_agent_dir(state: &AppState, fence: &Fence) -> PathBuf {
     )
 }
 
-pub(super) fn episode(fence: &Fence) -> String {
+pub fn episode(fence: &Fence) -> String {
     let key = format!(
         "mailbox:{}:{}:{}",
         fence.subject, fence.incarnation, fence.component
@@ -86,7 +86,7 @@ fn current_provider(
 
 /// Presence reports inherit the admitted peer's custody, never their reported PID.
 /// Recheck the durable provider fence without repeatedly querying the PTY process tree.
-pub(super) fn admit_report(
+pub fn admit_report(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
@@ -162,7 +162,7 @@ pub(super) fn admit_report(
     result
 }
 
-pub(super) fn loss_if_current(
+pub fn loss_if_current(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
@@ -215,24 +215,24 @@ pub(super) fn loss_if_current(
 /// Inputs to a consumed replay, not authentication. Every report still goes
 /// through admission, including current custody, epoch and revocation checks.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ReplayProofInputs {
-    pub(super) failure: Option<String>,
-    pub(super) subject: String,
-    pub(super) component: String,
-    pub(super) incarnation: String,
-    pub(super) epoch: u64,
-    pub(super) peer_agent: String,
-    pub(super) peer_transport: &'static str,
-    pub(super) peer_pid: u32,
-    pub(super) peer_archives_inbox: bool,
-    pub(super) process_birth: u64,
+pub struct ReplayProofInputs {
+    pub failure: Option<String>,
+    pub subject: String,
+    pub component: String,
+    pub incarnation: String,
+    pub epoch: u64,
+    pub peer_agent: String,
+    pub peer_transport: &'static str,
+    pub peer_pid: u32,
+    pub peer_archives_inbox: bool,
+    pub process_birth: u64,
     // Provider, session, PID, process generation and native ownership sequence.
-    pub(super) lease_owner: Authority,
+    pub lease_owner: Authority,
     episode_key: String,
     agent_dir: PathBuf,
 }
 
-pub(super) fn replay_proof_inputs(
+pub fn replay_proof_inputs(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
@@ -262,7 +262,7 @@ pub(super) fn replay_proof_inputs(
 impl ReplayProofInputs {
     /// Compare on dirty passes without rebuilding the immutable stream inputs.
     /// Any read error invalidates the proof; none of these reads admits a report.
-    pub(super) fn is_current(
+    pub fn is_current(
         &self,
         state: &AppState,
         fence: &Fence,
@@ -295,7 +295,7 @@ impl ReplayProofInputs {
     }
 }
 
-pub(super) fn repair_proven(
+pub fn repair_proven(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
@@ -504,7 +504,7 @@ fn bootstrap_witness(
 /// A declared argv-only program can consume channel envelopes without a model provider.
 /// This preserves the delivery monitor's protocol, not qualified native custody or repair.
 #[cfg(target_os = "linux")]
-pub(super) fn with_argv_channel<T>(
+pub fn with_argv_channel<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
@@ -560,7 +560,7 @@ pub(super) fn with_argv_channel<T>(
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(super) fn with_argv_channel<T>(
+pub fn with_argv_channel<T>(
     _state: &AppState,
     _fence: &Fence,
     _peer: &NativeDeliveryPeer,
@@ -569,7 +569,7 @@ pub(super) fn with_argv_channel<T>(
     Ok(None)
 }
 
-pub(super) fn with_authority<T>(
+pub fn with_authority<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,

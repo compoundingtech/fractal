@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub(in crate::api) struct ResourcesQuery {
+pub struct ResourcesQuery {
     limit: Option<usize>,
     cursor: Option<String>,
     opened_by: Option<String>,
@@ -32,7 +32,7 @@ fn decode_cursor(encoded: &str) -> Result<ResourcesCursor, ApiError> {
     serde_json::from_slice(&bytes).map_err(|_| malformed())
 }
 
-pub(in crate::api) async fn list(
+pub async fn list(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
     Query(query): Query<ResourcesQuery>,

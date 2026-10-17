@@ -28,11 +28,11 @@ fn conform(validator: &jsonschema::Validator, entries: &[Value]) {
 fn every_native_reader_output_conforms_to_client_v0_timeline_entry() {
     let validator = validator();
     let fixtures = [
-        (ExternalDriver::Omp, include_str!("../../../../fixtures/native-records/omp-parity.jsonl")),
-        (ExternalDriver::Pi, include_str!("../../../../fixtures/native-records/omp-parity.jsonl")),
-        (ExternalDriver::Claude, include_str!("../../../../fixtures/native-records/claude.jsonl")),
-        (ExternalDriver::Codex, include_str!("../../../../fixtures/native-records/codex.jsonl")),
-        (ExternalDriver::Omp, include_str!("../../../../fixtures/native-records/schema-conformance.jsonl")),
+        (ExternalDriver::Omp, include_str!("../../../../../st3-daemon/fixtures/native-records/omp-parity.jsonl")),
+        (ExternalDriver::Pi, include_str!("../../../../../st3-daemon/fixtures/native-records/omp-parity.jsonl")),
+        (ExternalDriver::Claude, include_str!("../../../../../st3-daemon/fixtures/native-records/claude.jsonl")),
+        (ExternalDriver::Codex, include_str!("../../../../../st3-daemon/fixtures/native-records/codex.jsonl")),
+        (ExternalDriver::Omp, include_str!("../../../../../st3-daemon/fixtures/native-records/schema-conformance.jsonl")),
     ];
     let mut exported = Vec::new();
     for (driver, records) in fixtures {
@@ -83,7 +83,7 @@ fn every_native_reader_output_conforms_to_client_v0_timeline_entry() {
 fn incomplete_native_views_preserve_raw_records_without_invalid_projections() {
     let root = tempfile::tempdir().unwrap();
     let native = super::tests::fixture(root.path(), json!([]));
-    std::fs::write(&native.transcript, include_str!("../../../../fixtures/native-records/schema-conformance.jsonl")).unwrap();
+    std::fs::write(&native.transcript, include_str!("../../../../../st3-daemon/fixtures/native-records/schema-conformance.jsonl")).unwrap();
     let entries = crate::external_sessions::normalized_timeline(&native).unwrap();
     let blocks: Vec<_> = entries.iter().flat_map(|entry| entry["body"]["blocks"].as_array().into_iter().flatten()).collect();
     assert!(blocks.iter().any(|block| block["view"]["wall_ms"] == 13));

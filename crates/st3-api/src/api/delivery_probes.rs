@@ -43,7 +43,7 @@ struct PreviousRead {
     latency_ms: u128,
 }
 
-pub(super) fn check(
+pub fn check(
     store: &Store,
     now: u128,
     peers: &[String],

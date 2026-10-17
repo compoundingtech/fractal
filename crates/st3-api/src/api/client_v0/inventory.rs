@@ -2,14 +2,14 @@
 use super::*;
 use std::path::PathBuf;
 
-pub(super) fn is_inventory(collection: &str) -> bool {
+pub fn is_inventory(collection: &str) -> bool {
     matches!(
         collection,
         "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
     )
 }
 
-pub(super) fn validate(request: &CollectionSubscribe) -> Result<(), ApiError> {
+pub fn validate(request: &CollectionSubscribe) -> Result<(), ApiError> {
     if request.collection != "usage" && (request.since_ms.is_some() || request.until_ms.is_some()) {
         return Err(validation("period boundaries are supported for usage only"));
     }
@@ -36,7 +36,7 @@ pub(super) fn validate(request: &CollectionSubscribe) -> Result<(), ApiError> {
 }
 
 /// Shared serialization keeps the HTTP and followed usage reports identical.
-pub(super) fn usage_value(store: &Store, since_ms: u64, until_ms: u64) -> anyhow::Result<Value> {
+pub fn usage_value(store: &Store, since_ms: u64, until_ms: u64) -> anyhow::Result<Value> {
     let (mut rows, agent_messages) = store.usage_period_report(since_ms, until_ms)?;
     for row in &mut rows {
         if let Some(fields) = row.as_object_mut() {
@@ -59,7 +59,7 @@ pub(super) fn usage_value(store: &Store, since_ms: u64, until_ms: u64) -> anyhow
     )
 }
 
-pub(super) fn items(
+pub fn items(
     state: &AppState,
     session: &ClientSession,
     request: &CollectionSubscribe,
@@ -182,7 +182,7 @@ pub(super) fn items(
 }
 
 /// Schedule actual membership expirations, without a timer that rereads idle inventories.
-pub(super) fn next_expiry(subscription: &CollectionSubscription) -> Option<u128> {
+pub fn next_expiry(subscription: &CollectionSubscription) -> Option<u128> {
     subscription
         .request
         .inventory_deadline
@@ -192,9 +192,9 @@ pub(super) fn next_expiry(subscription: &CollectionSubscription) -> Option<u128>
 
 /// Watch native inventory files while a session list is held. Missing roots are watched at
 /// their nearest existing ancestor, without recursively watching an unrelated home tree.
-pub(super) struct NativeWatch {
+pub struct NativeWatch {
     watcher: notify::RecommendedWatcher,
-    pub(super) processes_in_read: Arc<Mutex<Vec<u32>>>,
+    pub processes_in_read: Arc<Mutex<Vec<u32>>>,
     #[cfg(target_os = "linux")]
     processes: BTreeMap<u32, tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>,
     home: PathBuf,
@@ -203,7 +203,7 @@ pub(super) struct NativeWatch {
 }
 
 impl NativeWatch {
-    pub(super) fn open(home: &Path) -> anyhow::Result<Self> {
+    pub fn open(home: &Path) -> anyhow::Result<Self> {
         let (sender, events) = tokio::sync::watch::channel(Ok(()));
         let roots = native_roots(home);
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -278,7 +278,7 @@ impl NativeWatch {
         Ok(())
     }
 
-    pub(super) fn observe_processes(&mut self) -> anyhow::Result<bool> {
+    pub fn observe_processes(&mut self) -> anyhow::Result<bool> {
         let mut exited = false;
         #[cfg(target_os = "linux")]
         {
@@ -312,7 +312,7 @@ impl NativeWatch {
         Ok(exited)
     }
 
-    pub(super) async fn changed(&mut self) -> anyhow::Result<()> {
+    pub async fn changed(&mut self) -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
         let mut exits = self
             .processes

@@ -6,7 +6,7 @@ use serde::de::{MapAccess, SeqAccess, Visitor};
 use std::convert::Infallible;
 
 #[derive(Clone)]
-pub(super) struct Context {
+pub struct Context {
     pub state: AppState,
     pub client_request: bool,
     pub observation_report: bool,
@@ -17,12 +17,12 @@ pub(super) struct Context {
 }
 
 #[derive(Clone)]
-pub(super) struct Metrics {
+pub struct Metrics {
     pub elapsed: Duration,
     pub bytes: usize,
 }
 
-pub(super) fn is_json(response: &Response) -> bool {
+pub fn is_json(response: &Response) -> bool {
     response.status() != StatusCode::SWITCHING_PROTOCOLS
         && response
             .headers()

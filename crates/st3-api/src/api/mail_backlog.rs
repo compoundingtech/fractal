@@ -1,7 +1,7 @@
 use super::*;
 
-pub(super) const THRESHOLD_MS: u64 = 3_600_000;
-pub(super) const CLEANUP_COMMAND: &str = "st conversations cleanup --all --older-than 1h";
+pub const THRESHOLD_MS: u64 = 3_600_000;
+pub const CLEANUP_COMMAND: &str = "st conversations cleanup --all --older-than 1h";
 
 fn overdue(
     store: &Store,
@@ -58,7 +58,7 @@ fn unfinished_archive(store: &Store, message: &MessageView) -> anyhow::Result<bo
                 .is_some())
 }
 
-pub(super) fn report(store: &Store, now: u128) -> anyhow::Result<st3_client::MailBacklog> {
+pub fn report(store: &Store, now: u128) -> anyhow::Result<st3_client::MailBacklog> {
     // Historical held flags are incomplete during bounded bootstrap. Suppress the cleanup
     // banner until its exclusion count is authoritative; cleanup itself always checks tags.
     if !store.coordination_backfill_status()?.2 {
@@ -79,7 +79,7 @@ pub(super) fn report(store: &Store, now: u128) -> anyhow::Result<st3_client::Mai
     })
 }
 
-pub(super) async fn get(
+pub async fn get(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
 ) -> Result<Json<st3_client::MailBacklog>, ApiError> {
@@ -91,7 +91,7 @@ pub(super) async fn get(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct CleanupRequest {
+pub struct CleanupRequest {
     pub older_than_ms: u64,
     pub to: Option<String>,
     #[serde(default)]
@@ -100,7 +100,7 @@ pub(super) struct CleanupRequest {
     pub dry_run: bool,
 }
 
-pub(super) async fn cleanup(
+pub async fn cleanup(
     State(state): State<AppState>,
     Json(request): Json<CleanupRequest>,
 ) -> Result<Json<Value>, ApiError> {

@@ -33,7 +33,7 @@ fn prepare_issue(capabilities: &mut BTreeMap<String, Capability>, now: u128) -> 
     Ok(())
 }
 
-pub(super) fn issue(
+pub fn issue(
     state: &AppState,
     session: &ClientSession,
     terminal: &str,
@@ -60,7 +60,7 @@ pub(super) fn issue(
     Ok(token)
 }
 
-pub(super) fn consume(
+pub fn consume(
     state: &AppState,
     session: &ClientSession,
     terminal: &str,

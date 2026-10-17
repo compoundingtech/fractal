@@ -8,7 +8,7 @@ use std::sync::{Barrier, Mutex};
 // affect this admission-order control, and the registration is removed on drop.
 static SNAPSHOT_CONSTRUCTIONS: Mutex<BTreeMap<usize, usize>> = Mutex::new(BTreeMap::new());
 
-pub(in crate::api) fn note_snapshot_construction(state: &AppState) {
+pub fn note_snapshot_construction(state: &AppState) {
     if let Some(count) = SNAPSHOT_CONSTRUCTIONS
         .lock()
         .unwrap()

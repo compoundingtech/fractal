@@ -1,12 +1,12 @@
 use super::*;
 
 #[derive(Default, Deserialize)]
-pub(super) struct SessionListQuery {
+pub struct SessionListQuery {
     #[serde(default)]
     history: bool,
 }
 
-pub(super) async fn list_sessions(
+pub async fn list_sessions(
     State(state): State<AppState>,
     Query(query): Query<SessionListQuery>,
 ) -> Result<Json<Vec<crate::model::SubjectStatus>>, ApiError> {
@@ -17,7 +17,7 @@ pub(super) async fn list_sessions(
 }
 
 #[derive(Deserialize)]
-pub(super) struct SessionLogQuery {
+pub struct SessionLogQuery {
     #[serde(default)]
     after: u64,
     #[serde(default = "default_log_limit")]
@@ -28,7 +28,7 @@ pub(super) struct SessionLogQuery {
     wait: bool,
 }
 
-pub(super) async fn logs_session(
+pub async fn logs_session(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
     Query(query): Query<SessionLogQuery>,
@@ -129,7 +129,7 @@ pub(super) async fn logs_session(
     }
 }
 
-pub(super) async fn screen_session(
+pub async fn screen_session(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<SessionScreen>, ApiError> {
@@ -151,7 +151,7 @@ pub(super) async fn screen_session(
     }))
 }
 
-pub(super) async fn input_session(
+pub async fn input_session(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
     Json(request): Json<SessionInputRequest>,
@@ -159,7 +159,7 @@ pub(super) async fn input_session(
     input_session_as(&state, subject, request, "requester").await
 }
 
-pub(super) async fn clear_context(
+pub async fn clear_context(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
     Json(request): Json<ContextClearRequest>,
@@ -238,7 +238,7 @@ pub(super) async fn clear_context(
     )
 }
 
-pub(super) async fn signal_session(
+pub async fn signal_session(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
     Json(request): Json<SessionSignalRequest>,
@@ -246,7 +246,7 @@ pub(super) async fn signal_session(
     signal_session_as(state, subject, request, "requester").await
 }
 
-pub(super) async fn attach_session(
+pub async fn attach_session(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
     Json(_request): Json<AttachRequest>,
@@ -289,7 +289,7 @@ pub(super) async fn attach_session(
 /// to it directly. It checks what an attachment checks but issues no capability: it only reads,
 /// so it answers while a busy reconciler holds the writer, and the attach never waits for this
 /// daemon again. The caller proves the incarnation against the PTY itself before attaching.
-pub(super) async fn local_terminal(
+pub async fn local_terminal(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<LocalTerminal>, ApiError> {
@@ -315,11 +315,11 @@ pub(super) async fn local_terminal(
 }
 
 #[derive(Deserialize)]
-pub(super) struct TerminalQuery {
+pub struct TerminalQuery {
     capability: String,
 }
 
-pub(super) async fn terminal_session(
+pub async fn terminal_session(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,

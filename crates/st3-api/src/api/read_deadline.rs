@@ -52,8 +52,8 @@ use super::{ApiError, AppState, ClientTransportBoundary};
 
 const ORDINARY: Duration = Duration::from_secs(15);
 const MAX_WAIT_MS: u64 = 30_000;
-#[cfg(test)]
-const EVENT: Duration = Duration::from_secs(45);
+#[cfg(any(test, feature = "test-support"))]
+pub const EVENT: Duration = Duration::from_secs(45);
 const BULK: Duration = Duration::from_secs(120);
 
 /// Only explicit read operations are cancellable. Writes and their acknowledgement
@@ -235,7 +235,7 @@ fn body_timeout_response(state: &AppState) -> Response {
     timeout_response(state, crate::peer::CLIENT_READ_FORWARD_PATH)
 }
 
-pub(super) async fn envelope(
+pub async fn envelope(
     state: (AppState, ClientTransportBoundary),
     request: Request<Body>,
     next: Next,
@@ -391,7 +391,7 @@ async fn envelope_work(
 }
 
 #[derive(Debug)]
-pub(super) enum WorkError {
+pub enum WorkError {
     Join(tokio::task::JoinError),
     Panic,
     Deadline(crate::model::St3Error),
@@ -424,7 +424,7 @@ fn admission_error(error: anyhow::Error) -> WorkError {
 /// waits hold no reader on either runtime and cannot starve other read workers. Long-poll
 /// handlers and unbudgeted upgrades never take this loan: their actual queries use their
 /// own explicit scopes.
-pub(super) async fn handler<F>(future: F) -> Response
+pub async fn handler<F>(future: F) -> Response
 where
     F: Future<Output = Response>,
 {
@@ -484,7 +484,7 @@ where
 /// keeps the upgraded stream's existing policy: no read budget or deadline is imposed,
 /// and dropping the returned future releases a still-pending admission. Same-thread
 /// nested callers run inline: same-pool loans are reused, and another pool is tried without waiting.
-pub(super) async fn store_read<T, F>(store: &Arc<super::Store>, work: F) -> Result<T, WorkError>
+pub async fn store_read<T, F>(store: &Arc<super::Store>, work: F) -> Result<T, WorkError>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -514,7 +514,7 @@ where
 /// future stays on the async task until its waker signals another poll. Mutations remain
 /// detached from the request waiter, as before; dependent nested writer work retains
 /// the shared permit until its actual completion.
-pub(super) fn spawn_mutation_handler<F, P, T>(
+pub fn spawn_mutation_handler<F, P, T>(
     store: Arc<super::Store>,
     future: F,
     mut scope: P,
@@ -560,7 +560,7 @@ where
 /// Propagate the read budget to every nested blocking task in the API. This wrapper has
 /// no effect on writes or on stream work started after the request's upgrade completes.
 #[track_caller]
-pub(super) fn spawn_blocking<F, T>(work: F) -> impl Future<Output = Result<T, WorkError>>
+pub fn spawn_blocking<F, T>(work: F) -> impl Future<Output = Result<T, WorkError>>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -569,7 +569,7 @@ where
 }
 
 #[track_caller]
-pub(super) fn spawn_handler<F, T>(roster: Option<tracing::Span>, writer: Option<Arc<super::Store>>, work: F) -> impl Future<Output = Result<T, WorkError>>
+pub fn spawn_handler<F, T>(roster: Option<tracing::Span>, writer: Option<Arc<super::Store>>, work: F) -> impl Future<Output = Result<T, WorkError>>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -793,7 +793,7 @@ fn spawn_erased(work: ErasedWork, query: bool, roster: Option<tracing::Span>, wr
 /// One synchronous, explicitly read-only query. Long-poll waiting and WebSocket
 /// lifetime do not become this query's deadline; stream reads get a fresh budget.
 #[track_caller]
-pub(super) fn query<T>(
+pub fn query<T>(
     store: &super::Store,
     route: &'static str,
     work: impl FnOnce() -> Result<T, ApiError>,
@@ -812,7 +812,7 @@ pub(super) fn query<T>(
     })
 }
 
-pub(super) fn error(error: &WorkError) -> Option<ApiError> {
+pub fn error(error: &WorkError) -> Option<ApiError> {
     match error {
         WorkError::Deadline(_) => Some(ApiError::bad(crate::model::St3Error::new(
             "read-deadline",

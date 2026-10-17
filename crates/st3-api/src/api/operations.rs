@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
+pub async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
     let harnesses = read_deadline::spawn_blocking(crate::environment::available_harnesses)
         .await
         .map_err(ApiError::internal)?
@@ -8,7 +8,7 @@ pub(super) async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError>
     Ok(Json(harnesses))
 }
 
-pub(super) async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, ApiError> {
+pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, ApiError> {
     let reader_store = state.store.clone();
     let environment = crate::api::read_deadline::spawn_blocking(crate::environment::snapshot)
         .await
@@ -192,7 +192,7 @@ fn build_tools_check(tools: &crate::environment::BuildTools) -> DoctorCheck {
     }
 }
 
-pub(super) async fn operational_repair_plan(
+pub async fn operational_repair_plan(
     State(state): State<AppState>,
 ) -> Result<Json<OperationalRepairPlan>, ApiError> {
     let store = state.store.clone();
@@ -201,7 +201,7 @@ pub(super) async fn operational_repair_plan(
         .map(Json)
 }
 
-pub(super) async fn apply_operational_repair(
+pub async fn apply_operational_repair(
     State(state): State<AppState>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
@@ -214,7 +214,7 @@ pub(super) async fn apply_operational_repair(
 }
 
 /// Spool one snapshot on a read worker; a slow downloader never holds the SQLite snapshot.
-pub(super) async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiError> {
+pub async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiError> {
     let store = state.store.clone();
     let bodies = message_body::bodies(&state.state_dir);
     let file = blocking_store(move || {
@@ -244,12 +244,12 @@ pub(super) async fn backup_export(State(state): State<AppState>) -> Result<Respo
 }
 
 #[derive(Deserialize)]
-pub(super) struct UsageQuery {
+pub struct UsageQuery {
     since_ms: Option<u64>,
     until_ms: Option<u64>,
 }
 
-pub(super) async fn get_coordination_counts(
+pub async fn get_coordination_counts(
     State(state): State<AppState>,
     Query(query): Query<UsageQuery>,
 ) -> Result<Json<Value>, ApiError> {
@@ -266,7 +266,7 @@ pub(super) async fn get_coordination_counts(
     ))
 }
 
-pub(super) async fn get_usage(
+pub async fn get_usage(
     State(state): State<AppState>,
     Query(query): Query<UsageQuery>,
 ) -> Result<Json<Value>, ApiError> {
@@ -331,14 +331,14 @@ pub(super) async fn get_usage(
     Ok(Json(report))
 }
 
-pub(super) async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
     let rows = blocking_store(move || slo_rows(&store)).await?;
     Ok(Json(json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows})))
 }
 
 /// What was left of one objective or budget across a period, from the local history log.
-pub(super) async fn get_slo_history(
+pub async fn get_slo_history(
     State(state): State<AppState>,
     Query(query): Query<SloHistoryQuery>,
 ) -> Result<Json<Value>, ApiError> {
@@ -366,7 +366,7 @@ pub(super) async fn get_slo_history(
 }
 
 #[derive(Deserialize)]
-pub(super) struct HarnessDiagnosticRequest {
+pub struct HarnessDiagnosticRequest {
     actor: String,
     code: String,
     reason: String,
@@ -376,7 +376,7 @@ pub(super) struct HarnessDiagnosticRequest {
     idempotency_key: String,
 }
 
-pub(super) async fn post_harness_diagnostic(
+pub async fn post_harness_diagnostic(
     State(state): State<AppState>,
     Json(request): Json<HarnessDiagnosticRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
@@ -430,7 +430,7 @@ pub(super) async fn post_harness_diagnostic(
 }
 
 #[derive(Deserialize)]
-pub(super) struct StatusQuery {
+pub struct StatusQuery {
     subject: Option<String>,
     owner_run: Option<String>,
     at_index: Option<u64>,
@@ -443,7 +443,7 @@ pub(super) struct StatusQuery {
 
 /// One subject's desired record. Each Claude seat's status line reads it on every render (every
 /// five seconds), which a full status reduction of the seat made a tenth of a core on a member.
-pub(super) async fn get_desired(
+pub async fn get_desired(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<crate::model::DesiredSubject>, ApiError> {
@@ -457,7 +457,7 @@ pub(super) async fn get_desired(
         .ok_or_else(|| ApiError::not_found(format!("`{subject}` has no desired record")))
 }
 
-pub(super) async fn status(
+pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
 ) -> Result<Json<StatusResponse>, ApiError> {
@@ -483,7 +483,7 @@ pub(super) async fn status(
     .map(Json)
 }
 
-pub(super) async fn events(
+pub async fn events(
     State(state): State<AppState>,
     Query(query): Query<EventQuery>,
 ) -> Result<Response, ApiError> {

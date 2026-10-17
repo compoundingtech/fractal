@@ -9,7 +9,7 @@ const STORES: usize = 64;
 const WINDOWS: usize = 64;
 const SESSION_WINDOWS: usize = 16;
 const KIND_LIMIT: usize = 10_000;
-pub(super) const COLLECTIONS: [&str; 14] = [
+pub const COLLECTIONS: [&str; 14] = [
     "missions",
     "attention",
     "agents",
@@ -54,17 +54,17 @@ type WindowEntry = Arc<Entry>;
 type WindowEntries = VecDeque<(String, String, WindowEntry)>;
 
 #[derive(Clone)]
-pub(super) struct Prepared {
+pub struct Prepared {
     key: String,
     entry: WindowEntry,
 }
 
 impl Prepared {
-    pub(super) fn try_admit(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    pub fn try_admit(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
         self.entry.admission.clone().try_lock_owned().ok()
     }
 
-    pub(super) async fn admit(&self) -> tokio::sync::OwnedMutexGuard<()> {
+    pub async fn admit(&self) -> tokio::sync::OwnedMutexGuard<()> {
         let started = Instant::now();
         let guard = self.entry.admission.clone().lock_owned().await;
         crate::performance::record_request("collection/admission-wait", None, started.elapsed());
@@ -72,16 +72,16 @@ impl Prepared {
     }
 }
 
-pub(super) struct ReadFence {
-    pub(super) index: u64,
-    pub(super) now: u128,
-    pub(super) commits: u64,
-    pub(super) prepared: Option<Prepared>,
+pub struct ReadFence {
+    pub index: u64,
+    pub now: u128,
+    pub commits: u64,
+    pub prepared: Option<Prepared>,
 }
 
 /// Held by all sockets using this Store, and by physical workers until they finish.
 /// The registry and commit callback keep only weak references. No follower task is started.
-pub(super) struct Windows {
+pub struct Windows {
     commits: AtomicU64,
     revisions: Mutex<Revisions>,
     /// Held while one socket weighs new commits, so sockets woken by the same commit wait for
@@ -90,7 +90,7 @@ pub(super) struct Windows {
     observed: Mutex<Observed>,
     entries: Mutex<WindowEntries>,
     observer: Mutex<Option<smallclaims::sqlite::CommitObserver>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     builds: std::sync::atomic::AtomicUsize,
 }
 
@@ -98,10 +98,10 @@ type Registry = Vec<(Weak<Store>, Weak<Windows>)>;
 static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
 
 impl Windows {
-    pub(super) fn commits(&self) -> u64 {
+    pub fn commits(&self) -> u64 {
         self.commits.load(Ordering::Acquire)
     }
-    pub(super) fn attach(store: &Arc<Store>) -> Option<Arc<Self>> {
+    pub fn attach(store: &Arc<Store>) -> Option<Arc<Self>> {
         let mut registry = REGISTRY
             .get_or_init(Default::default)
             .lock()
@@ -127,7 +127,7 @@ impl Windows {
             }),
             entries: Mutex::new(VecDeque::new()),
             observer: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             builds: std::sync::atomic::AtomicUsize::new(0),
         });
         let weak = Arc::downgrade(&windows);
@@ -258,7 +258,7 @@ impl Windows {
 
     /// Every collection's revision, when another socket already weighed the newest commit: then
     /// no snapshot or worker is needed. `None` means [`Self::changes`] must weigh it.
-    pub(super) fn current_changes(&self, store: &Store) -> Option<[u64; COLLECTIONS.len()]> {
+    pub fn current_changes(&self, store: &Store) -> Option<[u64; COLLECTIONS.len()]> {
         let commits = self.commits();
         let index = store.index().ok()?;
         let revisions = self
@@ -271,7 +271,7 @@ impl Windows {
     /// Weigh the commits since the last look, once for every socket on this store. Call it only
     /// from a socket's own blocking worker, never from a request path that holds a read budget:
     /// a waiter on `weighing` must not hold a reader the weigher needs (#2019's bounded pool).
-    pub(super) fn changes(&self, store: &Store) -> anyhow::Result<[u64; COLLECTIONS.len()]> {
+    pub fn changes(&self, store: &Store) -> anyhow::Result<[u64; COLLECTIONS.len()]> {
         let _weighing = self.weighing.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(revisions) = self.current_changes(store) {
             return Ok(revisions);
@@ -290,7 +290,7 @@ impl Windows {
         })
     }
 
-    pub(super) fn changed(collection: &str, before: &[u64; COLLECTIONS.len()], after: &[u64; COLLECTIONS.len()]) -> bool {
+    pub fn changed(collection: &str, before: &[u64; COLLECTIONS.len()], after: &[u64; COLLECTIONS.len()]) -> bool {
         COLLECTIONS
             .iter()
             .position(|name| *name == collection)
@@ -325,7 +325,7 @@ impl Windows {
     }
 
     /// Reserve a window before gate admission and its physical SQLite query.
-    pub(super) fn prepare(
+    pub fn prepare(
         &self,
         state: &AppState,
         session: &ClientSession,
@@ -342,7 +342,7 @@ impl Windows {
 
     /// Called inside the authorized SQLite snapshot after gate admission. Cache mutexes
     /// hold only Arc loads/stores; computation, serialization and deep clones run outside them.
-    pub(super) fn read(
+    pub fn read(
         &self,
         state: &AppState,
         session: &ClientSession,
@@ -440,8 +440,8 @@ impl Windows {
         Ok((items, has_more))
     }
 
-    #[cfg(test)]
-    pub(super) fn builds(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn builds(&self) -> usize {
         self.builds.load(Ordering::SeqCst)
     }
 }

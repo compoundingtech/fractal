@@ -1,7 +1,7 @@
 //! Process-local fixture tools. The tools that need only the store live in st3-store and are
 //! re-exported here; the API fixtures live in this file.
 
-pub use st3_store::test_support::*;
+pub use st3_reconcile::test_support::*;
 
 /// Build an explicit already-admitted protocol fixture. Callers own its temporary Store,
 /// socket and synthetic runtime. This adapter preserves kernel peer subject checks and
