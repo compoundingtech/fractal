@@ -116,17 +116,22 @@ impl Cache {
             // A run of tool calls, or one other entry drawn as in full.
             let run = entries[index..]
                 .iter()
-                .take_while(|entry| matches!(entry.body, Body::Tool { .. }))
+                .take_while(|entry| crate::entry::bundles(&entry.body))
                 .count();
             if run == 0 {
                 let entry = &entries[index];
-                doc.entries.push((entry.id.clone(), doc.lines.len()));
                 // Mail between others is two lines until opened (Nathan, 2026-10-02).
-                if folds(&entry.body) && !expanded.contains(&entry.id) {
+                if matches!(&entry.body, Body::Mail { .. })
+                    && folds(&entry.body)
+                    && !expanded.contains(&entry.id)
+                {
+                    doc.entries.push((entry.id.clone(), doc.lines.len()));
                     doc.append(mail_lines(entry, width, theme), 0);
                     index += 1;
                     continue;
                 }
+                // Drawn in full, the entry records its own start, once: content
+                // decorators add their lines after each start they find.
                 let one = self.render_as(
                     std::slice::from_ref(entry),
                     width,
@@ -141,15 +146,15 @@ impl Cache {
             }
             let calls = &entries[index..index + run];
             let bundle = bundle_id(&calls[0].id);
-            for entry in calls {
-                doc.entries.push((entry.id.clone(), doc.lines.len()));
-            }
             let open = expanded.contains(&bundle);
             if run > 1 {
+                doc.entries.push((bundle.clone(), doc.lines.len()));
                 doc.append(bundle_line(calls, &bundle, open, width, spinner, theme), 0);
             }
             if run == 1 || open {
                 for entry in calls {
+                    // Content decorators own this call's range, not the bundle header.
+                    doc.entries.push((entry.id.clone(), doc.lines.len()));
                     if expanded.contains(&entry.id) {
                         doc.append(render_entry(entry, width, true, spinner, theme), 0);
                     } else {
@@ -190,7 +195,7 @@ fn call_line(entry: &Entry, width: usize, spinner: &str, theme: &Theme) -> Doc {
         width: width as u16,
         hit: PaneIntent::Expand(entry.id.clone()),
     });
-    let title = text::truncate(&text::sanitize(title), width.saturating_sub(6));
+    let title = crate::pane::truncate(&text::sanitize(title), width.saturating_sub(6));
     doc.line(Line::from(vec![
         Span::styled("▎ ", theme::fg(color)),
         Span::styled(format!("{glyph} "), theme::fg(color)),
@@ -225,14 +230,17 @@ fn mail_lines(entry: &Entry, width: usize, theme: &Theme) -> Doc {
     } else {
         format!("{from} → {to}")
     };
-    let head = text::truncate(&head, width.saturating_sub(2));
+    let head = crate::pane::truncate(&head, width.saturating_sub(2));
     let at = format!("  {}", entry.at);
     // The subject gets what the names and the time leave.
     let room = width.saturating_sub(2 + text::width(&head) + text::width(&at) + 4);
     let mut spans = vec![bar(), Span::styled(head, from_style)];
     if !subject.is_empty() && room > 1 {
         spans.push(Span::styled(
-            format!("  {}", text::truncate(&text::sanitize(subject), room)),
+            format!(
+                "  {}",
+                crate::pane::truncate(&text::sanitize(subject), room)
+            ),
             fg(look.text, theme),
         ));
     }
@@ -244,7 +252,7 @@ fn mail_lines(entry: &Entry, width: usize, theme: &Theme) -> Doc {
     let mut lines = body.lines().map(str::trim).filter(|line| !line.is_empty());
     let first = lines.next().unwrap_or_default();
     let more = lines.next().is_some();
-    let first = text::truncate(
+    let first = crate::pane::truncate(
         &format!("{}{}", text::sanitize(first), if more { " …" } else { "" }),
         width.saturating_sub(2),
     );
@@ -327,7 +335,10 @@ fn bundle_line(
         let room = width.saturating_sub(used + 9);
         if room > 8 {
             spans.push(Span::styled(
-                format!(" · last: {}", text::truncate(&text::sanitize(title), room)),
+                format!(
+                    " · last: {}",
+                    crate::pane::truncate(&text::sanitize(title), room)
+                ),
                 fg(rules.last, theme),
             ));
         }
@@ -413,7 +424,10 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
                 title_style = title_style.add_modifier(Modifier::BOLD);
             }
             let row_style = fg(look.rows, theme);
-            let title = text::truncate(&text::sanitize(title), width.saturating_sub(6));
+            let preview_head = title.starts_with("write ") || title.starts_with("compaction");
+            let child_name = title.split(" · ").next().unwrap_or(title);
+            let recovered = title.starts_with("assistant error · recovered");
+            let title = crate::pane::truncate(&text::sanitize(title), width.saturating_sub(6));
             doc.targets.push(Target {
                 line: 0,
                 column: 0,
@@ -426,9 +440,17 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
                 Span::styled(title, title_style),
             ]));
             // Every row the output takes once wrapped; collapsed, a call shows its last few.
+            // A subagent card's `open <session>` row also opens that child conversation.
             let mut rows = Vec::new();
+            let mut open_row = None;
             for line in output {
-                let line = text::sanitize(line);
+                let opens = line.starts_with("open ") && open_row.is_none();
+                let before = rows.len();
+                let line = if opens {
+                    text::sanitize(&format!("open {child_name}"))
+                } else {
+                    text::sanitize(line)
+                };
                 let style = if line.starts_with('+') {
                     fg(rules.added, theme)
                 } else if line.starts_with('-') || line.contains("error") {
@@ -448,10 +470,15 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
                     &[edge(), run("  ", style)],
                     None,
                 ));
+                if opens {
+                    open_row = Some(before);
+                }
             }
             let total = rows.len();
             let hidden = if open {
                 0
+            } else if recovered {
+                total
             } else {
                 total.saturating_sub(COLLAPSED_TOOL_LINES)
             };
@@ -465,7 +492,32 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
             if open && total > COLLAPSED_TOOL_LINES {
                 control(&mut doc, rules.collapse.text.into());
             }
-            doc.lines(rows.into_iter().skip(hidden));
+            if preview_head {
+                doc.lines(rows.into_iter().take(total - hidden));
+            } else {
+                doc.lines(rows.into_iter().skip(hidden));
+            }
+            if let (Some(row), Some(session)) = (
+                open_row.filter(|row| {
+                    if preview_head {
+                        *row < total - hidden
+                    } else {
+                        *row >= hidden
+                    }
+                }),
+                crate::header::open_session(output),
+            ) {
+                doc.targets.push(Target {
+                    line: if preview_head {
+                        row + 1
+                    } else {
+                        row - hidden + 1
+                    },
+                    column: 0,
+                    width: width as u16,
+                    hit: PaneIntent::Open(session.to_owned()),
+                });
+            }
             if open && total > COLLAPSED_TOOL_LINES {
                 control(&mut doc, rules.collapse.text.into());
             }
@@ -678,7 +730,7 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
             } else {
                 format!(" {} · {} ", text::sanitize(event), entry.at)
             };
-            let label = text::truncate(&label, width.saturating_sub(1));
+            let label = crate::pane::truncate(&label, width.saturating_sub(1));
             let side = width.saturating_sub(text::width(&label)) / 2;
             doc.line(Line::from(vec![
                 Span::styled("─".repeat(side.min(6)), fg(RULES.event.rule, theme)),
@@ -769,6 +821,33 @@ mod tests {
         entries.push(entry("3", Body::Event("step ready".into())));
         let grown = cache.render(&entries, 40, &HashSet::new(), "⠋", &crate::tests::theme());
         assert_eq!(&grown.lines[..first.lines.len()], &first.lines[..]);
+    }
+
+    #[test]
+    fn simplified_records_each_entry_once() {
+        // A decorator adds its lines after every start it finds; twice would draw them twice.
+        let entries = vec![
+            entry("1", Body::User("what is growing here?".into())),
+            entry(
+                "2#images",
+                Body::Tool {
+                    title: "image · Ctrl+Enter details · Ctrl+U load inline".into(),
+                    state: ToolState::Ok,
+                    output: Vec::new(),
+                },
+            ),
+            entry("3", Body::Assistant("Rings of clover.".into())),
+        ];
+        let doc = Cache::default().render_as(
+            &entries,
+            60,
+            &HashSet::new(),
+            "⠋",
+            &crate::tests::theme(),
+            Density::Simple,
+        );
+        let ids: Vec<_> = doc.entries.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["1", "2#images", "3"]);
     }
 
     #[test]

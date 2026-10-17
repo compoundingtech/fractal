@@ -6,13 +6,13 @@ export. Doctor can seal pending work; these diagnostics are not the initial read
 for that affected history.
 
 For other stores, start with the smallest question: is the daemon reachable, is the seat ready,
-or is the work waiting on a dependency? These checks use the invented garden from
-[getting started](getting-started.md):
+or is the work waiting on a dependency? These checks use the worker and README mission from
+[missions in practice](missions-in-practice.md):
 
 ```sh
 st doctor
 st service status
-st missions show mission-run/garden/first-note/one
+st missions show mission-run/garden/readme/one
 st agents show agent/garden/worker
 st agents queue agent/garden/worker
 ```
@@ -39,6 +39,27 @@ st terminals peek agent/garden/worker
 
 The last terminal screen can explain a login, crash, or provider limit; the graph says whether the stop was requested, the owner ended, a suspension is active, or the runtime failed. A stopped seat can retain a historical terminal, and a seat with no recorded terminal may have nothing to peek.
 
+## Free heap and resident memory
+
+On Linux with glibc, the daemon checks free arena bytes every 30 seconds on a
+blocking thread. When `mallinfo2().fordblks` exceeds 256 MiB, it calls
+`malloc_trim(0)` to return whole free pages in all arenas to the OS. This is a
+reclamation trigger, not a hard RSS limit: live or fragmented pages cannot be
+returned. Free arena bytes can remain high after pages are discarded.
+
+Set `ST3_MALLOC_TRIM_THRESHOLD_BYTES` and `ST3_MALLOC_TRIM_INTERVAL_SECS` in
+the daemon environment to change the threshold and interval. Set the threshold
+to `0` to disable trimming. The interval must be positive; invalid configuration
+fails startup. Restart the daemon after changing these values.
+
+`st.allocator.trim.duration` records seconds per call. `st.allocator.trim.released`
+records nonnegative byte decreases with `source=fordblks` or `source=rss`.
+These are process-wide observations, not exact attribution to trimming:
+concurrent allocations can affect both samples. The debug log includes raw
+before/after values and the glibc return flag. Trimming can pause allocator users
+during each call and cause page faults when discarded pages are reused.
+Other platforms and non-glibc Linux builds do not start this worker.
+
 ## Check usage without starting another turn
 
 ```sh
@@ -58,7 +79,7 @@ st terminals attach agent/garden/worker
 
 After fixing its dependency, restart a stale running seat; explicitly start an intentionally stopped one. Resume a suspended one instead. [Seat lifecycle](seat-lifecycle.md) gives the commands and their different effects. Retry failed work through the graph after correcting its cause; preserve the failure evidence rather than completing a step just to make the display green.
 
-For a Claude seat with stale delivery, check `st claude-channel status`, then attach and use Claude's `/mcp` menu. If `plugin:st-channel:st` says failed, select it and **Reconnect**. The v0.3.4 rehearsal needed this after some launches; delivery then became `current` and queued work ran. A ready installation does not by itself prove that a seat's channel connected.
+For a Claude seat with stale delivery, check `st claude-channel status`, then attach and use Claude's `/mcp` menu. If `plugin:st-channel:st` says failed, select it and **Reconnect**. A ready installation does not by itself prove that a seat's channel connected.
 
 If doctor reports an operational contradiction, inspect the bounded repair plan:
 
@@ -70,7 +91,7 @@ Apply only the exact reviewed token with the procedure in [operational repair](s
 
 ## What the watchdog does
 
-The runtime watches process liveness, readiness, claim leases, and message delivery; `doctor` reports those facts. A fleet may also run an **operations watchdog mission** that inspects health, groups faults, and routes repairs to an operations agent. That mission is an operating policy, not something every new installation receives automatically. Look for it under Missions, and read its run when it reports a fault; Home should show only what needs your action.
+The runtime watches process liveness, readiness, claim leases, and message delivery; `doctor` reports those facts. A fleet may also run an **operations watchdog mission** that inspects health, groups faults, and routes repairs to an operations agent. That mission is an operating policy, not something every new installation receives automatically. Look for it under Missions, and read its run when it reports a fault; Now should show only what needs your action.
 
 A watcher cannot fix a missing harness login, choose a product preference, or make an expired provider allowance return. Follow the recorded cause, and ask a person through a structured request when only that person can settle it.
 
@@ -122,7 +143,7 @@ reset state, delete the database or downgrade across a migration to get a reacha
 ## PATH, PTY and harness login
 
 ```sh
-command -v st st3 stui pty
+command -v st st3 pty
 st --version --json
 st doctor
 ```
@@ -184,9 +205,9 @@ keys/database is not a normal troubleshooting step.
 
 ## Report an install or upgrade problem
 
-Use [Smalltalk GitHub issues](https://github.com/compoundingtech/smalltalk/issues/new/choose)
+Use [Fractal GitHub issues](https://github.com/compoundingtech/smalltalk/issues/new/choose)
 with the **Install or upgrade problem** template as the single support path. Initial triage is
-owned by the Smalltalk distribution agent, which routes
+owned by the Fractal distribution agent, which routes
 runtime, signing and replication failures to the relevant maintainer. No separate support
 account or chat channel is required.
 

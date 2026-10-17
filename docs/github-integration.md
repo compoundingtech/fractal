@@ -1,8 +1,8 @@
 # GitHub integration
 
-Smalltalk can observe a repository and start finite review and triage missions for new pull requests and issues. A durable seat serves those runs; a curator groups what needs a person before it reaches Home.
+Fractal can observe a repository and start finite review and triage missions for new pull requests and issues. A durable seat serves those runs; a curator groups what needs a person before it reaches Now.
 
-Use the worker and workspace from [getting started](getting-started.md), and a repository you are allowed to inspect. Install [GitHub CLI](https://cli.github.com/), then log in as the OS user who runs the daemon:
+Use the worker and workspace from [missions in practice](missions-in-practice.md#declare-a-worker-seat), and a repository you are allowed to inspect. Install [GitHub CLI](https://cli.github.com/), then log in as the OS user who runs the daemon:
 
 ```sh
 gh auth login
@@ -219,7 +219,7 @@ st missions start garden/github-intake --id garden/github-intake/main \
   --input "repository=$garden_repo" --workspace "$PWD/github-intake" --as person/ada
 st missions show mission-run/garden/github-intake/main
 st agents queue agent/garden/worker
-stui
+st
 ```
 
 The first observation is a baseline and starts no work. Subsequent new ready PR heads and issues create runs; drafts wait until ready. Requests are remembered across restarts, and a child mission's capacity limit holds pending requests instead of dropping them. One worker runs these jobs serially; separate review and triage seats let independent work run in parallel.
@@ -231,7 +231,7 @@ st missions cancel mission-run/garden/github-intake/main \
   --reason 'Finished the intake trial.' --as person/ada
 ```
 
-## Put a curator in front of Home
+## Put a curator in front of Now
 
 Route incoming events and grouped review findings to an agent responsible for deciding what matters. The curator asks the person only for concrete decisions, actionable failures, or requested feedback. Raw PR activity and successful routine checks belong in agent conversations and mission results, not as a pile of person requests.
 
@@ -248,6 +248,6 @@ gh pr checks "$garden_pr"
 gh pr merge "$garden_pr" --auto
 ```
 
-For `compoundingtech/smalltalk`, `linux-gate`, `isolation-vm`, and `genie-freshness` are required; [CI operations](ci.md) explains its queue. `--auto` requests landing when GitHub's requirements pass; it is not a substitute for review or proof that a PR has already merged.
+For `compoundingtech/smalltalk`, `linux-gate`, `isolation-vm`, `genie-freshness`, `typescript-client`, and `mail-redelivery-canaries` are required; [CI operations](ci.md) explains its queue. `--auto` requests landing when GitHub's requirements pass; it is not a substitute for review or proof that a PR has already merged.
 
 See [repository intake examples](../examples/st3/github-intake.kdl), [review/triage examples](../examples/st3/github-intake-work.kdl), and [subscriptions](st3/resource-subscriptions.md) for larger setups and cleanup.

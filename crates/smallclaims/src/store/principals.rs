@@ -210,10 +210,13 @@ fn claim_row(connection: &Connection, claim_id: &str) -> Result<Option<ClaimRow>
         .optional()?)
 }
 
-/// The trust roots: `(host/NAME, key)` for every member incarnation fleet membership admits, and
-/// this node's own key.
-fn roots(connection: &Connection, origin: &str) -> Result<BTreeSet<(String, String)>> {
-    let mut roots = fleet_membership_tx(connection)?
+/// The member incarnations fleet membership admits, as `(host/NAME, key)`. A fold of every fleet
+/// claim: hundreds of statements, and on a large store tens of milliseconds to seconds of the
+/// writer each time.
+fn member_roots(connection: &Connection) -> Result<BTreeSet<(String, String)>> {
+    #[cfg(test)]
+    MEMBER_ROOT_FOLDS.with(|folds| folds.set(folds.get() + 1));
+    Ok(fleet_membership_tx(connection)?
         .incarnations()
         .map(|incarnation| {
             (
@@ -221,11 +224,57 @@ fn roots(connection: &Connection, origin: &str) -> Result<BTreeSet<(String, Stri
                 incarnation.member_key.clone(),
             )
         })
-        .collect::<BTreeSet<_>>();
-    if let Some(own) = fleet_meta(connection, OWN_NODE_KEY)? {
-        roots.insert((format!("host/{origin}"), own));
+        .collect::<BTreeSet<_>>())
+}
+
+// Per thread, so tests running side by side cannot count each other's folds.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static MEMBER_ROOT_FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl Store {
+    /// The trust roots: `(host/NAME, key)` for every member incarnation fleet membership admits,
+    /// and this node's own key. The membership part is folded again only when `fleet_generation`
+    /// moved: it is a function of the fleet claims, their envelopes' signatures and the anchor,
+    /// and triggers advance the generation whenever any of them changes.
+    ///
+    /// Call it before the transaction writes anything: the generation and the fold are then read
+    /// from the same committed snapshot, so a cached pair is always consistent. A transaction that
+    /// had already changed fleet claims could cache a membership its rollback would undo.
+    pub(crate) fn trust_roots(
+        &self,
+        connection: &Connection,
+        origin: &str,
+    ) -> Result<BTreeSet<(String, String)>> {
+        let generation: i64 = connection.query_row(
+            "SELECT value FROM fleet_generation WHERE id=1",
+            [],
+            |row| row.get(0),
+        )?;
+        let cached = self
+            .roots_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|(folded_at, _)| *folded_at == generation)
+            .map(|(_, roots)| roots.clone());
+        let mut roots = match cached {
+            Some(roots) => roots,
+            None => {
+                let roots = member_roots(connection)?;
+                *self
+                    .roots_cache
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some((generation, roots.clone()));
+                roots
+            }
+        };
+        if let Some(own) = fleet_meta(connection, OWN_NODE_KEY)? {
+            roots.insert((format!("host/{origin}"), own));
+        }
+        Ok(roots)
     }
-    Ok(roots)
 }
 
 /// Answers for one claim being judged: every question about order is about claims before it.
@@ -403,7 +452,19 @@ fn judge_claim(
         memo,
         links: RefCell::default(),
     };
-    let fields = row.body.get("fields").cloned().unwrap_or(Value::Null);
+    let mut fields = row.body.get("fields").cloned().unwrap_or(Value::Null);
+    // A long message's claim holds a preview, and names its whole text in an `attachments` entry
+    // of type text/plain. A device that signs such a message names `body_sha256` and `body_bytes`
+    // among its signed fields; they are those entry's hash and size, not stored fields.
+    if row.kind == "message.sent"
+        && let Some(body) = fields
+            .get("attachments")
+            .and_then(crate::principal::message_body_entry)
+            .cloned()
+    {
+        fields["body_sha256"] = body.get("sha256").cloned().unwrap_or(Value::Null);
+        fields["body_bytes"] = body.get("size").cloned().unwrap_or(Value::Null);
+    }
     let judged = crate::principal::Judged {
         id: &row.id,
         subject: &row.subject,
@@ -447,6 +508,26 @@ fn write_verdict_tx(
             signature.on_behalf
         ])?;
     Ok(previous.as_ref() != Some(verdict))
+}
+
+/// Forget a claim's signature and every cached verdict row of it, when a checkpoint drops the
+/// claim. None of these rows is synced or in a digest, and nothing reads them for a claim that is
+/// gone: a nonce counts as used before only by a claim the store still holds, and a dropped claim
+/// is never a delegation another verdict relies on (those kinds are never dropped).
+pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result<usize> {
+    let mut rows = 0;
+    for table in [
+        "claim_signatures",
+        "claim_verdicts",
+        "claim_verdict_links",
+        "claim_verdict_queue",
+        "claim_verdict_fresh",
+    ] {
+        rows += connection
+            .prepare_cached(&format!("DELETE FROM {table} WHERE claim_id=?1"))?
+            .execute([claim_id])?;
+    }
+    Ok(rows)
 }
 
 /// Queue every verdict linked to `link`.
@@ -495,6 +576,53 @@ pub struct Unsealed<'a> {
     pub actor: Option<&'a str>,
     pub body: &'a Value,
     pub accepted_at_unix_ms: u128,
+}
+
+/// All `claim_signer` reads of a claim besides the keyring: the issuer and issuer key of the
+/// grant it makes, when it is a key grant, and its actor. Claims with equal inputs are signed by
+/// the same signer.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SignerInput {
+    grant: Option<(String, String)>,
+    actor: Option<String>,
+}
+
+impl SignerInput {
+    pub(crate) fn of(claim: &Unsealed<'_>) -> Self {
+        let grant = if claim.kind == KEY_GRANTED {
+            claim
+                .body
+                .get("fields")
+                .and_then(KeyGrant::from_fields)
+                .map(|grant| (grant.issuer, grant.issuer_key))
+        } else {
+            None
+        };
+        Self {
+            grant,
+            actor: claim.actor.map(str::to_owned),
+        }
+    }
+}
+
+/// The key a claim is signed with, the principal it signs as, the principal it acts for and the
+/// delegation chain from its key: what a claim signature records about its signer.
+pub(crate) struct ClaimSigner {
+    pub(crate) key: Arc<crate::fleet::MemberKey>,
+    pub(crate) signer: String,
+    pub(crate) on_behalf: Option<String>,
+    pub(crate) chain: Vec<String>,
+}
+
+impl ClaimSigner {
+    /// Whether `signature` names this signer: the same key, principal, principal acted for and
+    /// chain. Two signatures by the same signer differ only in nonce, and so in signature bytes.
+    pub(crate) fn signed(&self, signature: &ClaimSignature) -> bool {
+        signature.key == self.key.public()
+            && signature.signer == self.signer
+            && signature.on_behalf == self.on_behalf
+            && signature.chain == self.chain
+    }
 }
 
 /// What a verdict recheck found.
@@ -830,52 +958,70 @@ impl Store {
     /// principal this node holds a key for with that key, anything else by the node on the
     /// writer's behalf. `None` without a node key.
     pub(crate) fn sign_unsealed(&self, claim: &Unsealed<'_>) -> Option<ClaimSignature> {
-        let node = self.keyring.node()?;
+        let chosen = self.claim_signer(claim)?;
         let content = content_digest(claim.subject, claim.kind, claim.actor, claim.body);
         let signed_at = u64::try_from(claim.accepted_at_unix_ms).unwrap_or(u64::MAX);
-        let node_subject = self.node_subject();
-        if claim.kind == KEY_GRANTED
-            && let Some(grant) = claim.body.get("fields").and_then(KeyGrant::from_fields)
-        {
-            if grant.issuer == node_subject && grant.issuer_key == node.public() {
-                return Some(ClaimSignature::sign(
-                    &node,
-                    &content,
-                    &node_subject,
-                    None,
-                    Vec::new(),
-                    signed_at,
-                ));
-            }
-            if let Some(issuer) = self.keyring.by_public(&grant.issuer_key)
-                && issuer.principal == grant.issuer
-            {
-                return Some(ClaimSignature::sign(
-                    &issuer.key,
-                    &content,
-                    &issuer.principal,
-                    None,
-                    issuer.chain,
-                    signed_at,
-                ));
-            }
-        }
-        if let Some(actor) = claim.actor
-            && let Some(held) = self.keyring.signing(actor)
-        {
-            return Some(ClaimSignature::sign(
-                &held.key, &content, actor, None, held.chain, signed_at,
-            ));
-        }
-        let on_behalf = claim.actor.filter(|actor| *actor != node_subject);
         Some(ClaimSignature::sign(
-            &node,
+            &chosen.key,
             &content,
-            &node_subject,
-            on_behalf,
-            Vec::new(),
+            &chosen.signer,
+            chosen.on_behalf.as_deref(),
+            chosen.chain,
             signed_at,
         ))
+    }
+
+    /// Who `sign_unsealed` signs `claim` as, read from the keyring without signing. `None`
+    /// without a node key.
+    pub(crate) fn claim_signer(&self, claim: &Unsealed<'_>) -> Option<ClaimSigner> {
+        self.claim_signer_for(&SignerInput::of(claim))
+    }
+
+    /// Who `sign_unsealed` signs a claim with these inputs as. `None` without a node key.
+    pub(crate) fn claim_signer_for(&self, input: &SignerInput) -> Option<ClaimSigner> {
+        let node = self.keyring.node()?;
+        let node_subject = self.node_subject();
+        if let Some((issuer, issuer_key)) = &input.grant {
+            if *issuer == node_subject && issuer_key == node.public() {
+                return Some(ClaimSigner {
+                    key: node,
+                    signer: node_subject,
+                    on_behalf: None,
+                    chain: Vec::new(),
+                });
+            }
+            if let Some(held) = self.keyring.by_public(issuer_key)
+                && held.principal == *issuer
+            {
+                return Some(ClaimSigner {
+                    key: held.key,
+                    signer: held.principal,
+                    on_behalf: None,
+                    chain: held.chain,
+                });
+            }
+        }
+        if let Some(actor) = input.actor.as_deref()
+            && let Some(held) = self.keyring.signing(actor)
+        {
+            return Some(ClaimSigner {
+                key: held.key,
+                signer: actor.to_owned(),
+                on_behalf: None,
+                chain: held.chain,
+            });
+        }
+        let on_behalf = input
+            .actor
+            .as_deref()
+            .filter(|actor| *actor != node_subject)
+            .map(str::to_owned);
+        Some(ClaimSigner {
+            key: node,
+            signer: node_subject,
+            on_behalf,
+            chain: Vec::new(),
+        })
     }
 
     /// Whether a pass has anything to judge: a newly signed claim, or a queued one. Two probes
@@ -898,7 +1044,7 @@ impl Store {
         if check_roots {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
-            let roots = roots(&transaction, &self.origin)?;
+            let roots = self.trust_roots(&transaction, &self.origin)?;
             let roots_digest = crate::hash::canonical_hash(&roots)?;
             if fleet_meta(&transaction, VERDICT_ROOTS)?.as_deref() != Some(roots_digest.as_str()) {
                 queue_linked_tx(&transaction, "root")?;
@@ -914,7 +1060,7 @@ impl Store {
             let mut connection = self.connection.write();
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let roots = roots(&transaction, &self.origin)?;
+            let roots = self.trust_roots(&transaction, &self.origin)?;
             let fresh = transaction
                 .prepare_cached("SELECT claim_id FROM claim_verdict_fresh LIMIT ?1")?
                 .query_map([JUDGE_CHUNK as i64], |row| row.get::<_, String>(0))?

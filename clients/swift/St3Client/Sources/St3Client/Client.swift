@@ -4,6 +4,17 @@ import Foundation
 import FoundationNetworking
 #endif
 
+/// W3C trace context supplied by the application's active span.
+public struct TraceContext: Sendable, Equatable {
+    public let traceparent: String
+    public let tracestate: String?
+
+    public init(traceparent: String, tracestate: String? = nil) {
+        self.traceparent = traceparent
+        self.tracestate = tracestate
+    }
+}
+
 public actor St3Client {
     public let baseURL: URL
     private let session: URLSession
@@ -11,12 +22,14 @@ public actor St3Client {
     /// The app's name and build, sent as `x-st3-client` ("smalltalk-ios 1.0 (42)"). st lists it as
     /// reported; it is never identity or authority.
     private let client: String?
+    private let traceContext: (@Sendable () -> TraceContext?)?
 
-    public init(fabricLoopbackURL: URL, credential: String? = nil, session: URLSession = .shared, client: String? = nil) {
+    public init(fabricLoopbackURL: URL, credential: String? = nil, session: URLSession = .shared, client: String? = nil, traceContext: (@Sendable () -> TraceContext?)? = nil) {
         self.baseURL = fabricLoopbackURL
         self.credential = credential
         self.session = session
         self.client = client
+        self.traceContext = traceContext
     }
 
     public func setCredential(_ credential: String?) { self.credential = credential }
@@ -68,6 +81,7 @@ public actor St3Client {
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         if let after { components.queryItems = [.init(name: "after", value: after)] }
         var request = URLRequest(url: components.url!); request.setValue("custom-subjects.v1, conversation-blocks.v1", forHTTPHeaderField: "x-st3-features"); request.setValue("st3.client.conversation.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        applyTraceContext(to: &request)
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
@@ -100,6 +114,7 @@ public actor St3Client {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         var request = URLRequest(url: components.url!); request.setValue("custom-subjects.v1, conversation-blocks.v1", forHTTPHeaderField: "x-st3-features"); request.setValue("st3.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        applyTraceContext(to: &request)
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
@@ -123,6 +138,7 @@ public actor St3Client {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         var request = URLRequest(url: components.url!); request.setValue("st3.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
+        applyTraceContext(to: &request)
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
@@ -163,6 +179,7 @@ public actor St3Client {
             if UInt64(whole.count) >= chunk.size { return whole }
         }
     }
+    public func notesList() async throws -> Envelope<DirectiveNotes> { try await get("v1/client/notes") }
     public func customSubjectsList(kind: String? = nil, version: Int? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let kind { query.append(.init(name: "kind", value: kind)) }; if let version { query.append(.init(name: "version", value: String(version))) }; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/custom-subjects", query: query) }
     public func customSubjectsGet(id: String) async throws -> Envelope<Resource> { try await resource("custom-subjects", id: id) }
     public func hostRepositories(id: String) async throws -> Envelope<HostRepositories> { try await get("v1/client/hosts/\(id)/repositories") }
@@ -172,6 +189,8 @@ public actor St3Client {
     public func publicationDefinition(subject: String) async throws -> Envelope<PublicationDefinition> { try await get("v1/client/publication-definition", query: [.init(name: "subject", value: subject)]) }
     public func subjectDefinition(subject: String, showEnvValues: Bool = false) async throws -> Envelope<SubjectDefinition> { try await get("v1/client/subject-definition", query: [.init(name: "subject", value: subject), .init(name: "show_env_values", value: showEnvValues ? "true" : "false")]) }
     public func mailBacklogSummary() async throws -> Envelope<MailBacklog> { try await get("v1/client/mail-backlog") }
+    public func sloList() async throws -> Envelope<SloList> { try await get("v1/client/slo") }
+    public func sloHistory(id: String, sinceMS: UInt64? = nil, untilMS: UInt64? = nil, steps: Int? = nil) async throws -> Envelope<SloHistory> { var query: [URLQueryItem] = [.init(name: "id", value: id)]; if let sinceMS { query.append(.init(name: "since_ms", value: String(sinceMS))) }; if let untilMS { query.append(.init(name: "until_ms", value: String(untilMS))) }; if let steps { query.append(.init(name: "steps", value: String(steps))) }; return try await get("v1/client/slo/history", query: query) }
     public func usagePeriod(sinceMS: UInt64? = nil, untilMS: UInt64? = nil) async throws -> Envelope<UsagePeriod> { var query: [URLQueryItem] = []; if let sinceMS { query.append(.init(name: "since_ms", value: String(sinceMS))) }; if let untilMS { query.append(.init(name: "until_ms", value: String(untilMS))) }; return try await get("v1/client/usage", query: query) }
     public func clientsList() async throws -> Envelope<ClientConnections> { try await get("v1/client/clients") }
     public func nowList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("now", cursor: cursor, limit: limit, history: history) }
@@ -181,6 +200,7 @@ public actor St3Client {
     public func attentionGet(id: String) async throws -> Envelope<Resource> { try await resource("attention", id: id) }
     public func messagesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("messages", cursor: cursor, limit: limit, history: history) }
     public func messagesGet(id: String) async throws -> Envelope<Resource> { try await resource("messages", id: id) }
+    public func messageBodyGet(id: String) async throws -> Envelope<MessageBody> { try await get("v1/client/message-bodies/\(id)") }
     public func launchesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("launches", cursor: cursor, limit: limit, history: history) }
     public func launchesGet(id: String) async throws -> Envelope<Resource> { try await resource("launches", id: id) }
     public func launchVariantsList(launchID: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/launches/\(launchID.replacingOccurrences(of: "launch/", with: ""))/variants", query: query) }
@@ -217,9 +237,16 @@ public actor St3Client {
     public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> { try await get("v1/client/arrangements/\(Self.routedSessionID(personName))/\(Self.routedSessionID(uuid))") }
     public func glassesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("glasses", cursor: cursor, limit: limit, history: history) }
     public func glassesGet(id: String) async throws -> Envelope<Resource> { try await resource("glasses", id: id) }
+    public func assistantSummary(_ params: AssistantSummaryRequest, proof: ScgReadAuthorization) async throws -> Envelope<AssistantSummary> { try await assistantRead("summary", params, proof: proof) }
+    public func assistantAttention(_ params: AssistantPageRequest, proof: ScgReadAuthorization) async throws -> Envelope<AssistantAttentionPage> { try await assistantRead("attention", params, proof: proof) }
+    public func assistantMissions(_ params: AssistantPageRequest, proof: ScgReadAuthorization) async throws -> Envelope<AssistantMissionPage> { try await assistantRead("missions", params, proof: proof) }
+    public func assistantAgents(_ params: AssistantPageRequest, proof: ScgReadAuthorization) async throws -> Envelope<AssistantAgentPage> { try await assistantRead("agents", params, proof: proof) }
+    public func assistantConversationContent(_ params: AssistantConversationContentRequest, proof: ScgReadAuthorization) async throws -> Envelope<AssistantContentPage> { try await assistantRead("conversation-content", params, proof: proof) }
+    public func assistantTerminalContent(_ params: AssistantTerminalContentRequest, proof: ScgReadAuthorization) async throws -> Envelope<AssistantContentPage> { try await assistantRead("terminal-content", params, proof: proof) }
     public func agentCreate(id: String, idempotencyKey: String, fence: Fence, parameters: AgentCreateParameters) async throws -> Envelope<ActionResult> { try await submit(try .agentCreate(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func agentQueueMove(id: String, idempotencyKey: String, fence: Fence, parameters: AgentQueueMoveParameters) async throws -> Envelope<ActionResult> { try await submit(try .agentQueueMove(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func agentResume(id: String, idempotencyKey: String, fence: Fence, parameters: AgentResumeParameters) async throws -> Envelope<ActionResult> { try await submit(try .agentResume(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func agentRetire(id: String, idempotencyKey: String, fence: Fence, parameters: AgentRetireParameters) async throws -> Envelope<ActionResult> { try await submit(try .agentRetire(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func agentStart(id: String, idempotencyKey: String, fence: Fence, parameters: AgentStartParameters) async throws -> Envelope<ActionResult> { try await submit(try .agentStart(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func agentStop(id: String, idempotencyKey: String, fence: Fence, parameters: AgentStopParameters) async throws -> Envelope<ActionResult> { try await submit(try .agentStop(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func agentSuspend(id: String, idempotencyKey: String, fence: Fence, parameters: AgentSuspendParameters) async throws -> Envelope<ActionResult> { try await submit(try .agentSuspend(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
@@ -245,6 +272,7 @@ public actor St3Client {
     public func missionRevise(id: String, idempotencyKey: String, fence: Fence, parameters: MissionReviseParameters) async throws -> Envelope<ActionResult> { try await submit(try .missionRevise(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func missionStart(id: String, idempotencyKey: String, fence: Fence, parameters: MissionStartParameters) async throws -> Envelope<ActionResult> { try await submit(try .missionStart(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func pairingRevoke(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .pairingRevoke(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func promptRespond(id: String, idempotencyKey: String, fence: Fence, parameters: PromptRespondParameters) async throws -> Envelope<ActionResult> { try await submit(try .promptRespond(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func reviewApprove(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .reviewApprove(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func reviewReject(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .reviewReject(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func reviewRequestChanges(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .reviewRequestChanges(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
@@ -271,8 +299,35 @@ public actor St3Client {
     public func workRelease(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .workRelease(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func workRenew(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .workRenew(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func workRetry(id: String, idempotencyKey: String, fence: Fence, parameters: WorkRetryParameters) async throws -> Envelope<ActionResult> { try await submit(try .workRetry(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
-    public func beginPairing(deviceName: String, personID: String) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", PairingBegin(apiVersion: st3ClientAPIVersion, deviceName: deviceName, personID: personID)) }
+    /// Diagnostic local acceptance: no graph receipt or snapshot fence.
+    public func observationsReport(_ report: ObservationReport) async throws -> ObservationResponse { try await post("v1/client/observations", report) }
+
+    public func beginPairing(deviceName: String, personID: String) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", PersonPairingBegin(apiVersion: st3ClientAPIVersion, deviceName: deviceName, personID: personID)) }
+    public func beginPairing(_ request: PairingBegin) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", request) }
     public func completePairing(pairingID: String, code: String, devicePublicKey: String) async throws -> Envelope<PairedSession> { try await post("v1/client/pairings/\(pairingID.replacingOccurrences(of: "pairing/", with: ""))/complete", PairingComplete(apiVersion: st3ClientAPIVersion, code: code, devicePublicKey: devicePublicKey)) }
+    public func assistantGrant(_ id: String) async throws -> Envelope<AssistantGrant> { try await get("v1/client/assistant/grants/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id)") }
+    public func assistantGrantRevoke(_ id: String) async throws -> Envelope<AssistantGrant> { try await post("v1/client/assistant/grants/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id)/revoke", [String: String]()) }
+    public func assistantGrantPolicy(_ id: String, _ policy: AssistantGrantPolicy) async throws -> Envelope<AssistantGrant> { try await post("v1/client/assistant/grants/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id)/policy", policy) }
+    public func assistantGrantReadTrust(_ id: String, _ trust: AssistantReadTrustRequest) async throws -> Envelope<AssistantGrant> { try await post("v1/client/assistant/grants/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id)/read-trust", trust) }
+    /// One approval-once assistant read. The proof must already name this projection, these exact decoded
+    /// query parameters and this response budget; the client never signs, retries or widens the budget.
+    private func assistantRead<Params: Encodable, T: Decodable & Sendable>(_ projection: String, _ params: Params, proof: ScgReadAuthorization) async throws -> T {
+        guard let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(params)) as? [String: Any] else { throw AssistantReadRejected(reason: "assistant parameters must be an object") }
+        var parameters: [String: String] = [:]
+        for (name, value) in object {
+            if let value = value as? String { parameters[name] = value }
+            else if let value = value as? NSNumber, value.int64Value >= 0, value.stringValue == String(value.uint64Value) { parameters[name] = value.stringValue }
+            else { throw AssistantReadRejected(reason: "assistant parameters must be scalar strings or unsigned integers") }
+        }
+        guard proof.payload.projection.rawValue == projection else { throw AssistantReadRejected(reason: "assistant proof names a different projection") }
+        guard proof.payload.parameters == parameters else { throw AssistantReadRejected(reason: "assistant proof parameters differ from the request query") }
+        // An omitted budget means the grant pin's default, which the signed proof already names.
+        let budget = proof.payload.maxResponseBytes
+        guard (1...st3MaxAssistantResponseBytes).contains(budget), parameters["max_response_bytes"].map({ $0 == String(budget) }) ?? true else { throw AssistantReadRejected(reason: "assistant response budget must match the proof and stay within 1...16384") }
+        let header = try JSONEncoder().encode(proof).base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        let query = parameters.keys.sorted().map { URLQueryItem(name: $0, value: parameters[$0]) }
+        return try await request("v1/client/assistant/\(projection)", query: query, method: "GET", body: nil, readAuthorization: (header, budget))
+    }
     public func terminalScreen(_ id: String) async throws -> Envelope<TerminalScreen> { try await get("v1/client/terminals/\(id.replacingOccurrences(of: "terminal/", with: ""))/screen") }
     public func agentQueue(_ id: String) async throws -> Envelope<AgentQueue> { try await get("v1/client/agent-queues/\(id)") }
     /// Open the terminal stream one `terminal.attach` capability allows. Each element is a whole
@@ -284,6 +339,7 @@ public actor St3Client {
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         if let incarnation { components.queryItems = [.init(name: "incarnation", value: incarnation)] }
         var request = URLRequest(url: components.url!); request.setValue("custom-subjects.v1, conversation-blocks.v1", forHTTPHeaderField: "x-st3-features"); request.setValue("\(st3ClientTerminalSubprotocol), st3.cap.\(streamCapability)", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        applyTraceContext(to: &request)
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
@@ -307,16 +363,44 @@ public actor St3Client {
         switch message { case .data(let data): return data; case .string(let text): return Data(text.utf8); @unknown default: throw URLError(.cannotParseResponse) }
     }
 
+    private func applyTraceContext(to request: inout URLRequest) {
+        guard let context = traceContext?() else { return }
+        var length = 0
+        var nonzeroTraceID = false
+        var nonzeroSpanID = false
+        for byte in context.traceparent.utf8 {
+            guard length < 55 else { return }
+            switch length {
+            case 2, 35, 52:
+                guard byte == 45 else { return } // "-"
+            default:
+                guard (48...57).contains(byte) || (97...102).contains(byte) else { return }
+                if (3..<35).contains(length), byte != 48 { nonzeroTraceID = true }
+                if (36..<52).contains(length), byte != 48 { nonzeroSpanID = true }
+            }
+            length += 1
+        }
+        guard length == 55, !context.traceparent.hasPrefix("ff"),
+              nonzeroTraceID, nonzeroSpanID else { return }
+        request.setValue(context.traceparent, forHTTPHeaderField: "traceparent")
+        if let tracestate = context.tracestate {
+            request.setValue(tracestate, forHTTPHeaderField: "tracestate")
+        }
+    }
+
     private func get<T: Decodable & Sendable>(_ path: String, query: [URLQueryItem] = []) async throws -> T { try await request(path, query: query, method: "GET", body: Optional<Data>.none) }
     private func post<T: Decodable & Sendable, Body: Encodable>(_ path: String, _ body: Body) async throws -> T { try await request(path, query: [], method: "POST", body: try JSONEncoder().encode(body)) }
-    private func request<T: Decodable & Sendable>(_ path: String, query: [URLQueryItem], method: String, body: Data?, idempotencyKey: String? = nil, contentType: String = "application/json") async throws -> T {
+    private func request<T: Decodable & Sendable>(_ path: String, query: [URLQueryItem], method: String, body: Data?, idempotencyKey: String? = nil, contentType: String = "application/json", readAuthorization: (header: String, budget: Int)? = nil) async throws -> T {
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!; let basePath = components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/")); components.percentEncodedPath = "/" + ([basePath, path].filter { !$0.isEmpty }.joined(separator: "/")); if !query.isEmpty { components.queryItems = query }
         // Query parameters are decoded as form data by the server, where an unescaped "+" is a space.
         components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         var request = URLRequest(url: components.url!); request.setValue("custom-subjects.v1, conversation-blocks.v1", forHTTPHeaderField: "x-st3-features"); request.httpMethod = method; request.httpBody = body; request.setValue("application/json", forHTTPHeaderField: "Accept")
         if body != nil { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }; if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         if let idempotencyKey { request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key") }
+        if let readAuthorization { request.setValue(readAuthorization.header, forHTTPHeaderField: "x-st3-scg-read-authorization") }
+        applyTraceContext(to: &request)
         let (data, response) = try await session.data(for: request); let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if let readAuthorization, data.count > readAuthorization.budget { throw AssistantReadRejected(reason: "assistant response exceeded max_response_bytes") }
         if !(200..<300).contains(status) { throw try JSONDecoder().decode(ErrorEnvelope.self, from: data) }
         return try JSONDecoder().decode(T.self, from: data)
     }
@@ -327,3 +411,11 @@ public actor St3Client {
         return innerID.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
     }
 }
+
+/// Assistant read budgets bound the entire JSON envelope, inclusive (`operations.json` limits).
+public let st3DefaultAssistantResponseBytes = 4096
+public let st3MaxAssistantResponseBytes = 16384
+
+/// A local refusal before or after an assistant read: the proof does not bind this exact request, or the
+/// answer exceeded its budget. It is never retried.
+public struct AssistantReadRejected: Error, Sendable, Equatable { public let reason: String }

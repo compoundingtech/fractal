@@ -1,4 +1,13 @@
 import type { ActionOf, ConversationSearchHit, TimelineMessageBody } from './Models.generated.ts';
+import type { ClientOptions, TraceContext } from './Client.generated.ts';
+
+const traceContext: TraceContext = {
+    traceparent: '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01',
+    tracestate: 'vendor=value',
+};
+const tracedOptions: ClientOptions = { baseUrl: 'https://example.test', traceContext: () => traceContext };
+const untracedOptions: ClientOptions = { baseUrl: 'https://example.test', traceContext: () => undefined };
+void [tracedOptions, untracedOptions];
 
 const valid: ActionOf<'launch.approve'> = {
     api_version: 'st3.client.v0',
@@ -87,3 +96,16 @@ const missingTerminalCapability: CollectionCommand = { kind: 'subscribe', id: 't
 // @ts-expect-error Failure metadata is explicitly declared; arbitrary properties remain closed.
 const extraResyncProperty: CollectionFrame = { kind: 'resync', id: 'agents', undeclared: true };
 void [missingTerminalCapability, extraResyncProperty];
+
+// Error metadata remains open alongside the typed terminal-send refusal.
+import type { ErrorEnvelope } from './Models.generated.ts';
+const genericRefusal: ErrorEnvelope = {
+    api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/example',
+    code: 'forbidden', message: 'The scope is not granted', retryable: false,
+    details: { scope: 'control.messages', future_detail: { version: 2 } },
+};
+const terminalRefusal: ErrorEnvelope = {
+    ...genericRefusal, code: 'recipient-retired', applied: 'none',
+    details: { scope: 'control.messages', applied: 'none', refusal: { variant: 'Retired', recipient: 'agent/example/worker' } },
+};
+void [genericRefusal, terminalRefusal];

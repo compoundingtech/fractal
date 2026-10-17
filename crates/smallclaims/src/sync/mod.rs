@@ -21,6 +21,7 @@ use sha2::{Digest as _, Sha256};
 use crate::fleet::{MemberKey, Sender, verify_signature};
 
 mod backend;
+pub mod telemetry;
 mod worker;
 
 pub use backend::{Backend, Local, redemption_answer};
@@ -32,7 +33,6 @@ pub const EXCHANGE_PATH: &str = "/v1/peer/exchange";
 /// A page of a checkpoint's manifest, for a node that adopts a checkpoint it did not take part
 /// in. Older builds neither serve nor call it.
 pub const CHECKPOINT_PATH: &str = "/v1/peer/checkpoint";
-pub const HEAL_PATH: &str = "/v1/peer/heal";
 pub const JOIN_PATH: &str = "/v1/fleet/join";
 pub const MAX_JOIN_BYTES: usize = 4096;
 const HEADER_FLEET: &str = "x-st3-fleet";

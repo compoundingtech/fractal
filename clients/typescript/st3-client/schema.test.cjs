@@ -4,6 +4,119 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('pairing challenge object siblings constrain every union branch in both decode modes', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const assistantEnvelope = require('../../../docs/st3/client-v0/fixtures/assistant-pairing-challenge.json');
+    const capabilities = require('../../../docs/st3/client-v0/fixtures/capabilities.json');
+    const person = {
+        kind: 'pairing-challenge', pairing_id: 'pairing/person', code: 'ABCDEFGH',
+        expires_at: assistantEnvelope.value.expires_at,
+    };
+    for (const mode of ['tolerant', 'strict']) {
+        const challenge = Rich.decodeUnknownSync(Rich.PairingChallenge, mode);
+        const envelope = Rich.decodeUnknownSync(Rich.Envelope, mode);
+        for (const wire of [person, { ...person, grant_kind: 'person' }, assistantEnvelope.value]) {
+            const encoded = Schema.encodeSync(Rich.PairingChallenge)(challenge(wire));
+            assert.equal(encoded.kind, wire.kind);
+            assert.equal(encoded.pairing_id, wire.pairing_id);
+            assert.equal(encoded.code, wire.code);
+            assert.equal(encoded.expires_at, new Date(wire.expires_at).toISOString());
+            assert.equal(envelope({ ...assistantEnvelope, value: wire }).value.kind, 'pairing-challenge');
+            for (const key of ['kind', 'pairing_id', 'code', 'expires_at']) {
+                const missing = { ...wire };
+                delete missing[key];
+                assert.throws(() => challenge(missing), `${mode}: missing ${key}`);
+            }
+            for (const invalid of [{ kind: 'capabilities' }, { code: 'invalid' }, { expires_at: 'invalid' }]) {
+                assert.throws(() => challenge({ ...wire, ...invalid }));
+            }
+        }
+        assert.equal(envelope(capabilities).value.kind, 'capabilities');
+        assert.throws(() => challenge(capabilities.value));
+        assert.throws(() => challenge({ ...person, grant_id: assistantEnvelope.value.grant_id }));
+        assert.throws(() => challenge({ ...assistantEnvelope.value, person_root_fingerprint: `sha256:${'A'.repeat(43)}` }));
+    }
+    const future = { ...person, future_field: true };
+    assert.equal(Rich.decodeUnknownSync(Rich.PairingChallenge)(future).kind, 'pairing-challenge');
+    assert.throws(() => Rich.decodeUnknownSync(Rich.PairingChallenge, 'strict')(future));
+});
+
+test('queued mission deadlines decode null and admission timestamps', async () => {
+    const [{ Option, Schema }, Rich] = await modules;
+    const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');
+    for (const mode of ['strict', 'tolerant']) {
+        const decode = Rich.decodeUnknownSync(Rich.Mission, mode);
+        const queued = structuredClone(wire);
+        queued.run_details[0].after = 'mission-run/predecessor';
+        queued.run_details[0].deadline = null;
+        const value = decode(queued);
+        assert(Option.isNone(value.run_details[0].deadline));
+        assert.equal(Schema.encodeSync(Rich.Mission)(value).run_details[0].deadline, null);
+        queued.run_details[0].deadline = '2026-09-20T11:05:00.000Z';
+        assert(Option.isSome(decode(queued).run_details[0].deadline));
+        assert.equal(Schema.encodeSync(Rich.Mission)(decode(queued)).run_details[0].deadline,
+            '2026-09-20T11:05:00.000Z');
+    }
+});
+
+test('terminal refusal and unconfirmed send envelopes preserve their applied answers', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const decode = Rich.decodeUnknownSync(Rich.ErrorEnvelope);
+    for (const [code, applied, refusal] of [
+        ['recipient-retired', 'none', { variant: 'Retired', recipient: 'agent/example/worker' }],
+        ['lifecycle-unavailable', 'none', { variant: 'LifecycleUnavailable', recipient: 'agent/example/worker', reason: 'conflict' }],
+        ['message-send-unconfirmed', 'unknown', undefined],
+    ]) {
+        const wire = { api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/example',
+            code, message: 'The send outcome', retryable: false, applied,
+            details: { applied, scope: 'control.messages', future_detail: { version: 2 }, ...(refusal ? { refusal } : {}) } };
+        const roundTrip = Schema.encodeSync(Rich.ErrorEnvelope)(decode(wire));
+        assert.equal(roundTrip.applied, applied);
+        assert.equal(roundTrip.details.applied, applied);
+        assert.equal(roundTrip.details.scope, 'control.messages');
+        assert.deepEqual(roundTrip.details.future_detail, { version: 2 });
+        if (refusal) assert.deepEqual(roundTrip.details.refusal, refusal);
+    }
+});
+
+test('directive notes decode metadata and expiry without becoming gate evidence', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = require('../../../docs/st3/client-v0/fixtures/directive-notes.json').value;
+    const decode = Rich.decodeUnknownSync(Rich.DirectiveNotes, 'strict');
+    const result = Schema.encodeSync(Rich.DirectiveNotes)(decode(wire));
+    assert.equal(result.notes[0].person, 'person/ada');
+    assert.equal(result.notes[0].author, 'person/ada');
+    assert.equal(result.notes[0].expires_at, '2026-10-12T09:00:00.000Z');
+    assert.equal(result.notes[0].text, wire.notes[0].text);
+    assert.deepEqual(Schema.encodeSync(Rich.DirectiveNotes)(decode({ notes: [] })), { notes: [] });
+    const invalid = structuredClone(wire);
+    invalid.notes[0].time = '2026-02-30T09:00:00Z';
+    assert.throws(() => decode(invalid));
+});
+
+test('person-ask mission rows retain actor references through the generated decoder', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');
+    const decode = Rich.decodeUnknownSync(Rich.Mission, 'strict');
+    const roundTrip = Schema.encodeSync(Rich.Mission)(decode(wire));
+    assert.equal(roundTrip.run_details[0].current_steps[0].assignee, 'person/avery');
+    assert.equal(roundTrip.run_details[0].steps[0].assignee, 'person/avery');
+    assert.equal(roundTrip.run_details[0].steps[0].wake.assignee, 'person/avery');
+    assert.equal(roundTrip.run_details[0].steps[0].claimant, null);
+    for (const actor of ['agent/asker', 'daemon/reconciler', 'person/avery']) {
+        const row = structuredClone(wire);
+        row.run_details[0].current_steps[0].assignee = actor;
+        row.run_details[0].current_steps[0].claimant = actor;
+        row.run_details[0].steps[0].assignee = actor;
+        row.run_details[0].steps[0].claimant = actor;
+        row.run_details[0].steps[0].wake.assignee = actor;
+        assert.equal(Schema.encodeSync(Rich.Mission)(decode(row)).run_details[0].steps[0].claimant, actor);
+    }
+    const invalid = structuredClone(wire);
+    invalid.run_details[0].steps[0].assignee = 'mission/not-an-actor';
+    assert.throws(() => decode(invalid));
+});
+
 test('timestamp codecs reject normalized invalid calendar dates and preserve instants', async () => {
     const [{ DateTime, Schema }, Rich] = await modules;
     const decode = Rich.decodeUnknownSync(Rich.Timestamp);
@@ -21,10 +134,61 @@ test('unknown cases round-trip tolerantly and reject in both strict decoding API
     assert.deepEqual(future, { _tag: 'Unknown', raw: 'future-error' });
     assert.equal(Schema.encodeSync(Rich.ErrorCode)(future), 'future-error');
     assert.equal(Rich.decodeUnknownSync(Rich.ErrorCode, 'strict')('not-found'), 'not-found');
+    assert.equal(Rich.decodeUnknownSync(Rich.ErrorCode, 'strict')('agent-roster-cut-not-ready'), 'agent-roster-cut-not-ready');
+    assert.equal(Schema.encodeSync(Rich.ErrorCode)('agent-roster-cut-not-ready'), 'agent-roster-cut-not-ready');
     assert.throws(() => Rich.decodeUnknownSync(Rich.ErrorCode, 'strict')('future-error'));
     assert.deepEqual(Effect.runSync(Rich.decodeUnknownEffect(Rich.ErrorCode)('future-error')), future);
     assert.throws(() => Effect.runSync(Rich.decodeUnknownEffect(Rich.ErrorCode, 'strict')('future-error')));
     assert.throws(() => Schema.encodeSync(Rich.ErrorCode)({ _tag: 'Unknown', raw: 'not-found' }));
+});
+
+test('optional agent lifecycle preserves known values and absence while future values keep roster rows', async () => {
+    const [{ Effect, Schema }, Rich] = await modules;
+    const wire = {
+        id: 'agent/example/worker', kind: 'agent', name: 'Worker',
+        reachability: 'local', revision: '1', runtime_ids: [], state: 'waiting',
+        updated_at: '2024-02-29T00:00:00.000Z',
+    };
+    for (const mode of ['tolerant', 'strict']) {
+        const decode = Rich.decodeUnknownSync(Rich.Agent, mode);
+        const absent = decode(wire);
+        assert.equal(Object.hasOwn(absent, 'lifecycle'), false);
+        assert.equal(Object.hasOwn(Schema.encodeSync(Rich.Agent)(absent), 'lifecycle'), false);
+        for (const lifecycle of ['standing', 'owner', 'bounded']) {
+            const decoded = decode({ ...wire, lifecycle });
+            assert.equal(decoded.lifecycle, lifecycle);
+            assert.equal(Schema.encodeSync(Rich.Agent)(decoded).lifecycle, lifecycle);
+            assert.equal(Effect.runSync(Rich.decodeUnknownEffect(Rich.Agent, mode)({ ...wire, lifecycle })).lifecycle, lifecycle);
+        }
+    }
+
+    const future = { ...wire, lifecycle: 'future-kind' };
+    const unknown = { _tag: 'Unknown', raw: 'future-kind' };
+    const decoded = Rich.decodeUnknownSync(Rich.Agent)(future);
+    assert.deepEqual(decoded.lifecycle, unknown);
+    assert.equal(Schema.encodeSync(Rich.Agent)(decoded).lifecycle, 'future-kind');
+    assert.deepEqual(Effect.runSync(Rich.decodeUnknownEffect(Rich.Agent)(future)).lifecycle, unknown);
+    assert.throws(() => Rich.decodeUnknownSync(Rich.Agent, 'strict')(future));
+    assert.throws(() => Effect.runSync(Rich.decodeUnknownEffect(Rich.Agent, 'strict')(future)));
+    assert.throws(() => Schema.encodeSync(Rich.Agent)({ ...decoded, lifecycle: { _tag: 'Unknown', raw: 'standing' } }));
+
+    const roster = {
+        kind: 'page', collection: 'agents', filters: {},
+        items: [wire, future], page: { limit: 50, has_more: false },
+    };
+    const page = Rich.decodeUnknownSync(Rich.Page)(roster);
+    assert.equal(page.items.length, 2);
+    assert.equal(Object.hasOwn(page.items[0], 'lifecycle'), false);
+    assert.equal(page.items[1].id, wire.id);
+    assert.equal(page.items[1].name, wire.name);
+    assert.equal(page.items[1].state, wire.state);
+    assert.deepEqual(page.items[1].lifecycle, unknown);
+    const encoded = Schema.encodeSync(Rich.Page)(page);
+    assert.equal(encoded.items.length, 2);
+    assert.equal(Object.hasOwn(encoded.items[0], 'lifecycle'), false);
+    assert.equal(encoded.items[1].lifecycle, 'future-kind');
+    assert.throws(() => Rich.decodeUnknownSync(Rich.Page, 'strict')(roster));
+    assert.throws(() => Effect.runSync(Rich.decodeUnknownEffect(Rich.Page, 'strict')(roster)));
 });
 
 test('recursive Glass layouts enforce child bounds and strict nested keys', async () => {
@@ -283,4 +447,97 @@ test('normalized conversation fallbacks and open block payloads survive schema r
     const block = { id: 'native-1/0', kind: 'future-kind', source_type: 'native-future', payload: { raw: { token: 'invented-token', nested: { arguments: ['all', 'values'] } } } };
     const decoded = Rich.decodeUnknownSync(Rich.TimelineBlock, 'strict')(block);
     assert.deepEqual(Schema.encodeSync(Rich.TimelineBlock)(decoded), block);
+});
+
+test('assistant error views preserve exact native diagnostics in both decoder modes', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = {
+        type: 'assistant_error', status: 'failed', presentation: 'full',
+        is_error: true, label: 'native diagnostic', message: 'native diagnostic',
+        native: {
+            stopReason: 'future-stop', errorMessage: 'native\n\u001bdiagnostic',
+            errorStatus: { future: [false, null, 429] }, errorId: null,
+            retryRecovery: { attempt: 2, future: ['unchanged'] },
+            future: { retained: true },
+        },
+    };
+    for (const mode of ['strict', 'tolerant']) {
+        const decoded = Rich.decodeUnknownSync(Rich.TimelineViewAssistantError, mode)(wire);
+        assert.deepEqual(Schema.encodeSync(Rich.TimelineViewAssistantError)(decoded), wire);
+        const { native, ...legacy } = wire;
+        assert.deepEqual(
+            Schema.encodeSync(Rich.TimelineViewAssistantError)(
+                Rich.decodeUnknownSync(Rich.TimelineViewAssistantError, mode)(legacy)),
+            legacy,
+        );
+    }
+});
+
+
+test('relay omission fixture keeps absent fields, nullable values, and unknown bodies', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const fixture = require('../../../docs/st3/client-v0/fixtures/timeline-relay-omission.json');
+    for (const entry of fixture.value.items) {
+        const typed = Rich.decodeUnknownSync(Rich.TimelineEntry)(entry);
+        assert.deepEqual(Schema.encodeSync(Rich.TimelineEntry)(typed), {
+            ...entry, timestamp: new Date(entry.timestamp).toISOString(),
+        });
+    }
+    assert.equal(fixture.value.items[0].body.reply_to, null);
+});
+
+test('phone observation schema keeps histogram pairs and live-share as separate closed types', async () => {
+    const [{Schema},Rich] = await modules;
+    const decode=Rich.decodeUnknownSync(Rich.ObservationReport,'strict');
+    const interval={carrier:'lan',interval_start:'2026-10-10T15:00:00Z',interval_end:'2026-10-10T15:01:00Z'};
+    const report={report_id:'019a1234-0000-7000-8000-000000000001',samples:[
+        {...interval,kind:'latency',target:'ios-connect',count:100,over_target:1,max_ms:2000,buckets:[[103,99],[2047,1]]},
+        {...interval,kind:'live-share',target:'ios-live-share',foreground_ms:10000,live_ms:9900},
+    ]};
+    assert.deepEqual(Schema.encodeSync(Rich.ObservationReport)(decode(report)),report);
+    for (const samples of [
+        [{...report.samples[0],buckets:[[103,99,1]]}],
+        [{...report.samples[0],buckets:[[103,1000001]]}],
+        [{...report.samples[1],kind:'latency'}],
+        [{...report.samples[1],carrier:'unknown'}],
+    ]) assert.throws(()=>decode({...report,samples}));
+});
+
+test('producer conformance fixtures decode strictly without losing tool results', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const replay = require(process.env.ST_TIMELINE_CONFORMANCE_OUTPUT
+        ?? '../../../docs/st3/client-v0/fixtures/timeline-conformance.json');
+    const fixtures = Array.isArray(replay) ? replay : replay.items;
+    assert.ok(fixtures.length > 0);
+    const decode = Rich.decodeUnknownSync(Rich.TimelineEntry, 'strict');
+    for (const entry of fixtures) {
+        assert.doesNotThrow(() => Schema.encodeSync(Rich.TimelineEntry)(decode(entry)), entry.id);
+    }
+});
+
+test('known daemon sender schema gap remains an explicit rejection (issue #1957)', async () => {
+    // https://github.com/compoundingtech/smalltalk/issues/1957 — pending sender amendment.
+    const [, Rich] = await modules;
+    const entry = {
+        id: 'timeline-entry/ada', sequence: 0, revision: 1, final: true,
+        timestamp: '2026-10-12T00:00:00.000Z', role: 'system', type: 'message',
+        body: { message_id: 'message/tester', from: 'daemon/runtime', to: 'agent/ada' },
+    };
+    assert.throws(() => Rich.decodeUnknownSync(Rich.TimelineEntry, 'strict')(entry));
+});
+
+test('exchange carrier additions preserve legacy absence and future carrier values', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = { host_id: 'host/birch', peer_only_envelopes: 5, local_only_envelopes: 0, last_exchange_at: null, estimated_catch_up_seconds: null, diverged_since: null };
+    const decode = Rich.decodeUnknownSync(Rich.SyncPeer, 'strict');
+    assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(wire)), wire);
+    const observed = {
+        ...wire,
+        last_successful_exchange: { at: '2026-10-13T12:00:00.000Z', carrier: 'loopback' },
+        last_failed_exchange: { at: '2026-10-13T11:59:00.000Z', carrier: 'fabric', fabric_route: 'unknown' },
+    };
+    assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(observed)), observed);
+    const future = { ...observed, last_successful_exchange: { ...observed.last_successful_exchange, carrier: 'future-carrier' } };
+    assert.deepEqual(Schema.encodeSync(Rich.SyncPeer)(decode(future)), future);
+    assert.throws(() => decode({ ...observed, last_failed_exchange: { carrier: 'fabric' } }));
 });

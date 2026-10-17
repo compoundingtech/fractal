@@ -32,11 +32,11 @@ fn cleanup_fixture() {
     }
     let evidence = std::env::var_os("ST3_CLEANUP_FIXTURE").expect("regression fixture directory");
     let mode = std::env::var("ST3_CLEANUP_FIXTURE_MODE").unwrap();
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut fixture = Command::new("python3")
         .arg(repo.join("scripts/st3-test-process-test"))
         .arg("--boot-fixture")
-        .arg(env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
         .arg(&evidence)
         .arg(&mode)
         .spawn()
@@ -62,11 +62,11 @@ fn every_exit_reaps_the_daemon_even_when_the_rust_test_is_killed() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("python3")
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg(repo.join("scripts/st3-test-process-test"))
-        .arg(env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
         .arg(std::env::current_exe().unwrap())
         .output()
         .unwrap();
@@ -78,8 +78,43 @@ fn every_exit_reaps_the_daemon_even_when_the_rust_test_is_killed() {
     );
 }
 
+#[test]
+fn interrupted_tests_keep_logs_and_pending_observations() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new("python3")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .arg(repo.join("scripts/st3-test-evidence-test"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn event_waits_find_transient_states_and_fail_at_once_when_waiting_cannot_help() {
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new("python3")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .arg(repo.join("scripts/st3-events-test"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn canary(harness: &str, scenario: &str) {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let in_ci = std::env::var_os("CI_RUN_ID").is_some();
     let path = std::env::var_os("PATH").unwrap_or_default();
     let on_path =
@@ -115,13 +150,14 @@ fn canary(harness: &str, scenario: &str) {
     // it goes on the target directory's disk, not the small tmpfs the daemon's sockets live on.
     let scratch = tempfile::Builder::new()
         .prefix("boot-canary-scratch-")
-        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .tempdir_in(test_env!("CARGO_TARGET_TMPDIR"))
         .unwrap();
     // Double-fork out of the calling seat's ancestry: the isolated daemon binds a caller to the
     // nearest ST_AGENT above it, and the canary acts as person/eval.
     let output = Command::new("setsid")
         .args([
             "-f",
+            "--wait",
             "env",
             "-u",
             "ST_AGENT",
@@ -135,7 +171,7 @@ fn canary(harness: &str, scenario: &str) {
         } else {
             "scripts/st3-boot-canaries/run"
         }))
-        .arg(env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
         .arg(&evidence)
         .args([harness, scenario, "--bound", "180", "--scratch"])
         .arg(scratch.path())
@@ -146,7 +182,8 @@ fn canary(harness: &str, scenario: &str) {
         .as_ref()
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-        .is_some_and(|result| result["verdict"] == "pass");
+        .is_some_and(|result| result["verdict"] == "pass")
+        && output.status.success();
     if matches!(scenario, "when-idle" | "idle-hold") {
         eprintln!(
             "{}",
@@ -156,17 +193,27 @@ fn canary(harness: &str, scenario: &str) {
     if !passed {
         eprintln!("boot canary evidence: {}", evidence.display());
         let _ = evidence_root.keep();
+    } else if keep && (scenario.starts_with("access-") || scenario == "claim-socket-denied") {
+        let _ = evidence_root.keep();
     } else if keep {
         // Passing runs are not worth uploading.
         let _ = std::fs::remove_dir_all(&evidence);
     }
     assert!(
         passed,
-        "{}\n{}\n{}",
+        "canary runner {}: {}\n{}\n{}",
+        output.status,
         result.unwrap_or_default(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn first_claim_socket_denial_names_cause_and_recovers_on_an_isolated_daemon() {
+    if st3::test_support::supervise_test() { return; }
+    canary("codex", "claim-socket-denied");
 }
 
 /// The canary's private root is redrawn until its name avoids "st2": the fresh-seat boundary check
@@ -176,7 +223,7 @@ fn the_canary_never_names_its_root_after_st2() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("python3")
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg(repo.join("scripts/st3-boot-canaries/run"))
@@ -305,4 +352,24 @@ fn opencode_idle_minute_makes_no_hold_calls_then_delivers_with_hold_release_and_
         return;
     }
     canary("opencode", "idle-hold");
+}
+
+#[test]
+fn plain_codex_legacy_config_boots_and_resumes_with_driver_bypass_defaults() {
+    canary("codex", "access-bypass");
+}
+
+#[test]
+fn plain_codex_auto_config_boots_and_resumes_with_a_workspace_socket_profile() {
+    canary("codex", "access-auto");
+}
+
+#[test]
+fn plain_claude_legacy_config_boots_and_resumes_with_driver_bypass_defaults() {
+    canary("claude", "access-bypass");
+}
+
+#[test]
+fn plain_claude_auto_config_boots_and_resumes_with_auto_permissions() {
+    canary("claude", "access-auto");
 }

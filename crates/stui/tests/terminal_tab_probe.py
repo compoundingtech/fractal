@@ -102,9 +102,11 @@ class Tab:
             raise AssertionError(f"pty {args[0]}: {result.stderr.decode(errors='replace')}")
         return result
 
-    def start(self):
+    def start(self, before_attach=None):
         self.pty_command("run", "--force", "-d", "--id", "copper", "--", *self.command)
         wait_for(lambda: (self.registry / "copper.sock").exists(), bool, "session socket")
+        if before_attach is not None:
+            before_attach()
         self.relay_thread = threading.Thread(target=self.relay, daemon=True)
         self.relay_thread.start()
 
@@ -188,11 +190,14 @@ class Tab:
         return b"".join(bytes.fromhex(row["hex"]) for row in json_lines(self.root / "program.jsonl")
                         if row["kind"] == "input")
 
-    def emit(self, data):
+    def publish_output(self, data):
         self.request_id += 1
         request = {"id": self.request_id, "hex": data.hex()}
         (self.root / "request.new").write_text(json.dumps(request))
         (self.root / "request.new").replace(self.root / "request.json")
+
+    def emit(self, data):
+        self.publish_output(data)
         return wait_for(self.status, lambda status: status and status["title"] == f"copper-{self.request_id}",
                         f"output {self.request_id}")
 
@@ -203,20 +208,29 @@ class Tab:
     def send(self, data):
         os.write(self.master, data)
 
+    def action(self, value):
+        # The worker consumes this file as soon as it exists. Publish complete bytes,
+        # as with output requests, so it cannot consume a partially written action.
+        staged = self.root / "ui-action.new"
+        staged.write_text(value)
+        staged.replace(self.root / "ui-action")
+
     def exercise(self, data):
         start = len(self.input())
         self.send(data + BARRIER)
-        received = wait_for(self.input, lambda raw: len(raw) > start and BARRIER_PATTERN.search(raw) is not None,
+        # A previous case ends with Ctrl-B. An a event followed by this case's
+        # first Ctrl-B can look like another barrier across that old boundary.
+        received = wait_for(self.input, lambda raw: BARRIER_PATTERN.search(raw, start) is not None,
                             f"input {data.hex()}")
-        return received[start:BARRIER_PATTERN.search(received).start()]
+        return received[start:BARRIER_PATTERN.search(received, start).start()]
 
     def query(self, data):
         start = len(self.input())
         self.emit(data)
         self.send(BARRIER)
-        received = wait_for(self.input, lambda raw: len(raw) > start and BARRIER_PATTERN.search(raw) is not None,
+        received = wait_for(self.input, lambda raw: BARRIER_PATTERN.search(raw, start) is not None,
                             f"query {data.hex()}")
-        return received[start:BARRIER_PATTERN.search(received).start()]
+        return received[start:BARRIER_PATTERN.search(received, start).start()]
 
     def close(self):
         (self.root / "stop").touch()
@@ -232,6 +246,20 @@ class Tab:
         self.pty_command("rm", "copper", check=False)
         os.close(self.master)
         os.close(self.slave)
+
+
+def no_answer_client(tab):
+    # A connected, unattached client cannot answer paste requests. Query the real
+    # daemon before starting stui's writable attachment; no transport is rewritten.
+    with socket.socket(socket.AF_UNIX) as client:
+        client.connect(str(tab.registry / "copper.sock"))
+        raw = b"\x1b[?5522$p"
+        start = len(tab.input())
+        tab.publish_output(RESET + b"\x1b[?5522h" + raw)
+        received = wait_for(lambda: tab.input()[start:], lambda data: data.endswith(b"$y"),
+                            "DECRQM 5522 without an answering client")
+    return {"case": "queries/DECRQM-5522/no-answer-client", "sent": raw.hex(),
+            "received": received.hex()}
 
 
 def matrix(tab):
@@ -509,10 +537,10 @@ def controls_and_images(worker):
             tab.emit(b"\x1b[1S")
             wait_for(tab.status, lambda s: s and len(s["image_cells"]) == 2, "image scroll crop")
             hidden_start = len(tab.output)
-            (tab.root / "ui-action").write_text("hide")
+            tab.action("hide")
             wait_for(tab.status, lambda s: s and not s["focused"] and not s["image_cells"], "hide terminal tab images")
             wait_for(lambda: bytes(tab.output[hidden_start:]), lambda raw: b"a=d,d=I" in raw, "release hidden image storage")
-            (tab.root / "ui-action").write_text("show")
+            tab.action("show")
             shown = wait_for(tab.status, lambda s: s and s["focused"] and len(s["image_cells"]) == 2, "show terminal tab images")
             # Move the real tab through the UI's actual drag/drop decoder into a right split.
             terminal_tab = shown["tabs"][0]
@@ -596,21 +624,62 @@ def check_program(worker, name, binary):
             tab.close()
 
 
+def action_publication(worker):
+    # Force the consumer to run while the producer has written only the first byte.
+    # Two title acknowledgements span a new worker loop during that interval.
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="stui-action-probe-") as directory:
+        tab = Tab(worker, [sys.executable, str(HERE / "copper_probe.py"), directory], directory)
+        original_write = Path.write_text
+
+        def split_write(path, value, *args, **kwargs):
+            if path.parent == tab.root and path.name in ("ui-action", "ui-action.new"):
+                with path.open("w") as stream:
+                    stream.write(value[:1])
+                    stream.flush()
+                    tab.emit(b"")
+                    tab.emit(b"")
+                    stream.write(value[1:])
+                return len(value)
+            return original_write(path, value, *args, **kwargs)
+
+        try:
+            tab.start()
+            with patch.object(Path, "write_text", split_write):
+                tab.action("hide")
+                wait_for(tab.status, lambda s: s and not s["focused"], "published hide action")
+                tab.action("show")
+                wait_for(tab.status, lambda s: s and s["focused"], "published show action")
+            assert tab.process.poll() is None, "fixture worker exited during action publication"
+            assert tab.relay_error is None, tab.relay_error
+        except Exception:
+            print("worker tail:", bytes(tab.output[-2000:]), file=sys.stderr)
+            raise
+        finally:
+            tab.close()
+    print("terminal tab: split-write hide/show publication controls passed")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", required=True, type=Path)
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--check-action-publication", action="store_true")
     parser.add_argument("--record", type=Path)
     parser.add_argument("--program", action="append", default=[], metavar="NAME=PATH")
     args = parser.parse_args()
     if not shutil.which("pty"):
         raise SystemExit("pty is required; use the repository's Nix development shell")
+    if args.check_action_publication:
+        action_publication(args.worker.resolve())
+        return
     with tempfile.TemporaryDirectory(prefix="stui-probe-") as directory:
         command = [sys.executable, str(HERE / "copper_probe.py"), directory]
         tab = Tab(args.worker.resolve(), command, directory)
         try:
-            tab.start()
-            rows = matrix(tab)
+            rows = []
+            tab.start(before_attach=lambda: rows.append(no_answer_client(tab)))
+            rows.extend(matrix(tab))
         except Exception:
             print("worker tail:", bytes(tab.output[-2000:]), file=sys.stderr)
             print("relay error:", tab.relay_error, file=sys.stderr)

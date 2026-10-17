@@ -19,6 +19,11 @@ declaration.
 
 ## When a seat can suspend
 
+Suspend first checks the declaration's native session arguments. An authored selector such as
+`--resume`, `--session`, or `-c` refuses with `suspend-authored-session-selection`, naming the
+selector in `details.selector`. Native resume would refuse that selector even if its transcript
+exists. This check reads no transcript, appends no claims, and leaves the seat running.
+
 A seat suspends only at a clean boundary. Core does not read harness state. Each driver adds
 `quiescent` and `blocking` to the `harness.observed` claims it already publishes, and core reads
 those two fields. Core adds its own blockers, so st refuses a suspend with a typed list of
@@ -54,7 +59,7 @@ relaunches its harness on exactly that session:
 | Claude | `claude --resume ID` | the transcript is in the workspace's Claude project directory |
 | Codex | `codex --remote … resume THREAD`, then the control connection's `thread/resume` | the app-server accepts the thread |
 | pi | `pi --session TRANSCRIPT` | the seat's transcript has the session's header |
-| omp | `omp --resume ID` | the seat's transcript has the session's header |
+| omp | `omp --resume TRANSCRIPT` | the seat's transcript has the session's header |
 | OpenCode | `opencode --session ID`, with delivery held to that session | the session is in `opencode.db`, and the server returns it |
 
 A driver that cannot resume ends the launch before the harness picks another session. It records
@@ -64,6 +69,22 @@ a `native-resume-unavailable` diagnostic whose status is the reason: `transcript
 native session. A different session (`native-session-mismatch`), no session within three minutes
 (`native-session-unbound`), or an exit before binding fails the resume. After a failed resume the
 seat stays suspended on the same snapshot, with the code and reason.
+
+## Leaving an existing suspension when resume refuses
+
+Older daemons accepted suspends whose declaration already selects a session. If resume reports
+`authored-session-selection`, the exit is to stop the seat and then start it:
+
+```sh
+st agents stop agent/example/worker --as person/ada
+st agents start agent/example/worker --as person/ada
+```
+
+Stop ends the suspension. Start launches the declaration with its authored selector, such as
+`--resume TRANSCRIPT`. The session kept by suspend is no longer guaranteed: the authored selector
+chooses the conversation, which may differ from the suspended session. This exit does not delete
+the saved transcript, but it gives up suspend's promise to resume that exact session. A start
+without a stop leaves the suspension in place; restart refuses while it holds the seat.
 
 ## Phases
 
@@ -76,9 +97,18 @@ resume:  restoring -> verifying   -> resumed
 move:    fencing-source -> transferring -> restoring -> verifying -> resumed        (failed: back to suspended, with a code)
 ```
 
-A suspension belongs to the launch it was taken under. Stopping the seat, or applying a
-declaration that changes how it launches, ends the suspension, and the next start follows the
-usual rules. A label change does not end it.
+A suspension belongs to the launch it was taken under. Stopping the seat or immediately applying
+a non-manual declaration that changes its launch ends the suspension. A label change does not end it.
+
+Publishing a changed launch for an owned seat with `rollout "manual"` keeps the suspension,
+including a suspend that is still in flight. Publication does not start the seat or replace its
+saved native session. Same-host resume runs the incumbent declaration on that exact session;
+the new declaration stays pending. An explicit rollout while the suspension holds the seat
+refuses with `rollout-suspended`. Resume first, then request the rollout to apply the pending
+declaration through strict native resume. See [owned-seat rollout](owned-seat-cutover.md).
+
+While the manual launch change is pending, resume on the current host. Apply the rollout
+before requesting a cross-host move. This keeps resume from applying part of the pending launch.
 
 ## Cross-host continuation
 
