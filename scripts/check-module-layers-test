@@ -161,6 +161,34 @@ class ModuleLayers(unittest.TestCase):
         self.assertEqual(ml.client_boundary_findings(str(self.root)), [])
     # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-state-dirs-fractal
 
+    def test_leaf_crates_reject_client_dependency_aliases_in_every_table(self):
+        sections = [
+            "dependencies", "dev-dependencies", "build-dependencies",
+            'target.\'cfg(unix)\'.dependencies',
+            'target.\'cfg(unix)\'.dev-dependencies',
+            'target.\'cfg(unix)\'.build-dependencies',
+        ]
+        for crate in ("st3-kernel", "st3-telemetry"):
+            path = f"crates/{crate}/Cargo.toml"
+            for section in sections:
+                with self.subTest(crate=crate, section=section):
+                    self.write(path, f'[{section}]\nclient = {{ package = "st3-client", path = "../st3-client" }}\n')
+                    self.assertIn("aliases st3-client as client", self.run_script().stderr)
+                    self.write(path, f'[{section}]\nst3-client = {{ path = "../st3-client" }}\n')
+                    self.assertEqual(ml.client_boundary_findings(str(self.root)), [])
+            self.write(path, "")
+
+    def test_leaf_crates_reject_client_api_in_all_cargo_target_directories(self):
+        for crate in ("st3-kernel", "st3-telemetry"):
+            for target in ("tests", "benches", "examples"):
+                with self.subTest(crate=crate, target=target):
+                    path = f"crates/{crate}/{target}/nested/client.rs"
+                    self.write(path, "use st3_client::Client;\n")
+                    result = self.run_script()
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn(path + ":1: forbidden st3_client reference", result.stderr)
+                    self.write(path, "")
+
     def split_packages(self, daemon_version="0.1.0", daemon_deps="", build=True, binary_deps=""):
         self.write("crates/st3/Cargo.toml", f'[package]\nname = "st3"\nversion = "0.1.0"\n\n[dependencies]\nstui = "1"\n{binary_deps}')
         self.write("crates/st3-daemon/Cargo.toml",

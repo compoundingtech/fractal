@@ -67,8 +67,10 @@ macros. Other crates use a part of it:
   <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-state-dirs-fractal — DELETE at contraction — #3032 -->
   The sole R11 exception is `st3_client::product_dirs`, for the same standalone
   resolver ownership reason. `scripts/check-module-layers` enforces this exact
-  namespace exception for both crates, including tests; all other client API
-  paths remain forbidden. Remove this edge and its resolver at contraction.
+  namespace exception in `src/`, `tests/`, `benches/` and `examples/` of both crates;
+  all other client API paths remain forbidden. Renaming `st3-client` in any
+  dependency table, including dev/build and target-specific dependencies, is
+  forbidden as well. Remove this edge and its resolver at contraction.
   <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-state-dirs-fractal -->
 
 `scripts/check-module-layers` reports the first three.
