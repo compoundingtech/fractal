@@ -161,14 +161,14 @@ const meta = {
 } satisfies Meta
 export default meta
 type Story = StoryObj
-export const HoverCardKnown: Story = { name: 'Hover card · fully reported', render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /></main>, play: async ({ canvasElement }) => assertCompactCard(canvasElement) }
-export const HoverCardUnknown: Story = { name: 'Hover card · unreported fields omitted', render: () => <main {...stylex.props(styles.root)}><CardPair row={unreportedRow} /></main>, play: async ({ canvasElement }) => {
+export const HoverCardKnown: Story = { tags: ['critical'], name: 'Hover card · fully reported', render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /></main>, play: async ({ canvasElement }) => assertCompactCard(canvasElement) }
+export const HoverCardUnknown: Story = { tags: ['critical'], name: 'Hover card · unreported fields omitted', render: () => <main {...stylex.props(styles.root)}><CardPair row={unreportedRow} /></main>, play: async ({ canvasElement }) => {
   const card = within(canvasElement).getByTestId('hover-facts')
   await assertCompactCard(canvasElement)
   await expect(await paintedText(card)).not.toMatch(/unknown|unavailable|—/i)
   for (const label of ['Spend', 'Duration', 'Last turn', 'Model', 'PR', 'Branch']) await expect(within(card).queryByText(label)).toBeNull()
 } }
-export const TimeCohort: Story = { name: 'Time cohort · known vs none', render: () => <main {...stylex.props(styles.root)}><CohortList /></main>, play: async ({ canvasElement }) => {
+export const TimeCohort: Story = { tags: ['critical'], name: 'Time cohort · known vs none', render: () => <main {...stylex.props(styles.root)}><CohortList /></main>, play: async ({ canvasElement }) => {
   await assertRowNames(canvasElement)
   const rows = within(canvasElement).getAllByTestId('taste-agent-row')
   const child = rows.find(row => row.textContent?.includes('Check output'))!
@@ -177,7 +177,7 @@ export const TimeCohort: Story = { name: 'Time cohort · known vs none', render:
   const titleLeft = rows[0]!.querySelector('[data-row-column="title-text"]')!.getBoundingClientRect().left
   for (const row of rows) await expect(Math.abs(row.querySelector('[data-row-column="title-text"]')!.getBoundingClientRect().left - titleLeft)).toBeLessThanOrEqual(1)
 } }
-export const QuickOpenAction: Story = { name: 'Row hover · quick Open', render: () => <main {...stylex.props(styles.root)}><QuickOpenCohort /></main>, play: async ({ canvasElement }) => {
+export const QuickOpenAction: Story = { tags: ['critical'], name: 'Row hover · quick Open', render: () => <main {...stylex.props(styles.root)}><QuickOpenCohort /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const rows = canvas.getAllByTestId('taste-agent-row')
   const target = rows[1]!
@@ -196,7 +196,7 @@ export const QuickOpenAction: Story = { name: 'Row hover · quick Open', render:
   await waitFor(() => expect(rows[2]!.querySelector('[aria-current="page"]')).not.toBeNull())
   await assertRowNames(canvasElement)
 } }
-export const AllStates: Story = { render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /><div data-frame-rows {...stylex.props(styles.list)}>{contextRowElements}</div><MetricWidths /></main>, play: async ({ canvasElement }) => {
+export const AllStates: Story = { tags: ['critical'], render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /><div data-frame-rows {...stylex.props(styles.list)}>{contextRowElements}</div><MetricWidths /></main>, play: async ({ canvasElement }) => {
   await assertRowNames(canvasElement)
   await assertHelperDescriptions(canvasElement)
   await assertSingleHoverDisclosure(canvasElement)
@@ -207,7 +207,7 @@ export const AllStates: Story = { render: () => <main {...stylex.props(styles.ro
   probe.removeAttribute('title')
   await assertRowNames(canvasElement)
 } }
-export const DensitiesAndChildren: Story = { name: 'Names and descriptions · SR-1/2/3, collapsed and expanded', render: () => <main {...stylex.props(styles.root)}><DensityMatrix /></main>, play: async ({ canvasElement }) => {
+export const DensitiesAndChildren: Story = { tags: ['critical'], name: 'Names and descriptions · SR-1/2/3, collapsed and expanded', render: () => <main {...stylex.props(styles.root)}><DensityMatrix /></main>, play: async ({ canvasElement }) => {
   await assertRowNames(canvasElement)
   await assertSingleHoverDisclosure(canvasElement)
   const toggle = within(canvasElement).getByRole('button', { name: 'Expand 2 subagents' })
@@ -218,6 +218,8 @@ export const DensitiesAndChildren: Story = { name: 'Names and descriptions · SR
   await userEvent.click(within(canvasElement).getByRole('button', { name: 'Collapse 2 subagents' }))
   await waitFor(() => expect(within(canvasElement).queryByRole('button', { name: 'Subagent two' })).toBeNull())
   await assertRowNames(canvasElement)
+  // The pointer rests on the row, so its hover card opens; the a11y check must see it open, not race its delay.
+  await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1), { timeout: hoverSettleTimeout })
 } }
 
 /** The row's accessible description, whichever ARIA attribute carries it. */
@@ -231,6 +233,7 @@ const contextRows: readonly Row[] = [
 ]
 const contextRowElements = contextRows.map(row => <SidebarAgentRow key={row.ref} item={row} now={storyNow} extraSignals={[]} onOpen={() => undefined} />)
 export const ContextOccupancy: Story = {
+  tags: ['critical'],
   render: () => <main {...stylex.props(styles.root)}><div data-frame-rows {...stylex.props(styles.list)}>{contextRowElements}</div></main>,
   play: async ({ canvasElement }) => {
     const rows = within(canvasElement).getAllByTestId('taste-agent-row')
@@ -264,6 +267,7 @@ function MetricWidths() {
   </div>)}</section>
 }
 export const LayoutCWidths: Story = {
+  tags: ['critical'],
   render: () => <main {...stylex.props(styles.root)}><MetricWidths /></main>,
   play: async ({ canvasElement }) => {
     const [compact, compactUnknown] = canvasElement.querySelectorAll<HTMLElement>('[data-metric-width="256"] [data-testid="taste-agent-row"]')

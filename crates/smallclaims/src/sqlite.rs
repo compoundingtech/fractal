@@ -792,7 +792,7 @@ fn write_queue(
             WriterJob::Lend { lent, returned, holder, enqueued, origin }
             | WriterJob::FenceLend { lent, returned, holder, enqueued, origin, .. } => {
                 fifo.dequeued_at(enqueued);
-                telemetry::METRICS.queue.record(enqueued.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
+                telemetry::queued(enqueued.elapsed(), origin.as_ref());
                 let _hold = crate::windows::holds::WriterHold::start(crate::windows::holds::HoldKind::Lend, &holder);
                 let _holder = callbacks.3.map(|writer| writer.holding(origin));
                 if let Err(std::sync::mpsc::SendError(back)) = lent.send(connection) {
@@ -847,10 +847,10 @@ fn run_write_batch(
     let _holder = writer_telemetry.map(|writer| writer.holding(first_origin.cloned()));
     if let WriterJob::Batched { enqueued, .. } = &first {
         fifo.dequeued_at(*enqueued);
-        telemetry::METRICS.queue.record(enqueued.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
+        telemetry::queued(enqueued.elapsed(), first_origin);
     }
     let started = std::time::Instant::now();
-    let mut attribution = writer_telemetry.map(telemetry::Batch::start);
+    let mut attribution = writer_telemetry.filter(|_| telemetry::phase_spans_enabled()).map(telemetry::Batch::start);
     // The writer starts a batch only from a batched write.
     let first_holder = match &first {
         WriterJob::Batched { holder, .. } => holder.clone(),
@@ -902,7 +902,7 @@ fn run_write_batch(
         }
         if !answers.is_empty() {
             fifo.dequeued_at(enqueued);
-            telemetry::METRICS.queue.record(enqueued.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
+            telemetry::queued(enqueued.elapsed(), origin.as_ref());
         }
         match (&transaction, &failure) {
             (Some(transaction), None) => {
@@ -1001,6 +1001,14 @@ fn run_write_batch(
 }
 
 impl WriterGuard<'_> {
+    /// Re-verify native observation after detecting writes through another connection.
+    /// Unsupported coverage is reported through the observer's latched failure callback.
+    pub fn reverify_observer_coverage(&self) {
+        if let Some(observer) = self.mutation_observer {
+            observer.reverify(self);
+        }
+    }
+
     /// Begin a managed transaction and run prepare before returning it. Existing helpers
     /// accepting &Transaction can use the wrapper through dereference; commit finalizes
     /// before COMMIT. Prepare failure rolls back and retains its original error cause.
@@ -1281,7 +1289,7 @@ impl Drop for PinnedRead<'_> {
 
 impl ReadPool {
     pub fn new(path: &Path, shared_memory: bool) -> Result<Self> {
-        let pool = Self {
+        let mut pool = Self {
             idle: Arc::new(Mutex::new(Vec::new())),
             returned: Condvar::new(),
             path: path.to_path_buf(),
@@ -1292,6 +1300,7 @@ impl ReadPool {
         };
         // Open one now, so a store that cannot be read fails to open.
         let connection = pool.open_connection()?;
+        pool.path = opened_database_path(&connection, path)?;
         pool.release(connection);
         telemetry::register_pool(&pool);
         Ok(pool)
@@ -1942,6 +1951,32 @@ pub mod work {
         }
     }
 
+}
+
+/// Use the filename of the actual opened main database, as resolved by SQLite's VFS.
+/// Unlike canonicalizing the caller's spelling, this also handles a newly created file and
+/// SQLite URI filenames. Empty filenames denote memory/temporary databases: retain the
+/// original URI so named shared-memory readers still open the same database.
+pub(crate) fn opened_database_path(connection: &Connection, requested: &Path) -> Result<PathBuf> {
+    let filename: Vec<u8> = connection
+        .query_row("SELECT file FROM pragma_database_list WHERE name='main'", [], |row| {
+            Ok(row.get_ref(0)?.as_bytes()?.to_vec())
+        })
+        .with_context(|| format!("resolve opened st database {}", requested.display()))?;
+    if filename.is_empty() {
+        return Ok(requested.to_path_buf());
+    }
+    // SQLite accepts native filename bytes on Unix. Do not turn a valid non-UTF-8 target
+    // into another path through display/to_string_lossy while deriving readers or sidecars.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        Ok(PathBuf::from(std::ffi::OsString::from_vec(filename)))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(PathBuf::from(String::from_utf8(filename).context("opened st database filename is not UTF-8")?))
+    }
 }
 
 pub fn open_read_connection(path: &Path, shared_memory: bool) -> Result<Connection> {
