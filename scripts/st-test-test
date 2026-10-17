@@ -120,6 +120,42 @@ class StTest(unittest.TestCase):
         self.assertNotIn('behind', out)  # the branch holds the base's tip: nothing to report
         self.assertIn('clean worktree', out)
 
+    def lane_file(self, definition=('scripts/lane.sh',)):
+        lanes = {'version': 1, 'lanes': {'demo': {'argv': ['sh', '-c', 'echo ran'], 'definition_paths': list(definition)}}}
+        (self.work / 'scripts/lane.sh').write_text('lane\n')
+        (self.work / '.st/required-lanes.json').write_text(json.dumps(lanes))
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-q', '-m', 'lane file')
+        git(self.work, 'push', '-q', 'origin', 'HEAD:main')
+        git(self.work, 'fetch', '-q', 'origin')
+
+    def test_a_lane_defined_at_the_base_puts_its_definition_digest_in_the_note(self):
+        self.lane_file()
+        self.commit('b.txt', 'two')  # the change touches no definition path
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, err)
+        statement, = self.statements()
+        digest = statement['predicate']['observed']['inputs']['lane_definition_sha256']
+        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        rules = verifier.lane_rules(git(self.work, 'show', 'origin/main:.st/required-lanes.json'), 'demo')
+        base_tree = git(self.work, 'rev-parse', 'origin/main^{tree}')
+        self.assertEqual(digest, verifier.lane_definition(str(self.work), base_tree, git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)['sha256'])
+
+    def test_a_tree_that_edits_its_own_lane_is_not_signed(self):
+        self.lane_file()
+        self.commit('scripts/lane.sh', 'lane, but fewer tests\n')
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.statements(), [])
+        self.assertIn('FAILED', out)  # the wrapper's own message goes to the child's stderr, not to this capture
+
+    def test_without_a_lane_file_at_the_base_the_note_carries_no_digest_as_before(self):
+        self.commit('b.txt', 'two')
+        code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, err)
+        statement, = self.statements()
+        self.assertNotIn('lane_definition_sha256', statement['predicate']['observed']['inputs'])
+
     def test_untracked_and_ignored_files_in_the_checkout_cannot_change_the_result(self):
         self.commit('b.txt', 'two')
         (self.work / 'stray.txt').write_text('untracked')
@@ -279,6 +315,19 @@ class StTest(unittest.TestCase):
                              {'GIT_SSH_COMMAND': 'ssh', 'GIT_ASKPASS': 'z', 'GIT_CONFIG_COUNT': '1', 'KEPT': 'yes'})
             for name in ('GIT_DIR', 'GIT_AUTHOR_NAME', 'GIT_WORK_TREE', 'GIT_PUSH_OPTION_COUNT'):
                 self.assertNotIn(name, os.environ)
+
+    def test_the_checks_do_not_see_the_agent_seats_variables_but_the_hosts_ranking_name_and_the_switches_stay(self):
+        self.commit('b.txt', 'two')
+        seat = {'ST_MISSION': 'm', 'ST3_ENDPOINT': 'e', 'CLAUDECODE': '1', 'CLAUDE_CONFIG_DIR': '/c', 'ANTHROPIC_API_KEY': 'k',
+                'ST_AGENT': 'agent/x', 'ST_AGENT_FOO': 'x', 'ST_SKIP_EVIDENCE': '0', 'ST_EVIDENCE_TIME_LIMIT': '9'}
+        out = Path(self.tmp.name) / 'seen'
+        code, _, err = self.run_st_test('--check', 'demo', extra_env=seat, command=['sh', '-c', f'env > {out}'])
+        self.assertEqual(code, 0, err)
+        seen = dict(line.split('=', 1) for line in out.read_text().splitlines() if '=' in line)
+        for name in ('ST_MISSION', 'ST3_ENDPOINT', 'CLAUDECODE', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ST_AGENT_FOO'):
+            self.assertNotIn(name, seen)
+        for name in ('ST_AGENT', 'ST_SKIP_EVIDENCE', 'ST_EVIDENCE_TIME_LIMIT'):
+            self.assertIn(name, seen)
 
     def test_a_base_that_looks_like_a_git_option_is_refused(self):
         self.commit('b.txt', 'two')
