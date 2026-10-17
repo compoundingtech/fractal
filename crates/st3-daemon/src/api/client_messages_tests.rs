@@ -578,11 +578,15 @@ async fn sql_message_page_counts_attachment_and_envelope_at_exact_boundary() {
     let request_id = "request/boundary-\"λ\"";
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::state(root.path());
+    // Every independently opened variant must serialize the same delivery age,
+    // not an elapsed wall-clock value whose decimal width can change.
+    let accepted_at = 1_800_000_000_000;
+    let now = accepted_at + 100_000;
+    state.store.set_write_clock_at(accepted_at).unwrap();
     // A supported folded attachment has no inline-body limit. Tune its ASCII
     // name using the real serialized response, not a guessed metadata allowance.
     append_byte_budget_message(&state.store, 0, "body", Some(""));
     let query = ClientListQuery { history: true, limit: Some(1), ..Default::default() };
-    let now = client_now_ms();
     let snapshot = new_client_snapshot(&state);
     let (Extension(returned), Json(page)) = client_messages_sql_page_with_envelope(
         &state, snapshot, &query, now, request_id, None,
@@ -594,6 +598,7 @@ async fn sql_message_page_counts_attachment_and_envelope_at_exact_boundary() {
     for extra in [0, 1] {
         let root = tempfile::tempdir().unwrap();
         let state = super::tests::state(root.path());
+        state.store.set_write_clock_at(accepted_at).unwrap();
         append_byte_budget_message(&state.store, 0, "body", Some(&"x".repeat(padding + extra)));
         let result = client_messages_sql_page_with_envelope(
             &state, new_client_snapshot(&state), &query, now, request_id, None,
