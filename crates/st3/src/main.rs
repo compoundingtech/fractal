@@ -538,10 +538,12 @@ fn fleet_person(actor: Option<String>, config: &Config) -> Result<String> {
         .context("set person in config.toml or pass --as person/NAME")
 }
 
-fn services_installed() -> bool {
-    st3::service::status()
-        .map(|report| report.services.iter().any(|service| service.installed))
-        .unwrap_or(false)
+fn services_installed() -> Result<bool> {
+    match st3::service::status() {
+        Ok(report) => Ok(report.services.iter().any(|service| service.installed)),
+        Err(error) if error.is::<st3::service::ConflictingServices>() => Err(error),
+        Err(_) => Ok(false), // A host without a user manager can run unmanaged.
+    }
 }
 
 #[derive(Args)]
@@ -5838,7 +5840,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
         );
         tokio::spawn(st3::otlp::run(store.clone(), exporter));
         // The live SLO windows go out as gauges, once a minute, on a timer of their own.
-        tokio::spawn(st3::otlp::run_slo(st3::otlp::OtlpExporter::new(otlp, &config.node)?));
+        tokio::spawn(st3::otlp::run_slo(
+            st3::otlp::OtlpExporter::new(otlp, &config.node)?,
+            st3::api::request_latency_target_windows,
+        ));
     }
     #[cfg(target_os = "macos")]
     tokio::spawn(async {
@@ -10457,10 +10462,8 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
             let config = Config::load_unvalidated(None)?;
             let mut report = st3::service::status()?;
             if let Some(startup) = st3::startup::read(&config.client_socket()) {
-                for service in &mut report.services {
-                    if service.name == "st3.service" || service.name == "com.compoundingtech.st3" {
-                        service.state = format!("{} · {}", service.state, startup.summary());
-                    }
+                for service in report.services.iter_mut().take(1) {
+                    service.state = format!("{} · {}", service.state, startup.summary());
                 }
             }
             if json_output {
@@ -16087,7 +16090,9 @@ async fn publish_claude_readiness_fallback(
         || !state
             .claude_readiness_fallback
             .initialized_at_ms
-            .is_some_and(|started| now_ms.saturating_sub(started) >= 15_000)
+            .is_some_and(|started| {
+                now_ms.saturating_sub(started) >= claude_readiness_grace_ms()
+            })
     {
         return Ok(false);
     }
@@ -16199,7 +16204,7 @@ async fn check_claude_attachment(
     let attached = checked.as_ref().is_ok_and(|attachment| attachment.attached);
     let phase = if attached {
         "attached"
-    } else if started.elapsed() >= Duration::from_secs(20)
+    } else if started.elapsed() >= claude_attachment_window()
         || state.claude_attachment_phase == "blocked"
     {
         "blocked"
@@ -16248,6 +16253,30 @@ fn finish_claude_attachment_publication(
         }
     }
     published
+}
+
+/// How long a Claude seat may start before an unattached channel is reported as blocked.
+/// `ST3_CLAUDE_ATTACH_WINDOW_MS` can only shorten it, as `ST3_SUBAGENT_LEASE_MS` does a lease, so
+/// the boot canaries need not wait out the production window.
+fn claude_attachment_window() -> Duration {
+    const DEFAULT_MS: u64 = 20_000;
+    let cap = std::env::var("ST3_CLAUDE_ATTACH_WINDOW_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|cap| *cap > 0);
+    Duration::from_millis(cap.map_or(DEFAULT_MS, |cap| cap.min(DEFAULT_MS)))
+}
+
+/// How long an initialized Claude channel waits for a native hook before the driver publishes
+/// readiness without one. `ST3_CLAUDE_READINESS_GRACE_MS` can only shorten it, as
+/// `ST3_SUBAGENT_LEASE_MS` does a lease, so tests of the fallback need not wait out 15 s.
+fn claude_readiness_grace_ms() -> u64 {
+    const DEFAULT_MS: u64 = 15_000;
+    std::env::var("ST3_CLAUDE_READINESS_GRACE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|cap| *cap > 0)
+        .map_or(DEFAULT_MS, |cap| cap.min(DEFAULT_MS))
 }
 
 fn same_claude_attachment_binding(a: &st3::mailbox::Fence, b: &st3::mailbox::Fence) -> bool {
@@ -17623,6 +17652,7 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                 let now = Instant::now();
                 let duration_ms = started.elapsed().as_millis();
                 let report = result.as_ref().ok();
+                smallclaims::sqlite::telemetry::wal_checkpoint_observed(&store.readers, report);
                 let stuck = pin.observe(report);
                 let abnormal = abnormal_wal_checkpoint(report) || stuck >= WAL_PIN_REPORT_AFTER;
                 st3::otel::record_wal_checkpoint(trace_started, report, abnormal);
