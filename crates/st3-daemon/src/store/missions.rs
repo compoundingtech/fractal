@@ -279,6 +279,58 @@ impl Store {
             .collect()
     }
 
+    /// Count the current collection's phases without constructing mission cards or steps.
+    pub(crate) fn assistant_mission_state_counts_at(
+        &self,
+        at_unix_ms: u128,
+    ) -> Result<BTreeMap<String, u64>> {
+        let connection = self.readers.get();
+        let sql = canonical_sql(
+            "WITH ids AS (
+                SELECT mission_id FROM mission_definitions UNION SELECT mission_id FROM mission_runs
+             ), ranked AS (
+                SELECT mission_id,id,status,updated_at_unix_ms,
+                    ROW_NUMBER() OVER (PARTITION BY mission_id ORDER BY created_at_unix_ms DESC,id DESC) AS rank
+                FROM mission_runs
+             ), counts AS (
+                SELECT mission_id,SUM(status='running') AS running,SUM(status='standing') AS standing
+                FROM mission_runs GROUP BY mission_id
+             ), phases AS (
+                SELECT ids.mission_id, latest.status AS latest_status, latest.updated_at_unix_ms,
+                    COALESCE(def.state,'ready') AS definition_state,
+                    CASE WHEN COALESCE(counts.running,0)>0 THEN 'running'
+                         WHEN COALESCE(counts.standing,0)>0 THEN 'standing'
+                         WHEN def.state='retired' THEN 'retired'
+                         ELSE COALESCE(latest.status,def.state,'ready') END AS phase
+                FROM ids
+                LEFT JOIN mission_definitions def ON def.mission_id=ids.mission_id
+                LEFT JOIN counts ON counts.mission_id=ids.mission_id
+                LEFT JOIN ranked latest ON latest.mission_id=ids.mission_id AND latest.rank=1
+                WHERE ids.mission_id NOT LIKE '__st3/%'
+             ), visible AS (
+                SELECT * FROM phases
+                WHERE phase NOT IN ('completed','failed','cancelled','retired')
+                   OR (phase IN ('failed','cancelled') AND CAST(updated_at_unix_ms AS INTEGER)>=?1)
+             ), projected AS (
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM ranked r WHERE r.mission_id=visible.mission_id AND r.rank<=3
+                    AND (SELECT json_extract(c.body,'$.fields.status') FROM claims c
+                         WHERE c.subject='mission-run/'||r.id AND c.kind='reconcile.fault'
+                           AND json_extract(c.body,'$.fields.scope')=?2
+                         ORDER BY CANONICAL_DESC(c) LIMIT 1)='faulted'
+                ) THEN 'blocked' ELSE phase END AS state FROM visible
+             )
+             SELECT state,COUNT(*) FROM projected GROUP BY state",
+        );
+        connection.prepare_cached(&sql)?
+            .query_map(params![
+                at_unix_ms.saturating_sub(RECENTLY_ENDED_MS) as i64,
+                crate::reconcile::FIRST_READINESS_FAULT_SCOPE
+            ], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)))?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(Into::into)
+    }
+
     pub fn mission_definitions_for_ids(
         &self,
         ids: &[String],

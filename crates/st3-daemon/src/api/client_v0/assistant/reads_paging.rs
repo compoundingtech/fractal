@@ -1,0 +1,147 @@
+//! Page-sized assistant source reads. Mission cursors seek by key; attention and roster
+//! cursors reference an existing publication. Only the offline agent path caches shallow refs.
+use super::*;
+
+pub(super) async fn page(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    projection: &str,
+    parameters: &BTreeMap<String, String>,
+    max_bytes: usize,
+    binding: &str,
+) -> Result<(ClientSnapshot, Value), ApiError> {
+    allow(parameters, METADATA_FIELDS, max_bytes)?;
+    let limit = parameters.get("limit").map(|limit| {
+        limit.parse::<usize>().ok()
+            .filter(|limit| (1..=CLIENT_MAX_PAGE_ITEMS).contains(limit))
+            .ok_or_else(|| validation(format!("limit must be between 1 and {CLIENT_MAX_PAGE_ITEMS}")))
+    }).transpose()?;
+    let query = ClientListQuery {
+        limit, cursor: parameters.get("cursor").cloned(), ..Default::default()
+    };
+    // The native cursor's collection field also binds the disclosure class, grant and
+    // policy revision. Authorization still precedes every first and subsequent page.
+    let collection = format!("assistant.{projection}:{binding}");
+    let cursor = query.cursor.as_deref().map(decode_client_cursor).transpose()?;
+    if let Some(cursor) = &cursor {
+        if cursor.collection != collection
+            || cursor.snapshot.id != snapshot.id
+            || cursor.snapshot.store_index != snapshot.store_index
+            || limit.is_some_and(|limit| limit != cursor.limit)
+            || cursor.expires_at_unix_ms < client_now_ms()
+        {
+            return Err(client_page_expired("the assistant cursor does not match this collection, grant, policy, or snapshot"));
+        }
+    }
+    let person = owner(state)?;
+    let reader = state.clone();
+    let snapshot = snapshot.clone();
+    let projection = projection.to_owned();
+    blocking_store(move || reader.store.clone().read_snapshot(|index| {
+        Ok(read_page(&reader, snapshot, &projection, &collection, &person, &query, cursor, index))
+    })).await?
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_page(
+    state: &AppState,
+    snapshot: ClientSnapshot,
+    projection: &str,
+    collection: &str,
+    person: &str,
+    query: &ClientListQuery,
+    cursor: Option<ClientPageCursor>,
+    index: u64,
+) -> Result<(ClientSnapshot, Value), ApiError> {
+    let snapshot = if cursor.is_some() { snapshot } else { client_snapshot_at(state, index) };
+    let now = client_snapshot_time(&snapshot);
+    let rich = projection.ends_with("-rich");
+    let limit = cursor.as_ref().map_or(query.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS), |cursor| cursor.limit);
+    let expires = cursor.as_ref().map_or_else(|| client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS), |cursor| cursor.expires_at_unix_ms);
+    let offset = cursor.as_ref().map_or(0, |cursor| cursor.offset);
+    let mut after_key = None;
+    let (snapshot, items, has_more, marker) = if projection.starts_with("missions") {
+        let marker = "assistant-mission-keyset".to_owned();
+        check_source(&cursor, &marker)?;
+        let mut keys = state.store.mission_collection_page_at(
+            false, 0, limit.saturating_add(1),
+            cursor.as_ref().and_then(|cursor| cursor.after_key.as_ref()), now,
+        ).map_err(ApiError::internal)?;
+        let has_more = keys.len() > limit;
+        keys.truncate(limit);
+        let ids = keys.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        let cards = mission_list_cards_at(&state.store, &ids, now).map_err(ApiError::internal)?;
+        after_key = keys.last().map(|(id, time)| (*time, id.clone()));
+        (snapshot, mission_rows(&cards, rich).map_err(ApiError::internal)?, has_more, marker)
+    } else if projection.starts_with("attention") {
+        let (cut, published_at, rows) = published_assistant_attention_rows(&state.store, index, person)
+            .ok_or_else(|| published_view_not_ready("attention"))?;
+        let marker = format!("assistant-attention:{cut}:{published_at}");
+        check_source(&cursor, &marker)?;
+        let snapshot = if cursor.is_some() { snapshot } else { roster_snapshot(state, cut, published_at) };
+        let end = offset.saturating_add(limit).min(rows.len());
+        let items = rows.get(offset..end).unwrap_or_default().iter()
+            .map(|row| attention_row(row, rich)).collect::<anyhow::Result<Vec<_>>>()
+            .map_err(ApiError::internal)?;
+        (snapshot, items, end < rows.len(), marker)
+    } else if state.store.agent_roster_refresher_running() {
+        let publication = if cursor.is_some() {
+            state.store.published_agent_roster_at(snapshot.store_index, false)
+                .map(|(cards, time)| (snapshot.store_index, cards, time))
+        } else {
+            state.store.published_agent_roster(index, false)
+        };
+        let Some((cut, cards, published_at)) = publication else {
+            state.store.request_agent_roster_refresh();
+            return Err(if cursor.is_some() {
+                client_page_expired("the agent publication changed; restart pagination")
+            } else { published_view_not_ready("agents") });
+        };
+        if cut < index { state.store.request_agent_roster_refresh(); }
+        let marker = format!("assistant-agents:{cut}:{published_at}");
+        check_source(&cursor, &marker)?;
+        let snapshot = if cursor.is_some() { snapshot } else { roster_snapshot(state, cut, published_at) };
+        let end = offset.saturating_add(limit).min(cards.len());
+        let mut selected = cards.get(offset..end).unwrap_or_default().to_vec();
+        overlay_agent_resources(&state.store, &mut selected, &snapshot.created_at).map_err(ApiError::internal)?;
+        (snapshot, agent_rows(&selected, rich), end < cards.len(), marker)
+    } else {
+        // Reuse the native unfiltered agent path: cache only membership/queue refs, then
+        // materialize the selected cards. No full-card list or all-row JSON digest is built.
+        let refs = if cursor.is_some() { Vec::new() } else {
+            client_agent_page_refs(&state.store, false, index).map_err(ApiError::internal)?
+        };
+        let mut page = client_page_read(state, &snapshot, collection, refs, query, true)?;
+        let cards = client_agent_cards_for_page(&state.store, false, snapshot.store_index, &page.items, &snapshot.created_at)?;
+        page.items = agent_rows(&cards, rich);
+        page.collection = format!("assistant.{projection}");
+        return Ok((snapshot, serde_json::to_value(page).map_err(ApiError::internal)?));
+    };
+    let next_cursor = if has_more {
+        Some(encode_client_cursor(&ClientPageCursor {
+            snapshot: snapshot.clone(), collection: collection.to_owned(),
+            offset: offset.saturating_add(items.len()), limit,
+            history: false, person: None, actor: None, owner_run: None,
+            status: None, owner: None, state: None, native_only: false,
+            items_digest: marker, before_index: None, after_key,
+            expires_at_unix_ms: expires,
+        })?)
+    } else { None };
+    let page = ClientResourcePage {
+        kind: "page".into(), collection: format!("assistant.{projection}"),
+        filters: client_page_filters("", query), items,
+        page: ClientPageInfo {
+            limit, has_more, next_cursor,
+            cursor_expires_at: has_more.then(|| client_timestamp(expires)),
+        },
+        sync: client_sync_notice(state), replicated: None,
+    };
+    Ok((snapshot, serde_json::to_value(page).map_err(ApiError::internal)?))
+}
+
+fn check_source(cursor: &Option<ClientPageCursor>, marker: &str) -> Result<(), ApiError> {
+    if cursor.as_ref().is_some_and(|cursor| cursor.items_digest != marker) {
+        return Err(client_page_expired("the assistant source publication changed; restart pagination"));
+    }
+    Ok(())
+}

@@ -10,6 +10,19 @@ use crate::store::person_work::tests::fixture;
 
 const PEOPLE: &[&str] = &["person/avery", "person/robin", "person/lichen"];
 
+#[test]
+fn owner_index_preserves_each_owners_order_without_other_owners() {
+    let rows = vec![
+        json!({"id":"attention/a","person_id":PEOPLE[0]}),
+        json!({"id":"attention/b","person_id":PEOPLE[1]}),
+        json!({"id":"attention/c","person_id":PEOPLE[0]}),
+    ];
+    let owners = AttentionPublication::index_owners(&rows);
+    assert_eq!(owners[PEOPLE[0]].as_ref(), &vec![rows[0].clone(), rows[2].clone()]);
+    assert_eq!(owners[PEOPLE[1]].as_ref(), &vec![rows[1].clone()]);
+    assert!(!owners.contains_key(PEOPLE[2]));
+}
+
 fn input(subject: &str, kind: &str, actor: Option<&str>, fields: Value) -> ClaimInput {
     ClaimInput {
         subject: subject.into(),
@@ -310,6 +323,7 @@ fn a_checkpoint_forgets_the_list_and_a_refresh_from_before_it_cannot_publish() {
             future_after: None,
             published_at_unix_ms: now_ms(),
             rows: Arc::clone(&before.rows),
+            owners: before.owners.clone(),
         },
         false,
     );
@@ -383,6 +397,7 @@ fn rows_older_than_the_clock_period_fold_again() {
             future_after: None,
             published_at_unix_ms: before.published_at_unix_ms,
             rows: Arc::clone(&before.rows),
+            owners: before.owners.clone(),
         },
         false,
     );
@@ -500,6 +515,7 @@ fn a_claim_from_any_seat_a_shared_login_item_covers_folds() {
             due_at_unix_ms: None,
             future_after: None,
             published_at_unix_ms: now_ms(),
+            owners: AttentionPublication::index_owners(&rows),
             rows: Arc::new(rows),
         }
     };
@@ -511,6 +527,7 @@ fn a_claim_from_any_seat_a_shared_login_item_covers_folds() {
         future_after: None,
         published_at_unix_ms: now_ms(),
         rows: Arc::clone(&publication.rows),
+        owners: publication.owners.clone(),
     };
     let delta = |publication: &AttentionPublication| {
         store
@@ -565,6 +582,7 @@ fn a_prompt_blocked_on_a_person_and_its_clearing_fold() {
         due_at_unix_ms: None,
         future_after: None,
         published_at_unix_ms: now_ms(),
+        owners: AttentionPublication::index_owners(&rows),
         rows: Arc::new(rows),
     };
     // A seat blocked on a person is a new prompt: its observation folds.

@@ -33,6 +33,7 @@ fn fleet(state: &AppState, root: &std::path::Path) {
     let source = format!(
         r#"version 2
 agent "reads-fixture.worker" {{ workspace "/tmp"; command "true"; restart always; }}
+agent "reads-fixture.second" {{ workspace "/tmp"; command "true"; restart always; }}
 mission "reads-fixture-mission" state="ready" {{
     goal "{SECRET} {INJECTION} Entscheidung 決定";
     step "build" {{ assigned-to "{AGENT}"; goal "{SECRET} {INJECTION}"; }}
@@ -66,10 +67,12 @@ mission "reads-fixture-second" state="ready" {{ goal "{SECRET} {INJECTION}"; }}
             .unwrap(),
         )
         .unwrap();
+    crate::api::refresh_agent_roster(&state.store, false).unwrap();
+    crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
 }
 
 async fn read(state: &AppState, projection: &str, query: &[(&str, &str)], max: usize) -> Result<Value, ApiError> {
-    project(state, &new_client_snapshot(state), projection, &params(query), max)
+    project(state, &new_client_snapshot(state), projection, &params(query), max, "test-grant:1")
         .await
         .map(|(_, value)| value)
 }
@@ -160,6 +163,54 @@ fn unknown_source_values_become_closed_enums_and_prose_identifiers_vanish() {
     assert_eq!(timestamp(&json!(INJECTION)), Value::Null);
 }
 
+#[test]
+fn published_attention_projection_allowlists_metadata_and_keeps_rich_content_on_its_row() {
+    let source = json!({
+        "id": "attention/native",
+        "source_id": "step-run/ask-one",
+        "person_id": OWNER,
+        "episode": INJECTION,
+        "attention_kind": "person-step",
+        "conversation_id": AGENT,
+        "mission_id": MISSION,
+        "mission_run_id": "mission-run/example",
+        "requested_at": client_timestamp(1_700_000_000_000),
+        "title": SECRET,
+        "detail": INJECTION,
+        "request": {"type": "text", "prompt": SECRET},
+        "targets": [INJECTION],
+        "unrecognized": SECRET,
+    });
+    let metadata = attention_row(&source, false).unwrap();
+    assert_no_source_text(&metadata);
+    assert_eq!(metadata["episode"], "");
+    assert_eq!(metadata["revision"], "");
+    assert_eq!(metadata["agent_id"], AGENT);
+    assert_eq!(metadata["mission_id"], MISSION);
+    assert_eq!(metadata["waiting_since"], source["requested_at"]);
+    assert_eq!(keys(&metadata), BTreeSet::from([
+        "id", "attention_kind", "person_id", "agent_id", "mission_id", "mission_run_id",
+        "revision", "episode", "waiting_since",
+    ]));
+    let rich = attention_row(&source, true).unwrap();
+    assert_eq!(rich["title"], SECRET);
+    assert_eq!(rich["detail"], INJECTION);
+    assert_eq!(rich["request"], source["request"]);
+    assert_eq!(rich["target_id"], source["source_id"]);
+    assert_eq!(rich["evidence"], source["targets"]);
+    assert!(rich.get("unrecognized").is_none());
+    assert_eq!(rich["id"], metadata["id"]);
+}
+
+#[test]
+fn summary_mission_counts_read_phases_without_building_cards() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    fleet(&state, root.path());
+    let counts = state.store.assistant_mission_state_counts_at(client_now_ms()).unwrap();
+    assert_eq!(counts, BTreeMap::from([("ready".to_owned(), 1), ("running".to_owned(), 1)]));
+}
+
 #[tokio::test]
 async fn queries_admit_only_named_scalar_fields_and_hold_the_byte_ceiling() {
     let root = tempfile::tempdir().unwrap();
@@ -186,12 +237,12 @@ async fn queries_admit_only_named_scalar_fields_and_hold_the_byte_ceiling() {
     assert_eq!(read(&state, "native", &[], MAX_RESPONSE_BYTES).await.unwrap_err().status, StatusCode::NOT_FOUND);
     // A first page is read in, and returns, a fresh snapshot; its cursor continues in it.
     let admitted = new_client_snapshot(&state);
-    let (snapshot, first) = project(&state, &admitted, "missions", &params(&[("limit", "1")]), MAX_RESPONSE_BYTES)
+    let (snapshot, first) = project(&state, &admitted, "missions", &params(&[("limit", "1")]), MAX_RESPONSE_BYTES, "test-grant:1")
         .await
         .unwrap();
     assert!(snapshot.store_index >= admitted.store_index);
     let cursor = first["page"]["next_cursor"].as_str().expect("two fixture missions require a second page");
-    let (continued, second) = project(&state, &snapshot, "missions", &params(&[("cursor", cursor)]), MAX_RESPONSE_BYTES)
+    let (continued, second) = project(&state, &snapshot, "missions", &params(&[("cursor", cursor)]), MAX_RESPONSE_BYTES, "test-grant:1")
         .await
         .unwrap();
     assert_eq!(continued.id, snapshot.id);
@@ -202,6 +253,57 @@ async fn queries_admit_only_named_scalar_fields_and_hold_the_byte_ceiling() {
         .unwrap();
     assert!(serde_json::to_vec(&bounded).unwrap().len() <= DEFAULT_RESPONSE_BYTES);
     assert_eq!(bounded["items"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn collection_cursors_are_stable_and_bound_to_disclosure_grant_and_policy() {
+    for published_agents in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        fleet(&state, root.path());
+        state.store.ask_person(&serde_json::from_value(json!({
+            "person": OWNER, "actor": AGENT, "title": "second fixture ask",
+            "reason": "fixture", "new_run": "reads-fixture-second-ask",
+            "idempotency_key": "reads-fixture-second-ask",
+        })).unwrap()).unwrap();
+        crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
+        if published_agents {
+            state.store.start_agent_roster_refresher().unwrap();
+            crate::api::refresh_agent_roster(&state.store, false).unwrap();
+        }
+        for projection in ["attention", "attention-rich", "missions", "missions-rich", "agents", "agents-rich"] {
+            let (snapshot, first) = project(&state, &new_client_snapshot(&state), projection,
+                &params(&[("limit", "1")]), MAX_RESPONSE_BYTES, "grant-one:1").await.unwrap();
+            let cursor = first["page"]["next_cursor"].as_str().expect("two source rows");
+            let query = params(&[("cursor", cursor)]);
+            state.store.append_claim(&ClaimInput {
+                subject: format!("custom/assistant-cursor/{projection}"),
+                kind: "custom.test.marker".into(), actor: None, fields: BTreeMap::new(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let (continued, second) = project(&state, &snapshot, projection, &query,
+                MAX_RESPONSE_BYTES, "grant-one:1").await.unwrap();
+            let (_, repeated) = project(&state, &snapshot, projection, &query,
+                MAX_RESPONSE_BYTES, "grant-one:1").await.unwrap();
+            assert_eq!(continued.id, snapshot.id);
+            assert_eq!(continued.store_index, snapshot.store_index);
+            assert_eq!(second["items"], repeated["items"], "{projection}");
+            assert_eq!(second["items"].as_array().unwrap().len(), 1);
+            assert_ne!(first["items"][0]["id"], second["items"][0]["id"], "{projection}");
+            for binding in ["grant-two:1", "grant-one:2"] {
+                assert_eq!(project(&state, &snapshot, projection, &query, MAX_RESPONSE_BYTES, binding)
+                    .await.unwrap_err().code, "page-cursor-expired");
+            }
+            let other = if projection.ends_with("-rich") {
+                projection.trim_end_matches("-rich").to_owned()
+            } else { format!("{projection}-rich") };
+            assert_eq!(project(&state, &snapshot, &other, &query, MAX_RESPONSE_BYTES, "grant-one:1")
+                .await.unwrap_err().code, "page-cursor-expired");
+            let wrong_limit = params(&[("cursor", cursor), ("limit", "2")]);
+            assert_eq!(project(&state, &snapshot, projection, &wrong_limit, MAX_RESPONSE_BYTES, "grant-one:1")
+                .await.unwrap_err().code, "page-cursor-expired");
+        }
+    }
 }
 
 #[tokio::test]
@@ -490,7 +592,7 @@ async fn terminal_content_reads_a_live_pty_with_exact_fences_and_unicode_budgets
     ]);
     let snapshot = new_client_snapshot(&state);
     let (returned_snapshot, content) = project(
-        &state, &snapshot, "terminal-content", &query(&incarnation, &revision), DEFAULT_RESPONSE_BYTES,
+        &state, &snapshot, "terminal-content", &query(&incarnation, &revision), DEFAULT_RESPONSE_BYTES, "test-grant:1",
     ).await.unwrap();
     assert_eq!(returned_snapshot.id, snapshot.id);
     assert_eq!(keys(&content), BTreeSet::from([
@@ -509,7 +611,7 @@ async fn terminal_content_reads_a_live_pty_with_exact_fences_and_unicode_budgets
     assert!(serde_json::to_vec(&content).unwrap().len() < DEFAULT_RESPONSE_BYTES);
     // This direct projection budget checks text truncation; the route separately accounts
     // for the whole JSON envelope. Four bytes cannot split the second three-byte character.
-    let (_, bounded) = project(&state, &snapshot, "terminal-content", &query(&incarnation, &revision), 4)
+    let (_, bounded) = project(&state, &snapshot, "terminal-content", &query(&incarnation, &revision), 4, "test-grant:1")
         .await.unwrap();
     assert_eq!(bounded["text"], "決");
     assert_eq!(bounded["returned_bytes"], 3);
@@ -519,7 +621,7 @@ async fn terminal_content_reads_a_live_pty_with_exact_fences_and_unicode_budgets
         ("foreign-incarnation", revision.as_str()),
         (incarnation.as_str(), "foreign-screen-revision"),
     ] {
-        let error = project(&state, &snapshot, "terminal-content", &query(incarnation, revision), DEFAULT_RESPONSE_BYTES)
+        let error = project(&state, &snapshot, "terminal-content", &query(incarnation, revision), DEFAULT_RESPONSE_BYTES, "test-grant:1")
             .await.unwrap_err();
         assert_eq!((error.status, error.code.as_str()), (StatusCode::CONFLICT, "stale-fence"));
         assert!(!error.message.contains(SECRET));
@@ -529,11 +631,11 @@ async fn terminal_content_reads_a_live_pty_with_exact_fences_and_unicode_budgets
         .await.unwrap().unwrap();
     let changed = fixture_screen(&mut screens, "changed:next").await;
     assert_ne!(changed.revision(), revision);
-    let error = project(&state, &snapshot, "terminal-content", &query(&incarnation, &revision), DEFAULT_RESPONSE_BYTES)
+    let error = project(&state, &snapshot, "terminal-content", &query(&incarnation, &revision), DEFAULT_RESPONSE_BYTES, "test-grant:1")
         .await.unwrap_err();
     assert_eq!((error.status, error.code.as_str()), (StatusCode::CONFLICT, "stale-fence"));
     let (_, current) = project(
-        &state, &snapshot, "terminal-content", &query(&incarnation, changed.revision()), DEFAULT_RESPONSE_BYTES,
+        &state, &snapshot, "terminal-content", &query(&incarnation, changed.revision()), DEFAULT_RESPONSE_BYTES, "test-grant:1",
     ).await.unwrap();
     assert_eq!(current["screen_revision"], changed.revision());
     assert_eq!(current["incarnation_id"], incarnation);

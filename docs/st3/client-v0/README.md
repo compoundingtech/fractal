@@ -1269,6 +1269,15 @@ scope, consent, issuer as a concrete `PersonId` and revoked status, never the be
 digest. `key_id` is the public-key SHA-256 digest. The owner may configure exact agent recipient
 IDs and `write.assistant.messages` / `write.assistant.custom-reply` scopes for low-risk writes.
 
+Assistant collection reads materialize only the requested page. Missions seek through the
+native mission keyset and build cards for those IDs; agents slice the published roster or
+use the native shallow-reference pager when no refresher runs. Attention slices a published
+owner-specific list. These cursors bind the projection's metadata/content class, grant,
+policy revision, snapshot and page size. A changed or unavailable publication returns
+`page-cursor-expired`; before the first attention or agent publication, reads requiring it
+return the corresponding view-not-ready error. Summary reads count grouped mission states
+and published attention/agent state inputs, without building collection cards.
+
 The issuer is sealed from the configured owner at trusted-local begin and preserved through
 gateway completion; remote callers cannot select or replace it. Assistant clients validate
 the issuer's concrete person shape from that gateway response without person grant proofs

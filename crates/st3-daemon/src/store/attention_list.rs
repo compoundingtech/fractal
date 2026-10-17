@@ -78,6 +78,20 @@ pub(crate) struct AttentionPublication {
     pub(crate) published_at_unix_ms: u128,
     /// Every person's rows, most urgent first, as `client_attention_resources_at` orders them.
     pub(crate) rows: Arc<Vec<Value>>,
+    /// Owner-indexed rows in the same order, built only when the refresher changes the rows.
+    pub(crate) owners: BTreeMap<String, Arc<Vec<Value>>>,
+}
+
+impl AttentionPublication {
+    pub(crate) fn index_owners(rows: &[Value]) -> BTreeMap<String, Arc<Vec<Value>>> {
+        let mut owners = BTreeMap::<String, Vec<Value>>::new();
+        for row in rows {
+            if let Some(person) = row["person_id"].as_str() {
+                owners.entry(person.to_owned()).or_default().push(row.clone());
+            }
+        }
+        owners.into_iter().map(|(person, rows)| (person, Arc::new(rows))).collect()
+    }
 }
 
 /// The refresher's registration, its requests and the newest publication.
