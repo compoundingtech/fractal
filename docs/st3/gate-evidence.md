@@ -758,6 +758,32 @@ The committed file lists the two lanes `scripts/st-test` can run today, with the
 only with a read trace of the lane (a later change). No producer writes the digest yet, nothing passes `--lanes-from`, and no gate reads the file, so
 this changes no behaviour; when a gate does read it, `.st/required-lanes.json` must join that gate's protected paths.
 
+Producer half: `scripts/evidence-wrap --lanes-from BASE` (and `scripts/st-test`, which passes its base for every check the base's lane file defines)
+refuses any command that is not the lane's argv, refuses a tree whose lane definition differs from BASE (nothing is signed; CI runs the check, and the
+message names the paths), and records `lane_definition_sha256`, the digest the verifier recomputes from the same base. Without a lane file at the base
+nothing changes. A lane's `definition_paths` are a hand-declared list: a helper script it reads but the list omits is not covered, which is what the closure
+control below checks. So this alone must never let a signed note skip a queue lane; shadow reporting and the pull-request signing path are the only
+uses until every lane a gate relies on has a clean trace (typescript-client has; genie-freshness has not been traced).
+
+#### Lane closure: what the lane really touches (`scripts/evidence-lane-trace`)
+
+A lane entry may also list `absent_paths`: paths the lane LOOKS FOR and does not find (a `.pnpmfile.cjs`, a `package.yaml`, a `fixtures/package.json`
+that would change module resolution). A tracked file appearing at or below one of them changes what the lane does, so none may exist in the signed
+tree (`definition_changed` names it), none may exist at the base (a lane-file error), and the list is part of the digest. The hand-written lists are
+checked against a real run: `scripts/evidence-lane-trace --lane NAME --lanes-file FILE --root DIR -- COMMAND...` runs the command under `strace -f -y`
+(or `--analyze RAW` reads a log) and reports `uncovered_reads` (repository files opened or stat'ed that no list covers) and
+`uncovered_absence_probes` (paths looked for and not found that no list covers), exit 1 if either is non-empty. Relative paths are resolved from the
+log's directory annotations and chdir/clone tracking; `unresolved_calls` counts the ones that could not be placed (a lane is not closed by a trace
+that has any). Anything inside `node_modules` or `.git` is not tree content and is skipped, but a MISSING `node_modules` directory is reported.
+
+typescript-client was traced once on 2026-10-17 at main 47fb60d96cb (`nix develop .#web -c bash -c 'pnpm install --frozen-lockfile && bash scripts/ci-typescript-client'`,
+3,607 distinct paths opened, 1,922 looked for and not found). The hand-written lists had missed one file the tests import
+(`apps/fractal-web/src/folders/core.mts`, now a `tree_input` and in the skip policy's declared `inputs`, which had the same gap) and 24 absence probes (now
+`absent_paths`); the result after the fix is no uncovered path and no unresolved call. Limits, stated plainly: the trace covers only the paths that ONE
+run took (a branch the run did not execute is not seen); it must be repeated when the lane's command, the dev shell or the test suites change; the
+genie-freshness lane was not traced (its definition paths are wide on purpose); and a lane whose `unresolved_calls` is not 0 is not closed. Until
+every lane a gate relies on has a clean trace, a signed note still must not skip a queue lane on this alone.
+
 ### Which tree a pull request run asks about
 
 A `pull_request` run checks out GitHub's merge of the head into the CURRENT base, a new tree whenever main moved, so a note for the tree an agent

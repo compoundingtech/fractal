@@ -172,7 +172,7 @@ def policy_rules(text, check, repository):
 
 
 LANES_KEYS = {'version', 'lanes'}
-LANE_KEYS = {'argv', 'definition_paths', 'tree_inputs'}
+LANE_KEYS = {'argv', 'definition_paths', 'tree_inputs', 'absent_paths'}
 
 
 def lane_rules(text, lane):
@@ -180,7 +180,9 @@ def lane_rules(text, lane):
 
     `argv` is what a producer runs, `definition_paths` the files whose bytes define what that argv does (a directory means
     everything below it), `tree_inputs` the sources the lane is meant to test (informational: they may differ between the
-    signed tree and the base). Unknown keys are refused, like the skip policy."""
+    signed tree and the base), and `absent_paths` the paths the lane LOOKS FOR and does not find (a `.pnpmfile.cjs`, a
+    `package.yaml`): a tracked file appearing there changes what the lane does, so none may exist in the signed tree.
+    Unknown keys are refused, like the skip policy."""
     try:
         doc = json.loads(text)
     except ValueError as error:
@@ -201,7 +203,12 @@ def lane_rules(text, lane):
     inputs = entry.get('tree_inputs', [])
     if inputs:
         inputs = declared_paths(inputs, f'lane {lane} tree_inputs')
-    return {'argv': argv, 'definition_paths': paths, 'tree_inputs': tuple(inputs)}
+    absent = entry.get('absent_paths', [])
+    if absent:
+        absent = declared_paths(absent, f'lane {lane} absent_paths')
+        if '.' in absent:
+            raise Failure('error', f'lane {lane}: absent_paths must name files or directories, not the whole tree')
+    return {'argv': argv, 'definition_paths': paths, 'tree_inputs': tuple(inputs), 'absent_paths': tuple(absent)}
 
 
 def definition_entries(repo, tree, paths):
@@ -223,10 +230,19 @@ def lane_definition(repo, base_tree, tree, rules):
     for path in rules['definition_paths']:
         if not any(name == path or name.startswith(path + '/') for _, _, name in base):
             raise Failure('error', f'lane definition path {path} does not exist at the accepted base')
+    absent = tuple(rules.get('absent_paths', ()))
+    if absent:
+        there = definition_entries(repo, base_tree, absent)
+        if there:
+            raise Failure('error', f'lane absent path {sorted(there, key=lambda e: e[2])[0][2]} exists at the accepted base')
     lines = ''.join(f'{mode} {oid} {name}\n' for mode, oid, name in sorted(base, key=lambda e: e[2]))
-    digest = hashlib.sha256((lines + 'argv:' + json.dumps(rules['argv'])).encode('utf-8', 'surrogateescape')).hexdigest()
+    text = lines + 'argv:' + json.dumps(rules['argv']) + ('\nabsent:' + json.dumps(sorted(absent)) if absent else '')
+    digest = hashlib.sha256(text.encode('utf-8', 'surrogateescape')).hexdigest()
     other = definition_entries(repo, tree, rules['definition_paths'])
-    changed = sorted({name for _, _, name in base ^ other})
+    changed = {name for _, _, name in base ^ other}
+    if absent:
+        changed |= {name for _, _, name in definition_entries(repo, tree, absent)}
+    changed = sorted(changed)
     return {'sha256': digest, 'changed': changed}
 
 
