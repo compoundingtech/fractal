@@ -209,6 +209,11 @@ async fn direct_answer_executes_without_approval_with_provenance_and_rejects_sta
     assert_eq!(claim.body["fields"]["sender_class"], "external-assistant");
     assert_eq!(claim.body["fields"]["assistant_grant_id"], paired.grant.id);
     let notification = h.state.store.messages(Some(AGENT), true).unwrap().pop().unwrap();
+    let notification_claim = h.state.store.latest_claim(&notification.subject, Some("message.sent")).unwrap().unwrap();
+    assert_eq!(notification_claim.actor.as_deref(), Some("assistant/chatgpt"));
+    assert_eq!(notification_claim.body["fields"]["from"], "assistant/chatgpt");
+    assert_eq!(notification_claim.body["fields"]["assistant_owner"], OWNER);
+    assert_eq!(notification_claim.body["fields"]["assistant_session_actor"], paired.session_actor);
     let metadata = notification.assistant_metadata().unwrap();
     let ding = st_drivers::ding::st3_notification_with_metadata(
         &notification.subject, &notification.from, &notification.to, notification.title.as_deref(),
