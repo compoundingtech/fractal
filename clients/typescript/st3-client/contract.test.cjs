@@ -208,7 +208,7 @@ test('onOpen cancellation and fence replacement follow pre-open subscriptions in
     assert.deepEqual(held.get('term'), { kind: 'subscribe', id: 'term', collection: 'terminal', terminal: 'terminal/test', incarnation: 'new-incarnation', capability: 'new-capability' });
 });
 function envelope(value) { return { api_version: 'st3.client.v0', request_id: 'request/test', snapshot, value }; }
-function response(value, status = 200) { return { ok: status < 400, status, json: async () => value }; }
+function response(value, status = 200) { return { ok: status < 400, status, json: async () => value, arrayBuffer: async () => new TextEncoder().encode(JSON.stringify(value)).buffer }; }
 const capabilityFixture = require('../../../docs/st3/client-v0/fixtures/capabilities.json');
 const cursorGapFixture = require('../../../docs/st3/client-v0/fixtures/cursor-gap-error.json');
 const capabilities = { ...capabilityFixture.value, limits: { ...capabilityFixture.value.limits, max_page_items: 2, max_event_items: 3, max_wait_ms: 10 } };
@@ -222,7 +222,8 @@ test('every HTTP API keeps cancellation in transport options, including all mani
     };
     const readArguments = (id, options) => {
         switch (id) {
-            case 'capabilities.get': case 'notes.list': case 'clients.list': case 'mail-backlog.summary': return [options];
+            case 'slo.history': return ['objective/example', {}, options];
+            case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': return [options];
             case 'arrangements.list': return ['person/example', {}, options];
             case 'arrangements.get': return ['example', 'arrangement-id', options];
             case 'conversation.search': return ['needle', {}, options];
@@ -236,6 +237,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
             case 'host.repositories': return ['host/example', options];
             case 'terminal.screen': return ['terminal/example', options];
             default:
+                if (id.startsWith('assistant.')) return [{}, { payload: { projection: id.slice('assistant.'.length), parameters: {}, max_response_bytes: 4096 } }, options];
                 if (id.endsWith('.get')) return ['resource/example', options];
                 if (id.startsWith('launch-')) return ['launch/example', {}, options];
                 return [{}, options];
