@@ -60,6 +60,7 @@ let
   applyCommands =
     map (file: [ "apply" "${file}" "--no-gate-check" "--as" cfg.person ]) cfg.declarations.seats
     ++ map (file: [ "apply" "${file}" "--as" cfg.person ]) cfg.declarations.missions;
+  # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk-apply.
   applyScript = pkgs.writeShellScript "smalltalk-apply" (
     ''set -eu
 ''
@@ -214,6 +215,7 @@ in
       + lib.optionalString (cfg.socket != null) "socket = ${builtins.toJSON cfg.socket}\n"
       + lib.optionalString (cfg.clientGatewaySocket != null) "client_gateway_socket = ${builtins.toJSON cfg.clientGatewaySocket}\n";
 
+    # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk.service.
     systemd.user.services = mkIf pkgs.stdenv.hostPlatform.isLinux ({
       smalltalk = {
         Unit = {
@@ -242,6 +244,7 @@ in
         Install.WantedBy = [ "default.target" ];
       };
     } // lib.optionalAttrs (cfg.declarationsApply.enable && hasDeclarations) {
+      # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain smalltalk-apply.
       smalltalk-apply = {
         Unit = {
           Description = "Apply smalltalk KDL declarations";
@@ -264,6 +267,7 @@ in
         $DRY_RUN_CMD mkdir -p ${lib.escapeShellArg "${cfg.stateDir}/logs"}
       ''
     );
+    # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain Home Manager launchd labels.
     launchd.agents = mkIf pkgs.stdenv.hostPlatform.isDarwin ({
       smalltalk = {
         enable = true;
@@ -282,6 +286,7 @@ in
         };
       };
     } // lib.optionalAttrs (cfg.declarationsApply.enable && hasDeclarations) {
+      # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — retain apply agent label.
       smalltalk-apply = {
         enable = true;
         config = {

@@ -1,6 +1,6 @@
-# Smalltalk
+# Fractal
 
-Download Smalltalk, then run `st`. It opens a terminal interface where you can talk to
+Download Fractal, then run `st`. It opens a terminal interface where you can talk to
 your coding agents and follow their work. Give them a mission with goals, constraints
 and checks; durable seats carry it through and bring you the decisions that need you.
 
@@ -11,7 +11,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compound
 The installer selects your platform, verifies the downloaded archive and opens `st`.
 On the first run, choose your name and this machine's name, accept the background
 service, and choose an installed coding harness. Before it starts, setup says that the
-built-in Smalltalk Assistant runs an agent on your own harness account (using its usage and quota) and
+built-in Fractal Assistant runs an agent on your own harness account (using its usage and quota) and
 asks; it then guides you through your first mission and stays available afterward. Nothing
 is started on an installation that already has a configuration.
 
@@ -43,7 +43,7 @@ The existing `st` and `st3` names and display strings remain unchanged. Their
 sunset is 60 days after the first release shipping `fractal`; the release date
 and resulting sunset date will be recorded when that release ships.
 
-**[Get started](docs/getting-started.md)** covers first-run questions, the Smalltalk Assistant,
+**[Get started](docs/getting-started.md)** covers first-run questions, the Fractal Assistant,
 installation choices and background services. Each person currently runs their own
 fleet; start with one machine and add others when you need them.
 
