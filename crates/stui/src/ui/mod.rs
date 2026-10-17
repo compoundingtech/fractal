@@ -498,7 +498,7 @@ pub struct Ui {
     /// The prompt alert whose form has the keys (Ctrl+N in a conversation, `a` in Now).
     prompt_keys: Option<String>,
     /// Each alert's band card from the last frame, with a hash of what it was drawn from.
-    band_cards: RefCell<HashMap<(String, usize), alerts::KeptCard>>,
+    band_cards: RefCell<HashMap<(String, usize, alerts::Place), alerts::KeptCard>>,
     /// `stui --glasses`: named glasses of tabs and split panes, and a palette, in place of the
     /// sidebar layout.
     pub(crate) glasses: Option<glass::Glasses>,
@@ -2955,7 +2955,7 @@ impl Ui {
         let mut band = if agent.unmanaged || find.is_some() {
             Vec::new()
         } else {
-            self.alert_band(&agent.id, area.width as usize, room)
+            self.alert_band(&agent.id, area.width as usize, room, alerts::Place::Band)
         };
         band.truncate(room);
         let band_height = band.len() as u16;
@@ -3598,8 +3598,9 @@ impl Ui {
         if !agent.starts_with("agent/") || area.height < 6 {
             return 0;
         }
-        let mut band = self.alert_band(agent, area.width as usize);
-        band.truncate((area.height as usize / 2).max(1));
+        let room = (area.height as usize / 2).max(1);
+        let mut band = self.alert_band(agent, area.width as usize, room, alerts::Place::Terminal);
+        band.truncate(room);
         for (offset, row) in band.iter().enumerate() {
             let y = area.y + 1 + offset as u16;
             buf.set_style(

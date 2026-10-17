@@ -28,12 +28,15 @@ const CALL_LINES: usize = 4;
 const PLAN_LINES: usize = 24;
 
 /// Where a prompt's form is drawn: its words for the keys differ.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Place {
     /// The band above a conversation's message box: Ctrl+N gives it the keys, Esc folds it.
     Band,
     /// The prompt's card in Now: `a` gives it the keys.
     Now,
+    /// The band over an attached terminal: every key goes to the terminal, so only a click
+    /// reaches it.
+    Terminal,
 }
 
 /// One numbered row of a prompt's form, in the order it is drawn and numbered.
@@ -370,6 +373,7 @@ pub(super) fn prompt_form(
             match place {
                 Place::Band => "The call is too long to show here in full: read it in Now (Ctrl+H), or answer it in the terminal (Ctrl+]).",
                 Place::Now => "The call is too long to show here in full: answer it in the terminal (Ctrl+]).",
+                Place::Terminal => "The call is too long to show here in full: read it in Now, or answer it in this terminal.",
             },
         );
     }
@@ -408,13 +412,14 @@ pub(super) fn prompt_form(
         hints.push(numbers);
         hints.push(match place {
             Place::Band => "Esc to fold".into(),
-            Place::Now => "Esc to stop".into(),
+            Place::Now | Place::Terminal => "Esc to stop".into(),
         });
         hints.join(" · ")
     } else {
         match place {
             Place::Band => "Ctrl+N to answer with the keys · or click an option".into(),
             Place::Now => "a to answer with the keys · or click an option".into(),
+            Place::Terminal => "click an option".into(),
         }
     };
     doc.wrap(&[text::run(hints, theme::dim())], width);
@@ -528,6 +533,13 @@ impl Ui {
             .collect()
     }
 
+    /// Alert `id`'s form state in a band at `place`: over a terminal the form never has the keys.
+    fn band_form_state(&self, id: &str, place: Place) -> FormState<'_> {
+        let mut state = self.form_state(id);
+        state.keys &= place != Place::Terminal;
+        state
+    }
+
     /// What the person has done on alert `id`'s form.
     pub(super) fn form_state(&self, id: &str) -> FormState<'_> {
         FormState {
@@ -615,18 +627,28 @@ impl Ui {
     /// on the person there, one line that says what waits until the person expands it, then the
     /// cards in place. The line is a click or Ctrl+N away from them; no other key reaches it, so
     /// typing is never taken by an alert.
-    pub(super) fn alert_band(&self, agent: &str, width: usize, room: usize) -> Vec<BandRow> {
+    pub(super) fn alert_band(
+        &self,
+        agent: &str,
+        width: usize,
+        room: usize,
+        place: Place,
+    ) -> Vec<BandRow> {
         let alerts = self.alerts_in(agent);
         let Some(first) = alerts.first() else {
             return Vec::new();
         };
         if self.alerts_open.contains(agent) {
-            return self.alert_card(agent, width, room);
+            return self.alert_card(agent, width, room, place);
         }
         let count = alerts.len();
         let (glyph, color) = screens::attention_style(&first.kind);
         let lead = format!(" ◆ {count} alert{} · ", if count == 1 { "" } else { "s" });
-        let tail = " ▸ show · Ctrl+N ";
+        let tail = if place == Place::Terminal {
+            " ▸ show "
+        } else {
+            " ▸ show · Ctrl+N "
+        };
         let room = width
             .saturating_sub(text::width(&lead) + text::width(tail) + 4)
             .max(8);
@@ -666,7 +688,7 @@ impl Ui {
     /// One alert's card for the band, kept from the last frame while nothing it reads changed:
     /// the alert, its seat's pending calls and harness, the form's state, the width and the
     /// limit. Typing redraws every key, and the card should cost it nothing.
-    fn band_card(&self, item: &Attention, width: usize, limit: usize) -> (Doc, usize) {
+    fn band_card(&self, item: &Attention, width: usize, limit: usize, place: Place) -> (Doc, usize) {
         use std::fmt::Write as _;
         use std::hash::{Hash, Hasher};
         struct Feed<'a>(&'a mut std::collections::hash_map::DefaultHasher);
@@ -677,8 +699,8 @@ impl Ui {
             }
         }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        (width, limit).hash(&mut hasher);
-        let state = self.form_state(&item.id);
+        (width, limit, place).hash(&mut hasher);
+        let state = self.band_form_state(&item.id, place);
         let seat = match &item.kind {
             AttentionKind::Prompt { seat_id, .. } => Some(seat_id.as_str()),
             _ => None,
@@ -700,13 +722,13 @@ impl Ui {
             state.chosen
         );
         let signature = hasher.finish();
-        let key = (item.id.clone(), limit);
+        let key = (item.id.clone(), limit, place);
         if let Some((kept, doc, shown)) = self.band_cards.borrow().get(&key)
             && *kept == signature
         {
             return (doc.clone(), *shown);
         }
-        let (doc, shown) = self.draw_band_card(item, width, limit);
+        let (doc, shown) = self.draw_band_card(item, width, limit, place);
         let mut cards = self.band_cards.borrow_mut();
         if cards.len() > 32 {
             cards.clear();
@@ -718,7 +740,13 @@ impl Ui {
     /// One alert's card for the band, as its card in Now draws it: its kind and age in the frame,
     /// its title, and for a prompt the same form, the call cut to `limit` lines. Also returns how
     /// many lines of the call it shows.
-    fn draw_band_card(&self, item: &Attention, width: usize, limit: usize) -> (Doc, usize) {
+    fn draw_band_card(
+        &self,
+        item: &Attention,
+        width: usize,
+        limit: usize,
+        place: Place,
+    ) -> (Doc, usize) {
         let (_, color) = screens::attention_style(&item.kind);
         let heavy = color == theme::PERSON;
         let inner = width.saturating_sub(4).max(10);
@@ -746,10 +774,10 @@ impl Ui {
                     &mut card,
                     &self.world,
                     item,
-                    self.form_state(&item.id),
+                    self.band_form_state(&item.id, place),
                     inner,
                     Some(limit),
-                    Place::Band,
+                    place,
                 );
             }
             AttentionKind::Request {
@@ -837,7 +865,7 @@ impl Ui {
 
     /// The cards of `agent`'s alerts at `width` columns in at most `room` rows, under a line that
     /// folds them again. A prompt's call is cut to what fits, never its answers.
-    fn alert_card(&self, agent: &str, width: usize, room: usize) -> Vec<BandRow> {
+    fn alert_card(&self, agent: &str, width: usize, room: usize, place: Place) -> Vec<BandRow> {
         let alerts = self.alerts_in(agent);
         if alerts.is_empty() {
             return Vec::new();
@@ -847,10 +875,11 @@ impl Ui {
         // that belongs to the box under it; the whole bar folds it again.
         let left = format!(" ◆ {count} alert{} ", if count == 1 { "" } else { "s" });
         // Esc folds only while a form here has the keys; a click on the bar always does.
-        let keys_here = self
-            .prompt_keys
-            .as_ref()
-            .is_some_and(|keys| alerts.iter().any(|item| &item.id == keys));
+        let keys_here = place != Place::Terminal
+            && self
+                .prompt_keys
+                .as_ref()
+                .is_some_and(|keys| alerts.iter().any(|item| &item.id == keys));
         let right = if keys_here { " ▾ fold · Esc " } else { " ▾ fold " };
         let gap = width.saturating_sub(text::width(&left) + text::width(right));
         let bar = |style: Style| style.bg(theme::SURFACE0);
@@ -878,11 +907,13 @@ impl Ui {
         let mut shown = 0;
         for item in ordered.iter().take(SHOWN) {
             let left = room.saturating_sub(rows.len() + 1);
-            let (mut card, call_shown) = self.band_card(item, width, PLAN_LINES);
+            let (mut card, call_shown) = self.band_card(item, width, PLAN_LINES, place);
             if card.lines.len() > left && call_shown > 0 {
                 // Cut the call to what fits, keeping the form's answers and keys in view.
                 let over = card.lines.len() - left;
-                card = self.band_card(item, width, call_shown.saturating_sub(over)).0;
+                card = self
+                    .band_card(item, width, call_shown.saturating_sub(over), place)
+                    .0;
             }
             if shown > 0 && card.lines.len() > left {
                 break;
@@ -893,7 +924,11 @@ impl Ui {
         if count > shown {
             rows.push(BandRow {
                 line: Line::from(Span::styled(
-                    format!("   +{} more in Now (Ctrl+H)", count - shown),
+                    if place == Place::Terminal {
+                        format!("   +{} more in Now", count - shown)
+                    } else {
+                        format!("   +{} more in Now (Ctrl+H)", count - shown)
+                    },
                     theme::dim(),
                 )),
                 hits: Vec::new(),
@@ -1686,7 +1721,7 @@ mod tests {
         assert!(shown.contains("closed, x clears it"), "{shown}");
         assert!(options(&shown).is_empty(), "{shown}");
         assert!(!shown.contains("to answer with the keys"), "{shown}");
-        assert!(ui.alert_band(SEAT, 80, 20).is_empty());
+        assert!(ui.alert_band(SEAT, 80, 20, Place::Band).is_empty());
     }
 
     /// The bar names Esc only while a form here has the keys, and Esc still folds a form whose
@@ -1697,7 +1732,7 @@ mod tests {
         let mut ui = in_conversation(world.clone());
         ui.live = true;
         ui.toggle_alerts(SEAT);
-        let bar = |ui: &Ui| ui.alert_band(SEAT, 80, 30)[0].line.to_string();
+        let bar = |ui: &Ui| ui.alert_band(SEAT, 80, 30, Place::Band)[0].line.to_string();
         assert!(bar(&ui).contains("▾ fold") && !bar(&ui).contains("Esc"), "{}", bar(&ui));
         ui.toggle_alerts(SEAT);
         press(&mut ui, KeyCode::Char('n'), KeyModifiers::CONTROL);
@@ -1714,8 +1749,40 @@ mod tests {
         assert!(options(&render(&ui, 80, 40)).is_empty());
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(ui.prompt_keys.is_none());
-        assert_eq!(ui.alert_band(SEAT, 80, 30).len(), 1, "folded to its line");
+        assert_eq!(ui.alert_band(SEAT, 80, 30, Place::Band).len(), 1, "folded to its line");
         assert!(ui.effects.is_empty());
+    }
+
+    #[test]
+    fn over_a_terminal_the_band_names_no_key_and_answers_by_click() {
+        let mut ui = in_conversation(bash_world());
+        let flat = |rows: &[BandRow]| {
+            rows.iter()
+                .map(|row| row.line.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let folded = flat(&ui.alert_band(SEAT, 80, 30, Place::Terminal));
+        assert!(folded.contains("▸ show") && !folded.contains("Ctrl+N"), "{folded}");
+        // Even with the keys given to its form in the conversation, every key here is the
+        // terminal's: the band names none and answers only a click.
+        press(&mut ui, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        let rows = ui.alert_band(SEAT, 80, 30, Place::Terminal);
+        let shown = flat(&rows);
+        for key in ["Esc", "Enter", "Ctrl+N", "↑/↓", "to choose", "Ctrl+H"] {
+            assert!(!shown.contains(key), "{key} named over the terminal:\n{shown}");
+        }
+        assert!(shown.contains("click an option"), "{shown}");
+        assert!(
+            rows.iter().flat_map(|row| &row.hits).any(|(_, _, hit)| matches!(
+                hit,
+                Hit::Alert(_, AlertTap::Answer(answer)) if answer == "allow"
+            )),
+            "{shown}"
+        );
+        // The conversation's band still names them.
+        let band = flat(&ui.alert_band(SEAT, 80, 30, Place::Band));
+        assert!(band.contains("Esc to fold"), "{band}");
     }
 
     #[test]
@@ -1730,14 +1797,14 @@ mod tests {
         let mut world = demo::world();
         world.attention = Load::Ready(vec![update]);
         let ui = Ui::new(world);
-        assert!(ui.alert_band(SEAT, 80, 20).is_empty());
+        assert!(ui.alert_band(SEAT, 80, 20, Place::Band).is_empty());
     }
 
     #[test]
     fn the_collapsed_line_fits_a_narrow_pane() {
         let ui = in_conversation(bash_world());
         for width in [12usize, 24, 40] {
-            assert_eq!(ui.alert_band(SEAT, width, 10).len(), 1);
+            assert_eq!(ui.alert_band(SEAT, width, 10, Place::Band).len(), 1);
         }
     }
 }
