@@ -128,6 +128,10 @@ async fn timeline(
     let collection = format!("{projection}:{binding}:");
     let cursor = parameters.get("cursor")
         .map(|cursor| timeline_cursor(cursor, &collection)).transpose()?;
+    // The gateway cannot inspect the authenticated assistant wrapper. Recover the
+    // native page's pinned snapshot only after verifying its grant-policy MAC.
+    let snapshot = cursor.as_deref().map(decode_client_cursor_snapshot).transpose()?
+        .unwrap_or_else(|| snapshot.clone());
     let mut session = ClientSession::local(Some(person))?;
     session.conversation_blocks = true;
     let reader = state.clone();
@@ -147,7 +151,7 @@ async fn timeline(
         let signature = hex::encode(timeline_cursor_mac(&collection, cursor)?.finalize().into_bytes());
         projected_page["next_cursor"] = json!(format!("{collection}{signature}:{cursor}"));
     }
-    Ok((snapshot.clone(), json!({
+    Ok((snapshot, json!({
         "kind":if detail { "conversation-detail" } else { "conversation-timeline" },
         "agent_id":agent_id, "session_id":session_id, "current_session_id":session_id,
         "items":items, "page":projected_page,
