@@ -85,7 +85,7 @@ fn paired(session: &ClientSession) -> Result<&str, ApiError> {
 
 fn validate(registration: &PushRegistration) -> Result<(), ApiError> {
     if !(2..=512).contains(&registration.token.len())
-        || registration.token.len() % 2 != 0
+        || !registration.token.len().is_multiple_of(2)
         || !registration
             .token
             .bytes()
