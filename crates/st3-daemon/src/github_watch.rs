@@ -1241,6 +1241,8 @@ mod tests {
             body_ref: None,
             body_bytes: None,
             body_origin: None,
+            sender_class: None,
+            assistant_grant_id: None,
             created_index: 1,
         };
         assert_eq!(
@@ -1325,6 +1327,8 @@ mod tests {
             body_ref: None,
             body_bytes: None,
             body_origin: None,
+            sender_class: None,
+            assistant_grant_id: None,
             created_index: 1,
         };
         let post = PostInFlight::begin("agent/example.planner", &thread);
