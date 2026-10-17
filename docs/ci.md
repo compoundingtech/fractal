@@ -566,7 +566,9 @@ workflow-level path filters. `linux-gate` does not depend on them.
   imported by it runs all of them: package, lock, TypeScript, Vite and Vitest configuration, the
   test environment, the app scripts, CI inputs, a deleted or renamed file, and a module-less data file
   in the app, kit or client trees; so does a diff that cannot be read. A change to a file no test
-  imports selects no tests (typecheck and the merge gate still cover it). The lane
+  imports, or entirely outside the app, kit and client trees (docs, Rust), selects no tests: the lane
+  prints `none selected` and runs no app test on the pull request (typecheck and the merge gate still
+  cover it). The lane
   `App unit test selection` pins these rules.
   App, UI kit, Storybook, browser and performance lanes join the script with the
   packages that add them. The detector separately emits `kit-inputs`: app-only changes
