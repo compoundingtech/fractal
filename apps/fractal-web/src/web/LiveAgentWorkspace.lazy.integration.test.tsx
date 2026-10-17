@@ -321,6 +321,7 @@ describe('conversation import boundary', () => {
       switchDataReady: () => {},
       transcriptCommitted: () => () => {},
       beginSendEcho: () => ({ committed: () => () => {}, cancel: () => {} }),
+    beginAlertAnswer: () => ({ landed: () => () => {}, cancel: () => {} }),
       observeSync: () => {},
       dispose: () => {},
     }
