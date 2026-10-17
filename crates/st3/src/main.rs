@@ -3818,11 +3818,11 @@ struct MessageListArgs {
     #[arg(long = "from")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     sender: Option<String>,
-    /// Match the message's subject text exactly (case-sensitive).
-    #[arg(long, conflicts_with = "subject_prefix")]
+    /// Match this sender's subject text exactly (case-sensitive); requires --from.
+    #[arg(long, conflicts_with = "subject_prefix", requires = "sender")]
     subject: Option<String>,
-    /// Match a literal, case-sensitive prefix of the message's subject text.
-    #[arg(long)]
+    /// Match a literal, case-sensitive subject prefix within --from's messages.
+    #[arg(long, requires = "sender")]
     subject_prefix: Option<String>,
 }
 

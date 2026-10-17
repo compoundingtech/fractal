@@ -371,6 +371,10 @@ impl Store {
     ) -> Result<(Vec<MessageView>, Option<u64>)> {
         let recipient = recipient.map(normalize_message_party);
         let sender = sender.map(normalize_message_party);
+        anyhow::ensure!(
+            sender.is_some() || (subject.is_none() && subject_prefix.is_none()),
+            "subject filters need a sender filter"
+        );
         let connection = self.readers.get();
         // Sender selection starts at the existing expression indexes, not the recipient's
         // entire mailbox. Include legacy root fields and declarations, whose defaults and
@@ -397,33 +401,15 @@ impl Store {
              JOIN message_index ON message_index.subject=candidates.subject
              WHERE created_index>?3 AND created_index<=?4
              ORDER BY created_index, message_index.subject"
-        } else if recipient.is_some() {
-            concat!("WITH candidates(subject) AS (
-                SELECT subject FROM claims INDEXED BY claims_message_to_index
-                WHERE kind='message.sent' AND ", message_sent_recipient_match!(), "
-                UNION
-                SELECT subject FROM claims INDEXED BY claims_message_legacy_to_index
-                WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
-                  AND json_extract(body,'$.to') IN (?1,?2)
-                UNION
-                SELECT desired.subject FROM desired,
-                       json_each(desired.body,'$.children') child
-                WHERE desired.kind='message' AND ", message_desired_recipient_match!(), "
-             )
-             SELECT message_index.subject, created_index FROM candidates
-             JOIN message_index ON message_index.subject=candidates.subject
-             WHERE created_index>?3 AND created_index<=?4
-             ORDER BY created_index, message_index.subject")
         } else {
             "SELECT subject, created_index FROM message_index
              WHERE (?1 IS NULL AND ?2 IS NULL) AND created_index>?3 AND created_index<=?4
              ORDER BY created_index, subject"
         };
         let mut statement = connection.prepare_cached(sql)?;
-        let party = sender.as_deref().or(recipient.as_deref());
-        let bare_party = party.map(message_bare_recipient);
+        let bare_sender = sender.as_deref().map(message_bare_recipient);
         let mut rows = statement.query(params![
-            party, bare_party, after.unwrap_or(0), through,
+            sender.as_deref(), bare_sender, after.unwrap_or(0), through,
         ])?;
         let mut output: Vec<MessageView> = Vec::new();
         while let Some(row) = rows.next()? {

@@ -122,6 +122,24 @@ pub(super) struct MessagesPageQuery {
     delivery: Option<String>,
 }
 
+impl MessagesPageQuery {
+    fn validate_filters(&self) -> Result<(), ApiError> {
+        if (self.subject.is_some() || self.subject_prefix.is_some()) && self.from.is_none() {
+            return Err(ApiError::bad(St3Error::new(
+                "validation-failed",
+                "subject filters need a sender filter",
+            )));
+        }
+        if self.subject.is_some() && self.subject_prefix.is_some() {
+            return Err(ApiError::bad(St3Error::new(
+                "validation-failed",
+                "subject and subject_prefix are mutually exclusive",
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct MessagesPageCursor {
     after: u64,
@@ -169,12 +187,7 @@ pub(super) async fn list_messages_page(
     let limit = query.limit.unwrap_or(100).clamp(1, 200);
     let to = query.to.as_deref().map(normalize_message_party);
     let from = query.from.as_deref().map(normalize_message_party);
-    if query.subject.is_some() && query.subject_prefix.is_some() {
-        return Err(ApiError::bad(St3Error::new(
-            "validation-failed",
-            "subject and subject_prefix are mutually exclusive",
-        )));
-    }
+    query.validate_filters()?;
     if let (Some(to), Some(report)) = (to.as_deref(), query.delivery.as_deref()) {
         delivery_presence::record(to, report);
     } else {
@@ -471,5 +484,22 @@ mod page_cursor_tests {
         assert!(cursor.validate(&query, None, None, 2).is_ok());
         query.subject_prefix = Some("literal".into());
         assert!(cursor.validate(&query, None, None, 2).is_err());
+    }
+}
+
+#[cfg(test)]
+mod subject_filter_tests {
+    use super::*;
+
+    #[test]
+    fn subject_filters_require_sender_before_store_access() {
+        for field in ["subject", "subject_prefix"] {
+            let query: MessagesPageQuery =
+                serde_json::from_value(json!({(field): "review", "to": "agent/reviewer"}))
+                    .unwrap();
+            let error = query.validate_filters().expect_err("accepted subject-only query");
+            assert_eq!(error.code, "validation-failed");
+            assert_eq!(error.message, "subject filters need a sender filter");
+        }
     }
 }

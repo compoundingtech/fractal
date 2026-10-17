@@ -888,6 +888,8 @@ fn conversations_ls_accepts_sender_and_literal_subject_filters() {
             "conversations",
             "ls",
             "agent/reader",
+            "--from",
+            "agent/ada",
             "--subject",
             "Review",
             "--subject-prefix",
@@ -895,6 +897,15 @@ fn conversations_ls_accepts_sender_and_literal_subject_filters() {
         ])
         .is_err()
     );
+    for flag in ["--subject", "--subject-prefix"] {
+        let error = Cli::try_parse_from([
+            "st3", "conversations", "ls", "agent/reviewer", flag, "Review",
+        ])
+        .err()
+        .expect("subject filters need a sender filter");
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert!(error.to_string().contains("--from"));
+    }
 }
 
 #[tokio::test]

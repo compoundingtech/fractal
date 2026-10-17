@@ -211,7 +211,7 @@ st conversations --help
 st conversations ls --help
 st conversations ls person/alex
 st conversations ls person/alex --from agent/worker
-st conversations ls person/alex --subject "Review ready"
+st conversations ls person/alex --from agent/worker --subject "Review ready"
 st conversations ls person/alex --from agent/worker --subject-prefix "Review" --archive --count
 st conversations sessions --help
 st conversations sessions
@@ -225,9 +225,11 @@ harness process with `ST_AGENT` can read, archive, send, reply, claim, and act o
 agent; a different `agent/...` actor is refused.
 
 `ls --from ACTOR` filters by sender; combine it with either `--subject TEXT` for an exact
-message subject or `--subject-prefix TEXT` for a literal prefix. Both subject filters are
-case-sensitive and match the human-readable subject (`title` in JSON), not the `message/...`
-resource ID. They are mutually exclusive; `%` and `_` have no wildcard meaning. The daemon
+message subject or `--subject-prefix TEXT` for a literal prefix within that sender's messages.
+Both subject filters require `--from`: subject-only listing is out of scope because it would
+need a title index to avoid reading the whole mailbox. Both are case-sensitive and match the
+human-readable subject (`title` in JSON), not the `message/...` resource ID. They are mutually
+exclusive; `%` and `_` have no wildcard meaning. The daemon
 applies these filters before paging, including for `--archive`, `--count`, and `--json`.
 With an older daemon that ignores these query fields, the CLI filters the returned pages
 locally for the same result.
