@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { Agent, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@smalltalk/st3-client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import * as DateTime from 'effect/DateTime'
 import * as Option from 'effect/Option'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -15,6 +16,7 @@ import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import * as dataHooks from '../data/react.tsx'
 import * as rowProjection from './sidebarRow.ts'
 import * as treeProjection from './liveSidebarTree.ts'
+import * as folderComponents from '../shell/AgentFolders.tsx'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
 
@@ -95,6 +97,35 @@ it('keeps workspace providers and unchanged roster rows out of the one-second cl
     workspaceRenders.mockRestore()
     projectedRows.mockRestore()
     projectedTree.mockRestore()
+  }
+})
+
+it('keeps tree render callbacks and unchanged rows stable when one agent receives a data frame', async () => {
+  const first = { ...agent, last_activity_at: Option.some(DateTime.makeUnsafe(1000)) }
+  const other: Agent = { ...agent, id: 'agent/other', name: 'Other Agent' }
+  registry.set(agents, observed({ value: [first, other] }))
+  const rows = vi.spyOn(dataHooks, 'useAgent')
+  const folders = vi.spyOn(folderComponents, 'AgentFolders')
+  const calls = (ref: string) => rows.mock.calls.filter(([value]) => value === ref).length
+  try {
+    await mount(1440)
+    const firstCount = calls(first.id)
+    const otherCount = calls(other.id)
+    const before = folders.mock.calls.at(-1)![0]
+    if (!('tree' in before)) throw new Error('Expected the bound live sidebar')
+    await act(async () => registry.set(agents, observed({ value: [{ ...first, last_activity_at: Option.some(DateTime.makeUnsafe(2000)) }, other] })))
+    const after = folders.mock.calls.at(-1)![0]
+    if (!('tree' in after)) throw new Error('Expected the bound live sidebar')
+    expect(calls(first.id)).toBeGreaterThan(firstCount)
+    expect(calls(other.id)).toBe(otherCount)
+    expect(after.renderAgent).toBe(before.renderAgent)
+    expect(after.renderFolderSignal).toBe(before.renderFolderSignal)
+    expect(after.accessibleNames).toBe(before.accessibleNames)
+    expect(after.tree).toBe(before.tree)
+    expect(roster().querySelector('[data-wf-agent-ref="agent/example"] [data-row-column="time"] time')?.textContent).toBe('3s')
+  } finally {
+    rows.mockRestore()
+    folders.mockRestore()
   }
 })
 
