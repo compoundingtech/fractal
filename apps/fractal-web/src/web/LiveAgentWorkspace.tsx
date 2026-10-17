@@ -19,7 +19,7 @@ import { SidebarAgentRow, ThreadHeader, ResizableSplit, assistantDarkTheme, live
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
-import { useFleet, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource } from '../data/react.tsx'
+import { useFleet, useSubjectList, useConnection, useNow, useFeedInterest, useDataSource } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
 import type { ResourcePanelState } from '../shell/state.ts'
@@ -321,15 +321,13 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
 
 /** Only time-bearing surfaces subscribe to the wall clock, not the workspace providers. */
 function ClockedThreadHeader({ agent, stale, ...props }: Omit<React.ComponentProps<typeof ThreadHeader>, 'now' | 'status' | 'statusLabel' | 'statusSince'> & { readonly agent?: Agent; readonly stale: boolean }) {
-  const now = useNowSnapshot()
-  const row = agent === undefined ? undefined : sidebarRow({ agent, stale, now })
+  const row = agent === undefined ? undefined : sidebarRow({ agent, stale })
   return <ThreadHeader {...props} status={row?.status} statusLabel={row?.statusLabel} statusSince={row?.statusSince} />
 }
 
-/** The list reads one clock snapshot for source validation; only SidebarTime leaves tick. */
+/** The list projects source observations; only SidebarTime leaves tick. */
 function LiveRoster({ agents, stale, current, query, onSelect }: { readonly agents: readonly Agent[]; readonly stale: boolean; readonly current: string; readonly query: string; readonly onSelect: (ref: string) => void }) {
-  const now = useNowSnapshot()
-  return agents.map(agent => <SidebarAgentRow key={agent.ref} item={sidebarRow({ agent, stale, now })} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={query} active={current === agent.ref} onOpen={() => onSelect(agent.ref)} />)
+  return agents.map(agent => <SidebarAgentRow key={agent.ref} item={sidebarRow({ agent, stale })} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={query} active={current === agent.ref} onOpen={() => onSelect(agent.ref)} />)
 }
 
 const assumedOnline = Atom.make({ _tag: 'Online' } as const)
