@@ -1,8 +1,12 @@
 //! Isolated transport lookup measurement on a disposable, checkpointed database copy.
 //!
 //! Build: cargo build --release --locked -p smallclaims --features transport-bench --example transport_observation_bench
-//! Run: target/release/examples/transport_observation_bench --store COPY --n 1000 --mode after
+//! Run: target/release/examples/transport_observation_bench --store COPY --n 1000 --mode after --bootstrap-yield-ms 0
 //! Repeat with --mode before against the SAME unchanged input for the original lookup.
+//! Yield defaults to production's 100 ms; 0 skips only example inter-page sleeps.
+//! For zero-yield runs, project production elapsed seconds by adding bootstrap_pages*0.1.
+//! index_bytes_dbstat selects exact helper-object dbstat bytes versus checkpointed file
+//! growth (page_count*page_size delta, which can undercount when free pages are reused).
 //!
 //! Linux only: a write lease rejects existing openers and aborts on a racing opener.
 //! The input is never modified; a private temporary reflink (or full copy) is measured.
@@ -142,15 +146,27 @@ mod harness {
         })
     }
 
-    fn options() -> Result<(PathBuf, usize, bool)> {
+    fn checkpointed_bytes(connection: &rusqlite::Connection) -> Result<u64> {
+        let busy: u64 = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        ensure!(busy == 0);
+        let pages: u64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        Ok(pages * size)
+    }
+
+    fn options() -> Result<(PathBuf, usize, bool, u64)> {
         let mut args = std::env::args_os().skip(1);
         let mut store = None;
         let mut n = None;
         let mut before = None;
+        let mut bootstrap_yield_ms = None;
         while let Some(arg) = args.next() {
             match arg.to_str() {
                 Some("--store") if store.is_none() => store = Some(PathBuf::from(args.next().ok_or_else(|| anyhow::anyhow!("argument"))?)),
                 Some("--n") if n.is_none() => n = Some(args.next().and_then(|v| v.to_str().and_then(|v| v.parse::<usize>().ok())).ok_or_else(|| anyhow::anyhow!("argument"))?),
+                Some("--bootstrap-yield-ms") if bootstrap_yield_ms.is_none() => {
+                    bootstrap_yield_ms = Some(args.next().and_then(|v| v.to_str().and_then(|v| v.parse::<u64>().ok())).ok_or_else(|| anyhow::anyhow!("argument"))?);
+                }
                 Some("--mode") if before.is_none() => {
                     before = Some(match args.next().as_deref().and_then(|v| v.to_str()) {
                         Some("before") => true,
@@ -163,12 +179,12 @@ mod harness {
         }
         let n = n.ok_or_else(|| anyhow::anyhow!("argument"))?;
         ensure!(n > 0);
-        Ok((store.ok_or_else(|| anyhow::anyhow!("argument"))?, n, before.ok_or_else(|| anyhow::anyhow!("argument"))?))
+        Ok((store.ok_or_else(|| anyhow::anyhow!("argument"))?, n, before.ok_or_else(|| anyhow::anyhow!("argument"))?, bootstrap_yield_ms.unwrap_or(100)))
     }
 
     pub fn run() -> Result<()> {
         ensure!(!cfg!(debug_assertions));
-        let (input, n, before) = options()?;
+        let (input, n, before, bootstrap_yield_ms) = options()?;
         let temp = tempfile::Builder::new().prefix("transport-bench-").tempdir()?;
         let path = temp.path().join("claims.db");
         let (_lease, reflink) = isolated_copy(&input, &path)?;
@@ -191,19 +207,41 @@ mod harness {
         drop(connection);
         let store = Store::open(&path, origin, Arc::new(Plain))?;
         store.transport_bench_original_lookup.store(before, Ordering::Relaxed);
-        let initial_claims: u64 = store.readers.get().query_row("SELECT COUNT(*) FROM claims", [], |r| r.get(0))?;
+        let source_claim_rows: u64 = store.readers.get().query_row("SELECT COUNT(*) FROM claims", [], |r| r.get(0))?;
+        let sizing = rusqlite::Connection::open(&path)?;
+        let index_bytes_dbstat: bool = sizing.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_module_list WHERE name='dbstat')", [], |r| r.get(0),
+        )?;
+        let initial_bytes = if index_bytes_dbstat { 0 } else { checkpointed_bytes(&sizing)? };
         let mut bootstrap = Vec::new();
         let mut copied = 0;
+        let bootstrap_started = Instant::now();
         if !before {
             loop {
                 let page = transport_observation_index::advance(&store.connection)?;
                 bootstrap.push(page.write_hold);
                 copied += page.copied;
                 if page.ready { break; }
-                // Preserve the daemon's online page cadence, outside the transaction sample.
-                std::thread::sleep(Duration::from_millis(100));
+                // Only this example overrides pacing; transaction samples are unchanged.
+                std::thread::sleep(Duration::from_millis(bootstrap_yield_ms));
             }
         }
+        let bootstrap_elapsed = if before { Duration::ZERO } else { bootstrap_started.elapsed() };
+        let bootstrap_pages = bootstrap.len();
+        // Sizing and any fallback checkpoint are outside bootstrap/insert timing samples.
+        let index_bytes: u64 = if before {
+            0
+        } else if index_bytes_dbstat {
+            sizing.query_row(
+                "SELECT COALESCE(SUM(pgsize),0) FROM dbstat WHERE name IN (
+                 SELECT name FROM sqlite_master WHERE tbl_name IN (
+                 'transport_observation_index','transport_observation_backfill'))",
+                [], |r| r.get(0),
+            )?
+        } else {
+            checkpointed_bytes(&sizing)?.saturating_sub(initial_bytes)
+        };
+        drop(sizing);
         // Seed stale evidence. Repeated up/last_success_at=0 calls still write even when
         // canonical timestamp ties choose an earlier up observation in the measured loop.
         store.record_transport_observation(&peer, "unknown", None, Some(0))?;
@@ -242,7 +280,12 @@ mod harness {
             "ok": true,
             "mode": if before { "before" } else { "after" },
             "iterations": n,
-            "initial_claims": initial_claims,
+            "source_claim_rows": source_claim_rows,
+            "bootstrap_elapsed_ms": bootstrap_elapsed.as_secs_f64() * 1000.0,
+            "bootstrap_pages": bootstrap_pages,
+            "bootstrap_yield_ms": bootstrap_yield_ms,
+            "index_bytes": index_bytes,
+            "index_bytes_dbstat": index_bytes_dbstat,
             "reflink": reflink,
             "bootstrap_rows_copied": copied,
             "bootstrap_write_transactions": summary(&mut bootstrap),

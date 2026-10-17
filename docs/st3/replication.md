@@ -64,17 +64,31 @@ background queue admission. The index is rebuildable local acceleration, not rep
 
 For offline production-size evidence, build the aggregate-only
 `smallclaims` example `transport_observation_bench` in release mode with the
-`transport-bench` feature. Run `--store COPY --n 1000 --mode before`, then the
-same command with `--mode after`, using the same checkpointed disposable input.
+`transport-bench` feature. Run `--store COPY --n 1000 --mode before --bootstrap-yield-ms 0`,
+then the same command with `--mode after`, using the same checkpointed disposable input.
 Both modes measure a private temporary copy; the before mode removes the helper
 objects and uses main's identical SQL literal, per-call canonical expansion and
 uncached `query_row` preparation path, without readiness probes. The after mode
-executes every real bootstrap page with the daemon's 100 ms inter-page yield.
+executes every real bootstrap page. The example-only `--bootstrap-yield-ms` defaults
+to the daemon's 100 ms inter-page yield; use `0` for the accelerated measurement
+without changing transaction boundaries or sampling. Production pacing is unchanged.
+Project production-paced bootstrap time as `bootstrap_elapsed_ms / 1000 +
+bootstrap_pages * 0.1` seconds from a zero-yield run (a conservative extra yield
+for the final page). Removing deliberate sleeps targets an approximately one-hour
+operator run, but storage speed and unknown claim count can still exceed that target.
 The harness rejects open databases, SQLite sidecars and nearby daemon socket/lock
 artifacts; Linux write-lease support is required. Set `TMPDIR` to private local
 storage with capacity for the database plus its working WAL (reflinks are attempted).
 Only aggregate JSON is emitted, including every bootstrap transaction and the
 writer-transaction totals and wall time per synthetic receive-shaped claim insert.
+The JSON also reports `source_claim_rows` from one premeasurement count,
+`bootstrap_elapsed_ms`, `bootstrap_pages`, `bootstrap_yield_ms` and `index_bytes`.
+When `index_bytes_dbstat` is true, size sums `dbstat.pgsize` for both helper tables
+and their indexes. Otherwise it is the checkpointed `page_count * page_size` growth
+across bootstrap, excluding WAL; reused free pages can make this fallback undercount
+the objects' occupied space. Sizing/checkpoint work is outside transaction samples.
+The advance API exposes copied observation rows, not scanned source rows, so
+`bootstrap_rows_copied` must not be interpreted as the scanned claim count.
 The workload persists a synthetic message and its transport observation, not the
 full replication authentication or runtime projection path. No stored message
 bodies or identifiers are emitted; failures are deliberately detail-free.
