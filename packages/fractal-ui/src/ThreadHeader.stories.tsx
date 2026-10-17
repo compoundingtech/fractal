@@ -38,3 +38,4 @@ export const TerminalHiddenLight: Story = { ...TerminalHidden, args: { scheme: '
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans },
 })
+// probe: combined wall measurement; not for merge
