@@ -76,7 +76,7 @@ pub fn person_name(person: &str) -> Option<&str> {
 
 /// A sekrets or tile name: lowercase letters, digits, `-`, `_` and `.`, 64 bytes at most, not
 /// starting with `.` or `-`.
-pub(crate) fn valid_word(word: &str) -> bool {
+pub fn valid_word(word: &str) -> bool {
     !word.is_empty()
         && word.len() <= 64
         && !word.starts_with(['.', '-'])
