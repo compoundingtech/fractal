@@ -1,4 +1,4 @@
-# Smalltalk iOS
+# Fractal iOS
 
 The four-tab Expo app uses the generated `st3.client.v0` TypeScript client. Its tabs are Now, Resources, Fleet and Spaces. It connects only to a paired gateway: over HTTPS; over plain HTTP to a Tailscale IPv4 address (100.64.0.0/10), which Tailscale encrypts; or over plain HTTP on the local network to a `*.local` name or an RFC1918 address (10/8, 172.16/12, 192.168/16). LAN HTTP is not encrypted: anyone on that network can read the paired credential and data, and the app says so. App Transport Security allows HTTP only for those ranges and `.local`; any other HTTP gateway URL is rejected. The gateway URL and tab order stay in local app preferences; the paired bearer credential stays in iOS Keychain through `expo-secure-store`. No private endpoint or credential is built into the app.
 
@@ -33,7 +33,7 @@ Each tab holds its own native stack, and every detail (a conversation, terminal,
 - **Now** lists what stui's Home lists: every unresolved request, review, approval, native harness prompt and provider sign-in for the paired person, plus the updates they asked for, grouped by tier (somebody is stopped on you, today, when there is time) with stui's glyphs and a legend. The first thing it prints is the alert count: nothing at zero, `1 alert`, `N alerts` otherwise; the tab's badge shows the same number. An alert is whatever blocks or waits on the person (an update asks nothing and is not one). The app reads `alert` on each attention row, and a daemon that predates alerts is read as everything but an update or an unread message. The wire names (`attention`, `/attention`) are unchanged, so older and newer builds keep working. An item opens its detail, with resolve when st offers it; a long press offers the agent's conversation and the mission.
 - **Resources** keeps the Agents and Missions lists one tap away, with their search, list/tree controls, conversation results and mission cards. It opens on the person's own folders, then Everything else grouped into Agents, Missions, Terminals and Machines. The filter stays on top. Agent and mission status glyphs and needs-you dots remain visible, including sessions found running. A row opens its conversation, mission or terminal; long-press offers Move to. New folder, folder rename and confirmed deletion use `arrangement.edit`; each folder's + finds a resource not already in it. Drag handles move resources or reorder rows and folders; tapping a handle changes nothing. The stream supplies the winning registers after edits. Collapse choices and unavailable resource names stay on this phone.
 - **Fleet** shows machines, sessions found running on the gateway machine, this connection, paired devices, and the tab order.
-- **Alerts in a conversation.** Each alert shows above the conversation of the agent it belongs to (`conversation_id`; a provider sign-in shared by several seats shows in each, once, naming the others), a line that opens to its question and its answers, and starts open when it is the only one. Requests are answered there as they are on Now. A Claude permission prompt (`prompt.respond`) shows the pending tool call in full, from the conversation where Claude records it before asking, beside Allow and Deny. The prompt names no call, so Allow is offered only when exactly one call is unanswered and shown; with several, all are listed and only Deny is offered, with a pointer to the terminal. Deny is always offered, and an answer in the terminal still wins. A prompt of another harness, or a question prompt, says to answer it in the terminal. A seat whose harness is compacting its conversation reads `compacting` in the agent strip and the Agents list: a status, never an alert.
+- **Alerts in a conversation.** Each alert shows above the conversation of the agent it belongs to (`conversation_id`; a provider sign-in shared by several seats shows in each, once, naming the others), a line that opens to its question and its answers, and starts open when it is the only one. Requests are answered there as they are on Now. A native prompt (`prompt.respond`) shows the pending tool call in full, from the conversation where the harness records it before asking, beside the answers st offers for it: Allow and Deny for a permission or a Codex approval, Approve plan and Deny for a plan, the question's options for a Claude question (any number for a multi-select, sent together with Send, or Decline), and a screen prompt's own answers (Use it, Use all, Skip; Trust, Exit or Quit). The prompt names no call, so Allow and Approve plan are offered only when exactly one call is unanswered and shown; with several, all are listed with a pointer to the terminal. Deny and a screen prompt's answers are always offered, and an answer in the terminal still wins. Now, where the conversation is not loaded, says to open it to see the call. A refusal because the prompt is gone says so in st's words and is not sent again. A prompt st cannot deliver an answer to says to answer it in the terminal. A seat whose harness is compacting its conversation reads `compacting` in the agent strip and the Agents list: a status, never an alert.
 - **Spaces** is always one of the four tabs. It lists the person's spaces by name, followed live when the gateway grants `glasses`; selecting a space shows its tabs grouped by pane in the computer's order. A pane opens its conversation, mission, resource, terminal or Fleet for a machine. An unavailable subject stays marked. The phone reads spaces and never changes them. Saved spaces and sidebar folders remain available offline, with the age of the cached data shown.
 
 New agent offers a repository from the selected machine’s agents, or an absolute path you type. Selecting a repository creates a Git worktree using the agent’s safe simple name as its default branch, with `origin/main` as the editable base. An empty repository uses a plain workspace. Workspace is optional in either case; st chooses a new directory when it is empty. The conversation header shows the requested worktree and branch, and any checkout failure remains visible as the agent’s fault.
@@ -71,6 +71,202 @@ test "${APP_VARIANT-}" = daily &&
 The private-range and `.local` HTTP ATS exceptions intentionally apply to the daily Release app too: its paired gateway can be reached over encrypted Tailscale or a trusted LAN, not only public HTTPS. This does not make LAN HTTP encrypted; the credential/data exposure warning and gateway URL restrictions described above still apply. Prefer HTTPS on an untrusted LAN.
 
 Daily uses the `com.compoundingtech.smalltalk` URL scheme, separate from the dev starter scheme. It does not accept the starter-scheme pairing or `fabric-proof` links; those remain Debug-only development/proof tools, not a daily provisioning path. Pair the daily app through its form as described under Connect.
+
+### Automatic daily Release delivery
+
+`scripts/release_delivery.py` reconciles a tracked Git ref to the daily device
+app (`com.compoundingtech.smalltalk`), without Metro, EAS, or OTA. The tracked
+ref must support `APP_VARIANT=daily`; a ref without that variant is refused
+rather than replacing the separate Debug app. First prepare a signed artifact
+without phone access:
+
+```sh
+python3 apps/ios/scripts/release_delivery.py \
+  --repo "$SOURCE_REPO" --state "$DELIVERY_STATE" \
+  --expected-origin "$TRUSTED_ORIGIN_URL" --trusted-commit "$REVIEWED_FULL_SHA" \
+  --device "$ST_IOS_DEVICE" --team "$ST_IOS_TEAM" \
+  --developer-dir "$DEVELOPER_DIR" --build-only
+```
+
+The script starts nothing by itself: delivery runs only when a separately
+configured host scheduler invokes it, and this repository ships no scheduler.
+
+The default ref is protected `origin/main`. The device owner must approve
+the tracked branch and its protection before scheduling delivery; repository
+maintainers own branch protection. Supply the exact approved origin URL with
+`--expected-origin` / `ST_IOS_EXPECTED_ORIGIN`, and an independently reviewed
+full 40-character bootstrap commit with `--trusted-commit` /
+`ST_IOS_TRUSTED_COMMIT`. These must come from trusted operator configuration,
+not the fetched ref. The script refuses an origin mismatch before fetching,
+and refuses any fetched commit not descended from its persisted `trusted_head`
+(initially the bootstrap commit), before inspecting manifests or running code.
+Accepted fetches atomically advance that head even if a later build fails.
+The trust configuration is bound to the state directory; changing it requires
+explicit reprovisioning, not silently reusing another trust boundary.
+
+This deliberately refuses historical ref rewinds and divergent branch
+switches. Rollback must be a new reviewed revert commit descended from the
+last trusted head. There is no signature check; the origin pin and ancestry
+boundary do not make a malicious maintainer-approved fast-forward safe.
+Do not point the script at a contributor branch. `--ref` / `ST_IOS_REF`
+accepts a valid branch (`origin/<branch>` or local) or a full commit SHA,
+subject to that same ancestry boundary. Remote branches are fetched directly
+from the source repository's approved `origin`; the source checkout is never
+changed. A private dedicated clone, signed artifacts, and retry state live
+under `--state`. Use a separate state directory for each device/team.
+
+The tracked ref's code runs with the signing identity, login keychain, and
+inherited environment: Expo configuration/plugins, Metro configuration,
+podspec Ruby, `export:ios`, and Xcode build phases. The workspace install passes
+`--ignore-scripts`, disabling dependency lifecycle scripts even if the ref
+drops the workspace setting; it does not sandbox tracked `.pnpmfile.cjs`,
+`.npmrc`, or explicitly invoked build scripts. Persistent `node_modules`,
+native inputs, and DerivedData can be poisoned by an untrusted ref; clear
+those caches before resuming trusted builds after such exposure.
+Use `--build-only` or `ST_IOS_BUILD_ONLY=1` to prepare a signed artifact while
+phone access is held. Installation and launch require the caller to supply
+`AGENT_ACTION_APPROVAL=deploy`; without it, the signed artifact is retained
+and no phone command runs. Remove `--build-only` and supply that approval
+only after the device owner authorizes delivery; the retained artifact is
+reused without rebuilding. Before signing, the generated app's `Info.plist` receives the full
+Git revision as `StBuildCommit` and the revision's commit count as
+`CFBundleVersion`. The artifact's `success.json` records both. Compare its
+`build_version` with `devicectl device info apps --bundle-id
+com.compoundingtech.smalltalk --device "$ST_IOS_DEVICE" --json-output -` to
+verify the installed build independently of pairing or proof-only UI.
+The embedded `EXPO_PUBLIC_ST3_BUILD` revision also appears in connected-client
+diagnostics.
+
+Prerequisites are Python 3, Git, Node 24, pnpm 12.7.0, CocoaPods, Xcode, and `gate-slot`
+in the scheduler's PATH. The build takes a heavy admission slot, runs under
+`taskpolicy -c utility` and `nice -n 19`, and caps Xcode parallelism at four jobs.
+Utility QoS yields to interactive work without restricting a native build to
+efficiency cores as background QoS does. The scheduler itself must not inherit
+background QoS or low-priority I/O: `taskpolicy -c utility` is a clamp, not an
+elevation from background. Missing admission tooling refuses the build; it
+never silently bypasses host limits.
+An advisory lock makes scheduled and manual invocations single-flight.
+One root `pnpm install --frozen-lockfile` installs the workspace. Delivery follows
+the app's recursive `workspace:` and `file:` runtime dependencies (currently
+`clients/typescript/st3-views` and `clients/typescript/st3-client`). Changes under
+that closure or `apps/ios`, or to root `package.json`, `pnpm-lock.yaml`,
+`pnpm-workspace.yaml`, `.npmrc`, or `.pnpmfile.cjs`, cause a build; server-only changes do not.
+
+The dedicated checkout retains pnpm installations and generated native inputs.
+`build-cache/` stores their input identities and shared Xcode DerivedData,
+including partial compilation from unsuccessful attempts. The frozen workspace
+install reruns only when a package manifest, root lock/workspace configuration,
+or Node/pnpm path changes, or `node_modules` is missing. Native generation and CocoaPods rerun only when
+the package locks/manifests, evaluated app configuration, config plugins,
+native modules, assets, or immutable toolchain paths change, or their generated
+workspace/lock is missing. JS-only changes reuse the native cache.
+The worker uses `pnpm exec expo config` and clean `pnpm exec expo prebuild`,
+then `pnpm run export:ios`, all with `APP_VARIANT=daily` and the daily fabric
+settings pinned before invoking Xcode.
+Metro inlines `EXPO_PUBLIC_*` values into each transformed module, so the build runs
+with a delivery-scoped `TMPDIR` under `build-cache/tmp` and resets that
+transform cache whenever the inlined values change; a successful build also
+fails if the bundle does not embed the current revision. Each
+successful signed app is copied to its own immutable commit artifact before
+it becomes eligible for installation, so another build cannot mutate a
+pending install. Clear `build-cache/` after an in-place upgrade of a mutable
+Node/CocoaPods/Xcode installation; versioned or Nix tool paths invalidate it
+automatically. Do not delete a pending commit artifact.
+
+Release signing uses `CODE_SIGN_STYLE=Automatic`, the supplied development
+team, `Apple Development`, and `-allowProvisioningUpdates`. Set up the Xcode
+account, development certificate/private key, unlocked keychain, and device
+provisioning once interactively. Then prove a complete build from the same
+unattended scheduler environment: a successful interactive Xcode build alone
+does not prove its keychain/account access. Device/team IDs and signing
+material belong in private environment/configuration, never in this repo.
+
+Delivery compares content, not commits. The observed head is the tracked ref
+from the last successful fetch, updated on every fetch, including reverts and
+app-irrelevant commits. Its content key hashes the Git trees of `apps/ios` and
+its local-package closure together with the inputs outside the revision: the
+Xcode directory, Node/pnpm/CocoaPods paths, inherited `EXPO_PUBLIC_*` values,
+and the pinned native environment. Builds always run with the daily Release
+values `APP_VARIANT=daily`, `ST3_FABRIC_PROOF=0` (read by `StFabric.podspec`),
+and `ST3_FABRIC_OFFLINE_DEBUG=0` (read by `metro.config.js`), so an inherited
+value never reaches prebuild, CocoaPods, Metro, or Xcode; the pins are also part
+of the native-generation cache key. A signed artifact is installed only if its
+key equals the observed head's key under the current inputs. A build runs only
+when no retained artifact or installed app has that key; a revert to retained
+content reuses its artifact if that does not lower the installed version.
+`CFBundleVersion` comes from a persisted counter, the larger of the commit
+count and the last assigned version plus one, so it never decreases across
+reviewed revert commits and forward branch switches. Every install checks it against the
+installed version; an artifact with a lower version is rebuilt instead.
+A pending artifact for other content is dropped, never installed.
+An unsuccessful build cannot be installed. A failed content key is retried
+after 15 minutes, then after 30, doubling up to six hours (`--build-backoff`
+or `ST_IOS_BUILD_BACKOFF` sets the first delay in seconds); new content, such
+as a fix, revert, or input change, builds on the next tick. A successful build is retained
+until installation and launch both succeed; an unreachable or locked phone
+is retried on the next tick without rebuilding. While the ref cannot be
+fetched, the last observed head is used, never an older revision, and is
+rebuilt from the local checkout if needed (deferred if it is missing there).
+An origin mismatch is not an offline condition and never uses a cached target.
+Offline delivery requires an existing observed commit equal to the persisted
+trusted head; a fresh state cannot bless a cached ref when fetch fails.
+The script never grants itself deployment approval. An operator supplies
+`AGENT_ACTION_APPROVAL=deploy` for an approved invocation, or the separately
+approved host scheduler sets it deliberately in its job environment. Enabling
+that scheduler is standing deployment authorization for its configured device
+and tracked branch and requires the device owner's explicit approval; it
+remains held separately from this script PR and any outage hold must be lifted
+by its owner. Run an approved scheduler every five minutes while the Mac is
+awake and on the phone's LAN. Neither pairing nor the Debug bundle is touched.
+Xcode 27's process listing exposes executable paths and PIDs, not foreground
+state: the scheduler conservatively treats a running daily app as active and
+defers installation until 40 minutes after observing the change. After that,
+delivery takes priority even if the app is running. With five-minute polling,
+this leaves time within the one-hour delivery target for installation; build,
+admission, provisioning, and device failures remain visible rather than being
+reported as delivered. No launch uses `--terminate-existing`.
+Use `--max-deferral` or `ST_IOS_MAX_DEFERRAL` to configure that courtesy window;
+zero is appropriate for a coordinated proof when the phone is not being used.
+
+Every invocation records outcomes to `outcomes.jsonl` and stdout; each build
+has `artifacts/<commit>/build.log`. `state.json` records the observed head and
+its content key, the pending signed artifact, the installed content, and the
+installed and last assigned build versions. Every state file is written to a
+temporary file, fsynced, and renamed over the old one. An unreadable
+`state.json` is never replaced with fresh state, which could lower
+`CFBundleVersion`: the tick records `state_corrupt`, exits nonzero, and neither
+builds nor touches the phone until an operator restores or repairs the file.
+Legacy state without a trust anchor is also refused; do not delete it to
+silently reset the authoritative version floor. Reprovisioning is an operator
+action that must preserve the installed/assigned build-version floor and set
+the independently reviewed trust configuration.
+
+Before installation the script persists an independent `install_attempt`
+artifact record, retained even when a build-only tick supersedes its pending
+artifact. If interrupted between device installation and saving success,
+the next approved tick queries `devicectl device info apps` into a private JSON file
+and removes the receipt after parsing. An exact daily bundle ID and numeric
+`bundleVersion` (not the marketing version) establish whether installation
+already completed, so launch can resume without a second install. A higher
+device version raises the version floor and refuses the older artifact.
+Query failure, malformed JSON, duplicate daily entries, or invalid versions
+defer delivery without assuming success or mutating the phone. An absent
+daily app permits retry; any previously persisted version floor is retained.
+A readback contradicting the cached installed version also invalidates the
+cached installed-content identity, while retaining the monotonic version floor.
+No device query runs under `--build-only` or without caller deploy approval.
+Optionally set both `--notify-from` and `--notify-to` (or
+`ST_IOS_NOTIFY_FROM`/`ST_IOS_NOTIFY_TO`) to send state changes with
+`st conversations send`: each newly installed commit, a new build failure,
+or device unavailability lasting over one hour (once until recovery).
+A notification carries only the outcome, time, commit, build version, and
+exit status; raw tool errors and log paths, which can name the device or
+signing identity, stay in `outcomes.jsonl`.
+Unchanged ticks stay in the log only. Notification failures do not discard
+delivery state or stop installation.
+Keep all logs and state private: native tools include signing/device details.
+
+Focused scheduler tests: `python3 -m unittest discover -s apps/ios/scripts -p 'test_release_delivery.py'`.
 
 The Debug app accepts a short-lived pairing deep link for headless simulator checks: `com.compoundingtech.smalltalk.starter://pair?gateway=...&id=...&code=...`. The link opens the pairing form with the code prefilled; it does not submit the code until a separately supplied fingerprint or explicit unpinned override is chosen. The handler is disabled in Release. Treat the link as a temporary credential and do not commit or log its populated form.
 
