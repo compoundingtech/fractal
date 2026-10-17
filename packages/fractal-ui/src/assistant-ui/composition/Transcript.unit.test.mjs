@@ -42,7 +42,7 @@ test('live activity shares compact header durations and host-supplied waiting st
   for (const [elapsed, duration] of [[12000, '12s'], [60000, '1m'], [185000, '3m 05s'], [3720000, '1h 02m'], [14820000, '4h 07m'], [16027000, '4h 27m']]) {
     for (const tag of ['Working', 'WaitingForAnswer']) {
       const markup = renderToStaticMarkup(React.createElement(LiveActivity, { state: { _tag: tag }, startedAt: new Date(now - elapsed).toISOString(), now }))
-      assert.ok(markup.includes(tag === 'Working' ? `Working for ${duration}` : `Waiting for your answer · ${duration}`))
+      assert.ok(markup.includes(tag === 'Working' ? `Working · ${duration}` : `Waiting for your answer · ${duration}`))
     }
   }
   const noStart = renderToStaticMarkup(React.createElement(LiveActivity, { state: { _tag: 'WaitingForAnswer' }, now }))
@@ -88,7 +88,7 @@ test('read-only work uses a static summary and the reasoning button is named Thi
   }))
   assert.match(markup, /Worked/)
   assert.equal((markup.match(/<button\b/g) ?? []).length, 1)
-  assert.match(markup, /<button[^>]*aria-expanded="false"[^>]*>[\s\S]*?<span>Thinking<\/span><\/button>/)
+  assert.match(markup, /<button[^>]*aria-expanded="false"[^>]*>[\s\S]*?<span data-call-title="true"[^>]*>Thinking<\/span>[\s\S]*?<\/button>/)
   assert.equal((markup.match(/data-testid="thinking-entry"/g) ?? []).length, 1)
   assert.doesNotMatch(markup, /Thought 0/)
 })

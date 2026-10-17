@@ -25,7 +25,7 @@ function fixture(state: State, prefix: string): TranscriptStoryData {
   const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `${prefix}/prompt`, role: 'user', text: 'Keep the row projection readable and verify that selection survives the change.', attachments: [], streaming: false, at, sender: { kind: 'human', label: 'Operator' }, sendState: state === 'pending-send' ? { _tag: 'Pending' } : state === 'failed-send' ? { _tag: 'Failed', reason: { _tag: 'Failed' }, detail: 'The connection dropped while sending. Your draft is still saved; try again in a moment.' } : state === 'unconfirmed-send' ? { _tag: 'Unconfirmed', detail: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.' } : undefined }
   const calls: ConversationItem[] = [
     { _tag: 'ToolCall', id: `${prefix}/read`, callId: `${prefix}/read`, name: 'read', input: { path: 'src/rows.ts' }, status: 'success', result: { content: source, mediaType: 'text/plain', isError: false, at: '2026-01-15T12:00:03Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' },
-    { _tag: 'ToolCall', id: `${prefix}/run`, callId: `${prefix}/run`, name: 'run', input: { command: 'pnpm test rows' }, status: failed ? 'error' : interrupted ? 'interrupted' : running ? 'running' : 'success', result: running ? undefined : { content: failed ? 'The row assertion did not match the observed selection.' : interrupted ? 'Stopped before the checks completed.' : '✓ selection retained\n✓ visible count matches\n✓ empty rows handled', mediaType: 'text/x-shellscript', isError: failed, at: '2026-01-15T12:00:18Z' }, callSeen: true, at: '2026-01-15T12:00:05Z' },
+    { _tag: 'ToolCall', id: `${prefix}/run`, callId: `${prefix}/run`, name: 'run', input: { command: 'pnpm test rows' }, status: failed ? 'error' : interrupted ? 'interrupted' : running ? 'running' : 'success', result: running ? undefined : { content: failed ? 'The row assertion did not match the observed selection.' : interrupted ? 'Stopped before the checks completed.' : 'Passed: selection retained\nPassed: visible count matches\nPassed: empty rows handled', mediaType: 'text/x-shellscript', isError: failed, at: '2026-01-15T12:00:18Z' }, callSeen: true, at: '2026-01-15T12:00:05Z' },
     { _tag: 'ToolCall', id: `${prefix}/empty`, callId: `${prefix}/empty`, name: 'read', input: { path: 'src/empty.ts' }, status: 'success', result: { content: '', isError: false, at: '2026-01-15T12:00:19Z' }, callSeen: true, at: '2026-01-15T12:00:19Z' },
   ]
   const reasoning: ConversationItem = { _tag: 'Reasoning', id: `${prefix}/thinking`, text: 'Compare the **observed selection** with the projected rows before changing the result.', streaming: running, at }
@@ -82,6 +82,7 @@ function ReasoningExamples({ scheme = 'dark' }: { scheme?: Scheme }) {
   </section>
 }
 export const AdjacentReasoning: Story = {
+  tags: ['critical'],
   render: args => <ReasoningExamples scheme={args.scheme} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
@@ -116,16 +117,16 @@ export const AdjacentReasoning: Story = {
   },
 }
 export const AdjacentReasoningLight: Story = { ...AdjacentReasoning, args: { scheme: 'light' } }
-export const Settled: Story = { play: async ({ canvasElement }) => {
+export const Settled: Story = { tags: ['critical'], play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const fold = await canvas.findByRole('button', { name: /Worked for 24s/ })
   await expect(fold).toHaveAttribute('aria-expanded', 'false')
   await expect(canvasElement.querySelector('[data-testid="tool-detail-preview"]')).toBeNull()
-  await expect(canvasElement.querySelector('[data-testid="answer-meta"]')).not.toBeNull()
+  await expect(canvasElement.querySelector('[data-testid="message-header"] time')).not.toBeNull()
   await expect(canvasElement.querySelector('[data-testid="live-work"]')).toBeNull()
 } }
 export const SettledLight: Story = { ...Settled, args: { scheme: 'light' } }
-export const Expanded: Story = { args: { state: 'expanded' }, play: async ({ canvasElement }) => {
+export const Expanded: Story = { tags: ['critical'], args: { state: 'expanded' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const fold = await canvas.findByRole('button', { name: /Worked for 24s/ })
   await userEvent.click(fold)
@@ -139,10 +140,12 @@ export const Expanded: Story = { args: { state: 'expanded' }, play: async ({ can
   await waitFor(() => expect(previews[0]!.querySelector('[data-syntax-token~="keyword"]')).not.toBeNull())
   await expect(previews[0]).toHaveTextContent('export const visibleRows')
   await expect(previews[1]).toHaveTextContent('selection retained')
-  await expect(canvas.getByTestId('work-log-divider')).toBeInTheDocument()
+  await expect(canvasElement.querySelector('[data-testid="work-log"] hr')).toBeNull()
+  await expect(canvas.getByTestId('work-log-children')).toContainElement(canvas.getByTestId('thinking-entry'))
   await expect(canvas.getByRole('button', { name: 'Thinking' })).toHaveAttribute('aria-expanded', 'false')
   // A silent success with input stays collapsed: no preview, but it can still be expanded for its raw input.
-  const empty = canvasElement.querySelector('[data-tool-status="success"]:last-child')!
+  // E18/C3: Thinking shares the fold scroller, so the final tool row is no longer its last child.
+  const empty = Array.from(canvasElement.querySelectorAll('[data-tool-status="success"]')).at(-1)!
   await expect(empty.querySelector('button')).toHaveAttribute('aria-expanded', 'false')
   await expect(empty.querySelector('[data-testid="tool-detail-preview"]')).toBeNull()
   await expectNoOutputWithControl(empty as HTMLElement)
@@ -164,7 +167,7 @@ const longCommand = 'pnpm --filter ./packages/rows exec vitest run src/rows.test
 const commandRowItems = ([['short', 'pnpm test rows'], ['long', longCommand]] as const).map(([key, command]): ConversationItem => ({ _tag: 'ToolCall', id: `rows/${key}`, callId: `rows/${key}`, name: 'run', input: { command }, status: 'success', result: { content: '✓ selection retained', mediaType: 'text/x-shellscript', isError: false, at: '2026-01-15T12:00:04Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' }))
 const commandRowData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'rows', items: commandRowItems, work: workLogTurnFromItems(commandRowItems, { kindFor: () => 'run', running: false, failed: false, interrupted: false, durationMs: 4000, startedAt: at, completeHistory: true }) }] }
 /** A long command keeps its row to one line: ellipsis in place, full text in the title. */
-export const LongCommandRow: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={commandRowData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
+export const LongCommandRow: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={commandRowData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await userEvent.click(await canvas.findByRole('button', { name: /Worked for 4s/ }))
   const rows = [...canvasElement.querySelectorAll<HTMLElement>('[data-tool-status] > button')]
@@ -214,7 +217,7 @@ const rawInputData: TranscriptStoryData = (() => {
   return { ...base, turns: [{ ...turn, items, work }] }
 })()
 /** Row expansion shows intent first; exact input requires the second disclosure. */
-export const RawInputOnExpand: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={rawInputData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
+export const RawInputOnExpand: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={rawInputData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const notice = await canvas.findByRole('alert')
   // Control: the overlay probe does see promoted output, so its raw-input absence is meaningful.
@@ -250,7 +253,7 @@ export const RawInputOnExpand: Story = { render: args => <main {...stylex.props(
 export const RawInputOnExpandLight: Story = { ...RawInputOnExpand, args: { scheme: 'light' } }
 const rawDefaultTurn = workLogTurnFromItems([{ _tag: 'ToolCall', id: 'raw-default/run', callId: 'raw-default/run', name: 'run', input: `pnpm test rows # ${rawMarker}:default`, status: 'success', result: { content: '✓ selection retained', isError: false, at }, callSeen: true, at }], { kindFor: () => 'run', running: false, failed: false, interrupted: false, completeHistory: true })
 /** The kit's default detail renderer applies the same rule; a string input stays verbatim. */
-export const RawInputDefaultDetail: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><WorkLogV1 turn={rawDefaultTurn} /></main>, play: async ({ canvasElement }) => {
+export const RawInputDefaultDetail: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><WorkLogV1 turn={rawDefaultTurn} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await userEvent.click(canvas.getByRole('button', { name: 'Worked · 1 command' }))
   await expect(canvas.queryByTestId('tool-raw-input')).toBeNull()
@@ -276,7 +279,7 @@ const withoutOutputData: TranscriptStoryData = { sync: { _tag: 'Live', since: no
   { id: 'live', items: liveItems, work: workLogTurnFromItems(liveItems, { kindFor: () => 'run', running: true, failed: false, interrupted: false, startedAt: at }) },
 ] }
 /** Silent success, failure and in-flight calls retain both disclosure stages even without output. */
-export const RawInputWithoutOutput: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={withoutOutputData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
+export const RawInputWithoutOutput: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={withoutOutputData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const notice = await canvas.findByRole('alert')
   const rows = [...canvasElement.querySelectorAll<HTMLElement>('[data-tool-status] > button')]
@@ -313,7 +316,7 @@ const nativeOutputItems: readonly ConversationItem[] = [
   { name: 'non-text output', content: [{ type: 'image', data: 'synthetic-bytes' }] },
 ].map(({ name, content }, index) => ({ _tag: 'ToolCall', id: `native-output/${index}`, callId: `native-call/${index}`, name, input: {}, status: 'success', callSeen: true, at, result: { content, isError: false, at } }))
 const nativeOutputTurn = workLogTurnFromItems(nativeOutputItems, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true })
-export const NativeToolOutput: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><WorkLogV1 turn={nativeOutputTurn} /></main>, play: async ({ canvasElement }) => {
+export const NativeToolOutput: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><WorkLogV1 turn={nativeOutputTurn} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await userEvent.click(canvas.getByRole('button', { name: 'Worked' }))
   const native = canvas.getByRole('button', { name: /^native array output/ })
@@ -334,18 +337,18 @@ export const NativeToolOutput: Story = { render: args => <main {...stylex.props(
   await expectNoOutputWithControl(canvasElement)
 } }
 export const NativeToolOutputLight: Story = { ...NativeToolOutput, args: { scheme: 'light' } }
-export const Streaming: Story = { args: { state: 'streaming' }, play: async ({ canvasElement }) => {
+export const Streaming: Story = { tags: ['critical'], args: { state: 'streaming' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await canvas.findByTestId('live-work')
   await expect(canvasElement.querySelectorAll('[data-testid="live-work"]')).toHaveLength(1)
   await expect(canvas.getByRole('status', { name: 'Response in progress' })).toBeInTheDocument()
   await expect(canvas.getByRole('progressbar', { name: 'Run in progress' })).toHaveAttribute('aria-valuetext', 'Running')
   await expect(canvasElement.querySelectorAll('[data-streaming-tail="true"]')).toHaveLength(1)
-  await expect(canvasElement.querySelector('[data-testid="answer-meta"]')).toBeNull()
+  await expect(canvasElement.querySelector('[aria-label="Copy answer"]')).toBeNull()
   await expect(canvas.getByRole('button', { name: /Working/ })).toBeDisabled()
 } }
 export const StreamingLight: Story = { ...Streaming, args: { state: 'streaming', scheme: 'light' } }
-export const Failed: Story = { args: { state: 'failed' }, play: async ({ canvasElement }) => {
+export const Failed: Story = { tags: ['critical'], args: { state: 'failed' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const notice = await canvas.findByRole('alert')
   await expect(notice).toHaveTextContent('Command did not complete')
@@ -362,22 +365,22 @@ export const FailedLight: Story = { ...Failed, args: { state: 'failed', scheme: 
 export const Interrupted: Story = { args: { state: 'interrupted' } }
 export const InterruptedLight: Story = { args: { state: 'interrupted', scheme: 'light' } }
 export const CompletionUnknown: Story = { args: { state: 'unknown' } }
-export const Loading: Story = { args: { state: 'loading' }, play: async ({ canvasElement }) => {
+export const Loading: Story = { tags: ['critical'], args: { state: 'loading' }, play: async ({ canvasElement }) => {
   await expect(await within(canvasElement).findByText('Loading conversation…')).toBeVisible()
 } }
 export const LoadingLight: Story = { ...Loading, args: { state: 'loading', scheme: 'light' } }
-export const CatchingUp: Story = { args: { state: 'catching-up' }, play: async ({ canvasElement }) => {
+export const CatchingUp: Story = { tags: ['critical'], args: { state: 'catching-up' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await canvas.findByTestId('transcript-turn')
   await expect(canvas.getByRole('progressbar', { name: 'Thread synchronization' })).toHaveAttribute('aria-valuenow', '32')
   await expect(canvas.getByRole('progressbar', { name: 'Thread synchronization' })).toHaveAttribute('aria-valuemax', '64')
-  await expect(canvas.getByTestId('answer-meta')).toBeInTheDocument()
+  await expect(canvas.getAllByTestId('message-header').length).toBeGreaterThan(0)
 } }
 export const CatchingUpLight: Story = { ...CatchingUp, args: { state: 'catching-up', scheme: 'light' } }
 export const Reconnecting: Story = { args: { state: 'reconnecting' } }
 export const SyncFailed: Story = { args: { state: 'sync-failed' } }
 export const SyncFailedLight: Story = { args: { state: 'sync-failed', scheme: 'light' } }
-export const AllStates: Story = { render: args => <main {...stylex.props(styles.all, ...baselineTheme, args.scheme === 'light' && lightTheme)}>{(['settled', 'streaming', 'failed', 'interrupted', 'unknown', 'loading', 'catching-up', 'reconnecting', 'sync-failed'] as const).map(state => <section key={state}><h2>{state}</h2><TranscriptStory scheme={args.scheme} state={state} /></section>)}</main>, play: async ({ canvasElement }) => {
+export const AllStates: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.all, ...baselineTheme, args.scheme === 'light' && lightTheme)}>{(['settled', 'streaming', 'failed', 'interrupted', 'unknown', 'loading', 'catching-up', 'reconnecting', 'sync-failed'] as const).map(state => <section key={state}><h2>{state}</h2><TranscriptStory scheme={args.scheme} state={state} /></section>)}</main>, play: async ({ canvasElement }) => {
   await expect(within(canvasElement).getAllByRole('main')).toHaveLength(1)
   await expect(canvasElement.querySelector('main main')).toBeNull()
   const examples = within(canvasElement).getAllByRole('region', { name: / conversation example$/ })
@@ -397,18 +400,23 @@ function AnswerMetadataStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   const retry = React.useCallback(() => {}, [])
   return <main {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><RuntimeTranscript data={data} onOpenTool={open} onRetry={retry} /></main>
 }
-export const SettledAnswerMeta: Story = { render: args => <AnswerMetadataStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+export const SettledAnswerMeta: Story = { tags: ['critical'], render: args => <AnswerMetadataStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await canvas.findAllByRole('button', { name: 'Copy answer' })
   const answers = canvas.getAllByTestId('agent-message')
   await expect(answers).toHaveLength(3)
   await expect(answers[0]!.querySelector('time')?.getAttribute('datetime')).toBe('2026-01-15T12:00:24.000Z')
   await expect(answers[1]!.querySelector('time')).toBeNull()
-  await expect(answers[2]!.querySelector('[data-testid="answer-meta"]')).toBeNull()
-  const footer = answers[0]!.querySelector('[data-testid="answer-meta"]')!
+  await expect(answers[2]!.querySelector('[aria-label="Copy answer"]')).toBeNull()
+  const header = within(answers[0]!).getByTestId('message-header')
+  const copy = within(answers[0]!).getByRole('button', { name: 'Copy answer' })
   const prose = answers[0]!.querySelector('[data-testid="markdown"]')!
-  await expect(footer.getBoundingClientRect().top).toBeGreaterThanOrEqual(prose.getBoundingClientRect().bottom)
-  await expect(getComputedStyle(footer).opacity).toBe('1')
+  await expect(header.getBoundingClientRect().bottom).toBeLessThanOrEqual(prose.getBoundingClientRect().top)
+  await expect(header.getBoundingClientRect().height).toBe(16)
+  await expect(header).toContainElement(answers[0]!.querySelector('time'))
+  await expect(getComputedStyle(copy).opacity).toBe('0')
+  await userEvent.hover(answers[0]!)
+  await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
   const clipboard = navigator.clipboard
   const original = Object.getOwnPropertyDescriptor(clipboard, 'writeText')
   let copied = ''
@@ -434,14 +442,14 @@ async function tabTo(target: HTMLElement) {
   for (let step = 0; step < 12 && document.activeElement !== target; step++) await userEvent.tab()
   await expect(target).toHaveFocus()
 }
-export const Unavailable: Story = { args: { state: 'sync-failed', availability: unavailable() }, play: async ({ canvasElement }) => {
+export const Unavailable: Story = { tags: ['critical'], args: { state: 'sync-failed', availability: unavailable() }, play: async ({ canvasElement }) => {
   const state = await expectUnavailableState(canvasElement)
   await userEvent.click(within(state).getByRole('button', { name: 'Show details' }))
   await waitFor(() => expect(within(state).getByText(unavailableDetail).checkVisibility()).toBe(true))
 } }
 export const UnavailableLight: Story = { ...Unavailable, args: { ...Unavailable.args, scheme: 'light' } }
 const tryAgain = fn()
-export const UnavailableWithAction: Story = { args: { state: 'sync-failed', availability: unavailable({ label: 'Try again', onPress: tryAgain }) }, play: async ({ canvasElement }) => {
+export const UnavailableWithAction: Story = { tags: ['critical'], args: { state: 'sync-failed', availability: unavailable({ label: 'Try again', onPress: tryAgain }) }, play: async ({ canvasElement }) => {
   tryAgain.mockClear()
   const state = await expectUnavailableState(canvasElement, 'Try again')
   const action = within(state).getByRole('button', { name: 'Try again' })
@@ -460,7 +468,7 @@ function UnavailableComposerStory({ scheme = 'dark' }: { scheme?: Scheme }) {
     <div data-testid="host-composer" {...stylex.props(styles.composerDock)}><EmbraceComposer variant="C1" /></div>
   </section></EmbraceRuntimeProvider></main>
 }
-export const UnavailableWithComposer: Story = { render: args => <UnavailableComposerStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+export const UnavailableWithComposer: Story = { tags: ['critical'], render: args => <UnavailableComposerStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   tryAgain.mockClear()
   const state = await expectUnavailableState(canvasElement, 'Try again')
   const dock = within(canvasElement).getByTestId('host-composer')
@@ -476,7 +484,7 @@ export const UnavailableWithComposer: Story = { render: args => <UnavailableComp
 } }
 export const UnavailableWithComposerLight: Story = { ...UnavailableWithComposer, args: { scheme: 'light' } }
 const loadEarlier = fn()
-export const HasOlderWithLoad: Story = { args: { history: { _tag: 'HasOlder', onLoadEarlier: loadEarlier } }, play: async ({ canvasElement }) => {
+export const HasOlderWithLoad: Story = { tags: ['critical'], args: { history: { _tag: 'HasOlder', onLoadEarlier: loadEarlier } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   loadEarlier.mockClear()
   await canvas.findByRole('button', { name: /Worked for 24s/ })
@@ -485,20 +493,20 @@ export const HasOlderWithLoad: Story = { args: { history: { _tag: 'HasOlder', on
   await expect(loadEarlier).toHaveBeenCalledTimes(1)
 } }
 export const HasOlderWithLoadLight: Story = { ...HasOlderWithLoad, args: { ...HasOlderWithLoad.args, scheme: 'light' } }
-export const HasOlderWithoutLoad: Story = { args: { history: { _tag: 'HasOlder' } }, play: async ({ canvasElement }) => {
+export const HasOlderWithoutLoad: Story = { tags: ['critical'], args: { history: { _tag: 'HasOlder' } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await canvas.findByRole('button', { name: /Worked for 24s/ })
   await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
   await expect(canvas.queryByRole('button', { name: 'Load earlier messages' })).toBeNull()
 } }
 export const HasOlderLight: Story = { ...HasOlderWithoutLoad, args: { ...HasOlderWithoutLoad.args, scheme: 'light' } }
-export const PendingSend: Story = { args: { state: 'pending-send' }, play: async ({ canvasElement }) => {
+export const PendingSend: Story = { tags: ['critical'], args: { state: 'pending-send' }, play: async ({ canvasElement }) => {
   const prompt = await within(canvasElement).findByTestId('user-message')
   await expect(prompt).toHaveAttribute('data-send-state', 'pending')
   await expect(prompt.querySelector('time')).toBeNull()
 } }
 export const PendingSendLight: Story = { ...PendingSend, args: { state: 'pending-send', scheme: 'light' } }
-export const FailedSend: Story = { args: { state: 'failed-send' }, play: async ({ canvasElement }) => {
+export const FailedSend: Story = { tags: ['critical'], args: { state: 'failed-send' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const failure = await canvas.findByTestId('send-failure')
   await expect(failure).toHaveTextContent("Couldn't send")
@@ -507,7 +515,7 @@ export const FailedSend: Story = { args: { state: 'failed-send' }, play: async (
 } }
 export const FailedSendLight: Story = { ...FailedSend, args: { state: 'failed-send', scheme: 'light' } }
 /** st may have taken the send: a neutral status with Send again, never failure copy or an alert. */
-export const UnconfirmedSend: Story = { args: { state: 'unconfirmed-send' }, play: async ({ canvasElement }) => {
+export const UnconfirmedSend: Story = { tags: ['critical'], args: { state: 'unconfirmed-send' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const prompt = await canvas.findByTestId('user-message')
   await expect(prompt).toHaveAttribute('data-send-state', 'unconfirmed')
@@ -525,7 +533,7 @@ function SendIdentityStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   const data = React.useMemo(() => fixture(delivered ? 'settled' : 'pending-send', 'identity'), [delivered])
   return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><button type="button" onClick={() => setDelivered(true)}>Deliver echo</button><div {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} /></div></main>
 }
-export const SendIdentity: Story = { render: args => <SendIdentityStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+export const SendIdentity: Story = { tags: ['critical'], render: args => <SendIdentityStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const selector = '[data-testid="user-message"][data-item-id="identity/prompt"]'
   await expect(await canvas.findByTestId('user-message')).toHaveAttribute('data-send-state', 'pending')
@@ -573,7 +581,7 @@ function AppendedItemsStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   }, [count])
   return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><button type="button" disabled={count === appendItems.length} onClick={() => setCount(value => value + 1)}>Append {count === 0 ? 'tool' : count === 1 ? 'reasoning' : 'answer'}</button><div {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} /></div></main>
 }
-export const AppendedItems: Story = { render: args => <AppendedItemsStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+export const AppendedItems: Story = { tags: ['critical'], render: args => <AppendedItemsStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const turn = await canvas.findByTestId('transcript-turn')
   const prompt = await canvas.findByTestId('user-message')
@@ -651,7 +659,7 @@ function StrandedItemStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><button type="button" disabled={appended} onClick={() => setAppended(true)}>Append dropped entry</button><div {...stylex.props(styles.frame)}><RuntimeTranscript data={data} drop={strandedDrop} onRetry={() => {}} /></div></main>
 }
 const itemOrder = (turn: Element) => Array.from(turn.querySelectorAll('[data-item-id]'), element => element.getAttribute('data-item-id'))
-export const StrandedItem: Story = { render: args => <StrandedItemStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+export const StrandedItem: Story = { tags: ['critical'], render: args => <StrandedItemStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   // The virtualized transcript's first paint can exceed findBy's 1s default on a saturated strict host.
   const lost = await canvas.findByText('This answer never reached the runtime.', undefined, { timeout: 10_000 })
@@ -689,9 +697,9 @@ function FailedRetryStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   const [state, setState] = React.useState<State>('failed-send')
   const data = React.useMemo(() => fixture(state, 'retry'), [state])
   const retry = (itemId: string) => { retrySend(itemId); setState('pending-send') }
-  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><h2>Failed → Retry</h2><button type="button" onClick={() => setState('settled')}>Deliver echo</button><div {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} onRetrySend={retry} /></div></main>
+  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><h2>Failed retry</h2><button type="button" onClick={() => setState('settled')}>Deliver echo</button><div {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} onRetrySend={retry} /></div></main>
 }
-export const FailedRetry: Story = { name: 'Failed → Retry', render: args => <FailedRetryStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+export const FailedRetry: Story = { tags: ['critical'], name: 'Failed Retry', render: args => <FailedRetryStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   retrySend.mockClear()
   const canvas = within(canvasElement)
   const selector = '[data-testid="user-message"][data-item-id="retry/prompt"]'
@@ -715,7 +723,7 @@ const promptlessData: TranscriptStoryData = {
   sync: { _tag: 'Live', since: now },
   turns: fixture('settled', 'promptless').turns.map(({ prompt, ...turn }) => turn),
 }
-export const MidTurnHistory: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={promptlessData} onOpenTool={() => {}} onRetry={() => {}} history={{ _tag: 'HasOlder' }} /></main>, play: async ({ canvasElement }) => {
+export const MidTurnHistory: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={promptlessData} onOpenTool={() => {}} onRetry={() => {}} history={{ _tag: 'HasOlder' }} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(await canvas.findByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
   await expect(await canvas.findByTestId('agent-message')).toHaveTextContent('The row projection now keeps')
@@ -725,7 +733,7 @@ export const MidTurnHistory: Story = { render: args => <main {...stylex.props(st
 } }
 export const MidTurnHistoryLight: Story = { ...MidTurnHistory, args: { scheme: 'light' } }
 
-export const ReadOnlyTools: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={cases.settled} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
+export const ReadOnlyTools: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={cases.settled} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const work = await within(canvasElement).findByTestId('work-log')
   await expect(work.querySelector(':scope > button, :scope > [role="button"]')).toBeNull()
   const rows = work.querySelectorAll<HTMLElement>('[data-tool-status]')
@@ -748,7 +756,7 @@ export const ReadOnlyTools: Story = { render: args => <main {...stylex.props(sty
 export const ReadOnlyToolsLight: Story = { ...ReadOnlyTools, args: { scheme: 'light' } }
 const proseOnlyItems: readonly ConversationItem[] = [{ _tag: 'Text', id: 'prose/answer', role: 'assistant', text: 'A plain answer needs no work summary.', attachments: [], streaming: false, at }]
 const proseOnlyData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'prose', items: proseOnlyItems, work: workLogTurnFromItems(proseOnlyItems, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true }) }] }
-export const ProseOnly: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={proseOnlyData} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
+export const ProseOnly: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={proseOnlyData} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(await canvas.findByTestId('agent-message')).toHaveTextContent('A plain answer')
   await expect(canvas.queryByTestId('work-log')).toBeNull()
@@ -804,7 +812,7 @@ const semanticData: TranscriptStoryData = {
     work: workLogTurnFromItems(semanticItems, { kindFor: () => 'read', running: false, failed: false, interrupted: false, durationMs: 24000, completeHistory: true }),
   }],
 }
-export const SemanticItems: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={semanticData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
+export const SemanticItems: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={semanticData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await userEvent.click(await canvas.findByRole('button', { name: /Worked for 24s/ }))
   await userEvent.click(canvas.getByRole('button', { name: 'Thinking' }))
@@ -853,7 +861,7 @@ export const SemanticItems: Story = { render: args => <main {...stylex.props(sty
   await expect(parseFloat(focus.outlineOffset)).toBeLessThan(0)
 } }
 export const SemanticItemsLight: Story = { ...SemanticItems, args: { scheme: 'light' } }
-export const ReadableEmpty: Story = { args: { state: 'empty', emptyState: { title: 'No messages in this conversation', body: 'Send a message to start working with the agent.' } }, play: async ({ canvasElement }) => {
+export const ReadableEmpty: Story = { tags: ['critical'], args: { state: 'empty', emptyState: { title: 'No messages in this conversation', body: 'Send a message to start working with the agent.' } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvas.getByTestId('transcript-empty')).toBeInTheDocument()
   await expect(canvas.getByText('No messages in this conversation')).toBeInTheDocument()
@@ -861,7 +869,7 @@ export const ReadableEmpty: Story = { args: { state: 'empty', emptyState: { titl
   await expect(canvasElement.querySelector('[data-testid="transcript-unavailable"]')).toBeNull()
 } }
 export const ReadableEmptyLight: Story = { ...ReadableEmpty, args: { ...ReadableEmpty.args, scheme: 'light' } }
-export const DefaultEmpty: Story = { args: { state: 'empty' }, play: async ({ canvasElement }) => {
+export const DefaultEmpty: Story = { tags: ['critical'], args: { state: 'empty' }, play: async ({ canvasElement }) => {
   await expect(within(canvasElement).getByTestId('transcript-empty')).toHaveTextContent('No messages yet')
 } }
 export const SettledAnswerMetaLight: Story = { ...SettledAnswerMeta, args: { scheme: 'light' } }
@@ -897,7 +905,7 @@ function greenFindings(root: Element): string[] {
 function NoGreenStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   return <main data-scheme={scheme} {...stylex.props(styles.all, ...baselineTheme, scheme === 'light' && lightTheme)}>{noGreenData.map(([name, data]) => <section key={name} data-no-green-state={name}><h2>{name}</h2><div {...stylex.props(styles.cell)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} onRetrySend={() => {}} /></div></section>)}</main>
 }
-export const NoGreenAllStates: Story = { render: args => <NoGreenStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+export const NoGreenAllStates: Story = { tags: ['critical'], render: args => <NoGreenStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   await within(canvasElement).findAllByTestId('transcript-turn')
   for (let pass = 0; pass < 4; pass++) {
     const closed = [...canvasElement.querySelectorAll<HTMLElement>('[aria-expanded="false"]:not([disabled]):not([aria-disabled="true"])')]
