@@ -237,6 +237,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
             true,
         )?
     };
+    st3::service::preflight(service && start)?;
     // Validate every answer before writing, including the persisted machine identity.
     merge_config(&path, &config)?;
     say!("Saved {}", path.display());

@@ -171,9 +171,22 @@ fn setup_service_conflict_is_hard_error_without_install_or_unmanaged_fallback() 
     }
     let fixture = Fixture::new();
     conflicting_services(&fixture);
+    let config = fixture.path("home/.config/st3/config.toml");
+    let work = fixture.path("work-not-created");
+    let original_config = format!(
+        "person = 'person/ada'\nnode = 'studio'\nwork_root = '{}'\n",
+        work.display()
+    );
+    fs::write(&config, &original_config).unwrap();
+    let binaries = fixture.path("home/.local/bin");
+    fs::create_dir_all(&binaries).unwrap();
+    for name in ["st3", "pty"] {
+        fs::write(binaries.join(name), format!("existing {name}")).unwrap();
+    }
+    symlink("st3", binaries.join("st")).unwrap();
     let output = fixture.cli().args([
-        "setup", "--person", "ada", "--node", "studio", "--yes",
-        "--install", "false", "--service", "true", "--start", "true",
+        "setup", "--person", "robin", "--node", "studio", "--yes",
+        "--install", "true", "--service", "true", "--start", "true",
         "--harness", "none",
     ]).output().unwrap();
     assert!(!output.status.success());
@@ -182,6 +195,12 @@ fn setup_service_conflict_is_hard_error_without_install_or_unmanaged_fallback() 
     assert!(!String::from_utf8_lossy(&output.stdout).contains("user service is unavailable"));
     assert!(!fixture.path("home/.local/state/st3/logs/setup-daemon.log").exists());
     assert!(!fixture.path("run/st3.sock").exists());
+    assert_eq!(fs::read_to_string(&config).unwrap(), original_config);
+    for name in ["st3", "pty"] {
+        assert_eq!(fs::read_to_string(binaries.join(name)).unwrap(), format!("existing {name}"));
+    }
+    assert_eq!(fs::read_link(binaries.join("st")).unwrap(), Path::new("st3"));
+    assert!(!work.exists());
     let calls = fs::read_to_string(fixture.path("home/manager.log")).unwrap();
     assert!(calls.lines().all(|line| line.starts_with("--user show ")), "{calls}");
 }
