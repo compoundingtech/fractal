@@ -462,6 +462,7 @@ describe('LiveAgentWorkspace retained panes', () => {
     switchDataReady: () => {},
     transcriptCommitted: (ref) => { committed.push(ref); return () => {} },
     beginSendEcho: () => ({ committed: () => () => {}, cancel: () => {} }),
+    beginAlertAnswer: () => ({ landed: () => () => {}, cancel: () => {} }),
     observeSync: () => {},
     dispose: () => {},
   }

@@ -11,6 +11,7 @@ import { syncLineNextChange } from '@smalltalk/fractal-ui/assistant-ui/sync-stat
 import { createConversationTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, type SendRefusal } from './composerSend.ts'
 import { spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
 import { DOCUMENT_REF } from '../documents/document-port.ts'
 import { documentReferences } from '../documents/DocumentLink.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
@@ -90,11 +91,12 @@ export const ConversationPane = ({
     onFocusCapture={event => { if (!visible) event.target.blur() }}
     onKeyDownCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}
     onClickCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}>
-    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} feed={feed} state={state} />
+    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} feed={feed} state={state} ux={ux} />
   </div>
 }
 
-const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, feed, state }: {
+const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, feed, state, ux }: {
+  readonly ux?: UxTelemetry
   readonly agentRef: string
   readonly agentName: string
   readonly onOpenTool: (call: WorkLogCall) => void
@@ -120,6 +122,23 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     items: state._tag === 'Observed' ? state.items : [],
     refusal, onRefused: setRefusal,
   })
+  // The composer's Stop (and Esc) interrupts the agent's turn, as Interrupt in its actions does.
+  // A refusal belongs to the run it answered (the running turn's id): it shows beside Stop while that run
+  // lasts, clears when the run ends or another starts, and a late answer for an older run is dropped.
+  const agentControls = source.agentControls
+  const running = state._tag === 'Observed' && state.isRunning
+  const runId = state._tag === 'Observed' && state.isRunning ? state.turns.findLast(turn => turn.work.running)?.id ?? '' : undefined
+  const [stopRefusal, setStopRefusal] = React.useState<{ readonly runId: string; readonly detail: string }>()
+  if (stopRefusal !== undefined && stopRefusal.runId !== runId) setStopRefusal(undefined)
+  // The run on screen when an interrupt answer lands; a closure would hold the run of the press.
+  const currentRun = React.useRef(runId)
+  React.useLayoutEffect(() => { currentRun.current = runId }, [runId])
+  const onCancel = React.useMemo(() => agentControls === undefined ? undefined : async () => {
+    setStopRefusal(undefined)
+    const result = await agentControls.interrupt(agentRef)
+    // An answer for an older run must not touch the current run's refusal.
+    if (result._tag === 'Refused' && runId !== undefined && currentRun.current === runId) setStopRefusal({ runId, detail: result.detail })
+  }, [agentControls, agentRef, runId])
   const retryConversation = source.retryConversation
   const renderInlineReference = React.useMemo(() => onOpenDocument === undefined ? undefined : documentReferences(onOpenDocument), [onOpenDocument])
   // A Markdown link to a `doc/…` opens it in a tab instead of following a relative URL.
@@ -130,7 +149,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     event.stopPropagation()
     onOpenDocument(href)
   }
-  return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: state._tag === 'Observed' && state.isRunning }}>
+  return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: running, ...(onCancel === undefined ? {} : { onCancel }) }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
     <Transcript
@@ -159,9 +178,10 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       {...(state._tag === 'Observed' && state.emptyState !== undefined ? { emptyState: state.emptyState } : {})}
     />
     </div>
+    <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} ux={ux} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     <div data-testid="conversation-composer-dock" style={{ flexShrink: 0, paddingBottom: spaceVars.lg }}>
-      <EmbraceComposer variant="C1" readingColumn disabledReason={binding.disabledReason} />
+      <EmbraceComposer variant="C1" readingColumn disabledReason={binding.disabledReason} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
     </div>
   </EmbraceRuntimeProvider>
 })
