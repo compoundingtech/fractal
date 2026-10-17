@@ -29,12 +29,16 @@ export interface RedesignMilestoneProps {
   readonly state: MilestoneState
   /** Device-local key for persisted panel sizes; stories pass a per-story key so screenshots stay deterministic. */
   readonly persistKey: string
+  /** The fetch a Retry performs; the failed surface shows loading until it settles. Defaults to a short simulated fetch. */
+  readonly reload?: () => Promise<void>
 }
 
 const rosterState: Record<Phase, RosterState> = {
   slice: 'ready', loading: 'loading', 'empty-roster': 'empty', 'empty-thread': 'ready', 'no-match': 'ready', 'roster-error': 'error',
   'roster-retry': 'loading', 'thread-unavailable': 'ready', 'thread-retry': 'ready', stale: 'stale', navigation: 'ready',
 }
+/** Simulated network latency for browsing the workshop; plays pass a reload they settle themselves. */
+const simulatedReload = () => new Promise<void>(resolve => { window.setTimeout(resolve, 900) })
 const changesKey = 'changes'
 const allRows = rosterFolders.flatMap(folder => folder.rows.flatMap(row => [row, ...row.children]))
 const rowFor = (ref: string) => allRows.find(row => row.ref === ref)!
@@ -92,15 +96,17 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
   const [revealRequest, setRevealRequest] = React.useState<DiffRevealRequest>()
   const [sent, setSent] = React.useState<Readonly<Record<string, readonly TranscriptTurn[]>>>({})
   const searchRef = React.useRef<HTMLInputElement>(null)
-  const timer = React.useRef<number | undefined>(undefined)
-  React.useEffect(() => () => window.clearTimeout(timer.current), [])
+  // Only the latest Retry may finish recovery, and never after unmount.
+  const attempt = React.useRef(0)
+  React.useEffect(() => () => { attempt.current = -1 }, [])
+  const reload = props.reload ?? simulatedReload
 
   // Each Retry walks the real recovery path for its own fault only: the failed surface loads, then shows live data.
   const recover = React.useCallback((through: Phase) => {
     setPhase(through)
-    window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => setPhase('slice'), 900)
-  }, [])
+    const current = ++attempt.current
+    void reload().then(() => { if (attempt.current === current) setPhase('slice') })
+  }, [reload])
   const retryRoster = React.useCallback(() => recover('roster-retry'), [recover])
   const retryThread = React.useCallback(() => recover('thread-retry'), [recover])
 
@@ -112,7 +118,7 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
   // The kit has no tool-output pane yet, so a call's "Open" shows the change set beside the thread, at the call's file.
   const openTool = React.useCallback((call: WorkLogCall) => {
     setChangesOpen(true)
-    if (window.matchMedia(narrowQuery).matches) { setTabs(current => current.includes(changesKey) ? current : [...current, changesKey]); setActiveKey(changesKey) }
+    if (window.matchMedia(narrowQuery).matches) setActiveKey(changesKey)
     const path = call.changedPath ?? changedFiles.find(file => file.path === call.argsSummary)?.path
     if (path !== undefined) setRevealRequest(previous => ({ path, sequence: (previous?.sequence ?? 0) + 1 }))
   }, [])
@@ -140,8 +146,8 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
     return resource === undefined ? undefined : <ResourceChipV1 resource={resource} file={resource.files[0]!} />
   }, [openAgent])
 
-  // Narrow: one pane, so Changes folds in as a tab. Docked: Changes is a resizable panel beside the thread.
-  const paneKeys = narrow && changesOpen && !tabs.includes(changesKey) ? [...tabs, changesKey] : narrow ? tabs : tabs.filter(key => key !== changesKey)
+  // Narrow: one pane, so Changes folds in as a tab derived from changesOpen alone. Docked: a resizable panel beside the thread.
+  const paneKeys = narrow && changesOpen ? [...tabs, changesKey] : tabs
   const shownKey = paneKeys.includes(activeKey) ? activeKey : paneKeys[0]
   const paneTabs = paneKeys.map(key => key === changesKey ? { key, title: 'Changes' } : agentTab(key, phase))
   const sidebarHidden = narrow || collapsed

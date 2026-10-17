@@ -15,7 +15,7 @@ import { baselineTheme } from '../../assistant-ui/neutral-theme'
 import { lightTheme } from '../../assistant-ui/composition-theme'
 import { borderVars as border, spaceVars as sp, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
 
-type Args = Omit<RedesignMilestoneProps, 'persistKey'>
+type Args = Omit<RedesignMilestoneProps, 'persistKey' | 'reload'>
 
 const meta: Meta<Args> = {
   title: 'Fractal UI/Redesign milestone',
@@ -87,6 +87,42 @@ const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const chord = (key: string) => isMac ? `{Meta>}${key}{/Meta}` : `{Control>}${key}{/Control}`
 const rows = (root: HTMLElement) => root.querySelectorAll('[data-testid="milestone-agent-row"]')
 
+/** A reload the play settles itself: recovery plays assert the loading frame, then complete it with no timer to race. */
+function manualReload() {
+  let settle: (() => void) | undefined
+  return {
+    reload: () => new Promise<void>(resolve => { settle = resolve }),
+    settle: () => { expect(settle).toBeDefined(); settle!(); settle = undefined },
+  }
+}
+const rosterReload = manualReload()
+const threadReload = manualReload()
+
+/** Opening a tool's output shows Changes; hiding changes removes it again, including the narrow Changes tab. */
+export const HideChanges: Story = {
+  tags: ['critical'], args: { state: 'slice' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const page = within(canvasElement.ownerDocument.body)
+    const narrow = canvasElement.querySelector('[data-narrow]') !== null
+    const changesTab = () => canvas.queryByRole('tab', { name: 'Changes' })
+    const docked = () => canvas.queryByRole('separator', { name: 'Resize changes' })
+    await userEvent.click((await canvas.findAllByRole('button', { name: /^Worked for/ }))[0]!)
+    await userEvent.click(await waitFor(() => { const row = canvasElement.querySelector<HTMLElement>('[data-tool-status] > button'); expect(row).not.toBeNull(); return row! }))
+    await userEvent.click(await canvas.findByRole('button', { name: /^Open .+ tool detail$/ }))
+    if (narrow) await waitFor(() => expect(changesTab()).toHaveAttribute('aria-selected', 'true'))
+    else await waitFor(() => expect(docked()).not.toBeNull())
+    await userEvent.keyboard(chord('k'))
+    const palette = await page.findByRole('dialog', { name: 'Command palette' })
+    await userEvent.keyboard('hide changes')
+    await waitFor(() => expect(within(palette).getAllByRole('menuitem')[0]).toHaveTextContent('Hide changes'))
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(page.queryByRole('dialog', { name: 'Command palette' })).toBeNull())
+    await waitFor(() => expect(narrow ? changesTab() : docked()).toBeNull())
+    await expect(canvasElement.querySelector('[aria-label^="Transcript"]')).not.toBeNull()
+  },
+}
+
 /** Mod+K opens with the first result highlighted, so Enter opens it; "/" filter, tree arrows and Mod+B work end to end. */
 export const NavigationKeyboard: Story = {
   tags: ['critical'], args: { state: 'slice' },
@@ -125,6 +161,7 @@ export const NavigationKeyboard: Story = {
 /** A roster fault stays in the sidebar while the open thread keeps working; Retry walks loading back to a loaded roster. */
 export const ErrorRecovery: Story = {
   tags: ['critical'], args: { state: 'roster-error' },
+  render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...args} persistKey={`rm1-${context.id}`} reload={rosterReload.reload} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const alert = await canvas.findByRole('alert')
@@ -133,23 +170,30 @@ export const ErrorRecovery: Story = {
     await userEvent.click(within(alert).getByRole('button', { name: 'Details' }))
     await waitFor(() => expect(alert).toHaveTextContent('HTTP 503'))
     await userEvent.click(within(alert).getByRole('button', { name: 'Retry' }))
+    // Loading holds until the play settles the reload.
     await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'loading'))
-    await waitFor(() => expect(rows(canvasElement).length).toBeGreaterThan(3), { timeout: 3000 })
     await expect(canvas.queryByRole('alert')).toBeNull()
+    rosterReload.settle()
+    await waitFor(() => expect(canvasElement.querySelector('[data-roster-state]')).toHaveAttribute('data-roster-state', 'ready'))
+    await expect(rows(canvasElement).length).toBeGreaterThan(3)
   },
 }
 
 /** A thread fault stays in its pane while the roster stays live; Retry loads that conversation only. */
 export const ThreadRecovery: Story = {
   tags: ['critical'], args: { state: 'thread-unavailable' },
+  render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...args} persistKey={`rm1-${context.id}`} reload={threadReload.reload} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await userEvent.click(await canvas.findByRole('button', { name: 'Retry: Conversation unavailable' }))
+    // Loading holds until the play settles the reload.
     await waitFor(() => expect(canvasElement.querySelector('[data-thread-loading]')).not.toBeNull())
+    await expect(canvasElement.querySelector('[data-thread-unavailable]')).toBeNull()
     // Docked, the roster stays loaded throughout; narrow, it sits in the closed drawer and is not rendered.
     const roster = canvasElement.querySelector('[data-roster-state]')
     if (roster !== null) await expect(roster).toHaveAttribute('data-roster-state', 'ready')
-    await waitFor(() => expect(canvasElement.querySelector('[data-thread-unavailable], [data-thread-loading]')).toBeNull(), { timeout: 3000 })
+    threadReload.settle()
+    await waitFor(() => expect(canvasElement.querySelector('[data-thread-unavailable], [data-thread-loading]')).toBeNull())
     await expect(canvasElement.querySelector('[aria-label^="Transcript"]')).not.toBeNull()
   },
 }
