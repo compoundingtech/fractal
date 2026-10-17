@@ -17,3 +17,11 @@ pub fn admitted_mailbox_protocol_router(state: crate::api::AppState) -> axum::Ro
 pub fn synthetic_mailbox_protocol_router(state: crate::api::AppState, subject: &str) -> axum::Router {
     crate::api::synthetic_mailbox_protocol_router(state, subject)
 }
+
+/// Runs this process's client-facing clock `skew_ms` ahead of the wall clock (0 restores it), so a
+/// test can pass a real freshness horizon without sleeping. It is process-wide: use it only in a
+/// test that nextest runs in its own process, and restore the clock before asserting on new reports.
+#[cfg(feature = "test-support")]
+pub fn skew_client_clock(skew_ms: u64) {
+    crate::api::set_client_clock_skew_ms(skew_ms);
+}
