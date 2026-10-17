@@ -56,11 +56,13 @@ export const pickRunnerJob = {
   // GitHub-hosted, so the choice never waits for either pool it chooses between.
   'runs-on': 'ubuntu-latest',
   'timeout-minutes': 3,
-  permissions: { 'pull-requests': 'read' },
+  permissions: { 'pull-requests': 'read', actions: 'read' },
   outputs: {
     ci1: '${{ steps.pick.outputs.ci1 }}',
+    ci1_profile: '${{ steps.pick.outputs.ci1_profile }}',
     ci1_secondary: '${{ steps.pick.outputs.ci1_secondary }}',
     ci1_mail: '${{ steps.pick.outputs.ci1_mail }}',
+    ci1_build: '${{ steps.pick.outputs.ci1_build }}',
   },
   steps: [
     {
@@ -69,13 +71,16 @@ export const pickRunnerJob = {
       env: {
         // A token that may only read the organization's self-hosted runners. Forks never receive it.
         GH_TOKEN: '${{ secrets.CI1_RUNNERS_READ_TOKEN }}',
+        GH_REPO_TOKEN: '${{ github.token }}',
         EVENT: '${{ github.event_name }}',
         REPOSITORY: '${{ github.repository }}',
         HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
         PR_LABELS: '${{ toJSON(github.event.pull_request.labels.*.name) }}',
         OWNER: '${{ github.repository_owner }}',
         NEED: `\${{ vars.CI1_MIN_IDLE || '${ci1MinIdle}' }}`,
-        MERGE_OVERFLOW: '${{ vars.CI_MERGE_OVERFLOW }}',
+        MERGE_OVERFLOW: "${{ vars.CI_MERGE_OVERFLOW || 'on' }}",
+        MERGE_PRODUCER_OWNED: '${{ vars.CI_MERGE_TEST_BUILD_OWNED }}',
+        MERGE_NAMESPACE_PROFILE: '${{ vars.CI_MERGE_NAMESPACE_PROFILE }}',
         MERGE_NEED: "${{ vars.CI_MERGE_MIN_IDLE || '3' }}",
         RUN_ID: '${{ github.run_id }}',
       },
@@ -92,9 +97,11 @@ export const priorityRunnerJob = {
 } as const
 
 // Every required merge job follows one pool decision, including explicit overflow.
+// Consumers retain the common merge choice; the opt-in producer has its own admission.
+const mergeProfileLabels = `github.event_name == 'merge_group' && (needs.${pickRunnerJobId}.outputs.ci1_profile || needs.${pickRunnerJobId}.outputs.ci1 || '["ci1-priority"]')`
 const mergeCi1Labels = `github.event_name == 'merge_group' && (needs.${pickRunnerJobId}.outputs.ci1 || '["ci1-priority"]')`
-const pickedOr = (namespaceLabels: string, output = 'ci1') =>
-  `\${{ fromJSON(${mergeCi1Labels} || (github.event_name != 'merge_group' && needs.${pickRunnerJobId}.outputs.${output}) || ${namespaceLabels}) }}`
+const pickedOr = (namespaceLabels: string, output = 'ci1', mergeLabels = mergeCi1Labels) =>
+  `\${{ fromJSON(${mergeLabels} || (github.event_name != 'merge_group' && needs.${pickRunnerJobId}.outputs.${output}) || ${namespaceLabels}) }}`
 
 // Deployment and merge progress take precedence during saturation. Required PR
 // checks precede optional/manual work; local reservations remain unchanged.
@@ -111,6 +118,12 @@ export const linuxStageRunsOn = pickedOr(
 
 /** Both test consumers and their producer use the owned merge lane. */
 export const primaryTestRunsOn = pickedOr(namespaceLabels(linuxStageRunner), 'ci1')
+
+// Unset is inert. 'on' uses qualified six-member host admission; 'off' (or an
+// invalid nonempty mode) forces Namespace for an immediate forward-only rollback.
+// Only the merge-group producer reads ci1_build; consumers retain their choices.
+export const testBuildRunsOn = pickedOr(namespaceLabels(linuxStageRunner), 'ci1',
+  `github.event_name == 'merge_group' && vars.CI_MERGE_TEST_BUILD_OWNED && (needs.${pickRunnerJobId}.outputs.ci1_build || ${namespaceLabels(linuxStageRunner)}) || ${mergeCi1Labels}`)
 
 /** Extra PR jobs use idle general slots; merges always use the priority reserve. */
 export const secondaryStageRunsOn = pickedOr(
@@ -132,7 +145,7 @@ export const linuxRunsOn = pickedOr(
 )
 
 /** Supporting merge jobs use the priority lane; supporting PR jobs use Namespace. */
-export const supportingLinuxRunsOn = `\${{ fromJSON(${mergeCi1Labels} || ${namespaceLabels(linuxRunner)}) }}`
+export const supportingLinuxRunsOn = `\${{ fromJSON(${mergeProfileLabels} || ${namespaceLabels(linuxRunner)}) }}`
 export const supportingStageRunsOn = `\${{ fromJSON(${mergeCi1Labels} || ${namespaceLabels(linuxStageRunner)}) }}`
 
 /** A job that needs `pick-runner` still runs when it was skipped (ci1 off). */
@@ -165,6 +178,17 @@ export const nixCacheStep = {
     path: '${{ runner.temp }}/st-ci-cache',
     key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}",
     'restore-keys': 'nix5-${{ github.job }}-${{ runner.os }}-\nnix4-${{ github.job }}-${{ runner.os }}-',
+  },
+} as const
+
+// A Genie hit must contain the entire shell, including upstream-signed stdenv inputs.
+// Never accept the old selective archive as a hit or a restore-prefix match.
+export const genieNixCacheStep = {
+  ...nixCacheStep,
+  with: {
+    ...nixCacheStep.with,
+    key: "nix6-genie-closure-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', 'scripts/ci-nix-cache', 'scripts/ci-genie-cache-verify') }}",
+    'restore-keys': '',
   },
 } as const
 
@@ -216,6 +240,11 @@ printf 'HOME=%s\\nXDG_CONFIG_HOME=%s/.config\\nXDG_CACHE_HOME=%s/.cache\\nXDG_ST
     run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"',
   },
 ]
+
+export const genieSetupSteps = commonSetupSteps
+  .filter((step) => step !== cargoCacheStep && step !== buildSnapshotRestore && step !== buildSnapshotPrepare)
+  .map((step) => step === nixCacheStep ? genieNixCacheStep
+    : 'name' in step && step.name === 'Use the cached Nix outputs' ? { ...step, run: 'bash scripts/ci-nix-cache use' } : step)
 
 /** Provider fixtures, rendered hooks, and the standalone workspace test build. */
 export const testBuildSteps = [
@@ -310,6 +339,16 @@ export const evidenceStageJob = (name: string) =>
 export const evidenceStepNames = ['genie-freshness', 'typescript-client', 'isolation-vm'] as const
 export const evidenceStepJob = () => ({ environment: evidenceEnvironment })
 
+// The evidence gate(s) that can cover a job's work. A job that took such a skip must not sign a note for a run in
+// which it did not run its work: the signing helper refuses when this is 'true' (and so makes no note), whatever the
+// job's log or step outcomes say. Every gate named here must be in that job's `needs`.
+export const gateSkipExpression = (name: string): string => {
+  const gates = name === 'mail-redelivery-canaries'
+    ? ['linux-gate', 'mail-redelivery-canaries']
+    : (evidenceStepNames as readonly string[]).includes(name) ? [name] : ['linux-gate']
+  return '${{ ' + gates.map((gate) => `needs.evidence-gate-${gate}.outputs.skip == 'true'`).join(' || ') + ' }}'
+}
+
 const signingCore = (
   name: string,
   facts: { helper: 'stage-facts' | 'step-facts'; env: Record<string, string>; toolchain: boolean },
@@ -357,7 +396,11 @@ python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
       ...soft,
       name: `Sign this ${facts.helper === 'stage-facts' ? 'stage' : 'job'} result`,
       if: "${{ always() && steps.evidence-configure.outcome == 'success' }}",
-      env: facts.env,
+      env: {
+        ...facts.env,
+        GATE_SKIP: gateSkipExpression(name),
+        PROJECT_BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}',
+      },
       run: `helper=${evidenceHelper}
 python3 "$helper" once ${facts.helper === 'stage-facts' ? '"$STAGE_JOB"' : '"$STEP_CHECK"'}
 python3 "$helper" ${facts.helper} "$RUNNER_TEMP/job-facts.json"
@@ -533,6 +576,11 @@ export const fractalWebJobs = {
         env: {
           ...pnpmStoreEnv,
           KIT_INPUTS: '${{ needs.fractal-web-changes.outputs.kit-inputs }}',
+          // Pull requests run the stories tagged critical without axe, within the 7-minute budget;
+          // merge groups (observed and signed) and manual runs keep every story with axe.
+          KIT_PLAY_SET: "${{ github.event_name == 'pull_request' && 'critical' || 'all' }}",
+          KIT_PLAY_A11Y: "${{ github.event_name == 'pull_request' && 'off' || 'on' }}",
+          KIT_PLAY_MAX_SECONDS: "${{ github.event_name == 'pull_request' && '420' || '' }}",
           BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
           HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
         },
