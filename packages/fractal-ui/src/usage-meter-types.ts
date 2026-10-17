@@ -64,4 +64,6 @@ export interface UsageMeterTableProps {
   readonly onCloseDetail: () => void
   /** History for the selected row; omitted when the source has none. */
   readonly history?: UsageMeterHistory
+  /** Disambiguates landmark names when several monitors share one page; visible titles stay unchanged. */
+  readonly landmarkContext?: string
 }

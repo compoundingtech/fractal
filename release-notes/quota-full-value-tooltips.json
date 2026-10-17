@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Quota drawer and usage-meter tables replace native hover titles with one React Aria tooltip per clipped value. Account captions, compact meters, resets, amounts, status and the shortcut footer open the full text on hover and on keyboard focus, and screen readers read the same full text. Meter-history bars are keyboard-focusable with Arrow, Home and End and show their period reading on hover or focus. At narrow drawer widths the sort controls stay 8px apart and keep their labels; inactive sort glyphs hide first. Usage-meter Sort and +N buttons are named from their visible text, and an optional landmarkContext keeps region names unique when several monitors share a page.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted or wire schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Callbacks and data-quota/data-usage-meter row hooks are unchanged; UsageMeterTable, UsageMeterRowDetail and UsageMeterHistoryChart gain an optional landmarkContext prop. Clipped cells no longer carry a title attribute; tests or scripts that read full values from title should read the trigger's [data-quota-full-value] or [data-usage-meter-full-value] text. The usage-meter sort button no longer has aria-label 'Cycle usage sort' (select it by [data-usage-meter-cycle-sort]; its name is 'Cycle usage Sort'), and the +N button is named '+N more: show all windows and evidence for <row>' (select it by [data-usage-meter-more]). Hosts must keep rendering the tables inside a ThemePortal so tooltips inherit theme tokens." },
+  "downtime": { "status": "none", "detail": "No restart required." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

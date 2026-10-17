@@ -9,6 +9,7 @@ import { QuotaUsagePage } from './QuotaUsagePage.tsx'
 import type { QuotaDrawerProps, QuotaSort, QuotaStatus, QuotaUnit, QuotaUsageProps } from './quota-design-types.ts'
 import { quotaAccounts, quotaClock, quotaColumns, quotaCoverageDays, quotaDays, quotaEconomics, quotaRefreshedAccounts, quotaStatuses } from './quota-design-fixtures.ts'
 import { assertQuotaDrawerDensity } from './quota-design-density-proof.ts'
+import { expectNoNativeTitles, expectSingleFullValueTooltip } from './full-value-tooltip-play.ts'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
@@ -137,6 +138,36 @@ export const quotaLinePlay = async ({ canvasElement }: { canvasElement: HTMLElem
 const restFocus = (canvasElement: HTMLElement) => {
   const active = canvasElement.ownerDocument.activeElement
   if (active instanceof HTMLElement && canvasElement.contains(active)) active.blur()
+}
+/** Content-sized sort controls keep 8px between neighbours inside the toolbar; glyphs are SVG, never text arrows. No native title doubles a custom hover. */
+export const quotaPriorityPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+  await quotaLinePlay({ canvasElement })
+  const drawer = canvasElement.querySelector<HTMLElement>('[data-quota-drawer]')!
+  await expectNoNativeTitles(drawer)
+  const toolbar = within(drawer).getByRole('toolbar', { name: 'Sort quota' })
+  const buttons = [...toolbar.querySelectorAll<HTMLElement>('[data-quota-sort]')]
+  await expect(buttons.map(button => button.textContent)).toEqual(['Gov', 'Cmp', 'Acct', 'Reset', '+N'])
+  await expect(toolbar.querySelector('[aria-pressed="true"] [data-quota-sort-indicator] svg')).not.toBeNull()
+  const boxes = buttons.map(button => button.getBoundingClientRect())
+  for (const [index, button] of buttons.entries()) {
+    await expect(button.scrollWidth).toBeLessThanOrEqual(button.clientWidth)
+    if (index > 0) await expect(boxes[index]!.left - boxes[index - 1]!.right).toBeGreaterThanOrEqual(7.99)
+  }
+  const bounds = toolbar.getBoundingClientRect()
+  await expect(boxes[0]!.left).toBeGreaterThanOrEqual(bounds.left)
+  await expect(boxes.at(-1)!.right).toBeLessThanOrEqual(bounds.right)
+}
+/** A clipped account name and an abbreviated reset each open exactly one tooltip with the full value on hover and on keyboard focus. */
+export const quotaFullValuePlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+  await quotaPriorityPlay({ canvasElement })
+  const row = canvasElement.querySelector<HTMLElement>('[data-quota-row="unknown"]')!
+  const account = row.querySelector<HTMLElement>('[data-quota-cell="account"] button')!
+  await expect(account.scrollWidth).toBeGreaterThan(account.clientWidth)
+  await expectSingleFullValueTooltip(account, account.getAttribute('aria-label')!.replace(/^Open usage for /, ''))
+  const reset = row.querySelector<HTMLElement>('[data-quota-cell="reset"] [data-full-value-trigger]')!
+  await expectSingleFullValueTooltip(reset, reset.querySelector('[data-quota-full-value]')!.textContent!)
+  await expectNoNativeTitles(canvasElement.querySelector<HTMLElement>('[data-quota-drawer]')!)
+  restFocus(canvasElement)
 }
 export const quotaSortPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
   await quotaDensityPlay({ canvasElement })
