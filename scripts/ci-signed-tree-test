@@ -93,9 +93,9 @@ class SignedTree(unittest.TestCase):
         head, tree = self.pull_request({'src.txt': 'two\n'})
         rules = support.evidence_verify.lane_rules((self.f.repo / '.st/required-lanes.json').read_text(), 'unit')
         digest = support.evidence_verify.lane_definition(str(self.f.repo), self.f.git('rev-parse', 'main^{tree}'), tree, rules)['sha256']
-        self.note(head, tree)  # a note without the lane digest does not count once the base defines the lane
+        self.note(head, tree, seconds=0)  # a note without the lane digest does not count once the base defines the lane
         self.assertEqual(self.run_job(head)['lanes'], 'unit:wrong_definition')
-        self.note(head, tree, inputs={'lane_definition_sha256': digest})
+        self.note(head, tree, inputs={'lane_definition_sha256': digest}, seconds=5)  # dated later: two passes with equal dates are ordered by ref iteration
         fields = self.run_job(head)
         self.assertEqual((fields['decision'], fields['reason'], fields['lanes']), ('ok', 'satisfied', 'unit:ok'))
 
