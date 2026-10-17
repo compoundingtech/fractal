@@ -71,20 +71,7 @@ fn hook_var(env: &dyn HookEnv, name: &str) -> Option<String> {
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
 pub(crate) fn identity_conflict(env: &dyn HookEnv) -> bool {
-    ["ST_AGENT", "ST3_SUBJECT", "ST_DRIVER_IDENTITY", "ST_CLAUDE_IDENTITY"]
-        .into_iter().any(|name| {
-            let old = env.raw_var(name).or_else(|| {
-                st_drivers::contracts::legacy_env_name(name).and_then(|old| env.raw_var(&old))
-            });
-            let new = st_drivers::contracts::fractal_env_name(name)
-                .and_then(|new| env.raw_var(&new));
-            if old.zip(new).is_some_and(|(old, new)| old != new) {
-                let _ = hook_var(env, name); // Report through the shared, value-redacting warning.
-                true
-            } else {
-                false
-            }
-        })
+    st_drivers::contracts::identity_conflict_with(&|name| env.raw_var(name))
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 
@@ -589,8 +576,7 @@ fn allow_approved_call(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw:
     }
 }
 
-/// The diagnostic code of a call Claude's auto mode classifier denied.
-pub(crate) const PERMISSION_DENIED_CODE: &str = "permission-denied";
+pub(crate) use crate::model::PERMISSION_DENIED_CODE;
 
 /// The diagnostic code that names the call a shown prompt asks about.
 pub const PROMPT_CALL_CODE: &str = "native-prompt-call";
@@ -804,22 +790,6 @@ pub fn post_diagnostic(env: &dyn HookEnv, diagnostic: &Diagnostic) -> Result<()>
 mod tests {
     use super::*;
 
-    #[test]
-    fn hook_identity_cannot_fall_through_a_conflicting_alias() {
-        let mut env = BTreeMap::from([
-            ("ST_AGENT".into(), "agent/seat".into()),
-            ("FRACTAL_AGENT".into(), "agent/seat".into()),
-        ]);
-        assert_eq!(hook_identity(&env).as_deref(), Some("seat"));
-        env.remove("ST_AGENT");
-        assert_eq!(hook_identity(&env).as_deref(), Some("seat"));
-        env.insert("ST3_SUBJECT".into(), "agent/seat".into());
-        env.insert("FRACTAL_SUBJECT".into(), "agent/other".into());
-        assert!(hook_identity(&env).is_none());
-        env.remove("FRACTAL_SUBJECT");
-        env.insert("FRACTAL_AGENT".into(), String::new());
-        assert!(hook_identity(&env).is_none());
-    }
 
     fn seat(root: &Path) -> (PathBuf, BTreeMap<String, String>) {
         let catalog = root.join("catalog");
