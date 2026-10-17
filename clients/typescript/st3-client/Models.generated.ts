@@ -1770,8 +1770,10 @@ export type PersonAnswerRecord = {
   answer?: PersonAnswer;
   answered_at_unix_ms: number;
   ask: Id;
+  assistant_grant_id?: Id;
   evidence?: Array<Id>;
   respondent: Id;
+  sender_class?: string;
   status: "completed" | "cancelled";
   summary: string;
 };

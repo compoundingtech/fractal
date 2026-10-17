@@ -464,10 +464,11 @@ async fn assistant_cannot_complete_authored_owner_step_but_owner_can() {
         mission: "authored-review".into(), revision: None, workspace: h.root.path().to_string_lossy().into_owned(),
         requester: Some(OWNER.into()), mode: Some("run".into()), inputs: Default::default(), idempotency_key: "authored-review".into(),
     }).unwrap();
-    let step = &run.steps[0];
+    h.state.store.set_step_state(&run.steps[0].subject, "ready", Some("test activation")).unwrap();
+    let step = h.state.store.step_run(&run.steps[0].subject).unwrap().unwrap();
     assert_eq!(step.status, "ready");
     let paired = h.pair().await;
-    let action = ActionRequest::work_done("action/authored", "authored-answer", h.fence().await,
+    let action = ActionRequest::work_done("action/authored", "native-test-authored-answer", h.fence().await,
         PersonStepParameters { target_id: step.subject.clone(), summary: "Reviewed".into(),
             episode: format!("{}:{}:{}", step.generation, step.attempt, step.readiness_epoch),
             ..Default::default() }).unwrap();

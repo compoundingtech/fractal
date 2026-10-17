@@ -2473,8 +2473,12 @@ export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
   "answer": optionalKey(PersonAnswer),
   "answered_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "ask": Id,
+  /** The assistant grant that authorized the response. */
+  "assistant_grant_id": optionalKey(Id),
   "evidence": optionalKey(Schema.Array(Id)),
   "respondent": Id,
+  /** External assistant attribution when the response was submitted through an assistant grant. */
+  "sender_class": optionalKey(Schema.String).annotate({ description: "External assistant attribution when the response was submitted through an assistant grant." }),
   "status": Schema.Literals(["completed","cancelled"]),
   "summary": Schema.String
 }).annotate({ identifier: "PersonAnswerRecord" }))()
