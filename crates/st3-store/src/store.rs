@@ -1282,7 +1282,7 @@ const UNREPAIRED_CLAIM: &str = "NOT EXISTS (
 // Custom actual-state kinds can also supply a runtime id; a fixed kind allowlist is incomplete.
 const RUNTIME_ID_FIELD: &str = "json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
     THEN '$.runtime_id' ELSE '$.fields.runtime_id' END)";
-static RUNTIME_ID_INDEX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+pub(crate) static RUNTIME_ID_INDEX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     let mut indexes = format!(
         "CREATE INDEX IF NOT EXISTS claims_runtime_id_subject_index
          ON claims({RUNTIME_ID_FIELD}, subject, store_index)

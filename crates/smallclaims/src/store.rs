@@ -437,6 +437,17 @@ mod projection_failure_diagnostic_tests {
     }
 }
 
+macro_rules! transport_pair_index {
+    () => {
+        "CREATE INDEX IF NOT EXISTS claims_transport_pair_accepted_index
+ON claims(origin, subject, length(accepted_at_unix_ms), accepted_at_unix_ms)
+WHERE kind='transport.observed';"
+    };
+}
+
+/// Shared by startup and the offline owner-index preparation command.
+pub const TRANSPORT_PAIR_INDEX: &str = transport_pair_index!();
+
 macro_rules! core_schema {
     ($begin:literal, $end:literal) => {
         concat!(r#"
@@ -480,9 +491,7 @@ CREATE INDEX IF NOT EXISTS claims_kind_index ON claims(kind, store_index);
 CREATE INDEX IF NOT EXISTS claims_subject_kind_index ON claims(subject, kind, store_index);
 CREATE INDEX IF NOT EXISTS claims_subject_kind_accepted_index
 ON claims(subject, kind, length(accepted_at_unix_ms), accepted_at_unix_ms);
-CREATE INDEX IF NOT EXISTS claims_transport_pair_accepted_index
-ON claims(origin, subject, length(accepted_at_unix_ms), accepted_at_unix_ms)
-WHERE kind='transport.observed';
+"#, transport_pair_index!(), r#"
 CREATE INDEX IF NOT EXISTS claims_batch_index ON claims(batch_id, store_index);
 -- Heals once compared claim identities through this index; nothing reads it any more.
 DROP INDEX IF EXISTS claims_batch_claim_id;

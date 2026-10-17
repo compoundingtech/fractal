@@ -2010,6 +2010,12 @@ enum RepairCommand {
     DryRun,
     /// Apply exactly the plan identified by a dry-run token.
     Apply { token: String },
+    /// Build and verify mandatory owner indexes offline; stop all store writers first.
+    PrepareOwnerIndexes {
+        /// Existing SQLite store file; no default and no implicit store creation.
+        #[arg(long)]
+        store: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4726,6 +4732,11 @@ async fn run(cli: Cli) -> Result<()> {
     // Evidence is portable: repository objects and a caller trust list suffice.
     if let Command::Evidence(args) = cli.command {
         return st3::evidence::cli::run(args);
+    }
+    if let Command::Repair {
+        command: RepairCommand::PrepareOwnerIndexes { ref store },
+    } = cli.command {
+        return st3::owner_indexes::prepare(store, &mut cli_output::stdout());
     }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
@@ -10032,6 +10043,9 @@ async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) 
                     println!("  receipt\t{receipt}");
                 }
             }
+        }
+        RepairCommand::PrepareOwnerIndexes { store } => {
+            st3::owner_indexes::prepare(&store, &mut cli_output::stdout())?;
         }
     }
     Ok(())

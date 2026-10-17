@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn owner_index_preparation_is_explicit_and_only_in_maintenance_help() {
+    assert!(Cli::try_parse_from(["st", "repair", "prepare-owner-indexes"]).is_err());
+    let cli = Cli::try_parse_from([
+        "st", "repair", "prepare-owner-indexes", "--store", "/private/claims.sqlite3",
+    ]).unwrap();
+    assert!(matches!(cli.command, Command::Repair {
+        command: RepairCommand::PrepareOwnerIndexes { store },
+    } if store == std::path::Path::new("/private/claims.sqlite3")));
+    assert!(!cli_help::root_help(false).contains("prepare-owner-indexes"));
+    let mut command = Cli::command();
+    let repair = command.find_subcommand_mut("repair").unwrap();
+    assert!(repair.render_help().to_string().contains("prepare-owner-indexes"));
+}
+
+#[test]
 fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
     let rows = vec![
         json!({"id": "person-read", "kind": "objective", "status": "met", "target": "p99 ≤ 100 ms",

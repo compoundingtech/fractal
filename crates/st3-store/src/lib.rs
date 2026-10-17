@@ -38,6 +38,7 @@ pub mod maintenance;
 pub mod message_body;
 pub mod mission;
 pub mod node_identity;
+pub mod owner_indexes;
 pub mod native_resume;
 pub mod person_request;
 pub mod provenance;
