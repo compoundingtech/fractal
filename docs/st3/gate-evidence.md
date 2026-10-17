@@ -695,9 +695,12 @@ on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into
 `claude-channel` and `plugins` (the plugin files `include_bytes!`d into st-drivers) and `docs/st2` (`tests/invariants.rs` includes
 `docs/st2/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
 `include_bytes!` or `include!` path in the Rust sources resolves outside the declared inputs. `release-notes` is deliberately not declared: the Rust sources only name `release-notes` as an
-artifact name, and `upgrade-impact`, which reads the fragments, always runs. The scan misses paths a test builds at run time, so
+artifact name, and `upgrade-impact`, which reads the fragments, always runs. The one file under `apps` the Rust tests read at run time is declared by name
+(`apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf`, opened by a test in `crates/st3-daemon/src/attach_image.rs`). The scan misses paths a test builds at run time, so
 the first runs are shadow: a miss shows up as a satisfied note beside a failing real job, and `scripts` and `.github` are declared
-whole until a per-file list is reviewed against a trace of what each stage opens. The skip decision is taken once per stage group
+whole until a per-file list is reviewed against a trace of what each stage opens.
+
+**Known gap, whole-tree lints:** `tests/public_repo.rs`, `tests/native_only.rs` and `tests/vrs_ledger.rs` read EVERY tracked file, so a pull request that changes only a path outside the declared inputs (a page under `apps`, `packages`, `release-notes`) still changes what those lints see. The Rust key therefore must not be enforced until those lints run on every tree (a separate always-run check or an inputs list that includes them); until then it is shadow only, and a miss would show as a satisfied note beside a failing real job. The skip decision is taken once per stage group
 before the partitions (`needs.evidence-gate-linux-gate.outputs.skip` on the shards, clippy and fleet-compat), so the four shards
 share one key.
 

@@ -13,6 +13,7 @@
         ".github",
         "Cargo.lock",
         "Cargo.toml",
+        "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
         "claude-channel",
         "clients",
         "components",
