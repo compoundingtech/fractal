@@ -36,6 +36,12 @@ pub const MAX_DETAIL_KEY_BYTES: usize = 4096;
 
 pub struct DetailBudget(usize);
 
+impl Default for DetailBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DetailBudget {
     pub fn new() -> Self {
         Self(MAX_DETAIL_SOURCE_BYTES)

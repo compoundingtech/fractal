@@ -29,6 +29,12 @@ pub struct Fixture {
     pub db: Connection,
     pub installer: Installer,
 }
+impl Default for Fixture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Fixture {
     pub fn new() -> Self {
         let mut db = Connection::open_in_memory().unwrap();
