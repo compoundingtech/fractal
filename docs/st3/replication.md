@@ -62,6 +62,22 @@ reports the switch; `st.db.migration.index.build.duration` records elapsed build
 write-hold upper bound, including finalizers and SQLite acquisition wait but excluding
 background queue admission. The index is rebuildable local acceleration, not replicated authority.
 
+For offline production-size evidence, build the aggregate-only
+`smallclaims` example `transport_observation_bench` in release mode with the
+`transport-bench` feature. Run `--store COPY --n 1000 --mode before`, then the
+same command with `--mode after`, using the same checkpointed disposable input.
+Both modes measure a private temporary copy; the before mode removes the helper
+objects and uses the original lookup without readiness probes. The after mode
+executes every real bootstrap page with the daemon's 100 ms inter-page yield.
+The harness rejects open databases, SQLite sidecars and nearby daemon socket/lock
+artifacts; Linux write-lease support is required. Set `TMPDIR` to private local
+storage with capacity for the database plus its working WAL (reflinks are attempted).
+Only aggregate JSON is emitted, including every bootstrap transaction and the
+writer-transaction totals and wall time per synthetic receive-shaped claim insert.
+The workload persists a synthetic message and its transport observation, not the
+full replication authentication or runtime projection path. No stored message
+bodies or identifiers are emitted; failures are deliberately detail-free.
+
 The daemon caches its sealed membership view at the store's fleet generation, rather than
 folding the full fleet history on every worker poll. The generation and fold share a read
 snapshot. Fleet claims, their batch/envelope identities, verified signer rows and the pinned
