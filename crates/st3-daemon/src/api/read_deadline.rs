@@ -134,6 +134,12 @@ fn long_poll_route(route: &str) -> bool {
         || route.starts_with("/v1/sessions/logs/")
 }
 
+// Export seals/judges via the writer before/after its explicit consistent snapshot.
+// Neither handler polls nor nested blocking work may retain a reader across those waits.
+fn export_route(route: &str) -> bool {
+    route == "/v1/internal/replication/export"
+}
+
 /// Install thread-local context only while this future is polled. It never leaks across
 /// an await onto another task on the runtime worker. Dropping the request signals workers.
 struct Budgeted<F> {
@@ -425,7 +431,7 @@ where
     let admission_budget = read_budget::current();
     let scoped_store = if admission_budget
         .as_ref()
-        .is_some_and(|budget| !long_poll_route(budget.route()))
+        .is_some_and(|budget| !long_poll_route(budget.route()) && !export_route(budget.route()))
     {
         STORE.with(|slot| slot.borrow().clone())
     } else {
@@ -626,7 +632,7 @@ fn spawn_erased(work: ErasedWork, query: bool, roster: Option<tracing::Span>, wr
         query && store.is_some() && !reentrant && smallclaims::sqlite::thread_holds_reader();
     // Handlers never own a whole-request reader: `handler` admits per poll, and their
     // nested queries take query admission themselves. Only explicit query work admits here.
-    let loan = budget.is_some() && query;
+    let loan = budget.as_ref().is_some_and(|budget| !export_route(budget.route())) && query;
     let admission_store = store.clone().filter(|_| loan);
     let admission_budget = budget.clone();
     // Capture cancellation before executing an inline operation, including a panic.
@@ -833,6 +839,143 @@ pub(super) fn error(error: &WorkError) -> Option<ApiError> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn export_read_loan_snapshot_wait_obeys_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("claims.sqlite");
+        let store = Arc::new(super::super::Store::open(&path, "node").unwrap());
+        store.seal_local_batches().unwrap();
+        store.replication_snapshot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let held = store.replication_snapshot_build.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worker_store = store.clone();
+        let (done, result) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let budget = ReadBudget::new("/v1/internal/replication/export", Duration::from_millis(75));
+            let started = std::time::Instant::now();
+            let answer = read_budget::with(Some(budget), || worker_store.readers.request_read(|| {
+                worker_store.export_replication_summary("fleet")
+            }));
+            done.send((started.elapsed(), answer)).unwrap();
+        });
+        let (elapsed, answer) = result.recv_timeout(Duration::from_secs(5))
+            .expect("export retained its loan behind the snapshot-build mutex");
+        assert_eq!(smallclaims::error::typed(answer.unwrap().unwrap_err()).code, "read-deadline");
+        assert!(elapsed < Duration::from_secs(2), "deadline unwind took {elapsed:?}");
+        assert_eq!(store.readers.live_read_report().live_checkouts, 0);
+        let checkpoint = rusqlite::Connection::open(&path).unwrap();
+        let report = smallclaims::sqlite::checkpoint_wal_report(&checkpoint).unwrap();
+        assert_eq!(report.frames, report.backfilled);
+        drop(held);
+        worker.join().unwrap();
+        // A failed build publishes no partial snapshot; the same export is retryable.
+        assert!(store.replication_snapshot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_none());
+        assert!(store.export_replication_summary("fleet").is_ok());
+    }
+
+    #[test]
+    fn export_read_loan_writer_wait_holds_no_reader() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("claims.sqlite");
+        let store = Arc::new(super::super::Store::open(&path, "node").unwrap());
+        let held = store.connection.write();
+        held.execute_batch("CREATE TABLE export_wait_probe(value); INSERT INTO export_wait_probe VALUES(1);
+            INSERT INTO claim_verdict_queue(claim_id) VALUES('export-wait-missing')").unwrap();
+        let worker_store = store.clone();
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (done, answer) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2)
+                .enable_all().build().unwrap();
+            let handler_store = worker_store.clone();
+            let budget = ReadBudget::new("/v1/internal/replication/export", Duration::from_secs(10));
+            let response = with_store(Some(worker_store), || read_budget::with(Some(budget), || {
+                runtime.block_on(handler(async move {
+                    assert!(!handler_store.readers.has_request_reader());
+                    spawn_blocking(move || {
+                        assert!(!handler_store.readers.has_request_reader());
+                        entered.send(()).unwrap();
+                        handler_store.export_replication_summary("fleet")
+                    }).await.unwrap().unwrap();
+                    StatusCode::OK.into_response()
+                }))
+            }));
+            done.send(response.status()).unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The writer is unavailable, but the export must not pin reader capacity or WAL.
+        assert!(answer.recv_timeout(Duration::from_millis(50)).is_err());
+        assert_eq!(store.readers.live_read_report().live_checkouts, 0);
+        let checkpoint = rusqlite::Connection::open(&path).unwrap();
+        let report = smallclaims::sqlite::checkpoint_wal_report(&checkpoint).unwrap();
+        assert!(report.frames > 0);
+        assert_eq!(report.frames, report.backfilled);
+        drop(held);
+        assert_eq!(answer.recv_timeout(Duration::from_secs(10)).unwrap(), StatusCode::OK);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn export_read_loan_metrics_report_age_lag_and_recovery() {
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+        use smallclaims::sqlite::telemetry;
+        const NAME: &str = "api::read_deadline::tests::export_read_loan_metrics_report_age_lag_and_recovery";
+        if std::env::var("ST_EXPORT_LOAN_METRICS_TEST").as_deref() != Ok("1") {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env("ST_EXPORT_LOAN_METRICS_TEST", "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        let root = tempfile::tempdir().unwrap();
+        let store = super::super::Store::open(&root.path().join("claims.sqlite"), "node").unwrap();
+        let _origin = telemetry::enter_origin(telemetry::route_origin("POST", "/v1/internal/replication/export"));
+        let loan = store.readers.get();
+        let mut report = smallclaims::sqlite::WalCheckpointReport {
+            frames: 10, backfilled: 4, passive_ms: 0, writer_wait_ms: 0,
+            truncate_ms: None, recycled: false,
+        };
+        telemetry::wal_checkpoint_observed(&store.readers, Some(&report));
+        provider.force_flush().unwrap();
+        let samples = |name: &str| -> Vec<(f64, Vec<opentelemetry::KeyValue>)> {
+            let finished = exporter.get_finished_metrics().unwrap();
+            let metric = finished.iter().rev()
+                .flat_map(|resource| resource.scope_metrics())
+                .flat_map(|scope| scope.metrics()).find(|metric| metric.name() == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            match metric.data() {
+                AggregatedMetrics::F64(MetricData::Gauge(gauge)) => gauge.data_points()
+                    .map(|point| (point.value(), point.attributes().cloned().collect())).collect(),
+                AggregatedMetrics::U64(MetricData::Gauge(gauge)) => gauge.data_points()
+                    .map(|point| (point.value() as f64, point.attributes().cloned().collect())).collect(),
+                AggregatedMetrics::U64(MetricData::Sum(sum)) => sum.data_points()
+                    .map(|point| (point.value() as f64, point.attributes().cloned().collect())).collect(),
+                _ => panic!("wrong type for {name}"),
+            }
+        };
+        let loans = samples("st.db.read.loan.oldest_age");
+        assert_eq!(loans.len(), 1);
+        assert!(loans[0].0 > 0.);
+        assert!(loans[0].1.contains(&opentelemetry::KeyValue::new("origin", "POST /v1/internal/replication/export")));
+        assert_eq!(samples("st.db.wal.checkpoint.lag")[0].0, 6.);
+        assert_eq!(samples("st.db.wal.checkpoint.deferred")[0].0, 1.);
+        assert!(samples("st.db.wal.checkpoint.deferred_age")[0].0 > 0.);
+        drop(loan);
+        report.frames = 0;
+        report.backfilled = 0;
+        report.recycled = true;
+        telemetry::wal_checkpoint_observed(&store.readers, Some(&report));
+        provider.force_flush().unwrap();
+        assert_eq!(samples("st.db.read.loan.oldest_age")[0].0, 0.);
+        assert_eq!(samples("st.db.wal.checkpoint.lag")[0].0, 0.);
+        assert_eq!(samples("st.db.wal.checkpoint.deferred_age")[0].0, 0.);
+        provider.shutdown().unwrap();
+    }
 
     async fn writer_burst_keeps_reads_and_nested_acknowledgements_live() {
         use axum::{Json, Router, middleware::from_fn_with_state, routing::{get, post}};
@@ -2330,24 +2473,49 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    async fn idle_long_poll_keeps_its_normal_empty_answer(path: &'static str, route: &'static str) {
+    /// The handler idles for the longest wait on the paused clock (callers run `start_paused`), so
+    /// the ordinary 15 s deadline still has to give way to the 30 s wait, without 30 real seconds.
+    /// The handler runs on a blocking poll, which keeps the paused clock from advancing by itself,
+    /// so the test advances it once the handler has started.
+    async fn idle_long_poll_keeps_its_normal_empty_answer(
+        path: &'static str,
+        route: &'static str,
+        paused: bool,
+    ) {
         use axum::{Router, middleware::from_fn_with_state, routing::get};
         use tower::ServiceExt;
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::state(root.path());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started = Arc::new(std::sync::Mutex::new(Some(started_tx)));
         let app = Router::new()
             .route(
                 route,
-                get(|| async {
-                    tokio::time::sleep(Duration::from_millis(MAX_WAIT_MS)).await;
-                    Json(json!({ "items": [] }))
+                get(move || {
+                    let started = started.clone();
+                    async move {
+                        // The wait starts counting when it is created, so create it before
+                        // signalling: the test advances the clock as soon as it hears.
+                        let wait = tokio::time::sleep(Duration::from_millis(MAX_WAIT_MS));
+                        let _ = started.lock().unwrap().take().unwrap().send(());
+                        wait.await;
+                        Json(json!({ "items": [] }))
+                    }
                 }),
             )
             .layer(from_fn_with_state(
                 (state, ClientTransportBoundary::Unix),
                 super::super::response_envelope,
             ));
-        let response = app.oneshot(request(Method::GET, path)).await.unwrap();
+        let response = tokio::spawn(app.oneshot(request(Method::GET, path)));
+        started_rx.await.unwrap();
+        if paused {
+            let past_ordinary = ORDINARY + Duration::from_secs(1);
+            tokio::time::advance(past_ordinary).await;
+            assert!(!response.is_finished(), "{path} was cut at the ordinary deadline");
+            tokio::time::advance(Duration::from_millis(MAX_WAIT_MS) - past_ordinary).await;
+        }
+        let response = response.await.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1_000_000)
             .await
@@ -2357,49 +2525,70 @@ mod tests {
         assert_eq!(value["items"], json!([]), "{body}");
     }
 
+    /// The one idle read-deadline test on the real clock: 30 real seconds, so the paused-clock
+    /// tests below are not the only proof that the envelope really waits past the ordinary deadline.
     #[tokio::test]
+    async fn an_idle_conversation_poll_is_not_cut_at_the_ordinary_deadline_on_the_real_clock() {
+        idle_long_poll_keeps_its_normal_empty_answer(
+            "/v1/client/conversations/test/changes?wait_ms=30000",
+            "/v1/client/conversations/{id}/changes",
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn an_idle_conversation_poll_is_not_cut_at_the_ordinary_deadline() {
         idle_long_poll_keeps_its_normal_empty_answer(
             "/v1/client/conversations/test/changes?wait_ms=30000",
             "/v1/client/conversations/{id}/changes",
+            true,
         )
         .await;
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_idle_client_event_poll_is_not_cut_at_the_ordinary_deadline() {
         idle_long_poll_keeps_its_normal_empty_answer(
             "/v1/client/events?wait_ms=30000",
             "/v1/client/events",
+            true,
         )
         .await;
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_idle_screen_poll_is_not_cut_at_the_ordinary_deadline() {
         idle_long_poll_keeps_its_normal_empty_answer(
             "/v1/client/terminals/test/screen?after=cursor&wait_ms=30000",
             "/v1/client/terminals/{id}/screen",
+            true,
         )
         .await;
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_idle_log_poll_is_not_cut_at_the_ordinary_deadline() {
         idle_long_poll_keeps_its_normal_empty_answer(
             "/v1/sessions/logs/test?wait=true",
             "/v1/sessions/logs/{*subject}",
+            true,
         )
         .await;
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_idle_legacy_event_poll_is_not_cut_at_the_ordinary_deadline() {
-        idle_long_poll_keeps_its_normal_empty_answer("/v1/events?timeout_ms=30000", "/v1/events")
-            .await;
+        idle_long_poll_keeps_its_normal_empty_answer(
+            "/v1/events?timeout_ms=30000",
+            "/v1/events",
+            true,
+        )
+        .await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_idle_paged_event_poll_is_not_cut_at_the_ordinary_deadline() {
         idle_long_poll_keeps_its_normal_empty_answer(
             "/v1/events/page?wait=true&timeout_ms=30000",
             "/v1/events/page",
+            true,
         )
         .await;
     }

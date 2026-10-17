@@ -1439,7 +1439,7 @@ fn request_latency_snapshot() -> Vec<Value> {
 }
 
 /// Only the targets' live windows, for the collector: see `slo/targets.toml`.
-pub(crate) fn request_latency_target_windows() -> Value {
+pub fn request_latency_target_windows() -> Value {
     request_latency().lock().unwrap().targets_only(Instant::now())
 }
 
@@ -1572,11 +1572,24 @@ fn record_request_latency(
 
 pub(crate) use crate::model::new_request_id;
 
+/// Milliseconds the client-facing clock runs ahead of the wall clock. Only the test-support
+/// build has it, so a test can cross a real freshness horizon without sleeping through it.
+#[cfg(feature = "test-support")]
+static CLIENT_CLOCK_SKEW_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(feature = "test-support")]
+pub(crate) fn set_client_clock_skew_ms(skew_ms: u64) {
+    CLIENT_CLOCK_SKEW_MS.store(skew_ms, std::sync::atomic::Ordering::SeqCst);
+}
+
 fn client_now_ms() -> u128 {
-    std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis()
+        .as_millis();
+    #[cfg(feature = "test-support")]
+    let now = now + u128::from(CLIENT_CLOCK_SKEW_MS.load(std::sync::atomic::Ordering::SeqCst));
+    now
 }
 
 fn client_snapshot_time(snapshot: &ClientSnapshot) -> u128 {
@@ -1661,7 +1674,7 @@ fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> V
 
 fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
     // The work list's refresher ended: nothing publishes it until the daemon restarts.
-    if code == Some(published_lists::WORK_LIST_ENDED) {
+    if matches!(code, Some(published_lists::WORK_LIST_ENDED | client_v0::published_missions::ENDED)) {
         return false;
     }
     // An unconfirmed mutation needs the exact original request, not a generic
@@ -1735,6 +1748,8 @@ fn client_error_code(code: Option<&str>) -> String {
         | "page-cursor-expired"
         | "agent-roster-cut-not-ready"
         | "rate-limited"
+        | "mission-list-not-ready"
+        | "mission-list-ended"
         | "runtime-not-local"
         | "runtime-authority-indeterminate"
         | "remote-unavailable"

@@ -50,7 +50,7 @@ hook signals ── daemon observations exporter ──────────�
 
 ## Pipeline and identity
 
-`crates/st3-daemon/src/otel.rs` owns SDK initialization, resource construction, and shutdown.
+`crates/st3-telemetry/src/otel.rs` owns SDK initialization, resource construction, and shutdown.
 The tracer provider uses `Sampler::AlwaysOn` and a plain SDK `BatchSpanProcessor` to export
 every span, including spans with an unsampled remote parent. There is no in-process sampler
 or span buffer beyond the SDK batch queue. The manifest pins OpenTelemetry API, SDK
@@ -85,13 +85,13 @@ unit. `ST3_CLI_OTEL=off` selects it for the CLI only.
 | Driver hook | `st-hook` via daemon observations exporter; no direct SDK export | No collector flush in the hook |
 | `driver claude-statusline` | None; `telemetry::local_only()` | No pipeline |
 
-`crates/st3-daemon/src/telemetry.rs` remains the hook path. Hooks hand signals to the daemon and
+`crates/st3-telemetry/src/telemetry.rs` remains the hook path. Hooks hand signals to the daemon and
 never contact a collector. The observations exporter emits hook spans and hook invocation
 metrics as `st-hook`; observation logs and usage metrics retain `st-daemon`. Statusline calls remain local-only and do not initialize an SDK pipeline.
 
 The shared resource contains `service.name`, `service.version` from
 `st_drivers::version::machine_version()`, a random per-process `service.instance.id`,
-`host.name`, and `st3.node`. The observations exporter in `crates/st3-daemon/src/otlp.rs` uses this
+`host.name`, and `st3.node`. The observations exporter in `crates/st3-telemetry/src/otlp.rs` uses this
 resource builder, including the version: hook spans and invocation metrics are `st-hook`,
 observation logs and usage metrics are `st-daemon`. The bare `st` service name is retired.
 The platform edge supplies fleet-owned attributes.
@@ -384,10 +384,14 @@ Duration buckets are
 | `st.db.readers.open` | Observable gauge | `{connection}` | —; current open readers |
 | `st.db.readers.idle` | Observable gauge | `{connection}` | —; current idle readers |
 | `st.db.readers.opened` | Counter | `{connection}` | —; readers opened |
+| `st.db.read.loan.oldest_age` | Observable gauge | `s` | `origin`; oldest live pooled connection loan per bounded route/task origin, not confirmed transaction age |
 | `st.db.wal.size` | Observable gauge | `By` | —; stat the main database's `-wal` file |
 | `st.db.wal.checkpoint.duration` | Histogram | `s` | `db.operation.name=checkpoint.truncate`; truncate checkpoint duration |
+| `st.db.wal.checkpoint.deferred` | Counter | `{attempt}` | —; physical checkpoint attempts with nonempty WAL not recycled |
+| `st.db.wal.checkpoint.lag` | Observable gauge | `{frame}` | —; last known WAL frames minus backfilled frames, summed across live pools |
+| `st.db.wal.checkpoint.deferred_age` | Observable gauge | `s` | —; age since the first consecutive deferred attempt, maximum across live pools |
 
-Every storage metric carries `db.system.name=sqlite`. Writer hold and queue origins reuse
+Every storage metric carries `db.system.name=sqlite`. Writer hold, queue, and oldest-loan origins reuse
 the bounded writer-span vocabulary: normalized router `MatchedPath` templates prefixed
 by one of nine HTTP methods, the fourteen fixed task names in the storage origin table,
 and `other` for unknown origins. No paths, SQL, ids, or raw request URIs are attributes.
@@ -461,6 +465,23 @@ and checks the exported abandonment counter, wait histogram, and empty-queue res
 It also checks pending-admission cancellation removes queue entries.
 `busy_period_covers_all_queued_callbacks_and_clears` checks busy-period publication,
 retention across queued callbacks, clear and restart.
+
+Loan age covers a connection checkout, which may have no active transaction; it does
+not identify a WAL frame owner. An empty registry reports zero with origin `other`.
+Checkpoint lag is the most recent successful PASSIVE report, not a WAL file-size estimate.
+Deferral age continues between attempts and across errors (errors do not prove recovery);
+an empty or recycled WAL resets it. A fully backfilled WAL awaiting recycling has zero
+lag but can still have nonzero deferral age.
+
+Replication export (`POST /v1/internal/replication/export`) retains its bulk read deadline,
+but, like long-poll routes, has no handler-wide or nested blocking callback read loan.
+Sealing and verdict writer waits therefore retain no reader. The snapshot-build gate
+and snapshot-cache mutex waits check deadline/cancellation at most every 5 ms.
+Authoritative inventory, graph and projection inputs remain captured together by
+`sealed_replication_snapshot`'s explicit `read_snapshot`; payload/signature lookups
+use scoped read guards. No snapshot is released and reacquired halfway through a build.
+An expired export returns the existing `read-deadline` error, not a partial exchange;
+the peer retries without acknowledging a partial inventory or advancing its cursor.
 
 A scoped thread-local `Option<Arc<WriterWait>>` shares a request accumulator across
 handler, store, action, and API blocking sections. Two relaxed atomics sum writer ACK
@@ -689,7 +710,7 @@ successfully sent envelopes. Neither counts signatures or claims.
 `peer` is bounded by fleet members plus explicitly
 configured/bootstrap peers; it is a node name, never a URL, route, session,
 agent, or message id. Outcomes, directions, and reasons are closed
-lowercase registries owned by Smalltalk. No other identities become metric
+lowercase registries owned by Fractal. No other identities become metric
 attributes.
 
 Error reasons preserve worker failure classification: typed `PeerOverloaded`
@@ -786,7 +807,7 @@ the global text-map propagator. This makes the daemon's SERVER span a child of t
 `st3.cli.command` span (or its current child); hook requests use their current span in the
 same way. No SDK/OTel layer or an invalid context produces no trace headers.
 
-The wire-only tracestate entry `st=c` is owned by Smalltalk and means sampling is decided
+The wire-only tracestate entry `st=c` is owned by Fractal and means sampling is decided
 by the collector. Injection replaces an existing `st` entry without growing the list.
 When adding `st` to a full 32-entry list, it first drops the rightmost entry; all other
 entries retain their order. It does not mutate the current span's context. The daemon
