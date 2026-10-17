@@ -20,7 +20,7 @@ pub mod missions;
 pub mod seats;
 pub mod trace_principal;
 #[cfg(test)]
-mod accountable_tests;
+pub mod accountable_tests;
 pub mod custom;
 pub mod assistant_write;
 #[cfg(feature = "test-support")]
@@ -32,35 +32,36 @@ pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
 #[cfg(test)]
-mod arrangements_tests;
+pub mod arrangements_tests;
 #[cfg(test)]
-mod authored_pull_requests_tests;
+pub mod authored_pull_requests_tests;
 #[cfg(test)]
-mod schedule_active_run_tests;
+pub mod schedule_active_run_tests;
 pub mod glasses;
 pub mod mailbox_wakes;
 pub mod mailbox_changes;
 pub mod mailbox_lease;
 #[cfg(test)]
-mod message_send_tests;
+pub mod message_send_tests;
 // Qualification only: no production caller or Source registration.
 #[cfg(test)]
-mod message_point_qualification;
+pub mod message_point_qualification;
 #[cfg(test)]
-mod message_thread_legacy_rank_dependency_tests;
+pub mod message_thread_legacy_rank_dependency_tests;
 #[cfg(test)]
-mod actual_state_sorter_tests;
+pub mod actual_state_sorter_tests;
 #[cfg(test)]
-mod writer_bound_tests;
+pub mod writer_bound_tests;
 pub mod owned_sets;
 #[cfg(test)]
-mod owned_sets_tests;
+pub mod owned_sets_tests;
 #[cfg(test)]
-mod usage_fold_tests;
+pub mod usage_fold_tests;
 pub mod resources;
 pub mod resource_preparation;
+pub mod observer_actuals;
 #[cfg(test)]
-mod resource_preparation_fence_tests;
+pub mod resource_preparation_fence_tests;
 pub mod github_workflow_failures;
 pub mod git_changes;
 pub mod message_subscriptions;
@@ -71,13 +72,13 @@ pub mod seat_status;
 pub mod stop_deferral;
 pub mod card_fold;
 #[cfg(test)]
-mod card_fold_tests;
+pub mod card_fold_tests;
 #[cfg(test)]
-mod roster_controls;
+pub mod roster_controls;
 #[cfg(test)]
-mod roster_fresh_proof_tests;
+pub mod roster_fresh_proof_tests;
 #[cfg(test)]
-mod agents_window_deadline_tests;
+pub mod agents_window_deadline_tests;
 pub mod step_labels;
 pub mod operation_audit;
 pub mod mission_provenance;
@@ -86,7 +87,7 @@ pub mod backup_format;
 pub mod message_bodies;
 pub mod projectors;
 #[cfg(test)]
-mod projectors_tests;
+pub mod projectors_tests;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[cfg(test)]
@@ -221,19 +222,19 @@ pub use subagents::{
     EndedSubagent, SUBAGENT_KINDS, SUBAGENT_LEASE_MS, SubagentSweep, SubagentView,
 };
 #[cfg(test)]
-mod checkpoint_agreement_tests;
+pub mod checkpoint_agreement_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod terminal_gate_evidence;
 #[cfg(test)]
-mod checkpoint_tests;
+pub mod checkpoint_tests;
 #[cfg(test)]
-mod checkpoint_capture_epoch_tests;
+pub mod checkpoint_capture_epoch_tests;
 #[cfg(test)]
-mod checkpoint_replication_capture_tests;
+pub mod checkpoint_replication_capture_tests;
 #[cfg(test)]
-mod convergence;
+pub mod convergence;
 #[cfg(test)]
-mod document_index_tests;
+pub mod document_index_tests;
 pub mod lanes;
 pub mod operations;
 pub mod mission_ivm;
@@ -250,11 +251,11 @@ pub mod published_list;
 pub mod mission_list;
 pub mod work_list;
 #[cfg(test)]
-mod tombstones_tests;
+pub mod tombstones_tests;
 #[cfg(test)]
-mod step_wait_tests;
+pub mod step_wait_tests;
 #[cfg(test)]
-mod work_renew_tests;
+pub mod work_renew_tests;
 pub use runtime::SmalltalkRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
@@ -12383,7 +12384,7 @@ pub fn message_canonical_key_tx(connection: &Connection, subject: &str) -> Resul
 
 #[cfg(test)]
 #[path = "store/message_canonical_sort_tests.rs"]
-mod message_canonical_sort_tests;
+pub mod message_canonical_sort_tests;
 
 fn message_bare_recipient(value: &str) -> &str {
     value
@@ -13552,7 +13553,7 @@ fn validate_replica_repair(
 }
 
 #[cfg(test)]
-mod fleet_admission_tests;
+pub mod fleet_admission_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
@@ -20458,7 +20459,7 @@ pub fn expire_work_lease_by_claim(store: &Store, subject: &str, actor: &str, inc
 }
 
 #[cfg(test)]
-mod tests;
+pub mod tests;
 
 /// The projected tables the graph digest commits: digest label, table, digested columns in
 /// order, and row order. Triggers built from the same list bump `graph_generation` whenever one
@@ -21542,4 +21543,4 @@ pub fn a_malformed_peer_hash_does_not_stop_replication() {
 }
 
 #[cfg(test)]
-mod harness_event_tests;
+pub mod harness_event_tests;
