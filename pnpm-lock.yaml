@@ -218,9 +218,18 @@ importers:
       '@assistant-ui/react':
         specifier: 0.15.25
         version: 0.15.25(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(use-sync-external-store@1.7.0(react@19.2.8))
+      '@smalltalk/st3-client':
+        specifier: workspace:*
+        version: link:../../clients/typescript/st3-client
+      '@smalltalk/st3-scenarios':
+        specifier: workspace:*
+        version: link:../../clients/typescript/st3-scenarios
       '@stylexjs/stylex':
         specifier: 0.19.0
         version: 0.19.0
+      effect:
+        specifier: 4.0.0-rc.118
+        version: 4.0.0-rc.118
       react:
         specifier: 19.2.8
         version: 19.2.8
@@ -246,6 +255,9 @@ importers:
       '@storybook/react-vite':
         specifier: 10.6.1
         version: 10.6.1(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(storybook@10.6.1(@types/react@19.2.14)(react@19.2.8))(supports-color@8.1.1)(typescript@6.0.3)(vite@8.0.5(@emnapi/core@1.11.0)(@emnapi/runtime@1.11.0)(@types/node@26.6.4)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
+      '@stylexjs/unplugin':
+        specifier: 0.19.0
+        version: 0.19.0(supports-color@8.1.1)(unplugin@2.3.11)
       '@tailwindcss/vite':
         specifier: 4.2.2
         version: 4.2.2(vite@8.0.5(@emnapi/core@1.11.0)(@emnapi/runtime@1.11.0)(@types/node@26.6.4)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
