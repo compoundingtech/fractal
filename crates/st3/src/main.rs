@@ -551,10 +551,12 @@ fn fleet_person(actor: Option<String>, config: &Config) -> Result<String> {
         .context("set person in config.toml or pass --as person/NAME")
 }
 
-fn services_installed() -> bool {
-    st3::service::status()
-        .map(|report| report.services.iter().any(|service| service.installed))
-        .unwrap_or(false)
+fn services_installed() -> Result<bool> {
+    match st3::service::status() {
+        Ok(report) => Ok(report.services.iter().any(|service| service.installed)),
+        Err(error) if error.is::<st3::service::ConflictingServices>() => Err(error),
+        Err(_) => Ok(false), // A host without a user manager can run unmanaged.
+    }
 }
 
 #[derive(Args)]
@@ -10475,10 +10477,8 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
             let config = Config::load_unvalidated(None)?;
             let mut report = st3::service::status()?;
             if let Some(startup) = st3::startup::read(&config.client_socket()) {
-                for service in &mut report.services {
-                    if service.name == "st3.service" || service.name == "com.compoundingtech.st3" {
-                        service.state = format!("{} · {}", service.state, startup.summary());
-                    }
+                for service in report.services.iter_mut().take(1) {
+                    service.state = format!("{} · {}", service.state, startup.summary());
                 }
             }
             if json_output {
@@ -17636,6 +17636,7 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                 let now = Instant::now();
                 let duration_ms = started.elapsed().as_millis();
                 let report = result.as_ref().ok();
+                smallclaims::sqlite::telemetry::wal_checkpoint_observed(&store.readers, report);
                 let stuck = pin.observe(report);
                 let abnormal = abnormal_wal_checkpoint(report) || stuck >= WAL_PIN_REPORT_AFTER;
                 st3::otel::record_wal_checkpoint(trace_started, report, abnormal);
