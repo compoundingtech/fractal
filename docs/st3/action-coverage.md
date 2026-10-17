@@ -165,6 +165,11 @@ edits and removes retired subjects without changing unfiltered reads.
 | `st conversations timeline` | real CLI over private Unix socket; disk store reopened between actions | [`cli_devices_and_native_import_survive_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
 | `st devices` | real CLI over private Unix socket; disk store reopened between actions | [`cli_reads_preserve_operational_views_after_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs); [`cli_devices_and_native_import_survive_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
 | `st devices complete` | real CLI against an isolated paired gateway; credential/key profile reloaded; generated/imported Ed25519/P-256 signed messages verify | [`devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secrets`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/client_v0_cli.rs); [`shared_completion_persists_both_key_types_and_preserves_a_working_device_on_failure`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3-client/tests/device_signing.rs) |
+| `st devices grant inspect` | CLI parse and local term validation; trusted local Unix person only | [`assistant_pairing_seals_explicit_scopes_expiry_and_consent`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/src/main.rs) |
+| `st devices grant policy` | CLI parse and local term validation; trusted local Unix person only | [`assistant_pairing_seals_explicit_scopes_expiry_and_consent`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/src/main.rs) |
+| `st devices grant read-trust` | CLI parse and real read-proof authorization; trusted-local configured owner only | [`assistant_read_trust_cli_pins_explicit_keys_and_downward_budgets`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/src/main.rs); [`assistant_response_budget_includes_envelope_and_supports_downward_policy`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/src/api/client_v0/assistant/authorization_tests.rs) |
+| `st devices grant renew` | CLI parse and local term validation; trusted local Unix person only | [`assistant_pairing_seals_explicit_scopes_expiry_and_consent`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/src/main.rs) |
+| `st devices grant revoke` | CLI parse; trusted local Unix person only | [`assistant_pairing_seals_explicit_scopes_expiry_and_consent`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/src/main.rs) |
 | `st devices ls` | real CLI over private Unix socket; disk store reopened between actions | [`cli_reads_preserve_operational_views_after_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
 | `st devices pair` | real CLI over private Unix socket; disk store reopened between actions | [`cli_devices_and_native_import_survive_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
 | `st devices revoke` | real CLI over private Unix socket; disk store reopened between actions | [`cli_devices_and_native_import_survive_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
@@ -404,7 +409,7 @@ grace cleanup, and 72 seconds of protocol-heartbeat idle with no request.
 `collectionSocket.test.mjs` checks authentication and control-event delivery at
 the native bridge boundary; it does not claim an iOS simulator was driven.
 
-The stui consumer is covered by `st3-feed/src/inventory_tests.rs` over an isolated
+The stui consumer is covered by `crates/st3-e2e/tests/feed/inventory.rs` over an isolated
 Unix daemon: all six windows, typed client/usage adaptation, period replacement,
 unsubscription and authoritative reconnect snapshots.
 `stui/tests/client_only.rs::the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute`
