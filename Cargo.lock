@@ -4808,6 +4808,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "signal-hook 0.3.18",
+ "smallclaims",
  "st3-schema",
  "tempfile",
  "thiserror 2.0.20",

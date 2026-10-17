@@ -40,6 +40,7 @@ base64 = "0.22"
 hex = "0.4"
 ring = "0.17"
 sha2 = "0.10"
+smallclaims = { path = "../smallclaims" }
 tempfile = "3"
 opentelemetry_sdk = "0.30"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
