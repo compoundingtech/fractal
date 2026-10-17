@@ -106,9 +106,9 @@ fn conflicting_agent_aliases_cannot_fall_back_to_native_driver_identity() {
 #[test]
 fn legacy_daemon_wait_preserves_invalid_empty_and_non_utf8_values() {
     use std::os::unix::ffi::OsStringExt as _;
-    for value in [
-        std::ffi::OsString::new(),
-        std::ffi::OsString::from_vec(vec![0xff]),
+    for (value, diagnostic) in [
+        (std::ffi::OsString::new(), "--daemon-wait"),
+        (std::ffi::OsString::from_vec(vec![0xff]), "invalid UTF-8"),
     ] {
         let output = Command::new(test_env!("CARGO_BIN_EXE_st3"))
             .env_clear()
@@ -117,7 +117,7 @@ fn legacy_daemon_wait_preserves_invalid_empty_and_non_utf8_values() {
             .output().unwrap();
         assert!(!output.status.success(), "{output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("--daemon-wait"), "{stderr}");
+        assert!(stderr.contains(diagnostic), "{stderr}");
     }
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
