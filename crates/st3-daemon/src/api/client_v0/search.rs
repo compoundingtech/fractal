@@ -18,6 +18,8 @@ pub(in crate::api) struct SearchQuery {
     // Internal projection policy, never accepted from an external query string.
     #[serde(skip)]
     assistant_text_only: bool,
+    #[serde(skip)]
+    assistant_binding: Option<String>,
 }
 
 struct IndexState {
@@ -34,7 +36,7 @@ struct IndexState {
 }
 
 type HeldIndex = Arc<Mutex<IndexState>>;
-type IndexKey = (usize, String, bool);
+type IndexKey = (usize, String, bool, Option<String>);
 static INDEXES: OnceLock<Mutex<BTreeMap<IndexKey, HeldIndex>>> = OnceLock::new();
 
 #[derive(Deserialize, Serialize)]
@@ -46,11 +48,17 @@ struct Cursor {
     entry: String,
 }
 
-fn index_for(state: &AppState, session: &ClientSession, assistant_text_only: bool) -> Result<HeldIndex, ApiError> {
+fn index_for(
+    state: &AppState,
+    session: &ClientSession,
+    assistant_text_only: bool,
+    assistant_binding: Option<&str>,
+) -> Result<HeldIndex, ApiError> {
     let key = (
         Arc::as_ptr(&state.store) as usize,
         session.authority_actor.clone(),
         assistant_text_only,
+        assistant_binding.map(str::to_owned),
     );
     let mut indexes = INDEXES.get_or_init(Default::default).lock().unwrap();
     indexes.retain(|_, index| index.lock().unwrap().store.strong_count() > 0);
@@ -594,17 +602,20 @@ pub(in crate::api) async fn search(
     {
         return Err(validation("agent must be an agent subject"));
     }
-    let binding = hex::encode(Sha256::digest(
-        serde_json::to_vec(&(
+    // Preserve native cursor identities; only assistant queries add the grant-policy identity.
+    let query_identity = (
             &session.authority_actor,
             &query.text,
             &query.agent,
             &query.since,
             limit,
             query.assistant_text_only,
-        ))
-        .map_err(ApiError::internal)?,
-    ));
+    );
+    let identity = match &query.assistant_binding {
+        Some(assistant_binding) => serde_json::to_vec(&(query_identity, assistant_binding)),
+        None => serde_json::to_vec(&query_identity),
+    }.map_err(ApiError::internal)?;
+    let binding = hex::encode(Sha256::digest(identity));
     let cursor: Option<Cursor> = query
         .cursor
         .as_ref()
@@ -632,7 +643,7 @@ pub(in crate::api) async fn search(
     {
         return Err(validation("invalid search cursor timestamp"));
     }
-    let held = index_for(&state, &session, query.assistant_text_only)?;
+    let held = index_for(&state, &session, query.assistant_text_only, query.assistant_binding.as_deref())?;
     {
         let mut index = held.lock().unwrap();
         if cursor.is_none()
@@ -675,9 +686,11 @@ pub(super) async fn assistant_search(
     agent: Option<String>,
     cursor: Option<String>,
     limit: usize,
+    binding: &str,
 ) -> Result<Json<Value>, ApiError> {
     search(State(state), Extension(session), Query(SearchQuery {
         text, agent, cursor, limit: Some(limit), assistant_text_only: true,
+        assistant_binding: Some(binding.to_owned()),
         ..Default::default()
     })).await
 }
@@ -780,9 +793,10 @@ mod tests {
         item["body"]["media_type"] = json!("application/json");
         assert!(entry_text(&item, true).is_empty());
         let query: SearchQuery = serde_json::from_value(json!({
-            "text":"word", "assistant_text_only":true,
+            "text":"word", "assistant_text_only":true, "assistant_binding":"foreign",
         })).unwrap();
         assert!(!query.assistant_text_only);
+        assert!(query.assistant_binding.is_none());
     }
 
     fn claim(state: &AppState, subject: &str, kind: &str, mut fields: Value) {
@@ -820,13 +834,58 @@ mod tests {
     }
     async fn rebuild(state: &AppState, person: &str) {
         let session = ClientSession::local(Some(person)).unwrap();
-        let held = index_for(state, &session, false).unwrap();
+        let held = index_for(state, &session, false, None).unwrap();
         let runtime = tokio::runtime::Handle::current();
         let state = state.clone();
         crate::api::read_deadline::spawn_blocking(move || refresh(&state, &session, &held, &runtime, false))
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn assistant_search_indexes_and_cursors_are_bound_to_grant_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests::state(root.path());
+        for name in ["incoming", "outgoing"] {
+            claim(&state, &format!("message/{name}"), "message.sent",
+                json!({"from":"agent/sender", "to":"person/alex", "content":format!("orchid {name}")}));
+        }
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let first_index = index_for(&state, &session, true, Some("grant-a-policy-1")).unwrap();
+        assert!(Arc::ptr_eq(&first_index,
+            &index_for(&state, &session, true, Some("grant-a-policy-1")).unwrap()));
+        for binding in [Some("grant-b-policy-1"), Some("grant-a-policy-2"), None] {
+            let other = index_for(&state, &session, binding.is_some(), binding).unwrap();
+            assert!(!Arc::ptr_eq(&first_index, &other));
+        }
+        // Build the real safe index synchronously so this assertion needs no refresh timing.
+        let runtime = tokio::runtime::Handle::current();
+        let reader = state.clone();
+        let actor = session.clone();
+        crate::api::read_deadline::spawn_blocking(move ||
+            refresh(&reader, &actor, &first_index, &runtime, true))
+            .await.unwrap().unwrap();
+        let Json(first) = assistant_search(state.clone(), session.clone(), "orchid".into(),
+            None, None, 1, "grant-a-policy-1").await.unwrap();
+        let cursor = first["page"]["next_cursor"].as_str().unwrap().to_owned();
+        let Json(second) = assistant_search(state.clone(), session.clone(), "orchid".into(),
+            None, Some(cursor.clone()), 1, "grant-a-policy-1").await.unwrap();
+        assert_ne!(first["items"][0]["entry_id"], second["items"][0]["entry_id"]);
+        for binding in ["grant-b-policy-1", "grant-a-policy-2"] {
+            let error = assistant_search(state.clone(), session.clone(), "orchid".into(),
+                None, Some(cursor.clone()), 1, binding).await.unwrap_err();
+            assert_eq!(error.code, "validation-failed");
+        }
+        let mut native_query = query("orchid", 1);
+        native_query.cursor = Some(cursor);
+        assert_eq!(read(&state, "person/alex", native_query).await.unwrap_err().code,
+            "validation-failed");
+        let native = read(&state, "person/alex", query("orchid", 1)).await.unwrap();
+        let error = assistant_search(state, session, "orchid".into(), None,
+            Some(native["page"]["next_cursor"].as_str().unwrap().to_owned()), 1,
+            "grant-a-policy-1").await.unwrap_err();
+        assert_eq!(error.code, "validation-failed");
     }
 
     #[tokio::test]
@@ -968,7 +1027,7 @@ mod tests {
             .unwrap()
             .lock()
             .unwrap()
-            .remove(&(Arc::as_ptr(&state.store) as usize, "person/alex".to_owned(), false));
+            .remove(&(Arc::as_ptr(&state.store) as usize, "person/alex".to_owned(), false, None));
         assert_eq!(
             read(&state, "person/alex", evicted).await.unwrap_err().code,
             "cursor-gap"
@@ -1051,7 +1110,7 @@ mod tests {
         }
         rebuild(&state, "person/alex").await;
         let session = ClientSession::local(Some("person/alex")).unwrap();
-        let held = index_for(&state, &session, false).unwrap();
+        let held = index_for(&state, &session, false, None).unwrap();
         let (first_sizes, first_stamps, first_revision, first_incomplete) = {
             let index = held.lock().unwrap();
             (

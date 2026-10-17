@@ -13,18 +13,19 @@ const WORK_STATES: &[&str] = &[
     "cancelled", "skipped",
 ];
 
-pub(super) async fn project(
+pub(super) async fn project_bound(
     state: &AppState,
     snapshot: &ClientSnapshot,
     projection: &str,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
+    binding: &str,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     // Also required for cursor continuations: a cached page cannot bypass owner admission.
     owner(state)?;
     match projection {
-        "work" => page(state, snapshot, "assistant.work", parameters, max_bytes, work_rows).await,
-        "agent-queue" => queue_page(state, snapshot, parameters, max_bytes).await,
+        "work" => page(state, snapshot, "assistant.work", parameters, max_bytes, work_rows, binding).await,
+        "agent-queue" => queue_page(state, snapshot, parameters, max_bytes, binding).await,
         "mission-detail" | "work-detail" | "agent-detail" => {
             let (parameter, prefix) = match projection {
                 "mission-detail" => ("mission_id", "mission/"),
@@ -252,6 +253,7 @@ fn agent_detail(source: &Value) -> Value {
 
 async fn queue_page(
     state: &AppState, snapshot: &ClientSnapshot, parameters: &BTreeMap<String, String>, max_bytes: usize,
+    binding: &str,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     allow(parameters, &["agent_id", "cursor", "limit", "max_response_bytes"], max_bytes)?;
     let id = selected_id(parameters, "agent_id", "agent/")?.to_owned();
@@ -262,7 +264,7 @@ async fn queue_page(
     let query = ClientListQuery { limit, cursor: parameters.get("cursor").cloned(), ..Default::default() };
     // The collection participates in cursor validation and the cache key, so another
     // agent's otherwise valid cursor cannot address this agent's queue.
-    let collection = format!("assistant.agent-queue:{id}");
+    let collection = format!("assistant.agent-queue:{id}:{binding}");
     if query.cursor.is_some() {
         let result = client_page(state, snapshot, &collection, Vec::new(), &query)?;
         return Ok((snapshot.clone(), serde_json::to_value(result).map_err(ApiError::internal)?));

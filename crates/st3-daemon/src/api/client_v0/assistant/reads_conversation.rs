@@ -8,12 +8,25 @@ const MAX_LIMIT: usize = 50;
 const SNIPPET_BYTES: usize = 512;
 const REFERENCE_BYTES: usize = 4096;
 
+#[cfg(test)]
 pub(super) async fn project(
     state: &AppState,
     snapshot: &ClientSnapshot,
     projection: &str,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
+) -> Result<(ClientSnapshot, Value), ApiError> {
+    project_bound(state, snapshot, projection, parameters, max_bytes, "conversation-test-binding").await
+}
+
+/// Assistant discovery, timeline and search continuations are scoped to one grant policy.
+pub(super) async fn project_bound(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    projection: &str,
+    parameters: &BTreeMap<String, String>,
+    max_bytes: usize,
+    binding: &str,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     // Even cached discovery pages require a configured owner.
     let person = owner(state)?;
@@ -25,19 +38,19 @@ pub(super) async fn project(
             if !parameters.contains_key("cursor") || parameters.contains_key("limit") {
                 query.insert("limit".into(), limit.to_string());
             }
-            page(state, snapshot, "assistant.conversations", &query, max_bytes, conversations).await
+            page(state, snapshot, "assistant.conversations", &query, max_bytes, conversations, binding).await
         }
         "conversation-detail" => {
             allow(parameters, &["agent_id", "max_response_bytes"], max_bytes)?;
-            timeline(state, snapshot, &person, parameters, (DEFAULT_LIMIT, max_bytes), true).await
+            timeline(state, snapshot, &person, parameters, (DEFAULT_LIMIT, max_bytes), true, binding).await
         }
         "conversation-timeline" => {
             allow(parameters, &["agent_id", "session_id", "cursor", "limit", "max_response_bytes"], max_bytes)?;
-            timeline(state, snapshot, &person, parameters, (limit(parameters)?, max_bytes), false).await
+            timeline(state, snapshot, &person, parameters, (limit(parameters)?, max_bytes), false, binding).await
         }
         "conversation-search" => {
             allow(parameters, &["text", "agent_id", "cursor", "limit", "max_response_bytes"], max_bytes)?;
-            search(state, snapshot, &person, parameters, max_bytes).await
+            search(state, snapshot, &person, parameters, max_bytes, binding).await
         }
         _ => Err(ApiError::not_found("unknown assistant conversation projection")),
     }
@@ -68,6 +81,34 @@ fn conversations(state: &AppState, _person: &str, index: u64, _now: u128) -> any
     }).collect())
 }
 
+/// Authenticate the wrapper as well as the native handle: a caller must not relabel
+/// a native cursor with another grant's otherwise-public collection identity.
+fn timeline_cursor_mac(collection: &str, cursor: &str) -> Result<hmac::Hmac<sha2::Sha256>, ApiError> {
+    use hmac::Mac as _;
+    static KEY: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(|| {
+        let mut key = [0_u8; 32];
+        getrandom::fill(&mut key).expect("creating the assistant timeline cursor authentication key");
+        key
+    });
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(&*KEY)
+        .expect("HMAC accepts a 32-byte key");
+    mac.update(&serde_json::to_vec(&(collection, cursor)).map_err(ApiError::internal)?);
+    Ok(mac)
+}
+
+fn timeline_cursor(encoded: &str, collection: &str) -> Result<String, ApiError> {
+    use hmac::Mac as _;
+    let invalid = || stale("the cursor does not belong to this assistant projection and grant policy");
+    let (signature, cursor) = encoded.strip_prefix(collection).and_then(|value| value.split_once(':'))
+        .ok_or_else(invalid)?;
+    if cursor.is_empty() || cursor.len() > 8192 || signature.len() != 64 {
+        return Err(invalid());
+    }
+    let signature = hex::decode(signature).map_err(|_| invalid())?;
+    timeline_cursor_mac(collection, cursor)?.verify_slice(&signature).map_err(|_| invalid())?;
+    Ok(cursor.to_owned())
+}
+
 async fn timeline(
     state: &AppState,
     snapshot: &ClientSnapshot,
@@ -75,6 +116,7 @@ async fn timeline(
     parameters: &BTreeMap<String, String>,
     capacity: (usize, usize),
     detail: bool,
+    binding: &str,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     let (limit, max_bytes) = capacity;
     let agent_id = agent(parameters)?.to_owned();
@@ -82,14 +124,10 @@ async fn timeline(
     if parameters.get("session_id").is_some_and(|requested| requested != &session_id) {
         return Err(stale("the session is not the agent's current conversation"));
     }
-    let collection = if detail { "assistant.conversation-detail:" } else { "assistant.conversation-timeline:" };
-    let cursor = parameters.get("cursor").map(|cursor| {
-        cursor.strip_prefix(collection).map(str::to_owned)
-            .ok_or_else(|| stale("the cursor belongs to another assistant projection"))
-    }).transpose()?;
-    if cursor.as_ref().is_some_and(|cursor| cursor.is_empty() || cursor.len() > 8192) {
-        return Err(validation("conversation cursor must contain 1 through 8192 bytes"));
-    }
+    let projection = if detail { "assistant.conversation-detail" } else { "assistant.conversation-timeline" };
+    let collection = format!("{projection}:{binding}:");
+    let cursor = parameters.get("cursor")
+        .map(|cursor| timeline_cursor(cursor, &collection)).transpose()?;
     let mut session = ClientSession::local(Some(person))?;
     session.conversation_blocks = true;
     let reader = state.clone();
@@ -105,7 +143,9 @@ async fn timeline(
         .map(|item| timeline_item(item, snippet_bytes)).collect::<Vec<_>>();
     let mut projected_page = safe_page(&native["page"]);
     if let Some(cursor) = projected_page["next_cursor"].as_str() {
-        projected_page["next_cursor"] = json!(format!("{collection}{cursor}"));
+        use hmac::Mac as _;
+        let signature = hex::encode(timeline_cursor_mac(&collection, cursor)?.finalize().into_bytes());
+        projected_page["next_cursor"] = json!(format!("{collection}{signature}:{cursor}"));
     }
     Ok((snapshot.clone(), json!({
         "kind":if detail { "conversation-detail" } else { "conversation-timeline" },
@@ -175,6 +215,7 @@ async fn search(
     person: &str,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
+    binding: &str,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     let limit = limit(parameters)?;
     let text = required(parameters, "text")?;
@@ -184,7 +225,7 @@ async fn search(
     }
     let Json(native) = super::super::super::search::assistant_search(
         state.clone(), ClientSession::local(Some(person))?, text.to_owned(),
-        parameters.get("agent_id").cloned(), parameters.get("cursor").cloned(), limit,
+        parameters.get("agent_id").cloned(), parameters.get("cursor").cloned(), limit, binding,
     ).await?;
     let snippet_bytes = SNIPPET_BYTES.min(max_bytes / limit);
     let items = native["items"].as_array().into_iter().flatten().take(limit).map(|hit| {
@@ -272,6 +313,53 @@ mod tests {
             ("agent_id","agent/reads-codex"), ("session_id","session/foreign"),
         ]), MAX_RESPONSE_BYTES).await.unwrap_err();
         assert_eq!(error.code, "stale-fence");
+    }
+
+    #[tokio::test]
+    async fn timeline_continuations_are_bound_to_grant_policy_and_projection() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let (state, _, _, _) = super::super::tests::managed_conversation(
+            root.path(), &"word ".repeat(1900));
+        let mut transcript = std::fs::OpenOptions::new().append(true).open(
+            root.path().join("home/.codex/sessions/2026/10/11/assistant.jsonl")).unwrap();
+        for number in 2..=3 {
+            writeln!(transcript, "{}", json!({
+                "type":"response_item", "timestamp":format!("2026-10-11T12:00:0{number}Z"),
+                "payload":{"type":"message", "role":"assistant", "id":format!("answer-{number}"),
+                    "content":[{"type":"output_text", "text":format!("answer {number}")}]},
+            })).unwrap();
+        }
+        let snapshot = new_client_snapshot(&state);
+        let query = parameters(&[("agent_id","agent/reads-codex"), ("limit","1")]);
+        let (_, first) = project_bound(&state, &snapshot, "conversation-timeline", &query,
+            MAX_RESPONSE_BYTES, "grant-a-policy-1").await.unwrap();
+        let cursor = first["page"]["next_cursor"].as_str().unwrap();
+        let mut next = query.clone();
+        next.insert("cursor".into(), cursor.into());
+        let (_, second) = project_bound(&state, &snapshot, "conversation-timeline", &next,
+            MAX_RESPONSE_BYTES, "grant-a-policy-1").await.unwrap();
+        assert_ne!(first["items"][0]["id"], second["items"][0]["id"]);
+        for binding in ["grant-b-policy-1", "grant-a-policy-2"] {
+            let error = project_bound(&state, &snapshot, "conversation-timeline", &next,
+                MAX_RESPONSE_BYTES, binding).await.unwrap_err();
+            assert_eq!(error.code, "stale-fence");
+            let mut relabeled = next.clone();
+            relabeled.insert("cursor".into(), cursor.replace("grant-a-policy-1", binding));
+            let error = project_bound(&state, &snapshot, "conversation-timeline", &relabeled,
+                MAX_RESPONSE_BYTES, binding).await.unwrap_err();
+            assert_eq!(error.code, "stale-fence");
+        }
+        let (_, native) = cursor.strip_prefix("assistant.conversation-timeline:grant-a-policy-1:")
+            .unwrap().split_once(':').unwrap();
+        for foreign in [native.to_owned(), format!("assistant.conversation-timeline:{native}"),
+            format!("assistant.conversation-detail:grant-a-policy-1:{native}")] {
+            next.insert("cursor".into(), foreign);
+            let error = project_bound(&state, &snapshot, "conversation-timeline", &next,
+                MAX_RESPONSE_BYTES, "grant-a-policy-1").await.unwrap_err();
+            assert_eq!(error.code, "stale-fence");
+        }
     }
 
     #[tokio::test]

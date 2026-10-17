@@ -39,22 +39,23 @@ const TERMINAL_FIELDS: &[&str] = &[
 /// Project one assistant read with the snapshot its rows were read in. `parameters` are the
 /// exact decoded query parameters the read authorization names; the person is the
 /// configured owner, never a parameter. A cursor or content read keeps `snapshot`.
-pub(super) async fn project(
+pub(super) async fn project_bound(
     state: &AppState,
     snapshot: &ClientSnapshot,
     projection: &str,
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
+    binding: &str,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     match projection {
         "summary" => {
             allow(parameters, SUMMARY_FIELDS, max_bytes)?;
             summary(state).await
         }
-        "attention" => page(state, snapshot, "assistant.attention", parameters, max_bytes, attention_rows).await,
-        "attention-rich" => page(state, snapshot, "assistant.attention-rich", parameters, max_bytes, attention_rich_rows).await,
-        "missions-rich" => page(state, snapshot, "assistant.missions-rich", parameters, max_bytes, mission_rich_rows).await,
-        "agents-rich" => page(state, snapshot, "assistant.agents-rich", parameters, max_bytes, agent_rich_rows).await,
+        "attention" => page(state, snapshot, "assistant.attention", parameters, max_bytes, attention_rows, binding).await,
+        "attention-rich" => page(state, snapshot, "assistant.attention-rich", parameters, max_bytes, attention_rich_rows, binding).await,
+        "missions-rich" => page(state, snapshot, "assistant.missions-rich", parameters, max_bytes, mission_rich_rows, binding).await,
+        "agents-rich" => page(state, snapshot, "assistant.agents-rich", parameters, max_bytes, agent_rich_rows, binding).await,
         "attention-content" => {
             allow(parameters, &["alert_id","max_response_bytes"], max_bytes)?;
             let id = required(parameters, "alert_id")?;
@@ -64,16 +65,24 @@ pub(super) async fn project(
             Ok((snapshot.clone(), json!({"id":item.subject,"episode":item.episode,"kind":item.kind,
                 "title":item.title,"detail":item.detail,"request":item.request})))
         },
-        "missions" => page(state, snapshot, "assistant.missions", parameters, max_bytes, mission_rows).await,
-        "agents" => page(state, snapshot, "assistant.agents", parameters, max_bytes, agent_rows).await,
+        "missions" => page(state, snapshot, "assistant.missions", parameters, max_bytes, mission_rows, binding).await,
+        "agents" => page(state, snapshot, "assistant.agents", parameters, max_bytes, agent_rows, binding).await,
         "conversations" | "conversation-detail" | "conversation-timeline" | "conversation-search" =>
-            conversation_reads::project(state, snapshot, projection, parameters, max_bytes).await,
+            conversation_reads::project_bound(state, snapshot, projection, parameters, max_bytes, binding).await,
         "mission-detail" | "work" | "work-detail" | "agent-detail" | "agent-queue" =>
-            operational_reads::project(state, snapshot, projection, parameters, max_bytes).await,
+            operational_reads::project_bound(state, snapshot, projection, parameters, max_bytes, binding).await,
         "conversation-content" => Ok((snapshot.clone(), conversation(state, parameters, max_bytes).await?)),
         "terminal-content" => Ok((snapshot.clone(), terminal(state, parameters, max_bytes).await?)),
         _ => Err(ApiError::not_found("unknown assistant projection")),
     }
+}
+
+#[cfg(test)]
+pub(super) async fn project(
+    state: &AppState, snapshot: &ClientSnapshot, projection: &str,
+    parameters: &BTreeMap<String, String>, max_bytes: usize,
+) -> Result<(ClientSnapshot, Value), ApiError> {
+    project_bound(state, snapshot, projection, parameters, max_bytes, "test-grant-policy").await
 }
 
 /// Every parameter is named by the projection; a stated budget must be the one enforced.
@@ -170,8 +179,10 @@ async fn page(
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
     rows: Rows,
+    binding: &str,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     allow(parameters, METADATA_FIELDS, max_bytes)?;
+    let collection = format!("{collection}:{binding}");
     let limit = parameters
         .get("limit")
         .map(|limit| {
@@ -191,7 +202,7 @@ async fn page(
     // As `client_snapshot_page`: a cursor continues the cached first page of the snapshot it
     // was issued in; a first page is read inside one SQLite snapshot and names that snapshot.
     if query.cursor.is_some() {
-        let page = client_page(state, snapshot, collection, Vec::new(), &query)?;
+        let page = client_page(state, snapshot, &collection, Vec::new(), &query)?;
         return Ok((snapshot.clone(), serde_json::to_value(page).map_err(ApiError::internal)?));
     }
     let reader = state.clone();
@@ -206,7 +217,7 @@ async fn page(
         })
     })
     .await?;
-    let page = client_page_read(state, &snapshot, collection, items, &query, true)?;
+    let page = client_page_read(state, &snapshot, &collection, items, &query, true)?;
     Ok((snapshot, serde_json::to_value(page).map_err(ApiError::internal)?))
 }
 

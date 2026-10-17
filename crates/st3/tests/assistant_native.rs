@@ -12,6 +12,9 @@ use st3_client::{ActionRequest, AssistantGrant, AssistantGrantPolicy, AssistantM
     PersonStepParameters};
 use tower::ServiceExt as _;
 
+#[path = "assistant_cursor_grants.rs"]
+mod cursor_grants;
+
 const OWNER: &str = "person/ada";
 const AGENT: &str = "agent/native.worker";
 const POLICY: &str = "custom.client.assistant.v1.policy";
