@@ -283,6 +283,14 @@ the recipient's local message arrival; channel readiness records an observation,
 `.config/nextest.toml` gives the messaging fault matrix and the fleet reconnect test, both with
 real multi-minute outages, first priority so their retries fit the CI test window. Failed tests
 retry twice with fixed 30-second delays; a retry pass is reported as flaky, not a gate failure.
+The messaging fault cases need the pinned historical st3 (`.github/messaging-compat-baseline.json`).
+CI builds it once per job and exports `ST3_MESSAGING_COMPAT_BIN`. Without that variable each case, a
+separate nextest process, runs `scripts/messaging-compat-binary`. The script builds it once per
+baseline commit under a lock and caches the path in `${XDG_CACHE_HOME:-~/.cache}/st3`
+(`ST3_MESSAGING_COMPAT_CACHE` moves it), so the other cases read the cached path instead of each
+queuing its own `nix build`; a cached path that is no longer executable is rebuilt, and a caller
+that cannot get the lock within `ST3_MESSAGING_COMPAT_LOCK_WAIT` seconds (default 540, below the callers' 10 minute `timeout`) fails with
+the way out (set `ST3_MESSAGING_COMPAT_BIN`). `scripts/messaging-compat-binary-test` runs it against a fake `nix`.
 Each run isolates test `HOME` and XDG state. The summary records the tested SHA,
 each stage's elapsed time, result and exit code; each stage job uploads `<job>-logs` with its log and `.time` file.
 Nextest's final summary retains flaky outcomes.
@@ -1076,6 +1084,7 @@ repo-settings changes have merged.
 | `fleet.yml` | The old fork-only fleet compatibility job is absorbed into `linux-gate`, which now covers every PR and main. This preserves fork coverage and adds same-repository coverage on Namespace. |
 | `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
 | `release-smalltalk.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
+| `debug-assertions-daily.yml` | New. Once a day (03:41 UTC) and on dispatch, never on pull requests: builds and runs the whole required test set with `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true`, because the dev and test profiles build without debug assertions (see Debug assertions). A failure opens, or comments on, one open issue titled `Daily debug-assertions run failed`. Not a required check. |
 | `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
 | `public-repo.yml` | Preserve the guard and its tests on all PRs and main pushes; move Linux to Namespace. |
 
