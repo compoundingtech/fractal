@@ -1138,26 +1138,36 @@ mod retry_tests {
             fleet.clone(),
             notify.subscribe(),
         ));
-        async fn tick() {
-            // Allow signed exchange/store work and socket I/O to settle at this instant.
-            for _ in 0..500 {
+        async fn settled(
+            local: &Store,
+            ready: impl Fn(&crate::replication::ReplicationWorkerStatus) -> bool,
+        ) {
+            // Paused time must not outrun real socket/blocking-store work. Wait for the
+            // worker's completed transition before advancing its retry/cooldown clock.
+            let started = std::time::Instant::now();
+            loop {
+                let worker = local
+                    .replication_sync
+                    .lock()
+                    .unwrap()
+                    .get("beacon")
+                    .and_then(|progress| progress.worker.clone());
+                if worker.as_ref().is_some_and(&ready) {
+                    return;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(30),
+                    "worker did not settle: {worker:?}"
+                );
                 tokio::task::yield_now().await;
             }
-            tokio::time::advance(Duration::from_secs(1)).await;
         }
-        for _ in 0..20 {
-            tick().await;
-            if local
-                .replication_status(false, None, &["beacon".into()])
-                .unwrap()
-                .peers[0]
-                .worker
-                .as_ref()
-                .is_some_and(|worker| worker.preferred_retry_at_unix_ms.is_some())
-            {
-                break;
-            }
-        }
+        settled(&local, |worker| worker.phase == "backoff").await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settled(&local, |worker| {
+            worker.phase == "idle" && worker.route_is_preferred == Some(false)
+        })
+        .await;
         assert!(fleet.activity.read().unwrap().contains_key("beacon"));
         assert!(attempts.lock()[0], "preferred fails first");
         assert_eq!(attempts.lock().last(), Some(&false), "fallback succeeds");
@@ -1173,18 +1183,22 @@ mod retry_tests {
         preferred_up.store(true, Ordering::SeqCst);
         // Local writes wake the worker throughout cooldown, but neither retry early nor
         // slide the deadline on each successful fallback exchange.
-        for _ in 0..20 {
+        for _ in 0..3 {
+            let before = attempts.lock().len();
             notify.send_modify(|generation| *generation += 1);
-            tick().await;
+            tokio::time::advance(Duration::from_secs(10)).await;
+            settled(&local, |worker| {
+                worker.phase == "idle" && attempts.lock().len() > before
+            })
+            .await;
         }
         assert_eq!(attempts.lock().iter().filter(|&&route| route).count(), 1);
-        for _ in 0..70 {
-            notify.send_modify(|generation| *generation += 1);
-            tick().await;
-            if attempts.lock().last() == Some(&true) {
-                break;
-            }
-        }
+        notify.send_modify(|generation| *generation += 1);
+        tokio::time::advance(Duration::from_secs(31)).await;
+        settled(&local, |worker| {
+            worker.phase == "idle" && worker.route_is_preferred == Some(true)
+        })
+        .await;
         assert_eq!(attempts.lock().last(), Some(&true), "preferred recovers");
         let worker = local
             .replication_status(false, None, &["beacon".into()])
@@ -1196,27 +1210,24 @@ mod retry_tests {
         assert_eq!(worker.route_is_preferred, Some(true));
         assert_eq!(worker.preferred_retry_at_unix_ms, None);
         preferred_up.store(false, Ordering::SeqCst);
-        let before = attempts.lock().len();
-        for _ in 0..20 {
-            notify.send_modify(|generation| *generation += 1);
-            tick().await;
-            let observed = attempts.lock();
-            if observed.len() > before && observed.last() == Some(&false) {
-                break;
-            }
-        }
+        notify.send_modify(|generation| *generation += 1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settled(&local, |worker| worker.phase == "backoff").await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settled(&local, |worker| {
+            worker.phase == "idle" && worker.route_is_preferred == Some(false)
+        })
+        .await;
         assert_eq!(attempts.lock().last(), Some(&false));
         let preferred_before = attempts.lock().iter().filter(|&&route| route).count();
-        for _ in 0..90 {
-            notify.send_modify(|generation| *generation += 1);
-            tick().await;
-            let observed = attempts.lock();
-            if observed.iter().filter(|&&route| route).count() > preferred_before
-                && observed.last() == Some(&false)
-            {
-                break;
-            }
-        }
+        notify.send_modify(|generation| *generation += 1);
+        tokio::time::advance(Duration::from_secs(61)).await;
+        settled(&local, |worker| worker.phase == "backoff").await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settled(&local, |worker| {
+            worker.phase == "idle" && worker.route_is_preferred == Some(false)
+        })
+        .await;
         let observed = attempts.lock();
         assert!(observed.iter().filter(|&&route| route).count() > preferred_before);
         assert_eq!(
