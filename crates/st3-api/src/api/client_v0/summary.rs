@@ -92,7 +92,7 @@ fn shared(
         let mut internal = request.clone();
         internal.collection = "summary-missions".into();
         internal.limit = None;
-        let prepared = windows.prepare(/* sqlite-large-value: allow-for-now lv-ha5a3ffd8dbf6 owner=st3::api::client_v0::summary TODO=trace-statement-and-value-representation */ state, session, &internal);
+        let prepared = windows.prepare(/* sqlite-large-value: allow-for-now lv-hf1cbc78316cc owner=st3_api::api::client_v0::summary TODO=trace-statement-and-value-representation */ state, session, &internal);
         windows
             .read(
                 state,

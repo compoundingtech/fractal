@@ -5,7 +5,7 @@ use crate::changes::{Revision, change_id, oid};
 
 const MAX_RECORD_BYTES: usize = 16 * 1024;
 
-pub const SCHEMA: &str = r#"
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3c59a3fb6230 owner=st3_store::store::git_changes TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_git_change_records (
     repository TEXT NOT NULL,
     object_id TEXT NOT NULL,
@@ -72,13 +72,13 @@ impl Store {
             );
         } else {
             transaction.execute(
-                "INSERT INTO local_git_change_records(repository,object_id,change_id,record_json,indexed_at)
+                /* sqlite-large-value: allow-for-now lv-h2db0a8e159a3 owner=st3_store::store::git_changes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_git_change_records(repository,object_id,change_id,record_json,indexed_at)
                  VALUES(?1,?2,?3,?4,?5)",
                 params![repository, revision.oid, revision.record.change_id, body, indexed_at],
             )?;
         }
         transaction.execute(
-            "INSERT INTO local_git_change_latest(repository,change_id,object_id,generation)
+            /* sqlite-large-value: allow-for-now lv-h9473d9f5980e owner=st3_store::store::git_changes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_git_change_latest(repository,change_id,object_id,generation)
              VALUES(?1,?2,?3,?4)
              ON CONFLICT(repository,change_id) DO UPDATE SET object_id=excluded.object_id,generation=excluded.generation
              WHERE excluded.generation>local_git_change_latest.generation",
@@ -111,7 +111,7 @@ impl Store {
         let mut records = BTreeMap::new();
         for object in objects {
             let row: Option<(String, String)> = statement
-                .query_row(params![repository, object], |row| {
+                .query_row(/* sqlite-large-value: allow-for-now lv-hd38e14e93247 owner=st3_store::store::git_changes TODO=trace-statement-and-value-representation */ params![repository, object], |row| {
                     Ok((row.get(0)?, row.get(1)?))
                 })
                 .optional()?;
@@ -310,8 +310,8 @@ pub mod tests {
         {
             let mut writer = store.connection.write();
             let tx = writer.transaction().unwrap();
-            tx.execute("INSERT INTO local_git_change_records VALUES('other/repo',printf('%040x',0),'I'||printf('%040x',0),'{}','fixture')", []).unwrap();
-            tx.execute("INSERT INTO local_git_change_latest VALUES('other/repo','I'||printf('%040x',0),printf('%040x',0),1)", []).unwrap();
+            tx.execute(/* sqlite-large-value: allow-for-now lv-he71195e47c5a owner=st3_store::store::git_changes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_git_change_records VALUES('other/repo',printf('%040x',0),'I'||printf('%040x',0),'{}','fixture')", []).unwrap();
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h0bc101d3b161 owner=st3_store::store::git_changes TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_git_change_latest VALUES('other/repo','I'||printf('%040x',0),printf('%040x',0),1)", []).unwrap();
             tx.commit().unwrap();
         }
         let measure = || {
@@ -330,9 +330,9 @@ pub mod tests {
         {
             let mut writer = store.connection.write();
             let tx = writer.transaction().unwrap();
-            tx.execute("WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<100000)
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h918cbce43f8c owner=st3_store::store::git_changes TODO=bound-or-reference-values-and-reclamation */ "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<100000)
                 INSERT INTO local_git_change_records SELECT 'other/repo',printf('%040x',n),'I'||printf('%040x',n),'{}','fixture' FROM rows", []).unwrap();
-            tx.execute("WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<100000)
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h275bb7d7aab8 owner=st3_store::store::git_changes TODO=bound-or-reference-values-and-reclamation */ "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<100000)
                 INSERT INTO local_git_change_latest SELECT 'other/repo','I'||printf('%040x',n),printf('%040x',n),1 FROM rows", []).unwrap();
             tx.commit().unwrap();
         }

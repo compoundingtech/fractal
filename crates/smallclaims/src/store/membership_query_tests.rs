@@ -242,7 +242,7 @@ fn membership_signers_do_not_multiply_claim_rows_or_scan_unrelated_signatures() 
 #[test]
 fn sealed_fleet_cache_reuses_the_query_and_invalidates_every_fold_input() {
     let mut connection = fixture();
-    connection.execute_batch(&fleet_generation_schema()).unwrap();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hebccae97eca4 owner=smallclaims::store::membership_query_tests TODO=trace-statement-and-value-representation */ &fleet_generation_schema()).unwrap();
     let anchor = admitted("anchor", "birch", "anchor-key", "anchor", "birch", 3);
     insert_claim(&connection, &anchor);
     envelope(&connection, &anchor, "anchor", &["anchor-key"]);
@@ -264,32 +264,32 @@ fn sealed_fleet_cache_reuses_the_query_and_invalidates_every_fold_input() {
     // No time-dependent fields exist: "current" is an open writer window,
     // not a wall-clock lease. Only a claim closes that window.
     let mutations = [
-        "UPDATE claims SET body=json_set(body,'$.fields.mode','dial-out')",
-        "UPDATE claims SET subject='host/cedar'",
-        "UPDATE claims SET id='renamed'",
-        "UPDATE batches SET replica_sequence=4",
-        "UPDATE batches SET origin='cedar'",
-        "UPDATE batches SET origin='birch', replica_sequence=3",
-        "UPDATE replica_envelopes SET batch_id=NULL",
-        "UPDATE replica_envelopes SET batch_id='anchor'",
-        "UPDATE replica_envelopes SET envelope_hash='changed'",
-        "UPDATE replica_envelope_signatures SET envelope_hash='changed'",
-        "UPDATE replica_envelope_signatures SET member_key='other-key'",
-        "DELETE FROM replica_envelope_signatures",
-        "INSERT INTO replica_envelope_signatures VALUES('birch',3,'changed','anchor-key')",
-        "DELETE FROM replica_envelopes",
-        "INSERT INTO replica_envelopes VALUES('birch',3,'changed','anchor')",
-        "UPDATE meta SET value='other-anchor' WHERE key='fleet_anchor_key'",
-        "DELETE FROM meta WHERE key='fleet_anchor_key'",
-        "INSERT INTO meta VALUES('fleet_anchor_key','anchor-key')",
-        "DELETE FROM batches",
-        "INSERT INTO batches VALUES('anchor','birch',3)",
-        "DELETE FROM claims",
-        "INSERT INTO claims VALUES('new','fleet.member-left','host/birch','{\"fields\":{}}','anchor')",
+        /* sqlite-large-value: allow-for-now lv-hfe7bc53ccf35 owner=smallclaims::store::membership_query_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.mode','dial-out')",
+        /* sqlite-large-value: allow-for-now lv-h29c99d643170 owner=smallclaims::store::membership_query_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET subject='host/cedar'",
+        /* sqlite-large-value: allow-for-now lv-h603ade762e9a owner=smallclaims::store::membership_query_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET id='renamed'",
+        /* sqlite-large-value: allow-for-now lv-h55e08ce4e425 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=4",
+        /* sqlite-large-value: allow-for-now lv-h2d780a78ea0a owner=smallclaims::store::membership_query_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE batches SET origin='cedar'",
+        /* sqlite-large-value: allow-for-now lv-h09426db0fbaa owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET origin='birch', replica_sequence=3",
+        /* sqlite-large-value: allow-for-now lv-h7bb07031ba8c owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET batch_id=NULL",
+        /* sqlite-large-value: allow-for-now lv-he92456f7fb9b owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET batch_id='anchor'",
+        /* sqlite-large-value: allow-for-now lv-h2c3a8c113139 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET envelope_hash='changed'",
+        /* sqlite-large-value: allow-for-now lv-h9d8387c139c5 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelope_signatures SET envelope_hash='changed'",
+        /* sqlite-large-value: allow-for-now lv-h23116f518f45 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelope_signatures SET member_key='other-key'",
+        /* sqlite-large-value: allow-for-now lv-hba1cdada2276 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures",
+        /* sqlite-large-value: allow-for-now lv-hfe05e3188e97 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_envelope_signatures VALUES('birch',3,'changed','anchor-key')",
+        /* sqlite-large-value: allow-for-now lv-hc58680be3c16 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelopes",
+        /* sqlite-large-value: allow-for-now lv-hf31184c6716d owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_envelopes VALUES('birch',3,'changed','anchor')",
+        /* sqlite-large-value: allow-for-now lv-hc6ed37a4e642 owner=smallclaims::store::membership_query_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='other-anchor' WHERE key='fleet_anchor_key'",
+        /* sqlite-large-value: allow-for-now lv-h294c8934b41c owner=smallclaims::store::membership_query_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='fleet_anchor_key'",
+        /* sqlite-large-value: allow-for-now lv-h361bb9e86be3 owner=smallclaims::store::membership_query_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta VALUES('fleet_anchor_key','anchor-key')",
+        /* sqlite-large-value: allow-for-now lv-he2d6d2705ec5 owner=smallclaims::store::membership_query_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM batches",
+        /* sqlite-large-value: allow-for-now lv-h8d6172d79300 owner=smallclaims::store::membership_query_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO batches VALUES('anchor','birch',3)",
+        /* sqlite-large-value: allow-for-now lv-h130b3e63e6de owner=smallclaims::store::membership_query_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims",
+        /* sqlite-large-value: allow-for-now lv-h1a9cad174821 owner=smallclaims::store::membership_query_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES('new','fleet.member-left','host/birch','{\"fields\":{}}','anchor')",
     ];
     for sql in mutations {
         let before = fleet_generation(&connection).unwrap();
-        connection.execute_batch(sql).unwrap();
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2cdc92932736 owner=smallclaims::store::membership_query_tests TODO=trace-statement-and-value-representation */ sql).unwrap();
         let after = fleet_generation(&connection).unwrap();
         assert!(after > before, "generation did not invalidate: {sql}");
         STATEMENTS.with(|count| count.set(0));
@@ -311,7 +311,7 @@ fn sealed_fleet_cache_reuses_the_query_and_invalidates_every_fold_input() {
 #[test]
 fn sealed_fleet_cache_never_includes_the_local_signer_fallback() {
     let connection = fixture();
-    connection.execute_batch(&fleet_generation_schema()).unwrap();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb247a89ed0c1 owner=smallclaims::store::membership_query_tests TODO=trace-statement-and-value-representation */ &fleet_generation_schema()).unwrap();
     let anchor = admitted("anchor", "birch", "anchor-key", "anchor", "birch", 3);
     insert_claim(&connection, &anchor);
     let local = fleet_membership_tx_with_local_signer(
@@ -329,25 +329,25 @@ fn sealed_fleet_cache_never_includes_the_local_signer_fallback() {
 #[test]
 fn sealed_fleet_cache_tracks_batch_signers_after_envelope_identity_changes() {
     let connection = fixture();
-    connection.execute_batch(&fleet_generation_schema()).unwrap();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h0854bfdff2a6 owner=smallclaims::store::membership_query_tests TODO=trace-statement-and-value-representation */ &fleet_generation_schema()).unwrap();
     let anchor = admitted("anchor", "birch", "anchor-key", "anchor", "birch", 3);
     insert_claim(&connection, &anchor);
     envelope(&connection, &anchor, "sealed", &["anchor-key"]);
     connection.execute(
-        "UPDATE replica_envelopes SET writer='other-writer', sequence=99", [],
+        /* sqlite-large-value: allow-for-now lv-h2757229ad360 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET writer='other-writer', sequence=99", [],
     ).unwrap();
     let mut cache = None;
     assert_eq!(
         sealed_fleet_view_tx(&connection, &mut cache).unwrap().current("birch").len(), 1,
     );
     for sql in [
-        "DELETE FROM replica_envelope_signatures",
-        "INSERT INTO replica_envelope_signatures VALUES('birch',3,'sealed','anchor-key')",
-        "UPDATE replica_envelope_signatures SET member_key='other-key'",
-        "UPDATE replica_envelope_signatures SET member_key='anchor-key'",
+        /* sqlite-large-value: allow-for-now lv-h779f1f624a47 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures",
+        /* sqlite-large-value: allow-for-now lv-h150e2cf396af owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_envelope_signatures VALUES('birch',3,'sealed','anchor-key')",
+        /* sqlite-large-value: allow-for-now lv-h71413c178150 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelope_signatures SET member_key='other-key'",
+        /* sqlite-large-value: allow-for-now lv-h6b76f19a47e9 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelope_signatures SET member_key='anchor-key'",
     ] {
         let before = fleet_generation(&connection).unwrap();
-        connection.execute_batch(sql).unwrap();
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc7fc61537933 owner=smallclaims::store::membership_query_tests TODO=trace-statement-and-value-representation */ sql).unwrap();
         assert!(fleet_generation(&connection).unwrap() > before, "{sql}");
         assert_eq!(
             sealed_fleet_view_tx(&connection, &mut cache).unwrap(),
