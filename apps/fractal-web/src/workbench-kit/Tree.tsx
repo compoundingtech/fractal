@@ -42,6 +42,7 @@ const styles = stylex.create({
   },
   rowHovered: { backgroundColor: tokens['--ds-gray-alpha-100'] },
   rowSelected: { backgroundColor: tokens['--ds-gray-alpha-200'] },
+  contentRow: { height: 'auto', minHeight: '1.75rem' },
   rowFocusVisible: { boxShadow: `inset 0 0 0 2px ${tokens['--ds-focus-color']}` },
   indent: (level: number) => ({ paddingInlineStart: `${(level - 1) * 12 + 4}px` }),
   chevron: {
@@ -106,6 +107,7 @@ export interface TreeNodeProps {
   readonly children?: ReactNode
   readonly onHoverStart?: () => void
   readonly onFocus?: () => void
+  readonly contentHeight?: boolean
 }
 
 /** Navigator row with disclosure affordance and current-editor marker. */
@@ -116,6 +118,7 @@ export const TreeNode = ({
   children,
   onHoverStart,
   onFocus,
+  contentHeight = false,
 }: TreeNodeProps) => {
   const current = useContext(CurrentContext) === id
   return (
@@ -138,6 +141,7 @@ export const TreeNode = ({
             {...stylex.props(
               styles.row,
               styles.indent(level),
+              contentHeight && styles.contentRow,
               isHovered && styles.rowHovered,
               current && styles.rowSelected,
               isFocusVisible && styles.rowFocusVisible,

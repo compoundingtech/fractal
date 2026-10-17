@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fractal web renders resolved folder-only sidebar nesting through the shared sidebar projection and React Aria tree, retaining the flat roster for legacy unresolved arrangements.",
+  "replay": { "status": "none", "detail": "Read-only web adapter; no runtime replay change." },
+  "schema": { "status": "none", "detail": "Uses existing native arrangement schemas and authoritative resolution." },
+  "rules": { "status": "none", "detail": "No checkpoint rule change." },
+  "compatibility": { "status": "none", "detail": "Unresolved arrangements retain the existing flat agent roster. Dormant placements do not become visible agent seats." },
+  "downtime": { "status": "none", "detail": "No service interruption introduced." },
+  "manual": { "status": "none", "detail": "No host rollout or installation change." },
+  "recovery": { "status": "none", "detail": "No database or runtime recovery change." }
+}

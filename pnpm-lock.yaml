@@ -19,6 +19,9 @@ importers:
       '@smalltalk/st3-client':
         specifier: file:../../clients/typescript/st3-client
         version: link:../../clients/typescript/st3-client
+      '@smalltalk/st3-views':
+        specifier: workspace:*
+        version: link:../../clients/typescript/st3-views
       '@st3/sdk':
         specifier: workspace:*
         version: link:packages/st3-sdk

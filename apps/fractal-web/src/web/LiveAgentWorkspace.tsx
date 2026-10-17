@@ -27,6 +27,10 @@ import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
 import { useGatewaySync } from '../data/react.tsx'
 import { matchesSidebarHost, parseSidebarQuery } from '../shell/sidebar/filter.ts'
+import { folders, type FolderState } from '../folders/client.ts'
+import { sidebarV2 } from '../folders/sidebarV2.ts'
+import type { SidebarNode } from '../folders/sidebarContract.ts'
+import { Tree, TreeNode } from '../workbench-kit/Tree.tsx'
 
 // A static import would evaluate the kit Transcript/Markdown/refractor before the shell paints.
 // Demand and speculative prefetch share one in-flight request; rejection releases it for retry.
@@ -122,7 +126,7 @@ const initialAgentFromUrl = () => {
 }
 
 /** One authoritative agent thread per workspace; local geometry never grants backend authority. */
-export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void }) {
+export function LiveAgentWorkspace({ ux, onSelectConversation, folderSource = folders }: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void; readonly folderSource?: Atom.Atom<FolderState> }) {
   const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), now = useNow()
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
   const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [scheme, setScheme] = useAtom(palette)
@@ -130,7 +134,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   const location = React.useSyncExternalStore(subscribeLocation, locationState, locationState)
   const hoverOwner = React.useRef<HTMLElement | null>(null)
   const rememberHoverOwner = (event: React.SyntheticEvent<HTMLElement>) => {
-    hoverOwner.current = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-wf-agent-ref]') : null
+    hoverOwner.current = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-wf-agent-ref], [data-key^="agent/"]') : null
   }
   React.useLayoutEffect(() => {
     // Use the row's existing Escape contract: it cancels pending hover intent as well
@@ -202,6 +206,22 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   const filtered = agents.filter((row) =>
     matchesSidebarHost(row.host, parsedSearch.machines) &&
     `${row.name} ${row.ref} ${row.host}`.toLowerCase().includes(textSearch))
+  const folderState = useAtomValue(folderSource)
+  const nesting = React.useMemo(() => sidebarV2(folderState.arrangement, agents.map(row => ({
+    id: row.ref, subject: row.ref, label: row.name, host: row.host,
+  }))), [folderState.arrangement, agents])
+  const visibleAgents = new Map(filtered.map(row => [row.ref, row]))
+  const treeNodes = (nodes: readonly SidebarNode[]): React.ReactNode[] => nodes.flatMap(node => {
+    if (node._tag !== 'Agent') {
+      const children = treeNodes(node.children)
+      if (search.trim() !== '' && children.length === 0) return []
+      return [<TreeNode key={node.id} id={node.id} textValue={node.label} content={node.label}>{children}</TreeNode>]
+    }
+    const row = visibleAgents.get(node.id)
+    return row === undefined ? [] : [<TreeNode key={node.id} id={node.id} textValue={row.name} contentHeight content={
+      <SidebarAgentRow inTree item={sidebarRow({ agent: row, stale, now })} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={parsedSearch.query} active={current === row.ref} onOpen={() => select(row.ref)} />
+    } />]
+  })
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
   const separator = selectedPane.lastIndexOf(':')
   const urlPresentation = selectedPane.slice(separator + 1)
@@ -244,9 +264,11 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                           <span data-wf-skeleton-line="host" {...stylex.props(styles.skeletonLine, styles.skeletonHost)} />
                         </div>)}
                       </div> : null}
-                      {filtered.map((row) => (
+                      {nesting._tag === 'Built' ? <Tree key={search} label="Agents and folders" currentId={current} defaultExpandedKeys={search.trim() === '' ? [] : Object.keys(folderState.arrangement?.body.folders ?? {}).map(id => `folder:${id}`)} onAction={id => { if (visibleAgents.has(id)) select(id) }}>
+                        {treeNodes(nesting.tree)}
+                      </Tree> : nesting._tag === 'Legacy' ? filtered.map((row) => (
                         <SidebarAgentRow key={row.ref} item={sidebarRow({ agent: row, stale, now })} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={parsedSearch.query} active={current === row.ref} onOpen={() => select(row.ref)} />
-                      ))}
+                      )) : <p role="status">Folder layout could not be displayed ({nesting.error._tag}).</p>}
                     </nav>
                     {fleet._tag !== 'Observed' ? (
                       <p role="status" data-wf-roster-reason={fleet._tag === 'Unavailable' ? fleet.reason : undefined} {...stylex.props(styles.notice)}>

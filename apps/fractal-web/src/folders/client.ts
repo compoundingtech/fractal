@@ -72,6 +72,7 @@ import { emptyDoc, type FolderDoc, type Stamp } from './core.mts'
 import { createArrangementEditor, refusalText, type ArrangementEditor, type ArrangementRefusal, type EditOutcome, type SidebarOperation, type StructuralIntent } from './edit.ts'
 export interface FolderState {
   readonly doc: FolderDoc
+  readonly arrangement?: Arrangement
   readonly phase: 'fixture' | 'connecting' | 'synced' | 'pending' | 'unavailable'
   readonly detail?: string
   readonly readOnly?: boolean
@@ -126,7 +127,7 @@ export const sidebarFolders = ({ gateway, socket }: {
   const retry = () => { if (follow !== undefined) follow.refresh(); else if (!starting) void start() }
   const publish = (next: FolderState) => {
     if (!active) return
-    if (next.doc === current.doc && next.phase === current.phase && next.detail === current.detail &&
+    if (next.arrangement === current.arrangement && next.doc === current.doc && next.phase === current.phase && next.detail === current.detail &&
       next.refusal === current.refusal && next.retryEdit === current.retryEdit && next.retryReady === current.retryReady && next.readOnly === current.readOnly &&
       (next.pendingTargets === current.pendingTargets || (next.pendingTargets?.length === current.pendingTargets?.length && next.pendingTargets?.every((target, index) => target === current.pendingTargets?.[index]))) &&
       next.sidebarSubject === current.sidebarSubject && next.restoreUnavailable === current.restoreUnavailable &&
@@ -153,6 +154,7 @@ export const sidebarFolders = ({ gateway, socket }: {
           if (key !== shown) { doc = state.arrangement === undefined ? emptyDoc() : arrangementSidebarDoc(state.arrangement); shown = key }
           publish({
             doc, phase: state.phase === 'refused' ? 'unavailable' : state.phase, readOnly: state.restoreUnavailable === true, edit, retry,
+            ...(state.arrangement === undefined ? {} : { arrangement: state.arrangement }),
             ...(state.sidebarCandidates === undefined ? {} : { sidebarCandidates: state.sidebarCandidates }),
             ...(state.sidebarSubject === undefined ? {} : { sidebarSubject: state.sidebarSubject }),
             ...(state.restoreUnavailable === undefined ? {} : { restoreUnavailable: state.restoreUnavailable }),
@@ -176,6 +178,7 @@ export const sidebarFolders = ({ gateway, socket }: {
             if (key !== shown) { doc = winner === undefined ? emptyDoc() : arrangementSidebarDoc(winner); shown = key }
             publish({
               doc, phase: 'synced', detail: 'Arrangement folders · read-only (control.arrangements is not granted)', readOnly: true, edit, retry,
+              ...(winner === undefined ? {} : { arrangement: winner }),
               ...(candidates.length > 1 ? { sidebarCandidates: candidates.map((candidate) => ({ id: candidate.id, label: `${candidate.body.name.value} (${candidate.id})` })) } : {}),
               ...(winner === undefined ? (restoreUnavailable ? { sidebarSubject: reserved } : {}) : { sidebarSubject: winner.id }),
               ...(restoreUnavailable ? { restoreUnavailable: true } : {}),

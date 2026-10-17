@@ -322,6 +322,29 @@ CI=1 pnpm --dir apps/fractal-web exec vitest run src/data/inventory-transport.un
 pnpm --filter fractal-web typecheck
 ```
 
+### Live folder nesting
+
+The live agent workspace decodes native arrangements with the generated schema and
+consumes `st3-views/sidebarView.build` for folder-only nesting. The winning arrangement's
+authoritative `resolved` parents determine display placement; the browser does not
+recompute cycle cuts from register revisions. The existing React Aria navigator Tree
+owns disclosure and keyboard navigation, while agent leaves retain the kit's agent row.
+Only current roster seats become visible leaves: dormant and non-agent placements keep
+their stored positions without inventing roster entries.
+
+Connections without a resolved arrangement retain the flat roster. Invalid resolved
+layouts show an explicit unavailable status instead of a fabricated nesting projection.
+Search preserves the agent text/host predicate, reveals matching ancestors, and expands
+them while searching. This read adapter does not add arrangement writes or agent-parent
+nesting.
+
+`/sidebar-nesting.browser.html` in the Vite dev server mounts the real live workspace
+against the folder-only golden contract. Run its focused regressions with:
+
+```sh
+CI=1 pnpm --filter fractal-web test src/folders/sidebarV2.unit.test.ts src/web/sidebarNesting.integration.test.tsx src/web/LiveAgentWorkspace.sidebar.integration.test.tsx
+```
+
 ## Fractal web roster lifecycle
 
 The generated client-v0 `Agent` schema models lifecycle as an optional open enum:
