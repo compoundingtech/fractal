@@ -61,14 +61,17 @@ class ViewportController {
     const element = this.element
     if (element === null || this.loadEarlier === undefined || element.clientHeight === 0) return
     if (this.following ? element.scrollHeight >= element.clientHeight * 2 : element.scrollTop > element.clientHeight) return
-    if (!this.following) {
-      if (this.captureFrame !== undefined) cancelAnimationFrame(this.captureFrame)
-      this.captureFrame = undefined
-      this.capture()
-    }
+    this.prepareMaterialize()
     const load = this.loadEarlier
     this.loadEarlier = undefined
     load()
+  }
+  /** Prepending history is not a request to stop following or to move the reader. */
+  readonly prepareMaterialize = () => {
+    if (this.following) return
+    if (this.captureFrame !== undefined) cancelAnimationFrame(this.captureFrame)
+    this.captureFrame = undefined
+    this.capture()
   }
 
   /** Explicit navigation owns history, rather than fighting the tail-follow schedule. */
@@ -168,25 +171,29 @@ class ViewportController {
     return true
   }
 
+  /** Commit one window boundary before paint, using the existing following/anchor policy. */
+  readonly settle = () => {
+    const element = this.element
+    if (element === null) return
+    if (this.preservePress()) { this.lastWidth = element.clientWidth; return }
+    if (this.following) this.writeTop(element.scrollHeight)
+    else if (this.pendingTop !== undefined) {
+      this.writeTop(this.pendingTop)
+      if (Math.abs(element.scrollTop - Math.max(0, Math.min(this.pendingTop, element.scrollHeight - element.clientHeight))) < geometryNumbers.scrollEndTolerance) {
+        this.pendingTop = undefined
+        this.scheduleCapture()
+      }
+    } else if (this.captureFrame === undefined && this.anchor?.element.isConnected) {
+      this.writeTop(element.scrollTop + this.anchor.element.getBoundingClientRect().top - element.getBoundingClientRect().top - this.anchor.offset)
+    }
+    this.lastWidth = element.clientWidth
+  }
+
   readonly schedule = () => {
     if (this.frame !== undefined) return
     this.frame = requestAnimationFrame(() => {
       this.frame = undefined
-      const element = this.element
-      if (element === null) return
-      // The pressed row takes precedence over the reader's history anchor.
-      if (this.preservePress()) { this.lastWidth = element.clientWidth; return }
-      if (this.following) this.writeTop(element.scrollHeight)
-      else if (this.pendingTop !== undefined) {
-        this.writeTop(this.pendingTop)
-        if (Math.abs(element.scrollTop - Math.max(0, Math.min(this.pendingTop, element.scrollHeight - element.clientHeight))) < geometryNumbers.scrollEndTolerance) {
-          this.pendingTop = undefined
-          this.scheduleCapture()
-        }
-      } else if (this.captureFrame === undefined && this.anchor?.element.isConnected) {
-        this.writeTop(element.scrollTop + this.anchor.element.getBoundingClientRect().top - element.getBoundingClientRect().top - this.anchor.offset)
-      }
-      this.lastWidth = element.clientWidth
+      this.settle()
       this.loadEarlierIfNeeded()
     })
   }
@@ -343,7 +350,7 @@ export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HT
   readonly scrollToBottomKey?: string
   /** Mount the tail first, then fill one extra viewport and prepend on upward navigation. */
   readonly initialTailCount?: number
-  readonly children?: React.ReactNode | ((startIndex: number, revealRow: (id: string) => void) => React.ReactNode)
+  readonly children?: React.ReactNode | ((startIndex: number, revealRow: (id: string, preservePosition?: boolean) => void) => React.ReactNode)
 }
 
 export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, children, contentProps, stateKey, scrollToBottomKey, initialTailCount, ...props }: EmbraceScrollViewportProps) {
@@ -356,10 +363,11 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
   const savedIndex = savedFirstId === undefined ? -1 : items.findIndex(item => item.id === savedFirstId)
   const startIndex = initialTailCount === undefined ? 0 : savedIndex >= 0 ? savedIndex : Math.max(0, items.length - initialTailCount)
   const firstId = items[startIndex]?.id
-  const revealRow = React.useCallback((id: string) => {
+  const revealRow = React.useCallback((id: string, preservePosition = false) => {
     const index = items.findIndex(item => item.id === id)
     if (index === -1) return
-    controller.reveal()
+    if (preservePosition) controller.prepareMaterialize()
+    else controller.reveal()
     setWindow({ key: stateKey, firstId: items[Math.min(index, startIndex)]?.id })
   }, [controller, items, stateKey, startIndex])
   const previousItems = React.useRef(items)
@@ -383,9 +391,11 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
     previousItems.current = items
   }, [controller, items, store, stateKey, scrollToBottomKey])
   React.useLayoutEffect(() => {
+    const windowChanged = controller.firstRenderedId !== firstId
     controller.firstRenderedId = firstId
     if (window.key !== stateKey || window.firstId === undefined && firstId !== undefined) setWindow({ key: stateKey, firstId })
     controller.loadEarlier = startIndex === 0 ? undefined : () => setWindow({ key: stateKey, firstId: items[Math.max(0, startIndex - 4)]?.id })
+    if (windowChanged) controller.settle()
     controller.schedule()
     return () => { controller.loadEarlier = undefined }
   }, [controller, firstId, items, stateKey, startIndex, window.key, window.firstId])

@@ -8,6 +8,7 @@ import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assi
 import { EmbraceScrollViewport, ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import type { TranscriptTurn } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
+import { observeUserMessageOverflow } from '../../../../packages/fractal-ui/src/assistant-ui/composition/user-message-overflow.ts'
 
 // Only CSS and browser layout are supplied by the harness; all runtime, mounting,
 // observer scheduling and scroll-controller behavior uses the real components.
@@ -30,6 +31,8 @@ let observers: Set<{ callback: ResizeObserverCallback; elements: Set<Element> }>
 let spanHeight: number
 let spanScrollHeight: number
 let originalScrollIntoView: PropertyDescriptor | undefined
+let viewportHeight: number
+let viewportWidth: number
 
 const renderedRows = (lane: Element) => [...lane.querySelectorAll<HTMLElement>('[data-test-tail-row], [data-testid="transcript-turn"]')]
 const rect = (top: number, height: number) => ({ top, bottom: top + height, left: 0, right: 600, width: 600, height, x: 0, y: top, toJSON() {} })
@@ -43,6 +46,8 @@ beforeEach(() => {
   observers = new Set()
   spanHeight = 100
   spanScrollHeight = 100
+  viewportHeight = 50
+  viewportWidth = 600
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     frames.set(++nextFrame, callback)
     return nextFrame
@@ -59,9 +64,9 @@ beforeEach(() => {
     disconnect() { observers.delete(this.entry) }
   })
   vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
-    return this.tagName === 'SPAN' ? spanHeight : 50
+    return this.tagName === 'SPAN' ? spanHeight : viewportHeight
   })
-  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(600)
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => viewportWidth)
   vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
     return this.tagName === 'SPAN' ? spanScrollHeight : renderedRows(this).length * 100
   })
@@ -71,7 +76,7 @@ beforeEach(() => {
       const row = this.closest<HTMLElement>('[data-test-tail-row], [data-testid="transcript-turn"]')
       if (row !== null) return rect(renderedRows(lane).indexOf(row) * 100 - lane.scrollTop, 100)
     }
-    return rect(0, 50)
+    return rect(0, viewportHeight)
   })
   vi.stubGlobal('CSS', { ...globalThis.CSS, escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, character => `\\${character}`) })
   Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => {
@@ -128,6 +133,31 @@ const scrollUp = async (top: number) => {
 }
 
 describe('tail-first transcript mounting', () => {
+  it('pins the latest rows before the first animation frame, including after a conversation switch', async () => {
+    await act(async () => { root.render(viewport('A')) })
+    expect(lane().scrollTop).toBe(lane().scrollHeight - lane().clientHeight)
+    await flushFrames()
+    await scrollUp(25)
+    await act(async () => { root.render(viewport('B')) })
+    expect(lane().scrollTop).toBe(lane().scrollHeight - lane().clientHeight)
+  })
+
+  it('fills the resized viewport when its width and height change during the initial mount', async () => {
+    await act(async () => { root.render(viewport('A')) })
+    viewportWidth = 300
+    viewportHeight = 150
+    await act(async () => {
+      for (const observer of observers) {
+        observer.callback([...observer.elements].map(target => ({ target, contentRect: target.getBoundingClientRect(), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: [] })), {} as ResizeObserver)
+      }
+    })
+    await flushFrames()
+    expect(lane().clientWidth).toBe(300)
+    expect(lane().scrollHeight).toBeGreaterThanOrEqual(2 * lane().clientHeight)
+    expect(lane().scrollTop).toBe(lane().scrollHeight - lane().clientHeight)
+    expect(renderedRows(lane()).length).toBeLessThan(rows.length)
+  })
+
   it('mounts the latest rows first and prepends older rows without moving the reading anchor', async () => {
     await render(viewport('A'))
     const initial = renderedRows(lane())
@@ -163,17 +193,43 @@ describe('tail-first transcript mounting', () => {
     expect(lane().scrollTop).toBe(top)
   })
 
-  it('materializes an old turn for native browser find without mounting every turn initially', async () => {
+  it('offers accessible full-history actions instead of incomplete hidden browser-find proxies', async () => {
     await render(transcript())
     expect(container.querySelectorAll('[data-testid="transcript-turn"]').length).toBeLessThan(turns.length)
-    expect(container.querySelector('[data-testid="transcript-turn"][data-item-id="turn-0"]')).toBeNull()
-    const search = container.querySelector<HTMLElement>('[data-transcript-search-id="turn-0"]')!
-    expect(search).not.toBeNull()
-    expect(search.getAttribute('hidden')).toBe('until-found')
-    expect(search.textContent).toContain('Historical prompt 0')
-    await act(async () => { search.dispatchEvent(new Event('beforematch', { bubbles: true })) })
+    expect(container.querySelector('[hidden="until-found"]')).toBeNull()
+    const notice = [...container.querySelectorAll('[role="status"]')].find(node => node.textContent?.includes('Browser Find'))
+    expect(notice?.textContent).toMatch(/only searches shown messages/)
+    const earlier = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show earlier messages')!
+    const all = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show all messages')!
+    expect(earlier).toBeDefined()
+    expect(all).toBeDefined()
+    const count = renderedRows(lane()).length
+    await act(async () => {
+      earlier.focus()
+      earlier.click()
+    })
     await flushFrames()
+    expect(renderedRows(lane())).toHaveLength(count + 4)
+    expect(document.activeElement).toBe(earlier)
+    await act(async () => { all.click() })
+    await flushFrames()
+    expect(container.querySelectorAll('[data-testid="transcript-turn"]')).toHaveLength(turns.length)
     expect(container.querySelector('[data-testid="transcript-turn"][data-item-id="turn-0"]')?.textContent).toContain('Historical prompt 0')
+  })
+
+  it('keeps the focused scroll lane and visible anchor while prepending through the keyboard', async () => {
+    await render(viewport('A'))
+    const anchor = renderedRows(lane())[0]!
+    await act(async () => {
+      lane().tabIndex = 0
+      lane().focus()
+      lane().dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }))
+      lane().scrollTop = 25
+      lane().dispatchEvent(new Event('scroll'))
+    })
+    await flushFrames()
+    expect(document.activeElement).toBe(lane())
+    expect(anchor.getBoundingClientRect().top).toBe(-25)
   })
 
   it('makes the full history available to native Find without cancelling the browser shortcut', async () => {
@@ -185,6 +241,44 @@ describe('tail-first transcript mounting', () => {
     expect(find.defaultPrevented).toBe(false)
     expect(container.querySelectorAll('[data-testid="transcript-turn"]')).toHaveLength(turns.length)
     expect(container.querySelector('[data-testid="transcript-turn"][data-item-id="turn-0"]')?.textContent).toContain('Historical prompt 0')
+  })
+
+  it('preserves a detached reading anchor when Ctrl-F materializes the full transcript', async () => {
+    await render(transcript())
+    await scrollUp(25)
+    const anchor = renderedRows(lane()).find(row => row.getBoundingClientRect().bottom > 0)!
+    const top = anchor.getBoundingClientRect().top
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true }))
+    })
+    await flushFrames()
+    expect(renderedRows(lane())).toHaveLength(turns.length)
+    expect(anchor.getBoundingClientRect().top).toBe(top)
+  })
+
+  it('keeps following new rows after native Find is opened and cancelled without navigating', async () => {
+    await render(transcript())
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true, cancelable: true }))
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    await flushFrames()
+    expect(lane().scrollTop).toBe(lane().scrollHeight - lane().clientHeight)
+    await render(transcript([...turns, { ...turns[0]!, id: 'turn-new', prompt: { ...turns[0]!.prompt!, id: 'prompt-new', text: 'New streaming prompt' } }]))
+    expect(lane().scrollTop).toBe(lane().scrollHeight - lane().clientHeight)
+    expect(renderedRows(lane()).at(-1)?.dataset.itemId).toBe('turn-new')
+  })
+
+  it('re-parses streaming Markdown updates on the same message id', async () => {
+    const streamed: TranscriptTurn = {
+      ...turns.at(-1)!,
+      items: [{ _tag: 'Text', id: 'streaming-answer', role: 'assistant', text: 'An **unfinished', attachments: [], streaming: true, at: new Date(now).toISOString() }],
+    }
+    await render(transcript([streamed]))
+    expect(container.querySelector('[data-testid="agent-message"]')?.textContent).toContain('unfinished')
+    await render(transcript([{ ...streamed, items: [{ ...streamed.items[0]!, _tag: 'Text', id: 'streaming-answer', role: 'assistant', text: 'An **updated answer**', attachments: [], streaming: true, at: new Date(now).toISOString() }] }]))
+    expect(container.querySelector('[data-testid="agent-message"] strong')?.textContent).toBe('updated answer')
+    expect(container.querySelector('[data-testid="agent-message"]')?.textContent).not.toContain('unfinished')
   })
 
   it('reveals an unmounted old message before jumping to its hash target', async () => {
@@ -208,6 +302,69 @@ describe('tail-first transcript mounting', () => {
 })
 
 describe('batched message measurements', () => {
+  it('reads and publishes at most sixteen prompt measurements per animation frame', async () => {
+    const events: string[] = []
+    const published = vi.fn()
+    const cleanups = Array.from({ length: 40 }, (_, index) => {
+      const element = document.createElement('span')
+      container.appendChild(element)
+      Object.defineProperty(element, 'scrollHeight', { configurable: true, get: () => {
+        events.push(`read-${index}`)
+        return 180
+      } })
+      return observeUserMessageOverflow(element, overflows => {
+        events.push(`publish-${index}`)
+        published(overflows)
+      })
+    })
+    try {
+      expect(events).toHaveLength(0)
+      for (const expectedTotal of [16, 32, 40]) {
+        events.length = 0
+        await act(async () => {
+          const pending = [...frames.values()]
+          frames.clear()
+          pending.forEach(callback => callback(0))
+        })
+        expect(published).toHaveBeenCalledTimes(expectedTotal)
+        const firstPublish = events.findIndex(event => event.startsWith('publish-'))
+        expect(firstPublish).toBeGreaterThan(0)
+        expect(firstPublish).toBeLessThanOrEqual(16)
+        expect(events.slice(0, firstPublish).every(event => event.startsWith('read-'))).toBe(true)
+        expect(events.slice(firstPublish).every(event => event.startsWith('publish-'))).toBe(true)
+      }
+      expect(published.mock.calls.every(([overflows]) => overflows === true)).toBe(true)
+      expect(frames.size).toBe(0)
+    } finally {
+      cleanups.forEach(cleanup => cleanup())
+    }
+  })
+
+  it('cancels queued measurement continuations on unmount and does not publish them after a switch', async () => {
+    const oldPublish = vi.fn()
+    const oldCleanups = Array.from({ length: 40 }, () => observeUserMessageOverflow(document.createElement('span'), oldPublish))
+    let newCleanup: (() => void) | undefined
+    try {
+      await act(async () => {
+        const pending = [...frames.values()]
+        frames.clear()
+        pending.forEach(callback => callback(0))
+      })
+      expect(oldPublish).toHaveBeenCalledTimes(16)
+      expect(frames.size).toBe(1)
+      oldCleanups.forEach(cleanup => cleanup())
+      expect(frames.size).toBe(0)
+      const newPublish = vi.fn()
+      newCleanup = observeUserMessageOverflow(document.createElement('span'), newPublish)
+      await flushFrames()
+      expect(oldPublish).toHaveBeenCalledTimes(16)
+      expect(newPublish).toHaveBeenCalledTimes(1)
+    } finally {
+      oldCleanups.forEach(cleanup => cleanup())
+      newCleanup?.()
+    }
+  })
+
   it('updates the overflow disclosure after ResizeObserver reports a narrower and then wider message', async () => {
     await render(transcript(turns.slice(-1)))
     const message = container.querySelector<HTMLElement>('[data-testid="user-message"]')!
