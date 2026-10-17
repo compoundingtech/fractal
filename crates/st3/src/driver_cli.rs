@@ -626,7 +626,17 @@ async fn drive_st2_native(
         ..
     } = paths.clone();
     let mut mailbox =
-        NativeMailbox::start(client, subject, &incarnation, driver, &mut loop_state).await?;
+        match NativeMailbox::start(client, subject, &incarnation, driver, &mut loop_state).await {
+            Ok(mailbox) => mailbox,
+            // A provider can run its whole life inside the bind's one-second retry pause (a
+            // loaded host, a short fixture). The daemon then refuses the binding because that
+            // provider has ended. There is nothing left to deliver to: record the exit as
+            // usual instead of failing the wrapper with the refusal.
+            Err(error) if provider_ended_before_bind(&error) && provider_task_settled(&task).await => {
+                NativeMailbox::unbound(subject, &incarnation, driver, &mut loop_state)
+            }
+            Err(error) => return Err(error),
+        };
     let attach_started = settle.attach_started();
     if driver == "claude" && mailbox.subscription.is_some() && settle.passed()
         && let Err(error) = check_claude_attachment(
@@ -692,6 +702,16 @@ async fn drive_st2_native(
                 {
                     fs::write(PathBuf::from(root).join("fence-received"),
                         if task.is_finished() { "finished" } else { "pending" })?;
+                }
+                // The subscription can reopen after the provider has ended, and the daemon then
+                // fences it as terminal. With the provider's task returned there is nothing left
+                // to deliver to: stop listening and let the task arm record the exit.
+                if let Some(st3::mailbox::Frame::Fenced { reason }) = &frame
+                    && provider_ended_refusal(reason)
+                    && provider_task_settled(&task).await
+                {
+                    mailbox.subscription = None;
+                    continue;
                 }
                 let mail_changed = matches!(&frame, Some(st3::mailbox::Frame::Mailbox { .. }));
                 mailbox.accept(frame, &runtime_id)?;
@@ -2702,4 +2722,98 @@ fn unix_minute() -> Result<u64> {
 fn renewal_minute(subject: &str) -> Result<Option<u64>> {
     let seconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     Ok(renewal_minute_at(subject, seconds))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The idle-minute boot canary's property at its cause: an idle provider's driver tick reads
+    /// no graph delivery control at all, and waiting mail reads it once per tick. Both mailbox
+    /// sources (the push subscription agent seats use and the inbox directory) and both native
+    /// transports are covered, so a regression is caught without a real idle minute.
+    #[tokio::test]
+    async fn native_delivery_control_reads_hold_only_while_mail_waits() {
+        use axum::{Json, Router, routing::get};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let subject = "agent/eval/gated";
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("control.sock");
+        let reads = Arc::new(AtomicUsize::new(0));
+        let count = reads.clone();
+        let app = Router::new().route("/v1/delivery/hold", get(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Json(json!({"api_version":"st3.v1", "value": {
+                    "subject": subject, "active":false,
+                    "until_unix_ms":null, "reason":null, "actor":null, "claim":null,
+                }}))
+            }
+        }));
+        let server_socket = socket.clone();
+        let server = tokio::spawn(async move { serve_unix(&server_socket, app).await.unwrap() });
+        for _ in 0..100 {
+            if socket.exists() { break; }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert!(socket.exists());
+        let client = Client::unix(&socket);
+
+        for push in [true, false] {
+            for transport in ["app-server", "opencode-server"] {
+                let case = format!("push={push} transport={transport}");
+                let inbox = root.path().join(format!("inbox-{push}-{transport}"));
+                let mut paths = NativePaths {
+                    delivery_gate: st_drivers::session_control::DeliveryGate::default(),
+                    pending_hold_adoption: None,
+                    driver_root: root.path().into(),
+                    session_dir: root.path().into(),
+                    agent_dir: root.path().into(),
+                    identity: subject.into(),
+                    runtime_id: "runtime-1".into(),
+                };
+                let fence = st3::mailbox::Fence::new(subject, "incarnation-1", "delivery");
+                let mut mailbox = NativeMailbox {
+                    // The stream never connects: the fake daemon serves only delivery control.
+                    subscription: push.then(|| st3::mailbox::Subscription::start(
+                        client.clone(), fence.clone(), json!({}),
+                    )),
+                    fence,
+                    messages: Vec::new(),
+                    queued: BTreeMap::new(),
+                    replayed: true,
+                    last_title_warning: None,
+                };
+
+                let before = reads.load(Ordering::SeqCst);
+                for _ in 0..100 {
+                    sync_native_delivery_control(&client, subject, &mut paths, &mailbox, &inbox, transport)
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(reads.load(Ordering::SeqCst), before, "{case}: an idle tick read delivery control");
+                assert!(paths.delivery_gate.held(), "{case}: idle must leave native input closed");
+
+                if push {
+                    mailbox.messages.push(serde_json::from_value(json!({
+                        "subject": "message/waiting", "from": "person/eval", "to": subject,
+                        "content": "Do the work.", "status": "sent", "created_index": 1,
+                    })).unwrap());
+                } else {
+                    st_drivers::message::send_to_inbox(&inbox, "person/eval", None, None, &[], "Do the work.")
+                        .unwrap();
+                }
+                let before = reads.load(Ordering::SeqCst);
+                for tick in 1..=100 {
+                    sync_native_delivery_control(&client, subject, &mut paths, &mailbox, &inbox, transport)
+                        .await
+                        .unwrap();
+                    assert_eq!(reads.load(Ordering::SeqCst) - before, tick, "{case}: one read per waiting tick");
+                }
+                assert!(!paths.delivery_gate.held(), "{case}: an unheld seat's waiting mail opens native input");
+            }
+        }
+        server.abort();
+    }
 }
