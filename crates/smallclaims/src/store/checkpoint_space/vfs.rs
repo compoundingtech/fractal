@@ -893,7 +893,7 @@ mod tests {
                     .unwrap();
             }
         }
-        let guard = guard(&live, &scratch, 128 * 1024);
+        let guard = guard(&live, &scratch, 4 * 1024);
         let vfs = ProofVfs::register(&guard).unwrap();
         vfs.self_test(&owner, &scratch.join("proof-vfs-test.sqlite3"))
             .unwrap();
@@ -945,7 +945,9 @@ mod tests {
             )
             .unwrap();
         }
-        let guard = guard(&live, &scratch, 32 * 1024 * 1024);
+        // This fixture checks interception, not admission. SQLite can rewrite the temporary
+        // sorter file many times while producing one sorted table.
+        let guard = guard(&live, &scratch, 1024 * 1024 * 1024);
         let vfs = ProofVfs::register(&guard).unwrap();
         vfs.self_test(&owner, &scratch.join("proof-vfs-test.sqlite3"))
             .unwrap();
