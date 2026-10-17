@@ -13,7 +13,7 @@ export const liveSidebarTree = ({ tree, agents, needsYou, filters, stale }: {
   readonly stale: boolean
 }): readonly SidebarNode[] => {
   const query = parseSidebarQuery(filters.query)
-  const rows = new Map<string, SidebarMatchRow>(agents.map(agent => [agent.ref, { workspace: { title: agent.name, host: agent.host }, agent, status: sidebarRow({ agent, stale, now: 0 }).status, needsMe: needsYou.has(agent.ref) }]))
+  const rows = new Map<string, SidebarMatchRow>(agents.map(agent => [agent.ref, { workspace: { title: agent.name, host: agent.host }, agent, status: sidebarRow({ agent, stale }).status, needsMe: needsYou.has(agent.ref) }]))
   const filtering = isSidebarFiltering(filters, query)
   const visit = (nodes: readonly SidebarNode[]): readonly SidebarNode[] => {
     const visible = nodes.flatMap((node): SidebarNode[] => {

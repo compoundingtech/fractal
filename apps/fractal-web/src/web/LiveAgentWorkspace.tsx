@@ -17,7 +17,7 @@ import { SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, ThreadH
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
-import { useFleet, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource } from '../data/react.tsx'
+import { useFleet, useSubjectList, useConnection, useNow, useFeedInterest, useDataSource } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
 import type { ResourcePanelState } from '../shell/state.ts'
@@ -46,8 +46,7 @@ const LiveSidebarAgentRow = React.memo((props: {
   readonly active: boolean
   readonly select: (ref: string) => void
 }) => {
-  const now = useNowSnapshot()
-  const item = React.useMemo(() => sidebarRow({ agent: props.agent, stale: props.stale, now }), [props.agent, props.stale, now])
+  const item = React.useMemo(() => sidebarRow({ agent: props.agent, stale: props.stale }), [props.agent, props.stale])
   const onOpen = React.useCallback(() => props.select(props.agent.ref), [props.select, props.agent.ref])
   return <SidebarAgentRow inTree item={item} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={sidebarExtraSignals} active={props.active} onOpen={onOpen} />
 })
@@ -257,7 +256,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   // Filtering uses observed status, not wall time; ticking cannot change membership.
   const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, deferredFilters, stale])
   const agentsByRef = React.useMemo(() => new Map(agents.map(row => [row.ref, row])), [agents])
-  const accessibleNames = React.useMemo(() => new Map(agents.map(agent => [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale, now: 0 }))] as const)), [agents, stale])
+  const accessibleNames = React.useMemo(() => new Map(agents.map(agent => [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale }))] as const)), [agents, stale])
   const selectLatest = React.useRef(select)
   selectLatest.current = select
   const selectAgent = React.useCallback((ref: string) => selectLatest.current(ref), [])
@@ -378,8 +377,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
 
 /** Only time-bearing surfaces subscribe to the wall clock, not the workspace providers. */
 function ClockedThreadHeader({ agent, stale, ...props }: Omit<React.ComponentProps<typeof ThreadHeader>, 'now' | 'status' | 'statusLabel' | 'statusSince'> & { readonly agent?: Agent; readonly stale: boolean }) {
-  const now = useNowSnapshot()
-  const row = agent === undefined ? undefined : sidebarRow({ agent, stale, now })
+  const row = agent === undefined ? undefined : sidebarRow({ agent, stale })
   return <ThreadHeader {...props} status={row?.status} statusLabel={row?.statusLabel} statusSince={row?.statusSince} />
 }
 

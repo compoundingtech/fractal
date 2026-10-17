@@ -118,6 +118,24 @@ it('refreshes sidebar activity labels at their exact second and minute boundarie
   expect(time()).toBe('2m')
 })
 
+it('reveals a slightly future activity timestamp when only the leaf clock catches up', async () => {
+  const now = Atom.make(5000)
+  source = { ...source, now }
+  const timedAgent = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '1970-01-01T00:00:05.500Z', last_activity_at: '1970-01-01T00:00:05.500Z' })
+  registry.set(agents, observed({ value: [timedAgent] }))
+  const projectedRows = vi.spyOn(rowProjection, 'sidebarRow')
+  try {
+    await mount(1440)
+    const count = projectedRows.mock.calls.length
+    expect(roster().querySelector('[data-row-column="time"] time')).toBeNull()
+    await act(async () => registry.set(now, 6000))
+    expect(roster().querySelector('[data-row-column="time"] time')?.textContent).toBe('0s')
+    expect(projectedRows).toHaveBeenCalledTimes(count)
+  } finally {
+    projectedRows.mockRestore()
+  }
+})
+
 // Both the real data derivation and the kit's SidebarAgentRow DOM participate.
 describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
   it('dismisses the hovered row on navigation while preserving every roster node', async () => {

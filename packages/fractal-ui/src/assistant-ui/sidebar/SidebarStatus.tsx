@@ -34,7 +34,7 @@ const paths: Record<AgentStatus, React.ReactNode> = {
 /** Shapes never collapse distinct states into an attention or completion fixture state. */
 export function SidebarStatus({ status, statusLabel = statuses[status].label, variant = 'SG-1', discRefinement = 'G1', statusSince, now, freshness = 'unobserved', iconOnly = false }: SidebarStatusProps) {
   const boundary = statusSince === undefined ? 'Status boundary unavailable' : `Observed status since ${new Date(statusSince).toISOString()}`
-  const elapsed = useClockLabel(now => statusSince === undefined || iconOnly ? '' : compactTime({ at: statusSince, now }), statusSince === undefined || iconOnly ? 0 : now)
+  const elapsed = useClockLabel(now => statusSince === undefined || statusSince > now || iconOnly ? '' : compactTime({ at: statusSince, now }), statusSince === undefined || iconOnly ? 0 : now)
   const runningRing = variant === 'SG-1' && discRefinement === 'G2' && status === 'working'
   const shapeCue = variant === 'SG-1' && discRefinement === 'G3' && status !== 'working' && status !== 'idle'
   // The former native title text stays exact as the glyph's description; hosts own the only hover disclosure.
