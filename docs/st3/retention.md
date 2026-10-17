@@ -50,13 +50,19 @@ claim of the kind, so a later claim does not replace an earlier one. A test fail
 class allows dropping and it has neither a rule nor a `pending` reason, and when a durable kind has
 a rule.
 
+Harness questions retain their compact owner record indefinitely: id, status, answer positions
+and receipt are never deleted or hidden by age. Pending history stays whole; one day after
+resolution only redundant older observations may be trimmed, preserving the newest observation
+and resolution forever. Derived bulky data may expire independently, never the compact record.
+See [Harness questions](harness-questions.md).
+
 Each rule has:
 
 - `kind`, and `when`: conditions that must all hold (`actor=null`, `FIELD=set`, `FIELD=VALUE`);
 - `slot`: the fields besides subject and kind that make up a slot. `claim.origin` is the writer.
   A rule without a slot keeps every claim. `require_slot` leaves out a claim missing a slot field;
 - `keep`: what the rule keeps. It names the planner function in
-  `crates/st3/src/store/checkpoint_rules.rs` (`planner_rule`); the checkpoint tests fail on one
+  `crates/st3-store/src/store/checkpoint_rules.rs` (`planner_rule`); the checkpoint tests fail on one
   it does not know;
 - `after_slot`: extra terms rendered after the slot in the rules description, for a rule whose planner needs them;
 - `min_age`: only claims accepted at least this long before the cut go.
@@ -72,7 +78,7 @@ rule does, and changes the rules digest:
    If the checkpoint proof's reader answers (`subject_answers` in `checkpoint_rules.rs`) do not
    cover the new reader, add it, so a rule that changes an answer fails the proof.
 2. Bump `RULES_VERSION` and say why in its comment.
-3. Add a test in `crates/st3/src/store/checkpoint_tests.rs` that names the dropped and the kept
+3. Add a test in `crates/st3-store/src/store/checkpoint_tests.rs` that names the dropped and the kept
    claims.
 4. Measure it on a copy of a real store (below), never on a live one.
 5. Deploy it to every member. Until every participant runs the same rules, checkpoints wait at

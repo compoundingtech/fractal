@@ -69,6 +69,20 @@ def selecting(name):
     return name in SELECTING or name.startswith('GIT_PUSH_OPTION')
 
 
+SEAT_PREFIXES = ('ST_', 'ST2_', 'ST3_', 'CLAUDE', 'ANTHROPIC_')
+KEPT_SEAT = ('ST_AGENT', 'ST_SKIP_EVIDENCE')  # exact names, plus every ST_EVIDENCE* switch; this list is the only exception mechanism
+
+
+def scrub_seat_environment():
+    """A CI runner has none of the variables an agent seat carries (identity, mission, session, daemon endpoint, hook and messaging
+    settings), and the checks must see what CI sees: tests that read them fail or behave differently under a seat (the ci-local-gate
+    drill's claude hook tests did). ST_AGENT stays because the host ranks `nix develop` starts by it (so a check can still read it: the nix wrapper that needs it
+    starts the check); the evidence switches stay. The kept list is the only exception mechanism for a future ST_* switch."""
+    for name in [name for name in os.environ
+                 if name.startswith(SEAT_PREFIXES) and name not in KEPT_SEAT and not name.startswith('ST_EVIDENCE')]:
+        del os.environ[name]
+
+
 def scrub_git_environment():
     """Drop the repository- and identity-selecting GIT_* variables (st2#3014); the notes push keeps its transport variables."""
     for name in [name for name in os.environ if selecting(name)]:
@@ -94,6 +108,18 @@ def target_commit(base):
     docs/st3/gate-evidence.md, "Which tree a pull request run asks about"), so the tree an agent built and signed is the
     tree that counts, whether or not main has moved since. The merge queue still tests the integrated tree."""
     return text(git('rev-parse', 'HEAD'))
+
+
+def lane_names(base):
+    """The lanes the accepted base defines in .st/required-lanes.json (none when the file is absent or unreadable: then nothing changes)."""
+    done = git('show', f'{base}:.st/required-lanes.json', check=False)
+    if done.returncode != 0:
+        return set()
+    try:
+        lanes = json.loads(done.stdout.decode())['lanes']
+        return set(lanes) if isinstance(lanes, dict) else set()
+    except (ValueError, KeyError, UnicodeDecodeError, TypeError):
+        return set()
 
 
 def behind(base):
@@ -157,6 +183,7 @@ def repository_of(remote):
 
 def main(argv):
     scrub_git_environment()
+    scrub_seat_environment()
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--check', action='append', default=[], metavar='NAME', help='only this check (repeatable)')
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
@@ -215,9 +242,13 @@ def main(argv):
             repository = args.repository or repository_of(remote or 'origin')
             signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, tools['evidence-sign']])
             rows, failed = [], False
+            lanes = lane_names(args.base)
             for name in checks:
                 wrap = [sys.executable, tools['evidence-wrap'], '--check', name, '--attempt', args.attempt,
                         '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base]
+                if name in lanes:
+                    # The base defines this lane: the note carries the digest of its definition, and a tree that edits the lane is not signed.
+                    wrap += ['--lanes-from', args.base]
                 if args.toolchain_sha256:
                     wrap += ['--toolchain-sha256', args.toolchain_sha256]
                 if args.push:
