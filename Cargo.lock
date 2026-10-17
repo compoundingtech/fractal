@@ -5096,6 +5096,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-missions-base"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "kdl",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st3-missions-base",
+ "st3-schema",
+ "st3-secrets",
+]
+
+[[package]]
 name = "st3-peer"
 version = "0.1.0"
 dependencies = [
@@ -5244,6 +5261,7 @@ dependencies = [
  "st3-client",
  "st3-github-base",
  "st3-kernel",
+ "st3-missions-base",
  "st3-schema",
  "st3-secrets",
  "st3-store",

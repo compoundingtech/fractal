@@ -7,7 +7,7 @@ license = "MIT"
 
 [features]
 # Forwarded by st3-daemon's feature of the same name; never enabled by a production build.
-test-support = ["st3-telemetry/test-support", "st3-secrets/test-support", "st3-github-base/test-support", "smallclaims/test-support"]
+test-support = ["st3-telemetry/test-support", "st3-secrets/test-support", "st3-missions-base/test-support", "st3-github-base/test-support", "smallclaims/test-support"]
 
 [dependencies]
 anyhow = "1"
@@ -36,6 +36,7 @@ smallclaims = { path = "../smallclaims" }
 st3-kernel = { path = "../st3-kernel" }
 st3-telemetry = { path = "../st3-telemetry" }
 st3-secrets = { path = "../st3-secrets" }
+st3-missions-base = { path = "../st3-missions-base" }
 st3-github-base = { path = "../st3-github-base" }
 st-runtime = { path = "../st-runtime" }
 st3-client = { path = "../st3-client", features = ["trace-propagation"] }
