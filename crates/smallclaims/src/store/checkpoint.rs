@@ -1638,8 +1638,12 @@ impl Store {
     /// snapshot or a later commit. The `-shm` index is not copied: opening the copy rebuilds it
     /// from the WAL. False, with nothing left at `copy`, where the filesystem cannot clone.
     fn clone_store_to(&self, copy: &Path) -> Result<bool> {
-        let wal = PathBuf::from(format!("{}-wal", self.path.display()));
-        let copy_wal = PathBuf::from(format!("{}-wal", copy.display()));
+        let mut wal = self.path.as_os_str().to_os_string();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
+        let mut copy_wal = copy.as_os_str().to_os_string();
+        copy_wal.push("-wal");
+        let copy_wal = PathBuf::from(copy_wal);
         let connection = self.readers.get();
         let snapshot = connection.unchecked_transaction()?;
         snapshot.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get::<_, i64>(0))?;
