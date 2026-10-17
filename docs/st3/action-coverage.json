@@ -1573,14 +1573,6 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
-      "command": "st repair prepare-owner-indexes",
-      "description": "Build and verify mandatory owner indexes offline; stop all store writers first",
-      "tests": [
-        "crates/st3/tests/action_coverage.rs::cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated"
-      ],
-      "verification": "real offline CLI on a private store; cross-process daemon and SQLite writer locks refused, startup SQL byte-identical, second run byte-identical, invalid schema exits nonzero"
-    },
-    {
       "command": "st replication checkpoint excuse",
       "description": "Stop waiting for an unreachable writer. It fences nothing: what the writer wrote while away still replicates when it returns, and its next seal ends the excusal",
       "tests": [
@@ -2040,6 +2032,14 @@
         "crates/st3/tests/action_coverage.rs::cli_local_skill_completions_holds_and_repairs_use_private_files"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st store prepare-indexes",
+      "description": "Build and verify mandatory owner indexes offline; stop all store writers first",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated"
+      ],
+      "verification": "real offline CLI on a private store; cross-process daemon and SQLite writer locks refused, startup SQL byte-identical, second run byte-identical, invalid schema exits nonzero"
     },
     {
       "command": "st subject basis",

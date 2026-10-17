@@ -44,7 +44,8 @@ async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated
     }
     let run = || async {
         let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
-        command.args(["repair", "prepare-owner-indexes", "--store"]).arg(&path);
+        command.args(["store", "prepare-indexes", "--endpoint", "unix:/nonexistent/offline.sock",
+            "--daemon-wait", "0", "--store"]).arg(&path);
         command.output().await
     };
     // The CLI is a separate process: both lifetime and SQLite writer locks must fence it.
@@ -82,7 +83,7 @@ async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated
         String::from_utf8_lossy(&rejected.stderr), definitions(&connection));
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("schema gate failed"));
     let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
-    assert!(!command.args(["repair", "prepare-owner-indexes"]).output().await.unwrap().status.success());
+    assert!(!command.args(["store", "prepare-indexes"]).output().await.unwrap().status.success());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

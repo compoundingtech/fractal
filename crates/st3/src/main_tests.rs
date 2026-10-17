@@ -2,17 +2,18 @@ use super::*;
 
 #[test]
 fn owner_index_preparation_is_explicit_and_only_in_maintenance_help() {
-    assert!(Cli::try_parse_from(["st", "repair", "prepare-owner-indexes"]).is_err());
+    assert!(Cli::try_parse_from(["st", "store", "prepare-indexes"]).is_err());
     let cli = Cli::try_parse_from([
-        "st", "repair", "prepare-owner-indexes", "--store", "/private/claims.sqlite3",
+        "st", "store", "prepare-indexes", "--store", "/private/claims.sqlite3",
     ]).unwrap();
-    assert!(matches!(cli.command, Command::Repair {
-        command: RepairCommand::PrepareOwnerIndexes { store },
+    assert!(matches!(cli.command, Command::Store {
+        command: StoreCommand::PrepareIndexes { store },
     } if store == std::path::Path::new("/private/claims.sqlite3")));
-    assert!(!cli_help::root_help(false).contains("prepare-owner-indexes"));
+    assert!(!cli_help::root_help(false).contains("prepare-indexes"));
+    assert!(cli_help::root_help(false).contains("store"));
     let mut command = Cli::command();
-    let repair = command.find_subcommand_mut("repair").unwrap();
-    assert!(repair.render_help().to_string().contains("prepare-owner-indexes"));
+    let store = command.find_subcommand_mut("store").unwrap();
+    assert!(store.render_help().to_string().contains("prepare-indexes"));
 }
 
 #[test]
