@@ -2665,6 +2665,7 @@ async fn owner_queue_relay_preserves_large_and_maximally_escaped_content() {
         subject: "agent/queue-owner.queue-worker".into(), binding: binding.clone(), idle: false,
         input_supported: true,
         steer: Default::default(),
+        pending_ask: None, ask_supported: false, ask_reason: None,
         models: Models {
             choices: Vec::new(), selected: None, atomic_model_effort: false,
             revision: "models-one".into(), available: false, complete: true,

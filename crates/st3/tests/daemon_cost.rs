@@ -333,6 +333,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "closes a live native binding and settles uncertain dispatches",
     ),
     (
+        "POST /v1/harness-control/ask-terminal-input",
+        "revokes native ask automation through the exact live source-fenced binding; unrelated claim history is not read",
+    ),
+    (
         "POST /v1/repair/apply",
         "applies an operational repair plan",
     ),
@@ -2202,6 +2206,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             subject: seat,
             idle: true,
             input_supported: true,
+            ask_supported: false,
+            ask_reason: None,
+            pending_ask: None,
             steer: Default::default(),
             models: Models {
                 choices: vec![ModelChoice {

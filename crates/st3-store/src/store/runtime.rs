@@ -145,6 +145,7 @@ impl SmalltalkRuntime {
         agent_messages::create_schema(connection)?;
         harness_control::create_schema(connection)?;
         harness_model::create_schema(connection)?;
+        harness_ask::create_schema(connection)?;
         coordination::create_schema(connection)?;
         stop_deferral::create_schema(connection)?;
         publication_facts::create_schema(connection)?;

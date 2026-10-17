@@ -13,6 +13,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case arrangementEdit = "arrangement.edit"
     case attentionResolve = "attention.resolve"
     case customReply = "custom.reply"
+    case harnessAnswerAsk = "harness.answer_ask"
     case harnessModelSet = "harness.model.set"
     case harnessQueueMutate = "harness.queue.mutate"
     case laneApprove = "lane.approve"

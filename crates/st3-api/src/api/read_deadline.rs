@@ -179,7 +179,8 @@ fn forwarded_deadline(operation: &crate::peer::ClientReadOperation) -> Option<Du
     match operation {
         ClientReadOperation::TerminalControl { .. }
         | ClientReadOperation::HarnessQueueMutation { .. }
-        | ClientReadOperation::HarnessModelMutation { .. } => None,
+        | ClientReadOperation::HarnessModelMutation { .. }
+        | ClientReadOperation::HarnessAskMutation { .. } => None,
         ClientReadOperation::ConversationChanges { .. }
         | ClientReadOperation::TerminalScreenChange { .. } => Some(ORDINARY + operation.wait()),
         ClientReadOperation::ConversationContent { .. }

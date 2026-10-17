@@ -2649,6 +2649,7 @@ const LIMITED_PAIRING_SCOPES: &[&str] = &[
 const ACTIONS: &[&str] = &[
     "harness.model.set",
     "harness.queue.mutate",
+    "harness.answer_ask",
     "arrangement.edit",
     "attention.resolve",
     "review.approve",
@@ -2710,6 +2711,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "custom.reply",
     "harness.model.set",
     "harness.queue.mutate",
+    "harness.answer_ask",
     "prompt.respond",
     "arrangement.edit",
     "review.approve",
@@ -10287,6 +10289,7 @@ pub struct ActionRequest {
 
 fn action_scope(action: &str) -> Option<&'static str> {
     if action == "harness.model.set" { return Some("control.runtimes"); }
+    if action == "harness.answer_ask" { return Some("control.runtimes"); }
     if action == "harness.queue.mutate" {
         return Some("control.runtimes");
     }
@@ -12313,15 +12316,15 @@ async fn action_inner(
     if reserved_gate.is_none() {
         if matches!(
             request.action_type.as_str(),
-            "harness.queue.mutate" | "harness.model.set"
+            "harness.queue.mutate" | "harness.model.set" | "harness.answer_ask"
         ) {
             // Harness control carries its own native-binding and person checks.
             validate_action_scope(&session, &request)?;
             validate_fence(&state, &request.fence)?;
-            return Ok(Json(if request.action_type == "harness.queue.mutate" {
-                harness_control::mutate(&state, &session, &request).await?
-            } else {
-                harness_model::mutate(&state, &session, &request).await?
+            return Ok(Json(match request.action_type.as_str() {
+                "harness.queue.mutate" => harness_control::mutate(&state, &session, &request).await?,
+                "harness.model.set" => harness_model::mutate(&state, &session, &request).await?,
+                _ => harness_control::answer_ask(&state, &session, &request).await?,
             }));
         }
         validate_action_admission(&session, &request)?;

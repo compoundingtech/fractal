@@ -908,6 +908,9 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
             "this content is not plain text, so it was not returned".into()
         }
         ErrorCode::ValidationFailed
+        | ErrorCode::AskNoLongerPending
+        | ErrorCode::InvalidHarnessAnswers
+        | ErrorCode::UnsupportedHarnessAsk
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
         | ErrorCode::ProjectionDetailInvalidSource
@@ -2409,6 +2412,17 @@ impl Client {
         parameters: CustomReplyParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::custom_reply(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn harness_answer_ask(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HarnessAskParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::harness_answer_ask(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }

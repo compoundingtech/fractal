@@ -5,13 +5,18 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use st3_schema::harness_control::{
-    Approval as HarnessApproval, Binding as HarnessBinding,
+    Approval as HarnessApproval, AskAnswer as HarnessAskAnswer,
+    AskIndeterminateReason as HarnessAskIndeterminateReason, AskOption as HarnessAskOption,
+    AskOutcome as HarnessAskOutcome, AskQuestion as HarnessAskQuestion,
+    AskReceipt as HarnessAskReceipt, AskResult as HarnessAskResult, Binding as HarnessBinding,
     ControlOperationReceipt as HarnessControlOperationReceipt, ControlState as HarnessControlState,
     InputResult as HarnessInputResult, Lane as HarnessLane,
     ModelCatalogPage as HarnessModelCatalogPage, ModelChoice as HarnessModelChoice,
     ModelParameters as HarnessModelParameters, ModelReceipt as HarnessModelReceipt,
     ModelResult as HarnessModelResult, ModelsSummary as HarnessModelsSummary,
-    NativeResult as HarnessNativeResult, Outcome as HarnessOutcome, Queue as HarnessQueue,
+    NativeResult as HarnessNativeResult, Outcome as HarnessOutcome,
+    PendingAskView as HarnessPendingAsk, PublicAskAnswer as HarnessAskSelectionAnswer,
+    PublicAskParameters as HarnessAskParameters, Queue as HarnessQueue,
     QueueEntry as HarnessQueueEntry, QueueMutation as HarnessQueueMutation,
     QueueParameters as HarnessQueueParameters, QueueView as HarnessQueueView,
     Receipt as HarnessControlReceipt, SelectedModel as HarnessSelectedModel,
@@ -129,6 +134,9 @@ pub enum ErrorCode {
     UnavailableHarnessModel,
     UnsupportedHarnessEffort,
     HarnessControlBusy,
+    AskNoLongerPending,
+    InvalidHarnessAnswers,
+    UnsupportedHarnessAsk,
     RemoteUnavailable,
     TerminalUnavailable,
     TerminalEnded,
@@ -2513,6 +2521,8 @@ pub struct Fence {
 pub enum ActionType {
     #[serde(rename = "custom.reply")]
     CustomReply,
+    #[serde(rename = "harness.answer_ask")]
+    HarnessAnswerAsk,
     #[serde(rename = "harness.queue.mutate")]
     HarnessQueueMutate,
     #[serde(rename = "harness.model.set")]
@@ -2796,6 +2806,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::CustomReply,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn harness_answer_ask(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HarnessAskParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::HarnessAnswerAsk,
             idempotency_key,
             fence,
             &parameters,
@@ -3873,6 +3897,8 @@ pub struct ActionResult {
     pub harness_control: Option<HarnessControlReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_model: Option<HarnessModelReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_ask: Option<HarnessAskReceipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrangement_revision: Option<String>,
 }

@@ -6987,6 +6987,24 @@ mod tests {
     }
 
     #[test]
+    fn native_ask_details_preserve_selected_and_custom_answers() {
+        let mut items = Vec::new();
+        normalize_omp(ExternalDriver::Omp, &json!({
+            "type":"message","id":"ask-result","timestamp":"2026-10-05T00:00:00Z",
+            "message":{"role":"toolResult","toolCallId":"ask-call","toolName":"ask",
+                "content":[{"type":"text","text":"User answers"}],"isError":false,
+                "details":{"results":[{"id":"preferences","selectedOptions":["Blue","Green"],"customInput":"Purple"}]}}
+        }), 0, "", &mut items);
+        let result = items.iter().find(|item| item["type"] == "tool_result").unwrap();
+        // The answers travel in the tool_output block's verbatim metadata; the body keeps the
+        // native content unchanged.
+        let answers = &result["body"]["blocks"][0]["metadata"]["results"][0];
+        assert_eq!(answers["selectedOptions"], json!(["Blue","Green"]));
+        assert_eq!(answers["customInput"], "Purple");
+        assert_eq!(result["body"]["content"][0]["text"], "User answers");
+    }
+
+    #[test]
     fn current_codex_custom_tools_are_visible_but_bootstrap_prompts_are_not() {
         let fallback = timestamp(0);
         let mut items = Vec::new();

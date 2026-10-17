@@ -773,6 +773,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/harness-control/next", post(harness_control::next))
         .route("/v1/harness-control/receipts", post(harness_control::settle))
         .route("/v1/harness-control/close", post(harness_control::close))
+        .route("/v1/harness-control/ask-terminal-input", post(harness_control::ask_terminal_input))
         .route("/v1/messages/{message_id}/claims", post(messages::post_message_claim))
         .route("/v1/messages/read/{*subject}", get(messages::read_message))
         .route("/v1/messages/body/{*subject}", get(message_bodies::body))
@@ -1790,6 +1791,9 @@ fn client_error_code(code: Option<&str>) -> String {
         | "stale-harness-model"
         | "unavailable-harness-model"
         | "unsupported-harness-effort"
+        | "ask-no-longer-pending"
+        | "invalid-harness-answers"
+        | "unsupported-harness-ask"
         | "harness-control-busy"
         | "native-pre-dequeue-api-unavailable"
         | "database-busy"
