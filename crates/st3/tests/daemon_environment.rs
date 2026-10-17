@@ -118,6 +118,13 @@ fn client_without_runtime_dir_reaches_daemon_with_different_socket() {
     }
     let state_home = root.path().join("state").join("long".repeat(26));
     let (_service, socket) = start_service(root.path(), &home, &state_home);
+    // Socket readiness is not a roster publication; this fixture explicitly needs one.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(st3_client::Client::unix(&socket).agents_list_after(None, None, false, 0))
+        .expect("the fixture must publish its initial roster");
     let state_socket = state_home.join("st3/run/st3.sock");
     assert!(state_socket.as_os_str().len() > 108);
     assert_eq!(std::fs::read_link(&state_socket).unwrap(), socket);
@@ -356,7 +363,7 @@ fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_cr
     let config = st3::config::Config {
         node: "fixture-node".into(), person: Some("person/fixture".into()),
         state_dir: root.path().join("node-state"),
-        github: st3::config::GithubConfig { sekrets_profile: Some("owner/daemon-gh".into()), token_file: None },
+        github: st3::config::GithubConfig { sekrets_profile: Some("owner/daemon-gh".into()), token_file: None, observer_requests_per_hour: None },
         ..Default::default()
     };
     let key = smallclaims::fleet::MemberKey::load_or_create(
