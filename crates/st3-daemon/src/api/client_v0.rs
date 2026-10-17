@@ -121,6 +121,7 @@ pub(super) mod arrangements;
 pub(super) mod conversation_blocks;
 mod collection_windows;
 mod inventory;
+pub(super) mod published_missions;
 #[cfg(test)]
 mod conversation_follow_tests;
 mod collection_ivm;
@@ -649,13 +650,15 @@ async fn collection_items_with_windows(
                 } else {
                     None
                 };
-                // While a refresher serves the missions list, a missions window serves its newest
-                // publication under that list's own cut and never folds the missions it shows.
-                // Before the first publication, or while the refresher is failing, it folds on
-                // read as without one.
-                let published_missions = (collection == "missions")
-                    .then(|| store.published_missions())
-                    .flatten();
+                // Governed missions windows never fold while the refresher is preparing rows.
+                let published_missions = if collection == "missions" {
+                    match published_missions::current(&store) {
+                        Ok(publication) => publication.map(|(rows, _)| rows),
+                        Err(error) => return Ok(Err(error)),
+                    }
+                } else {
+                    None
+                };
                 // A work window serves the published list for its actor while its refresher runs,
                 // and never folds it on read meanwhile: with no current publication it is not
                 // ready, and once the refresher has ended, unavailable. With no refresher started
@@ -1029,7 +1032,8 @@ async fn deliver_collection(
             .await;
             return if !sent {
                 Refreshed::Closed
-            } else if retryable && error.code == super::published_lists::WORK_LIST_NOT_READY {
+            } else if retryable && matches!(error.code.as_str(),
+                super::published_lists::WORK_LIST_NOT_READY | published_missions::NOT_READY) {
                 Refreshed::NotReady
             } else if retryable {
                 Refreshed::Retry
@@ -1995,7 +1999,8 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         // Already told: the same not-ready answer is not sent again. The read still
                         // rechecked a paired session's authority before it got this far.
                         CollectionRead::Legacy(Err(error)) if subscription.waiting_for_view && governed
-                            && error.code == super::published_lists::WORK_LIST_NOT_READY
+                            && matches!(error.code.as_str(),
+                                super::published_lists::WORK_LIST_NOT_READY | published_missions::NOT_READY)
                             && client_error_retryable(error.status, Some(&error.code)) => Refreshed::NotReady,
                         CollectionRead::Legacy(result) => deliver_collection(&mut socket, subscription, result).await,
                         CollectionRead::Ivm(result) => deliver_ivm_collection(&mut socket, subscription, *result, &mut refresh).await,
@@ -4806,6 +4811,11 @@ pub(super) async fn missions(
     Query(query): Query<ClientListQuery>,
 ) -> Result<ClientPageResponse, ApiError> {
     require_scope(&session, "read.projections")?;
+    if !query.history && (state.store.published_missions_list().is_started()
+        || state.store.collection_view_published("missions"))
+    {
+        return published_missions::page(&state, snapshot, &query);
+    }
     let requested_limit = query
         .limit
         .unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS)
@@ -23415,18 +23425,39 @@ mission "example/zero-run" state="ready" {
         let mut previous = None;
         let mut written = 0;
         for history in [32, 512, 7_900] {
-            for index in written..history {
+            if written == 0 {
                 state.store.append_claim(&ClaimInput {
                     subject: "agent/runtime-perf".into(),
-                    kind: if index == 0 { "runtime.observed" } else { "harness.diagnostic" }.into(),
+                    kind: "runtime.observed".into(),
                     actor: Some("agent/runtime-perf".into()),
-                    fields: serde_json::from_value(if index == 0 {
-                        json!({"runtime_id": "fixed-runtime", "status": "running", "terminal": false})
-                    } else {
-                        json!({"code": "retained-diagnostic", "reason": format!("retained diagnostic {index}")})
-                    }).unwrap(),
+                    fields: serde_json::from_value(
+                        json!({"runtime_id": "fixed-runtime", "status": "running", "terminal": false}),
+                    ).unwrap(),
                     evidence: Vec::new(), expected_subject: None, idempotency_key: None,
                 }).unwrap();
+                written = 1;
+            }
+            // The retained history goes in one transaction per step, as in the other history
+            // fixtures: one commit per diagnostic made the 7,900 of them most of the test.
+            {
+                let mut connection = state.store.connection.write();
+                let transaction = connection.transaction().unwrap();
+                for index in written..history {
+                    crate::store::append_claim_tx(
+                        &transaction,
+                        &state.store.origin,
+                        "agent/runtime-perf",
+                        "harness.diagnostic",
+                        Some("agent/runtime-perf"),
+                        &json!({"fields": {
+                            "code": "retained-diagnostic",
+                            "reason": format!("retained diagnostic {index}"),
+                        }}),
+                        &[],
+                        None,
+                    ).unwrap();
+                }
+                transaction.commit().unwrap();
             }
             written = history;
             let snapshot = new_client_snapshot(&state);
