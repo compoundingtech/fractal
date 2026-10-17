@@ -81,7 +81,7 @@ pub struct Detail {
     pub item: Change,
 }
 
-pub(crate) fn advertised_ids(
+pub fn advertised_ids(
     advertisement: &Advertisement,
 ) -> Result<BTreeMap<String, Option<String>>> {
     let mut ids = BTreeMap::new();

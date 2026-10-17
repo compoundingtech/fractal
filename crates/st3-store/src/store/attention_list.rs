@@ -10,7 +10,7 @@ use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
 /// The views the refresher publishes, in the order it refreshes them.
-pub(crate) const PUBLISHED_VIEWS: [&str; 4] = ["attention", "glasses", "arrangements", "summary"];
+pub const PUBLISHED_VIEWS: [&str; 4] = ["attention", "glasses", "arrangements", "summary"];
 
 /// A view whose refresh has failed this long is withdrawn: its windows read for themselves, as
 /// before, until it publishes again. Once published, a window rereads only on publication, so
@@ -59,30 +59,30 @@ const SEAT_RUNTIME_KINDS: &[&str] = &[
 ];
 
 /// The rows of one attention fold and the cut they were folded at.
-pub(crate) struct AttentionPublication {
+pub struct AttentionPublication {
     /// The graph index the rows were folded at; windows serving them carry this snapshot.
-    pub(crate) cut: u64,
+    pub cut: u64,
     /// The graph projection's health row at the cut. Deferred replication projection catches
     /// up under the same admitted claims, so a different row means the rows may have changed.
-    pub(crate) projection: Option<(String, u64)>,
+    pub projection: Option<(String, u64)>,
     /// The clock the rows were evaluated at: eligibility and grace periods depend on it.
-    pub(crate) evaluated_at_unix_ms: u128,
+    pub evaluated_at_unix_ms: u128,
     /// The earliest acceptance time after `evaluated_at_unix_ms` among the claims this list's
     /// folds and deltas read: a claim dated in the future that becomes eligible then. The
     /// rows are evaluated again at that time, not only at the clock period.
-    pub(crate) due_at_unix_ms: Option<u128>,
+    pub due_at_unix_ms: Option<u128>,
     /// Claims after this index may still be dated after the clock the rows were evaluated at;
     /// `None` when none is.
-    pub(crate) future_after: Option<u64>,
+    pub future_after: Option<u64>,
     /// When these rows were published, in Unix ms: the list's "as of".
-    pub(crate) published_at_unix_ms: u128,
+    pub published_at_unix_ms: u128,
     /// Every person's rows, most urgent first, as `client_attention_resources_at` orders them.
-    pub(crate) rows: Arc<Vec<Value>>,
+    pub rows: Arc<Vec<Value>>,
 }
 
 /// The refresher's registration, its requests and the newest publication.
 #[derive(Default)]
-pub(crate) struct AttentionList {
+pub struct AttentionList {
     refresher: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     /// When a window last read one of the refresher's views (attention, glasses, arrangements),
     /// in Unix ms. The refresher follows commits only while someone reads.
@@ -103,7 +103,7 @@ pub(crate) struct AttentionList {
 }
 
 impl AttentionList {
-    pub(super) fn forget(&self) {
+    pub fn forget(&self) {
         let mut published = self.published.lock().unwrap_or_else(PoisonError::into_inner);
         self.forgotten.fetch_add(1, AtomicOrdering::AcqRel);
         let forgotten = published.take().is_some();
@@ -116,7 +116,7 @@ impl AttentionList {
 
 /// Why the newest publication can no longer stand for the rows at a newer cut.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum AttentionDelta {
+pub enum AttentionDelta {
     /// Nothing attention reads changed: the same rows hold at the newer cut, until the
     /// earliest future acceptance time among the claims read, if any.
     Unchanged(Option<u128>),
@@ -127,7 +127,7 @@ pub(crate) enum AttentionDelta {
 impl Store {
     /// Register the one task that keeps the attention list published, and return its wake.
     /// `None` when one is already registered.
-    pub(crate) fn start_attention_list_refresher(&self) -> Option<Arc<tokio::sync::Notify>> {
+    pub fn start_attention_list_refresher(&self) -> Option<Arc<tokio::sync::Notify>> {
         let wake = Arc::new(tokio::sync::Notify::new());
         self.smalltalk
             .attention_list
@@ -138,14 +138,14 @@ impl Store {
     }
 
     /// Whether a refresher was started for the attention list and its sibling views.
-    pub(crate) fn attention_list_refresher_running(&self) -> bool {
+    pub fn attention_list_refresher_running(&self) -> bool {
         let list = &self.smalltalk.attention_list;
         list.refresher.get().is_some() && !list.stopped.load(AtomicOrdering::Acquire)
     }
 
     /// Whether windows of `view` serve its publication rather than reading for themselves: its
     /// refresher runs and has not withdrawn it.
-    pub(crate) fn published_view_serving(&self, view: &str) -> bool {
+    pub fn published_view_serving(&self, view: &str) -> bool {
         let Some(position) = PUBLISHED_VIEWS.iter().position(|name| *name == view) else {
             return false;
         };
@@ -157,7 +157,7 @@ impl Store {
 
     /// Record one refresh of `view`. A view failing for [`WITHDRAW_AFTER_MS`] is withdrawn, so
     /// its windows follow commits again; its next good refresh serves it again.
-    pub(crate) fn note_view_refreshed(&self, view: &str, succeeded: bool) {
+    pub fn note_view_refreshed(&self, view: &str, succeeded: bool) {
         let Some(position) = PUBLISHED_VIEWS.iter().position(|name| *name == view) else {
             return;
         };
@@ -188,7 +188,7 @@ impl Store {
     /// A paired client's grant completed or was revoked since the last check: every window of a
     /// served view rereads, rechecking its session, as a commit of such a claim made it before
     /// views were published.
-    pub(crate) fn recheck_pairings(&self) -> Result<()> {
+    pub fn recheck_pairings(&self) -> Result<()> {
         let list = &self.smalltalk.attention_list;
         let checked = list.pairings_checked.load(AtomicOrdering::Acquire);
         let index = self.index()?;
@@ -211,7 +211,7 @@ impl Store {
     }
 
     /// The refresher task ended: windows of every view read for themselves from now on.
-    pub(crate) fn stop_attention_list_refresher(&self) {
+    pub fn stop_attention_list_refresher(&self) {
         let list = &self.smalltalk.attention_list;
         if list.refresher.get().is_none() || list.stopped.swap(true, AtomicOrdering::AcqRel) {
             return;
@@ -224,7 +224,7 @@ impl Store {
 
     /// Ask the refresher, if one runs, to publish the list at the newest cut. Requests made
     /// while it folds coalesce into one more refresh.
-    pub(crate) fn request_attention_list_refresh(&self) {
+    pub fn request_attention_list_refresh(&self) {
         if let Some(wake) = self.smalltalk.attention_list.refresher.get() {
             wake.notify_one();
         }
@@ -233,7 +233,7 @@ impl Store {
     /// The newest publication, and note that a window read it. A window serves these rows
     /// under the publication's own cut, never relabelled with its own, even when the window's
     /// snapshot began before that cut was published.
-    pub(crate) fn published_attention_list(&self) -> Option<Arc<AttentionPublication>> {
+    pub fn published_attention_list(&self) -> Option<Arc<AttentionPublication>> {
         let list = &self.smalltalk.attention_list;
         list.refresher.get()?;
         self.note_published_view_read();
@@ -245,20 +245,20 @@ impl Store {
 
     /// The newest publication, whatever its cut, for the refresher to start from, and the
     /// generation to publish under: read it before the snapshot that folds.
-    pub(crate) fn newest_attention_list(&self) -> (u64, Option<Arc<AttentionPublication>>) {
+    pub fn newest_attention_list(&self) -> (u64, Option<Arc<AttentionPublication>>) {
         let list = &self.smalltalk.attention_list;
         let published = list.published.lock().unwrap_or_else(PoisonError::into_inner);
         (list.forgotten.load(AtomicOrdering::Acquire), published.clone())
     }
 
     /// Whether nothing was ever published or forgotten: the refresher's first fold is due.
-    pub(crate) fn attention_list_starting(&self) -> bool {
+    pub fn attention_list_starting(&self) -> bool {
         matches!(self.newest_attention_list(), (0, None))
     }
 
     /// Note that a window read one of the refresher's views: it follows commits only while
     /// windows read them.
-    pub(crate) fn note_published_view_read(&self) {
+    pub fn note_published_view_read(&self) {
         self.smalltalk
             .attention_list
             .read_at
@@ -266,7 +266,7 @@ impl Store {
     }
 
     /// Whether a window read one of the refresher's views within `within_ms`.
-    pub(crate) fn attention_list_read_within(&self, within_ms: u64) -> bool {
+    pub fn attention_list_read_within(&self, within_ms: u64) -> bool {
         let read_at = self.smalltalk.attention_list.read_at.load(AtomicOrdering::Acquire);
         read_at != 0 && (now_ms() as u64).saturating_sub(read_at) <= within_ms
     }
@@ -276,7 +276,7 @@ impl Store {
     /// reread, and a window that reads later serves them under the newer cut.
     /// A refresh that began before views were forgotten (`generation` is stale) publishes
     /// nothing: what it read may no longer hold.
-    pub(crate) fn publish_attention_list(
+    pub fn publish_attention_list(
         &self,
         generation: u64,
         publication: AttentionPublication,
@@ -304,13 +304,13 @@ impl Store {
 
     /// Follows the revision of attention publications, so a stream that read an earlier one
     /// rereads the newer.
-    #[cfg(test)]
-    pub(crate) fn subscribe_attention_list(&self) -> tokio::sync::watch::Receiver<u64> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn subscribe_attention_list(&self) -> tokio::sync::watch::Receiver<u64> {
         self.smalltalk.attention_list.revision.subscribe()
     }
 
     /// Count one fold of the whole list, by why.
-    pub(crate) fn note_attention_list_fold(&self, cause: &str) {
+    pub fn note_attention_list_fold(&self, cause: &str) {
         *self
             .smalltalk
             .attention_list
@@ -333,7 +333,7 @@ impl Store {
 
     /// When the newest list must be evaluated again with no claim: its clock period after it
     /// was evaluated, or sooner when a claim it read becomes eligible. `None` before the first.
-    pub(crate) fn attention_list_due_at(&self, period_ms: u128) -> Option<u128> {
+    pub fn attention_list_due_at(&self, period_ms: u128) -> Option<u128> {
         let published = self.newest_attention_list().1?;
         let clock = published.evaluated_at_unix_ms.saturating_add(period_ms);
         Some(published.due_at_unix_ms.map_or(clock, |due| due.min(clock)))
@@ -342,7 +342,7 @@ impl Store {
     /// The earliest acceptance time after `now` among the claims in `(after, through]`: a
     /// fold at `now` left them out as not yet eligible. More claims than a delta reads are
     /// left to the clock period.
-    pub(crate) fn attention_future_since(&self, after: u64, through: u64, now: u128) -> Result<Option<u128>> {
+    pub fn attention_future_since(&self, after: u64, through: u64, now: u128) -> Result<Option<u128>> {
         if through.saturating_sub(after) > DELTA_LIMIT as u64 {
             return Ok(None);
         }
@@ -354,7 +354,7 @@ impl Store {
     }
 
     /// The graph projection's health row, read in the snapshot that folds or compares.
-    pub(crate) fn attention_projection_frontier(&self) -> Result<Option<(String, u64)>> {
+    pub fn attention_projection_frontier(&self) -> Result<Option<(String, u64)>> {
         Ok(self
             .readers
             .get()
@@ -370,7 +370,7 @@ impl Store {
     /// snapshot at `index`. Only the subjects, kinds, actors and acceptance times of the claims
     /// admitted (or projected) since are read, and for a seat's runtime claims whether the seat
     /// has or now needs a login item, or is retiring.
-    pub(crate) fn attention_list_delta(
+    pub fn attention_list_delta(
         &self,
         previous: &AttentionPublication,
         index: u64,

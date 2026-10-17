@@ -2,16 +2,16 @@
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Owner {
+pub struct Owner {
     pub subject: String,
     pub incarnation: Option<String>,
     pub runtime: Option<String>,
     pub origin: Option<String>,
 }
 
-pub(super) type Owners = BTreeMap<String, Owner>;
+pub type Owners = BTreeMap<String, Owner>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static BEFORE_OWNER_PUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static BEFORE_MESSAGE_DECODE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -49,7 +49,7 @@ const CONVERSATION_CHANGED: &str = "SELECT
       WHERE subject=?1 AND id>?4 AND id<=?5)";
 
 impl Store {
-    pub(crate) fn conversation_local_position(&self) -> Result<u64> {
+    pub fn conversation_local_position(&self) -> Result<u64> {
         Ok(self.readers.get().prepare_cached(
             "SELECT COALESCE(MAX(id),0) FROM local_observations",
         )?.query_row([], |row| row.get(0))?)
@@ -57,7 +57,7 @@ impl Store {
 
     /// Whether a fixed graph/local frontier contains a relevant change. No payload leaves SQL,
     /// and no retained snapshot spans native reads, display preparation, or a long-poll wait.
-    pub(crate) fn conversation_changed_at(
+    pub fn conversation_changed_at(
         &self, owner: &str, after: u64, through: u64, local_after: u64, local_through: u64,
     ) -> Result<bool> {
         if after == through && local_after == local_through {
@@ -70,7 +70,7 @@ impl Store {
     /// A volatile, rebuildable identity map at a logical claim frontier. Only changed agents
     /// are folded on subsequent reads. No lock or SQLite transaction spans the whole build,
     /// native transcript I/O, display preparation, or a long-poll wait.
-    pub(crate) fn conversation_owners_at(&self, through: u64) -> Result<Arc<Owners>> {
+    pub fn conversation_owners_at(&self, through: u64) -> Result<Arc<Owners>> {
         selected_index(self.index()?, Some(through)).map_err(anyhow::Error::new)?;
         let (generation, previous) = {
             let cache = self
@@ -190,7 +190,7 @@ impl Store {
             );
         }
         let owners = Arc::new(owners);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         BEFORE_OWNER_PUBLISH.with(|pause| {
             if let Some(pause) = pause.borrow_mut().take() {
                 pause();
@@ -224,7 +224,7 @@ impl Store {
     /// Preserve the existing newest-10,000 fleet-send window, but read payloads only for the
     /// selected endpoint and (for replay) after its cursor. Wrapped sends use existing endpoint
     /// indexes; partial indexes cover legacy root bodies.
-    pub(crate) fn conversation_messages_at(
+    pub fn conversation_messages_at(
         &self,
         owner: &str,
         before: Option<u64>,
@@ -234,7 +234,7 @@ impl Store {
     }
 
     /// Bounded indexed post-snapshot sends for native/graph read reconciliation.
-    pub(crate) fn conversation_message_delta_at(
+    pub fn conversation_message_delta_at(
         &self,
         owner: &str,
         before: Option<u64>,
@@ -297,7 +297,7 @@ impl Store {
     /// The owner records the stored-history fallback actually renders, selected inside the
     /// same latest-10,000 physical-row window as the previous claims_page read. Timeline
     /// operations keep their separate incarnation window and missing-history checks.
-    pub(crate) fn conversation_timeline_owner_claims_at(
+    pub fn conversation_timeline_owner_claims_at(
         &self,
         owner: &str,
         before: Option<u64>,
@@ -372,7 +372,7 @@ impl Store {
                 .position(|id| id == &last.id)
                 .expect("selected batch ID")
                 + 1;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             BEFORE_MESSAGE_DECODE.with(|pause| {
                 if let Some(pause) = pause.borrow_mut().take() {
                     pause();
@@ -392,7 +392,7 @@ impl Store {
     }
 
     /// Session membership reads indexed acceptance times without copying runtime bodies into Rust.
-    pub(crate) fn conversation_runtime_span(
+    pub fn conversation_runtime_span(
         &self,
         owner: &str,
         incarnation: &str,

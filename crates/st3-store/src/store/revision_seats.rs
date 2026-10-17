@@ -156,7 +156,7 @@ fn plan_completed_agents_tx(
 impl Store {
     /// Check completed declaration carry before the API publishes the candidate revision.
     /// Cutover rechecks under its writer transaction, so this preview grants no authority.
-    pub(crate) fn validate_revision_seat_carry(
+    pub fn validate_revision_seat_carry(
         &self,
         current: &MissionRunView,
         next: &MissionSpec,
@@ -193,7 +193,7 @@ impl Store {
     }
 }
 
-pub(super) fn carry_completed_agents_tx(
+pub fn carry_completed_agents_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     current: &MissionRunView,

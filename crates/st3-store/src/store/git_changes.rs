@@ -5,7 +5,7 @@ use crate::changes::{Revision, change_id, oid};
 
 const MAX_RECORD_BYTES: usize = 16 * 1024;
 
-pub(super) const SCHEMA: &str = r#"
+pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS local_git_change_records (
     repository TEXT NOT NULL,
     object_id TEXT NOT NULL,
@@ -193,13 +193,14 @@ impl Store {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
     use crate::changes::{Record, State, TrailerStatus};
+    #[cfg(test)]
     use smallclaims::sqlite::work::SqliteWorkScope;
 
-    pub(crate) fn revision() -> Revision {
+    pub fn revision() -> Revision {
         Revision {
             oid: "a".repeat(40),
             record: Record {

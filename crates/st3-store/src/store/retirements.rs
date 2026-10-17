@@ -2,7 +2,7 @@
 use super::*;
 use crate::model::{LifecycleUnavailableReason, MessageSendRefusal};
 
-pub(super) const SCHEMA: &str = "CREATE INDEX IF NOT EXISTS st3_replica_lifecycle_unavailable
+pub const SCHEMA: &str = "CREATE INDEX IF NOT EXISTS st3_replica_lifecycle_unavailable
     ON replica_records(subject_hint,kind_hint) WHERE state IN ('unknown','invalid');
     CREATE INDEX IF NOT EXISTS st3_lifecycle_operation_index
     ON claims(subject,json_extract(body,'$._operation.id'))
@@ -10,7 +10,7 @@ pub(super) const SCHEMA: &str = "CREATE INDEX IF NOT EXISTS st3_replica_lifecycl
 
 pub const KIND: &str = "agent.retired";
 
-pub(super) fn writer_required() -> St3Error {
+pub fn writer_required() -> St3Error {
     St3Error::new(
         "invalid-retirement",
         "terminal retirement must be written through agent.retire",
@@ -20,7 +20,7 @@ pub(super) fn writer_required() -> St3Error {
 
 /// Every declaration selector, including mission materialization, obeys the same terminal
 /// reducer. The trigger probes only the changed subject; it never scans the fleet on writes.
-pub(super) fn create_selection_triggers(connection: &Connection) -> Result<()> {
+pub fn create_selection_triggers(connection: &Connection) -> Result<()> {
     for (name, event) in [
         ("insert", "INSERT"),
         ("update", "UPDATE OF kind,member,body"),
@@ -41,7 +41,7 @@ pub(super) fn create_selection_triggers(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn record(
+pub fn record(
     connection: &Connection,
     subject: &str,
     at: Option<u64>,
@@ -65,7 +65,7 @@ fn retired(recipient: &str, claim: &ClaimRecord) -> St3Error {
     .into_error()
 }
 
-pub(super) fn refuse_declaration(
+pub fn refuse_declaration(
     connection: &Connection,
     desired: &DesiredSubject,
 ) -> Result<(), St3Error> {
@@ -79,7 +79,7 @@ pub(super) fn refuse_declaration(
 
 /// Terminal identity supersedes owned membership too. An effect prepared from the old
 /// declaration must fail its authority check; only the canonical terminal stop is current.
-pub(super) fn terminal_selection(
+pub fn terminal_selection(
     connection: &Connection,
     desired: &DesiredSubject,
 ) -> Result<Option<bool>, St3Error> {
@@ -95,7 +95,7 @@ pub(super) fn terminal_selection(
     }))
 }
 
-pub(super) fn admit_recipient(
+pub fn admit_recipient(
     connection: &Connection,
     recipient: Option<&str>,
 ) -> Result<(), St3Error> {
@@ -147,7 +147,7 @@ pub(super) fn admit_recipient(
 
 /// Runtime selection lowers terminal identity to a stop, retaining the declaration token and
 /// ownership history. The terminal claim remains separate and can never be overwritten by KDL.
-pub(super) fn project_subject(connection: &Connection, subject: &str) -> Result<(), St3Error> {
+pub fn project_subject(connection: &Connection, subject: &str) -> Result<(), St3Error> {
     if let Some(claim) = record(connection, subject, None)? {
         let body = json!({"name":"stop", "arguments":[subject], "properties":{}, "children":[], "retirement":claim.id});
         connection
@@ -160,7 +160,7 @@ pub(super) fn project_subject(connection: &Connection, subject: &str) -> Result<
     Ok(())
 }
 
-pub(super) fn overlay_row(
+pub fn overlay_row(
     connection: &Connection,
     subject: &str,
     at: Option<u64>,

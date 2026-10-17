@@ -7,54 +7,54 @@ use super::*;
 /// Where one mission sits in the current list, as `mission_collection_page` orders and filters
 /// it, and until when that holds with no new claim.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MissionKey {
+pub struct MissionKey {
     /// The list's sort time, newest first; a mission with none sorts last.
-    pub(crate) order: Option<i64>,
+    pub order: Option<i64>,
     /// The time a page continuation seeks after.
-    pub(crate) page_time: u128,
-    pub(crate) visible: bool,
+    pub page_time: u128,
+    pub visible: bool,
     /// The last moment a recently ended run keeps its mission shown, if that is all that does.
-    pub(crate) visible_until: Option<u128>,
+    pub visible_until: Option<u128>,
 }
 
 /// One publication of the current missions list.
 #[derive(Clone, Default)]
-pub(crate) struct MissionRows {
+pub struct MissionRows {
     /// Every shown mission's place in the list, by its `mission/` ID.
-    pub(crate) keys: HashMap<String, MissionKey>,
+    pub keys: HashMap<String, MissionKey>,
     /// The shown missions, in list order.
-    pub(crate) order: Vec<String>,
+    pub order: Vec<String>,
     /// The card of every shown mission.
-    pub(crate) cards: HashMap<String, Arc<Value>>,
+    pub cards: HashMap<String, Arc<Value>>,
     /// The runs that wait on a person, which every card's `must_act` reads.
-    pub(crate) attention_runs: BTreeSet<String>,
+    pub attention_runs: BTreeSet<String>,
     /// When the attention runs were last read: grace periods can move a run in or out of
     /// them with no new claim.
-    pub(crate) attention_read_at_unix_ms: u128,
+    pub attention_read_at_unix_ms: u128,
     /// When the cards were folded: a worker lease that ends after it changes a card.
-    pub(crate) folded_at_unix_ms: u128,
+    pub folded_at_unix_ms: u128,
     /// The first worker lease to end after the fold, if one does.
-    pub(crate) next_lease_end_unix_ms: Option<u128>,
+    pub next_lease_end_unix_ms: Option<u128>,
     /// The projection frontier at the fold, from [`Store::projection_frontier`].
-    pub(crate) frontier: u64,
+    pub frontier: u64,
     /// Every leased step's lease end at the fold. A quiet renewal moves one, and the step's
     /// `since` on its card, with no claim.
-    pub(crate) leases: HashMap<String, u128>,
+    pub leases: HashMap<String, u128>,
     /// The open human gates, read with `attention_runs`; every card's presentation reads them.
-    pub(crate) gates: Vec<st3_ui_model::missions::Gate>,
+    pub gates: Vec<st3_ui_model::missions::Gate>,
     /// The agents every card's presentation reads, from the newest published roster. None until
     /// a roster is published, which is not an empty roster: then a word that hinges on an agent's
     /// queue goes unsaid.
-    pub(crate) roster: Option<Arc<RosterFleet>>,
+    pub roster: Option<Arc<RosterFleet>>,
 }
 
 /// The agents a mission presentation reads, from one published roster: each agent's state and
 /// the step it holds, and which agent's queue holds each queued step.
 #[derive(Debug, Default)]
-pub(crate) struct RosterFleet {
+pub struct RosterFleet {
     /// The roster publication it reads, by `Store::agent_roster_revision`: a roster republished
     /// at the same cut after local activity is a new one.
-    pub(crate) revision: u64,
+    pub revision: u64,
     seats: HashMap<String, st3_ui_model::missions::Seat>,
     /// Queued step → the agent whose queue holds it.
     queues: HashMap<String, String>,
@@ -64,7 +64,7 @@ pub(crate) struct RosterFleet {
 
 impl RosterFleet {
     /// The fleet of `cards`, the roster publication `revision`.
-    pub(crate) fn from_cards(revision: u64, cards: &[Value]) -> Self {
+    pub fn from_cards(revision: u64, cards: &[Value]) -> Self {
         let mut fleet = RosterFleet { revision, ..Default::default() };
         for card in cards {
             let Some(id) = card["id"].as_str() else { continue };
@@ -106,7 +106,7 @@ impl RosterFleet {
     }
 
     /// The agents whose state, fault, held step or queue differ from `before`, by agent ID.
-    pub(crate) fn agents_changed_since(&self, before: &RosterFleet) -> BTreeSet<String> {
+    pub fn agents_changed_since(&self, before: &RosterFleet) -> BTreeSet<String> {
         let ids = self.seats.keys().chain(before.seats.keys());
         ids.filter(|id| {
             self.seats.get(*id) != before.seats.get(*id) || self.steps.get(*id) != before.steps.get(*id)
@@ -116,7 +116,7 @@ impl RosterFleet {
     }
 
     /// Every step `agent` holds or queues, here and in `before`.
-    pub(crate) fn steps_of<'a>(&'a self, before: &'a RosterFleet, agent: &str) -> impl Iterator<Item = &'a String> {
+    pub fn steps_of<'a>(&'a self, before: &'a RosterFleet, agent: &str) -> impl Iterator<Item = &'a String> {
         self.steps.get(agent).into_iter().chain(before.steps.get(agent)).flatten()
     }
 }
@@ -139,7 +139,7 @@ impl st3_ui_model::missions::Fleet for RosterFleet {
 impl MissionRows {
     /// Put the shown missions in list order: newest sort time first, missions without one
     /// last, then by ID, as `mission_collection_page` orders them.
-    pub(crate) fn sort(&mut self) {
+    pub fn sort(&mut self) {
         let mut order = self
             .keys
             .iter()
@@ -160,18 +160,18 @@ impl MissionRows {
 
     /// The first time a shown mission leaves the list with no new claim: just after the last
     /// moment its recent end keeps it shown.
-    pub(crate) fn visible_until(&self) -> Option<u128> {
+    pub fn visible_until(&self) -> Option<u128> {
         self.keys.values().filter_map(|key| key.visible_until).min().map(|until| until + 1)
     }
 }
 
 /// What claims between two cuts changed in the missions list.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct MissionChanges {
+pub struct MissionChanges {
     /// Missions whose key or card any of those claims can change.
-    pub(crate) missions: BTreeSet<String>,
+    pub missions: BTreeSet<String>,
     /// Whether one of them can change which runs wait on a person.
-    pub(crate) attention: bool,
+    pub attention: bool,
 }
 
 /// Claim kinds that move nothing the attention runs read: work activity and observations.
@@ -208,7 +208,7 @@ fn system_mission(id: &str) -> bool {
 }
 
 /// Each mission's key columns. With `?1` a JSON array of mission IDs, only those missions.
-pub(crate) fn mission_keys_sql(selected: bool) -> String {
+pub fn mission_keys_sql(selected: bool) -> String {
     let filter = if selected {
         "WHERE mission_id IN (SELECT value FROM json_each(?1))"
     } else {
@@ -248,7 +248,7 @@ pub(crate) fn mission_keys_sql(selected: bool) -> String {
 impl Store {
     /// The keys of the selected missions, or of every mission, at the reader's cut, as the
     /// current list sees them at `now`. A selected mission the store no longer has gets none.
-    pub(crate) fn mission_list_keys(
+    pub fn mission_list_keys(
         &self,
         selected: Option<&BTreeSet<String>>,
         now: u128,
@@ -313,7 +313,7 @@ impl Store {
     /// runs, and the person asks that block them, which their requesters' declarations and
     /// runtime decide; and which runs wait on a person. A claim about any other subject
     /// changes no card.
-    pub(crate) fn mission_list_changes(&self, after: u64, through: u64) -> Result<MissionChanges> {
+    pub fn mission_list_changes(&self, after: u64, through: u64) -> Result<MissionChanges> {
         let connection = self.readers.get();
         let mut changes = MissionChanges::default();
         let mut runs = BTreeSet::new();
@@ -401,7 +401,7 @@ impl Store {
     }
 
     /// Every mission's `mission/` ID, defined or run, for a fold from nothing to read in chunks.
-    pub(crate) fn mission_list_ids(&self) -> Result<Vec<String>> {
+    pub fn mission_list_ids(&self) -> Result<Vec<String>> {
         let connection = self.readers.get();
         let ids = connection
             .prepare_cached(
@@ -415,7 +415,7 @@ impl Store {
 
     /// The missions with a current step whose worker lease ended after `after` and by
     /// `through`: their cards show the step ready again with no new claim.
-    pub(crate) fn missions_with_leases_ended(&self, after: u128, through: u128) -> Result<BTreeSet<String>> {
+    pub fn missions_with_leases_ended(&self, after: u128, through: u128) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT DISTINCT 'mission/' || r.mission_id FROM step_runs s INDEXED BY step_runs_lease_index
@@ -434,7 +434,7 @@ impl Store {
     }
 
     /// When the first worker lease that has not ended by `now` ends.
-    pub(crate) fn next_lease_end(&self, now: u128) -> Result<Option<u128>> {
+    pub fn next_lease_end(&self, now: u128) -> Result<Option<u128>> {
         let connection = self.readers.get();
         let end = connection
             .prepare_cached(
@@ -446,7 +446,7 @@ impl Store {
     }
 
     /// The missions that own each of `steps`.
-    pub(crate) fn missions_of_steps<'a>(
+    pub fn missions_of_steps<'a>(
         &self,
         steps: impl IntoIterator<Item = &'a String>,
     ) -> Result<BTreeSet<String>> {
@@ -465,7 +465,7 @@ impl Store {
 
     /// The missions that own each of `runs`, which may name runs with or without their
     /// `mission-run/` prefix.
-    pub(crate) fn missions_of_runs<'a>(
+    pub fn missions_of_runs<'a>(
         &self,
         runs: impl IntoIterator<Item = &'a String>,
     ) -> Result<BTreeSet<String>> {
@@ -482,11 +482,11 @@ impl Store {
     }
 
     /// The published missions list, while a refresher keeps one.
-    pub(crate) fn published_missions(&self) -> Option<Arc<published_list::Publication<MissionRows>>> {
+    pub fn published_missions(&self) -> Option<Arc<published_list::Publication<MissionRows>>> {
         self.smalltalk.published_missions.newest()
     }
 
-    pub(crate) fn published_missions_list(&self) -> &published_list::PublishedList<MissionRows> {
+    pub fn published_missions_list(&self) -> &published_list::PublishedList<MissionRows> {
         &self.smalltalk.published_missions
     }
 }

@@ -12,13 +12,13 @@
 use super::*;
 use smallclaims::replication::ProjectionDivergence;
 
-pub(crate) const PROJECTION_DIVERGENCE_CONDITION: &str = "projection-divergence";
+pub const PROJECTION_DIVERGENCE_CONDITION: &str = "projection-divergence";
 /// Every divergence episode starts with this, so its failure and recovery read apart from the
 /// daemon's other faults.
 const EPISODE_PREFIX: &str = "projection-divergence/";
 
 /// The member that records a divergence records it on its own daemon subject.
-pub(crate) fn projection_divergence_subject(node: &str) -> String {
+pub fn projection_divergence_subject(node: &str) -> String {
     format!("daemon/{node}")
 }
 /// One divergence per member pair and projection, whichever member records it first. A
@@ -55,7 +55,7 @@ impl Store {
     /// Open a fault for each divergence with no open fault, and end the open faults this node
     /// shares with a peer whose last comparison agrees. Reads the comparisons in memory and the
     /// open faults once; writes only when a fault opens or ends.
-    pub(crate) fn check_projection_divergences(&self) -> Result<DivergenceCheck, St3Error> {
+    pub fn check_projection_divergences(&self) -> Result<DivergenceCheck, St3Error> {
         let local = self.origin().to_owned();
         let divergences = self.replication_divergences();
         let open = self.open_projection_divergences().map_err(internal)?;
@@ -185,7 +185,7 @@ impl Store {
     /// subjects that no recovery names, however old. Each is a P1 bug, so these claims stay few.
     /// The read never stops at the newest of them, since an older episode that is still open
     /// would then look closed and open again as a second failure.
-    pub(crate) fn open_projection_divergences(&self) -> Result<BTreeMap<String, OpenDivergence>> {
+    pub fn open_projection_divergences(&self) -> Result<BTreeMap<String, OpenDivergence>> {
         let mut nodes = self.compared_peers();
         nodes.push(self.origin().to_owned());
         let subjects = Value::from(

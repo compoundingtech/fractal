@@ -61,7 +61,7 @@ fn field<T: for<'de> serde::Deserialize<'de>>(claim: &ClaimRecord, name: &str) -
 
 /// The question `subject`: its newest observation and its first resolution in canonical order.
 /// The compact record stays visible indefinitely; only redundant observation history expires.
-pub(crate) fn question_at(
+pub fn question_at(
     connection: &Connection,
     subject: &str,
     _at: Option<u128>,

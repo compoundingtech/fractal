@@ -33,7 +33,7 @@ const LAST_WAKE_SQL: &str = "SELECT MAX(sent_at) FROM (
 
 /// One live GitHub watch a seat holds.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct LiveWatch {
+pub struct LiveWatch {
     pub subject: String,
     pub thread: ThreadRef,
     pub since_unix_ms: u128,
@@ -43,7 +43,7 @@ pub(crate) struct LiveWatch {
 impl Store {
     /// Whether a message to `agent` has not reached its harness yet: sent or staged, with no
     /// delivery, read or close.
-    pub(crate) fn has_undelivered_message(&self, agent: &str) -> Result<bool> {
+    pub fn has_undelivered_message(&self, agent: &str) -> Result<bool> {
         let (recipient, bare_recipient) = recipients(agent);
         smallclaims::touched::note_read(|| format!("mailbox:{recipient}"));
         let connection = self.readers.get();
@@ -64,7 +64,7 @@ impl Store {
     /// A nudge or a conversation that merely mentions the wait is not a source wake.
     /// Both source producers put their source tag first and exact wait tag second; claim
     /// writes materialize those fields and delivery state in the disposable message index.
-    pub(crate) fn last_wake_to(
+    pub fn last_wake_to(
         &self,
         agent: &str,
         tag: &str,
@@ -83,7 +83,7 @@ impl Store {
 
     /// The watches `agent` holds that have not ended. Watch subjects end with their seat, so
     /// this reads the declared watches' subject range, not the fleet's declarations.
-    pub(crate) fn live_watches_of(&self, agent: &str) -> Result<Vec<LiveWatch>> {
+    pub fn live_watches_of(&self, agent: &str) -> Result<Vec<LiveWatch>> {
         smallclaims::touched::note_read(|| format!("watches:{agent}"));
         let suffix = agent.trim_start_matches("agent/");
         let subjects = {
@@ -119,7 +119,7 @@ impl Store {
 
     /// When a watched thread that is still open left the merge queue, if it is out of the queue
     /// now and left it after `after_unix_ms`: the first observation that saw it out.
-    pub(crate) fn thread_left_merge_queue(
+    pub fn thread_left_merge_queue(
         &self,
         thread: &ThreadRef,
         after_unix_ms: u128,
@@ -175,7 +175,7 @@ impl Store {
 
     /// Open runs that have named this reporter. The caller checks the current reporter
     /// against later overrides. Seek this seat's report claims, without reading other runs.
-    pub(crate) fn open_mission_runs_reporting_to(
+    pub fn open_mission_runs_reporting_to(
         &self,
         agent: &str,
     ) -> Result<Vec<(String, u128)>> {
@@ -201,7 +201,7 @@ impl Store {
 
     /// The latest progress line for a nudge, read only when sending one. Reconcile work rows
     /// deliberately omit presentation history.
-    pub(crate) fn nudge_progress(&self, step: &StepRunView) -> Result<Option<(String, u128)>> {
+    pub fn nudge_progress(&self, step: &StepRunView) -> Result<Option<(String, u128)>> {
         let connection = self.readers.get();
         let found = connection
             .prepare_cached(
@@ -222,7 +222,7 @@ impl Store {
 
     /// Readiness reports alone do not start another idle period: there must have been a
     /// working observation from this incarnation since the last nudge.
-    pub(crate) fn harness_worked_after(
+    pub fn harness_worked_after(
         &self,
         agent: &str,
         incarnation: &str,
@@ -242,12 +242,12 @@ impl Store {
     }
 
     /// A step's newest nudge.
-    pub(crate) fn latest_nudge(&self, step: &str) -> Result<Option<ClaimRecord>> {
+    pub fn latest_nudge(&self, step: &str) -> Result<Option<ClaimRecord>> {
         self.latest_claim(step, Some(WORK_NUDGED_KIND))
     }
 
     /// The newest `harness.observed` of a seat, for its quiescence report.
-    pub(crate) fn latest_harness_report(&self, agent: &str) -> Result<Option<Value>> {
+    pub fn latest_harness_report(&self, agent: &str) -> Result<Option<Value>> {
         Ok(self
             .latest_claim(agent, Some("harness.observed"))?
             .map(|claim| claim.body.get("fields").cloned().unwrap_or(claim.body)))
@@ -265,9 +265,9 @@ fn recipients(agent: &str) -> (String, String) {
     (recipient, bare_recipient)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Store {
-    pub(crate) fn idle_lookup_plans(&self, agent: &str, tag: &str) -> Result<Vec<String>> {
+    pub fn idle_lookup_plans(&self, agent: &str, tag: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
         let mut plans = Vec::new();
         for (label, sql, args) in [

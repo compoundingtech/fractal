@@ -46,7 +46,7 @@ fn singleton(body: &KdlDocument, name: &str) -> Result<String, St3Error> {
     string(nodes[0])
 }
 
-pub(crate) fn parse_block(node: &KdlNode) -> Result<Provenance, St3Error> {
+pub fn parse_block(node: &KdlNode) -> Result<Provenance, St3Error> {
     bare(node, 0, true)?;
     let body = node.children().unwrap();
     if body.nodes().iter().any(|node| {
@@ -103,7 +103,7 @@ pub(crate) fn parse_block(node: &KdlNode) -> Result<Provenance, St3Error> {
     Ok(provenance)
 }
 
-pub(crate) fn parse(document: &KdlDocument) -> Result<BTreeMap<String, Provenance>, St3Error> {
+pub fn parse(document: &KdlDocument) -> Result<BTreeMap<String, Provenance>, St3Error> {
     let mut result = BTreeMap::new();
     for mission in document
         .nodes()
@@ -133,14 +133,14 @@ pub(crate) fn parse(document: &KdlDocument) -> Result<BTreeMap<String, Provenanc
     Ok(result)
 }
 
-pub(crate) fn subject(mission: &str, revision: &str) -> String {
+pub fn subject(mission: &str, revision: &str) -> String {
     format!(
         "mission/{}@{revision}",
         mission.strip_prefix("mission/").unwrap_or(mission)
     )
 }
 
-pub(crate) fn read(
+pub fn read(
     connection: &Connection,
     mission: &str,
     revision: &str,
@@ -158,7 +158,7 @@ pub(crate) fn read(
     .transpose()
 }
 
-pub(crate) fn validate_publication(
+pub fn validate_publication(
     connection: &Connection,
     intent: &NormalizedIntent,
 ) -> Result<(), St3Error> {
@@ -186,7 +186,7 @@ pub(crate) fn validate_publication(
     Ok(())
 }
 
-pub(crate) fn internal(error: impl std::fmt::Display) -> St3Error {
+pub fn internal(error: impl std::fmt::Display) -> St3Error {
     St3Error::new("internal", error.to_string())
 }
 
@@ -214,13 +214,13 @@ pub fn render(provenance: &Provenance) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
     use crate::model::IntentInput;
     use crate::{parse_intent, store::Store};
 
-    pub(crate) fn block(reason: &str) -> String {
+    pub fn block(reason: &str) -> String {
         format!(
             r#"provenance {{
             reason {reason:?}
@@ -237,7 +237,7 @@ pub(crate) mod tests {
         )
     }
 
-    pub(crate) fn source(goal: &str, reason: Option<&str>) -> String {
+    pub fn source(goal: &str, reason: Option<&str>) -> String {
         format!(
             "version 2\nmission \"orchard\" state=\"ready\" {{ {}\n goal {goal:?}; step \"build\" {{ goal {goal:?}; }} }}",
             reason.map(block).unwrap_or_default()

@@ -10,7 +10,7 @@ mod tests;
 use super::*;
 use smallclaims::ivm::{Contribution, Definition, LocalChange, Readiness, View, Views, source_cut};
 
-pub(crate) const VIEW: &str = "st3.work-summaries.v1";
+pub const VIEW: &str = "st3.work-summaries.v1";
 const CLOCK: &str = "st3.work-summaries.clock";
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS local_work_summary_clock (
@@ -38,16 +38,16 @@ const DUE: &str = "SELECT key FROM local_work_summaries
  WHERE next_at IS NOT NULL AND next_at<=?1 ORDER BY next_at,key LIMIT ?2";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Summaries {
+pub struct Summaries {
     pub progress_summary: Option<String>,
     pub progress_at_unix_ms: Option<u128>,
     pub completion_summary: Option<String>,
 }
 
-pub(crate) fn definitions() -> Vec<Box<dyn View>> {
+pub fn definitions() -> Vec<Box<dyn View>> {
     vec![Box::new(WorkSummaries)]
 }
-pub(crate) struct WorkSummaries;
+pub struct WorkSummaries;
 
 fn key(subject: &str, attempt: u32) -> Result<String> {
     Ok(serde_json::to_string(&(subject, attempt))?)
@@ -256,7 +256,7 @@ fn ready_at(connection: &Connection, views: &Views, at: u128) -> Result<()> {
 
 /// A writer-only captured-time page. Incomplete pages remain explicitly unavailable.
 /// The same certified claim cut is retained; no durable telemetry claim is synthesized.
-pub(crate) fn clock_page(
+pub fn clock_page(
     tx: &Transaction<'_>,
     views: &Views,
     at: u128,
@@ -298,7 +298,7 @@ pub(crate) fn clock_page(
     Ok(keys.len())
 }
 
-pub(crate) fn row(
+pub fn row(
     connection: &Connection,
     views: &Views,
     subject: &str,
@@ -309,7 +309,7 @@ pub(crate) fn row(
     stored(connection, &key(subject, attempt)?)
 }
 /// One query for a selected batch. Absence means empty summaries, never proof the step exists.
-pub(crate) fn rows(
+pub fn rows(
     connection: &Connection,
     views: &Views,
     selected: &[(String, u32)],
@@ -341,7 +341,7 @@ pub(crate) fn rows(
     }
     Ok(output)
 }
-pub(crate) fn next_deadline(
+pub fn next_deadline(
     connection: &Connection,
     views: &Views,
     at: u128,

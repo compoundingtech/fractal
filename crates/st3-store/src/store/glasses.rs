@@ -57,7 +57,7 @@ fn resource(claim: &ClaimRecord) -> Result<Value> {
     )
 }
 
-pub(super) fn glasses_at(
+pub fn glasses_at(
     connection: &Connection,
     person: &str,
     through: u64,
@@ -74,7 +74,7 @@ pub(super) fn glasses_at(
     Ok(result)
 }
 impl Store {
-    pub(crate) fn glasses_changed(&self, after: u64, through: u64) -> Result<bool> {
+    pub fn glasses_changed(&self, after: u64, through: u64) -> Result<bool> {
         Ok(self.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE store_index>?1 AND store_index<=?2 AND kind IN ('glass.upserted','glass.deleted'))", params![after, through], |row| row.get(0))?)
     }
     pub fn glasses(&self, person: &str, through: u64) -> Result<Vec<Value>> {
@@ -85,7 +85,7 @@ impl Store {
 
 /// Called under the claim writer's transaction, after idempotency has been resolved.
 /// Never validate quotas at replication admission: that would depend on arrival order.
-pub(super) fn prepare(
+pub fn prepare(
     transaction: &Transaction<'_>,
     input: &ClaimInput,
 ) -> Result<Option<BTreeMap<String, Value>>, St3Error> {

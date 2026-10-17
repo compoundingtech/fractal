@@ -8,7 +8,7 @@
 use super::*;
 use smallclaims::ivm::{Definition, LocalChange, Readiness, View, Views, source_cut};
 
-pub(crate) const VIEW: &str = "st3.mission-selection.v1";
+pub const VIEW: &str = "st3.mission-selection.v1";
 const SOURCE: &str = "st3.mission-selection.changed";
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS local_mission_counts (
@@ -76,11 +76,11 @@ CREATE TRIGGER IF NOT EXISTS mission_ivm_publication_time AFTER UPDATE OF accept
 END;
 "#;
 
-pub(crate) fn definitions() -> Vec<Box<dyn View>> {
+pub fn definitions() -> Vec<Box<dyn View>> {
     vec![Box::new(MissionSelection)]
 }
 
-pub(crate) struct MissionSelection;
+pub struct MissionSelection;
 impl View for MissionSelection {
     fn definition(&self) -> Definition {
         Definition {
@@ -206,7 +206,7 @@ fn maintain(tx: &Transaction<'_>, key: &str, at: u128) -> Result<bool> {
 /// Drain at most `limit` affected missions. The owner supplies a source cut only after proving
 /// complete projection/dependency coverage; changing the cut here cannot prove that coverage.
 /// On a fenced view the queue remains intact for an explicitly initiated recovery installer.
-pub(crate) fn flush(tx: &Transaction<'_>, views: &Views, at: u128, limit: usize) -> Result<usize> {
+pub fn flush(tx: &Transaction<'_>, views: &Views, at: u128, limit: usize) -> Result<usize> {
     anyhow::ensure!(
         (1..=1024).contains(&limit),
         "mission maintenance page bound"
@@ -268,7 +268,7 @@ pub(crate) fn flush(tx: &Transaction<'_>, views: &Views, at: u128, limit: usize)
 
 /// Explicit captured-time maintenance. Due candidates use a partial deadline index and
 /// each page changes at most `limit` public keys. Reads refuse overdue membership.
-pub(crate) fn clock_page(
+pub fn clock_page(
     tx: &Transaction<'_>,
     views: &Views,
     at: u128,
@@ -361,7 +361,7 @@ fn ready(connection: &Connection, views: &Views) -> Result<()> {
 
 /// Uses the existing timestamp DESC / public ID ASC continuation tuple. Membership is
 /// evaluated at the caller's captured time, including the inclusive end of the grace period.
-pub(crate) fn window(
+pub fn window(
     connection: &Connection,
     views: &Views,
     history: bool,
@@ -414,7 +414,7 @@ pub(crate) fn window(
         .map_err(Into::into)
 }
 
-pub(crate) fn row(
+pub fn row(
     connection: &Connection,
     views: &Views,
     at: u128,
@@ -434,7 +434,7 @@ pub(crate) fn row(
 }
 
 /// One indexed query for the already selected keys; callers retain their window order.
-pub(crate) fn rows(
+pub fn rows(
     connection: &Connection,
     views: &Views,
     at: u128,
@@ -456,7 +456,7 @@ pub(crate) fn rows(
         .collect()
 }
 
-pub(crate) fn clean(connection: &Connection) -> Result<bool> {
+pub fn clean(connection: &Connection) -> Result<bool> {
     connection
         .query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM local_mission_pending)",
@@ -467,7 +467,7 @@ pub(crate) fn clean(connection: &Connection) -> Result<bool> {
 }
 
 /// Earliest captured-time membership change for transport/reconciler timer ownership.
-pub(crate) fn next_deadline(
+pub fn next_deadline(
     connection: &Connection,
     views: &Views,
     at: u128,

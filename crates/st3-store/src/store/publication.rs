@@ -3,36 +3,22 @@ use super::*;
 use crate::model::MemberSpec;
 use crate::publication::{Interruption, interruption};
 
-pub(crate) type Guard = dyn Fn(&DesiredSubject, &Check) -> Result<(), St3Error> + Sync;
+pub type Guard = dyn Fn(&DesiredSubject, &Check) -> Result<(), St3Error> + Sync;
 
 #[derive(Default)]
-pub(crate) struct CommitChecks<'a> {
+pub struct CommitChecks<'a> {
     pub owned: Option<&'a owned_sets::Options>,
     pub guard: Option<&'a Guard>,
 }
 
-pub(crate) struct Check {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "The following refusal slice reports the checked incarnation."
-        )
-    )]
+pub struct Check {
     pub incarnation: Option<String>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "The following refusal slice reports the actual launch values."
-        )
-    )]
     pub launched: Option<MemberSpec>,
     pub interruption: Interruption,
     pub unknown_reason: Option<&'static str>,
 }
 
-pub(crate) fn launched_member(
+pub fn launched_member(
     connection: &Connection,
     subject: &str,
     origin: &str,
@@ -100,7 +86,7 @@ pub(crate) fn launched_member(
         .and_then(|desired| desired.member))
 }
 
-pub(crate) fn check(
+pub fn check(
     connection: &Connection,
     proposed: &DesiredSubject,
     at: u64,
@@ -192,7 +178,7 @@ pub(crate) fn check(
 }
 
 impl Store {
-    pub(crate) fn publication_cache_epoch(&self) -> Option<(i64, bool)> {
+    pub fn publication_cache_epoch(&self) -> Option<(i64, bool)> {
         *self
             .smalltalk
             .publication_cache_epoch
@@ -200,7 +186,7 @@ impl Store {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub(crate) fn publication_evidence_epoch(&self, subject: &str) -> Result<(u64, i64, bool)> {
+    pub fn publication_evidence_epoch(&self, subject: &str) -> Result<(u64, i64, bool)> {
         smallclaims::touched::note_read(|| subject.to_owned());
         Ok(self
             .readers
@@ -213,7 +199,7 @@ impl Store {
             )?
             .query_row([subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?)
     }
-    pub(crate) fn publication_action(
+    pub fn publication_action(
         &self,
         proposed: &DesiredSubject,
     ) -> Result<Option<PlannedAction>> {
@@ -251,7 +237,7 @@ impl Store {
             reason,
         }))
     }
-    pub(crate) fn publication_launch(
+    pub fn publication_launch(
         &self,
         subject: &str,
         incarnation: &str,

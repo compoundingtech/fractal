@@ -4,7 +4,7 @@ use crate::model::MemberSpec;
 use serde::Deserialize;
 use std::cell::RefCell;
 
-pub(super) const STAGED_SUBJECTS_QUERY: &str =
+pub const STAGED_SUBJECTS_QUERY: &str =
     "SELECT DISTINCT subject FROM claims WHERE json_extract(body,'$.owned_set') IS NOT NULL";
 
 // One statement proves both absences in a current SQLite snapshot. Any receipt, including a
@@ -138,7 +138,7 @@ pub struct View {
     pub blockers: Vec<String>,
 }
 
-pub(super) struct Plan {
+pub struct Plan {
     pub intent: NormalizedIntent,
     pub preview: Preview,
     pub retired: BTreeMap<String, Member>,
@@ -147,7 +147,7 @@ pub(super) struct Plan {
     pub materialize: BTreeSet<String>,
 }
 
-pub(super) fn manual_member(connection: &Connection, member: &Member) -> Result<bool, St3Error> {
+pub fn manual_member(connection: &Connection, member: &Member) -> Result<bool, St3Error> {
     Ok(member.manual_rollout
         || claim(connection, &member.claim, None)?
             .and_then(|c| serde_json::from_value::<DesiredSubject>(c.body).ok())
@@ -277,7 +277,7 @@ fn stop_declaration(subject: &str) -> Result<DesiredSubject, St3Error> {
 
 /// A complete winning membership also retires subjects learned only from losing branches.
 /// Such retirement is derived from the winning set claim until the next apply authors a stop.
-pub(super) fn effective_members(
+pub fn effective_members(
     connection: &Connection,
     view: &View,
     at: Option<u64>,
@@ -360,7 +360,7 @@ fn one_shot_retirement(
     ).optional().map_err(internal)
 }
 
-pub(super) fn one_shot_retirement_owner(
+pub fn one_shot_retirement_owner(
     connection: &Connection,
     desired: &DesiredSubject,
     origin: &str,
@@ -383,7 +383,7 @@ fn reference(view: &View) -> String {
     format!("{}@{}", view.id, view.revision)
 }
 
-pub(super) fn claim(
+pub fn claim(
     connection: &Connection,
     id: &str,
     at: Option<u64>,
@@ -396,7 +396,7 @@ pub(super) fn claim(
     ).optional().map_err(internal)
 }
 
-pub(super) fn selected(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, St3Error> {
+pub fn selected(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, St3Error> {
     let rows = rows(connection, at)?;
     let references: BTreeMap<_, _> = rows.iter().map(|v| (reference(v), v)).collect();
     let mut winners: BTreeMap<String, View> = BTreeMap::new();
@@ -499,7 +499,7 @@ pub(super) fn selected(connection: &Connection, at: Option<u64>) -> Result<Vec<V
     Ok(winners.into_values().collect())
 }
 
-pub(super) fn owner(
+pub fn owner(
     connection: &Connection,
     member: &str,
     at: Option<u64>,
@@ -522,7 +522,7 @@ pub(super) fn owner(
 
 /// The owning sets of every member at `at`, from one read of the set receipts. A member with
 /// more than one is what [`owner`] refuses as a conflict.
-pub(super) fn owners_at(
+pub fn owners_at(
     connection: &Connection,
     at: Option<u64>,
 ) -> Result<BTreeMap<String, BTreeSet<String>>, St3Error> {
@@ -535,7 +535,7 @@ pub(super) fn owners_at(
     Ok(owners)
 }
 
-pub(super) fn refuse_unmanaged(connection: &Connection, member: &str) -> Result<(), St3Error> {
+pub fn refuse_unmanaged(connection: &Connection, member: &str) -> Result<(), St3Error> {
     if let Some(set) = owner(connection, member, None)? {
         return Err(St3Error::new(
             "set-managed-subject",
@@ -546,7 +546,7 @@ pub(super) fn refuse_unmanaged(connection: &Connection, member: &str) -> Result<
 }
 
 /// A member's conflicts come from its owning set, rather than independent declaration leaves.
-pub(super) fn conflicts_at(
+pub fn conflicts_at(
     connection: &Connection,
     member: &str,
     at: Option<u64>,
@@ -565,7 +565,7 @@ pub(super) fn conflicts_at(
     }))
 }
 
-pub(super) fn guard_member(connection: &Connection, member: &str) -> Result<(), St3Error> {
+pub fn guard_member(connection: &Connection, member: &str) -> Result<(), St3Error> {
     if owner(connection, member, None)?.is_none() {
         let staged: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND json_extract(body,'$.owned_set') IS NOT NULL)",
@@ -589,7 +589,7 @@ pub(super) fn guard_member(connection: &Connection, member: &str) -> Result<(), 
     Ok(())
 }
 
-pub(super) fn guard_mission_start(connection: &Connection, mission: &str) -> Result<(), St3Error> {
+pub fn guard_mission_start(connection: &Connection, mission: &str) -> Result<(), St3Error> {
     let subject = format!(
         "mission/{}",
         mission.strip_prefix("mission/").unwrap_or(mission)
@@ -610,7 +610,7 @@ pub(super) fn guard_mission_start(connection: &Connection, mission: &str) -> Res
     Ok(())
 }
 
-pub(super) fn plan_tx(
+pub fn plan_tx(
     transaction: &Transaction<'_>,
     input: &NormalizedIntent,
     options: &Options,
@@ -998,7 +998,7 @@ pub(super) fn plan_tx(
     })
 }
 
-pub(super) fn validate_apply(plan: &Plan, options: &Options) -> Result<(), St3Error> {
+pub fn validate_apply(plan: &Plan, options: &Options) -> Result<(), St3Error> {
     if !plan.preview.blockers.is_empty() {
         return Err(
             St3Error::new("owned-set-refused", plan.preview.blockers.join("; "))
@@ -1033,7 +1033,7 @@ pub(super) fn validate_apply(plan: &Plan, options: &Options) -> Result<(), St3Er
     Ok(())
 }
 
-pub(super) fn commit_tx(
+pub fn commit_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     plan: &Plan,
@@ -1123,7 +1123,7 @@ pub(super) fn commit_tx(
 }
 
 /// Rebuild the existing desired and mission projections through exact set member references.
-pub(super) fn project_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> {
+pub fn project_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> {
     for view in selected(transaction, None)? {
         if !view.blockers.is_empty() {
             continue;
@@ -1152,7 +1152,7 @@ pub(super) fn project_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> 
     Ok(())
 }
 
-pub(super) fn desired_at(connection: &Connection, s: &str, at: u64) -> Result<Option<DesiredRow>> {
+pub fn desired_at(connection: &Connection, s: &str, at: u64) -> Result<Option<DesiredRow>> {
     let Some(set) = owner(connection, s, Some(at)).map_err(anyhow::Error::new)? else {
         return Ok(None);
     };
@@ -1196,7 +1196,7 @@ pub(super) fn desired_at(connection: &Connection, s: &str, at: u64) -> Result<Op
     }))
 }
 
-pub(super) fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), St3Error> {
+pub fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), St3Error> {
     let revision: Revision = serde_json::from_value(body["fields"]["body"].clone())
         .map_err(|e| St3Error::new("invalid-owned-set", e.to_string()))?;
     if subject(subject_name)? != subject_name
@@ -1243,7 +1243,7 @@ pub(super) fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), S
 impl Store {
     /// Called inside `read_snapshot`; holding this guard keeps the connection identity alive
     /// until the receipt cache is discarded, before the snapshot returns it to the pool.
-    pub(crate) fn with_owned_set_snapshot_reads<T>(&self, read: impl FnOnce() -> T) -> T {
+    pub fn with_owned_set_snapshot_reads<T>(&self, read: impl FnOnce() -> T) -> T {
         let connection = self.readers.get();
         with_snapshot_rows(&connection, read)
     }
@@ -1305,7 +1305,7 @@ impl Store {
     }
     /// Select a pass's candidates from one authority snapshot. This is not an effect fence:
     /// callers must still check current authority before workspace, render or runtime effects.
-    pub(crate) fn owned_desired_subjects(
+    pub fn owned_desired_subjects(
         &self,
         desired: &[DesiredSubject],
     ) -> Result<BTreeSet<String>, St3Error> {

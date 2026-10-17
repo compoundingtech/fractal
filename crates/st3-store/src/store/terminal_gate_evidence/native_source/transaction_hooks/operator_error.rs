@@ -4,12 +4,12 @@ use rusqlite::ErrorCode;
 use std::sync::atomic::AtomicBool;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Disposition {
+pub enum Disposition {
     Fence,
     Infrastructure,
     Unclassified,
 }
-pub(super) fn classify(error: &anyhow::Error) -> Disposition {
+pub fn classify(error: &anyhow::Error) -> Disposition {
     let Some(sql) = error.downcast_ref::<rusqlite::Error>() else {
         return Disposition::Fence;
     };
@@ -31,17 +31,17 @@ pub(super) fn classify(error: &anyhow::Error) -> Disposition {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Origin {
+pub enum Origin {
     Probe,
     Witness,
     Reentry,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Observed {
-    pub(super) primary: Option<ErrorCode>,
-    pub(super) extended: Option<i32>,
-    pub(super) disposition: Disposition,
-    pub(super) origin: Origin,
+pub struct Observed {
+    pub primary: Option<ErrorCode>,
+    pub extended: Option<i32>,
+    pub disposition: Disposition,
+    pub origin: Origin,
 }
 #[derive(Default)]
 struct State {
@@ -50,7 +50,7 @@ struct State {
     active: bool,
 }
 #[derive(Default)]
-pub(super) struct Cell {
+pub struct Cell {
     state: Mutex<State>,
     // Only the finite FULL fixture arms this real SQLite allocation probe.
     probe: AtomicBool,
@@ -61,17 +61,17 @@ impl Cell {
             .lock()
             .map_err(|_| anyhow::anyhow!("operator cell poisoned"))
     }
-    pub(super) fn reset(&self) -> Result<()> {
+    pub fn reset(&self) -> Result<()> {
         let mut state = self.state()?;
         ensure!(!state.active, "operator callback still active at prepare");
         state.error = None;
         state.observed = None;
         Ok(())
     }
-    pub(super) fn take(&self) -> Result<Option<anyhow::Error>> {
+    pub fn take(&self) -> Result<Option<anyhow::Error>> {
         Ok(self.state()?.error.take())
     }
-    pub(super) fn enter(self: &Arc<Self>) -> Result<Scope> {
+    pub fn enter(self: &Arc<Self>) -> Result<Scope> {
         let mut state = self.state()?;
         if state.active {
             if state.error.is_none() {
@@ -88,7 +88,7 @@ impl Cell {
         state.active = true;
         Ok(Scope(self.clone()))
     }
-    pub(super) fn preserve(
+    pub fn preserve(
         &self,
         error: anyhow::Error,
         origin: Origin,
@@ -115,13 +115,13 @@ impl Cell {
         }
         Ok(None)
     }
-    pub(super) fn observed(&self) -> Result<Option<Observed>> {
+    pub fn observed(&self) -> Result<Option<Observed>> {
         Ok(self.state()?.observed)
     }
-    pub(super) fn arm_probe(&self, armed: bool) {
+    pub fn arm_probe(&self, armed: bool) {
         self.probe.store(armed, Ordering::Relaxed);
     }
-    pub(super) fn constraint_reason(&self) -> Result<Option<String>> {
+    pub fn constraint_reason(&self) -> Result<Option<String>> {
         Ok(self
             .observed()?
             .filter(|o| o.primary == Some(ErrorCode::ConstraintViolation))
@@ -133,7 +133,7 @@ impl Cell {
             }))
     }
 }
-pub(super) struct Scope(Arc<Cell>);
+pub struct Scope(Arc<Cell>);
 impl Drop for Scope {
     fn drop(&mut self) {
         // A poisoned cell remains unusable; reset/take refuse it rather than pass.
@@ -142,8 +142,8 @@ impl Drop for Scope {
         }
     }
 }
-pub(super) struct DelegatingOperator {
-    pub(super) cell: Arc<Cell>,
+pub struct DelegatingOperator {
+    pub cell: Arc<Cell>,
 }
 impl Operator for DelegatingOperator {
     fn name(&self) -> &'static str {

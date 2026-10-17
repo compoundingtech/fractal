@@ -120,13 +120,13 @@ WHEN OLD.origin IS NOT NEW.origin OR OLD.replica_sequence IS NOT NEW.replica_seq
 END;
 "#;
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+pub fn create_schema(connection: &Connection) -> Result<()> {
     connection
         .execute_batch(SCHEMA)
         .context("creating glass head projection")
 }
 
-pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
+pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     let version: Option<String> = transaction
         .query_row(
             "SELECT value FROM meta WHERE key='glass_heads_version'",
@@ -141,7 +141,7 @@ pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
     }
 }
 
-pub(super) fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
+pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(
         "DELETE FROM glass_heads;
          DELETE FROM local_glass_head_pending;
@@ -159,7 +159,7 @@ pub(super) fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
 
 /// Call inside the writer transaction before preparing a glass write and before committing
 /// newly admitted glass claims. Metadata corrections take the exceptional subject replay path.
-pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
+pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
     let subjects = transaction
         .prepare("SELECT subject FROM local_glass_head_dirty ORDER BY subject")?
         .query_map([], |row| row.get::<_, String>(0))?
@@ -261,7 +261,7 @@ fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
 
 /// Eligibility and the pinned-head read share one SQLite snapshot. No result rows means
 /// historical/dirty fallback; the left-join sentinel means an eligible empty collection.
-pub(super) fn current_claims(
+pub fn current_claims(
     connection: &Connection,
     person: &str,
     through: u64,
@@ -304,13 +304,13 @@ pub(super) fn current_claims(
     Ok(Some(claims))
 }
 
-pub(super) struct SubjectHead {
-    pub(super) claim_id: Option<String>,
-    pub(super) deleted: bool,
+pub struct SubjectHead {
+    pub claim_id: Option<String>,
+    pub deleted: bool,
 }
 
 /// Writer callers must flush first; this lookup never reads a subject's durable history.
-pub(super) fn head(connection: &Connection, subject: &str) -> Result<Option<SubjectHead>> {
+pub fn head(connection: &Connection, subject: &str) -> Result<Option<SubjectHead>> {
     connection
         .query_row(
             "SELECT claim_id,deleted FROM glass_heads WHERE subject=?1",
@@ -328,7 +328,7 @@ pub(super) fn head(connection: &Connection, subject: &str) -> Result<Option<Subj
 
 /// Only quota occupancy matters; retained overflow never makes this read exceed 100 rows.
 /// Writer callers must flush first.
-pub(super) fn live_count(connection: &Connection, person: &str) -> Result<usize> {
+pub fn live_count(connection: &Connection, person: &str) -> Result<usize> {
     connection
         .query_row(
             "SELECT COUNT(*) FROM (

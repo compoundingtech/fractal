@@ -391,7 +391,7 @@ fn lane_view_tx(connection: &Connection, declaration: &DesiredSubject) -> Result
 }
 
 /// A lane's claims in the store's replica-stable order.
-pub(super) fn lane_events_tx(connection: &Connection, subject: &str) -> Result<Vec<Event>> {
+pub fn lane_events_tx(connection: &Connection, subject: &str) -> Result<Vec<Event>> {
     let mut statement = connection.prepare_cached(&canonical_sql(
         "SELECT claims.id, claims.kind, claims.actor, claims.body, claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id

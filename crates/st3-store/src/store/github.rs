@@ -3,7 +3,7 @@ use super::*;
 impl Store {
     /// Repository candidates on one host, excluding members with neither a checkout nor any
     /// published workspace evidence. Uses the host index rather than walking the fleet graph.
-    pub(crate) fn agent_repository_subjects(&self, host: &str) -> Result<Vec<DesiredSubject>> {
+    pub fn agent_repository_subjects(&self, host: &str) -> Result<Vec<DesiredSubject>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step FROM desired

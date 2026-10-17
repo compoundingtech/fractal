@@ -232,7 +232,7 @@ impl Store {
     }
 
     /// Commit the local choice, fenced restart intent and once-per-window marker together.
-    pub(super) fn switch_seat_account(
+    pub fn switch_seat_account(
         &self,
         seat: &str,
         limit: &AccountLimit,
@@ -288,7 +288,7 @@ impl Store {
     }
 }
 
-pub(super) fn declared_accounts_at(connection: &Connection) -> Result<Vec<AccountDecl>> {
+pub fn declared_accounts_at(connection: &Connection) -> Result<Vec<AccountDecl>> {
     let mut statement = connection
         .prepare_cached("SELECT subject, body FROM desired WHERE kind='account' ORDER BY subject")?;
     let rows = statement.query_map([], |row| {
@@ -366,7 +366,7 @@ fn observation_at(
 
 /// Quota belongs to an account, not an incarnation. A new binding cannot use the previous
 /// login's reading; a relaunch on the same declared account can use its account's evidence.
-pub(super) fn limit_binding_is_current(
+pub fn limit_binding_is_current(
     connection: &Connection,
     origin: &str,
     seat: &str,

@@ -5,7 +5,7 @@ use opentelemetry::trace::TraceContextExt as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 #[derive(Default)]
-pub(crate) struct AdmissionState {
+pub struct AdmissionState {
     next_id: u64,
     holder: Option<Arc<Holder>>,
 }
@@ -39,7 +39,7 @@ struct Holder {
     worker: std::sync::OnceLock<std::thread::ThreadId>,
 }
 
-pub(crate) struct AdmissionGuard {
+pub struct AdmissionGuard {
     // Snapshot, publication, and release all serialize with the actual mutex poll.
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     runtime: Arc<runtime::SmalltalkRuntime>,
@@ -47,7 +47,7 @@ pub(crate) struct AdmissionGuard {
     waited: std::time::Duration,
 }
 
-pub(super) struct Rebuild {
+pub struct Rebuild {
     context: opentelemetry::Context,
     _entered: opentelemetry::ContextGuard,
     admitted: bool,
@@ -116,13 +116,13 @@ impl AdmissionState {
 }
 
 impl AdmissionGuard {
-    pub(crate) fn waited(&self) -> std::time::Duration {
+    pub fn waited(&self) -> std::time::Duration {
         self.waited
     }
 
     /// Called after moving this guard into its synchronous snapshot worker.
     /// Other threads may build cold diagnostic rosters without owning this admission.
-    pub(crate) fn enter_worker(&self) {
+    pub fn enter_worker(&self) {
         if let Some(holder) = &self.holder {
             let worker = std::thread::current().id();
             let owner = holder.worker.get_or_init(|| worker);
@@ -164,7 +164,7 @@ impl AdmissionGuard {
 
 impl Store {
     /// Never waits; multi-gate readers release unrelated guards before queuing on a miss.
-    pub(crate) fn try_admit_agent_resources(&self, class: &'static str) -> Option<AdmissionGuard> {
+    pub fn try_admit_agent_resources(&self, class: &'static str) -> Option<AdmissionGuard> {
         debug_assert!(matches!(class, "http" | "ws" | "refresher" | "other"));
         let span = crate::otel::export_enabled().then(tracing::Span::current);
         let mut state = self.smalltalk.agent_resources_admission_state.lock()
@@ -180,13 +180,13 @@ impl Store {
         Some(admission)
     }
 
-    pub(crate) async fn admit_agent_resources(&self, class: &'static str) -> AdmissionGuard {
+    pub async fn admit_agent_resources(&self, class: &'static str) -> AdmissionGuard {
         self.admit_agent_resources_before_enqueue(class, || {}).await
     }
 
     // The no-op production closure is optimized away; fixtures use the boundary to
     // force a handoff after this waiter starts but before its actual mutex enqueue.
-    pub(crate) async fn admit_agent_resources_before_enqueue(
+    pub async fn admit_agent_resources_before_enqueue(
         &self,
         class: &'static str,
         before_enqueue: impl FnOnce(),
@@ -232,7 +232,7 @@ impl Store {
     }
 
     /// A refresher has no request span: its cold root becomes the admission holder identity.
-    pub(super) fn bind_roster_rebuild(&self, context: &opentelemetry::Context) -> bool {
+    pub fn bind_roster_rebuild(&self, context: &opentelemetry::Context) -> bool {
         let state = self.smalltalk.agent_resources_admission_state.lock().expect("roster admission state poisoned");
         let Some(holder) = &state.holder else { return false };
         if holder.worker.get() != Some(&std::thread::current().id()) {
@@ -269,7 +269,7 @@ impl Store {
         true
     }
 
-    pub(super) fn start_roster_rebuild(&self, reason: &'static str, index: u64) -> Option<Rebuild> {
+    pub fn start_roster_rebuild(&self, reason: &'static str, index: u64) -> Option<Rebuild> {
         if !crate::otel::export_enabled() {
             return None;
         }

@@ -2,11 +2,11 @@
 //! Claims provide the replicated history; local receipts only improve current freshness.
 use super::*;
 
-pub(crate) const WINDOW_MS: u128 = 7 * 24 * 60 * 60 * 1000;
-pub(crate) const MAX_TRANSITIONS: usize = 200;
-pub(crate) const STALE_MS: u128 = 90_000;
+pub const WINDOW_MS: u128 = 7 * 24 * 60 * 60 * 1000;
+pub const MAX_TRANSITIONS: usize = 200;
+pub const STALE_MS: u128 = 90_000;
 
-pub(super) fn permission_blocked(
+pub fn permission_blocked(
     state: Option<&str>,
     blocked_on: Option<&str>,
     ask: Option<&str>,
@@ -16,7 +16,7 @@ pub(super) fn permission_blocked(
         && ask == Some("permission")
 }
 
-pub(super) fn observation_time(claim: &ClaimRecord) -> u128 {
+pub fn observation_time(claim: &ClaimRecord) -> u128 {
     claim
         .body
         .pointer("/fields/observed_at_ms")
@@ -28,7 +28,7 @@ pub(super) fn observation_time(claim: &ClaimRecord) -> u128 {
 /// Match history_at's SQL `status_transition IS NOT 0` selection before reducing sources.
 /// A suppressed heartbeat can still change reducer state; feeding it only to the drop planner
 /// would hide a later legacy transition that the published history reader exposes.
-pub(super) fn history_source(claim: &ClaimRecord) -> bool {
+pub fn history_source(claim: &ClaimRecord) -> bool {
     if claim.kind != "harness.observed" {
         return true;
     }
@@ -39,7 +39,7 @@ pub(super) fn history_source(claim: &ClaimRecord) -> bool {
 
 /// Canonical source positions of transitions and incarnation resets. Heartbeats and changes
 /// to display details do not become transitions. Shared by the read and checkpoint rules.
-pub(super) fn transition_positions(claims: &[&ClaimRecord]) -> Vec<usize> {
+pub fn transition_positions(claims: &[&ClaimRecord]) -> Vec<usize> {
     transitions(claims)
         .into_iter()
         .map(|transition| transition.0)
@@ -140,7 +140,7 @@ fn transitions(claims: &[&ClaimRecord]) -> Vec<(usize, Option<String>, bool)> {
     entries
 }
 
-pub(super) fn state_run_since(
+pub fn state_run_since(
     connection: &Connection,
     subject: &str,
     incarnation: &str,
@@ -169,7 +169,7 @@ pub(super) fn state_run_since(
     Ok(since)
 }
 
-pub(super) fn enrich_harness(
+pub fn enrich_harness(
     connection: &Connection,
     subject: &str,
     at_index: Option<u64>,
@@ -249,7 +249,7 @@ pub(super) fn enrich_harness(
 impl Store {
     /// Client status describes harness evidence. Work progress can prove delivery readiness
     /// internally, but never substitutes for an observation in this contract.
-    pub(crate) fn observed_harness_at(
+    pub fn observed_harness_at(
         &self,
         subject: &str,
         index: u64,
@@ -320,7 +320,7 @@ impl Store {
         self.seat_status_history_at(subject, now, i64::MAX as u64)
     }
 
-    pub(crate) fn seat_status_history_at(
+    pub fn seat_status_history_at(
         &self,
         subject: &str,
         now: u128,
@@ -331,7 +331,7 @@ impl Store {
     }
 }
 
-pub(super) fn history_at(
+pub fn history_at(
     connection: &Connection,
     subject: &str,
     now: u128,
@@ -340,7 +340,7 @@ pub(super) fn history_at(
     history_at_inner(connection, subject, now, index, None)
 }
 
-pub(super) fn history_at_with_sources(connection: &Connection, subject: &str, now: u128, index: u64) -> Result<(Value, Vec<smallclaims::store::checkpoint::CheckpointItemSource>)> {
+pub fn history_at_with_sources(connection: &Connection, subject: &str, now: u128, index: u64) -> Result<(Value, Vec<smallclaims::store::checkpoint::CheckpointItemSource>)> {
     let mut sources = Vec::new();
     let history = history_at_inner(connection, subject, now, index, Some(&mut sources))?;
     Ok((history, sources))

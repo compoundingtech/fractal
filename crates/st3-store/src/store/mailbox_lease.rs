@@ -3,10 +3,10 @@ use super::*;
 use crate::mailbox::{Authority, Fence};
 use crate::model::{LaunchSpec, MemberKind, MemberSpec};
 
-#[cfg(test)]
-type FaultReadHook = Box<dyn FnOnce(&Connection) -> Result<()>>;
+#[cfg(any(test, feature = "test-support"))]
+pub type FaultReadHook = Box<dyn FnOnce(&Connection) -> Result<()>>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static BEFORE_FAULT_READER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static DURING_FAULT_READ: std::cell::RefCell<Option<FaultReadHook>> = const { std::cell::RefCell::new(None) };
@@ -17,13 +17,13 @@ thread_local! {
     static AFTER_PROMOTION_PRECHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Store {
-    pub(crate) fn expire_next_card_fault_read_for_test() {
+    pub fn expire_next_card_fault_read_for_test() {
         Self::expire_card_fault_reads_for_test(1);
     }
 
-    pub(crate) fn expire_card_fault_reads_for_test(count: usize) {
+    pub fn expire_card_fault_reads_for_test(count: usize) {
         CARD_FAULT_DEADLINES.with(|remaining| remaining.set(count));
     }
 }
@@ -71,7 +71,7 @@ fn capture_mailbox_faults(
     connection: &Connection, subjects: &[String], index: u64,
 ) -> Result<BTreeMap<String, String>> {
     let work = smallclaims::profile::span("mailbox_faults/work");
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     DURING_FAULT_READ.with(|hook| {
         hook.borrow_mut().take().map_or(Ok(()), |hook| hook(connection))
     })?;
@@ -1423,7 +1423,7 @@ fn argv_binding(connection: &Connection, fence: &Fence) -> Result<Option<MemberS
     serde_json::from_str(&member).map(Some).map_err(internal)
 }
 
-pub(super) fn refuse_argv_native_adoption(connection: &Connection, fence: &Fence) -> Result<(), St3Error> {
+pub fn refuse_argv_native_adoption(connection: &Connection, fence: &Fence) -> Result<(), St3Error> {
     let retained: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_mailbox_argv_bindings WHERE token=?1)",
         [&fence.token], |row| row.get(0),
@@ -1432,7 +1432,7 @@ pub(super) fn refuse_argv_native_adoption(connection: &Connection, fence: &Fence
     Ok(())
 }
 
-pub(super) fn record_argv_binding(connection: &Connection, fence: &Fence, member: &MemberSpec) -> Result<(), St3Error> {
+pub fn record_argv_binding(connection: &Connection, fence: &Fence, member: &MemberSpec) -> Result<(), St3Error> {
     connection.execute(
         "INSERT INTO local_mailbox_argv_bindings VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(token) DO NOTHING",
         params![fence.token,fence.subject,fence.component,fence.incarnation,fence.epoch,serde_json::to_string(member).map_err(internal)?],
@@ -1440,7 +1440,7 @@ pub(super) fn record_argv_binding(connection: &Connection, fence: &Fence, member
     Ok(())
 }
 
-pub(super) fn check_lease_fence(
+pub fn check_lease_fence(
     connection: &Connection,
     fence: &Fence,
     host: &str,
@@ -1484,7 +1484,7 @@ pub(super) fn check_lease_fence(
     Ok(())
 }
 
-pub(super) fn check_declaration(
+pub fn check_declaration(
     connection: &Connection,
     fence: &Fence,
     authority: &Authority,
@@ -1515,7 +1515,7 @@ pub(super) fn check_declaration(
     Ok(())
 }
 
-pub(super) fn check_argv_declaration(
+pub fn check_argv_declaration(
     connection: &Connection,
     fence: &Fence,
     captured: &MemberSpec,
@@ -1549,7 +1549,7 @@ pub(super) fn check_argv_declaration(
     Ok(())
 }
 
-pub(super) fn admit(
+pub fn admit(
     connection: &Connection,
     request: &Fence,
     authority: &Authority,
@@ -1674,7 +1674,7 @@ fn admit_with_probe(
     Ok(())
 }
 
-pub(super) fn record(
+pub fn record(
     connection: &Connection,
     fence: &Fence,
     authority: &Authority,
@@ -1704,7 +1704,7 @@ pub(super) fn record(
 }
 
 impl Store {
-    pub(crate) fn mailbox_failure_episode(
+    pub fn mailbox_failure_episode(
         &self,
         fence: &Fence,
         episode: &str,
@@ -1732,7 +1732,7 @@ impl Store {
 
     /// The caller holds the provider ownership lock. Recheck physical/declaration and
     /// canonical custody inside the same Store writer transaction as fault publication.
-    pub(crate) fn append_mailbox_lease_claim(
+    pub fn append_mailbox_lease_claim(
         &self,
         fence: &Fence,
         owner: &Authority,
@@ -1777,7 +1777,7 @@ impl Store {
     /// nothing: no lease row, or `promotion_is_noop`. That result never authorizes anything.
     /// It is released before the writer is borrowed, and any call that may promote reruns the
     /// whole transaction below on the writer's current state.
-    pub(crate) fn promote_current_mailbox_ownership(
+    pub fn promote_current_mailbox_ownership(
         &self,
         fence: &Fence,
         authority: &Authority,
@@ -1787,7 +1787,7 @@ impl Store {
             return Ok(());
         }
         drop(observed);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         AFTER_PROMOTION_PRECHECK.with(|pause| {
             let pause = pause.borrow_mut().take();
             if let Some(pause) = pause {
@@ -1824,7 +1824,7 @@ impl Store {
         record(&tx, fence, authority)?;
         tx.commit().map_err(internal)
     }
-    pub(crate) fn mailbox_lease_authority(
+    pub fn mailbox_lease_authority(
         &self,
         fence: &Fence,
     ) -> Result<Option<Authority>, St3Error> {
@@ -1840,7 +1840,7 @@ impl Store {
 
     /// Compare replay inputs without allocating another decoded lease. This is
     /// not report admission: runtime, custody and binding checks still run there.
-    pub(crate) fn mailbox_replay_owner_matches(
+    pub fn mailbox_replay_owner_matches(
         &self,
         fence: &Fence,
         owner: &Authority,
@@ -1860,7 +1860,7 @@ impl Store {
 
     /// A transient physical query may retry only a still-current canonical capability.
     /// An absent owner row can be repaired; a foreign owner or retired binding is terminal.
-    pub(crate) fn check_mailbox_custody_fence(&self, fence: &Fence) -> Result<(), St3Error> {
+    pub fn check_mailbox_custody_fence(&self, fence: &Fence) -> Result<(), St3Error> {
         let connection = self.readers.get();
         check_mailbox_incarnation(&connection, fence)?;
         if lease(&connection, fence)?.is_none() {
@@ -1882,7 +1882,7 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn mailbox_session_active(
+    pub fn mailbox_session_active(
         &self,
         fence: &Fence,
         authority: &Authority,
@@ -1892,13 +1892,13 @@ impl Store {
         check_declaration(&connection, fence, authority, &self.origin)
     }
 
-    pub(crate) fn has_mailbox_lease(&self, fence: &Fence) -> Result<bool, St3Error> {
+    pub fn has_mailbox_lease(&self, fence: &Fence) -> Result<bool, St3Error> {
         Ok(lease(&self.readers.get(), fence)?.is_some())
     }
 
     /// Captured public-card fault source, bounded to the selected subjects and cut.
     /// Keep the capture on one blocking worker: its CPU budget belongs to that thread.
-    pub(crate) fn mailbox_faults_for(
+    pub fn mailbox_faults_for(
         &self,
         subjects: &[String],
         index: u64,
@@ -1908,7 +1908,7 @@ impl Store {
         // Admission and result cleanup remain within the enclosing wall deadline.
         // Captures without a request retain their existing finite wall bound.
         let duration = std::time::Duration::from_millis(25);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let duration = CARD_FAULT_DEADLINES.with(|remaining| {
             let count = remaining.get();
             remaining.set(count.saturating_sub(1));
@@ -1920,7 +1920,7 @@ impl Store {
         let checked = budget.clone();
         smallclaims::read_budget::with(Some(budget), || {
             checked.check()?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             BEFORE_FAULT_READER.with(|pause| {
                 if let Some(pause) = pause.borrow_mut().take() { pause(); }
             });
@@ -1948,7 +1948,7 @@ impl Store {
             let result = if pinned { read() } else {
                 self.readers.request_read(read).and_then(|result| result)
             };
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             AFTER_FAULT_ACQUISITION.with(|pause| {
                 if let Some(pause) = pause.borrow_mut().take() { pause(); }
             });
@@ -1959,7 +1959,7 @@ impl Store {
         })
     }
 
-    pub(crate) fn owns_mailbox_lease(
+    pub fn owns_mailbox_lease(
         &self,
         fence: &Fence,
         authority: &Authority,
@@ -1976,8 +1976,8 @@ impl Store {
 
     /// Repair only the exact canonical lease. Never mint a token or advance an epoch.
     /// Deleting/revoking a binding is terminal; only displacement of its owner is repairable.
-    #[cfg(test)]
-    pub(crate) fn repair_mailbox(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn repair_mailbox(
         &self,
         fence: &Fence,
         authority: &Authority,
@@ -1985,7 +1985,7 @@ impl Store {
         self.repair_mailbox_checked(fence, authority, &|| Ok(()))
     }
 
-    pub(crate) fn repair_mailbox_checked(
+    pub fn repair_mailbox_checked(
         &self,
         fence: &Fence,
         authority: &Authority,

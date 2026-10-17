@@ -5,7 +5,7 @@ use serde_json::Value;
 use super::{ProviderForbidden, ProviderRateLimit, ProviderUnauthenticated};
 
 /// Why an observer cannot observe, and whether a person has to act.
-pub(crate) enum ObserverCondition {
+pub enum ObserverCondition {
     /// GitHub rejected the token or refused access. Nothing changes until a person acts.
     Access(String),
     /// A rate limit ends at a known reset. It needs a person only when the observer was already
@@ -18,11 +18,11 @@ pub(crate) enum ObserverCondition {
 }
 
 /// How long after a named reset a rate limit counts as outlasting it, for clock skew.
-pub(crate) const RATE_LIMIT_RESET_GRACE_MS: u128 = 60_000;
+pub const RATE_LIMIT_RESET_GRACE_MS: u128 = 60_000;
 const OBSERVER_UNREACHABLE_ATTENTION_MS: u128 = 3_600_000;
 
 impl ObserverCondition {
-    pub(crate) fn of(error: &anyhow::Error, previous: Option<&Value>) -> Self {
+    pub fn of(error: &anyhow::Error, previous: Option<&Value>) -> Self {
         let reason = error.to_string();
         if error.downcast_ref::<ProviderForbidden>().is_some()
             || error.downcast_ref::<ProviderUnauthenticated>().is_some()
@@ -46,7 +46,7 @@ impl ObserverCondition {
         Self::Unreachable(reason)
     }
 
-    pub(crate) fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
             Self::Access(_) => "access-denied",
             Self::RateLimited { .. } => "rate-limited",
@@ -55,7 +55,7 @@ impl ObserverCondition {
         }
     }
 
-    pub(crate) fn needs_person(&self, failing_for_ms: u128) -> bool {
+    pub fn needs_person(&self, failing_for_ms: u128) -> bool {
         match self {
             Self::Access(_) | Self::Rejected(_) => true,
             Self::RateLimited { outlasted, .. } => *outlasted,
@@ -63,7 +63,7 @@ impl ObserverCondition {
         }
     }
 
-    pub(crate) fn title(&self) -> &'static str {
+    pub fn title(&self) -> &'static str {
         match self {
             Self::Access(_) => "An observer has no access to GitHub",
             Self::RateLimited { .. } => "A GitHub rate limit outlasted its reset",
@@ -73,7 +73,7 @@ impl ObserverCondition {
     }
 
     /// The cause and the command that fixes it. `host` polls the observer.
-    pub(crate) fn reason(&self, subject: &str, host: &str) -> String {
+    pub fn reason(&self, subject: &str, host: &str) -> String {
         let closes = "This item closes when the observer observes again.";
         match self {
             Self::Access(reason) => format!(

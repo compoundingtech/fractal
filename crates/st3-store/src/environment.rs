@@ -157,13 +157,13 @@ fn build_tools() -> Vec<&'static str> {
 
 const LINK_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub(crate) struct BuildTools {
+pub struct BuildTools {
     pub found: Vec<&'static str>,
     pub missing: Vec<&'static str>,
     pub link: LinkResult,
 }
 
-pub(crate) enum LinkResult {
+pub enum LinkResult {
     Linked,
     /// Building needs cargo and rustc, so no crate was built.
     NotAttempted,
@@ -172,7 +172,7 @@ pub(crate) enum LinkResult {
 
 /// Look for each build tool on the environment's PATH, then build and link a small crate the way
 /// the repository does.
-pub(crate) fn check_build_tools(environment: &Environment) -> BuildTools {
+pub fn check_build_tools(environment: &Environment) -> BuildTools {
     let (found, missing): (Vec<_>, Vec<_>) = build_tools()
         .into_iter()
         .partition(|tool| st_runtime::resolve_executable(tool, environment).is_ok());
@@ -258,11 +258,11 @@ fn link_small_crate(environment: &Environment, timeout: Duration) -> Result<(), 
     ))
 }
 
-pub(crate) fn command(program: &str) -> Result<Command> {
+pub fn command(program: &str) -> Result<Command> {
     command_in(program, &snapshot()?)
 }
 
-pub(crate) fn command_in(program: &str, environment: &Environment) -> Result<Command> {
+pub fn command_in(program: &str, environment: &Environment) -> Result<Command> {
     let executable = st_runtime::resolve_executable(program, environment)?;
     let mut command = Command::new(executable);
     command.env_clear().envs(environment);

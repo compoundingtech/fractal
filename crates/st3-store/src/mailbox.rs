@@ -11,7 +11,7 @@ pub use crate::client::Fence;
 /// Captured by the daemon from its authenticated Unix peer, never from a request body.
 /// Provider ownership comes from the current driver record under the runtime's paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Authority {
+pub struct Authority {
     pub provider: String,
     pub session: String,
     pub sequence: u64,
@@ -210,8 +210,8 @@ impl Subscription {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
     use crate::model::ClaimInput;
     use crate::store::Store;
@@ -283,7 +283,7 @@ pub(crate) mod tests {
             idempotency_key: Some(key.into()),
         }
     }
-    pub(crate) fn ready(store: &Store, incarnation: &str) {
+    pub fn ready(store: &Store, incarnation: &str) {
         store
             .append_claim(&claim(
                 "agent/eval.worker",

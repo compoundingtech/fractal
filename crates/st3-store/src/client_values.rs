@@ -2,7 +2,7 @@
 //! published views both build client rows, so these sit below both.
 use sha2::{Digest as _, Sha256};
 
-pub(crate) fn client_timestamp(unix_ms: u128) -> String {
+pub fn client_timestamp(unix_ms: u128) -> String {
     let unix_ms = i64::try_from(unix_ms).unwrap_or(i64::MAX);
     chrono::DateTime::from_timestamp_millis(unix_ms)
         .unwrap_or(chrono::DateTime::UNIX_EPOCH)
@@ -10,7 +10,7 @@ pub(crate) fn client_timestamp(unix_ms: u128) -> String {
 }
 
 /// Translate internal step states once for every client projection.
-pub(crate) fn client_work_state(status: &str) -> &str {
+pub fn client_work_state(status: &str) -> &str {
     match status {
         "pending" => "waiting",
         "working" => "claimed",
@@ -18,7 +18,7 @@ pub(crate) fn client_work_state(status: &str) -> &str {
     }
 }
 
-pub(crate) fn client_attention_actions(
+pub fn client_attention_actions(
     kind: &str,
     review_mode: Option<&str>,
 ) -> Vec<&'static str> {
@@ -43,7 +43,7 @@ pub(crate) fn client_attention_actions(
 
 /// An attention card's ID: its source, recipient and waiting episode. A source asked again
 /// (a human gate's new request, a person step's new episode) gets a new card.
-pub(crate) fn client_attention_id(
+pub fn client_attention_id(
     subject: &str,
     person: &str,
     episode: &str,

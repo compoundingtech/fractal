@@ -6,12 +6,12 @@
 use super::*;
 
 /// The collections a refresher may publish. Agents keep their own roster signal.
-pub(crate) const PUBLISHED_COLLECTIONS: [&str; 6] =
+pub const PUBLISHED_COLLECTIONS: [&str; 6] =
     ["missions", "work", "attention", "summary", "glasses", "arrangements"];
 
 /// One collection's publication state.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub(crate) struct View {
+pub struct View {
     /// Rises with every publication, withdrawal and invalidation, and never goes back, so a
     /// window can tell any later change from the one it read.
     revision: u64,
@@ -23,9 +23,9 @@ pub(crate) struct View {
 }
 
 /// By position in [`PUBLISHED_COLLECTIONS`].
-pub(crate) type Revisions = [View; PUBLISHED_COLLECTIONS.len()];
+pub type Revisions = [View; PUBLISHED_COLLECTIONS.len()];
 
-pub(crate) struct PublishedViews(tokio::sync::watch::Sender<Revisions>);
+pub struct PublishedViews(tokio::sync::watch::Sender<Revisions>);
 
 impl Default for PublishedViews {
     fn default() -> Self {
@@ -38,7 +38,7 @@ fn position(collection: &str) -> Option<usize> {
 }
 
 /// The revision of `collection` in `revisions`; zero when it was never published.
-pub(crate) fn revision(revisions: &Revisions, collection: &str) -> u64 {
+pub fn revision(revisions: &Revisions, collection: &str) -> u64 {
     position(collection).map_or(0, |position| revisions[position].revision)
 }
 
@@ -56,7 +56,7 @@ impl PublishedViews {
 
     /// Count one more publication of `collection`'s view, after the refresher has swapped it in.
     #[cfg_attr(not(test), allow(dead_code, reason = "the missions, work and attention refreshers call it"))]
-    pub(crate) fn publish(&self, collection: &str) {
+    pub fn publish(&self, collection: &str) {
         self.change(collection, true);
     }
 
@@ -65,7 +65,7 @@ impl PublishedViews {
     /// governs its view holds it instead while it runs (see [`PublishedViews::hold`]); it is
     /// withdrawn only when that refresher ends.
     #[cfg_attr(not(test), allow(dead_code, reason = "the missions, work and attention refreshers call it"))]
-    pub(crate) fn withdraw(&self, collection: &str) {
+    pub fn withdraw(&self, collection: &str) {
         self.change(collection, false);
     }
 
@@ -74,13 +74,13 @@ impl PublishedViews {
     /// current. Its windows read once more, then wait for the view's next change instead of
     /// following commits, which would read nothing new.
     #[cfg_attr(not(test), allow(dead_code, reason = "the work refresher calls it"))]
-    pub(crate) fn hold(&self, collection: &str) {
+    pub fn hold(&self, collection: &str) {
         self.change(collection, true);
     }
 
     /// Every published view was discarded, as on rollback or reopen: each window that reads one
     /// rereads it. A view nobody publishes stays as it is.
-    pub(crate) fn invalidate(&self) {
+    pub fn invalidate(&self) {
         self.0.send_if_modified(|revisions| {
             let published = revisions.iter().any(|view| view.published);
             for view in revisions.iter_mut().filter(|view| view.published) {
@@ -90,11 +90,11 @@ impl PublishedViews {
         });
     }
 
-    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<Revisions> {
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Revisions> {
         self.0.subscribe()
     }
 
-    pub(crate) fn published(&self, collection: &str) -> bool {
+    pub fn published(&self, collection: &str) -> bool {
         position(collection).is_some_and(|position| self.0.borrow()[position].published)
     }
 }
@@ -103,31 +103,31 @@ impl Store {
     /// Say that `collection`'s refresher has swapped in a newer published view. Call it after
     /// every publication, including one at the same graph index after a deadline passed.
     #[cfg_attr(not(test), allow(dead_code, reason = "the missions, work and attention refreshers call it"))]
-    pub(crate) fn publish_collection_view(&self, collection: &str) {
+    pub fn publish_collection_view(&self, collection: &str) {
         self.smalltalk.published_views.publish(collection);
     }
 
     /// Say that `collection`'s refresher stopped serving its view, because it exited or keeps
     /// failing: its windows go back to following commits until it publishes again.
     #[cfg_attr(not(test), allow(dead_code, reason = "the missions, work and attention refreshers call it"))]
-    pub(crate) fn withdraw_collection_view(&self, collection: &str) {
+    pub fn withdraw_collection_view(&self, collection: &str) {
         self.smalltalk.published_views.withdraw(collection);
     }
 
     /// Say that `collection`'s running refresher governs its view while it has nothing to serve:
     /// see [`PublishedViews::hold`].
-    pub(crate) fn hold_collection_view(&self, collection: &str) {
+    pub fn hold_collection_view(&self, collection: &str) {
         self.smalltalk.published_views.hold(collection);
     }
 
     /// Whether a refresher serves or governs `collection`'s view: its windows then reread only
     /// when the view changes again.
-    pub(crate) fn collection_view_published(&self, collection: &str) -> bool {
+    pub fn collection_view_published(&self, collection: &str) -> bool {
         self.smalltalk.published_views.published(collection)
     }
 
     /// Follows every collection's publication revision.
-    pub(crate) fn subscribe_collection_views(&self) -> tokio::sync::watch::Receiver<Revisions> {
+    pub fn subscribe_collection_views(&self) -> tokio::sync::watch::Receiver<Revisions> {
         self.smalltalk.published_views.subscribe()
     }
 }

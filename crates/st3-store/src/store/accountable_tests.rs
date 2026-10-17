@@ -256,7 +256,7 @@ fn accountable_absent_preserves_previous_cbor_bytes_and_desired_revisions() {
     assert_eq!(canonical_hash(&previous(&minimal)).unwrap(), desired_revision(&minimal));
 
     let fixture: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/harness-access-previous-build.json"
+        "../../../st3-daemon/tests/fixtures/harness-access-previous-build.json"
     )).unwrap();
     for body in fixture["desired_subjects"].as_array().unwrap() {
         let mut desired: DesiredSubject = serde_json::from_value(body.clone()).unwrap();

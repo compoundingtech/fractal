@@ -117,7 +117,7 @@ WHEN OLD.origin IS NOT NEW.origin OR OLD.replica_sequence IS NOT NEW.replica_seq
 END;
 "#;
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+pub fn create_schema(connection: &Connection) -> Result<()> {
     // Earlier builds cannot admit this kind. Install an empty projection before any new
     // admission, without scanning or rewriting the existing log during schema migration.
     // Preserve the schema cookie on unchanged opens, while upgrading an older trigger
@@ -157,7 +157,7 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn rebuild(tx: &Transaction<'_>) -> Result<()> {
+pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch("DELETE FROM person_directive_notes;
         DELETE FROM local_directive_note_pending;
         DELETE FROM local_directive_note_dirty;
@@ -167,7 +167,7 @@ pub(super) fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     flush(tx)
 }
 
-pub(super) fn flush(tx: &Transaction<'_>) -> Result<()> {
+pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     let dirty = tx.prepare("SELECT subject FROM local_directive_note_dirty ORDER BY subject")?
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -200,7 +200,7 @@ fn project(tx: &Transaction<'_>, person: &str, id: &str) -> Result<()> {
 
 /// A pinned membership is necessary, not proof of undiscovered legacy peers. Operators must
 /// fence legacy replication before enabling notes; reject every observed unfenced writer too.
-pub(super) fn validate_publication(tx: &Transaction<'_>, origin: &str) -> Result<(), St3Error> {
+pub fn validate_publication(tx: &Transaction<'_>, origin: &str) -> Result<(), St3Error> {
     fn refused(message: impl Into<String>) -> St3Error {
         St3Error::new("directive-note-feature-barrier", message)
     }

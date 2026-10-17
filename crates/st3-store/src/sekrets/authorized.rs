@@ -168,7 +168,7 @@ pub fn authorized_request_at(
 }
 
 /// The request, naming `cgroup` as this process's in its statement; tests stand in for /proc.
-pub(crate) fn request_from_cgroup(
+pub fn request_from_cgroup(
     socket: &Path,
     config: &Config,
     profile: &str,

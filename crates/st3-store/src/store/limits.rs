@@ -18,7 +18,7 @@ use serde::Deserialize;
 /// The actor st records for what its limits policy does.
 pub const LIMITS_ACTOR: &str = "daemon/limits";
 
-pub(crate) const ACCOUNT_READING_WINDOW_MS: u64 = 3_600_000;
+pub const ACCOUNT_READING_WINDOW_MS: u64 = 3_600_000;
 
 fn select_account_reading(readings: Vec<AccountLimit>) -> AccountLimit {
     // A partial snapshot after a relaunch can know only the five-hour window. It is not a
@@ -73,7 +73,7 @@ fn select_account_reading(readings: Vec<AccountLimit>) -> AccountLimit {
 }
 
 /// Bound accounts remain distinct even when an older producer reports a generic provider label.
-pub(super) fn episode_account(limit: &AccountLimit) -> String {
+pub fn episode_account(limit: &AccountLimit) -> String {
     limit
         .account_ref
         .as_ref()
@@ -158,7 +158,7 @@ pub struct LimitsOutcome {
     pub notified: Vec<String>,
 }
 
-pub(crate) fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
+pub fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
     let fields = body.get("fields")?;
     let driver = fields["driver"].as_str()?.to_owned();
     let identity = fields["account"]
@@ -231,7 +231,7 @@ CREATE TABLE IF NOT EXISTS account_limit_seats (
 ) WITHOUT ROWID;
 "#;
 
-pub(super) fn create_limits_schema(connection: &Connection) -> Result<()> {
+pub fn create_limits_schema(connection: &Connection) -> Result<()> {
     connection
         .execute_batch(LIMITS_SCHEMA)
         .context("creating the account limits projection")
@@ -248,7 +248,7 @@ const LIMITS_READY: &str = "account_limits_ready";
 /// Check the projection's version when a store opens. Opening never folds history: a store that
 /// has `harness.limits` claims but no projection is filled by [`Store::catch_up_account_limits`],
 /// a page at a time, and reads say "not yet known" until it has finished.
-pub(super) fn open_limits(transaction: &Transaction<'_>) -> Result<()> {
+pub fn open_limits(transaction: &Transaction<'_>) -> Result<()> {
     let version: Option<String> = transaction
         .query_row(
             "SELECT value FROM meta WHERE key='account_limits_version'",
@@ -295,11 +295,11 @@ fn mark_limits_ready(transaction: &Transaction<'_>) -> Result<()> {
 
 /// Fold the next `limit` `harness.limits` claims after the cursor into the tables, and return how
 /// many. A page that finds fewer than `limit` has reached the end: the projection is ready.
-pub(super) fn flush_limits(transaction: &Transaction<'_>) -> Result<usize> {
+pub fn flush_limits(transaction: &Transaction<'_>) -> Result<usize> {
     flush_limits_page(transaction, LIMITS_APPEND_PAGE)
 }
 
-pub(crate) fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<usize> {
+pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<usize> {
     let through: u64 = transaction
         .query_row("SELECT value FROM meta WHERE key=?1", [LIMITS_CURSOR], |row| {
             row.get::<_, String>(0)
@@ -411,7 +411,7 @@ pub(crate) fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> 
 
 /// Empty the projection and fold every `harness.limits` claim into it again, in one
 /// transaction: what a checkpoint proof's copy reads, as a node that never trimmed would.
-pub(crate) fn refold_limits_tx(transaction: &Transaction<'_>) -> Result<()> {
+pub fn refold_limits_tx(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute("DELETE FROM account_limit_readings", [])?;
     transaction.execute("DELETE FROM account_limit_seats", [])?;
     transaction.execute("DELETE FROM meta WHERE key=?1", [LIMITS_CURSOR])?;
@@ -419,7 +419,7 @@ pub(crate) fn refold_limits_tx(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
+pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
     type Key = (String, String, Option<String>);
     let mut statement = connection.prepare_cached(
         "SELECT driver, account, account_ref, weekly, origin, subject, body

@@ -22,7 +22,7 @@ fn observed_sql() -> &'static str {
      THEN printf('%020s',body -> '$.fields.observed_at_unix_ms') ELSE printf('%020s','0') END"
 }
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(&format!(
         "CREATE INDEX IF NOT EXISTS {INDEX} ON claims({}, {}) WHERE {PREDICATE}",
         series_sql(), observed_sql()
@@ -31,7 +31,7 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn boundary_rows(
+pub fn boundary_rows(
     connection: &Connection,
     boundaries: &BTreeSet<u64>,
 ) -> Result<Vec<(String, u64, String)>> {

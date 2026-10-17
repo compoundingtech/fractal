@@ -48,7 +48,7 @@ impl Store {
 
     /// The API has verified this device signature. Stage, admit and consume it in the
     /// same writer savepoint as the message; retries keep the first committed signature.
-    pub(crate) fn append_signed_message(
+    pub fn append_signed_message(
         &self,
         input: &ClaimInput,
         signature: &smallclaims::principal::ClaimSignature,
@@ -65,8 +65,8 @@ impl Store {
             ClaimCommitContext { signature: Some(&signature), ..Default::default() })
     }
 
-    #[cfg(test)]
-    pub(crate) fn append_mailbox_receipt(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn append_mailbox_receipt(
         &self,
         input: &ClaimInput,
         fence: &crate::mailbox::Fence,
@@ -76,7 +76,7 @@ impl Store {
     }
 
     /// A fenced receipt, and whether it appended a claim rather than repeating or settling one.
-    pub(crate) fn append_mailbox_receipt_outcome(
+    pub fn append_mailbox_receipt_outcome(
         &self,
         input: &ClaimInput,
         fence: &crate::mailbox::Fence,
@@ -86,7 +86,7 @@ impl Store {
 
     /// Search refreshes only a person's private message texts, using the same endpoint
     /// indexes as the mailbox. Other fleet writes do not invalidate this source.
-    pub(crate) fn conversation_search_mail_stamp(&self, person: &str, through: u64) -> Result<String> {
+    pub fn conversation_search_mail_stamp(&self, person: &str, through: u64) -> Result<String> {
         let connection = self.readers.get();
         let (count, newest): (u64, u64) = connection.query_row(
             "WITH sent AS (
@@ -101,7 +101,7 @@ impl Store {
         Ok(format!("{count}:{newest}"))
     }
 
-    pub(crate) fn conversation_search_timeline_stamp(&self, agent: &str, incarnation: &str, through: u64) -> Result<String> {
+    pub fn conversation_search_timeline_stamp(&self, agent: &str, incarnation: &str, through: u64) -> Result<String> {
         let connection = self.readers.get();
         let (local_count, local_newest): (u64,u64) = connection.query_row(
             "SELECT COUNT(*),COALESCE(MAX(id),0) FROM local_observations
@@ -116,7 +116,7 @@ impl Store {
         Ok(format!("{local_count}:{local_newest}:{legacy_count}:{legacy_newest}"))
     }
 
-    pub(crate) fn conversation_search_messages(&self, person: &str, through: u64) -> Result<Vec<MessageView>> {
+    pub fn conversation_search_messages(&self, person: &str, through: u64) -> Result<Vec<MessageView>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare(&canonical_sql(
             "WITH candidates AS (
@@ -152,7 +152,7 @@ impl Store {
 
     /// A pinned reader must page through its SQLite index, which can lead the process atomic
     /// between COMMIT and publication of the committed index.
-    pub(crate) fn messages_through(
+    pub fn messages_through(
         &self,
         recipient: Option<&str>,
         include_closed: bool,
@@ -161,7 +161,7 @@ impl Store {
         self.messages_through_inner(recipient, include_closed, through, false)
     }
 
-    pub(crate) fn messages_for_delivery_through(
+    pub fn messages_for_delivery_through(
         &self,
         recipient: &str,
         through: u64,
@@ -169,7 +169,7 @@ impl Store {
         self.messages_through_inner(Some(recipient), false, through, true)
     }
 
-    pub(super) fn messages_through_inner(
+    pub fn messages_through_inner(
         &self,
         recipient: Option<&str>,
         include_closed: bool,
@@ -258,7 +258,7 @@ impl Store {
             .transpose()
     }
 
-    pub(super) fn message_view_cached(
+    pub fn message_view_cached(
         &self,
         connection: &Connection,
         subject: &str,
@@ -311,7 +311,7 @@ impl Store {
 
     /// Provider reply watches read only new native message events through the existing
     /// sender/store-index range. They never rebuild a recipient's historical mailbox.
-    pub(crate) fn adapter_delivery_page(
+    pub fn adapter_delivery_page(
         &self,
         sender: &str,
         recipients: &[String],
@@ -355,7 +355,7 @@ impl Store {
         self.messages_page_inner(recipient, include_closed, after, through, limit, false)
     }
 
-    pub(crate) fn messages_page_for_delivery(
+    pub fn messages_page_for_delivery(
         &self,
         recipient: &str,
         after: Option<u64>,
@@ -365,7 +365,7 @@ impl Store {
         self.messages_page_inner(Some(recipient), false, after, through, limit, true)
     }
 
-    pub(super) fn messages_page_inner(
+    pub fn messages_page_inner(
         &self,
         recipient: Option<&str>,
         include_closed: bool,
@@ -528,7 +528,7 @@ impl Store {
         })
     }
 
-    pub(super) fn subscription_fault_items(&self, as_of: u128) -> Result<Vec<AttentionItemView>> {
+    pub fn subscription_fault_items(&self, as_of: u128) -> Result<Vec<AttentionItemView>> {
         let mut items = Vec::new();
         {
             let connection = self.readers.get();
@@ -802,14 +802,14 @@ impl Store {
     }
 
     /// Local subscription ownership survives a daemon outage; an older channel cannot retake it.
-    pub(crate) fn bind_mailbox(
+    pub fn bind_mailbox(
         &self,
         request: &crate::mailbox::Fence,
     ) -> Result<crate::mailbox::Fence, St3Error> {
         self.bind_mailbox_with_lease(request, None)
     }
 
-    pub(crate) fn bind_mailbox_with_lease(
+    pub fn bind_mailbox_with_lease(
         &self,
         request: &crate::mailbox::Fence,
         authority: Option<&crate::mailbox::Authority>,
@@ -818,7 +818,7 @@ impl Store {
     }
 
     /// Recheck captured physical custody under the writer, before any capability mutation.
-    pub(crate) fn bind_mailbox_with_lease_checked(
+    pub fn bind_mailbox_with_lease_checked(
         &self,
         request: &crate::mailbox::Fence,
         authority: Option<&crate::mailbox::Authority>,
@@ -828,7 +828,7 @@ impl Store {
     }
 
     /// Explicit argv-only transports retain their legacy protocol, never provider custody.
-    pub(crate) fn bind_argv_mailbox_checked(
+    pub fn bind_argv_mailbox_checked(
         &self,
         request: &crate::mailbox::Fence,
         member: &crate::model::MemberSpec,
@@ -837,7 +837,7 @@ impl Store {
         self.bind_mailbox_with_admission_checked(request, None, Some(member), validate)
     }
 
-    pub(super) fn bind_mailbox_with_admission_checked(
+    pub fn bind_mailbox_with_admission_checked(
         &self,
         request: &crate::mailbox::Fence,
         authority: Option<&crate::mailbox::Authority>,
@@ -950,13 +950,13 @@ impl Store {
         Ok(bound)
     }
 
-    pub(crate) fn check_mailbox(&self, fence: &crate::mailbox::Fence) -> Result<(), St3Error> {
+    pub fn check_mailbox(&self, fence: &crate::mailbox::Fence) -> Result<(), St3Error> {
         check_mailbox_fence(&self.readers.get(), fence, &self.origin)
     }
 
     /// Durable cursors and the selected declaration/owner in one SQLite read snapshot.
     /// Streams advance this watermark only after capturing their corresponding delta.
-    pub(crate) fn mailbox_watermark(
+    pub fn mailbox_watermark(
         &self,
         fence: &crate::mailbox::Fence,
     ) -> Result<MailboxWatermark, St3Error> {
@@ -984,8 +984,8 @@ impl Store {
     /// message sent to it or newly declared, or a claim of a message in its last snapshot. The
     /// local dispatcher targets dependent streams; this durable check still filters coalesced
     /// wakes, without trusting the ephemeral routing index for correctness.
-    #[cfg(test)]
-    pub(crate) fn mailbox_changed_since(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn mailbox_changed_since(
         &self,
         fence: &crate::mailbox::Fence,
         mark: &MailboxWatermark,

@@ -63,22 +63,22 @@ pub fn parse_owned_set_intent(source: &str, default_host: &str) -> Result<Normal
     Ok(intent)
 }
 
-pub(crate) fn parse_internal_intent(
+pub fn parse_internal_intent(
     source: &str,
     default_host: &str,
 ) -> Result<NormalizedIntent, St3Error> {
     parse_intent_with_owner(source, default_host, None, true, false)
 }
 
-#[cfg(test)]
-pub(crate) fn parse_test_intent(
+#[cfg(any(test, feature = "test-support"))]
+pub fn parse_test_intent(
     source: &str,
     default_host: &str,
 ) -> Result<NormalizedIntent, St3Error> {
     parse_internal_intent(source, default_host)
 }
 
-pub(crate) fn parse_execution_intent(
+pub fn parse_execution_intent(
     source: &str,
     default_host: &str,
     run_id: &str,
@@ -92,7 +92,7 @@ pub(crate) fn parse_execution_intent(
 
 /// The placeholder variables a mission's declarations are interpolated with when they are
 /// checked without a run.
-pub(crate) fn runtime_proof_variables(
+pub fn runtime_proof_variables(
     mission: &crate::model::MissionSpec,
 ) -> BTreeMap<String, String> {
     let mut variables = BTreeMap::from([
@@ -783,7 +783,7 @@ fn merge_mission_run_declaration(
     Ok(())
 }
 
-pub(crate) fn planning_planner_subject(session: &str) -> String {
+pub fn planning_planner_subject(session: &str) -> String {
     let digest = hex::encode(Sha256::digest(session.as_bytes()));
     format!("agent/planner.{}", &digest[..20])
 }

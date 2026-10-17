@@ -1,9 +1,9 @@
 //! A dependency-admitted mission step with no desired seat has one readiness-scoped fault.
 use super::*;
 
-pub(crate) const MISSING_AGENT_CONDITION: &str = "mission-no-eligible-agent";
+pub const MISSING_AGENT_CONDITION: &str = "mission-no-eligible-agent";
 
-pub(super) fn episode(run: &MissionRunView, step: &StepRunView) -> String {
+pub fn episode(run: &MissionRunView, step: &StepRunView) -> String {
     format!(
         "{MISSING_AGENT_CONDITION}:{}:{}:{}",
         run.generation, step.step, step.readiness_epoch
@@ -35,7 +35,7 @@ fn missing_binding_tx(connection: &Connection, step: &StepRunView) -> Result<boo
 
 impl Store {
     /// Stop ownership is enough to preserve an existing cross-run ready queue.
-    pub(crate) fn selected_stop_owner_run(&self, subject: &str) -> Result<Option<String>> {
+    pub fn selected_stop_owner_run(&self, subject: &str) -> Result<Option<String>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         Ok(self
             .readers
@@ -49,7 +49,7 @@ impl Store {
             .flatten())
     }
 
-    pub(crate) fn missing_agent_fault_is_current(
+    pub fn missing_agent_fault_is_current(
         &self,
         run: &MissionRunView,
         step: &StepRunView,
@@ -66,7 +66,7 @@ impl Store {
 
     /// Recheck the generation, admitted step and bindings under the writer before reporting.
     /// The indexed source lookup dedupes without replaying operational episode history.
-    pub(crate) fn record_missing_agent_failure(
+    pub fn record_missing_agent_failure(
         &self,
         expected: &MissionRunView,
         expected_step: &StepRunView,

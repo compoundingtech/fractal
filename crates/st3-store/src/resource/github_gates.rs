@@ -26,7 +26,7 @@ pub async fn pull_request_merged(locator: &str) -> GateAnswer {
     pull_request_merged_at(locator, &github_api_base(), Some(&token)).await
 }
 
-pub(crate) async fn pull_request_merged_at(
+pub async fn pull_request_merged_at(
     locator: &str,
     api_base: &str,
     token: Option<&GithubAuth>,
@@ -76,7 +76,7 @@ pub async fn check_passed(repository: &str, reference: &str, check: &str) -> Gat
     check_passed_at(repository, reference, check, &github_api_base(), Some(&token)).await
 }
 
-pub(crate) async fn check_passed_at(
+pub async fn check_passed_at(
     repository: &str,
     reference: &str,
     check: &str,

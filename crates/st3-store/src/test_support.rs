@@ -10,7 +10,7 @@ pub mod events;
 
 static LOGIN_SHELL: OnceLock<PathBuf> = OnceLock::new();
 
-pub(crate) fn login_shell() -> Option<&'static Path> {
+pub fn login_shell() -> Option<&'static Path> {
     LOGIN_SHELL.get().map(PathBuf::as_path)
 }
 
@@ -206,7 +206,7 @@ pub fn git() -> Command {
 
 /// An isolated startup test can inspect the real daemon while its replay is in flight.
 #[cfg(feature = "test-support")]
-pub(crate) fn pause_startup_replay() {
+pub fn pause_startup_replay() {
     if login_shell().is_none() {
         return;
     }
@@ -307,23 +307,8 @@ pub fn hold_fixture_mailbox(store: &std::sync::Arc<crate::store::Store>, subject
 }
 
 #[cfg(feature = "test-support")]
-pub(crate) fn fixture_mailbox_transport(store: &std::sync::Arc<crate::store::Store>, subject: &str) -> tokio::sync::watch::Receiver<bool> {
+pub fn fixture_mailbox_transport(store: &std::sync::Arc<crate::store::Store>, subject: &str) -> tokio::sync::watch::Receiver<bool> {
     mailbox_transports().lock().unwrap()
         .entry((std::sync::Arc::as_ptr(store) as usize, subject.into()))
         .or_insert_with(|| tokio::sync::watch::channel(false).0).subscribe()
-}
-
-/// Build an explicit already-admitted protocol fixture. Callers own its temporary Store,
-/// socket and synthetic runtime. This adapter preserves kernel peer subject checks and
-/// durable Store fences, but cannot qualify native physical ownership or recovery.
-#[cfg(feature = "test-support")]
-pub fn admitted_mailbox_protocol_router(state: crate::api::AppState) -> axum::Router {
-    crate::api::admitted_mailbox_protocol_router(state)
-}
-
-/// An invented example seat in a caller-owned temporary Store. This supplies only a
-/// synthetic transport identity, not a physical native lease or provider authority.
-#[cfg(feature = "test-support")]
-pub fn synthetic_mailbox_protocol_router(state: crate::api::AppState, subject: &str) -> axum::Router {
-    crate::api::synthetic_mailbox_protocol_router(state, subject)
 }

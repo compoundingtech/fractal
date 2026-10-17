@@ -2693,7 +2693,7 @@ fn mixed_stamp_checkpoint_history(ties: bool, channels: bool, older_baseline: bo
     // Each cut uses the same fixed canonical source set, not the result of trimming the other cut.
     for cut in cuts {
         let before = store.seat_status_history(subject, cut).unwrap();
-        let legacy_time = json!(crate::api::client_timestamp(legacy.accepted_at_unix_ms));
+        let legacy_time = json!(crate::client_values::client_timestamp(legacy.accepted_at_unix_ms));
         assert!(before["items"].as_array().unwrap().iter().any(|item|
             item["state"] == "working" && item["observed_at"] == legacy_time));
         let sealed = store.checkpoint_sealed_set(cut).unwrap();

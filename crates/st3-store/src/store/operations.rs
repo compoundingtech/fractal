@@ -142,7 +142,7 @@ impl Store {
         self.mission_step_preview_at(run, now_ms())
     }
 
-    pub(crate) fn mission_step_preview_at(
+    pub fn mission_step_preview_at(
         &self,
         run: &str,
         at_unix_ms: u128,
@@ -178,7 +178,7 @@ impl Store {
     /// `not_before`, mission deadlines and step timeout budgets only change these cards
     /// after a graph write. Selected IDs include the page's has_more lookahead; only the
     /// newest three runs and first twenty steps are rendered. IDs may have a `mission/` prefix.
-    pub(crate) fn mission_collection_valid_until(
+    pub fn mission_collection_valid_until(
         &self,
         ids: &[String],
         now: u128,
@@ -395,11 +395,11 @@ impl Store {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Store {
     /// Generated read fixture: 2,401 runs and steps, 250,000 unrelated claims, and terminal
     /// transitions. Projection rows are bulk-loaded to keep fleet-scale tests inexpensive.
-    pub(crate) fn seed_operational_fleet(&self) {
+    pub fn seed_operational_fleet(&self) {
         let source = "version 2\nmission \"example/fleet\" state=\"ready\" {\n goal \"Build artifacts.\"\n step \"build\" { goal \"Build the example.\" }\n}\n";
         let intent = crate::graph::parse_intent(source, &self.origin).unwrap();
         let planned = self

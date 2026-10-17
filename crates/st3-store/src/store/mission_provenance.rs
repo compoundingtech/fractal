@@ -2,7 +2,7 @@
 use super::*;
 use crate::provenance::{Provenance, internal, read, subject};
 
-pub(super) fn record(
+pub fn record(
     transaction: &Transaction<'_>,
     origin: &str,
     mission: &MissionSpec,

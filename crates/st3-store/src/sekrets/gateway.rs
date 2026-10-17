@@ -85,7 +85,7 @@ pub struct ProgramCheckout {
     pub mount_root: PathBuf,
 }
 
-pub(super) fn program_principal(value: &str) -> bool {
+pub fn program_principal(value: &str) -> bool {
     let parts: Vec<_> = value.split('/').collect();
     value.len() <= 256
         && parts.len() == 3

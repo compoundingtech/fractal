@@ -12,7 +12,7 @@ impl Store {
     /// The complete declaration union consumed by watch maintenance, including remote
     /// subscriptions and observers. Read it only after selecting the stage: a pass-start
     /// roster can predate changes the preceding stages wrote and the change feed observed.
-    pub(crate) fn github_watch_declarations(&self) -> Result<Vec<DesiredSubject>> {
+    pub fn github_watch_declarations(&self) -> Result<Vec<DesiredSubject>> {
         smallclaims::touched::note_read(|| "kind:intent.desired".into());
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
@@ -64,14 +64,14 @@ impl Store {
     }
 
     /// Declare the repository's standing observer on this host unless it is running.
-    pub(crate) fn ensure_watch_observer(&self, thread: &ThreadRef) -> Result<bool, St3Error> {
+    pub fn ensure_watch_observer(&self, thread: &ThreadRef) -> Result<bool, St3Error> {
         let observers = self.repository_observers()?;
         self.ensure_standing_observer(&thread.locator(), &observers)
     }
 
     /// Declare a repository's standing observer on this host unless it runs on the resource it
     /// should record into (`standing_resource`). `observers` is every declared observer.
-    pub(crate) fn ensure_standing_observer(
+    pub fn ensure_standing_observer(
         &self,
         locator: &str,
         observers: &[(String, ObserverSpec)],
@@ -144,7 +144,7 @@ impl Store {
     }
 
     /// Every declared observer, by subject.
-    pub(crate) fn repository_observers(&self) -> Result<Vec<(String, ObserverSpec)>, St3Error> {
+    pub fn repository_observers(&self) -> Result<Vec<(String, ObserverSpec)>, St3Error> {
         let connection = self.readers.get();
         let mut statement = connection
             .prepare_cached(
@@ -170,7 +170,7 @@ impl Store {
         Ok(observers)
     }
 
-    pub(crate) fn live_watch(
+    pub fn live_watch(
         &self,
         subject: &str,
     ) -> Result<Option<(SubscriptionSpec, crate::model::WatchSpec)>, St3Error> {
@@ -258,7 +258,7 @@ impl Store {
     }
 
     /// Stop an ended watch's declaration, or the standing observer's.
-    pub(crate) fn stop_watch_declaration(&self, subject: &str) -> Result<(), St3Error> {
+    pub fn stop_watch_declaration(&self, subject: &str) -> Result<(), St3Error> {
         let Some(source) = github_watch::stop_source(subject) else {
             return Ok(());
         };
@@ -275,7 +275,7 @@ impl Store {
 
     /// A stopped seat still owns its conversation and watches. Only removing the declaration
     /// or explicitly starting a fresh conversation ends them silently.
-    pub(crate) fn watch_seat_ended(
+    pub fn watch_seat_ended(
         &self,
         subject: &str,
         agent: &str,
@@ -510,7 +510,7 @@ impl Store {
     /// Background one-identity maintenance. The read captures an exact head, then releases
     /// its snapshot before publication. Admission rechecks custody and own-post attribution
     /// in the claim's existing savepoint; concurrent delivery cannot be overwritten.
-    pub(crate) fn close_mailbox_own_post_wake(
+    pub fn close_mailbox_own_post_wake(
         &self,
         fence: &crate::mailbox::Fence,
         subject: &str,

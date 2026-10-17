@@ -120,11 +120,11 @@ fn registration(
     row.map(|(hash, m, state)| Ok((hash, serde_json::from_str(&m)?, state)))
         .transpose()
 }
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(SCHEMA)?;
     Ok(())
 }
-pub(super) fn open(tx: &Transaction<'_>) -> Result<()> {
+pub fn open(tx: &Transaction<'_>) -> Result<()> {
     if tx
         .query_row(
             "SELECT value FROM meta WHERE key='custom_projections_version'",
@@ -140,7 +140,7 @@ pub(super) fn open(tx: &Transaction<'_>) -> Result<()> {
         flush(tx)
     }
 }
-pub(super) fn rebuild(tx: &Transaction<'_>) -> Result<()> {
+pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch("DELETE FROM custom_registrations; DELETE FROM custom_sources; DELETE FROM custom_dependencies; DELETE FROM local_custom_dirty; INSERT INTO local_custom_dirty SELECT DISTINCT subject FROM claims WHERE subject LIKE 'custom/%' AND subject NOT LIKE 'custom/client/%';")?;
     flush(tx)?;
     tx.execute(
@@ -149,7 +149,7 @@ pub(super) fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     )?;
     Ok(())
 }
-pub(super) fn flush(tx: &Transaction<'_>) -> Result<()> {
+pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     if !tx.query_row("SELECT EXISTS(SELECT 1 FROM local_custom_dirty)", [], |r| {
         r.get::<_, bool>(0)
     })? {
@@ -286,7 +286,7 @@ fn refresh_registrations(tx: &Transaction<'_>) -> Result<()> {
 
 /// Local writes use this before appending. Replicated facts are validated again in the fold,
 /// including facts received before the immutable manifest or their creation claim.
-pub(super) fn prepare(
+pub fn prepare(
     tx: &Transaction<'_>,
     input: &ClaimInput,
 ) -> Result<Option<BTreeMap<String, Value>>, St3Error> {
@@ -814,7 +814,7 @@ impl Store {
     pub fn custom_basis_revision(&self, subject: &str, kinds: &[String]) -> Result<String> {
         basis_revision(&self.readers.get(), subject, kinds)
     }
-    pub(super) fn custom_attention_items(
+    pub fn custom_attention_items(
         &self,
         person: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {
@@ -840,7 +840,7 @@ impl Store {
         self.reply_custom_subject_authorized(request, None)
     }
 
-    pub(crate) fn reply_custom_subject_authorized(&self, request: &ReplyRequest,
+    pub fn reply_custom_subject_authorized(&self, request: &ReplyRequest,
         authorization: Option<&super::assistant_write::AssistantWriteAuthorization>) -> Result<ClaimRecord, St3Error> {
         validate_actor(&request.actor)?;
         if request.idempotency_key.is_empty() || request.idempotency_key.len() > 256 {
@@ -881,7 +881,7 @@ impl Store {
     }
 }
 /// One canonical custom source, shared by the collection reader and keyed maintenance.
-pub(super) fn attention_item(body: &Value, at: u128) -> Result<AttentionItemView> {
+pub fn attention_item(body: &Value, at: u128) -> Result<AttentionItemView> {
     let a = &body["attention"];
     Ok(AttentionItemView {
         episode: a["episode"].as_str().unwrap_or_default().into(),

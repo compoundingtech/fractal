@@ -70,7 +70,7 @@ fn slot_members(staging: &Connection, slot: &str) -> Result<Vec<Member>> {
 }
 
 /// See `plan_drops`; each step names the step there it reproduces.
-pub(crate) fn plan_staged(planner: &StagedPlanner<'_>) -> Result<()> {
+pub fn plan_staged(planner: &StagedPlanner<'_>) -> Result<()> {
     let staging = planner.staging();
     let cut = planner.cut_unix_ms();
 

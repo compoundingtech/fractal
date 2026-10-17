@@ -178,7 +178,7 @@ fn operation_for_selection(
 
 /// A pending person ask remains attached to the still-running retiring seat until
 /// its existing work finishes or the original incarnation actually ends.
-pub(super) fn retiring_ask_live(
+pub fn retiring_ask_live(
     connection: &Connection,
     ask: &ClaimRecord,
 ) -> Result<bool, St3Error> {
@@ -228,7 +228,7 @@ pub(super) fn retiring_ask_live(
         .map_err(internal)
 }
 
-pub(super) fn intake_held(
+pub fn intake_held(
     connection: &Connection,
     subject: &str,
     step: &str,
@@ -247,7 +247,7 @@ pub(super) fn intake_held(
     Ok(operation.allowed_work.get(step).copied() != attempt || attempt.is_none())
 }
 
-pub(super) fn message_allowed(
+pub fn message_allowed(
     connection: &Connection,
     message: &MessageView,
 ) -> Result<bool, St3Error> {
@@ -329,11 +329,11 @@ impl Store {
         message_allowed(&self.readers.get(), message)
     }
     /// The seat's current intake hold, if a rollout holds its independent mail.
-    pub(crate) fn rollout_intake_hold(&self, subject: &str) -> Result<Option<Operation>, St3Error> {
+    pub fn rollout_intake_hold(&self, subject: &str) -> Result<Option<Operation>, St3Error> {
         intake_hold(&self.readers.get(), subject)
     }
     /// `rollout_message_allowed` for a message to the seat whose `rollout_intake_hold` is `hold`.
-    pub(crate) fn rollout_message_allowed_under(
+    pub fn rollout_message_allowed_under(
         &self,
         hold: Option<&Operation>,
         message: &MessageView,
@@ -349,7 +349,7 @@ impl Store {
     }
     /// A status read uses the publication that selected its operation, including when that
     /// operation is absent or superseded, rather than selecting the declaration a second time.
-    pub(crate) fn rollout_and_selection(
+    pub fn rollout_and_selection(
         &self,
         subject: &str,
     ) -> Result<(Option<Operation>, Option<Selection>), St3Error> {

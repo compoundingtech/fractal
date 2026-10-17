@@ -195,7 +195,7 @@ pub fn hold_render(store: &Store, desired: &DesiredSubject) -> Result<bool> {
 
 /// The incumbent launch while a manual publication waits for an explicit cutover.
 /// Suspension and resume follow this launch, not the unapplied declaration.
-pub(crate) fn pending_manual_launch(
+pub fn pending_manual_launch(
     store: &Store,
     subject: &str,
 ) -> Result<Option<(String, MemberSpec)>> {

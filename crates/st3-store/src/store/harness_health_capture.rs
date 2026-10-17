@@ -109,7 +109,7 @@ impl QueryWork {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct Request<'a> {
+pub struct Request<'a> {
     pub subject: &'a str,
     /// Selected at the requested cut by the existing status/desired folds.
     pub runtime_claim: Option<&'a str>,
@@ -118,7 +118,7 @@ pub(crate) struct Request<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct SourceRow {
+pub struct SourceRow {
     pub id: String,
     pub subject: String,
     pub kind: String,
@@ -130,7 +130,7 @@ pub(crate) struct SourceRow {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct CandidateOwner {
+pub struct CandidateOwner {
     pub source: String,
     pub origin: String,
     pub runtime_incarnation: String,
@@ -144,7 +144,7 @@ pub(crate) struct CandidateOwner {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct PendingCandidates {
+pub struct PendingCandidates {
     /// A bounded subset of fresh, plain, never-offered messages, not a full inbox.
     pub subjects: BTreeSet<String>,
     pub oldest_at_ms: Option<u64>,
@@ -153,7 +153,7 @@ pub(crate) struct PendingCandidates {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct CardCapture {
+pub struct CardCapture {
     pub namespace: String,
     pub subject: String,
     pub index: u64,
@@ -178,7 +178,7 @@ pub(crate) struct CardCapture {
 /// begins a transaction and reads its cut before lending this connection. The
 /// autocommit guard below rejects loans outside that scope; it cannot validate
 /// claim IDs/harness structures selected by some unrelated caller or snapshot.
-pub(crate) fn capture(
+pub fn capture(
     connection: &Connection,
     namespace: &str,
     index: u64,

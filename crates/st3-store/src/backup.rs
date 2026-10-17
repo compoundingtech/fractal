@@ -14,7 +14,7 @@ pub use crate::store::backup_format::{
     FORMAT, Header, MessageBodyRecord, Record, RestoreReport, TableDigest, VERSION,
     VERSION_WITH_BODIES,
 };
-pub(crate) use crate::store::backup_format::{MAX_RECORD_BYTES, PAGE};
+pub use crate::store::backup_format::{MAX_RECORD_BYTES, PAGE};
 
 /// Download to a private temporary file, then publish only a complete, checksummed archive.
 pub async fn create(endpoint: &Endpoint, destination: &Path) -> Result<()> {

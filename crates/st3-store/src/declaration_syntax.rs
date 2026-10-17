@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::model::St3Error;
 
 /// The context variables st sets for mission steps and gates (`mission`).
-pub(crate) const VARIABLES: &[&str] = &[
+pub const VARIABLES: &[&str] = &[
     "ST_MISSION",
     "ST_MISSION_REVISION",
     "ST_MISSION_RUN",
@@ -36,11 +36,11 @@ pub(crate) const VARIABLES: &[&str] = &[
     "PATH",
 ];
 
-pub(crate) fn is_reserved_context_name(name: &str) -> bool {
+pub fn is_reserved_context_name(name: &str) -> bool {
     (VARIABLES.contains(&name) && name != "PATH") || name == "ST3_SUBJECT"
 }
 
-pub(crate) fn child_integer(document: &KdlDocument, name: &str) -> Result<Option<i128>, St3Error> {
+pub fn child_integer(document: &KdlDocument, name: &str) -> Result<Option<i128>, St3Error> {
     let Some(node) = unique_child(document, name)? else {
         return Ok(None);
     };
@@ -61,17 +61,17 @@ pub(crate) fn child_integer(document: &KdlDocument, name: &str) -> Result<Option
     }
 }
 
-pub(crate) fn child_string(document: &KdlDocument, name: &str) -> Result<Option<String>, St3Error> {
+pub fn child_string(document: &KdlDocument, name: &str) -> Result<Option<String>, St3Error> {
     unique_child(document, name)?.map(one_string).transpose()
 }
 
-pub(crate) fn child_strings(document: &KdlDocument, name: &str) -> Result<Option<Vec<String>>, St3Error> {
+pub fn child_strings(document: &KdlDocument, name: &str) -> Result<Option<Vec<String>>, St3Error> {
     unique_child(document, name)?
         .map(positional_strings)
         .transpose()
 }
 
-pub(crate) fn ensure_bare(node: &KdlNode) -> Result<(), St3Error> {
+pub fn ensure_bare(node: &KdlNode) -> Result<(), St3Error> {
     reject_type(node)?;
     if !node.entries().is_empty() {
         return Err(St3Error::new(
@@ -82,7 +82,7 @@ pub(crate) fn ensure_bare(node: &KdlNode) -> Result<(), St3Error> {
     Ok(())
 }
 
-pub(crate) fn ensure_no_children(node: &KdlNode) -> Result<(), St3Error> {
+pub fn ensure_no_children(node: &KdlNode) -> Result<(), St3Error> {
     if node.children().is_some() {
         Err(St3Error::new(
             "unexpected-children",
@@ -93,11 +93,11 @@ pub(crate) fn ensure_no_children(node: &KdlNode) -> Result<(), St3Error> {
     }
 }
 
-pub(crate) fn ensure_no_properties(node: &KdlNode) -> Result<(), St3Error> {
+pub fn ensure_no_properties(node: &KdlNode) -> Result<(), St3Error> {
     ensure_only_properties(node, &[])
 }
 
-pub(crate) fn ensure_only_properties(node: &KdlNode, allowed: &[&str]) -> Result<(), St3Error> {
+pub fn ensure_only_properties(node: &KdlNode, allowed: &[&str]) -> Result<(), St3Error> {
     reject_type(node)?;
     let mut seen = HashSet::new();
     for entry in node.entries().iter().filter(|entry| entry.name().is_some()) {
@@ -121,7 +121,7 @@ pub(crate) fn ensure_only_properties(node: &KdlNode, allowed: &[&str]) -> Result
     Ok(())
 }
 
-pub(crate) fn first_string(node: &KdlNode) -> Result<String, St3Error> {
+pub fn first_string(node: &KdlNode) -> Result<String, St3Error> {
     positional_values(node)
         .first()
         .ok_or_else(|| {
@@ -133,7 +133,7 @@ pub(crate) fn first_string(node: &KdlNode) -> Result<String, St3Error> {
         .and_then(|value| value_string(value))
 }
 
-pub(crate) fn json_value(value: &KdlValue) -> Result<Value, St3Error> {
+pub fn json_value(value: &KdlValue) -> Result<Value, St3Error> {
     Ok(match value {
         KdlValue::String(value) => Value::String(value.clone()),
         KdlValue::Integer(value) => {
@@ -154,12 +154,12 @@ pub(crate) fn json_value(value: &KdlValue) -> Result<Value, St3Error> {
     })
 }
 
-pub(crate) fn one_string(node: &KdlNode) -> Result<String, St3Error> {
+pub fn one_string(node: &KdlNode) -> Result<String, St3Error> {
     ensure_no_children(node)?;
     one_string_with_children(node)
 }
 
-pub(crate) fn one_string_with_children(node: &KdlNode) -> Result<String, St3Error> {
+pub fn one_string_with_children(node: &KdlNode) -> Result<String, St3Error> {
     first_string(node).and_then(|first| {
         if positional_values(node).len() == 1 {
             Ok(first)
@@ -205,7 +205,7 @@ pub fn parse_duration(value: &str, positive: bool) -> Result<u64, St3Error> {
     Ok(duration)
 }
 
-pub(crate) fn parse_map_child(
+pub fn parse_map_child(
     document: &KdlDocument,
     name: &str,
 ) -> Result<BTreeMap<String, String>, St3Error> {
@@ -230,7 +230,7 @@ pub(crate) fn parse_map_child(
     Ok(output)
 }
 
-pub(crate) fn placement_host(host: String, default_host: &str) -> String {
+pub fn placement_host(host: String, default_host: &str) -> String {
     if host == "local" {
         default_host.into()
     } else {
@@ -238,7 +238,7 @@ pub(crate) fn placement_host(host: String, default_host: &str) -> String {
     }
 }
 
-pub(crate) fn positional_strings(node: &KdlNode) -> Result<Vec<String>, St3Error> {
+pub fn positional_strings(node: &KdlNode) -> Result<Vec<String>, St3Error> {
     ensure_no_properties(node)?;
     ensure_no_children(node)?;
     positional_values(node)
@@ -247,7 +247,7 @@ pub(crate) fn positional_strings(node: &KdlNode) -> Result<Vec<String>, St3Error
         .collect()
 }
 
-pub(crate) fn positional_values(node: &KdlNode) -> Vec<&KdlValue> {
+pub fn positional_values(node: &KdlNode) -> Vec<&KdlValue> {
     node.entries()
         .iter()
         .filter(|entry| entry.name().is_none())
@@ -255,7 +255,7 @@ pub(crate) fn positional_values(node: &KdlNode) -> Vec<&KdlValue> {
         .collect()
 }
 
-pub(crate) fn property_string(node: &KdlNode, property: &str) -> Result<Option<String>, St3Error> {
+pub fn property_string(node: &KdlNode, property: &str) -> Result<Option<String>, St3Error> {
     node.entries()
         .iter()
         .find(|entry| entry.name().is_some_and(|name| name.value() == property))
@@ -263,7 +263,7 @@ pub(crate) fn property_string(node: &KdlNode, property: &str) -> Result<Option<S
         .transpose()
 }
 
-pub(crate) fn reject_type(node: &KdlNode) -> Result<(), St3Error> {
+pub fn reject_type(node: &KdlNode) -> Result<(), St3Error> {
     if node.ty().is_some() {
         Err(St3Error::new(
             "unexpected-type",
@@ -277,7 +277,7 @@ pub(crate) fn reject_type(node: &KdlNode) -> Result<(), St3Error> {
     }
 }
 
-pub(crate) fn reject_unknown_children(
+pub fn reject_unknown_children(
     document: &KdlDocument,
     allowed: &[&str],
     kind: &str,
@@ -297,7 +297,7 @@ pub(crate) fn reject_unknown_children(
     Ok(())
 }
 
-pub(crate) fn required_child_string(
+pub fn required_child_string(
     document: &KdlDocument,
     child: &str,
     owner: &str,
@@ -306,7 +306,7 @@ pub(crate) fn required_child_string(
         .ok_or_else(|| St3Error::new("missing-child", format!("`{owner}` needs child `{child}`")))
 }
 
-pub(crate) fn unique_child<'a>(
+pub fn unique_child<'a>(
     document: &'a KdlDocument,
     name: &str,
 ) -> Result<Option<&'a KdlNode>, St3Error> {
@@ -325,7 +325,7 @@ pub(crate) fn unique_child<'a>(
     }
 }
 
-pub(crate) fn valid_field_path(path: &str) -> bool {
+pub fn valid_field_path(path: &str) -> bool {
     path.split('.').all(|segment| {
         !segment.is_empty()
             && segment
@@ -338,7 +338,7 @@ pub(crate) fn valid_field_path(path: &str) -> bool {
     })
 }
 
-pub(crate) fn validate_document_ref(value: &str) -> Result<(), St3Error> {
+pub fn validate_document_ref(value: &str) -> Result<(), St3Error> {
     let (name, hash) = value.rsplit_once('@').unwrap_or((value, ""));
     if name.len() <= 4
         || name.contains("..")
@@ -354,7 +354,7 @@ pub(crate) fn validate_document_ref(value: &str) -> Result<(), St3Error> {
     Ok(())
 }
 
-pub(crate) fn validate_environment_name(name: &str) -> Result<(), St3Error> {
+pub fn validate_environment_name(name: &str) -> Result<(), St3Error> {
     let valid = name
         .bytes()
         .next()
@@ -371,7 +371,7 @@ pub(crate) fn validate_environment_name(name: &str) -> Result<(), St3Error> {
     Ok(())
 }
 
-pub(crate) fn validate_full_subject(value: &str) -> Result<(), St3Error> {
+pub fn validate_full_subject(value: &str) -> Result<(), St3Error> {
     if value.contains("${") {
         if value.starts_with("${")
             && value.ends_with('}')
@@ -419,7 +419,7 @@ pub(crate) fn validate_full_subject(value: &str) -> Result<(), St3Error> {
 
 /// A lane declares an optional entry prefix and an optional approver. Cleanup and revision
 /// retire it with `lane "NAME" { stop }`.
-pub(crate) fn validate_lane(node: &KdlNode) -> Result<(), St3Error> {
+pub fn validate_lane(node: &KdlNode) -> Result<(), St3Error> {
     ensure_no_properties(node)?;
     let Some(body) = node.children() else {
         one_string(node)?;
@@ -455,7 +455,7 @@ pub(crate) fn validate_lane(node: &KdlNode) -> Result<(), St3Error> {
     Ok(())
 }
 
-pub(crate) fn validate_name(value: &str, full: bool) -> Result<(), St3Error> {
+pub fn validate_name(value: &str, full: bool) -> Result<(), St3Error> {
     if value.is_empty() || value.len() > 512 || !value.is_ascii() {
         return Err(St3Error::new(
             "invalid-subject-name",
@@ -478,7 +478,7 @@ pub(crate) fn validate_name(value: &str, full: bool) -> Result<(), St3Error> {
     Ok(())
 }
 
-pub(crate) fn validate_string_map(node: &KdlNode, environment: bool) -> Result<(), St3Error> {
+pub fn validate_string_map(node: &KdlNode, environment: bool) -> Result<(), St3Error> {
     ensure_bare(node)?;
     let Some(body) = node.children() else {
         return Ok(());
@@ -506,7 +506,7 @@ pub(crate) fn validate_string_map(node: &KdlNode, environment: bool) -> Result<(
     Ok(())
 }
 
-pub(crate) fn value_string(value: &KdlValue) -> Result<String, St3Error> {
+pub fn value_string(value: &KdlValue) -> Result<String, St3Error> {
     match value {
         KdlValue::String(value) if !value.is_empty() => Ok(value.clone()),
         _ => Err(St3Error::new(

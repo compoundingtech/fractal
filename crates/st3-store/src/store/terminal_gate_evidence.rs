@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use smallclaims::ivm::install::{Mutation, Namespace, Operator};
 
-pub(crate) const VIEW: &str = "test.terminal-exec-gates.v1";
-pub(crate) const SOURCE: &str = "test.selected-terminal-facts.v1";
+pub const VIEW: &str = "test.terminal-exec-gates.v1";
+pub const SOURCE: &str = "test.selected-terminal-facts.v1";
 const MEMBERS: usize = 64;
 const INPUT_BYTES: usize = 16 * 1024;
 const STRUCTURAL_MARKERS: usize = 72;
@@ -179,12 +179,12 @@ fn expanded_subject(f: &Facts) -> Result<Option<String>> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Decision {
+pub enum Decision {
     Negative(String),
     NoWitness,
 }
 impl Decision {
-    pub(crate) fn into_witness(self) -> Option<String> {
+    pub fn into_witness(self) -> Option<String> {
         match self {
             Self::Negative(text) => Some(text),
             Self::NoWitness => None,
@@ -194,7 +194,7 @@ impl Decision {
 
 /// Unsupported/uncertain selection retracts ONLY this key. Err is global loss of trust:
 /// malformed/over-cap input or an explicitly incomplete source capture policy.
-pub(crate) fn witness(value: &Value) -> Result<Decision> {
+pub fn witness(value: &Value) -> Result<Decision> {
     let raw = value
         .as_str()
         .context("terminal input must be bounded encoded facts")?;
@@ -301,7 +301,7 @@ pub(crate) fn witness(value: &Value) -> Result<Decision> {
     Ok(Decision::Negative(text))
 }
 
-pub(crate) struct TerminalGates;
+pub struct TerminalGates;
 impl Operator for TerminalGates {
     fn name(&self) -> &'static str {
         VIEW
@@ -405,8 +405,8 @@ impl Operator for TerminalGates {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests;
 
 #[cfg(test)]
 mod native_source;

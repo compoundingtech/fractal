@@ -17,7 +17,7 @@ pub fn authorize(connection: &Connection, origin: &str, authorization: &Assistan
     authorized_grant(connection, origin, authorization).map(|_| ())
 }
 
-pub(super) fn authorize_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<String, St3Error> {
+pub fn authorize_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<String, St3Error> {
     let granted = authorized_grant(connection, origin, authorization)?;
     granted.body["fields"]["grant_id"].as_str().filter(|id| id.starts_with("assistant-grant/") && id.len() > "assistant-grant/".len())
         .map(str::to_owned).ok_or_else(|| St3Error::new("forbidden", "assistant grant identity is absent"))
@@ -56,7 +56,7 @@ fn authorized_grant(connection: &Connection, origin: &str, authorization: &Assis
 }
 
 /// Local generic writers cannot assert assistant identity or server-owned provenance.
-pub(super) fn refuse_unverified(kind: &str, actor: Option<&str>, from: Option<&str>, has_provenance: bool) -> Result<(), St3Error> {
+pub fn refuse_unverified(kind: &str, actor: Option<&str>, from: Option<&str>, has_provenance: bool) -> Result<(), St3Error> {
     if kind == "message.sent"
         && (actor.is_some_and(|actor| actor.starts_with("assistant/"))
             || from.is_some_and(|from| from.starts_with("assistant/"))
@@ -69,7 +69,7 @@ pub(super) fn refuse_unverified(kind: &str, actor: Option<&str>, from: Option<&s
 
 /// Replication already authenticates the originating writer. Do not reauthorize an old
 /// committed message against a receiver's missing, expired or revoked local grant.
-pub(super) fn validate_replicated(kind: &str, actor: Option<&str>, fields: &Value) -> Result<(), St3Error> {
+pub fn validate_replicated(kind: &str, actor: Option<&str>, fields: &Value) -> Result<(), St3Error> {
     if kind != "message.sent" { return Ok(()); }
     if ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().all(|key| fields.get(*key).is_none()) {
         return refuse_unverified(kind, actor, fields["from"].as_str(), false);

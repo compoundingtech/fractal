@@ -4,7 +4,7 @@ use super::*;
 
 const MAX_DEPTH: usize = 128;
 
-pub(super) const SCHEMA: &str = r#"
+pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS local_agent_ordered_nodes (
  id INTEGER PRIMARY KEY AUTOINCREMENT, claim TEXT NOT NULL UNIQUE,
  stream TEXT NOT NULL, rank BLOB NOT NULL, priority BLOB NOT NULL,
@@ -205,7 +205,7 @@ fn put_root(connection: &Connection, stream: &str, id: Option<u64>) -> Result<()
     Ok(())
 }
 
-pub(super) fn retract(connection: &Connection, claim: &str) -> Result<()> {
+pub fn retract(connection: &Connection, claim: &str) -> Result<()> {
     let source: Option<(String, Vec<u8>)> = connection
         .query_row(
             "SELECT stream,rank FROM local_agent_ordered_nodes WHERE claim=?1",
@@ -224,7 +224,7 @@ pub(super) fn retract(connection: &Connection, claim: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn admit(connection: &Connection, event: &Event) -> Result<()> {
+pub fn admit(connection: &Connection, event: &Event) -> Result<()> {
     retract(connection, &event.claim)?;
     let stream = stream(
         &event.subject,
@@ -250,11 +250,11 @@ pub(super) fn admit(connection: &Connection, event: &Event) -> Result<()> {
     put_root(connection, &stream, Some(next))
 }
 
-pub(super) fn stream(subject: &str, incarnation: Option<&str>) -> String {
+pub fn stream(subject: &str, incarnation: Option<&str>) -> String {
     serde_json::to_string(&(subject, incarnation)).expect("stream serializes")
 }
 
-pub(super) fn all(
+pub fn all(
     connection: &Connection,
     subject: &str,
     incarnation: Option<&str>,
@@ -285,7 +285,7 @@ fn suffix(
     }
 }
 
-pub(super) fn unnamed_after(
+pub fn unnamed_after(
     connection: &Connection,
     subject: &str,
     after: &[u8],
@@ -298,6 +298,6 @@ pub(super) fn unnamed_after(
     )
 }
 
-pub(super) fn event(connection: &Connection, id: u64) -> Result<Event> {
+pub fn event(connection: &Connection, id: u64) -> Result<Event> {
     Ok(read(connection, id)?.event)
 }

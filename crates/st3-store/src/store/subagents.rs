@@ -210,7 +210,7 @@ fn subagent_claim_tx(
 /// Keep each subagent's record whole: one appearance, renewals only while it is open, and one end.
 /// A repeated appearance or end answers with the claim already recorded. Returns that claim when
 /// the input adds nothing.
-pub(super) fn check_subagent_claim_tx(
+pub fn check_subagent_claim_tx(
     transaction: &Transaction<'_>,
     input: &ClaimInput,
 ) -> Result<Option<ClaimRecord>, St3Error> {

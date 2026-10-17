@@ -8,7 +8,7 @@ const FUTURE_ASK_SAME_WIDTH: &str = "SELECT accepted_at_unix_ms FROM claims INDE
 const FUTURE_ASK_LONGER: &str = "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_accepted_order_index WHERE kind='work.person-asked' AND length(accepted_at_unix_ms)>length(?1) ORDER BY length(accepted_at_unix_ms),accepted_at_unix_ms,store_index LIMIT 1";
 
 impl Store {
-    pub(crate) fn client_summary_missions(
+    pub fn client_summary_missions(
         &self,
         at: u128,
     ) -> Result<(Vec<st3_client::Mission>, Option<u128>)> {

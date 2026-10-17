@@ -20,7 +20,7 @@ FROM claims sent WHERE sent.store_index=(
     ORDER BY length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC LIMIT 1);
 "#;
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(
         r#"
 CREATE TABLE IF NOT EXISTS local_idle_messages (
@@ -151,11 +151,11 @@ DROP TRIGGER IF EXISTS local_idle_messages_update;
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Store {
     /// Synthetic retained history goes through the real SQLite claim triggers. It deliberately
     /// skips graph admission and projection unrelated to these reads, keeping scale tests cheap.
-    pub(crate) fn seed_idle_history(
+    pub fn seed_idle_history(
         &self,
         agent: &str,
         at: u128,

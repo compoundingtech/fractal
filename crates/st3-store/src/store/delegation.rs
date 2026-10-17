@@ -8,7 +8,7 @@ fn denied(message: impl Into<String>) -> St3Error {
     St3Error::new("delegation-refused", message)
 }
 
-pub(super) fn policy_actions(fields: &BTreeMap<String, Value>) -> Result<Vec<String>, St3Error> {
+pub fn policy_actions(fields: &BTreeMap<String, Value>) -> Result<Vec<String>, St3Error> {
     let actions: Vec<String> =
         serde_json::from_value(fields.get("actions").cloned().unwrap_or(Value::Null))
             .map_err(|_| denied("a policy needs an actions array"))?;
@@ -26,7 +26,7 @@ pub(super) fn policy_actions(fields: &BTreeMap<String, Value>) -> Result<Vec<Str
 }
 
 impl Store {
-    pub(crate) fn delegated_update_request(
+    pub fn delegated_update_request(
         &self,
         proof: &DelegationProof,
     ) -> Result<ClaimRecord, St3Error> {
@@ -43,7 +43,7 @@ impl Store {
         Ok(request)
     }
 
-    pub(crate) fn delegation_evidence(
+    pub fn delegation_evidence(
         &self,
         evidence: &mut Vec<String>,
         proof: &DelegationProof,
@@ -66,12 +66,12 @@ impl Store {
     }
 }
 
-pub(crate) fn add_fields(fields: &mut BTreeMap<String, Value>, proof: &DelegationProof) {
+pub fn add_fields(fields: &mut BTreeMap<String, Value>, proof: &DelegationProof) {
     fields.insert("acted_for".into(), json!(proof.person));
     fields.insert("delegation".into(), json!(proof));
 }
 
-pub(super) fn add_evidence(
+pub fn add_evidence(
     connection: &Connection,
     evidence: &mut Vec<String>,
     proof: &DelegationProof,
@@ -91,7 +91,7 @@ fn message_sent(connection: &Connection, subject: &str) -> Result<ClaimRecord, S
 }
 
 /// Runs under the writer lock on both specialized and generic local claim paths.
-pub(super) fn validate_write(
+pub fn validate_write(
     tx: &Transaction<'_>,
     subject: &str,
     kind: &str,

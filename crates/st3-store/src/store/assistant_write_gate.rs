@@ -13,12 +13,12 @@ pub fn install(root: &Path, grant_subject: Option<String>) -> Result<(), St3Erro
         .map_err(|_| St3Error::new("internal", "mutation gate already installed"))
 }
 
-pub(crate) struct Completion(&'static Path);
+pub struct Completion(&'static Path);
 impl Drop for Completion {
     fn drop(&mut self) { let _ = std::fs::write(self.0.join("done"), b"done"); }
 }
 
-pub(crate) fn pause(grant_subject: &str) -> Result<Option<Completion>, St3Error> {
+pub fn pause(grant_subject: &str) -> Result<Option<Completion>, St3Error> {
     let Some(gate) = GATE.get().filter(|gate|
         gate.root.join("hold").exists()
             && gate.grant_subject.as_deref().is_none_or(|target| target == grant_subject)

@@ -15,7 +15,7 @@ const MESSAGE_CHANGES: &str = "SELECT DISTINCT changed.subject FROM claims chang
 /// A live stream's canonical order keys, by message subject.
 type MailboxOrder = BTreeMap<String, canonical::ClaimKey>;
 
-pub(crate) struct MailboxChanges {
+pub struct MailboxChanges {
     pub mark: MailboxWatermark,
     pub seat: bool,
     pub resync: bool,
@@ -27,7 +27,7 @@ impl Store {
     /// The rowid range excludes a lifetime subject scan (including for DISTINCT).
     /// Seek new claims, then test their message's recipient using subject indexes. In
     /// particular, a staged/read/closed claim need not repeat the original recipient.
-    pub(crate) fn mailbox_changes(
+    pub fn mailbox_changes(
         &self,
         fence: &crate::mailbox::Fence,
         previous: &MailboxWatermark,
@@ -103,7 +103,7 @@ impl Store {
     /// one statement. A key is the subject's first send or declaration, so it changes only
     /// with a claim on that subject: callers remove each changed subject before ordering.
     /// Keeps only the current mailbox's keys.
-    pub(crate) fn order_mailbox_messages(
+    pub fn order_mailbox_messages(
         &self,
         messages: &mut [MessageView],
         keys: &mut MailboxOrder,

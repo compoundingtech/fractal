@@ -2,7 +2,7 @@ use super::*;
 
 impl Store {
     /// Whether a refresher keeps the roster published, so readers must never fold it.
-    pub(crate) fn agent_roster_refresher_running(&self) -> bool {
+    pub fn agent_roster_refresher_running(&self) -> bool {
         self.smalltalk.agent_roster_refresh.get().is_some()
     }
 
@@ -183,7 +183,7 @@ impl Store {
         self.mission_collection_ids_at(history, offset, limit, now_ms())
     }
 
-    pub(crate) fn mission_collection_ids_at(
+    pub fn mission_collection_ids_at(
         &self,
         history: bool,
         offset: usize,
@@ -197,7 +197,7 @@ impl Store {
             .collect())
     }
 
-    pub(crate) fn mission_collection_page(
+    pub fn mission_collection_page(
         &self,
         history: bool,
         offset: usize,
@@ -207,7 +207,7 @@ impl Store {
         self.mission_collection_page_at(history, offset, limit, after, now_ms())
     }
 
-    pub(crate) fn mission_collection_page_at(
+    pub fn mission_collection_page_at(
         &self,
         history: bool,
         offset: usize,
@@ -543,7 +543,7 @@ impl Store {
         self.set_planning_status(id, actor, status, published_revision)
     }
 
-    pub(super) fn set_planning_status(
+    pub fn set_planning_status(
         &self,
         id: &str,
         actor: &str,
@@ -681,7 +681,7 @@ impl Store {
         self.create_mission_run_inner(request, child, Some(&subject), None)
     }
 
-    pub(super) fn create_mission_run_inner(
+    pub fn create_mission_run_inner(
         &self,
         request: &MissionRunRequest,
         child: Option<ChildMissionContext>,
@@ -1800,7 +1800,7 @@ impl Store {
         Ok(view)
     }
 
-    pub(super) fn finish_proposal_cutover(
+    pub fn finish_proposal_cutover(
         &self,
         proposal_id: &str,
         actor: &str,
@@ -1875,7 +1875,7 @@ impl Store {
         Ok(view)
     }
 
-    pub(crate) fn step_has_active_child_runs(&self, step: &str) -> Result<bool> {
+    pub fn step_has_active_child_runs(&self, step: &str) -> Result<bool> {
         let step = normalize_step_run(step);
         smallclaims::touched::note_read(|| format!("children-of-step:{step}"));
         let connection = self.readers.get();
@@ -1897,7 +1897,7 @@ impl Store {
 
     /// Linked runs with their effective current steps, without presentation or work history.
     /// Read the parent link even when empty, so a new round invalidates its parent's evaluation.
-    pub(crate) fn mission_run_children_for_step(&self, step: &str) -> Result<Vec<MissionRunView>> {
+    pub fn mission_run_children_for_step(&self, step: &str) -> Result<Vec<MissionRunView>> {
         let step = normalize_step_run(step);
         smallclaims::touched::note_read(|| format!("children-of-step:{step}"));
         let connection = self.readers.get();
@@ -1936,7 +1936,7 @@ impl Store {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn adopt_approved_mission_revision(
+    pub fn adopt_approved_mission_revision(
         &self,
         run: &str,
         mission: &MissionSpec,
@@ -2482,7 +2482,7 @@ impl Store {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn adopt_mission_revision_inner(
+    pub fn adopt_mission_revision_inner(
         &self,
         run: &str,
         mission: &MissionSpec,
@@ -2922,7 +2922,7 @@ impl Store {
         self.mission_run_states_among(Some(subjects))
     }
 
-    pub(super) fn mission_run_states_among(
+    pub fn mission_run_states_among(
         &self,
         subjects: Option<&[String]>,
     ) -> Result<BTreeMap<String, MissionRunStateMoment>> {
@@ -3059,7 +3059,7 @@ impl Store {
 
     /// Hydrate the reconcile view and retain its pinned definition for evaluation.
     /// Empty runs load the definition lazily in the evaluator, after cleanup checks.
-    pub(crate) fn mission_run_for_evaluation(
+    pub fn mission_run_for_evaluation(
         &self,
         id: &str,
     ) -> Result<(MissionRunView, Option<MissionSpec>)> {
@@ -3551,7 +3551,7 @@ impl Store {
         self.append_claim(&input)
     }
 
-    pub(super) fn work_at_snapshot_internal(
+    pub fn work_at_snapshot_internal(
         &self,
         actor: Option<&str>,
         include_terminal: bool,
@@ -3572,7 +3572,7 @@ impl Store {
     /// `work_for_reconcile` reads them less the completed, failed and cancelled ones. A finished
     /// step stays finished in every view, so they are left out before reading, and the open
     /// steps index keeps the read to the fleet's open steps, not every step it ever ran.
-    pub(super) fn open_work_for_seat(&self, agent: &str) -> Result<Vec<StepRunView>> {
+    pub fn open_work_for_seat(&self, agent: &str) -> Result<Vec<StepRunView>> {
         self.work_at_snapshot_internal_with_agentless(
             Some(agent),
             true,
@@ -3583,7 +3583,7 @@ impl Store {
         )
     }
 
-    pub(super) fn work_at_snapshot_internal_with_agentless(
+    pub fn work_at_snapshot_internal_with_agentless(
         &self,
         actor: Option<&str>,
         include_terminal: bool,
@@ -3606,7 +3606,7 @@ impl Store {
     /// [`Self::work_at_snapshot_internal_with_agentless`], of only the `selected` step subjects
     /// when given, as the published work list refolds the steps whose claims changed.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn work_at_snapshot_selected(
+    pub fn work_at_snapshot_selected(
         &self,
         actor: Option<&str>,
         include_terminal: bool,
@@ -3749,7 +3749,7 @@ impl Store {
         self.client_work_history_page_after(actor, snapshot_unix_ms, offset, limit, None)
     }
 
-    pub(crate) fn client_work_history_page_after(
+    pub fn client_work_history_page_after(
         &self,
         actor: Option<&str>,
         snapshot_unix_ms: u128,
@@ -3850,7 +3850,7 @@ impl Store {
         Ok(visible_to_actor.then_some(view))
     }
 
-    pub(super) fn work_history_at_snapshot_with_agentless(
+    pub fn work_history_at_snapshot_with_agentless(
         &self,
         actor: Option<&str>,
         snapshot_unix_ms: u128,
@@ -3968,7 +3968,7 @@ impl Store {
             .collect())
     }
 
-    pub(super) fn work_annotation_with_owner(
+    pub fn work_annotation_with_owner(
         work: &StepRunView,
         owner: Option<(String, String, String, String, String, String, String)>,
     ) -> OperationalAnnotation {
@@ -4112,7 +4112,7 @@ impl Store {
         )
     }
 
-    pub(super) fn work_action_with_handoff(
+    pub fn work_action_with_handoff(
         &self,
         subject: &str,
         action: &str,
@@ -4191,7 +4191,7 @@ impl Store {
         let committed = self
             .connection
             .batched(|transaction| -> Result<StepRunView, St3Error> {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 let _writer_work = WorkActionWriterProbe::start(&request.idempotency_key);
                 if let Some(response) = smallclaims::store::idempotency::cached_response(transaction, &request.idempotency_key)?
                 {
@@ -4655,7 +4655,7 @@ impl Store {
     }
 
     /// Fill a committed work acknowledgement's queue, timing, summaries and wake from a reader.
-    pub(crate) fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()> {
+    pub fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()> {
         enrich_step_queue(&self.readers.get(), view).map_err(Into::into)
     }
 
@@ -4751,7 +4751,7 @@ impl Store {
         self.retry_step_as(subject, None, reason, backoff_ms)
     }
 
-    pub(super) fn retry_step_as(
+    pub fn retry_step_as(
         &self,
         subject: &str,
         actor: Option<&str>,
@@ -4876,7 +4876,7 @@ impl Store {
         self.mission_at_with_declared_agents(intent, resolved_intent, at_index, &BTreeSet::new())
     }
 
-    pub(super) fn mission_at_with_declared_agents(
+    pub fn mission_at_with_declared_agents(
         &self,
         intent: &NormalizedIntent,
         resolved_intent: IntentInput,
@@ -5358,7 +5358,7 @@ impl Store {
     }
 
     /// The fields used by live terminal fences, with the same authority decisions as `status`.
-    pub(crate) fn runtime_authority(&self, subject: &str) -> Result<Option<RuntimeAuthority>> {
+    pub fn runtime_authority(&self, subject: &str) -> Result<Option<RuntimeAuthority>> {
         smallclaims::touched::note_read(|| subject.to_owned());
 
         let connection = self.readers.get();
@@ -5369,7 +5369,7 @@ impl Store {
     }
 
     /// Runtime fences inside an existing read or committed-write snapshot.
-    pub(crate) fn runtime_authority_on(
+    pub fn runtime_authority_on(
         connection: &Connection,
         subject: &str,
     ) -> Result<Option<RuntimeAuthority>> {
@@ -5409,7 +5409,7 @@ impl Store {
 
     /// Candidate owners of a runtime resource at a snapshot. Retain historical observations:
     /// the canonical status fold, not the latest ingested claim, selects the current id.
-    pub(crate) fn runtime_subjects_for_id_at(
+    pub fn runtime_subjects_for_id_at(
         &self,
         runtime_id: Option<&str>,
         owner: Option<&str>,
@@ -5422,7 +5422,7 @@ impl Store {
         Ok(subjects)
     }
 
-    pub(crate) fn workspace_observation_from_host(
+    pub fn workspace_observation_from_host(
         &self,
         subject: &str,
         host: &str,
@@ -5747,7 +5747,7 @@ impl Store {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn record_resource_observation_attempt(
+    pub fn record_resource_observation_attempt(
         &self,
         observer: &str,
         desired_revision: &str,
@@ -5774,27 +5774,27 @@ impl Store {
         ))
         .map_err(internal)?;
         let idempotency_key = format!("resource-observation:{operation_hash}");
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let measurement = Mutex::new(None);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let pending = Mutex::new(None);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let enqueued = std::time::Instant::now();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let canonical = preparation.is_none();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let cached = std::sync::atomic::AtomicBool::new(false);
         let result = self.connection
             .batched(|transaction| -> Result<Option<ResourceObservationOutcome>, St3Error> {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 let _measurement = resource_preparation::WriterMeasure::new(&measurement);
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 { *pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(enqueued.elapsed()); }
                 check_observer_completion(transaction, observer, desired_revision, current)?;
                 let outcome = (|| {
                 if let Some(response) = smallclaims::store::idempotency::cached_response(transaction, &idempotency_key)?
                 {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     cached.store(true, std::sync::atomic::Ordering::Relaxed);
                     return serde_json::from_str(&response).map(Some).map_err(internal);
                 }
@@ -6626,7 +6626,7 @@ impl Store {
                 Ok(outcome)
             })
             .map_err(|error| St3Error::new("internal", error));
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some((elapsed, work)) = measurement
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner)
@@ -6634,7 +6634,7 @@ impl Store {
             resource_preparation::COUNTS
                 .with(|counts| counts.borrow_mut().writer.push((canonical, elapsed, work)));
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         resource_preparation::COUNTS.with(|counts| {
             let mut counts = counts.borrow_mut();
             if cached.load(std::sync::atomic::Ordering::Relaxed) {
@@ -6806,7 +6806,7 @@ impl Store {
     }
 
     /// Read just the newest runtime body of each origin in canonical order at a snapshot.
-    pub(crate) fn runtime_observations_at(
+    pub fn runtime_observations_at(
         &self, subject: &str, at: u64,
     ) -> Result<BTreeMap<String, ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
@@ -6984,7 +6984,7 @@ static RUNTIME_ID_SUBJECTS: std::sync::LazyLock<String> = std::sync::LazyLock::n
 ));
 
 /// Runtime authority without presentation, harness, planning or claim-history reduction.
-pub(crate) struct RuntimeAuthority {
+pub struct RuntimeAuthority {
     pub actual: Option<Value>,
     pub actual_origin: Option<String>,
     pub reachability: String,
@@ -7066,7 +7066,7 @@ fn collection_delivery_was_requested_tx(
 }
 
 /// The seat that registered a comment or review, by its GitHub ID, never by login.
-pub(crate) fn github_posted_by_tx(
+pub fn github_posted_by_tx(
     connection: &Connection,
     thread: &crate::github_watch::ThreadRef,
     entry: &Value,

@@ -252,7 +252,7 @@ impl Store {
         }
     }
 
-    pub(crate) fn prepare_backup_restore(&self, header: &Header, writer: &str) -> Result<()> {
+    pub fn prepare_backup_restore(&self, header: &Header, writer: &str) -> Result<()> {
         if let Some(fleet) = &header.fleet_id {
             self.bind_fleet(fleet)?;
         }
@@ -266,7 +266,7 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn receive_backup_page(
+    pub fn receive_backup_page(
         &self,
         header: &Header,
         envelopes: &[ReplicaEnvelope],
@@ -329,7 +329,7 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn receive_backup_signatures(
+    pub fn receive_backup_signatures(
         &self,
         header: &Header,
         signatures: &[ReplicaEnvelopeSignature],
@@ -367,7 +367,7 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn finish_backup_restore(
+    pub fn finish_backup_restore(
         &self,
         header: &Header,
         writer: &str,
@@ -436,7 +436,7 @@ impl Store {
 
     /// How many long messages the claims here name, by the `text/plain` entry in their
     /// `attachments`. A restore reads it once, offline, to say how many texts it could not return.
-    pub(crate) fn message_body_references(&self) -> Result<u64> {
+    pub fn message_body_references(&self) -> Result<u64> {
         Ok(self.readers.get().query_row(
             "SELECT COUNT(*) FROM claims WHERE kind='message.sent'
                AND json_extract(body,'$.fields.attachments') LIKE '%\"text/plain\"%'",

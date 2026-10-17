@@ -2699,7 +2699,7 @@ fn rewrite_envelope(
     }
 }
 
-pub(super) fn receive_and_project(
+pub fn receive_and_project(
     target: &Store,
     relay: &str,
     exchange: &ReplicationExchange,
@@ -2722,7 +2722,7 @@ pub(super) fn receive_and_project(
     admission
 }
 
-pub(super) fn exchange_from(
+pub fn exchange_from(
     source: &Store,
     remote: &ReplicationInventory,
 ) -> ReplicationExchange {
@@ -8559,7 +8559,7 @@ fn a_rebuilt_run_tree_keeps_an_adopted_revision() {
 
 /// A standing root with `count` child runs started from its step, replicated from a
 /// controller to a worker. Returns the stores, the root and the children.
-pub(super) fn replicated_run_tree(
+pub fn replicated_run_tree(
     count: usize,
 ) -> (Store, Store, MissionRunView, Vec<MissionRunView>) {
     let controller = Store::open_memory("controller").unwrap();
@@ -10390,7 +10390,7 @@ fn same_sequence_candidates_converge_in_any_receipt_order() {
 }
 
 /// One exchange carrying exactly `envelopes`, as a peer that holds only those would send it.
-pub(super) fn exchange_of(peer: &str, envelopes: Vec<ReplicaEnvelope>) -> ReplicationExchange {
+pub fn exchange_of(peer: &str, envelopes: Vec<ReplicaEnvelope>) -> ReplicationExchange {
     ReplicationExchange {
         build: None,
         projection_digests: Default::default(),
@@ -18490,7 +18490,7 @@ fn a_store_written_before_the_log_diet_upgrades_and_syncs_to_the_same_graph() {
     let path = directory.path().join("claims.sqlite3");
     let mut bytes = Vec::new();
     flate2::read::GzDecoder::new(
-        &include_bytes!("../../tests/fixtures/pre-diet-store.sqlite3.gz")[..],
+        &include_bytes!("../../../st3-daemon/tests/fixtures/pre-diet-store.sqlite3.gz")[..],
     )
     .read_to_end(&mut bytes)
     .unwrap();

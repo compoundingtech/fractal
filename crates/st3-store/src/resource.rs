@@ -10,8 +10,8 @@ use anyhow::{Context as _, Result, bail};
 /// What the built-in `merged` and `ci-passed` gates read from GitHub.
 pub mod github_gates;
 mod github_repository;
-pub(crate) mod github_workflows;
-pub(crate) use github_repository::{RECENT_COMMENTS, merge_recent_comments, recent_comment_key};
+pub mod github_workflows;
+pub use github_repository::{RECENT_COMMENTS, merge_recent_comments, recent_comment_key};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -48,12 +48,12 @@ pub fn default_resource(locator: &str) -> String {
     format!("resource/github/{}", locator.to_ascii_lowercase())
 }
 mod observer_condition;
-pub(crate) use observer_condition::ObserverCondition;
-#[cfg(test)]
-pub(crate) use observer_condition::RATE_LIMIT_RESET_GRACE_MS;
+pub use observer_condition::ObserverCondition;
+#[cfg(any(test, feature = "test-support"))]
+pub use observer_condition::RATE_LIMIT_RESET_GRACE_MS;
 
 /// Whether `seen` is the same comment as `known` or one created after it.
-pub(crate) fn newer_comment(seen: &Value, known: &Value) -> bool {
+pub fn newer_comment(seen: &Value, known: &Value) -> bool {
     let created = |comment: &Value| {
         comment
             .get("created_at")
@@ -219,7 +219,7 @@ const GITHUB_REQUEST_TIMEOUT: Duration = if cfg!(test) {
 
 /// Where the daemon reaches GitHub's API: `https://api.github.com`, or `ST3_GITHUB_API_URL` when
 /// the daemon's environment names another, such as a test's.
-pub(crate) fn github_api_base() -> String {
+pub fn github_api_base() -> String {
     std::env::var("ST3_GITHUB_API_URL")
         .ok()
         .map(|base| base.trim().trim_end_matches('/').to_owned())
@@ -228,7 +228,7 @@ pub(crate) fn github_api_base() -> String {
 }
 
 /// The HTTP client every GitHub request of this daemon shares.
-pub(crate) fn github_api_client() -> reqwest::Client {
+pub fn github_api_client() -> reqwest::Client {
     github_client()
 }
 
@@ -495,7 +495,7 @@ fn github_cache() -> &'static GithubCache {
     CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
 }
 
-pub(crate) use crate::github_http::{github_spender, spend_as};
+pub use crate::github_http::{github_spender, spend_as};
 
 /// Requests sent outside any observation.
 const GITHUB_UNATTRIBUTED: &str = "unattributed";
@@ -515,7 +515,7 @@ struct GithubSpend {
 
 /// The token's budget for one GitHub rate limit resource, as GitHub last reported it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GithubBudget {
+pub struct GithubBudget {
     pub resource: String,
     pub limit: u64,
     pub remaining: u64,
@@ -525,7 +525,7 @@ pub(crate) struct GithubBudget {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GithubSpenderReport {
+pub struct GithubSpenderReport {
     pub spender: String,
     pub sent: u64,
     pub not_modified: u64,
@@ -535,14 +535,14 @@ pub(crate) struct GithubSpenderReport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GithubBudgetReport {
+pub struct GithubBudgetReport {
     pub budget: GithubBudget,
     /// Requests this host's observers sent in the budget's current window that GitHub counted.
     pub counted_here: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct GithubUsageReport {
+pub struct GithubUsageReport {
     /// Most requests counted in the last hour first.
     pub spenders: Vec<GithubSpenderReport>,
     pub budgets: Vec<GithubBudgetReport>,
@@ -552,7 +552,7 @@ pub(crate) struct GithubUsageReport {
 /// reported. Every observer on every host shares the token's hourly budget. The counts stay in
 /// memory: a claim per request would cost more than it tells.
 #[derive(Default)]
-pub(crate) struct GithubUsage {
+pub struct GithubUsage {
     spenders: HashMap<String, GithubSpend>,
     budgets: std::collections::BTreeMap<String, GithubBudget>,
 }
@@ -695,7 +695,7 @@ fn github_usage() -> &'static std::sync::Mutex<GithubUsage> {
 }
 
 /// GitHub requests this daemon sent by observer, and the budget GitHub last reported.
-pub(crate) fn github_usage_report() -> GithubUsageReport {
+pub fn github_usage_report() -> GithubUsageReport {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -791,10 +791,10 @@ async fn github_pages(
 /// One read of a paged GitHub listing: its items, a version for each page (its ETag, or its
 /// content when GitHub named none), and whether more pages remained after the most this read
 /// takes.
-pub(crate) struct GithubListing {
-    pub(crate) values: Vec<Value>,
-    pub(crate) versions: Vec<String>,
-    pub(crate) truncated: bool,
+pub struct GithubListing {
+    pub values: Vec<Value>,
+    pub versions: Vec<String>,
+    pub truncated: bool,
 }
 
 /// Read up to `pages` pages of a listing. A listing that continues past them fails the read,
@@ -906,9 +906,9 @@ async fn github_graphql(
         .context("the GitHub GraphQL response has no data")
 }
 
-pub(crate) use crate::github_http::GITHUB_AUTH_REMEDY;
+pub use crate::github_http::GITHUB_AUTH_REMEDY;
 
-pub(crate) use crate::github_http::github_auth;
+pub use crate::github_http::github_auth;
 
 /// Select the daemon's GitHub source before its first request. Configuration is immutable
 /// for this process; token-file contents are revalidated when the file changes.
@@ -918,10 +918,10 @@ pub fn configure_github(config: &crate::config::Config) -> Result<()> {
 
 /// An st agent on this host and the workspace it works in.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AgentWorkspace {
-    pub(crate) agent: String,
-    pub(crate) run: Option<String>,
-    pub(crate) workspace: PathBuf,
+pub struct AgentWorkspace {
+    pub agent: String,
+    pub run: Option<String>,
+    pub workspace: PathBuf,
 }
 
 /// Name the st agent that opened each ready pull request in a repository listing. Agents open
@@ -930,7 +930,7 @@ pub(crate) struct AgentWorkspace {
 /// workspace as the pull request appears or moves to a new head, that agent is recorded as
 /// `opened_by` and its mission run as `opened_by_run`. A pull request keeps an opener once named,
 /// so a later checkout of the same branch by a reviewer or a fixer does not take it over.
-pub(crate) fn attach_pull_request_openers(
+pub fn attach_pull_request_openers(
     facts: &mut Value,
     previous: Option<&Value>,
     agents: &[AgentWorkspace],
@@ -993,7 +993,7 @@ fn checked_out_branches(agents: &[AgentWorkspace]) -> HashMap<String, Vec<&Agent
 
 /// The branch that a Git working tree has checked out, read from its `HEAD` without starting
 /// Git. A linked worktree's `.git` file names its own Git directory.
-pub(crate) fn checked_out_branch(workspace: &Path) -> Option<String> {
+pub fn checked_out_branch(workspace: &Path) -> Option<String> {
     let dot_git = workspace.join(".git");
     let git_directory = if dot_git.is_dir() {
         dot_git

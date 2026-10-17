@@ -61,7 +61,7 @@ impl Observation {
         self.advertisement.as_deref()
     }
 
-    pub(crate) fn advertised_ids(&self) -> &BTreeMap<String, Option<String>> {
+    pub fn advertised_ids(&self) -> &BTreeMap<String, Option<String>> {
         &self.ids
     }
 }

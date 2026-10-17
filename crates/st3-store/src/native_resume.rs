@@ -180,9 +180,9 @@ pub fn selector_scope(driver: &str, argv: &[String]) -> Option<String> {
     (!selected.is_empty()).then(|| hex::encode(Sha256::digest(serde_json::to_vec(&selected).expect("selector strings serialize"))))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn authored_selector_scope_ignores_unrelated_launch_edits() {
+pub fn authored_selector_scope_ignores_unrelated_launch_edits() {
     let argv = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
     let original = selector_scope("omp", &argv(&["omp", "--resume", "/transcript", "--model", "one"]));
     assert!(original.is_some());

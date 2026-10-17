@@ -89,7 +89,7 @@ fn temporary_schema_safe(connection: &Connection) -> bool {
     check().unwrap_or(false)
 }
 
-pub(super) struct Fence {
+pub struct Fence {
     // Ownership identity only: the numeric claim frontier is NOT a currentness proof.
     incarnation: Arc<std::sync::atomic::AtomicU64>,
     owner: Arc<()>,
@@ -97,14 +97,14 @@ pub(super) struct Fence {
     shared_memory: bool,
 }
 
-pub(super) struct Prepared<T> {
+pub struct Prepared<T> {
     owner: Arc<()>,
     cut: Option<NativeCut>,
-    pub(super) value: Option<T>,
+    pub value: Option<T>,
 }
 
 impl Fence {
-    pub(super) fn new(store: &Store) -> Self {
+    pub fn new(store: &Store) -> Self {
         Self {
             incarnation: store.committed_index.clone(),
             owner: Arc::new(()),
@@ -113,7 +113,7 @@ impl Fence {
         }
     }
 
-    pub(super) fn prepare<T>(
+    pub fn prepare<T>(
         &self,
         store: &Store,
         read: impl FnOnce(&Connection) -> T,
@@ -141,20 +141,20 @@ impl Fence {
         {
             // Seed from the actual writer at autocommit. This short loan reads only native
             // counters/cookies, never history. Drop it BEFORE starting the fresh read cut.
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let queued = std::time::Instant::now();
             let connection = store.connection.write();
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let waited = queued.elapsed();
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let started = std::time::Instant::now();
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let work = smallclaims::sqlite::work::SqliteWorkScope::start();
             if connection.is_autocommit() {
                 prepared.cut = NativeCut::read(&connection);
             }
             drop(connection);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             COUNTS.with(|counts| {
                 counts
                     .borrow_mut()
@@ -173,9 +173,9 @@ impl Fence {
         }) {
             return prepared;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let read_started = std::time::Instant::now();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let read_work = smallclaims::sqlite::work::SqliteWorkScope::start();
         let value = store.read_snapshot(|_| {
             let connection = store.readers.get();
@@ -197,7 +197,7 @@ impl Fence {
             }
             Ok(Some(read(&connection)))
         });
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         COUNTS.with(|counts| {
             counts
                 .borrow_mut()
@@ -210,7 +210,7 @@ impl Fence {
         prepared
     }
 
-    pub(super) fn current<T>(
+    pub fn current<T>(
         &self,
         store: &Store,
         connection: &Connection,
@@ -232,56 +232,56 @@ impl Fence {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug, Default)]
-pub(super) struct Counts {
-    pub(super) fast: usize,
-    pub(super) cached: usize,
-    pub(super) invalidated: usize,
-    pub(super) fallback: usize,
-    pub(super) seed: Vec<(
+pub struct Counts {
+    pub fast: usize,
+    pub cached: usize,
+    pub invalidated: usize,
+    pub fallback: usize,
+    pub seed: Vec<(
         std::time::Duration,
         std::time::Duration,
         smallclaims::sqlite::work::SqliteWork,
     )>,
-    pub(super) preparation: Vec<(std::time::Duration, smallclaims::sqlite::work::SqliteWork)>,
-    pub(super) until_callback: Vec<Option<std::time::Duration>>,
-    pub(super) acknowledged: Vec<std::time::Duration>,
-    pub(super) writer: Vec<(
+    pub preparation: Vec<(std::time::Duration, smallclaims::sqlite::work::SqliteWork)>,
+    pub until_callback: Vec<Option<std::time::Duration>>,
+    pub acknowledged: Vec<std::time::Duration>,
+    pub writer: Vec<(
         bool,
         std::time::Duration,
         smallclaims::sqlite::work::SqliteWork,
     )>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(super) static COUNTS: std::cell::RefCell<Counts> = std::cell::RefCell::new(Counts::default());
+    pub static COUNTS: std::cell::RefCell<Counts> = std::cell::RefCell::new(Counts::default());
 }
 
-#[cfg(test)]
-pub(super) fn take_counts() -> Counts {
+#[cfg(any(test, feature = "test-support"))]
+pub fn take_counts() -> Counts {
     COUNTS.with(|counts| std::mem::take(&mut *counts.borrow_mut()))
 }
 
-pub(super) struct Inputs {
-    pub(super) active_subscriptions: Vec<(String, SubscriptionSpec)>,
-    pub(super) normalized_observation: BTreeMap<String, Value>,
-    pub(super) previous: Option<Value>,
-    pub(super) baseline: bool,
-    pub(super) repository_facts: Value,
-    pub(super) legacy_collections: bool,
-    pub(super) changed_fields: Vec<String>,
-    pub(super) repository_changed_fields: Vec<String>,
-    pub(super) recorded_items: HashMap<String, Option<(Value, u128)>>,
-    pub(super) discovered: Vec<(&'static str, DiscoveredItem)>,
-    pub(super) observer_health_is_current: bool,
-    pub(super) subscription_states: BTreeMap<String, (bool, &'static str, bool)>,
-    pub(super) changed: bool,
-    pub(super) should_record: bool,
+pub struct Inputs {
+    pub active_subscriptions: Vec<(String, SubscriptionSpec)>,
+    pub normalized_observation: BTreeMap<String, Value>,
+    pub previous: Option<Value>,
+    pub baseline: bool,
+    pub repository_facts: Value,
+    pub legacy_collections: bool,
+    pub changed_fields: Vec<String>,
+    pub repository_changed_fields: Vec<String>,
+    pub recorded_items: HashMap<String, Option<(Value, u128)>>,
+    pub discovered: Vec<(&'static str, DiscoveredItem)>,
+    pub observer_health_is_current: bool,
+    pub subscription_states: BTreeMap<String, (bool, &'static str, bool)>,
+    pub changed: bool,
+    pub should_record: bool,
 }
 
-pub(super) fn inputs(
+pub fn inputs(
     transaction: &Connection,
     observer: &str,
     desired_revision: &str,
@@ -475,14 +475,14 @@ pub(super) fn inputs(
     })
 }
 
-#[cfg(test)]
-pub(super) type ValidateHook = Box<dyn FnMut(&Store, usize)>;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+pub type ValidateHook = Box<dyn FnMut(&Store, usize)>;
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(super) static BEFORE_VALIDATE: std::cell::RefCell<Option<ValidateHook>> = const { std::cell::RefCell::new(None) };
+    pub static BEFORE_VALIDATE: std::cell::RefCell<Option<ValidateHook>> = const { std::cell::RefCell::new(None) };
 }
-#[cfg(test)]
-pub(super) fn before_validate(store: &Store, pass: usize) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn before_validate(store: &Store, pass: usize) {
     BEFORE_VALIDATE.with(|hook| {
         if let Some(hook) = hook.borrow_mut().as_mut() {
             hook(store, pass);
@@ -490,15 +490,15 @@ pub(super) fn before_validate(store: &Store, pass: usize) {
     });
 }
 
-#[cfg(test)]
-pub(super) struct WriterMeasure<'a> {
+#[cfg(any(test, feature = "test-support"))]
+pub struct WriterMeasure<'a> {
     sink: &'a Mutex<Option<(std::time::Duration, smallclaims::sqlite::work::SqliteWork)>>,
     start: std::time::Instant,
     work: Option<smallclaims::sqlite::work::SqliteWorkScope>,
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl<'a> WriterMeasure<'a> {
-    pub(super) fn new(
+    pub fn new(
         sink: &'a Mutex<Option<(std::time::Duration, smallclaims::sqlite::work::SqliteWork)>>,
     ) -> Self {
         Self {
@@ -508,7 +508,7 @@ impl<'a> WriterMeasure<'a> {
         }
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for WriterMeasure<'_> {
     fn drop(&mut self) {
         *self.sink.lock().unwrap_or_else(PoisonError::into_inner) =

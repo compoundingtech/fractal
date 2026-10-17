@@ -13,12 +13,12 @@ use crate::model::{
     UsedMissionSpec, WorkSelector,
 };
 
-pub(crate) const LOOP_ROUND_INPUT: &str = "__st3_loop_round";
-pub(crate) const LOOP_FEEDBACK_INPUT: &str = "__st3_loop_feedback";
-pub(crate) const LOOP_ITEM_INPUT: &str = "__st3_loop_item";
-pub(crate) const CANDIDATE_INDEX_INPUT: &str = "__st3_candidate_index";
+pub const LOOP_ROUND_INPUT: &str = "__st3_loop_round";
+pub const LOOP_FEEDBACK_INPUT: &str = "__st3_loop_feedback";
+pub const LOOP_ITEM_INPUT: &str = "__st3_loop_item";
+pub const CANDIDATE_INDEX_INPUT: &str = "__st3_candidate_index";
 
-pub(crate) fn validate_mission_id(value: &str) -> Result<(), St3Error> {
+pub fn validate_mission_id(value: &str) -> Result<(), St3Error> {
     validate_id(value, "mission")
 }
 
@@ -66,7 +66,7 @@ fn collect_embedded_missions(mission: &MissionSpec, output: &mut Vec<MissionSpec
     }
 }
 
-pub(crate) fn mission_closure_ids(mission: &MissionSpec) -> BTreeSet<String> {
+pub fn mission_closure_ids(mission: &MissionSpec) -> BTreeSet<String> {
     fn collect(mission: &MissionSpec, include_self: bool, output: &mut BTreeSet<String>) {
         if include_self {
             output.insert(mission.id.clone());
@@ -2264,7 +2264,7 @@ pub fn run_mission(mission: MissionSpec, after: Option<&str>) -> Result<MissionS
 }
 
 /// The full subject of the run an `after-run` value names, with or without its prefix.
-pub(crate) fn after_run_subject(run: &str) -> String {
+pub fn after_run_subject(run: &str) -> String {
     format!(
         "mission-run/{}",
         run.strip_prefix("mission-run/").unwrap_or(run)
@@ -2950,7 +2950,7 @@ fn json_value(value: &KdlValue) -> Result<Value, St3Error> {
     }
 }
 
-pub(crate) fn is_mission_declaration(name: &str) -> bool {
+pub fn is_mission_declaration(name: &str) -> bool {
     matches!(
         name,
         "agent"
@@ -2969,7 +2969,7 @@ pub(crate) fn is_mission_declaration(name: &str) -> bool {
     )
 }
 
-pub(crate) fn validate_deferred_declaration(node: &KdlNode) -> Result<(), St3Error> {
+pub fn validate_deferred_declaration(node: &KdlNode) -> Result<(), St3Error> {
     validate_deferred_declaration_in(node, None)
 }
 

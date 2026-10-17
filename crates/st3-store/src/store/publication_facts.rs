@@ -2,7 +2,7 @@
 //! transaction finalizer derives canonical keys after all admission metadata is present.
 use super::*;
 
-pub(super) const PAGE: usize = 64;
+pub const PAGE: usize = 64;
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS local_publication_claims (
     claim_id TEXT PRIMARY KEY,
@@ -140,7 +140,7 @@ CREATE TRIGGER IF NOT EXISTS publication_repair_delete AFTER DELETE ON projectio
 END;
 "#;
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(SCHEMA)?;
     let repairs:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='projection_digest_repaired_claims' AND type='table')",[],|row|row.get(0))?;
     if repairs {
@@ -152,7 +152,7 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
 /// Publish a process-lifetime cache invalidation hint after native commit resolution.
 /// This is not authority for an effect. The publication writer reads its own evidence;
 /// physical-effect authorization must independently fence the current declaration. Read failure invalidates every cached proof.
-pub(super) fn install_cache_observer(graph: &GraphStore, runtime: &Arc<SmalltalkRuntime>) {
+pub fn install_cache_observer(graph: &GraphStore, runtime: &Arc<SmalltalkRuntime>) {
     let weak = Arc::downgrade(runtime);
     let observer = graph.connection.observe_commits(move |connection| {
         if let Some(runtime) = weak.upgrade() {
@@ -184,7 +184,7 @@ fn cache_epoch(connection: &Connection) -> Result<(i64, bool)> {
 }
 
 /// Indexed ceilings only. Never reads historical bodies or advances a bootstrap page in open.
-pub(super) fn initialize(transaction: &Transaction<'_>) -> Result<()> {
+pub fn initialize(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute(
         "INSERT OR IGNORE INTO local_publication_bootstrap(singleton,phase,cursor,ceiling,local_ceiling,progress_ms)
          SELECT 1,CASE WHEN shared=0 AND local=0 THEN 3 ELSE 0 END,0,shared,local,?1 FROM
@@ -250,7 +250,7 @@ fn sync_from_source(transaction: &Transaction<'_>, source: &Connection, id: &str
 
 /// Bound every writer loan. A larger admission leaves a pending queue and Unknown;
 /// the commit-driven background worker finishes it without a history fold or polling.
-pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
+pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
     let started = std::time::Instant::now();
     // Deleting a legacy batch member changes later fallback canonical positions.
     // Coalesce that invalidation per batch, then repair it in bounded durable pages.
@@ -317,7 +317,7 @@ pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn ready(connection: &Connection) -> Result<bool> {
+pub fn ready(connection: &Connection) -> Result<bool> {
     Ok(connection
         .prepare_cached(
             "SELECT COALESCE((SELECT phase=3 FROM local_publication_bootstrap WHERE singleton=1),0)
@@ -435,7 +435,7 @@ impl Store {
     }
 }
 
-pub(super) fn reset(transaction: &Transaction<'_>) -> Result<()> {
+pub fn reset(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(
         "DELETE FROM local_publication_claims;
         DELETE FROM local_publication_starts; DELETE FROM local_publication_pending; DELETE FROM local_publication_batches;

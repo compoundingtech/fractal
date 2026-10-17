@@ -54,7 +54,7 @@ WHEN NEW.claim_id IS NOT NULL BEGIN
 END;
 "#;
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+pub fn create_schema(connection: &Connection) -> Result<()> {
     connection
         .execute_batch(SCHEMA)
         .context("creating resource observation projection")?;
@@ -74,7 +74,7 @@ fn replace_pending_triggers(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
+pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     let trigger_version: Option<String> = transaction
         .query_row(
             "SELECT value FROM meta WHERE key='resource_pending_trigger_version'",
@@ -110,13 +110,13 @@ pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
+pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute("DELETE FROM resource_observations", [])?;
     transaction.execute("INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind='resource.observed'", [])?;
     flush(transaction)
 }
 
-pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
+pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
     let subjects = transaction
         .prepare("SELECT subject FROM local_resource_projection_pending ORDER BY subject")?
         .query_map([], |row| row.get::<_, String>(0))?
@@ -128,7 +128,7 @@ pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
 }
 
 /// Receipts add identity and the first opener; only observations replace resource facts.
-pub(super) fn merge_observation(
+pub fn merge_observation(
     current: &mut serde_json::Map<String, Value>,
     fields: &serde_json::Map<String, Value>,
 ) {
@@ -188,7 +188,7 @@ pub(super) fn merge_observation(
     }
 }
 
-pub(super) fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
+pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
     let claim = transaction.query_row(&canonical_sql(
         "SELECT id, body, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='resource.observed'
          AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
@@ -272,7 +272,7 @@ impl Store {
     /// The cursor of the observer that last recorded into `resource`, for `observer` when it has
     /// none of its own: it starts where that observer left the resource, so what changed between
     /// their polls is read as a change rather than taken as already known.
-    pub(crate) fn inherited_observer_cursor(
+    pub fn inherited_observer_cursor(
         &self,
         resource: &str,
         observer: &str,
@@ -309,7 +309,7 @@ impl Store {
     }
 
     /// Constant-work version, independent of claims that do not change resource rows.
-    pub(crate) fn resource_collection_version(&self) -> Result<String> {
+    pub fn resource_collection_version(&self) -> Result<String> {
         let connection = self.readers.get();
         let (columns, count, accumulator) = connection.query_row(
             "SELECT columns_json,row_count,accumulator FROM projection_digest_state WHERE table_name='resource_observations'",
@@ -325,7 +325,7 @@ impl Store {
     }
 
     /// Read at most `limit` current observations; callers request one extra row for pagination.
-    pub(crate) fn resource_collection_page(
+    pub fn resource_collection_page(
         &self,
         opened_by: Option<&str>,
         kind: Option<&str>,

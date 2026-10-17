@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn example() -> Manifest {
+pub fn example() -> Manifest {
     serde_json::from_str(include_str!(
         "../../../../../examples/st3/custom-review.json"
     ))

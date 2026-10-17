@@ -10,13 +10,13 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 /// Which person-owned collection a list holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OwnerView {
+pub enum OwnerView {
     Glasses,
     Arrangements,
 }
 
 impl OwnerView {
-    pub(crate) fn collection(self) -> &'static str {
+    pub fn collection(self) -> &'static str {
         match self {
             Self::Glasses => "glasses",
             Self::Arrangements => "arrangements",
@@ -111,15 +111,15 @@ fn glass_owner(subject: &str) -> Option<String> {
 }
 
 /// Every person's rows of one view at one cut. A person with no rows has no entry.
-pub(crate) struct OwnerListPublication {
-    pub(crate) cut: u64,
-    pub(crate) projection: Option<(String, u64)>,
-    pub(crate) published_at_unix_ms: u128,
-    pub(crate) owners: Arc<HashMap<String, Arc<Vec<Value>>>>,
+pub struct OwnerListPublication {
+    pub cut: u64,
+    pub projection: Option<(String, u64)>,
+    pub published_at_unix_ms: u128,
+    pub owners: Arc<HashMap<String, Arc<Vec<Value>>>>,
 }
 
 #[derive(Default)]
-pub(crate) struct OwnerList {
+pub struct OwnerList {
     published: Mutex<Option<Arc<OwnerListPublication>>>,
     /// Counts `forget`s. A refresh that began before one may not publish what it read.
     forgotten: AtomicU64,
@@ -129,7 +129,7 @@ pub(crate) struct OwnerList {
 }
 
 impl OwnerList {
-    pub(super) fn forget(&self) {
+    pub fn forget(&self) {
         let mut published = self.published.lock().unwrap_or_else(PoisonError::into_inner);
         self.forgotten.fetch_add(1, AtomicOrdering::AcqRel);
         *published = None;
@@ -140,7 +140,7 @@ impl Store {
     /// The newest publication of `view`, served under its own cut. Only while the attention
     /// list's refresher runs, which also keeps these published; a window then never reads them
     /// itself.
-    pub(crate) fn published_owner_list(&self, view: OwnerView) -> Option<Arc<OwnerListPublication>> {
+    pub fn published_owner_list(&self, view: OwnerView) -> Option<Arc<OwnerListPublication>> {
         self.attention_list_refresher_running().then_some(())?;
         self.note_published_view_read();
         view.list(self)
@@ -152,7 +152,7 @@ impl Store {
 
     /// Publish `view` at the current cut, reading again only the people whose rows may have
     /// changed. Returns whether any person's rows changed. One short snapshot.
-    pub(crate) fn refresh_owner_list(&self, view: OwnerView, published_at_unix_ms: u128) -> Result<bool> {
+    pub fn refresh_owner_list(&self, view: OwnerView, published_at_unix_ms: u128) -> Result<bool> {
         let list = view.list(self);
         let (generation, previous) = {
             let published = list.published.lock().unwrap_or_else(PoisonError::into_inner);
@@ -231,15 +231,15 @@ impl Store {
     }
 
     /// The cut of `view`'s newest publication, if any, without counting as a window's read.
-    #[cfg(test)]
-    pub(crate) fn owner_list_cut(&self, view: OwnerView) -> Option<u64> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn owner_list_cut(&self, view: OwnerView) -> Option<u64> {
         let published = view.list(self).published.lock().unwrap_or_else(PoisonError::into_inner);
         published.as_ref().map(|publication| publication.cut)
     }
 
     /// People read again by refreshes of `view`, and full reads of everyone.
-    #[cfg(test)]
-    pub(crate) fn owner_list_reads(&self, view: OwnerView) -> (u64, u64) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn owner_list_reads(&self, view: OwnerView) -> (u64, u64) {
         let list = view.list(self);
         (
             list.people_read.load(AtomicOrdering::Relaxed),

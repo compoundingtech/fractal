@@ -12,13 +12,13 @@ macro_rules! message_desired_recipient_match {
 }
 
 // Store methods by domain (the crate plan's domain rules); core stays in this file.
-mod attention;
-mod delivery;
-mod evidence;
-mod github;
-mod missions;
-mod seats;
-mod trace_principal;
+pub mod attention;
+pub mod delivery;
+pub mod evidence;
+pub mod github;
+pub mod missions;
+pub mod seats;
+pub mod trace_principal;
 #[cfg(test)]
 mod accountable_tests;
 pub mod custom;
@@ -28,19 +28,19 @@ pub mod assistant_write_gate;
 pub mod declarations;
 pub mod retirements;
 pub mod directive_notes;
-pub(crate) mod observer_subscription_detail;
-mod glass_heads;
-mod arrangements;
+pub mod observer_subscription_detail;
+pub mod glass_heads;
+pub mod arrangements;
 #[cfg(test)]
 mod arrangements_tests;
 #[cfg(test)]
 mod authored_pull_requests_tests;
 #[cfg(test)]
 mod schedule_active_run_tests;
-mod glasses;
-pub(crate) mod mailbox_wakes;
-mod mailbox_changes;
-mod mailbox_lease;
+pub mod glasses;
+pub mod mailbox_wakes;
+pub mod mailbox_changes;
+pub mod mailbox_lease;
 #[cfg(test)]
 mod message_send_tests;
 // Qualification only: no production caller or Source registration.
@@ -57,19 +57,19 @@ pub mod owned_sets;
 mod owned_sets_tests;
 #[cfg(test)]
 mod usage_fold_tests;
-mod resources;
-mod resource_preparation;
+pub mod resources;
+pub mod resource_preparation;
 #[cfg(test)]
 mod resource_preparation_fence_tests;
-mod github_workflow_failures;
+pub mod github_workflow_failures;
 pub mod git_changes;
-pub(crate) mod message_subscriptions;
-mod rollouts;
-pub(crate) mod publication;
-mod publication_facts;
-mod seat_status;
-mod stop_deferral;
-mod card_fold;
+pub mod message_subscriptions;
+pub mod rollouts;
+pub mod publication;
+pub mod publication_facts;
+pub mod seat_status;
+pub mod stop_deferral;
+pub mod card_fold;
 #[cfg(test)]
 mod card_fold_tests;
 #[cfg(test)]
@@ -78,13 +78,13 @@ mod roster_controls;
 mod roster_fresh_proof_tests;
 #[cfg(test)]
 mod agents_window_deadline_tests;
-pub(crate) mod step_labels;
-mod operation_audit;
-mod mission_provenance;
-pub(crate) mod agent_queue_values;
+pub mod step_labels;
+pub mod operation_audit;
+pub mod mission_provenance;
+pub mod agent_queue_values;
 pub mod backup_format;
 pub mod message_bodies;
-mod projectors;
+pub mod projectors;
 #[cfg(test)]
 mod projectors_tests;
 
@@ -123,11 +123,10 @@ use crate::model::{
     SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView,
 };
 #[cfg(test)]
-use crate::model::{
-    ReplicaEnvelope, ReplicaEnvelopeId, ReplicationExchange, ReplicationInventory,
-    ReplicationReceipt,
-};
-#[cfg(test)]
+use crate::model::{ReplicaEnvelope, ReplicaEnvelopeId, ReplicationInventory, ReplicationReceipt};
+#[cfg(any(test, feature = "test-support"))]
+use crate::model::ReplicationExchange;
+#[cfg(any(test, feature = "test-support"))]
 use smallclaims::replication::{ReplicaRange, ReplicationBatch, ReplicationResponse};
 use crate::model::{SeatQueueMoveRequest, SeatQueueMoveView, SeatQueueRunView, SeatQueueView};
 use crate::seat_queue::{self, Placement, QueueJoin, QueueMove, SeatStep};
@@ -138,12 +137,11 @@ use smallclaims::hash::{
     batch_header_hash, canonical_hash, canonical_json_text, canonical_json_value,
     canonical_serialized_json_text, claim_hash,
 };
+#[cfg(any(test, feature = "test-support"))]
+use smallclaims::hash::{claim_id_is_content_hash, verify_replica_batch_header};
 #[cfg(test)]
-use smallclaims::hash::{
-    claim_id_is_content_hash, replica_envelope_hash, replica_record_ref,
-    verify_replica_batch_header,
-};
-#[cfg(test)]
+use smallclaims::hash::{replica_envelope_hash, replica_record_ref};
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::Ordering;
 
 // The graph half of the store: the claim log, envelopes, replication, checkpoints,
@@ -171,21 +169,21 @@ pub use smallclaims::store::{
 };
 
 
-mod accounts;
-mod runtime_starts;
+pub mod accounts;
+pub mod runtime_starts;
 pub use runtime_starts::{RuntimeStartAdmission, RuntimeStartOperation, RuntimeStartLock};
-mod roster_admission;
-pub(crate) use roster_admission::AdmissionGuard;
-mod adhoc_work;
-mod attention_snapshot;
-pub(crate) use attention_snapshot::{
+pub mod roster_admission;
+pub use roster_admission::AdmissionGuard;
+pub mod adhoc_work;
+pub mod attention_snapshot;
+pub use attention_snapshot::{
     CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, PromptAnswer, native_prompt_gone_key,
     plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
     screen_prompt_undelivered_key,
 };
-pub(crate) mod attention_list;
-pub(crate) mod owner_lists;
-pub(crate) mod summary_list;
+pub mod attention_list;
+pub mod owner_lists;
+pub mod summary_list;
 // Registration stays opt-in until the shared installer certifies every source family.
 #[cfg_attr(
     not(test),
@@ -194,38 +192,38 @@ pub(crate) mod summary_list;
         reason = "prepared attention operators await certified shared-runtime integration"
     )
 )]
-pub(crate) mod attention_ivm;
-mod backup;
-mod checkpoint_rules;
-pub(crate) mod harness_questions;
-mod checkpoint_status;
-mod mission_eligibility;
-pub(crate) use mission_eligibility::MISSING_AGENT_CONDITION;
-mod revision_seats;
-pub(crate) mod delegation;
-mod limits;
-mod database_size;
-pub(crate) mod projection_divergence;
+pub mod attention_ivm;
+pub mod backup;
+pub mod checkpoint_rules;
+pub mod harness_questions;
+pub mod checkpoint_status;
+pub mod mission_eligibility;
+pub use mission_eligibility::MISSING_AGENT_CONDITION;
+pub mod revision_seats;
+pub mod delegation;
+pub mod limits;
+pub mod database_size;
+pub mod projection_divergence;
 pub use database_size::DatabaseSize;
-mod person_work;
+pub mod person_work;
 pub use person_work::AskImages;
-mod reconcile_work_context;
-pub(crate) mod work_summaries_ivm;
-mod subagents;
-mod watches;
-mod idle_holds;
-mod idle_mail;
+pub mod reconcile_work_context;
+pub mod work_summaries_ivm;
+pub mod subagents;
+pub mod watches;
+pub mod idle_holds;
+pub mod idle_mail;
 pub use idle_holds::WORK_NUDGED_KIND;
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
 pub use limits::{AccountLimit, LIMITS_ACTOR, LIMITS_CATCH_UP_PAGE, LimitsOutcome, LimitsPolicy};
-pub(crate) use limits::ACCOUNT_READING_WINDOW_MS;
+pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{
     EndedSubagent, SUBAGENT_KINDS, SUBAGENT_LEASE_MS, SubagentSweep, SubagentView,
 };
 #[cfg(test)]
 mod checkpoint_agreement_tests;
-#[cfg(test)]
-pub(crate) mod terminal_gate_evidence;
+#[cfg(any(test, feature = "test-support"))]
+pub mod terminal_gate_evidence;
 #[cfg(test)]
 mod checkpoint_tests;
 #[cfg(test)]
@@ -236,21 +234,21 @@ mod checkpoint_replication_capture_tests;
 mod convergence;
 #[cfg(test)]
 mod document_index_tests;
-mod lanes;
-mod operations;
-pub(crate) mod mission_ivm;
-pub(crate) mod client_summary;
-mod unread_mail;
-mod agent_messages;
-mod coordination;
+pub mod lanes;
+pub mod operations;
+pub mod mission_ivm;
+pub mod client_summary;
+pub mod unread_mail;
+pub mod agent_messages;
+pub mod coordination;
 pub mod agent_view;
-mod conversation_reads;
-mod usage_period;
-mod runtime;
-pub(crate) mod published_views;
-pub(crate) mod published_list;
-pub(crate) mod mission_list;
-pub(crate) mod work_list;
+pub mod conversation_reads;
+pub mod usage_period;
+pub mod runtime;
+pub mod published_views;
+pub mod published_list;
+pub mod mission_list;
+pub mod work_list;
 #[cfg(test)]
 mod tombstones_tests;
 #[cfg(test)]
@@ -258,8 +256,8 @@ mod step_wait_tests;
 #[cfg(test)]
 mod work_renew_tests;
 pub use runtime::SmalltalkRuntime;
-#[cfg(test)]
-pub(crate) use smallclaims::sqlite::STATEMENTS_RUN;
+#[cfg(any(test, feature = "test-support"))]
+pub use smallclaims::sqlite::STATEMENTS_RUN;
 
 /// The graph's checkpoints with smalltalk's checkpoint rules beside them.
 pub mod checkpoint {
@@ -267,7 +265,7 @@ pub mod checkpoint {
     pub use smallclaims::store::checkpoint::*;
 
     /// Prove a drop plan on a copy of the store with smalltalk's projections and readers.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn prove_on_copy(
         copy: &std::path::Path,
         sealed: &SealedSet,
@@ -287,11 +285,11 @@ pub mod projection_digest {
     pub use smallclaims::store::projection_digest::*;
 
     /// The shared tables the projection digest covers.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub const TABLES: &[(&str, &[&str])] = super::PROJECTION_DIGEST_TABLES;
 
     /// Every shared table's digest, computed from the rows themselves.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn oracle(
         connection: &rusqlite::Connection,
     ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
@@ -318,7 +316,7 @@ struct UsageSpend {
 /// An agent's usage summary as a fold over its `harness.usage` claims in canonical order, kept
 /// between reads so a later read folds only the claims that sort after it.
 #[derive(Clone, Default)]
-pub(crate) struct UsageFold {
+pub struct UsageFold {
     spend: BTreeMap<String, UsageSpend>,
     context: Option<(u64, ContextUsage)>,
     saw: bool,
@@ -326,7 +324,7 @@ pub(crate) struct UsageFold {
 
 /// An agent's usage fold over every usage claim at or before `through`, with the accepted time
 /// of the last one it folded.
-pub(crate) struct CachedUsageFold {
+pub struct CachedUsageFold {
     through: u64,
     last_accepted: String,
     fold: UsageFold,
@@ -338,7 +336,7 @@ const USAGE_FOLD_WEIGHT: usize = 65_536;
 
 /// The usage folds a store keeps, by agent, and their total weight.
 #[derive(Default)]
-pub(crate) struct UsageFolds {
+pub struct UsageFolds {
     folds: HashMap<String, Arc<CachedUsageFold>>,
     weight: usize,
 }
@@ -1308,7 +1306,7 @@ const RUNTIME_SUBJECTS: &str = "WITH RECURSIVE runtime_subjects(subject) AS (
 
 /// The subjects from `?2` up to but not including `?3` with a claim at or before store index
 /// `?1`, in subject order, by one seek per subject in `claims_subject_index`.
-pub(crate) const RANGE_SUBJECTS: &str = "WITH RECURSIVE range_subjects(subject) AS (
+pub const RANGE_SUBJECTS: &str = "WITH RECURSIVE range_subjects(subject) AS (
          SELECT (SELECT subject FROM claims INDEXED BY claims_subject_index
                  WHERE subject>=?2 AND subject<?3 AND store_index<=?1 ORDER BY subject LIMIT 1)
          UNION ALL
@@ -1381,7 +1379,7 @@ fn runtime_subject(subject: &str) -> bool {
 /// generation gained one since an answer was read loses it. `conflicts` counts conflicting
 /// operations, which change a subject's status without a claim of its own.
 #[derive(Default)]
-pub(crate) struct SubjectCache {
+pub struct SubjectCache {
     through: u64,
     conflicts: u64,
     views: HashMap<String, ViewEntry>,
@@ -1407,7 +1405,7 @@ struct StatusEntry {
 /// One runtime's answer. It depends on the runtime's own claims and, for a declared runtime,
 /// on its owning run's and generation's, so it holds at every snapshot from the newest of
 /// those claims, `head`, while none of `owners` or the runtime itself gains another.
-struct ViewEntry {
+pub struct ViewEntry {
     head: u64,
     history: bool,
     /// Whether the answer used a declaration, and so the snapshot's owner state.
@@ -1434,8 +1432,8 @@ fn subject_head_at(connection: &Connection, subject: &str, store_index: u64) -> 
 /// run and generation may decide it; the snapshot reduction reads them from their claims. The
 /// roster reads many runtimes at once ([`Store::runtime_view_entries`]); this one-runtime read
 /// is what its parity tests compare it with.
-#[cfg(test)]
-fn runtime_view_entry(
+#[cfg(any(test, feature = "test-support"))]
+pub fn runtime_view_entry(
     connection: &Connection,
     subject: &str,
     store_index: u64,
@@ -1628,7 +1626,7 @@ fn subject_status_at(
         ClaimsReduction::Runtime => "status/reduction-runtime",
         ClaimsReduction::AgentCard => "status/reduction-agent-card",
     });
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     SUBJECT_REDUCTIONS.with(|reductions| reductions.set(reductions.get() + 1));
     if subject.starts_with("arrangement/") {
         if owner_filter.is_some() { return Ok(None); }
@@ -1653,7 +1651,7 @@ fn subject_status_at(
         }, None)));
     }
     let desired = desired_row_at(connection, subject, at_index)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(after_read) = STATUS_AFTER_DESIRED_READ.with(|slot| slot.borrow_mut().take()) {
         after_read();
     }
@@ -1908,7 +1906,7 @@ pub struct StepLabel {
 type AgentStatusEntry = (u64, u64, bool, ClaimsReduction, Arc<StatusResponse>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MissionGateRunner {
+pub struct MissionGateRunner {
     pub subject: String,
     pub host: String,
     pub owner_run: String,
@@ -1984,17 +1982,17 @@ const RETIRED_OWNED_INTAKE_SUBJECTS: &str = "SELECT desired.subject
      ORDER BY desired.subject";
 const ACTUAL_CACHE_LIMIT: usize = 4096;
 
-pub(crate) struct MessageCacheEntry {
+pub struct MessageCacheEntry {
     latest_claim_index: u64,
     desired_claim_id: Option<String>,
     view: MessageView,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Store {
     /// Hold every read connection the pool has, as a burst of long reads does, so a read
     /// inside has to open another.
-    pub(crate) fn hold_read_connections_for_test(&self, hold: impl FnOnce()) {
+    pub fn hold_read_connections_for_test(&self, hold: impl FnOnce()) {
         let idle_count = self
             .readers
             .idle
@@ -2006,14 +2004,14 @@ impl Store {
         drop(guards);
     }
 
-    pub(crate) fn hold_writer_for_test(&self, hold: impl FnOnce()) {
+    pub fn hold_writer_for_test(&self, hold: impl FnOnce()) {
         let _writer = self.connection.write();
         hold();
     }
 
     /// Record local observations as `append_claim` does, in one transaction: one commit, and
     /// so one sync to disk, instead of one for each observation.
-    pub(crate) fn append_local_observations_for_test(&self, inputs: &[ClaimInput]) {
+    pub fn append_local_observations_for_test(&self, inputs: &[ClaimInput]) {
         let mut connection = self.connection.write();
         let transaction = connection.transaction().unwrap();
         for input in inputs {
@@ -2029,7 +2027,7 @@ impl Store {
         transaction.commit().unwrap();
     }
 
-    pub(crate) fn hold_write_transaction_for_test(&self, hold: impl FnOnce()) {
+    pub fn hold_write_transaction_for_test(&self, hold: impl FnOnce()) {
         let mut writer = self.connection.write();
         let transaction = writer.transaction().unwrap();
         transaction
@@ -2043,7 +2041,7 @@ impl Store {
     }
 }
 
-struct ChildMissionContext {
+pub struct ChildMissionContext {
     root_revision: String,
     root_run_id: String,
     parent_step_run: String,
@@ -2309,7 +2307,7 @@ fn migrate_mission_run_deadlines(connection: &Connection) -> Result<()> {
 
 /// One repository item whose recorded facts changed, with the facts that changed. `deliver` says
 /// whether the change asks a subscription for a review or a triage.
-struct DiscoveredItem {
+pub struct DiscoveredItem {
     subject: String,
     kind: &'static str,
     facts: Value,
@@ -2642,7 +2640,7 @@ fn listed_head_tx(
 
 /// How a watch ended, when it did: the `subscription.watch-ended` claim for the watch that began
 /// at its `since`. Watching again begins a new watch.
-pub(crate) fn watch_ended_tx(
+pub fn watch_ended_tx(
     connection: &Connection,
     subject: &str,
     watch: &crate::model::WatchSpec,
@@ -2668,7 +2666,7 @@ pub(crate) fn watch_ended_tx(
 
 /// End a watch: why, and the final wake that told its seat, if one did. Ending it twice records
 /// nothing more.
-pub(crate) fn end_watch_tx(
+pub fn end_watch_tx(
     transaction: &rusqlite::Transaction<'_>,
     origin: &str,
     batch_id: Option<&str>,
@@ -2702,7 +2700,7 @@ pub(crate) fn end_watch_tx(
 }
 
 /// The seat that registered the comment or review `kind` `id` of a repository.
-pub(crate) fn github_post_agent_tx(
+pub fn github_post_agent_tx(
     connection: &Connection,
     locator: &str,
     kind: &str,
@@ -2825,13 +2823,13 @@ fn roster_local_frontier(connection: &Connection, index: u64) -> Result<u64> {
 }
 
 #[derive(Default)]
-struct AgentResourcesDelta {
+pub struct AgentResourcesDelta {
     subjects: BTreeSet<String>,
     queues: bool,
     membership: bool,
 }
 
-enum AgentResourcesChange {
+pub enum AgentResourcesChange {
     Delta(AgentResourcesDelta),
     Invalidated { reason: &'static str, detail: String },
 }
@@ -2861,7 +2859,7 @@ fn agent_resources_entry_hits(
 }
 
 /// The runs that wait on a person, and the open human gates among them.
-pub(crate) type HumanAttention = (BTreeSet<String>, Vec<st3_ui_model::missions::Gate>);
+pub type HumanAttention = (BTreeSet<String>, Vec<st3_ui_model::missions::Gate>);
 
 impl Store {
     /// The explicitly registered keyed views for this graph. This getter performs no reads
@@ -2907,16 +2905,16 @@ impl Store {
     }
 
     /// Simulate a different build's registry on this node.
-    #[cfg(test)]
-    pub(crate) fn set_claim_registry(&self, registry: st3_schema::Registry) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_claim_registry(&self, registry: st3_schema::Registry) {
         assert!(
             self.smalltalk.claim_registry.set(registry).is_ok(),
             "the registry is set once"
         );
     }
 
-    #[cfg(test)]
-    fn append_latest_observation(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn append_latest_observation(
         &self,
         input: &ClaimInput,
         now: u128,
@@ -2927,7 +2925,7 @@ impl Store {
 
     /// When this node committed its first claim after store index `after`, through `through`,
     /// in Unix ms; `None` when every claim between came from another node, or there is none.
-    pub(crate) fn first_local_commit_after(
+    pub fn first_local_commit_after(
         &self,
         after: u64,
         through: u64,
@@ -3018,7 +3016,7 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn cached_idempotency_response<T: DeserializeOwned>(
+    pub fn cached_idempotency_response<T: DeserializeOwned>(
         &self,
         key: &str,
     ) -> Result<Option<T>> {
@@ -3028,8 +3026,8 @@ impl Store {
             .map_err(Into::into)
     }
 
-    #[cfg(test)]
-    pub(crate) fn cache_idempotency_response<T: Serialize>(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cache_idempotency_response<T: Serialize>(
         &self,
         key: &str,
         response: &T,
@@ -3404,8 +3402,7 @@ impl Store {
 
     /// Internal commit-time guard. Runs after subject CAS checks, before publication writes,
     /// using the writer's current runtime and incarnation rather than preview evidence.
-    #[cfg_attr(not(test), expect(dead_code, reason = "The following refusal slice exposes this tested commit-time guard."))]
-    pub(crate) fn apply_as_checked(
+    pub fn apply_as_checked(
         &self,
         intent: &NormalizedIntent,
         expected: &BTreeMap<String, Vec<String>>,
@@ -3428,7 +3425,7 @@ impl Store {
 
     /// Atomically commit the declaration and its caller-facing completed response. Exact retries
     /// also repair the old split-response window without publishing another declaration.
-    pub(crate) fn apply_with_local_receipt<T: Serialize>(
+    pub fn apply_with_local_receipt<T: Serialize>(
         &self,
         intent: &NormalizedIntent,
         expected: &BTreeMap<String, Vec<String>>,
@@ -4341,7 +4338,7 @@ impl Store {
     }
 
     /// Append a scheduler failure receipt only while its operation and desired revision remain current.
-    pub(crate) fn append_observer_state(
+    pub fn append_observer_state(
         &self,
         input: &ClaimInput,
         desired_revision: &str,
@@ -4353,14 +4350,14 @@ impl Store {
         ).map(|(claim, _)| claim)
     }
 
-    pub(crate) fn append_claim_outcome(
+    pub fn append_claim_outcome(
         &self,
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), St3Error> {
         self.graph.append_claim_outcome(input)
     }
 
-    pub(crate) fn append_assistant_claim_outcome(
+    pub fn append_assistant_claim_outcome(
         &self,
         input: &ClaimInput,
         authorization: &assistant_write::AssistantWriteAuthorization,
@@ -4376,7 +4373,7 @@ impl Store {
             ClaimCommitContext { assistant: Some(authorization), ..Default::default() })
     }
 
-    pub(crate) fn append_claim_fenced_outcome(
+    pub fn append_claim_fenced_outcome(
         &self,
         input: &ClaimInput,
         fence: Option<&crate::mailbox::Fence>,
@@ -4439,7 +4436,7 @@ impl Store {
             .map(|(claim, _)| claim)
     }
 
-    pub(crate) fn append_client_claim_outcome(
+    pub fn append_client_claim_outcome(
         &self,
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), St3Error> {
@@ -5212,7 +5209,7 @@ impl Store {
     /// Each runtime's answer is kept until a claim it depends on arrives, so a view costs what
     /// it shows and what changed, not every runtime the store has ever held. `owners` says
     /// whether the reduction reads owners at the snapshot, as the answers here do.
-    pub(crate) fn current_view_candidates(
+    pub fn current_view_candidates(
         &self,
         connection: &Connection,
         subjects: BTreeSet<String>,
@@ -5288,14 +5285,14 @@ impl Store {
 
     /// Forget every kept reduction, after claims were deleted, repaired or replayed into the
     /// graph without arriving anew.
-    #[cfg(test)]
-    pub(crate) fn forget_current_views(&self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn forget_current_views(&self) {
         self.smalltalk.forget_views();
     }
 
     /// Append a claim in a write transaction that then rolls back, as a failed write does.
-    #[cfg(test)]
-    pub(crate) fn roll_back_claim_for_test(&self, input: &ClaimInput) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn roll_back_claim_for_test(&self, input: &ClaimInput) {
         let mut writer = self.connection.write();
         let transaction = writer.transaction().unwrap();
         append_claim_tx(&transaction, &self.origin, &input.subject, &input.kind,
@@ -5305,8 +5302,8 @@ impl Store {
     }
 
     /// Drop the history an agreed checkpoint at `cut` would drop on this node.
-    #[cfg(test)]
-    pub(crate) fn trim_checkpoint_for_test(&self, cut: u128) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trim_checkpoint_for_test(&self, cut: u128) -> usize {
         let plan = plan_drops(&self.checkpoint_sealed_set(cut).unwrap());
         let mut writer = self.connection.write();
         let transaction = writer.transaction().unwrap();
@@ -5318,7 +5315,7 @@ impl Store {
         plan.claims.len()
     }
 
-    pub(crate) fn status_for_subject_names_at(
+    pub fn status_for_subject_names_at(
         &self,
         subjects: BTreeSet<String>,
         store_index: u64,
@@ -5615,8 +5612,8 @@ impl Store {
         smallclaims::store::events::bounds(&self.readers.get())
     }
 
-    #[cfg(test)]
-    pub(crate) fn prune_events_before(&self, retain_from: u64) -> Result<usize> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn prune_events_before(&self, retain_from: u64) -> Result<usize> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         smallclaims::store::events::raise_resume_floor_tx(
@@ -5733,7 +5730,7 @@ impl Store {
     }
 
     /// Compare shared claims by canonical order, independent of replica arrival.
-    pub(crate) fn claim_is_after(&self, left: &str, right: &str) -> Result<bool> {
+    pub fn claim_is_after(&self, left: &str, right: &str) -> Result<bool> {
         let connection = self.readers.get();
         Ok(canonical::claim_key(&connection, left)? > canonical::claim_key(&connection, right)?)
     }
@@ -5988,8 +5985,8 @@ impl Store {
     }
 
     /// The current faults raised for `person` under the reviewer each one names, owners aside.
-    #[cfg(test)]
-    pub(crate) fn fault_items(&self, person: Option<&str>) -> Result<Vec<AttentionItemView>> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fault_items(&self, person: Option<&str>) -> Result<Vec<AttentionItemView>> {
         Ok(self
             .fault_snapshot(now_ms())?
             .into_iter()
@@ -6039,7 +6036,7 @@ impl Store {
     }
 
     /// Only seats whose durable resume requests name this host need transfer reconciliation.
-    pub(crate) fn cross_host_resume_targets(&self, host: &str) -> Result<BTreeSet<String>> {
+    pub fn cross_host_resume_targets(&self, host: &str) -> Result<BTreeSet<String>> {
         smallclaims::touched::note_read(|| "kind:runtime.action.requested".to_owned());
         let connection = self.readers.get();
         let mut query = connection.prepare_cached(
@@ -6244,7 +6241,7 @@ impl Store {
     }
     /// Resolve retained appends in one incarnation scan, without loading their bodies.
     /// Full store/local positions distinguish query omission from a missing append.
-    pub(crate) fn timeline_entry_append_positions_at(
+    pub fn timeline_entry_append_positions_at(
         &self,
         subject: &str,
         incarnation: &str,
@@ -6287,7 +6284,7 @@ impl Store {
 
     /// Resolve physical prefix coverage independently of the bounded timeline window.
     /// Read only typed truncation bounds, never materialize the omitted transcript bodies.
-    pub(crate) fn timeline_retention_is_explicit_at(
+    pub fn timeline_retention_is_explicit_at(
         &self,
         subject: &str,
         incarnation: &str,
@@ -6488,7 +6485,7 @@ impl Store {
     }
 
     /// Positive attachment proof under the indexed current-incarnation diagnostic fence.
-    pub(crate) fn claude_channel_attached(&self, subject: &str, incarnation: &str) -> Result<bool> {
+    pub fn claude_channel_attached(&self, subject: &str, incarnation: &str) -> Result<bool> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
         let body: Option<String> = connection
@@ -6663,8 +6660,8 @@ impl Store {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn replace_desired_member_for_test(&self, subject: &str, member: &str) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn replace_desired_member_for_test(&self, subject: &str, member: &str) {
         self.connection
             .lock()
             .unwrap()
@@ -6938,11 +6935,11 @@ fn ensure_awaited_mission_run_tx(
 
 /// The claim that changes who a run reports to after it started. Its latest one replaces what
 /// the creation claim recorded; one with no `report_to` means the run reports to nobody.
-pub(crate) const RUN_REPORT_KIND: &str = "mission-run.report-to";
+pub const RUN_REPORT_KIND: &str = "mission-run.report-to";
 
 /// The agent, stall limit and completion report that a report claim or a creation claim
 /// records, or `None` when it names no agent.
-pub(crate) fn run_report_fields(body: &Value) -> Option<(String, u64, bool, bool)> {
+pub fn run_report_fields(body: &Value) -> Option<(String, u64, bool, bool)> {
     let fields = body.get("fields").unwrap_or(body);
     Some((
         fields.get("report_to")?.as_str()?.to_owned(),
@@ -7766,7 +7763,7 @@ fn normalize_actor_for_publication(actor: &str) -> String {
 }
 
 #[derive(Clone)]
-struct DesiredRow {
+pub struct DesiredRow {
     kind: String,
     revision: String,
     claim_id: String,
@@ -8546,7 +8543,7 @@ pub const USAGE_RESPONSE_HORIZON_MS: u128 = 30 * 24 * 60 * 60 * 1000;
 
 /// The responses st remembered counting before it recorded when each was made. They become
 /// dated now, so they are forgotten one horizon after this upgrade.
-pub(crate) fn migrate_local_usage_seen(connection: &Connection) -> Result<()> {
+pub fn migrate_local_usage_seen(connection: &Connection) -> Result<()> {
     let legacy: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_usage_seen')",
         [],
@@ -10076,7 +10073,7 @@ fn validate_message_transition(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn append_claim_tx(
+pub fn append_claim_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     subject: &str,
@@ -11051,7 +11048,7 @@ fn change_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Change> {
 
 /// See [`Store::mailbox_watermark`].
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct MailboxWatermark {
+pub struct MailboxWatermark {
     index: u64,
     local: i64,
     owner: Option<(String, i64, bool)>,
@@ -12352,8 +12349,8 @@ fn message_canonical_key_row(
     ))
 }
 
-#[cfg(test)]
-fn message_canonical_key_query() -> &'static str {
+#[cfg(any(test, feature = "test-support"))]
+pub fn message_canonical_key_query() -> &'static str {
     // Requires the named index: create_schema installs it before reader-pool creation.
     // A dropped or renamed index makes preparation fail, rather than using a slower fallback.
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(
@@ -12372,8 +12369,8 @@ fn message_canonical_key_query() -> &'static str {
     &QUERY
 }
 
-#[cfg(test)]
-fn message_canonical_key_tx(connection: &Connection, subject: &str) -> Result<canonical::ClaimKey> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn message_canonical_key_tx(connection: &Connection, subject: &str) -> Result<canonical::ClaimKey> {
     // Select the earliest ID without a batch join. An absent batch for that ID is an error,
     // not permission to select a younger claim. Decode exactly the shared key's columns.
     let (time, writer, sequence, batch, position, id) = connection
@@ -13311,14 +13308,14 @@ fn operational_annotation(
 }
 
 /// How long a mission whose run failed or was cancelled stays in the current missions view.
-pub(crate) const RECENTLY_ENDED_MS: u128 = 24 * 60 * 60 * 1000;
+pub const RECENTLY_ENDED_MS: u128 = 24 * 60 * 60 * 1000;
 
 /// The condition of a broken exec gate's operational failure. Its item goes to the publisher of
 /// the run's mission revision: a person reads it in their attention, an agent as a fault.
-pub(crate) const GATE_BROKEN_CONDITION: &str = "gate-broken";
+pub const GATE_BROKEN_CONDITION: &str = "gate-broken";
 
 /// The earliest end that still counts as recent.
-pub(crate) fn recently_ended_since() -> u128 {
+pub fn recently_ended_since() -> u128 {
     now_ms().saturating_sub(RECENTLY_ENDED_MS)
 }
 
@@ -13555,30 +13552,30 @@ fn validate_replica_repair(
 #[cfg(test)]
 mod fleet_admission_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static SUBJECT_REDUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub static SUBJECT_REDUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static STATUS_AFTER_DESIRED_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Steps whose queue, timing and wake a read enriched, so a test can see a read's work.
-    pub(crate) static STEPS_ENRICHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub static STEPS_ENRICHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Pinned mission definitions a read parsed, so a test can see one parse serve a whole run.
-    pub(crate) static DEFINITIONS_PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub static DEFINITIONS_PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The SQLite work each work action did inside its writer job, by idempotency key, so a test
 /// can see what one action holds the single writer for.
-#[cfg(test)]
-pub(crate) static WORK_ACTION_WRITER_WORK: Mutex<
+#[cfg(any(test, feature = "test-support"))]
+pub static WORK_ACTION_WRITER_WORK: Mutex<
     BTreeMap<String, smallclaims::sqlite::work::SqliteWork>,
 > = Mutex::new(BTreeMap::new());
 
-#[cfg(test)]
-struct WorkActionWriterProbe {
+#[cfg(any(test, feature = "test-support"))]
+pub struct WorkActionWriterProbe {
     key: String,
     scope: Option<smallclaims::sqlite::work::SqliteWorkScope>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl WorkActionWriterProbe {
     fn start(key: &str) -> Self {
         Self {
@@ -13588,7 +13585,7 @@ impl WorkActionWriterProbe {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for WorkActionWriterProbe {
     fn drop(&mut self) {
         if let Some(scope) = self.scope.take() {
@@ -13600,9 +13597,9 @@ impl Drop for WorkActionWriterProbe {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn streamed_digest_matches_materialized_rows() {
+pub fn streamed_digest_matches_materialized_rows() {
     let connection = Connection::open_in_memory().unwrap();
     connection
         .execute_batch("CREATE TABLE digest_rows (value TEXT); INSERT INTO digest_rows VALUES ('one'), ('é'), ('');")
@@ -13630,9 +13627,9 @@ fn streamed_digest_matches_materialized_rows() {
     assert_eq!(streamed, hex::encode(digest.finalize()));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn a_receipt_measures_how_far_behind_this_node_is() {
+pub fn a_receipt_measures_how_far_behind_this_node_is() {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     for index in 0..1_200 {
@@ -13699,7 +13696,7 @@ fn a_receipt_measures_how_far_behind_this_node_is() {
     );
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Store {
     /// The store index the replicated projection last reached.
     fn projected_through(&self) -> u64 {
@@ -13714,9 +13711,9 @@ impl Store {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn a_peer_that_says_how_many_envelopes_it_takes_gets_pages_that_size() {
+pub fn a_peer_that_says_how_many_envelopes_it_takes_gets_pages_that_size() {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     for index in 0..5_000 {
@@ -13766,9 +13763,9 @@ fn a_peer_that_says_how_many_envelopes_it_takes_gets_pages_that_size() {
     assert_eq!(page.envelopes.len(), REPLICATION_PAGE_LIMIT as usize);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn a_catching_up_node_projects_once_per_interval_and_again_when_caught_up() {
+pub fn a_catching_up_node_projects_once_per_interval_and_again_when_caught_up() {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     for index in 0..1_800 {
@@ -13844,9 +13841,9 @@ fn a_catching_up_node_projects_once_per_interval_and_again_when_caught_up() {
 /// A member catching up receives thousands of envelopes in one exchange (#898). Admitting them
 /// in one transaction held the only writer for seconds, so every lease renewal and message
 /// behind it waited; admission now commits in chunks, and the writer serves others between them.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn a_large_page_is_admitted_in_chunks_that_release_the_writer() {
+pub fn a_large_page_is_admitted_in_chunks_that_release_the_writer() {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     source.bind_fleet(FLEET).unwrap();
@@ -13892,9 +13889,9 @@ fn a_large_page_is_admitted_in_chunks_that_release_the_writer() {
     );
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn catch_up_projection_cannot_clear_an_admission_deferred_after_its_index_read() {
+pub fn catch_up_projection_cannot_clear_an_admission_deferred_after_its_index_read() {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     source.bind_fleet(FLEET).unwrap();
@@ -13959,9 +13956,9 @@ fn catch_up_projection_cannot_clear_an_admission_deferred_after_its_index_read()
     assert_eq!(target.projected_through(), target.index().unwrap());
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn catch_up_projection_commits_frontiers_and_serves_writes_between_them() {
+pub fn catch_up_projection_commits_frontiers_and_serves_writes_between_them() {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     source.bind_fleet(FLEET).unwrap();
@@ -14039,9 +14036,9 @@ fn catch_up_projection_commits_frontiers_and_serves_writes_between_them() {
     );
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn batches_accepted_in_one_millisecond_extend_the_projection_without_a_replay() {
+pub fn batches_accepted_in_one_millisecond_extend_the_projection_without_a_replay() {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     source.bind_fleet(FLEET).unwrap();
@@ -14117,9 +14114,9 @@ fn batches_accepted_in_one_millisecond_extend_the_projection_without_a_replay() 
 /// node's own newer claims (#898). Each binding keeps the earliest claim of its version whatever
 /// order bindings arrive in, so it extends the projection without rebuilding every version, and
 /// the result is the one a replay from nothing gives.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn a_document_binding_that_arrives_out_of_order_does_not_rebuild_every_version() {
+pub fn a_document_binding_that_arrives_out_of_order_does_not_rebuild_every_version() {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     source.bind_fleet(FLEET).unwrap();
@@ -14212,7 +14209,7 @@ fn a_document_binding_that_arrives_out_of_order_does_not_rebuild_every_version()
     assert_eq!(documents(&target), incremental);
 }
 
-pub(crate) use crate::model::canonical_child_string;
+pub use crate::model::canonical_child_string;
 
 fn canonical_child_strings(value: &Value, name: &str) -> Vec<String> {
     value
@@ -14232,8 +14229,8 @@ fn canonical_child_strings(value: &Value, name: &str) -> Vec<String> {
         .collect()
 }
 
-#[cfg(test)]
-fn validate_replicated_claim(
+#[cfg(any(test, feature = "test-support"))]
+pub fn validate_replicated_claim(
     transaction: &Connection,
     batch: &ReplicaBatch,
     claim: &ClaimRecord,
@@ -14317,9 +14314,9 @@ fn classify_replicated_claim_with_registry(
     Ok(ReplicatedClaimAdmission::Valid)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn terminal_binding_replica_admission_rejects_a_foreign_actor() {
+pub fn terminal_binding_replica_admission_rejects_a_foreign_actor() {
     let store = Store::open_memory("orchid").unwrap();
     for (key, source) in [
         (
@@ -14778,7 +14775,7 @@ fn run_part_of_tx(
 /// the asks it owns, or a run started from the root, each with every run started from their steps
 /// and every ask they own, all the way down.
 fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), St3Error> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     let _span = crate::profile::span("projection/run-tree");
     crate::profile::note("projection: run tree part rebuilt");
@@ -14895,7 +14892,7 @@ fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), S
             }
         }
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     RUN_PART_RUNS.with(|count| count.set(count.get() + runs.len()));
     rebuild_runs_tx(transaction, &runs)
 }
@@ -15006,7 +15003,7 @@ fn claims_in_replay_order_tx(
 /// claims: forget its runs, generations, steps and proposals, then project its claims again in
 /// the replay's order and passes.
 fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<(), St3Error> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     let _span = crate::profile::span("projection/run-tree");
     crate::profile::note("projection: run tree rebuilt");
@@ -15135,19 +15132,19 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
     reapply_local_work_lease_renewals_tx(transaction)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Run trees this thread rebuilt from their own claims.
     static RUN_TREE_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Runs this thread rebuilt as parts of run trees whose root never ended.
     static RUN_PART_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Desired subjects, documents and missions this thread rebuilt from their own claims.
     static BASE_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -15165,7 +15162,7 @@ fn rebuild_base_aggregate_tx(
         Aggregate::RunTree(_) | Aggregate::RunPart(_) => return Ok(()),
     };
     crate::profile::note(&format!("projection: {kind} subject rebuilt"));
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     BASE_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     match aggregate {
         Aggregate::Desired(subject) => {
@@ -15234,8 +15231,8 @@ fn replay_needed(reason: &'static str) -> IncrementalProjection {
     IncrementalProjection::Replay(reason)
 }
 
-#[cfg(test)]
-fn try_project_all_simple_replication_tx(
+#[cfg(any(test, feature = "test-support"))]
+pub fn try_project_all_simple_replication_tx(
     transaction: &Transaction<'_>,
     origin: &str,
 ) -> Result<bool, St3Error> {
@@ -15802,7 +15799,7 @@ const REPLAYED_GRAPH_TABLES: [&str; 8] = [
 /// over the rows an earlier projection left behind depends on how that projection ran: it
 /// skipped a generation it had already projected, so it re-applied a terminal state that the
 /// generation had reopened. Two nodes holding the same claims then showed different graphs.
-fn replay_graph_from_nothing_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> {
+pub fn replay_graph_from_nothing_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> {
     replay_graph_from_nothing_with_progress_tx(transaction, &mut |_| {})
 }
 
@@ -17264,7 +17261,7 @@ impl SeatQueueInputs {
 /// run's status. It reads from the open runs to their steps, in that order: from the steps,
 /// SQLite reads every step any seat was ever assigned before it finds the open runs among them.
 /// Every seat's queue moves (`?2` null), or one seat's, that no repair replaced, in graph order.
-pub(crate) fn seat_queue_moves_query() -> String {
+pub fn seat_queue_moves_query() -> String {
     canonical_sql(
         "SELECT claims.id, claims.subject, claims.actor, claims.body, claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id
@@ -17278,7 +17275,7 @@ pub(crate) fn seat_queue_moves_query() -> String {
     )
 }
 
-pub(crate) fn seat_queue_joins_query() -> String {
+pub fn seat_queue_joins_query() -> String {
     format!(
         "SELECT step_runs.assignee, step_runs.run_id,
                 MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
@@ -17369,15 +17366,15 @@ fn seat_queue_inputs_tx(
     seat_queue_inputs_of_tx(connection, agent, None)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Named-run probes `seat_queue_inputs_of_tx` made on this thread, for tests.
     static NAMED_RUN_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// How many named-run probes this thread's seat-queue reads have made, for tests.
-#[cfg(test)]
-pub(crate) fn named_run_probes() -> usize {
+#[cfg(any(test, feature = "test-support"))]
+pub fn named_run_probes() -> usize {
     NAMED_RUN_PROBES.with(std::cell::Cell::get)
 }
 
@@ -17480,7 +17477,7 @@ fn seat_queue_inputs_of_tx(
             let Some(run_id) = run.strip_prefix("mission-run/") else {
                 continue;
             };
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             NAMED_RUN_PROBES.with(|probes| probes.set(probes.get() + 1));
             let joined = statement
                 .query_row(params![seat, run_id], |row| {
@@ -17638,7 +17635,7 @@ fn interpolate_selector(
     }
 }
 
-pub(crate) fn mission_run_variables(
+pub fn mission_run_variables(
     run: &MissionRunView,
     revision: &str,
 ) -> BTreeMap<String, String> {
@@ -17723,7 +17720,7 @@ fn interpolate_goals(
     serde_json::to_string(&goals).map_err(internal)
 }
 
-pub(crate) fn analyze_mission_revision(
+pub fn analyze_mission_revision(
     old: &MissionSpec,
     new: &MissionSpec,
     requester: &str,
@@ -18145,7 +18142,7 @@ fn flattened_dependencies(mission: &MissionSpec) -> BTreeMap<String, BTreeSet<St
     output
 }
 
-fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunView> {
+pub fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunView> {
     let lease: Option<String> = row.get(14)?;
     let not_before: Option<String> = row.get(16)?;
     let created: String = row.get(17)?;
@@ -18203,7 +18200,7 @@ fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunView> {
 }
 
 /// What `work extend` has added to one step attempt's execution budget as of `snapshot_unix_ms`.
-pub(crate) fn step_timeout_extension_at(
+pub fn step_timeout_extension_at(
     connection: &Connection,
     subject: &str,
     attempt: u32,
@@ -18224,7 +18221,7 @@ pub(crate) fn step_timeout_extension_at(
 
 /// The episode of one attempt's timeout fault. An extension starts a new episode, so a step that
 /// runs out of its extended budget faults again.
-pub(crate) fn step_timeout_episode(subject: &str, attempt: u32, extension_ms: u64) -> String {
+pub fn step_timeout_episode(subject: &str, attempt: u32, extension_ms: u64) -> String {
     let key = format!("step-timeout:{subject}:{attempt}:{extension_ms}");
     let digest = hex::encode(Sha256::digest(key.as_bytes()));
     format!("attention/{}", &digest[..32])
@@ -18250,7 +18247,7 @@ fn enrich_step_queue_cached(
     snapshot_unix_ms: u128,
     definitions: &mut PinnedDefinitions,
 ) -> rusqlite::Result<()> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     STEPS_ENRICHED.with(|enriched| enriched.set(enriched.get() + 1));
     apply_effective_step_state(connection, view, snapshot_unix_ms)?;
     let timing = step_execution_clock_at(
@@ -18389,8 +18386,8 @@ fn enrich_step_summaries_at(
     Ok(())
 }
 
-#[cfg(test)]
-fn enrich_step_queue_for_reconcile_at(
+#[cfg(any(test, feature = "test-support"))]
+pub fn enrich_step_queue_for_reconcile_at(
     connection: &Connection,
     view: &mut StepRunView,
     snapshot_unix_ms: u128,
@@ -18461,7 +18458,7 @@ impl PinnedDefinitions {
         generation: &str,
     ) -> rusqlite::Result<Option<&MissionSpec>> {
         if !self.0.contains_key(generation) {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             DEFINITIONS_PARSED.with(|parsed| parsed.set(parsed.get() + 1));
             let mission = pinned_generation_mission_tx(connection, generation)?;
             self.0.insert(generation.to_owned(), mission);
@@ -18787,8 +18784,8 @@ fn harness_incarnation_for_key_at(
     Ok(None)
 }
 
-#[cfg(test)]
-fn step_execution_timing_at(
+#[cfg(any(test, feature = "test-support"))]
+pub fn step_execution_timing_at(
     connection: &Connection,
     subject: &str,
     attempt: u32,
@@ -18821,7 +18818,7 @@ fn step_execution_clock_at(
 /// The lease that bounds the open execution interval of `subject`'s `attempt` as of
 /// `snapshot_unix_ms`, as its claims last named it, when an interval is open under one. A
 /// quiet renewal moves the step's lease without a claim, never this one.
-pub(crate) fn step_timing_lease_at(
+pub fn step_timing_lease_at(
     connection: &Connection,
     subject: &str,
     attempt: u32,
@@ -18832,7 +18829,7 @@ pub(crate) fn step_timing_lease_at(
     Ok(started.and(lease))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static STEP_TIMING_FOLD_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -18842,7 +18839,7 @@ fn step_timing_events(
     connection: &Connection,
     subject: &str,
 ) -> rusqlite::Result<Vec<(String, Value, u128)>> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     STEP_TIMING_FOLD_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut statement = connection.prepare(&canonical_sql(
         "SELECT claims.kind, claims.body, claims.accepted_at_unix_ms
@@ -18875,7 +18872,7 @@ fn step_timing_events(
 
 /// A step's execution timing as of one snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct StepTiming {
+pub struct StepTiming {
     /// The start of the interval that is running now.
     pub started: Option<u128>,
     /// What earlier intervals and the running one have used.
@@ -18903,7 +18900,7 @@ fn end_wait(
 /// interval of `attempt` as of `snapshot_unix_ms`, and the time elapsed in earlier intervals.
 /// An interval closes when the next event arrives after its lease expiry. The checkpoint
 /// planner replays the same fold, so it keeps every renewal the answer depends on.
-pub(crate) fn fold_step_timing(
+pub fn fold_step_timing(
     events: &[(String, Value, u128)],
     attempt: u32,
     snapshot_unix_ms: u128,
@@ -18918,7 +18915,7 @@ pub(crate) fn fold_step_timing(
 /// `clock: "running"` reopens it, or until its `wait_until_unix_ms`, whichever comes first, so a
 /// seat that never resumes cannot hide a hung step. Renewals and ordinary progress during a wait
 /// keep the lease and leave the clock stopped.
-pub(crate) fn fold_step_clock(
+pub fn fold_step_clock(
     events: &[(String, Value, u128)],
     attempt: u32,
     snapshot_unix_ms: u128,
@@ -20098,7 +20095,7 @@ fn mission_run_view_and_definition_tx(
 
 /// The outcome someone set on a finished run: its latest state claim when that claim moved it
 /// from one terminal state to another, together with the state it replaced.
-fn mission_run_outcome_tx(
+pub fn mission_run_outcome_tx(
     connection: &Connection,
     run: &MissionRunView,
 ) -> rusqlite::Result<Option<MissionRunOutcomeView>> {
@@ -20171,7 +20168,7 @@ fn open_mission_run_headers_query() -> String {
     )
 }
 
-fn mission_run_header_tx(
+pub fn mission_run_header_tx(
     connection: &Connection,
     run_id: &str,
 ) -> rusqlite::Result<MissionRunView> {
@@ -20219,7 +20216,7 @@ fn mission_run_header_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Miss
     })
 }
 
-fn loop_run_views_tx(
+pub fn loop_run_views_tx(
     connection: &Connection,
     run: &MissionRunView,
 ) -> rusqlite::Result<Vec<LoopRunView>> {
@@ -20426,12 +20423,12 @@ fn revision_cutover_name(cutover: &RevisionCutover) -> &'static str {
     }
 }
 
-fn generation_id_from_subject(subject: &str) -> &str {
+pub fn generation_id_from_subject(subject: &str) -> &str {
     subject.strip_prefix("run-generation/").unwrap_or(subject)
 }
 
-#[cfg(test)]
-pub(crate) fn expire_work_lease_by_claim(store: &Store, subject: &str, actor: &str, incarnation: &str) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn expire_work_lease_by_claim(store: &Store, subject: &str, actor: &str, incarnation: &str) {
     let current = store.step_run(subject).unwrap().unwrap();
     let mut connection = store.connection.lock().unwrap();
     let transaction = connection.transaction().unwrap();
@@ -20535,9 +20532,9 @@ const GRAPH_DIGEST_TABLES: [smallclaims::store::runtime::LegacyDigestTable; 6] =
     ),
 ];
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Store {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn import_replication(
         &self,
         relay: &str,
@@ -20719,7 +20716,7 @@ impl Store {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn verify_replica_batch(batch: &ReplicaBatch) -> Result<(), St3Error> {
     verify_replica_batch_header(batch)?;
     for claim in &batch.claims {
@@ -20786,7 +20783,7 @@ fn check_observer_completion(
     Ok(())
 }
 
-pub(crate) fn append_claim_fenced_outcome(
+pub fn append_claim_fenced_outcome(
     graph: &GraphStore,
     input: &ClaimInput,
     fence: Option<&crate::mailbox::Fence>,
@@ -21222,8 +21219,8 @@ fn append_local_observation_fenced(
 /// Record an observation of `latest` retention. The local observation log keeps every
 /// one. The replicated claim log gets a claim only when the observed state changes; the
 /// returned record is that claim, or the local observation when nothing replicated.
-#[cfg(test)]
-fn append_latest_observation(
+#[cfg(any(test, feature = "test-support"))]
+pub fn append_latest_observation(
     graph: &GraphStore,
     input: &ClaimInput,
     now: u128,
@@ -21340,9 +21337,9 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("planning_previews", &[]),
 ];
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn unchanged_replication_snapshot_reuses_inventory() {
+pub fn unchanged_replication_snapshot_reuses_inventory() {
     let store = Store::open_memory("node").unwrap();
     let first = store.replication_snapshot().unwrap();
     let second = store.replication_snapshot().unwrap();
@@ -21356,9 +21353,9 @@ fn unchanged_replication_snapshot_reuses_inventory() {
     );
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn replication_snapshot_moves_an_exclusive_inventory_into_its_successor() {
+pub fn replication_snapshot_moves_an_exclusive_inventory_into_its_successor() {
     let store = Store::open_memory("node").unwrap();
     for index in 0..5 {
         store
@@ -21399,9 +21396,9 @@ fn replication_snapshot_moves_an_exclusive_inventory_into_its_successor() {
     assert_eq!(successor.inventory.envelopes.as_ptr(), buffer);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn replication_snapshot_inserts_new_envelopes_in_canonical_order() {
+pub fn replication_snapshot_inserts_new_envelopes_in_canonical_order() {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let target = Store::open_memory("z").unwrap();
     let initial = target.replication_snapshot().unwrap();
@@ -21460,9 +21457,9 @@ fn replication_snapshot_inserts_new_envelopes_in_canonical_order() {
     assert_eq!(incremental.buckets, test_replication_buckets(&full));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn replication_snapshot_keeps_compact_envelope_identifiers() {
+pub fn replication_snapshot_keeps_compact_envelope_identifiers() {
     assert_eq!(std::mem::size_of::<CompactEnvelopeId>(), 48);
     let store = Store::open_memory("node").unwrap();
     for index in 0..100 {
@@ -21490,9 +21487,9 @@ fn replication_snapshot_keeps_compact_envelope_identifiers() {
     );
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[test]
-fn a_malformed_peer_hash_does_not_stop_replication() {
+pub fn a_malformed_peer_hash_does_not_stop_replication() {
     const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
     let target = Store::open_memory("target").unwrap();

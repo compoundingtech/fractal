@@ -68,7 +68,7 @@ END;
 COMMIT;
 "#;
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(SCHEMA)?;
     let filled: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key='unread_mail_prefixes')",
@@ -124,7 +124,7 @@ fn flush_pending(connection: &Connection) -> Result<()> {
 
 /// A pinned diagnostic snapshot cannot write. Apply the queued subjects' exact delta
 /// to that snapshot's cached count without changing either the snapshot or the queue.
-pub(super) fn count_in_snapshot(connection: &Connection, before_unix_ms: u128) -> Result<u64> {
+pub fn count_in_snapshot(connection: &Connection, before_unix_ms: u128) -> Result<u64> {
     let before = i64::try_from(before_unix_ms).unwrap_or(i64::MAX);
     let base: i64 = connection
         .prepare_cached(COUNT_SQL)?
@@ -148,14 +148,14 @@ pub(super) fn count_in_snapshot(connection: &Connection, before_unix_ms: u128) -
 
 /// At most 128 oldest unoffered held subjects, selected from indexed metadata.
 /// Only these bounded subjects have their sender/recipient/tags read; a reader never writes.
-pub(super) struct UnreadSent {
+pub struct UnreadSent {
     pub to: String,
     pub from: String,
     pub tags: Vec<String>,
     pub sent_unix_ms: u128,
 }
 
-pub(super) fn sent_before(connection: &Connection, before_unix_ms: u128) -> Result<Vec<UnreadSent>> {
+pub fn sent_before(connection: &Connection, before_unix_ms: u128) -> Result<Vec<UnreadSent>> {
     let before = i64::try_from(before_unix_ms).unwrap_or(i64::MAX);
     let mut statement = connection.prepare_cached(
         "SELECT json_extract(sent.body,'$.fields.to'), json_extract(sent.body,'$.fields.from'),
@@ -186,7 +186,7 @@ pub(super) fn sent_before(connection: &Connection, before_unix_ms: u128) -> Resu
     Ok(sent)
 }
 
-pub(super) fn count_before(transaction: &Transaction<'_>, before_unix_ms: u128) -> Result<u64> {
+pub fn count_before(transaction: &Transaction<'_>, before_unix_ms: u128) -> Result<u64> {
     // The caller holds one writer transaction: pending changes and their exact age count
     // become visible together, and a concurrent message cannot disappear between the two.
     flush_pending(transaction)?;

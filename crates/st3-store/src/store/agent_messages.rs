@@ -3,8 +3,8 @@
 use super::*;
 use serde::Deserialize;
 
-pub(super) const DAY_MS: u64 = 86_400_000;
-pub(super) struct DailyUsage {
+pub const DAY_MS: u64 = 86_400_000;
+pub struct DailyUsage {
     pub since: u64,
     pub until: u64,
     pub cost: u64,
@@ -51,12 +51,12 @@ CREATE TRIGGER IF NOT EXISTS agent_message_send_delete AFTER DELETE ON agent_mes
 END;
 "#;
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(SCHEMA)?;
     Ok(())
 }
 
-pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
+pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     let filled: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key='agent_message_days_v1')",
         [],
@@ -97,7 +97,7 @@ fn eligible(fields: &Value) -> bool {
     from.starts_with("agent/") && to.starts_with("agent/") && !synthetic(fields)
 }
 
-pub(super) fn synthetic(fields: &Value) -> bool {
+pub fn synthetic(fields: &Value) -> bool {
     let from = fields["from"].as_str().unwrap_or_default();
     let to = fields["to"].as_str().unwrap_or_default();
     if [from, to]
@@ -147,7 +147,7 @@ pub(super) fn synthetic(fields: &Value) -> bool {
     })
 }
 
-pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
+pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
     let synced = flush_with_coordination(transaction, true)?;
     coordination::cover_synced_sends(transaction, &synced)
 }
@@ -228,7 +228,7 @@ struct Calibration {
 }
 
 /// At most the last 31 UTC days, clipped to the requested period. Zero-message days stay.
-pub(super) fn windows(since: u64, until: u64) -> Vec<(u64, u64)> {
+pub fn windows(since: u64, until: u64) -> Vec<(u64, u64)> {
     if since >= until {
         return Vec::new();
     }
@@ -241,7 +241,7 @@ pub(super) fn windows(since: u64, until: u64) -> Vec<(u64, u64)> {
 }
 
 impl Store {
-    pub(super) fn agent_message_estimate(&self, days: &[DailyUsage]) -> Result<Value> {
+    pub fn agent_message_estimate(&self, days: &[DailyUsage]) -> Result<Value> {
         let connection = self.readers.get();
         let calibration: Option<(String, Vec<u8>)> = connection
             .query_row(

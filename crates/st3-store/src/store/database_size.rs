@@ -74,7 +74,7 @@ fn physical_growth(samples: &[Sample], now: u128, physical: u64) -> Option<(i64,
 }
 
 /// The daily growth `samples` show at `now` for `live` bytes, and the span it was measured over.
-pub(crate) fn growth(samples: &[(u128, u64, u64)], now: u128, live: u64) -> Option<(i64, u128)> {
+pub fn growth(samples: &[(u128, u64, u64)], now: u128, live: u64) -> Option<(i64, u128)> {
     let day_ago = now.saturating_sub(DAY_MS);
     // The newest sample at least a day old, or else the oldest sample.
     let (at, then, _) = samples

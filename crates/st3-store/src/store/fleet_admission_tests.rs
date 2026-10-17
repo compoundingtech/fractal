@@ -3,11 +3,11 @@ use crate::fleet::{MemberKey, MemberState, envelope_signature_message, verify_si
 
 const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 
-pub(super) fn key() -> Arc<MemberKey> {
+pub fn key() -> Arc<MemberKey> {
     Arc::new(MemberKey::generate().unwrap().0)
 }
 
-pub(super) fn node(name: &str, key: Option<&Arc<MemberKey>>, anchor: Option<&Arc<MemberKey>>) -> Store {
+pub fn node(name: &str, key: Option<&Arc<MemberKey>>, anchor: Option<&Arc<MemberKey>>) -> Store {
     let store = Store::open_memory(name).unwrap();
     store.bind_fleet(FLEET).unwrap();
     if let Some(anchor) = anchor {
@@ -42,7 +42,7 @@ fn note(store: &Store, text: &str) -> ClaimRecord {
     )
 }
 
-pub(super) fn admit(by: &Store, name: &str, member: &MemberKey, via: &str, floor: Option<u64>) {
+pub fn admit(by: &Store, name: &str, member: &MemberKey, via: &str, floor: Option<u64>) {
     let mut fields = json!({
         "fleet_id": FLEET,
         "member_key": member.public(),
@@ -67,7 +67,7 @@ fn remove(by: &Store, name: &str, member: Option<&MemberKey>, high_water: u64) {
 }
 
 /// One exchange from `from` to `to`, then admission and projection on `to`.
-pub(super) fn sync(from: &Store, to: &Store) -> ReplicationAdmission {
+pub fn sync(from: &Store, to: &Store) -> ReplicationAdmission {
     let exchange = from
         .export_replication_exchange_answering(
             FLEET,

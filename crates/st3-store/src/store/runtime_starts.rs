@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+pub fn create_schema(connection: &Connection) -> Result<()> {
     let transaction = connection.unchecked_transaction()?;
     let has_subject_epochs: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_runtime_start_observation_subjects')",
@@ -123,7 +123,7 @@ thread_local! {
 
 /// Physical captures are synchronous and thread-scoped. Never carry the witness
 /// to another thread or allow a nested capture to erase its predecessor.
-pub(crate) struct RuntimeObservationCapture {
+pub struct RuntimeObservationCapture {
     previous: Option<(std::path::PathBuf, u64)>,
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
@@ -350,7 +350,7 @@ fn closed_runtime_start_result(
 }
 
 impl Store {
-    pub(crate) fn capture_runtime_observations(&self) -> Result<RuntimeObservationCapture> {
+    pub fn capture_runtime_observations(&self) -> Result<RuntimeObservationCapture> {
         let epoch = self.readers.get().query_row(
             "SELECT value FROM local_runtime_start_observation_generation WHERE id=1",
             [],
@@ -367,7 +367,7 @@ impl Store {
     /// A late physical snapshot cannot turn the prior target into a replacement
     /// for a newly verified launch. Admission order comes from the exact local
     /// request position, never UUID creation time or claim publication time.
-    pub(crate) fn append_reconciled_runtime_observation(
+    pub fn append_reconciled_runtime_observation(
         &self,
         input: &ClaimInput,
     ) -> Result<Option<ClaimRecord>> {
@@ -439,7 +439,7 @@ impl Store {
 
     /// Revocation, declaration selection and all launch receipts linearize in one short
     /// writer transaction. A stale completion cannot leave a success/starting receipt.
-    pub(crate) fn apply_runtime_start_result(
+    pub fn apply_runtime_start_result(
         &self,
         id: &str,
         inputs: &[ClaimInput],
@@ -758,7 +758,7 @@ impl Store {
 
     /// Point-read the exact admitted request snapshot at the physical boundary.
     /// Trim pins do not authorize launching after a repair or source retraction.
-    pub(crate) fn runtime_start_request_retained(&self, expected: &ClaimRecord) -> Result<bool> {
+    pub fn runtime_start_request_retained(&self, expected: &ClaimRecord) -> Result<bool> {
         let connection = self.readers.get();
         let actual = retained_runtime_start_request(&connection, self.origin(), &expected.id)?;
         Ok(actual.is_some_and(|actual| same_runtime_start_request(&actual, expected)))
@@ -969,7 +969,7 @@ impl Store {
 
     /// Revocation alone cannot close a dispatched worker. Decide this under the
     /// same writer that dispatch uses, before retaining never-dispatched proof.
-    pub(crate) fn cancel_undispatched_runtime_start(&self, id: &str) -> Result<bool> {
+    pub fn cancel_undispatched_runtime_start(&self, id: &str) -> Result<bool> {
         self.connection.batched(|tx| -> Result<bool> {
             let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
             if operation.dispatched || operation.finished || operation.revoked_by.is_none() { return Ok(false); }
@@ -982,7 +982,7 @@ impl Store {
     }
 
     /// Called only after a positive exact-operation producer closure check.
-    pub(crate) fn retain_runtime_start_producer_closed(&self, id: &str) -> Result<()> {
+    pub fn retain_runtime_start_producer_closed(&self, id: &str) -> Result<()> {
         self.connection
             .batched(|tx| -> Result<()> {
                 let operation =
@@ -1013,7 +1013,7 @@ impl Store {
     }
 
     /// An exact physical ending witness is retained separately from launch success.
-    pub(crate) fn retain_runtime_start_ended(
+    pub fn retain_runtime_start_ended(
         &self,
         id: &str,
         incarnation: &str,
@@ -1059,7 +1059,7 @@ impl Store {
             .map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
-    pub(crate) fn verify_runtime_start(&self, id: &str, incarnation: &str) -> Result<bool> {
+    pub fn verify_runtime_start(&self, id: &str, incarnation: &str) -> Result<bool> {
         self.connection.batched(|tx| -> Result<bool> {
             Ok(tx.execute(
                 "UPDATE local_runtime_starts SET result=json_set(result,
@@ -1070,7 +1070,7 @@ impl Store {
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
-    pub(crate) fn close_unverified_runtime_start(&self, id: &str) -> Result<bool> {
+    pub fn close_unverified_runtime_start(&self, id: &str) -> Result<bool> {
         self.connection
             .batched(|tx| -> Result<bool> {
                 let operation =
@@ -1119,7 +1119,7 @@ impl Store {
 
     /// Commit a positive, exact-incarnation physical retirement receipt and its
     /// ledger proof together. This is never called for a signal-only stop.
-    pub(crate) fn apply_runtime_start_retirement(
+    pub fn apply_runtime_start_retirement(
         &self,
         id: &str,
         incarnation: &str,

@@ -3,7 +3,7 @@ use super::*;
 impl Store {
     /// Classify the bounded claim interval by the dependencies that cards actually read.
     /// Unknown or structural claims still cold-build; queue changes are diffed separately.
-    pub(super) fn changed_agent_resources(
+    pub fn changed_agent_resources(
         &self,
         after: u64,
         through: u64,
@@ -122,7 +122,7 @@ impl Store {
 
     /// An allow-list for shallow refs, narrower than card-local invalidation: runtime status
     /// can move an undeclared or stopped agent into history, so runtime.observed is not safe.
-    pub(super) fn agent_page_refs_unchanged(&self, after: u64, through: u64, refs: &[Value]) -> Result<bool> {
+    pub fn agent_page_refs_unchanged(&self, after: u64, through: u64, refs: &[Value]) -> Result<bool> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT subject, kind FROM claims WHERE store_index>?1 AND store_index<=?2",
@@ -148,7 +148,7 @@ impl Store {
     /// The last claim that can change an agent's status: one about an agent, or about the run
     /// or generation that owns it, whose row decides the agent's projection layer. Steps,
     /// gates, subscriptions and diagnostics commit far more often and change no agent status.
-    pub(super) fn agent_status_index(&self, snapshot_index: u64) -> Result<u64> {
+    pub fn agent_status_index(&self, snapshot_index: u64) -> Result<u64> {
         // Walk back from the snapshot: about one recent claim in ten matches, so this stops
         // after a few rows instead of scanning every agent observation. The unary `+` keeps
         // SQLite from answering the three patterns from the subject index instead, which reads
@@ -160,18 +160,18 @@ impl Store {
             .unwrap_or_default())
     }
 
-    #[cfg(test)]
-    pub(crate) fn agent_resources_builds_for_test(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn agent_resources_builds_for_test(&self) -> usize {
         self.smalltalk.agent_resources_builds.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The most cards one projection call folded since the store opened.
-    #[cfg(test)]
-    pub(crate) fn agent_resources_largest_fold_for_test(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn agent_resources_largest_fold_for_test(&self) -> usize {
         self.smalltalk.agent_resources_largest_fold.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    pub(crate) fn cached_agent_resources(
+    pub fn cached_agent_resources(
         &self,
         index: u64,
         history: bool,
@@ -180,25 +180,25 @@ impl Store {
         self.cached_agent_resources_for(index, history, None, build)
     }
 
-    pub(crate) fn begin_agent_roster_fault_retries(&self, history: bool) {
+    pub fn begin_agent_roster_fault_retries(&self, history: bool) {
         let mut retries = self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned");
         let mode = usize::from(history);
         let mut pending = std::mem::take(&mut retries.pending[mode]);
         retries.due[mode].append(&mut pending);
     }
 
-    pub(crate) fn agent_roster_fault_retries(&self, history: bool) -> BTreeSet<String> {
+    pub fn agent_roster_fault_retries(&self, history: bool) -> BTreeSet<String> {
         self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned")
             .due[usize::from(history)].clone()
     }
 
-    pub(super) fn agent_roster_faults_pending(&self, history: bool) -> bool {
+    pub fn agent_roster_faults_pending(&self, history: bool) -> bool {
         let retries = self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned");
         let mode = usize::from(history);
         !retries.due[mode].is_empty() || !retries.pending[mode].is_empty()
     }
 
-    pub(crate) fn record_agent_roster_fault_read(
+    pub fn record_agent_roster_fault_read(
         &self, history: bool, subjects: &[String], deadline: bool,
         selected: Option<&BTreeSet<String>>,
     ) {
@@ -216,11 +216,11 @@ impl Store {
     }
 
     /// Only a failed latest attempt with no newer attempt in flight permits immediate fallback.
-    pub(crate) fn agent_roster_refresh_failed(&self) -> bool {
+    pub fn agent_roster_refresh_failed(&self) -> bool {
         self.smalltalk.agent_roster_attempt.load(std::sync::atomic::Ordering::Acquire) == 2
     }
 
-    pub(crate) fn previous_agent_faults(
+    pub fn previous_agent_faults(
         &self, index: u64, history: bool, subjects: &[String],
     ) -> BTreeMap<String, Value> {
         let subjects = subjects.iter().map(String::as_str).collect::<HashSet<_>>();
@@ -240,7 +240,7 @@ impl Store {
     }
 
     /// An agents WS window inherits the queue deadline from its selected or complete projection.
-    pub(crate) fn agent_roster_valid_until(&self, index: u64) -> Option<u128> {
+    pub fn agent_roster_valid_until(&self, index: u64) -> Option<u128> {
         self.smalltalk.agent_resources_cache.lock()
             .expect("agent resources cache poisoned").iter().rev()
             .find(|entry| entry.index == index && !entry.history)
@@ -249,7 +249,7 @@ impl Store {
 
     /// Register the one task that keeps the complete roster published, and return its wake.
     /// `None` when one is already registered.
-    pub(crate) fn start_agent_roster_refresher(&self) -> Option<Arc<tokio::sync::Notify>> {
+    pub fn start_agent_roster_refresher(&self) -> Option<Arc<tokio::sync::Notify>> {
         let wake = Arc::new(tokio::sync::Notify::new());
         self.smalltalk.agent_roster_refresh.set(Arc::clone(&wake)).ok()?;
         Some(wake)
@@ -259,7 +259,7 @@ impl Store {
     /// newest rows, complete or partial, say which cards changed since, and together with the
     /// agents they do not cover yet those are no more than `bound`. Otherwise why not. Read in
     /// the snapshot that folds.
-    pub(crate) fn agent_roster_unbounded_because(
+    pub fn agent_roster_unbounded_because(
         &self,
         index: u64,
         history: bool,
@@ -303,7 +303,7 @@ impl Store {
     }
 
     /// Count one roster assembled in chunks because no short fold could complete it, by why.
-    pub(crate) fn note_agent_roster_chunked(&self, reason: &str) {
+    pub fn note_agent_roster_chunked(&self, reason: &str) {
         crate::performance::record_request("roster/chunked-assembly", None, std::time::Duration::ZERO);
         *self.smalltalk.agent_roster_chunked.lock().expect("roster counts poisoned")
             .entry(reason.to_owned()).or_default() += 1;
@@ -316,7 +316,7 @@ impl Store {
 
     /// Whether the newest complete roster already is the one at `index`: same graph cut,
     /// same local activity, and no queue deadline passed since. A refresh would fold nothing.
-    pub(crate) fn agent_roster_current(&self, index: u64, history: bool) -> Result<bool> {
+    pub fn agent_roster_current(&self, index: u64, history: bool) -> Result<bool> {
         if self.agent_roster_faults_pending(history) { return Ok(false); }
         let local = roster_local_frontier(&self.readers.get(), index)?;
         let now = now_ms();
@@ -331,7 +331,7 @@ impl Store {
     /// rather than the newest one when the proof happens to run. No fold or write occurs.
     /// Keep the original wait predicate above unchanged: this is an additional observation
     /// for the served rows, not a new freshness/refresh admission policy.
-    pub(crate) fn served_agent_roster_unchanged_through(
+    pub fn served_agent_roster_unchanged_through(
         &self,
         through: u64,
         history: bool,
@@ -383,13 +383,13 @@ impl Store {
     }
 
     /// Note that an agents list read asked for the roster now, so a forget refolds it at once.
-    pub(crate) fn note_agent_roster_read(&self) {
+    pub fn note_agent_roster_read(&self) {
         self.smalltalk.agent_roster_read_at.store(now_ms() as u64, std::sync::atomic::Ordering::Release);
     }
 
     /// Ask the refresher, if one runs, to publish the roster at the newest cut. Requests made
     /// while it folds coalesce into one more refresh.
-    pub(crate) fn request_agent_roster_refresh(&self) {
+    pub fn request_agent_roster_refresh(&self) {
         if let Some(wake) = self.smalltalk.agent_roster_refresh.get() {
             let _ = self.smalltalk.agent_roster_requested_at.compare_exchange(
                 0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
@@ -400,7 +400,7 @@ impl Store {
     }
 
     /// Ask the refresher, if one runs, to also publish the history roster.
-    pub(crate) fn request_agent_roster_history(&self) {
+    pub fn request_agent_roster_history(&self) {
         self.smalltalk.agent_roster_history_wanted.store(true, std::sync::atomic::Ordering::Release);
         self.request_agent_roster_refresh();
     }
@@ -408,7 +408,7 @@ impl Store {
     /// Ask the refresher, if one runs, for a roster at the newest cut on behalf of a reader that
     /// waits for it: a refresher pausing between refreshes stops pausing once it has paused as
     /// long as its last refresh took, and at least a tenth of a second.
-    pub(crate) fn request_fresh_agent_roster(&self, history: bool) {
+    pub fn request_fresh_agent_roster(&self, history: bool) {
         if self.smalltalk.agent_roster_refresh.get().is_none() {
             return;
         }
@@ -422,19 +422,19 @@ impl Store {
 
     /// Resolves once a reader waits for a fresh roster, including one that asked before this
     /// was called and was not yet answered by a refresh's pause.
-    pub(crate) async fn fresh_agent_roster_wanted(&self) {
+    pub async fn fresh_agent_roster_wanted(&self) {
         self.smalltalk.agent_roster_fresh_wanted.notified().await;
     }
 
     /// Whether a reader asked for the history roster since the last time this was taken.
-    pub(crate) fn take_agent_roster_history_request(&self) -> bool {
+    pub fn take_agent_roster_history_request(&self) -> bool {
         self.smalltalk.agent_roster_history_wanted.swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
     /// Say once when a refresh request has gone unanswered so long that the refresher must be
     /// slow, failing or stopped. Readers keep serving the newest publication, which carries its
     /// own cut and publication time, rather than refusing rows that exist.
-    pub(super) fn warn_if_agent_roster_overdue(&self) {
+    pub fn warn_if_agent_roster_overdue(&self) {
         let requested = self.smalltalk.agent_roster_requested_at.load(std::sync::atomic::Ordering::Acquire);
         let waited = (now_ms() as u64).saturating_sub(requested);
         if requested != 0 && waited > AGENT_ROSTER_OVERDUE_MS
@@ -447,18 +447,18 @@ impl Store {
 
     /// Follows the revision of complete current roster publications: it rises with every one,
     /// including a replacement at the same graph index after local activity or a deadline.
-    pub(crate) fn subscribe_agent_roster(&self) -> tokio::sync::watch::Receiver<u64> {
+    pub fn subscribe_agent_roster(&self) -> tokio::sync::watch::Receiver<u64> {
         self.smalltalk.agent_roster_published.subscribe()
     }
 
     /// The revision `subscribe_agent_roster` follows, now.
-    pub(crate) fn agent_roster_revision(&self) -> u64 {
+    pub fn agent_roster_revision(&self) -> u64 {
         *self.smalltalk.agent_roster_published.borrow()
     }
 
     /// Queue selection changes at lease expiry even when the claim frontier is unchanged.
     /// Scan only on a cache miss, inside the same SQLite snapshot as the queue projection.
-    pub(super) fn agent_queue_valid_until(&self, now: u128) -> Result<Option<u128>> {
+    pub fn agent_queue_valid_until(&self, now: u128) -> Result<Option<u128>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT lease_expires_at_unix_ms FROM step_runs
@@ -478,7 +478,7 @@ impl Store {
 
     /// Membership/order/queue refs contain no local timeline data. Reuse them for unchanged
     /// graph cuts and agent-only observations, so a warm HTTP page does not scan fleet work.
-    pub(crate) fn cached_agent_page_refs(
+    pub fn cached_agent_page_refs(
         &self,
         index: u64,
         history: bool,
@@ -518,7 +518,7 @@ impl Store {
 
     /// Bounded immutable projections shared by pages and streams. Delta claims, membership
     /// differences, local activity and queue deadlines refold only affected cards.
-    pub(crate) fn cached_agent_resources_for(
+    pub fn cached_agent_resources_for(
         &self,
         index: u64,
         history: bool,
@@ -531,7 +531,7 @@ impl Store {
     /// [`Self::cached_agent_resources_for`] for one chunk of a roster assembled in short folds:
     /// it refolds only the `selected` agents. Changed cards outside them leave the published
     /// rows' coverage and fold with their own chunk, so one call folds at most `selected`.
-    pub(crate) fn cached_agent_resources_chunk(
+    pub fn cached_agent_resources_chunk(
         &self,
         index: u64,
         history: bool,
@@ -541,7 +541,7 @@ impl Store {
         self.cached_agent_resources_folding(index, history, Some(selected), true, build)
     }
 
-    pub(super) fn cached_agent_resources_folding(
+    pub fn cached_agent_resources_folding(
         &self,
         index: u64,
         history: bool,
@@ -555,7 +555,7 @@ impl Store {
             let _rebuild = self.start_roster_rebuild("historical_snapshot", index);
             let mut items = crate::performance::task("roster/card-projection",
                 || build(selected.map(|names| (names, &[][..]))))?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             self.count_refolded_cards_for_test(items.len());
             items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
                 .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
@@ -719,7 +719,7 @@ impl Store {
                         published_at_unix_ms: now_ms(),
                     });
                 }
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 self.smalltalk.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut items = previous.items.iter()
                     .filter(|item| {
@@ -730,7 +730,7 @@ impl Store {
                 let rebuilt = crate::performance::task("roster/card-projection",
                     || build(Some((&changed, queue_metadata.as_deref().unwrap_or(&previous.items)))))?;
                 record_roster_counts(changed.len() + deferred.len(), covered.as_ref().map_or(items.len() + rebuilt.len(), BTreeSet::len), rebuilt.len());
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 self.count_refolded_cards_for_test(rebuilt.len());
                 items.extend(rebuilt);
                 items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
@@ -745,11 +745,11 @@ impl Store {
             }
             None => {
                 let _rebuild = self.start_roster_rebuild(invalidation, index);
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 self.smalltalk.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut items = crate::performance::task("roster/card-projection",
                     || build(selected.map(|names| (names, &[][..]))))?;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 self.count_refolded_cards_for_test(items.len());
                 items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str())
                     .then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
@@ -806,7 +806,7 @@ impl Store {
     /// coverage, or `None` when only a build can answer. Never builds; a miss must drop its
     /// SQLite snapshot before waiting for admission. The rows are the complete unfiltered
     /// projection at the cut, so a page still selects its own subjects from them.
-    pub(crate) fn agent_resources_cached_at(
+    pub fn agent_resources_cached_at(
         &self,
         index: u64,
         history: bool,
@@ -818,7 +818,7 @@ impl Store {
     /// The matching warm pin for page refs: membership, ordering and queue metadata for exactly
     /// this graph cut and history mode while the queue lease window still holds, or `None`.
     /// Refs carry no local timeline data, so no frontier is read. Never builds.
-    pub(crate) fn agent_page_refs_cached_at(
+    pub fn agent_page_refs_cached_at(
         &self,
         index: u64,
         history: bool,
@@ -927,7 +927,7 @@ impl Store {
     /// A reconciler may defer an agent it parsed from an owned mission declaration.
     /// Messages can still address that declared seat before it enters the desired graph.
     /// This evidence is local to admission; it adds no field to any persisted intent.
-    pub(crate) fn apply_internal_with_declared_agents(
+    pub fn apply_internal_with_declared_agents(
         &self,
         intent: &NormalizedIntent,
         key: &str,
@@ -1139,7 +1139,7 @@ impl Store {
     /// The terminals collection consumes the same authority fields as full status, but
     /// discards harness history, claim provenance and desired conflicts. Reuse the capped
     /// card reduction for this read only; runtime control still uses full status.
-    pub(crate) fn terminal_resource_status_at(
+    pub fn terminal_resource_status_at(
         &self,
         owner: Option<&str>,
         index: u64,
@@ -1161,7 +1161,7 @@ impl Store {
         self.agent_card_status_at(Some(&names), index, history)
     }
 
-    pub(super) fn desired_harness_login_candidates(&self) -> Result<Vec<DesiredSubject>> {
+    pub fn desired_harness_login_candidates(&self) -> Result<Vec<DesiredSubject>> {
         smallclaims::touched::note_read(|| "desired-kind:agent".to_owned());
         smallclaims::touched::note_read(|| "kind:harness.observed".to_owned());
         smallclaims::touched::note_read(|| "kind:harness.diagnostic".to_owned());
@@ -1458,7 +1458,7 @@ impl Store {
     }
 
     /// Suspension follows all non-launch edits, independently of process retry budgets.
-    pub(crate) fn suspension_lineage(&self, subject: &str) -> Result<Vec<String>> {
+    pub fn suspension_lineage(&self, subject: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
         let Some(row) = current_desired_row(&connection, subject)? else {
             return Ok(Vec::new());
@@ -1466,13 +1466,13 @@ impl Store {
         desired_lineage_from_tx(&connection, row.claim_id, same_declared_launch)
     }
 
-    pub(crate) fn suspension_lineage_from(&self, token: &str) -> Result<Vec<String>> {
+    pub fn suspension_lineage_from(&self, token: &str) -> Result<Vec<String>> {
         desired_lineage_from_tx(&self.readers.get(), token.to_owned(), same_declared_launch)
     }
 
     /// Commit one restored move against the exact declaration its resume request named.
     /// The evidence keeps that suspension alive across this one placement change.
-    pub(crate) fn place_resumed_seat(
+    pub fn place_resumed_seat(
         &self,
         subject: &str,
         expected: &str,
@@ -1541,7 +1541,7 @@ impl Store {
                     subscriptions,
                 )
             });
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             resource_preparation::before_validate(self, pass);
             #[cfg(not(test))]
             let _ = pass;
@@ -1560,12 +1560,12 @@ impl Store {
             if let Some(outcome) = outcome {
                 return Ok(outcome);
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             resource_preparation::COUNTS.with(|counts| counts.borrow_mut().invalidated += 1);
         }
         // Exactly two unusable/stale preparations, then ONE invocation of the existing
         // canonical writer path. This preserves API progress, not a writer-hold cap.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         resource_preparation::COUNTS.with(|counts| counts.borrow_mut().fallback += 1);
         self.record_resource_observation_attempt(
             observer,
@@ -1585,7 +1585,7 @@ impl Store {
     /// Resume an agent's kept usage fold with only the usage claims after it, when every one of
     /// them sorts after the last claim it folded. `None` when one does not, such as a replicated
     /// claim accepted earlier, or two new claims tie on accepted time; the caller folds afresh.
-    pub(super) fn usage_fold_after(
+    pub fn usage_fold_after(
         connection: &rusqlite::Connection,
         subject: &str,
         cached: &CachedUsageFold,
@@ -1631,7 +1631,7 @@ impl Store {
         Ok((rows, self.agent_message_estimate(&days)?))
     }
 
-    pub(super) fn usage_period_data(
+    pub fn usage_period_data(
         &self,
         since_ms: u64,
         until_ms: u64,
@@ -1646,7 +1646,7 @@ impl Store {
         })
     }
 
-    pub(super) fn usage_period_data_from_rows(
+    pub fn usage_period_data_from_rows(
         rows: impl IntoIterator<Item = rusqlite::Result<(String, u64, String)>>,
         since_ms: u64,
         until_ms: u64,
@@ -1865,7 +1865,7 @@ impl Store {
         Ok(times.into_iter().max())
     }
 
-    pub(crate) fn cached_placement_fence(
+    pub fn cached_placement_fence(
         &self,
         token: &str,
         build: impl FnOnce() -> Result<Option<crate::model::PlacementFence>>,
@@ -1884,7 +1884,7 @@ impl Store {
 
     /// First observation of the current boot, including its index to distinguish messages
     /// accepted within the same millisecond. Late replicas must also pass the time boundary.
-    pub(crate) fn native_mail_boot_floor(&self, subject: &str) -> Result<Option<(u128, u64)>> {
+    pub fn native_mail_boot_floor(&self, subject: &str) -> Result<Option<(u128, u64)>> {
         let runtime = self.latest_claim(subject, Some("runtime.observed"))?;
         let Some(incarnation) = runtime.as_ref().and_then(|claim| {
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
@@ -1913,7 +1913,7 @@ impl Store {
     /// account this node placed it on, else the harness's own default login on that host. Only
     /// the seat's own node knows which pool account it chose, so a pooled seat on another node
     /// stands alone rather than being merged with seats that may use another login.
-    pub(super) fn seat_login(&self, desired: &DesiredSubject, host: &str, driver: &str) -> Result<String> {
+    pub fn seat_login(&self, desired: &DesiredSubject, host: &str, driver: &str) -> Result<String> {
         let account = match crate::accounts::harness_binding(&desired.desired).map(|b| b.binding) {
             Some(crate::accounts::Binding::Account(name)) => name,
             Some(crate::accounts::Binding::Pool(_)) if host == self.origin => {
@@ -1937,7 +1937,7 @@ impl Store {
             .unwrap_or(account))
     }
 
-    pub(crate) fn harness_login_episode_key(
+    pub fn harness_login_episode_key(
         &self,
         subject: &str,
         incarnation: &str,
@@ -1958,7 +1958,7 @@ impl Store {
         Ok((Some(latest), key))
     }
 
-    pub(crate) fn harness_auth_episode(
+    pub fn harness_auth_episode(
         &self,
         subject: &str,
         incarnation: &str,
@@ -1980,7 +1980,7 @@ impl Store {
 
     /// Prefer a bound account person, then follow declaration authors and mission requesters.
     /// Missing or cyclic ownership remains unknown; it never selects a global operator.
-    pub(crate) fn agent_person(&self, agent: &str) -> Result<Option<String>> {
+    pub fn agent_person(&self, agent: &str) -> Result<Option<String>> {
         let mut actor = agent.to_owned();
         let mut seen = BTreeSet::new();
         for _ in 0..16 {
@@ -2042,7 +2042,7 @@ impl Store {
     /// had a login problem. The view a seat that does need one gets is `current_harness`'s,
     /// except that its `since` is not refined (attention reads the state, incarnation and
     /// observation time).
-    pub(crate) fn current_harness_for_login(
+    pub fn current_harness_for_login(
         &self,
         subject: &str,
     ) -> Result<Option<crate::model::CurrentHarnessView>> {

@@ -3,7 +3,7 @@ use super::*;
 
 const CHUNK: usize = 128;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static MAX_SNAPSHOT_CALL_NS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
     static AFTER_OWNERS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -114,14 +114,14 @@ impl DefinitionIndex {
     }
 }
 
-pub(super) fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunView>> {
+pub fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunView>> {
     let actor = normalize_actor(actor, "agent");
     // The previous work_for_reconcile path also passed one clock to every enrichment.
     // All database reads use this cut; potentially large mission JSON is parsed after release.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let snapshot_started = std::time::Instant::now();
     let captured = store.read_snapshot(|_| inputs(store, &actor, at));
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     MAX_SNAPSHOT_CALL_NS
         .with(|maximum| maximum.set(maximum.get().max(snapshot_started.elapsed().as_nanos())));
     let mut inputs = captured?;
@@ -206,7 +206,7 @@ fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
         })?
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
     let owners = owners(&connection, &views)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(after) = AFTER_OWNERS.with(|hook| hook.borrow_mut().take()) {
         after();
     }
@@ -228,7 +228,7 @@ fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
         );
     }
     let support = support(&connection, &views)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(after) = AFTER_SUPPORT.with(|hook| hook.borrow_mut().take()) {
         after();
     }

@@ -68,7 +68,7 @@ impl Node {
         let path = directory.join("writer.sqlite3");
         let mut bytes = Vec::new();
         flate2::read::GzDecoder::new(
-            &include_bytes!("../../tests/fixtures/pre-diet-store.sqlite3.gz")[..],
+            &include_bytes!("../../../st3-daemon/tests/fixtures/pre-diet-store.sqlite3.gz")[..],
         )
         .read_to_end(&mut bytes)
         .unwrap();

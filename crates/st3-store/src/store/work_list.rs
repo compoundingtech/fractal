@@ -5,97 +5,97 @@
 use super::*;
 
 /// One step of the current work list.
-pub(crate) struct WorkRow {
+pub struct WorkRow {
     /// The step with its effective state at the fold, which orders it and decides which actors
     /// see it.
-    pub(crate) view: Arc<StepRunView>,
-    pub(crate) value: Arc<Value>,
+    pub view: Arc<StepRunView>,
+    pub value: Arc<Value>,
     /// The list time the row was folded or re-timed at.
-    pub(crate) time_unix_ms: u128,
+    pub time_unix_ms: u128,
     /// The step's worker lease when folded. A quiet renewal moves it without a claim.
-    pub(crate) lease_unix_ms: Option<u128>,
+    pub lease_unix_ms: Option<u128>,
     /// For a running step, the lease its claims last named, which bounds its execution time.
-    pub(crate) timing_lease_unix_ms: Option<u128>,
+    pub timing_lease_unix_ms: Option<u128>,
     /// The earliest claim about the step accepted after the row's time, which the row's
     /// time-fenced fields (progress, timing, answers) leave out until the list's time passes it.
-    pub(crate) next_claim_unix_ms: Option<u128>,
+    pub next_claim_unix_ms: Option<u128>,
 }
 
 /// One publication of the current work list.
 #[derive(Clone, Default)]
-pub(crate) struct WorkRows {
+pub struct WorkRows {
     /// Each registered seat's queue order at `orders_cut`, read in the fold's own snapshot: an
     /// actor's ready work is ordered by it, never by a newer cut's order. Only nonempty orders.
-    pub(crate) seat_orders: Arc<HashMap<String, Arc<Vec<String>>>>,
+    pub seat_orders: Arc<HashMap<String, Arc<Vec<String>>>>,
     /// The runs each registered seat's queue order read (see [`SeatQueue::runs`]), and the
     /// reverse: the seats that read each run. A seat is registered while it has an order or any
     /// such run; a change to any run it read rereads it. Shared between publications until a
     /// fold changes them.
-    pub(crate) seat_runs: Arc<HashMap<String, Arc<BTreeSet<String>>>>,
-    pub(crate) run_seats: Arc<HashMap<String, Arc<BTreeSet<String>>>>,
+    pub seat_runs: Arc<HashMap<String, Arc<BTreeSet<String>>>>,
+    pub run_seats: Arc<HashMap<String, Arc<BTreeSet<String>>>>,
     /// The cut `seat_orders` was read at. A publication is complete only when it equals the
     /// publication's cut.
-    pub(crate) orders_cut: u64,
+    pub orders_cut: u64,
     /// The actors' orders over these rows, built on an actor's first read and dropped with the
     /// publication. A clone for the next fold starts empty.
-    pub(crate) actors: ActorOrders,
-    pub(crate) rows: HashMap<String, Arc<WorkRow>>,
+    pub actors: ActorOrders,
+    pub rows: HashMap<String, Arc<WorkRow>>,
     /// The steps in the unfiltered list's order.
-    pub(crate) order: Vec<String>,
+    pub order: Vec<String>,
     /// The list's time: the projection time of its cut, never earlier than the previous
     /// publication's. A worker lease that ends after it changes a row.
-    pub(crate) time_unix_ms: u128,
+    pub time_unix_ms: u128,
     /// The step that owned each seat a row shows, when that row was folded.
-    pub(crate) seats: HashMap<String, String>,
+    pub seats: HashMap<String, String>,
     /// The projection frontier at the fold, from [`Store::projection_frontier`].
-    pub(crate) frontier: u64,
+    pub frontier: u64,
 }
 
 /// Every leased step's lease end, by the lease index.
-pub(crate) const WORK_LEASES: &str = "SELECT subject, CAST(lease_expires_at_unix_ms AS INTEGER) FROM step_runs
+pub const WORK_LEASES: &str = "SELECT subject, CAST(lease_expires_at_unix_ms AS INTEGER) FROM step_runs
  INDEXED BY step_runs_lease_index
  WHERE lease_owner IS NOT NULL AND lease_expires_at_unix_ms IS NOT NULL";
 /// The seat each of steps `?1`, a JSON array, is assigned to, if any, and its run, whatever its
 /// state or generation, by the primary key: a seat's queue order follows the runs it holds
 /// steps in.
-pub(crate) const STEP_ASSIGNEES: &str = "SELECT assignee, run_id FROM step_runs
+pub const STEP_ASSIGNEES: &str = "SELECT assignee, run_id FROM step_runs
  WHERE subject IN (SELECT value FROM json_each(?1))";
 
 /// One run key for every source: `mission-run/ID`, whether a source names the run bare.
-pub(crate) fn run_key(run: &str) -> String {
+pub fn run_key(run: &str) -> String {
     normalize_mission_run(run)
 }
 
 /// One seat's queue order and every run its read depends on: the runs it joined (an open run it
 /// holds a current step in), the runs its moves name or anchor on (whether or not it holds a
 /// step there), and those named runs' own joins. A change to any of them can change the order.
-pub(crate) struct SeatQueue {
-    pub(crate) order: Vec<String>,
-    pub(crate) runs: BTreeSet<String>,
+pub struct SeatQueue {
+    pub order: Vec<String>,
+    pub runs: BTreeSet<String>,
 }
 /// Whether a replica record was repaired by a claim after `?1` through `?2`, by the kind index.
-pub(crate) const REPAIRED_SINCE: &str = "SELECT 1 FROM claims
+pub const REPAIRED_SINCE: &str = "SELECT 1 FROM claims
  WHERE kind='record.repaired' AND store_index>?1 AND store_index<=?2 LIMIT 1";
 /// The earliest claim about step `?1` accepted after `?2`, by the subject index.
-pub(crate) const NEXT_CLAIM_AFTER: &str = "SELECT MIN(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims
+pub const NEXT_CLAIM_AFTER: &str = "SELECT MIN(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims
  WHERE subject=?1 AND CAST(accepted_at_unix_ms AS INTEGER)>?2";
 
 /// What claims between two cuts changed in the work list.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct WorkChanges {
+pub struct WorkChanges {
     /// Steps whose row any of those claims can change.
-    pub(crate) steps: BTreeSet<String>,
+    pub steps: BTreeSet<String>,
     /// Whether a seat's queue moved, which reorders that seat's windows with no row changing.
-    pub(crate) reorder: bool,
+    pub reorder: bool,
     /// The seats whose queue moved.
-    pub(crate) moved_seats: BTreeSet<String>,
+    pub moved_seats: BTreeSet<String>,
     /// The runs those claims name or reach, as run keys: a seat that read one rereads it.
-    pub(crate) runs: BTreeSet<String>,
+    pub runs: BTreeSet<String>,
 }
 
 /// How many actors' orders one publication keeps. Each holds at most one `u32` per row, so a
 /// publication's memo retains at most this many times four bytes per row.
-pub(crate) const ACTOR_ORDERS: usize = 64;
+pub const ACTOR_ORDERS: usize = 64;
 
 /// The rows each actor sees of one publication, as indexes into its `order`, in the order the
 /// direct read gives that actor. Every in-flight build has one cell per actor: concurrent reads
@@ -105,22 +105,22 @@ pub(crate) const ACTOR_ORDERS: usize = 64;
 /// new actor's cell is registered as overflow: reads of that actor share it, and it is removed
 /// once built. A dropped order lives on only while a read or a page cursor still holds it.
 #[derive(Default)]
-pub(crate) struct ActorOrders {
+pub struct ActorOrders {
     entries: Mutex<std::collections::VecDeque<ActorEntry>>,
     /// Rows scanned building actors' orders, builds, reuses and overflow registrations, for
     /// tests.
-    #[cfg(test)]
-    pub(crate) scanned: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
-    pub(crate) builds: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
-    pub(crate) hits: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
-    pub(crate) overflow: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
+    pub scanned: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
+    pub builds: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
+    pub hits: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
+    pub overflow: std::sync::atomic::AtomicUsize,
     /// Seats a fold reread and found unchanged, so copied nothing, for tests. Kept here, on a
     /// field every clone resets, so each publication counts its own fold's.
-    #[cfg(test)]
-    pub(crate) unchanged_seats: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
+    pub unchanged_seats: std::sync::atomic::AtomicUsize,
 }
 
 type OrderCell = Arc<std::sync::OnceLock<Arc<Vec<u32>>>>;
@@ -204,7 +204,7 @@ impl ActorOrders {
                             // Every kept actor is mid-build: this one is overflow.
                             None => false,
                         };
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     {
                         if !kept {
                             self.overflow.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -223,7 +223,7 @@ impl ActorOrders {
             Arc::new(build())
         }));
         drop(registration);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let counter = if built { &self.builds } else { &self.hits };
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -234,8 +234,8 @@ impl ActorOrders {
     /// The bytes the kept and overflow actors hold: each order's allocated row indexes, its
     /// actor's name, and its entry and cell. Orders dropped while a read or cursor still holds
     /// them are not here.
-    #[cfg(test)]
-    pub(crate) fn retained_bytes(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn retained_bytes(&self) -> usize {
         let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries
             .iter()
@@ -250,16 +250,16 @@ impl ActorOrders {
     }
 
     /// How many reads hold `actor`'s registered cell, if one is registered.
-    #[cfg(test)]
-    pub(crate) fn readers(&self, actor: &str) -> Option<usize> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn readers(&self, actor: &str) -> Option<usize> {
         let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries.iter().find(|entry| entry.actor == actor).map(|entry| entry.readers)
     }
 
     /// How many actors are kept, how many of those are still being built, and how many overflow
     /// cells are registered.
-    #[cfg(test)]
-    pub(crate) fn kept(&self) -> (usize, usize, usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn kept(&self) -> (usize, usize, usize) {
         let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         let kept = entries.iter().filter(|entry| entry.kept);
         (
@@ -285,7 +285,7 @@ fn visible_to(view: &StepRunView, viewer: &str) -> bool {
 }
 
 /// How the work list ranks a step's state: ready work first, ended work last.
-pub(crate) fn work_state_rank(status: &str) -> u8 {
+pub fn work_state_rank(status: &str) -> u8 {
     match status {
         "ready" => 0,
         "claimed" | "working" => 1,
@@ -299,7 +299,7 @@ pub(crate) fn work_state_rank(status: &str) -> u8 {
 impl WorkRows {
     /// Put the steps in the unfiltered list's order: by state, then readiness, step path and
     /// subject, as the direct read sorts them.
-    pub(crate) fn sort(&mut self) {
+    pub fn sort(&mut self) {
         let mut order = self.rows.values().map(|row| &row.view).collect::<Vec<_>>();
         order.sort_by(|left, right| {
             work_state_rank(&left.status)
@@ -313,12 +313,12 @@ impl WorkRows {
 
     /// The agent seats the rows name, each of which may read its own list: whose queue order
     /// the publication keeps. Every row's, for a fold from nothing or in chunks.
-    pub(crate) fn seats_shown(&self) -> BTreeSet<String> {
+    pub fn seats_shown(&self) -> BTreeSet<String> {
         self.seats_of(self.rows.keys())
     }
 
     /// The agent seats the rows of `steps` name, of the steps this list holds.
-    pub(crate) fn seats_of<'a>(&self, steps: impl IntoIterator<Item = &'a String>) -> BTreeSet<String> {
+    pub fn seats_of<'a>(&self, steps: impl IntoIterator<Item = &'a String>) -> BTreeSet<String> {
         let mut seats = BTreeSet::new();
         for row in steps.into_iter().filter_map(|step| self.rows.get(step)).filter(|row| !row.view.agentless) {
             let view = &row.view;
@@ -332,7 +332,7 @@ impl WorkRows {
     /// its order, its runs, and the reverse index, each link of its earlier runs removed and
     /// emptied buckets dropped. A seat stays registered while it has an order or any run. Says
     /// whether its order changed.
-    pub(crate) fn set_seat_queue(&mut self, seat: &str, queue: Option<SeatQueue>) -> bool {
+    pub fn set_seat_queue(&mut self, seat: &str, queue: Option<SeatQueue>) -> bool {
         // Unchanged, order and every run it read: nothing to copy or relink.
         let registered_order = self.seat_orders.get(seat).map(|order| order.as_slice());
         let registered_runs = self.seat_runs.get(seat).map(|runs| &**runs);
@@ -344,7 +344,7 @@ impl WorkRows {
             _ => registered_runs.is_none() && registered_order.is_none(),
         };
         if unchanged {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             self.actors.unchanged_seats.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return false;
         }
@@ -380,7 +380,7 @@ impl WorkRows {
     }
 
     /// Clear every registered seat, as a fold that reads every shown seat's queue again does.
-    pub(crate) fn clear_seat_queues(&mut self) {
+    pub fn clear_seat_queues(&mut self) {
         self.seat_orders = Arc::default();
         self.seat_runs = Arc::default();
         self.run_seats = Arc::default();
@@ -389,13 +389,13 @@ impl WorkRows {
     /// The rows `actor` sees, as indexes into `order`, in the order the direct read gives it:
     /// its ready work by its seat queue at this publication's own cut. Built on the actor's
     /// first read of this publication; says whether this read built it.
-    pub(crate) fn actor_rows(&self, actor: &str) -> (Arc<Vec<u32>>, bool) {
+    pub fn actor_rows(&self, actor: &str) -> (Arc<Vec<u32>>, bool) {
         let viewer = smallclaims::store::normalize_actor(actor, "agent");
         self.actors.get_or_build(&viewer, || self.actor_order(&viewer))
     }
 
     fn actor_order(&self, viewer: &str) -> Vec<u32> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.actors.scanned.fetch_add(self.order.len(), std::sync::atomic::Ordering::Relaxed);
         let mut shown = self
             .order
@@ -432,7 +432,7 @@ impl WorkRows {
 
     /// The rendered rows at `indexes`, or every row, in order, sharing this publication's values:
     /// what a page cursor keeps of it.
-    pub(crate) fn selected_rows(&self, indexes: Option<&[u32]>) -> Vec<Arc<Value>> {
+    pub fn selected_rows(&self, indexes: Option<&[u32]>) -> Vec<Arc<Value>> {
         match indexes {
             Some(indexes) => indexes
                 .iter()
@@ -444,7 +444,7 @@ impl WorkRows {
 
     /// The rendered rows at `indexes[offset..]`, at most `limit` of them, and whether more
     /// follow. Clones only the rows it returns.
-    pub(crate) fn page_of(&self, indexes: Option<&[u32]>, offset: usize, limit: usize) -> (Vec<Value>, bool) {
+    pub fn page_of(&self, indexes: Option<&[u32]>, offset: usize, limit: usize) -> (Vec<Value>, bool) {
         let len = indexes.map_or(self.order.len(), <[u32]>::len);
         let end = offset.saturating_add(limit).min(len);
         let items = (offset.min(end)..end)
@@ -464,7 +464,7 @@ impl Store {
     /// requesters' declarations and runtime decide, and the seats it owns with their usage. A
     /// claim about any other subject changes no row. `seats` names the step each seat shown on
     /// a row belonged to when that row was folded.
-    pub(crate) fn work_list_changes(
+    pub fn work_list_changes(
         &self,
         after: u64,
         through: u64,
@@ -563,7 +563,7 @@ impl Store {
 
     /// The steps whose worker lease ended after `after` and by `through`: their rows show them
     /// ready again with no new claim.
-    pub(crate) fn steps_with_leases_ended(&self, after: u128, through: u128) -> Result<BTreeSet<String>> {
+    pub fn steps_with_leases_ended(&self, after: u128, through: u128) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT subject FROM step_runs INDEXED BY step_runs_lease_index
@@ -582,7 +582,7 @@ impl Store {
 
     /// The steps the current work list can show: those whose state is not waiting or ended.
     /// Their effective state can hide more of them, never show others.
-    pub(crate) fn work_list_candidates(&self) -> Result<BTreeSet<String>> {
+    pub fn work_list_candidates(&self) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT subject FROM step_runs INDEXED BY step_runs_open_index
@@ -595,7 +595,7 @@ impl Store {
     }
 
     /// Every step that holds a worker lease, with the lease's end: few, by the lease index.
-    pub(crate) fn work_leases(&self) -> Result<HashMap<String, u128>> {
+    pub fn work_leases(&self) -> Result<HashMap<String, u128>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(WORK_LEASES)?;
         let leases = statement
@@ -606,7 +606,7 @@ impl Store {
 
     /// When the earliest claim about `subject` accepted after `time` was accepted. Replicated
     /// claims keep their own times, so one can arrive before the list's time reaches it.
-    pub(crate) fn next_claim_after(&self, subject: &str, time: u128) -> Result<Option<u128>> {
+    pub fn next_claim_after(&self, subject: &str, time: u128) -> Result<Option<u128>> {
         let connection = self.readers.get();
         let next = connection
             .prepare_cached(NEXT_CLAIM_AFTER)?
@@ -616,20 +616,20 @@ impl Store {
 
     /// The lease `subject`'s claims last named for the open execution interval of `attempt` at
     /// `at`, when one is open.
-    pub(crate) fn step_timing_lease(&self, subject: &str, attempt: u32, at: u128) -> Result<Option<u128>> {
+    pub fn step_timing_lease(&self, subject: &str, attempt: u32, at: u128) -> Result<Option<u128>> {
         Ok(step_timing_lease_at(&self.readers.get(), subject, attempt, at)?)
     }
 
     /// The published work list, while a refresher keeps one. Readers use
     /// [`published_list::PublishedList::current`], which also refuses a forgotten generation.
-    #[cfg(test)]
-    pub(crate) fn published_work(&self) -> Option<Arc<published_list::Publication<WorkRows>>> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn published_work(&self) -> Option<Arc<published_list::Publication<WorkRows>>> {
         self.smalltalk.published_work.newest()
     }
 
     /// The seats `steps` are assigned to and the runs they are in, whatever their state or
     /// generation, read in the caller's snapshot. Every step's run, with or without a seat.
-    pub(crate) fn step_assignees(&self, steps: &BTreeSet<String>) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    pub fn step_assignees(&self, steps: &BTreeSet<String>) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
         if steps.is_empty() {
             return Ok(Default::default());
         }
@@ -654,8 +654,8 @@ impl Store {
     /// inputs [`Store::seat_run_order`] reads. A seat with no queued run and no move is left
     /// out. One read of every seat's inputs serves them all: per seat, the moves query scans
     /// every move claim by kind and the joins every open run anyway.
-    pub(crate) fn seat_queues_of(&self, seats: &BTreeSet<String>) -> Result<HashMap<String, SeatQueue>> {
-        #[cfg(test)]
+    pub fn seat_queues_of(&self, seats: &BTreeSet<String>) -> Result<HashMap<String, SeatQueue>> {
+        #[cfg(any(test, feature = "test-support"))]
         {
             self.smalltalk.seat_order_reads.fetch_add(seats.len(), std::sync::atomic::Ordering::Relaxed);
             *self.smalltalk.last_seats_read.lock().unwrap() = seats.clone();
@@ -688,7 +688,7 @@ impl Store {
     /// move with no claim about the seat and no forget; the other routes forget when the record
     /// flips. Only claims newer than `after` count, so one repair folds the list from nothing
     /// once, however far a lagging frontier makes a fold read back.
-    pub(crate) fn repaired_since(&self, after: u64, through: u64) -> Result<bool> {
+    pub fn repaired_since(&self, after: u64, through: u64) -> Result<bool> {
         let connection = self.readers.get();
         Ok(connection
             .prepare_cached(REPAIRED_SINCE)?
@@ -698,8 +698,8 @@ impl Store {
     }
 
     /// Set how far replicated claims are projected, as a replication pass would, for tests.
-    #[cfg(test)]
-    pub(crate) fn set_projection_frontier_for_test(&self, index: u64) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_projection_frontier_for_test(&self, index: u64) {
         let connection = self.connection.lock().unwrap();
         connection
             .execute(
@@ -712,16 +712,16 @@ impl Store {
     }
 
     /// Count `count` runs a warm fold looked up in its reverse index, for tests.
-    pub(crate) fn count_seat_lookups(&self, count: usize) {
-        #[cfg(test)]
+    pub fn count_seat_lookups(&self, count: usize) {
+        #[cfg(any(test, feature = "test-support"))]
         self.smalltalk.seat_lookups.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
         #[cfg(not(test))]
         let _ = count;
     }
 
     /// Record `claim` as a replica record of `state`, as replication would, for tests.
-    #[cfg(test)]
-    pub(crate) fn record_replica_for_test(&self, record_ref: &str, claim: &str, state: &str) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_replica_for_test(&self, record_ref: &str, claim: &str, state: &str) {
         let connection = self.connection.lock().unwrap();
         connection
             .execute(
@@ -733,35 +733,35 @@ impl Store {
             .unwrap();
     }
 
-    #[cfg(test)]
-    pub(crate) fn seat_lookups(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seat_lookups(&self) -> usize {
         self.smalltalk.seat_lookups.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    #[cfg(test)]
-    pub(crate) fn last_seats_read(&self) -> BTreeSet<String> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn last_seats_read(&self) -> BTreeSet<String> {
         self.smalltalk.last_seats_read.lock().unwrap().clone()
     }
 
     /// Count one direct current-work read, which an enabled work list never makes. Counted in
     /// tests only.
-    pub(crate) fn count_direct_work_read(&self) {
-        #[cfg(test)]
+    pub fn count_direct_work_read(&self) {
+        #[cfg(any(test, feature = "test-support"))]
         self.smalltalk.direct_work_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// How many seats' queue orders folds have read, for tests.
-    #[cfg(test)]
-    pub(crate) fn seat_order_reads(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seat_order_reads(&self) -> usize {
         self.smalltalk.seat_order_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    #[cfg(test)]
-    pub(crate) fn direct_work_reads(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn direct_work_reads(&self) -> usize {
         self.smalltalk.direct_work_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    pub(crate) fn published_work_list(&self) -> &published_list::PublishedList<WorkRows> {
+    pub fn published_work_list(&self) -> &published_list::PublishedList<WorkRows> {
         &self.smalltalk.published_work
     }
 }

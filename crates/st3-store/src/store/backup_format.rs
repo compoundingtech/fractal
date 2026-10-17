@@ -14,9 +14,9 @@ pub const VERSION: u32 = 1;
 /// The version of an archive that also carries message bodies. An archive without any keeps
 /// [`VERSION`], so a build that predates bodies restores it; one with bodies it refuses cleanly.
 pub const VERSION_WITH_BODIES: u32 = 2;
-pub(crate) const PAGE: usize = 512;
+pub const PAGE: usize = 512;
 // One envelope can contain document bytes; reject unbounded lines before allocating them.
-pub(crate) const MAX_RECORD_BYTES: u64 = 128 * 1024 * 1024;
+pub const MAX_RECORD_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TableDigest {
@@ -81,7 +81,7 @@ pub struct RestoreReport {
     pub message_bodies_referenced: u64,
 }
 
-pub(crate) fn write_record(
+pub fn write_record(
     output: &mut impl Write,
     hash: &mut Sha256,
     record: &Record,

@@ -9,7 +9,7 @@ use super::*;
 
 /// The claim kinds an append projector takes.
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Takes {
+pub enum Takes {
     /// Every appended claim.
     Every,
     /// Only claims of these kinds.
@@ -17,7 +17,7 @@ pub(super) enum Takes {
 }
 
 impl Takes {
-    pub(super) fn takes(self, kind: &str) -> bool {
+    pub fn takes(self, kind: &str) -> bool {
         match self {
             Takes::Every => true,
             Takes::Kinds(kinds) => kinds.contains(&kind),
@@ -26,28 +26,27 @@ impl Takes {
 }
 
 /// A domain hook that writes only its own tables.
-pub(super) struct Hook {
-    #[cfg_attr(not(test), expect(dead_code, reason = "Only the order tests read the names."))]
-    pub(super) name: &'static str,
-    pub(super) run: fn(&Transaction<'_>) -> Result<()>,
+pub struct Hook {
+    pub name: &'static str,
+    pub run: fn(&Transaction<'_>) -> Result<()>,
 }
 
 /// A domain hook for one claim, after its event row is written. In `REPLICATED` the name is also
 /// the projection stage an error names.
-pub(super) struct AppendProjector {
-    pub(super) name: &'static str,
-    pub(super) takes: Takes,
-    pub(super) project: fn(&Transaction<'_>, &ClaimRecord) -> Result<()>,
+pub struct AppendProjector {
+    pub name: &'static str,
+    pub takes: Takes,
+    pub project: fn(&Transaction<'_>, &ClaimRecord) -> Result<()>,
 }
 
 /// One stage of the full graph replay, with the progress phase it reports.
-pub(super) struct ReplayStage {
-    pub(super) phase: &'static str,
-    pub(super) run: fn(&Transaction<'_>) -> Result<()>,
+pub struct ReplayStage {
+    pub phase: &'static str,
+    pub run: fn(&Transaction<'_>) -> Result<()>,
 }
 
 /// Installs each domain's tables and triggers when the store opens its projections.
-pub(super) const OPEN: &[Hook] = &[
+pub const OPEN: &[Hook] = &[
     Hook { name: "publication-facts", run: publication_facts::initialize },
     Hook { name: "custom", run: custom::open },
     Hook { name: "resources", run: resources::open },
@@ -59,7 +58,7 @@ pub(super) const OPEN: &[Hook] = &[
 ];
 
 /// Projects a locally appended claim, in this order, for the kinds each entry takes.
-pub(super) const APPEND: &[AppendProjector] = &[
+pub const APPEND: &[AppendProjector] = &[
     AppendProjector {
         name: "custom",
         takes: Takes::Every,
@@ -106,14 +105,14 @@ pub(super) const APPEND: &[AppendProjector] = &[
 
 /// Projects a replicated claim the incremental projection extends the graph with, after every
 /// claim of the range has its event row.
-pub(super) const REPLICATED: &[AppendProjector] = &[AppendProjector {
+pub const REPLICATED: &[AppendProjector] = &[AppendProjector {
     name: "arrangement-project",
     takes: Takes::Kinds(&["arrangement.edited"]),
     project: arrangements::project,
 }];
 
 /// Catches each domain up with the claims a projection pass admitted.
-pub(super) const FLUSH: &[Hook] = &[
+pub const FLUSH: &[Hook] = &[
     Hook { name: "custom", run: custom::flush },
     Hook { name: "resources", run: resources::flush },
     Hook { name: "glass-heads", run: glass_heads::flush },
@@ -125,7 +124,7 @@ pub(super) const FLUSH: &[Hook] = &[
 /// Rebuilds the claim-derived domain tables from the claims, after the operations: the explicit
 /// projection rebuild and the checkpoint proof's replay. Custom projections keep their tables
 /// here; only the full graph replay rebuilds them.
-pub(super) const REBUILD: &[Hook] = &[
+pub const REBUILD: &[Hook] = &[
     Hook { name: "planning", run: rebuild_planning_tx },
     Hook { name: "resources", run: resources::rebuild },
     Hook { name: "glass-heads", run: glass_heads::rebuild },
@@ -134,7 +133,7 @@ pub(super) const REBUILD: &[Hook] = &[
 ];
 
 /// The domain stages of the full graph replay, after the mission runs are replayed.
-pub(super) const GRAPH_REPLAY: &[ReplayStage] = &[
+pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/planning", run: rebuild_planning_tx },
     ReplayStage { phase: "full-replay/resources", run: resources::rebuild },
     ReplayStage { phase: "full-replay/glass-heads", run: glass_heads::rebuild },
@@ -144,12 +143,12 @@ pub(super) const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/flush", run: publication_facts::reset },
 ];
 
-pub(super) fn run_hooks(hooks: &[Hook], transaction: &Transaction<'_>) -> Result<()> {
+pub fn run_hooks(hooks: &[Hook], transaction: &Transaction<'_>) -> Result<()> {
     hooks.iter().try_for_each(|hook| (hook.run)(transaction))
 }
 
 /// Run each projector that takes `claim`'s kind, in the registry's order.
-pub(super) fn project_claim(
+pub fn project_claim(
     projectors: &[AppendProjector],
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,

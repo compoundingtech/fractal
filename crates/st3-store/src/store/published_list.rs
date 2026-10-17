@@ -13,22 +13,22 @@ use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Rows a refresher published, coherent at one graph cut.
-pub(crate) struct Publication<R> {
+pub struct Publication<R> {
     /// The graph index the rows were folded at. A reader serves them under this index's
     /// snapshot, never under its own newer one.
-    pub(crate) cut: u64,
+    pub cut: u64,
     /// When the rows were folded, in Unix ms: the collection's "as of".
-    pub(crate) published_at_unix_ms: u128,
+    pub published_at_unix_ms: u128,
     /// The first time a row can change with no new claim, as when a lease ends or an ended run
     /// leaves the list. The refresher refolds by then.
-    pub(crate) valid_until_unix_ms: Option<u128>,
-    pub(crate) rows: R,
+    pub valid_until_unix_ms: Option<u128>,
+    pub rows: R,
 }
 
 /// Numbers every list this process makes, so no two lists' publications share an identity.
 static LISTS: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) struct PublishedList<R> {
+pub struct PublishedList<R> {
     /// This list's number in the process: see [`PublicationId`].
     instance: u64,
     newest: Mutex<Option<Arc<Publication<R>>>>,
@@ -58,7 +58,7 @@ pub(crate) struct PublishedList<R> {
     /// Folds from nothing or in chunks, by why: each refolded many rows, not a few.
     rebuilds: Mutex<BTreeMap<String, u64>>,
     /// Folds the refresher began, for tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     folds: std::sync::atomic::AtomicUsize,
 }
 
@@ -79,14 +79,14 @@ impl<R> Default for PublishedList<R> {
             sequence: AtomicU64::new(0),
             changes: tokio::sync::watch::Sender::new(0),
             rebuilds: Mutex::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             folds: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
 
 /// What a reader that never folds the list can serve now. See [`PublishedList::current`].
-pub(crate) enum ListRead<R> {
+pub enum ListRead<R> {
     /// No refresher was started. Unless the list's view is held, as a governing refresher holds
     /// it before it starts, nothing governs the list, as with `ST3_PUBLISHED_LISTS=off` or a
     /// tool or test that starts none: the reader keeps its own direct read.
@@ -103,30 +103,30 @@ pub(crate) enum ListRead<R> {
 /// One publication's identity within the process: its list, the generation it was folded in
 /// and its number among the list's publications. No two publications share one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PublicationId {
-    pub(crate) list: u64,
-    pub(crate) generation: u64,
-    pub(crate) sequence: u64,
+pub struct PublicationId {
+    pub list: u64,
+    pub generation: u64,
+    pub sequence: u64,
 }
 
 impl<R> PublishedList<R> {
     /// Register the one refresher, and return its wake. `None` when one is already registered.
-    pub(crate) fn start(&self) -> Option<Arc<tokio::sync::Notify>> {
+    pub fn start(&self) -> Option<Arc<tokio::sync::Notify>> {
         (!self.started.swap(true, Ordering::AcqRel)).then(|| Arc::clone(&self.wake))
     }
 
     /// This list's number in the process, as its publications' [`PublicationId::list`] names it.
-    pub(crate) fn instance(&self) -> u64 {
+    pub fn instance(&self) -> u64 {
         self.instance
     }
 
     /// Whether a refresher was started for this list.
-    pub(crate) fn is_started(&self) -> bool {
+    pub fn is_started(&self) -> bool {
         self.started.load(Ordering::Acquire)
     }
 
     /// The refresher's task ended, by any path: stop serving, for good.
-    pub(crate) fn end(&self) {
+    pub fn end(&self) {
         let _newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
         self.ended.store(true, Ordering::Release);
         self.serving.store(false, Ordering::Release);
@@ -136,7 +136,7 @@ impl<R> PublishedList<R> {
     /// What a reader may serve now, for a reader that never folds the list. A publication is
     /// served only while the list is and only in the generation it was folded in, so rows of
     /// projections a forget replaced are never served.
-    pub(crate) fn current(&self) -> ListRead<R> {
+    pub fn current(&self) -> ListRead<R> {
         let newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
         if !self.started.load(Ordering::Acquire) {
             return ListRead::NeverStarted;
@@ -158,46 +158,46 @@ impl<R> PublishedList<R> {
     }
 
     /// The list's generation now: a cursor of an earlier one reads projections a forget replaced.
-    pub(crate) fn generation(&self) -> u64 {
+    pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
 
     /// Follows every publication, withdrawal, forget and end.
-    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
         self.changes.subscribe()
     }
 
     /// Ask the refresher to fold now rather than wait for its next commit or deadline.
-    pub(crate) fn request_refresh(&self) {
+    pub fn request_refresh(&self) {
         self.wake.notify_one();
     }
 
     /// Ask the refresher, for a reader waiting on it, to fold as soon as its current fold ends,
     /// without its pause. One request serves every reader waiting then.
-    pub(crate) fn request_fresh(&self) {
+    pub fn request_fresh(&self) {
         self.fresh.notify_one();
         self.wake.notify_one();
     }
 
     /// Count one fold the refresher began, for tests.
-    pub(crate) fn note_fold(&self) {
-        #[cfg(test)]
+    pub fn note_fold(&self) {
+        #[cfg(any(test, feature = "test-support"))]
         self.folds.fetch_add(1, Ordering::Relaxed);
     }
 
-    #[cfg(test)]
-    pub(crate) fn folds(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn folds(&self) -> usize {
         self.folds.load(Ordering::Relaxed)
     }
 
     /// What a fresh read's request notifies: see [`Self::request_fresh`].
-    pub(crate) fn fresh_requests(&self) -> Arc<tokio::sync::Notify> {
+    pub fn fresh_requests(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.fresh)
     }
 
     /// The newest publication, while the refresher keeps the list served. Its rows carry their
     /// own cut and publication time.
-    pub(crate) fn newest(&self) -> Option<Arc<Publication<R>>> {
+    pub fn newest(&self) -> Option<Arc<Publication<R>>> {
         if !self.serving.load(Ordering::Acquire) {
             return None;
         }
@@ -207,7 +207,7 @@ impl<R> PublishedList<R> {
     /// The newest publication for the refresher itself to fold from, served or not, unless the
     /// projections were replaced since: then it folds from nothing. With it, the generation
     /// [`Self::publish`] must still see for the fold to publish.
-    pub(crate) fn base(&self) -> (Option<Arc<Publication<R>>>, u64) {
+    pub fn base(&self) -> (Option<Arc<Publication<R>>>, u64) {
         // Under the lock a forget takes, so the flag and the generation are read together.
         let newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
         let generation = self.generation.load(Ordering::Acquire);
@@ -219,7 +219,7 @@ impl<R> PublishedList<R> {
 
     /// Serve the newest publication again, as a withdrawn list whose next fold finds nothing
     /// new must, unless the projections were replaced since `generation`. Says whether it did.
-    pub(crate) fn serve_again(&self, generation: u64) -> bool {
+    pub fn serve_again(&self, generation: u64) -> bool {
         let newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
         if newest.is_none() || self.generation.load(Ordering::Acquire) != generation {
             return false;
@@ -235,7 +235,7 @@ impl<R> PublishedList<R> {
     /// fold began (`generation` is stale): then it is dropped and `None` returned, and the next
     /// fold starts from nothing. Otherwise says whether the list was served before, so a list
     /// served again is announced to its windows.
-    pub(crate) fn publish(&self, publication: Publication<R>, generation: u64) -> Option<bool> {
+    pub fn publish(&self, publication: Publication<R>, generation: u64) -> Option<bool> {
         let mut newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
         if self.generation.load(Ordering::Acquire) != generation {
             return None;
@@ -251,7 +251,7 @@ impl<R> PublishedList<R> {
     /// Stop serving the list, as when its refresher keeps failing or stops, until a fold
     /// publishes again. Readers of a list its refresher governs refuse meanwhile; readers of
     /// another fold on read. Says whether it was served.
-    pub(crate) fn withdraw(&self) -> bool {
+    pub fn withdraw(&self) -> bool {
         let served = self.serving.swap(false, Ordering::AcqRel);
         self.changes.send_modify(|changes| *changes += 1);
         served
@@ -261,7 +261,7 @@ impl<R> PublishedList<R> {
     /// any fold already under way. Readers keep the newest rows, under their own cut, until the
     /// fold from nothing publishes; replays come in bursts, and folding every window on read
     /// meanwhile would cost more than rows a fold or two old.
-    pub(crate) fn forget(&self) {
+    pub fn forget(&self) {
         let _newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.fold_from_nothing_next();
@@ -270,43 +270,43 @@ impl<R> PublishedList<R> {
     }
 
     /// Fold from nothing next time, as after a fold from nothing failed.
-    pub(crate) fn fold_from_nothing_next(&self) {
+    pub fn fold_from_nothing_next(&self) {
         self.forgotten.store(true, Ordering::Release);
     }
 
     /// Count one fold of many rows, by why.
-    pub(crate) fn note_rebuild(&self, why: &str) {
+    pub fn note_rebuild(&self, why: &str) {
         *self.rebuilds.lock().unwrap_or_else(PoisonError::into_inner).entry(why.to_owned()).or_default() += 1;
     }
 
-    #[cfg(test)]
-    pub(crate) fn rebuilds(&self) -> BTreeMap<String, u64> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn rebuilds(&self) -> BTreeMap<String, u64> {
         self.rebuilds.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 }
 
 /// The claims after `?1` through `?2`, by store index, with the step a person-work claim names.
-pub(crate) const CLAIMS_SINCE: &str = "SELECT subject, kind, CASE WHEN kind LIKE 'work.person-%'
+pub const CLAIMS_SINCE: &str = "SELECT subject, kind, CASE WHEN kind LIKE 'work.person-%'
         THEN json_extract(body,'$.fields.origin_step') END
  FROM claims WHERE store_index>?1 AND store_index<=?2";
 /// The person asks the requesters in `?1`, a JSON array, made, by the kind index.
-pub(crate) const ASKS_BY_REQUESTERS: &str = "SELECT subject, json_extract(body,'$.fields.origin_step') FROM claims
+pub const ASKS_BY_REQUESTERS: &str = "SELECT subject, json_extract(body,'$.fields.origin_step') FROM claims
  WHERE kind='work.person-asked' AND actor IN (SELECT value FROM json_each(?1))";
 /// The ask on step `?1`, by the subject index.
-pub(crate) const ASK_ORIGIN_AND_RUN: &str = "SELECT json_extract(body,'$.fields.origin_step'), json_extract(body,'$.fields.run')
+pub const ASK_ORIGIN_AND_RUN: &str = "SELECT json_extract(body,'$.fields.origin_step'), json_extract(body,'$.fields.run')
  FROM claims WHERE subject=?1 AND kind='work.person-asked' LIMIT 1";
 /// A run's steps, by the run index.
-pub(crate) const RUN_STEPS: &str = "SELECT subject FROM step_runs INDEXED BY step_runs_run_index WHERE run_id=?1";
+pub const RUN_STEPS: &str = "SELECT subject FROM step_runs INDEXED BY step_runs_run_index WHERE run_id=?1";
 /// The runs a step started, by the parent-step index.
-pub(crate) const CHILD_RUNS: &str =
+pub const CHILD_RUNS: &str =
     "SELECT id FROM mission_runs WHERE parent_step_run=?1 AND parent_step_run IS NOT NULL";
 /// Person asks whose origin step is one of `?1`, a JSON array, by the kind index.
-pub(crate) const ASKS_FROM_STEPS: &str = "SELECT subject FROM claims
+pub const ASKS_FROM_STEPS: &str = "SELECT subject FROM claims
  WHERE kind='work.person-asked' AND json_extract(body,'$.fields.origin_step') IN (SELECT value FROM json_each(?1))";
 
 /// Claim kinds about an agent that decide whether its person asks still block their steps:
 /// its declaration, and the runtime state and actions that tell whether it is retiring.
-pub(crate) fn decides_asks(kind: &str) -> bool {
+pub fn decides_asks(kind: &str) -> bool {
     kind == "intent.desired" || kind == "runtime.observed" || kind.starts_with("runtime.action.")
 }
 
@@ -314,7 +314,7 @@ impl Store {
     /// How far replicated claims are projected: claims after this index that arrived by
     /// replication may still wait in the backlog, and a pass that projects them moves it on. A
     /// list that folded past them before then reads their claims again once it moves.
-    pub(crate) fn projection_frontier(&self) -> Result<u64> {
+    pub fn projection_frontier(&self) -> Result<u64> {
         let connection = self.readers.get();
         let frontier = connection
             .prepare_cached(
@@ -327,7 +327,7 @@ impl Store {
 
     /// The person asks that `requesters` made, with the step each asked from, in one read for a
     /// whole fold. Person asks are few; the kind index bounds the read to them.
-    pub(crate) fn asks_by_requesters(
+    pub fn asks_by_requesters(
         &self,
         requesters: &BTreeSet<String>,
     ) -> Result<Vec<(String, Option<String>)>> {
@@ -346,7 +346,7 @@ impl Store {
 
     /// For a claim about a person ask's step: the step that asked and the run the ask started,
     /// as the ask itself names them. Answers and cancellations name neither.
-    pub(crate) fn ask_origin_and_run(&self, ask: &str) -> Result<(Option<String>, Option<String>)> {
+    pub fn ask_origin_and_run(&self, ask: &str) -> Result<(Option<String>, Option<String>)> {
         let connection = self.readers.get();
         let found = connection
             .prepare_cached(ASK_ORIGIN_AND_RUN)?
@@ -357,7 +357,7 @@ impl Store {
 
     /// Every person ask, with the step it asked from: what a change to a subscription or
     /// schedule, whose deliveries an ask's currency walks, can affect. Person asks are few.
-    pub(crate) fn every_ask(&self) -> Result<Vec<(String, Option<String>)>> {
+    pub fn every_ask(&self) -> Result<Vec<(String, Option<String>)>> {
         let connection = self.readers.get();
         let asks = connection
             .prepare_cached(
@@ -372,7 +372,7 @@ impl Store {
     /// `runs` and every run under them, through the steps that started each child run: a
     /// run's state ends the steps of the runs under it, and decides whether asks in them are
     /// current. Walks the run and parent-step indexes, never the whole table.
-    pub(crate) fn runs_under(&self, runs: &BTreeSet<String>) -> Result<BTreeSet<String>> {
+    pub fn runs_under(&self, runs: &BTreeSet<String>) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
         let mut steps_of = connection.prepare_cached(RUN_STEPS)?;
         let mut children_of = connection.prepare_cached(CHILD_RUNS)?;
@@ -396,7 +396,7 @@ impl Store {
 
     /// The person asks that asked from any of `steps`: a change to the step that asked, as
     /// when it leaves waiting on a person, decides whether its asks are still current.
-    pub(crate) fn asks_from_steps(&self, steps: &BTreeSet<String>) -> Result<Vec<String>> {
+    pub fn asks_from_steps(&self, steps: &BTreeSet<String>) -> Result<Vec<String>> {
         if steps.is_empty() {
             return Ok(Vec::new());
         }
@@ -409,7 +409,7 @@ impl Store {
     }
 
     /// The run a revision proposal is for: its phase and timestamps change with the proposal.
-    pub(crate) fn revision_proposal_run(&self, proposal: &str) -> Result<Option<String>> {
+    pub fn revision_proposal_run(&self, proposal: &str) -> Result<Option<String>> {
         let connection = self.readers.get();
         let run = connection
             .prepare_cached("SELECT run_id FROM revision_proposals WHERE id=?1")?

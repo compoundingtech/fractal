@@ -10,7 +10,7 @@ const QUERY: &str =
              WHERE s.subject IN (SELECT value FROM json_each(?1))";
 
 // The existing public Store reader retains its original accepted batch sizes.
-pub(super) fn read(
+pub fn read(
     connection: &Connection,
     subjects: &[String],
 ) -> Result<BTreeMap<String, StepLabel>> {

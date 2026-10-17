@@ -678,7 +678,7 @@ fn native_gate_guard_inventory_and_default_store_have_no_public_wiring() {
 }
 
 // Shared only by the two private fixture modules; the native writers are unchanged.
-pub(super) fn seed_native(tx: &Transaction<'_>, binding: &Binding) -> String {
+pub fn seed_native(tx: &Transaction<'_>, binding: &Binding) -> String {
     let intent = parse_intent(
         r#"
 version 2

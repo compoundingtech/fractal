@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 use smallclaims::ivm::install::{Installer, Limits, Outcome, ScanPage};
 
-pub(crate) fn facts() -> Value {
+pub fn facts() -> Value {
     json!({
         "policy":{"version":"fixture-selected.v1","complete":true},
         "gate":{"revision":"rev/one","name":"prepared","subject":"exec/probe","path":"exit_code","operator":"is","expected":0},
@@ -14,7 +14,7 @@ pub(crate) fn facts() -> Value {
         "domain":{"complete":true,"origin":"node/one","kinds":["runtime.observed"]}
     })
 }
-pub(crate) fn mutation(key: &str, value: Option<Value>) -> Mutation {
+pub fn mutation(key: &str, value: Option<Value>) -> Mutation {
     Mutation {
         key: key.into(),
         old: None,
@@ -25,12 +25,12 @@ fn encoded(value: Value) -> Value {
     Value::String(value.to_string())
 }
 
-pub(crate) struct Fixture {
-    pub(crate) db: Connection,
-    pub(crate) installer: Installer,
+pub struct Fixture {
+    pub db: Connection,
+    pub installer: Installer,
 }
 impl Fixture {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let mut db = Connection::open_in_memory().unwrap();
         let installer = Installer::new(vec![Box::new(TerminalGates)]).unwrap();
         installer.create_schema(&db).unwrap();
@@ -80,7 +80,7 @@ impl Fixture {
         tx.commit().unwrap();
         Self { db, installer }
     }
-    pub(crate) fn record(&mut self, mutation: Mutation) {
+    pub fn record(&mut self, mutation: Mutation) {
         let tx = self.db.transaction().unwrap();
         self.installer.record(&tx, SOURCE, &mutation).unwrap();
         tx.commit().unwrap();

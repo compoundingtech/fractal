@@ -21,17 +21,17 @@ struct Registry {
 }
 
 #[derive(Default)]
-pub(crate) struct Wakes {
+pub struct Wakes {
     registry: Mutex<Registry>,
     failures: AtomicU64,
     degraded: AtomicBool,
 }
 
-pub(crate) struct Subscription {
+pub struct Subscription {
     wakes: Arc<Wakes>,
     id: u64,
     sender: watch::Sender<u64>,
-    pub(crate) changed: watch::Receiver<u64>,
+    pub changed: watch::Receiver<u64>,
     base: HashSet<Dependency>,
     dependencies: HashSet<Dependency>,
 }
@@ -96,7 +96,7 @@ impl Wakes {
         self.notify(keys);
     }
 
-    pub(crate) fn owner_changed(&self, subject: &str, component: &str) {
+    pub fn owner_changed(&self, subject: &str, component: &str) {
         self.notify([Dependency::Owner(subject.into(), component.into())]);
     }
 }
@@ -105,7 +105,7 @@ impl Subscription {
     /// Replace message dependencies under the same lock used by the dispatcher. The recipient
     /// dependency also routes every message mutation, covering a newly read message whose
     /// subject has not been registered yet.
-    pub(crate) fn messages(&mut self, subjects: &[String]) {
+    pub fn messages(&mut self, subjects: &[String]) {
         let next: HashSet<_> = self
             .base
             .iter()
@@ -154,7 +154,7 @@ impl Drop for Subscription {
 }
 
 impl Store {
-    pub(crate) fn subscribe_mailbox(
+    pub fn subscribe_mailbox(
         self: &Arc<Self>,
         fence: &crate::mailbox::Fence,
         events: &watch::Sender<u64>,
@@ -183,7 +183,7 @@ impl Store {
     }
 
     /// Local telemetry uses the existing doctor check shape; never claims or replicated state.
-    pub(crate) fn mailbox_wake_health(&self) -> DoctorCheck {
+    pub fn mailbox_wake_health(&self) -> DoctorCheck {
         let (failures, degraded) = self
             .smalltalk
             .mailbox_wakes
@@ -348,9 +348,9 @@ async fn dispatch(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Store {
-    pub(crate) fn miss_mailbox_owner_for_test(&self, subject: &str, component: &str) {
+    pub fn miss_mailbox_owner_for_test(&self, subject: &str, component: &str) {
         self.smalltalk
             .mailbox_wakes
             .get()
@@ -361,7 +361,7 @@ impl Store {
             .subscribers
             .remove(&Dependency::Owner(subject.into(), component.into()));
     }
-    pub(crate) fn miss_mailbox_recipient_for_test(&self, subject: &str) {
+    pub fn miss_mailbox_recipient_for_test(&self, subject: &str) {
         self.smalltalk
             .mailbox_wakes
             .get()

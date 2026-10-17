@@ -7,12 +7,12 @@ use serde_json::{Value, json};
 use super::Store;
 use crate::client_values::{client_timestamp, client_work_state};
 
-pub(crate) const AGENT_QUEUE_FIELDS: [&str; 8] = [
+pub const AGENT_QUEUE_FIELDS: [&str; 8] = [
     "current_work_ids", "active_work_count", "next_work_id", "upcoming_work_ids",
     "queued_work_count", "current_work", "next_work", "upcoming_work",
 ];
 
-pub(crate) fn agent_queue_fields(
+pub fn agent_queue_fields(
     queue: &crate::store::AgentWorkQueue,
     labels: &BTreeMap<String, crate::store::StepLabel>,
 ) -> Value {
@@ -35,7 +35,7 @@ pub(crate) fn agent_queue_fields(
 }
 
 /// Refresh queue selection and presentation once, without folding any agent cards.
-pub(crate) fn agent_queue_metadata(
+pub fn agent_queue_metadata(
     store: &Store,
     subjects: &BTreeSet<String>,
 ) -> anyhow::Result<Vec<Value>> {

@@ -21,7 +21,7 @@ fn acknowledged(
         params![handoff.subject, handoff.body["fields"]["handoff_to"].as_str(), handoff.body["fields"]["handoff_message"].as_str(), at as i64], |row| row.get(0))
 }
 
-pub(super) fn pending_handoff(
+pub fn pending_handoff(
     connection: &Connection,
     view: &StepRunView,
 ) -> Result<bool, St3Error> {
@@ -35,7 +35,7 @@ pub(super) fn pending_handoff(
         .map(|pending| pending.unwrap_or(false))
 }
 
-pub(super) fn validate_recipient(
+pub fn validate_recipient(
     tx: &Transaction<'_>,
     input: &WorkHandoffRequest,
     current: &StepRunView,
@@ -89,7 +89,7 @@ pub(super) fn validate_recipient(
     Ok(())
 }
 
-pub(super) fn transfer_tx(
+pub fn transfer_tx(
     tx: &Transaction<'_>,
     origin: &str,
     current: &StepRunView,
@@ -141,7 +141,7 @@ pub(super) fn transfer_tx(
     Ok(())
 }
 
-pub(super) fn enrich_handoff(
+pub fn enrich_handoff(
     connection: &Connection,
     view: &mut StepRunView,
     at: u128,
@@ -160,7 +160,7 @@ pub(super) fn enrich_handoff(
     Ok(())
 }
 
-pub(super) fn project_start(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<(), St3Error> {
+pub fn project_start(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<(), St3Error> {
     let fields = &claim.body["fields"];
     let mission: MissionSpec =
         serde_json::from_value(fields["mission_spec"].clone()).map_err(internal)?;
@@ -195,11 +195,11 @@ pub(super) fn project_start(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result
     Ok(())
 }
 
-pub(super) fn is_adhoc(connection: &Connection, run: &str) -> rusqlite::Result<bool> {
+pub fn is_adhoc(connection: &Connection, run: &str) -> rusqlite::Result<bool> {
     connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='mission-run.created' AND json_extract(body,'$.fields.ad_hoc_title') IS NOT NULL)", [run], |row| row.get(0))
 }
 
-pub(super) fn validate_retry(
+pub fn validate_retry(
     connection: &Connection,
     subject: &str,
     input: &WorkHandoffRequest,
@@ -220,7 +220,7 @@ pub(super) fn validate_retry(
 }
 
 impl Store {
-    pub(crate) fn handoff_retry(
+    pub fn handoff_retry(
         &self,
         subject: &str,
         input: &WorkHandoffRequest,

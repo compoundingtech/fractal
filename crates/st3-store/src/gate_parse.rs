@@ -9,7 +9,7 @@ use crate::declaration_syntax::*;
 
 const BUILT_IN_EXEC_GATES: &[&str] = &["merged", "ci-passed", "cargo-test"];
 
-pub(crate) fn gate_name(gate: &GateSpec) -> &str {
+pub fn gate_name(gate: &GateSpec) -> &str {
     match gate {
         GateSpec::Exists { name, .. }
         | GateSpec::Empty { name, .. }
@@ -25,7 +25,7 @@ pub(crate) fn gate_name(gate: &GateSpec) -> &str {
     }
 }
 
-pub(crate) fn one_duration(node: &KdlNode) -> Result<u64, St3Error> {
+pub fn one_duration(node: &KdlNode) -> Result<u64, St3Error> {
     ensure_no_properties(node)?;
     ensure_no_children(node)?;
     let [entry] = node.entries() else {
@@ -46,7 +46,7 @@ pub(crate) fn one_duration(node: &KdlNode) -> Result<u64, St3Error> {
     }
 }
 
-pub(crate) fn parse_baseline_gate(node: &KdlNode, name: String) -> Result<GateSpec, St3Error> {
+pub fn parse_baseline_gate(node: &KdlNode, name: String) -> Result<GateSpec, St3Error> {
     reject_type(node)?;
     ensure_no_properties(node)?;
     parse_predicate_gate(node, name)
@@ -55,7 +55,7 @@ pub(crate) fn parse_baseline_gate(node: &KdlNode, name: String) -> Result<GateSp
 /// A built-in gate kind, stored as the exec gate it expands to: an `st gate` subcommand that
 /// exits 0 to pass, 1 for not yet and 3 when the gate cannot answer. `host` defaults to `local`,
 /// `workspace` to `${ST_WORKSPACE}`, and `time-limit` to two minutes, or an hour for `cargo-test`.
-pub(crate) fn parse_built_in_gate(
+pub fn parse_built_in_gate(
     name: String,
     body: &KdlDocument,
     default_host: &str,
@@ -165,7 +165,7 @@ pub(crate) fn parse_built_in_gate(
     })
 }
 
-pub(crate) fn parse_gate(node: &KdlNode, default_host: &str) -> Result<GateSpec, St3Error> {
+pub fn parse_gate(node: &KdlNode, default_host: &str) -> Result<GateSpec, St3Error> {
     reject_type(node)?;
     ensure_only_properties(node, &["type", "mode"])?;
     let name = one_string_with_children(node)?;
@@ -219,7 +219,7 @@ pub(crate) fn parse_gate(node: &KdlNode, default_host: &str) -> Result<GateSpec,
     parse_predicate_gate(&body.nodes()[0], name)
 }
 
-pub(crate) fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, St3Error> {
+pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, St3Error> {
     reject_type(child)?;
     match child.name().value() {
         "exists" => {
@@ -434,7 +434,7 @@ pub(crate) fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<Gate
     }
 }
 
-pub(crate) fn parse_running_gate(
+pub fn parse_running_gate(
     node: &KdlNode,
     name: String,
     default_host: &str,
@@ -579,7 +579,7 @@ pub(crate) fn parse_running_gate(
     }
 }
 
-pub(crate) fn validate_pull_request_locator(locator: &str) -> Result<(), St3Error> {
+pub fn validate_pull_request_locator(locator: &str) -> Result<(), St3Error> {
     let valid = locator
         .rsplit_once('#')
         .is_some_and(|(repository, number)| {

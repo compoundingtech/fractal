@@ -3,7 +3,7 @@ use super::*;
 use crate::resource::github_workflows::PerformanceFailure;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn deliver_tx(
+pub fn deliver_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     batch: &str,

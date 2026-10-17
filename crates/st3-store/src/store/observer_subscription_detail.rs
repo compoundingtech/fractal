@@ -3,16 +3,16 @@
 
 use super::*;
 
-pub(crate) const SNAPSHOT_METADATA_SQL: &str =
+pub const SNAPSHOT_METADATA_SQL: &str =
     "SELECT store_index, octet_length(accepted_at_unix_ms),
                     typeof(accepted_at_unix_ms)='text'
              FROM claims WHERE store_index<=?1 ORDER BY store_index DESC LIMIT 1";
 
-pub(crate) const DECLARATION_KIND_METADATA_SQL: &str =
+pub const DECLARATION_KIND_METADATA_SQL: &str =
     "SELECT octet_length(kind), typeof(kind)='text'
              FROM desired WHERE subject=?1";
 
-pub(crate) const DECLARATION_METADATA_SQL: &str =
+pub const DECLARATION_METADATA_SQL: &str =
     "SELECT octet_length(subject) + octet_length(revision)
                     + octet_length(body) + coalesce(octet_length(owner_run),0)
                     + coalesce(octet_length(owner_generation),0)
@@ -24,24 +24,24 @@ pub(crate) const DECLARATION_METADATA_SQL: &str =
                     AND typeof(owner_step) IN ('null','text')
              FROM desired WHERE subject=?1";
 
-pub(crate) const STATE_METADATA_SQL: &str =
+pub const STATE_METADATA_SQL: &str =
     "SELECT store_index, octet_length(body) + octet_length(accepted_at_unix_ms),
                     typeof(body)='text' AND typeof(accepted_at_unix_ms)='text'
              FROM claims INDEXED BY claims_subject_kind_index
              WHERE subject=?1 AND kind=?2 AND store_index<=?3
              ORDER BY store_index DESC LIMIT 1";
 
-pub(crate) const MAX_DETAIL_SOURCE_BYTES: usize = 256 * 1024;
-pub(crate) const MAX_DETAIL_KEY_BYTES: usize = 4096;
+pub const MAX_DETAIL_SOURCE_BYTES: usize = 256 * 1024;
+pub const MAX_DETAIL_KEY_BYTES: usize = 4096;
 
-pub(crate) struct DetailBudget(usize);
+pub struct DetailBudget(usize);
 
 impl DetailBudget {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self(MAX_DETAIL_SOURCE_BYTES)
     }
 
-    pub(crate) fn charge(&mut self, bytes: i64) -> Result<()> {
+    pub fn charge(&mut self, bytes: i64) -> Result<()> {
         let Some(bytes) = usize::try_from(bytes).ok().filter(|bytes| *bytes <= self.0) else {
             return Err(St3Error::new(
                 "projection-detail-too-large",
@@ -54,15 +54,15 @@ impl DetailBudget {
     }
 }
 
-pub(crate) struct DetailDeclaration {
-    pub(crate) desired: DesiredSubject,
-    pub(crate) revision: String,
+pub struct DetailDeclaration {
+    pub desired: DesiredSubject,
+    pub revision: String,
 }
 
 impl Store {
     // client_snapshot_at reads this column too. Check its width before that helper
     // copies it; the caller holds the same snapshot through both reads.
-    pub(crate) fn observer_subscription_detail_snapshot_guard(
+    pub fn observer_subscription_detail_snapshot_guard(
         &self,
         index: u64,
         budget: &mut DetailBudget,
@@ -85,7 +85,7 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn observer_subscription_detail_declaration(
+    pub fn observer_subscription_detail_declaration(
         &self,
         subject: &str,
         kind: &str,
@@ -152,7 +152,7 @@ impl Store {
             .map_err(detail_read_error)
     }
 
-    pub(crate) fn observer_subscription_detail_state(
+    pub fn observer_subscription_detail_state(
         &self,
         subject: &str,
         kind: &str,

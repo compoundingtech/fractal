@@ -1,19 +1,19 @@
 use super::*;
 
 impl Store {
-    #[cfg(test)]
-    pub(super) fn count_refolded_cards_for_test(&self, cards: usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn count_refolded_cards_for_test(&self, cards: usize) {
         self.smalltalk.agent_resources_refolded_cards.fetch_add(cards, std::sync::atomic::Ordering::Relaxed);
         self.smalltalk.agent_resources_largest_fold.fetch_max(cards, std::sync::atomic::Ordering::Relaxed);
     }
 
-    #[cfg(test)]
-    pub(crate) fn agent_resources_refolded_cards_for_test(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn agent_resources_refolded_cards_for_test(&self) -> usize {
         self.smalltalk.agent_resources_refolded_cards.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Run one refresh, answering the requests made before it began only if it publishes.
-    pub(crate) fn answer_agent_roster_requests<T>(&self, refresh: impl FnOnce() -> Result<T>) -> Result<T> {
+    pub fn answer_agent_roster_requests<T>(&self, refresh: impl FnOnce() -> Result<T>) -> Result<T> {
         self.smalltalk.agent_roster_attempt.fetch_or(1, std::sync::atomic::Ordering::AcqRel);
         struct Attempt<'a>(&'a SmalltalkRuntime, bool);
         impl Drop for Attempt<'_> {
@@ -55,7 +55,7 @@ impl Store {
         self.mission_run_summaries_for_ids(Some(ids))
     }
 
-    pub(super) fn mission_run_summaries_for_ids(&self, ids: Option<&[String]>) -> Result<Vec<MissionRunView>> {
+    pub fn mission_run_summaries_for_ids(&self, ids: Option<&[String]>) -> Result<Vec<MissionRunView>> {
         let connection = self.readers.get();
         let placeholders = ids.map(|ids| vec!["?"; ids.len()].join(","));
         let sql = placeholders.as_ref().map(|placeholders| MISSION_RUN_HEADER_SELECT.replace(
@@ -108,7 +108,7 @@ impl Store {
 
     /// Only fields consumed by agent cards, retaining the full reducer's membership,
     /// reachability and operational annotation. Never use this for a public status response.
-    pub(crate) fn agent_card_status_at(
+    pub fn agent_card_status_at(
         &self,
         names: Option<&BTreeSet<String>>,
         index: u64,
@@ -416,7 +416,7 @@ impl Store {
             .ok_or_else(|| St3Error::new("internal", "the attention withdrawal was not stored"))
     }
 
-    pub(crate) fn resolve_attention_automatically(
+    pub fn resolve_attention_automatically(
         &self,
         subject: &str,
         reason: &str,
@@ -546,18 +546,18 @@ impl Store {
         self.human_attention_runs_at(now_ms())
     }
 
-    pub(crate) fn human_attention_runs_at(&self, now: u128) -> Result<BTreeSet<String>> {
+    pub fn human_attention_runs_at(&self, now: u128) -> Result<BTreeSet<String>> {
         Ok(self.human_attention_at(now)?.0)
     }
 
     /// The runs that wait on a person, with the open human gates among them: each gate's
     /// mission, the step it holds when it holds one, and the person it waits on.
-    pub(crate) fn human_attention(&self) -> Result<HumanAttention> {
+    pub fn human_attention(&self) -> Result<HumanAttention> {
         self.human_attention_at(now_ms())
     }
 
     /// [`Store::human_attention`] with person asks evaluated at `now`.
-    pub(crate) fn human_attention_at(&self, now: u128) -> Result<HumanAttention> {
+    pub fn human_attention_at(&self, now: u128) -> Result<HumanAttention> {
         let mut items = self.mission_run_attention_items(None)?;
         let gates = items
             .iter()
@@ -581,7 +581,7 @@ impl Store {
 
     /// The attention items that belong to a mission run: gate reviews, launch approvals and
     /// revision approvals. A run's header is all they read of the run.
-    pub(super) fn mission_run_attention_items(&self, person: Option<&str>) -> Result<Vec<AttentionItemView>> {
+    pub fn mission_run_attention_items(&self, person: Option<&str>) -> Result<Vec<AttentionItemView>> {
         let mut items = Vec::new();
         let reviews = self.pending_human_reviews(person)?;
         {
@@ -718,7 +718,7 @@ impl Store {
     }
 
     /// Keep the items requested by `as_of` whose run is still current, then order them.
-    pub(super) fn current_attention(
+    pub fn current_attention(
         &self,
         mut items: Vec<AttentionItemView>,
         as_of: u128,
@@ -802,7 +802,7 @@ impl Store {
         self.read_snapshot(|snapshot| self.usage_summaries_pinned(subjects, at_index, snapshot))
     }
 
-    pub(super) fn usage_summaries_pinned(
+    pub fn usage_summaries_pinned(
         &self,
         subjects: &[String],
         at_index: Option<u64>,
@@ -911,7 +911,7 @@ impl Store {
         Ok(summaries)
     }
 
-    pub(super) fn usage_summary_from_rows<I>(
+    pub fn usage_summary_from_rows<I>(
         rows: I,
         incarnation: Option<&str>,
     ) -> Result<Option<UsageSummary>>
@@ -931,7 +931,7 @@ impl Store {
     /// One alert per login that needs a person: seats that share a login directory on a host
     /// fail together and one sign-in fixes them all, so they share an alert that names each seat
     /// and shows in each one's conversation. It clears when the login works again.
-    pub(super) fn harness_login_attention_items(
+    pub fn harness_login_attention_items(
         &self,
         person: Option<&str>,
     ) -> Result<Vec<AttentionItemView>> {

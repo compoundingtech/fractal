@@ -27,7 +27,7 @@ impl Store {
     /// delta the incremental fold trusts), no agent timeline row arrived, and no queue deadline
     /// passed. A read that must see what was written before it need not wait for a refresh
     /// that would fold nothing. One range read over the claims since the cut; it never folds.
-    pub(crate) fn published_agent_roster_unchanged_through(
+    pub fn published_agent_roster_unchanged_through(
         &self,
         index: u64,
         history: bool,
@@ -62,7 +62,7 @@ impl Store {
     /// index, while a refresher keeps advancing it. A reader serves these rows under that
     /// index's snapshot, never under its own newer one, and wakes the refresher. Without a
     /// refresher there is none: readers then fold exactly their own cut, as before.
-    pub(crate) fn published_agent_roster(
+    pub fn published_agent_roster(
         &self,
         index: u64,
         history: bool,
@@ -81,7 +81,7 @@ impl Store {
 
     /// The complete roster published at exactly `cut`, for a page continuing from a first page
     /// served at that cut, with when it was published.
-    pub(crate) fn published_agent_roster_at(
+    pub fn published_agent_roster_at(
         &self,
         cut: u64,
         history: bool,
@@ -101,7 +101,7 @@ impl Store {
     /// (membership, order and queue metadata of every agent) and the cards of their first
     /// `count` agents, all at that one cut. The refresher publishes this head first as the
     /// daemon starts, so a window or first page need not wait for every card to fold.
-    pub(crate) fn published_agent_roster_head(
+    pub fn published_agent_roster_head(
         &self,
         index: u64,
         count: usize,
@@ -130,7 +130,7 @@ impl Store {
     }
 
     /// [`Self::agent_resources_cached_at`], with when the rows were published.
-    pub(crate) fn agent_resources_published_at(
+    pub fn agent_resources_published_at(
         &self,
         index: u64,
         history: bool,
@@ -162,7 +162,7 @@ impl Store {
 
     /// The actor that published the mission revision `run` works to: a broken gate's attention
     /// goes to it. A nested run works to its root run's revision.
-    pub(crate) fn mission_run_publisher(&self, run: &str) -> Result<Option<String>> {
+    pub fn mission_run_publisher(&self, run: &str) -> Result<Option<String>> {
         let connection = self.readers.get();
         let id = run.strip_prefix("mission-run/").unwrap_or(run);
         let Some(header) = mission_run_header_tx(&connection, id).optional()? else {
@@ -198,7 +198,7 @@ impl Store {
 
     /// Admission's transition decision, from the same transaction as its native runtime fence.
     /// The echoed producer record stays unchanged; it need not carry derived history metadata.
-    pub(crate) fn append_harness_event_publication(
+    pub fn append_harness_event_publication(
         &self,
         publication: &crate::harness_events::Publication,
     ) -> Result<(ClaimRecord, bool, bool), St3Error> {
@@ -265,7 +265,7 @@ impl Store {
     /// legacy admitted starts. A local row's after_store_index places it after that claim;
     /// this is local log ordering, not the driver's original writer/deadline proof.
     /// Multiple launches cannot bind a no-incarnation driver exit to the current process.
-    pub(crate) fn mechanical_gate_exit_receipt(
+    pub fn mechanical_gate_exit_receipt(
         &self,
         requested: &ClaimRecord,
     ) -> Result<Option<(ClaimRecord, Option<String>)>> {
@@ -355,7 +355,7 @@ impl Store {
 
     /// Gate runners are launched directly rather than through desired declarations. Their
     /// owner is durable in the request; older mechanical/LLM requests encode it in the subject.
-    pub(crate) fn mission_gate_runners(&self) -> Result<Vec<MissionGateRunner>> {
+    pub fn mission_gate_runners(&self) -> Result<Vec<MissionGateRunner>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare(
             "SELECT DISTINCT subject, origin,
@@ -472,7 +472,7 @@ impl Store {
     }
 
     /// Explicit credential evidence from the currently running native epoch only.
-    pub(crate) fn harness_auth_evidence(
+    pub fn harness_auth_evidence(
         &self,
         subject: &str,
         incarnation: &str,
@@ -496,4 +496,4 @@ impl Store {
 }
 
 /// A roster head: its cut, every agent's refs, the first cards in order, and when published.
-pub(crate) type PublishedRosterHead = (u64, Arc<Vec<Value>>, Vec<Value>, u128);
+pub type PublishedRosterHead = (u64, Arc<Vec<Value>>, Vec<Value>, u128);

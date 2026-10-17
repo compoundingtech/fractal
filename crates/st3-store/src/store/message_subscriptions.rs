@@ -1,7 +1,7 @@
 //! Validation for public direct-message registrations on existing observer declarations.
 use super::*;
 
-pub(crate) fn validate_actor(
+pub fn validate_actor(
     intent: &NormalizedIntent,
     actor: Option<&str>,
 ) -> Result<(), St3Error> {
@@ -34,7 +34,7 @@ pub(crate) fn validate_actor(
     Ok(())
 }
 
-pub(crate) fn validate(
+pub fn validate(
     connection: &Connection,
     intent: &NormalizedIntent,
     index: u64,
@@ -114,7 +114,7 @@ pub(crate) fn validate(
 
 /// Publication and replicated projection share the original-author check. The public API
 /// reparses KDL; a replicated main-field registration is classified from its durable spec.
-pub(crate) fn validate_publisher(
+pub fn validate_publisher(
     connection: &Connection,
     intent: &NormalizedIntent,
     actor: Option<&str>,
@@ -134,7 +134,7 @@ pub(crate) fn validate_publisher(
     Ok(())
 }
 
-pub(super) fn validate_replicated(
+pub fn validate_replicated(
     connection: &Transaction<'_>,
     claim: &ClaimRecord,
     desired: &DesiredSubject,
@@ -188,8 +188,8 @@ pub(super) fn validate_replicated(
     )
 }
 
-#[cfg(test)]
-pub(crate) const PERFORMANCE_REGISTRATION: &str = r#"version 2
+#[cfg(any(test, feature = "test-support"))]
+pub const PERFORMANCE_REGISTRATION: &str = r#"version 2
 subscription "fixture/main-performance-p0" {
   observer "observer/github/compoundingtech/smalltalk"
   on "main_performance_failures"
@@ -198,8 +198,8 @@ subscription "fixture/main-performance-p0" {
 }
 "#;
 
-#[cfg(test)]
-pub(crate) const PERFORMANCE_DECLARATIONS: &str = r#"version 2
+#[cfg(any(test, feature = "test-support"))]
+pub const PERFORMANCE_DECLARATIONS: &str = r#"version 2
 resource "github/compoundingtech/smalltalk" { kind "vcs.repository" }
 observer "github/compoundingtech/smalltalk" {
   resource "resource/github/compoundingtech/smalltalk"
@@ -214,7 +214,7 @@ agent "fleet/fixture-project/speed" { workspace "."; command "true" }
 mod tests {
     use super::*;
 
-    pub(crate) fn setup(store: &Store) {
+    pub fn setup(store: &Store) {
         let intent = crate::graph::parse_internal_intent(PERFORMANCE_DECLARATIONS, "node").unwrap();
         store
             .apply_internal(&intent, "fixture-declarations")

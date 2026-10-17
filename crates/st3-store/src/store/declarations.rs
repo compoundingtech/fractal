@@ -116,7 +116,7 @@ fn changed_fields(
     }
 }
 
-pub(super) fn diffs<'a>(
+pub fn diffs<'a>(
     connection: &Connection,
     intent: &NormalizedIntent,
     subjects: impl Iterator<Item = &'a str>,
@@ -143,7 +143,7 @@ pub(super) fn diffs<'a>(
 }
 
 impl Store {
-    pub(crate) fn publication_definition(
+    pub fn publication_definition(
         &self,
         subject: &str,
         at: u64,

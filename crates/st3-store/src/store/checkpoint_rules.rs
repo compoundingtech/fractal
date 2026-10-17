@@ -14,7 +14,7 @@ use smallclaims::store::checkpoint::DAY_MS;
 use smallclaims::store::checkpoint::*;
 
 mod staged;
-pub(crate) use staged::plan_staged;
+pub use staged::plan_staged;
 
 /// The rule engine's version. It is part of the rules digest, so nodes agree on a checkpoint only
 /// when they run the same rules. Version 5 leaves repaired originals out of the sealed set and
@@ -44,11 +44,11 @@ pub const RULES_VERSION: u32 = 18;
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
 /// snapshot: the series' total, and the baseline for a period that starts at the window's edge.
 /// Every response is also exported to OpenTelemetry for history beyond the window.
-pub(crate) const USAGE_WINDOW_MS: u128 = 7 * DAY_MS;
+pub const USAGE_WINDOW_MS: u128 = 7 * DAY_MS;
 const HOUR_MS: u128 = 60 * 60 * 1000;
 
 /// The optional fields `current_harness_at` folds newest first from a harness's observations.
-pub(crate) const HARNESS_OPTIONAL_FIELDS: [&str; 10] = [
+pub const HARNESS_OPTIONAL_FIELDS: [&str; 10] = [
     "driver",
     "transport",
     "reason",
@@ -63,7 +63,7 @@ pub(crate) const HARNESS_OPTIONAL_FIELDS: [&str; 10] = [
 
 /// The claims that close a subscription's mission request, as `pending_subscription_mission_requests`
 /// reads them.
-pub(crate) const REQUEST_CLOSERS: [&str; 3] = [
+pub const REQUEST_CLOSERS: [&str; 3] = [
     "subscription.mission-started",
     "subscription.mission-failed",
     "subscription.mission-request-cancelled",
@@ -83,7 +83,7 @@ review=retain-binding,withdrawal,verdict,actor-evidence,attempt-relation-referen
 /// A canonical description of every rule: one line per rule of the retention policy
 /// (`crates/st3-schema/retention.toml`), then the engine's terms. The rules digest hashes it with
 /// `RULES_VERSION`.
-pub(crate) fn rules_description() -> &'static str {
+pub fn rules_description() -> &'static str {
     static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     DESCRIPTION.get_or_init(|| {
         format!("{}\n{ENGINE_DESCRIPTION}", st3_schema::retention::policy().rules_description())
@@ -100,7 +100,7 @@ pub fn rules_digest() -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum Rule {
+pub enum Rule {
     Newest,
     /// The newest, and only claims accepted at least this long before the cut go.
     NewestAged(u128),
@@ -115,7 +115,7 @@ pub(crate) enum Rule {
 }
 
 /// Whether claims of `kind` belong to a harness question.
-pub(crate) fn question_kind(kind: &str) -> bool {
+pub fn question_kind(kind: &str) -> bool {
     matches!(
         kind,
         st3_schema::harness_questions::OBSERVED | st3_schema::harness_questions::RESOLVED
@@ -123,7 +123,7 @@ pub(crate) fn question_kind(kind: &str) -> bool {
 }
 
 /// Questions whose redundant observation history may expire. Their compact records stay.
-pub(crate) fn expired_questions<'a>(
+pub fn expired_questions<'a>(
     resolutions: impl Iterator<Item = (&'a str, u128)>,
     cut: u128,
 ) -> BTreeSet<&'a str> {
@@ -134,15 +134,15 @@ pub(crate) fn expired_questions<'a>(
 }
 
 /// Whether redundant observation history may expire at `at`.
-pub(crate) fn question_expired(resolved_at: u128, at: u128) -> bool {
+pub fn question_expired(resolved_at: u128, at: u128) -> bool {
     resolved_at.saturating_add(st3_schema::harness_questions::RESOLVED_RETENTION_MS) <= at
 }
 
-pub(crate) fn fields(claim: &ClaimRecord) -> Option<&serde_json::Map<String, Value>> {
+pub fn fields(claim: &ClaimRecord) -> Option<&serde_json::Map<String, Value>> {
     claim.body.get("fields").and_then(Value::as_object)
 }
 
-pub(crate) fn field_text(claim: &ClaimRecord, name: &str) -> String {
+pub fn field_text(claim: &ClaimRecord, name: &str) -> String {
     match fields(claim).and_then(|fields| fields.get(name)) {
         Some(Value::String(text)) => text.clone(),
         Some(value) => value.to_string(),
@@ -150,7 +150,7 @@ pub(crate) fn field_text(claim: &ClaimRecord, name: &str) -> String {
     }
 }
 
-pub(crate) fn field_str<'a>(claim: &'a ClaimRecord, name: &str) -> Option<&'a str> {
+pub fn field_str<'a>(claim: &'a ClaimRecord, name: &str) -> Option<&'a str> {
     fields(claim)
         .and_then(|fields| fields.get(name))
         .and_then(Value::as_str)
@@ -219,7 +219,7 @@ fn condition_holds(claim: &ClaimRecord, condition: &str) -> bool {
 
 /// The rule and slot of a claim, or `None` when no rule may drop it. The first policy rule for
 /// the claim's kind whose conditions hold applies.
-pub(crate) fn slot_of(claim: &ClaimRecord) -> Option<(Rule, Vec<String>)> {
+pub fn slot_of(claim: &ClaimRecord) -> Option<(Rule, Vec<String>)> {
     let (rule, planned) = policy_rules()
         .get(claim.kind.as_str())?
         .iter()
@@ -241,7 +241,7 @@ pub(crate) fn slot_of(claim: &ClaimRecord) -> Option<(Rule, Vec<String>)> {
 /// names are `later`. Folds read these kinds last writer wins, field by field, so the later
 /// claims replace it whatever arrives in between. A state transition clears every field of its
 /// kind, so any later claim of the kind replaces one that sets only schema fields.
-pub(crate) fn witnessed(
+pub fn witnessed(
     claim: &ClaimRecord,
     later: &BTreeSet<String>,
     later_claims: usize,
@@ -250,12 +250,12 @@ pub(crate) fn witnessed(
 }
 
 /// The names of the fields a claim sets.
-pub(crate) fn field_names(claim: &ClaimRecord) -> Vec<String> {
+pub fn field_names(claim: &ClaimRecord) -> Vec<String> {
     fields(claim).map(|fields| fields.keys().cloned().collect()).unwrap_or_default()
 }
 
 /// `witnessed` for a claim of `kind` that sets the fields `own`.
-pub(crate) fn witnessed_names(
+pub fn witnessed_names(
     kind: &str,
     own: &[String],
     later: &BTreeSet<String>,
@@ -272,12 +272,12 @@ pub(crate) fn witnessed_names(
 }
 
 /// The newest claim of a slot carrying each field name, so every field keeps its last value.
-pub(crate) fn field_carriers(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
+pub fn field_carriers(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
     carriers(&claims.iter().map(|claim| field_names(claim)).collect::<Vec<_>>())
 }
 
 /// `field_carriers` of a slot whose claims set the fields `names`, in order.
-pub(crate) fn carriers(names: &[Vec<String>]) -> BTreeSet<usize> {
+pub fn carriers(names: &[Vec<String>]) -> BTreeSet<usize> {
     let mut seen = BTreeSet::new();
     let mut keep = BTreeSet::new();
     for (position, names) in names.iter().enumerate().rev() {
@@ -290,7 +290,7 @@ pub(crate) fn carriers(names: &[Vec<String>]) -> BTreeSet<usize> {
     keep
 }
 
-pub(crate) fn harness_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
+pub fn harness_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
     let state = |claim: &ClaimRecord| field_str(claim, "state").map(str::to_owned);
     let ready =
         |claim: &ClaimRecord| matches!(state(claim).as_deref(), Some("ready" | "working" | "idle"));
@@ -373,7 +373,7 @@ fn usage_observed_at(claim: &ClaimRecord) -> u128 {
 /// A rollup series is cumulative, so the snapshots kept are the ones a period read uses as its
 /// ends: the last of each UTC hour within [`USAGE_WINDOW_MS`] before the cut, the newest before
 /// that window as its baseline, and the newest of all as the series' total.
-pub(crate) fn usage_series_keep(claims: &[&ClaimRecord], cut: u128) -> BTreeSet<usize> {
+pub fn usage_series_keep(claims: &[&ClaimRecord], cut: u128) -> BTreeSet<usize> {
     let window = cut.saturating_sub(USAGE_WINDOW_MS);
     let mut last_of_hour = BTreeMap::<u128, usize>::new();
     let mut newest_before_window = None;
@@ -392,7 +392,7 @@ pub(crate) fn usage_series_keep(claims: &[&ClaimRecord], cut: u128) -> BTreeSet<
 }
 
 /// A session's cumulative usage is read as its largest reading, which is normally its newest.
-pub(crate) fn usage_cumulative_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
+pub fn usage_cumulative_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
     let total = |claim: &ClaimRecord| {
         fields(claim)
             .and_then(|fields| fields.get("total_tokens"))
@@ -416,7 +416,7 @@ pub(crate) fn usage_cumulative_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> 
 
 /// The account group of a `harness.limits` reading, as the account fold groups it, and when it
 /// was measured. `None` for a claim the fold skips.
-pub(crate) fn limits_reading(claim: &ClaimRecord) -> Option<((String, String, String, bool), u64)> {
+pub fn limits_reading(claim: &ClaimRecord) -> Option<((String, String, String, bool), u64)> {
     let (limit, _) = super::limits::reading(&claim.origin, &claim.body)?;
     let group = (
         limit.driver,
@@ -431,7 +431,7 @@ pub(crate) fn limits_reading(claim: &ClaimRecord) -> Option<((String, String, St
 /// any accepted at the same time, since the fold breaks that tie by arrival; and every reading
 /// measured within an hour of the newest in its account group (`newest_measured`, across every
 /// seat). A group's newest only moves forward, so a reading below that floor is never read again.
-pub(crate) fn limits_keep(
+pub fn limits_keep(
     claims: &[&ClaimRecord],
     newest_measured: &BTreeMap<(String, String, String, bool), u64>,
 ) -> BTreeSet<usize> {
@@ -460,7 +460,7 @@ pub(crate) fn limits_keep(
     keep
 }
 
-pub(crate) fn loop_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
+pub fn loop_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
     let run_key = |claim: &ClaimRecord| (field_text(claim, "status"), field_text(claim, "round"));
     let mut keep = BTreeSet::new();
     for (position, claim) in claims.iter().enumerate() {
@@ -481,9 +481,9 @@ pub(crate) fn loop_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
     keep
 }
 
-pub(crate) type TimingEvent = (String, Value, u128);
+pub type TimingEvent = (String, Value, u128);
 
-pub(crate) fn timing_event(claim: &ClaimRecord) -> TimingEvent {
+pub fn timing_event(claim: &ClaimRecord) -> TimingEvent {
     (
         claim.kind.clone(),
         claim.body.clone(),
@@ -491,7 +491,7 @@ pub(crate) fn timing_event(claim: &ClaimRecord) -> TimingEvent {
     )
 }
 
-pub(crate) fn timing_answers(
+pub fn timing_answers(
     events: &[TimingEvent],
     attempt: u32,
     cut: u128,
@@ -508,7 +508,7 @@ pub(crate) fn timing_answers(
 
 impl Rule {
     /// Whether the rule's keep function reads claim bodies, beyond field names and times.
-    pub(crate) fn reads_bodies(self) -> bool {
+    pub fn reads_bodies(self) -> bool {
         matches!(
             self,
             Rule::HarnessObserved | Rule::UsageSeries | Rule::UsageCumulative | Rule::AccountLimits | Rule::LoopState
@@ -517,12 +517,12 @@ impl Rule {
 
     /// Whether the newest claim carrying each field stays. Question observations have a
     /// fixed shape, and a loop state keeps its own runs.
-    pub(crate) fn keeps_field_carriers(self) -> bool {
+    pub fn keeps_field_carriers(self) -> bool {
         !matches!(self, Rule::LoopState | Rule::QuestionLifecycle)
     }
 
     /// Whether a claim accepted at `accepted_at` is old enough for the rule to drop.
-    pub(crate) fn old_enough(self, accepted_at: u128, cut: u128) -> bool {
+    pub fn old_enough(self, accepted_at: u128, cut: u128) -> bool {
         match self {
             Rule::NewestAged(min_age) => accepted_at < cut.saturating_sub(min_age),
             _ => true,
@@ -559,11 +559,11 @@ impl Rule {
 }
 
 /// A rule and slot as one staging key, and back.
-pub(crate) fn slot_text(rule: Rule, slot: &[String]) -> String {
+pub fn slot_text(rule: Rule, slot: &[String]) -> String {
     serde_json::to_string(&(rule.tag(), slot)).expect("text serializes")
 }
 
-pub(crate) fn slot_from_text(text: &str) -> Option<(Rule, Vec<String>)> {
+pub fn slot_from_text(text: &str) -> Option<(Rule, Vec<String>)> {
     let (tag, slot): (String, Vec<String>) = serde_json::from_str(text).ok()?;
     Some((Rule::from_tag(&tag)?, slot))
 }
@@ -571,7 +571,7 @@ pub(crate) fn slot_from_text(text: &str) -> Option<(Rule, Vec<String>)> {
 /// The claims a slot's rule keeps, by position, before field carriers: `claims` are the slot's
 /// claims in order when the rule reads bodies, and `closed` says whether a deferral's request
 /// is closed.
-pub(crate) fn rule_keep(
+pub fn rule_keep(
     rule: Rule,
     len: usize,
     claims: &[&ClaimRecord],
@@ -596,7 +596,7 @@ pub(crate) fn rule_keep(
 
 /// The positions among one seat's status-history sources, in canonical order, that the
 /// status-history rule keeps.
-pub(crate) fn status_keep_positions(sources: &[&ClaimRecord], cut: u128) -> BTreeSet<usize> {
+pub fn status_keep_positions(sources: &[&ClaimRecord], cut: u128) -> BTreeSet<usize> {
     let mut keep = BTreeSet::new();
     let positions = seat_status::transition_positions(sources);
     let mut kept_positions = positions.iter().copied().rev()
@@ -637,7 +637,7 @@ pub(crate) fn status_keep_positions(sources: &[&ClaimRecord], cut: u128) -> BTre
 }
 
 /// Whether a claim is a source of its subject's status history.
-pub(crate) fn status_source(claim: &ClaimRecord) -> bool {
+pub fn status_source(claim: &ClaimRecord) -> bool {
     matches!(claim.kind.as_str(), "harness.observed" | "runtime.observed" | "harness.diagnostic")
         && seat_status::history_source(claim)
 }
@@ -645,7 +645,7 @@ pub(crate) fn status_source(claim: &ClaimRecord) -> bool {
 /// The claim IDs a claim cites as evidence, pins as a mission run's input, or references as a
 /// review record (binding, withdrawal, verdict, attempt relation, predecessors). Those claims are
 /// read by their IDs, so they stay.
-pub(crate) fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
+pub fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
     let body = &claim.body;
     let evidence = body
         .get("evidence")
@@ -670,7 +670,7 @@ pub(crate) fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
 
 /// Whether claims of `kind` are never dropped, because their validation reads them: a kind that
 /// is not plain append or state transition, or one the registry does not know.
-pub(crate) fn guarded_kind(kind: &str) -> bool {
+pub fn guarded_kind(kind: &str) -> bool {
     !matches!(
         st3_schema::registry().claim(kind).map(|spec| spec.cardinality.clone()),
         Some(st3_schema::Cardinality::Append | st3_schema::Cardinality::StateTransition)
@@ -678,7 +678,7 @@ pub(crate) fn guarded_kind(kind: &str) -> bool {
 }
 
 /// What the staged planner reads of a claim's body.
-pub(crate) fn claim_facts(claim: &ClaimRecord) -> smallclaims::store::checkpoint_staging::CheckpointClaimFacts {
+pub fn claim_facts(claim: &ClaimRecord) -> smallclaims::store::checkpoint_staging::CheckpointClaimFacts {
     smallclaims::store::checkpoint_staging::CheckpointClaimFacts {
         slot: slot_of(claim).map(|(rule, slot)| slot_text(rule, &slot)),
         status_source: status_source(claim),
@@ -952,7 +952,7 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
 }
 
 /// Tables projected from claims, children before the tables their foreign keys name.
-pub(crate) const PROJECTION_TABLES: [&str; 26] = [
+pub const PROJECTION_TABLES: [&str; 26] = [
     "operations",
     "arrangement_registers",
     "arrangements",
@@ -982,7 +982,7 @@ pub(crate) const PROJECTION_TABLES: [&str; 26] = [
 ];
 
 /// Clear every projection and replay the claims into it from nothing, as a new node would.
-pub(crate) fn replay_from_nothing(transaction: &Transaction<'_>) -> Result<()> {
+pub fn replay_from_nothing(transaction: &Transaction<'_>) -> Result<()> {
     // A partial event migration must not restore eligibility the replay is removing.
     let legacy: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='local_event_payloads')",
@@ -1011,17 +1011,17 @@ pub(crate) fn replay_from_nothing(transaction: &Transaction<'_>) -> Result<()> {
 
 /// The answers no one subject holds: the account limits, which fold every seat's readings. The
 /// proof's copy refolds them from its claims, as a node that never trimmed would.
-pub(crate) fn global_answers(transaction: &Transaction<'_>) -> Result<Value> {
+pub fn global_answers(transaction: &Transaction<'_>) -> Result<Value> {
     super::limits::refold_limits_tx(transaction)?;
     Ok(json!({"account_limits": super::limits::account_limits_at(transaction)?}))
 }
 
 /// Every answer about `subject` that a checkpoint must leave unchanged, as of the cut.
-pub(crate) fn subject_answers(connection: &Connection, subject: &str, cut: u128) -> Result<Value> {
+pub fn subject_answers(connection: &Connection, subject: &str, cut: u128) -> Result<Value> {
     subject_answers_inner(connection, subject, cut, None)
 }
 
-pub(crate) fn subject_answers_with_sources(connection: &Connection, subject: &str, cut: u128) -> Result<(Value, CheckpointAnswerSources)> {
+pub fn subject_answers_with_sources(connection: &Connection, subject: &str, cut: u128) -> Result<(Value, CheckpointAnswerSources)> {
     let mut sources = CheckpointAnswerSources::new();
     let answer = subject_answers_inner(connection, subject, cut, Some(&mut sources))?;
     Ok((answer, sources))
@@ -1248,7 +1248,7 @@ impl Store {
     /// The first checkpoint after the newest stable one that is still not stable
     /// `CHECKPOINT_ATTENTION_AFTER_MS` after it became due. The participant that sorts first
     /// among those that sealed asks the person to bring the others back or excuse them.
-    pub(crate) fn checkpoint_attention_items(
+    pub fn checkpoint_attention_items(
         &self,
         person: Option<&str>,
         as_of: u128,
@@ -1316,7 +1316,7 @@ impl Store {
 
 /// Empty every projection and the local observation log on a checkpoint proof's copy, before
 /// the graph cuts its claims down to the sealed set.
-pub(crate) fn clear_projections(transaction: &Transaction<'_>) -> Result<()> {
+pub fn clear_projections(transaction: &Transaction<'_>) -> Result<()> {
     for table in PROJECTION_TABLES {
         let exists: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",

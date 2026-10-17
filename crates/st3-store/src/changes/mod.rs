@@ -102,14 +102,14 @@ pub fn new_change_id() -> Result<String> {
     Ok(format!("I{}", random_hex::<20>()?))
 }
 
-pub(super) fn random_hex<const N: usize>() -> Result<String> {
+pub fn random_hex<const N: usize>() -> Result<String> {
     let mut bytes = [0; N];
     getrandom::fill(&mut bytes)
         .map_err(|error| anyhow::anyhow!("change randomness unavailable: {error}"))?;
     Ok(hex::encode(bytes))
 }
 
-pub(crate) fn oid(value: &str) -> Result<()> {
+pub fn oid(value: &str) -> Result<()> {
     ensure!(
         matches!(value.len(), 40 | 64)
             && value

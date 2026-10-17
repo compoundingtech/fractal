@@ -123,7 +123,7 @@ fn resolve_answer(
     Ok((Some(answer), summary))
 }
 
-pub(super) fn validate_delegated_answer(
+pub fn validate_delegated_answer(
     ask: &ClaimRecord,
     fields: &BTreeMap<String, Value>,
 ) -> Result<(), St3Error> {
@@ -173,13 +173,13 @@ const STEP_QUERY: &str = "SELECT subject, run_id, step_path, definition_hash, st
  created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
  FROM step_runs WHERE subject=?1";
 
-pub(super) fn step(connection: &Connection, subject: &str) -> Result<Option<StepRunView>> {
+pub fn step(connection: &Connection, subject: &str) -> Result<Option<StepRunView>> {
     Ok(connection
         .query_row(STEP_QUERY, [subject], step_run_from_row)
         .optional()?)
 }
 
-pub(super) fn request(connection: &Connection, subject: &str) -> Result<Option<ClaimRecord>> {
+pub fn request(connection: &Connection, subject: &str) -> Result<Option<ClaimRecord>> {
     Ok(connection
         .query_row(
             &canonical_sql(
@@ -193,7 +193,7 @@ pub(super) fn request(connection: &Connection, subject: &str) -> Result<Option<C
         .optional()?)
 }
 
-pub(super) fn declaration_live(connection: &Connection, subject: &str) -> Result<bool> {
+pub fn declaration_live(connection: &Connection, subject: &str) -> Result<bool> {
     let row = current_desired_row(connection, subject)?;
     let Some(row) = row else { return Ok(false) };
     let body: Value = serde_json::from_str(&row.body)?;
@@ -213,7 +213,7 @@ pub(super) fn declaration_live(connection: &Connection, subject: &str) -> Result
     Ok(true)
 }
 
-pub(super) fn run_live(
+pub fn run_live(
     connection: &Connection,
     run: &str,
     generation: Option<&str>,
@@ -226,7 +226,7 @@ pub(super) fn run_live(
 /// the generation their parent step belongs to, each parent step is still open, and a
 /// subscription or schedule that delivered it still runs. `failure` keeps a failed run or
 /// parent step live, for the fault that names it.
-pub(super) fn run_liveness(
+pub fn run_liveness(
     connection: &Connection,
     run: &str,
     generation: Option<&str>,
@@ -336,7 +336,7 @@ pub(super) fn run_liveness(
     }
 }
 
-pub(super) fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Result<bool> {
+pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Result<bool> {
     if ask.accepted_at_unix_ms > as_of {
         return Ok(false);
     }
@@ -412,7 +412,7 @@ pub(super) fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -
     Ok(true)
 }
 
-pub(super) fn is_update(ask: &ClaimRecord) -> bool {
+pub fn is_update(ask: &ClaimRecord) -> bool {
     ask.body["fields"]["request"]["type"] == "update"
 }
 
@@ -449,7 +449,7 @@ fn person_asked(connection: &Connection, person: &str, agent: &str, about: &str)
 
 /// Adds person responses to a step view: the responses to asks this attempt made, as
 /// constraints and as data, or a person ask's own response as data.
-pub(super) fn enrich_responses(
+pub fn enrich_responses(
     connection: &Connection,
     view: &mut StepRunView,
 ) -> rusqlite::Result<()> {
@@ -512,7 +512,7 @@ pub(super) fn enrich_responses(
 
 impl Store {
     /// A daemon-owned approval ask, projected in the same transaction as its durable claim.
-    pub(crate) fn ask_daemon_approval(&self, person: &str, key: &str, proposal: Value) -> Result<StepRunView, St3Error> {
+    pub fn ask_daemon_approval(&self, person: &str, key: &str, proposal: Value) -> Result<StepRunView, St3Error> {
         let subject = format!("step-run/chatgpt-{key}/ask");
         let mission_id = format!("chatgpt/{key}");
         let kdl = format!("version 2\nmission {mission_id:?} state=\"ready\" {{ goal \"Approve ChatGPT proposal\"; step \"ask\" {{ assigned-to {person:?}; goal \"Approve exact proposed action\"; }} }}");
@@ -637,7 +637,7 @@ impl Store {
         self.finish_person_step_authorized(input, cancel, None)
     }
 
-    pub(crate) fn finish_person_step_authorized(
+    pub fn finish_person_step_authorized(
         &self,
         input: &PersonStepResponse,
         cancel: bool,
@@ -769,7 +769,7 @@ impl Store {
         }))
     }
 
-    pub(crate) fn reconcile_person_asks(&self) -> Result<bool> {
+    pub fn reconcile_person_asks(&self) -> Result<bool> {
         /// How many asks one pass ends, each with its cancellation, message and update.
         const ENDED_ASKS_PER_PASS: usize = 32;
         // Drop this read connection before submitting any cancellation transaction.
@@ -1039,7 +1039,7 @@ fn send_answer_tx(
 }
 
 /// Shared projection for a one-step runtime run, used by asks and spontaneous work.
-pub(super) fn project_minimal_run(
+pub fn project_minimal_run(
     tx: &Transaction<'_>,
     claim: &ClaimRecord,
     mission: &MissionSpec,
@@ -1108,7 +1108,7 @@ pub(super) fn project_minimal_run(
     Ok(())
 }
 
-pub(super) fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, St3Error> {
+pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, St3Error> {
     let fields = &claim.body["fields"];
     if claim.kind == "work.person-asked" {
         let run = fields["run"]
@@ -1182,8 +1182,8 @@ pub(super) fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool,
     Ok(true)
 }
 
-#[cfg(test)]
-pub(super) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
 
     #[test]
@@ -1218,7 +1218,7 @@ pub(super) mod tests {
         );
     }
 
-    pub(in crate::store) fn fixture() -> (Store, StepRunView, PersonAskRequest) {
+    pub fn fixture() -> (Store, StepRunView, PersonAskRequest) {
         let store = Store::open_memory("alder").unwrap();
         let intent = crate::graph::parse_internal_intent(
             r#"version 2
@@ -2120,7 +2120,7 @@ mission "person-work" state="ready" {{
 
     const TEST_FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 
-    pub(in crate::store) fn receive(source: &Store, target: &Store) {
+    pub fn receive(source: &Store, target: &Store) {
         let exchange = source
             .export_replication_exchange_answering(
                 TEST_FLEET,

@@ -41,7 +41,7 @@ fn family(name: &str) -> (&'static str, &'static str, &'static str, &'static str
         .expect("a known stop-deferral family")
 }
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+pub fn create_schema(connection: &Connection) -> Result<()> {
     let arms = |column: usize| {
         FAMILIES
             .iter()
@@ -125,7 +125,7 @@ fn family_sql(name: &str, subject: &str, reference: Option<&str>) -> String {
 }
 
 impl Store {
-    pub(crate) fn latest_stop_deferral(&self, subject: &str) -> Result<Option<ClaimRecord>> {
+    pub fn latest_stop_deferral(&self, subject: &str) -> Result<Option<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
         connection.prepare_cached(&canonical_sql(&format!(
@@ -136,7 +136,7 @@ impl Store {
         )))?.query_row([subject], claim_from_row).optional().map_err(Into::into)
     }
 
-    pub(crate) fn pending_stop_deferral_failure(
+    pub fn pending_stop_deferral_failure(
         &self,
         diagnostic: &ClaimRecord,
     ) -> Result<Option<ClaimRecord>> {
@@ -166,7 +166,7 @@ impl Store {
     /// Current aged deferral faults for this page of seats at the caller's history cut. A
     /// stopped runtime, replaced declaration, cleared diagnostic or recovered fault hides the
     /// episode immediately, even before the next reconciler pass.
-    pub(crate) fn stop_deferral_faults_for(
+    pub fn stop_deferral_faults_for(
         &self,
         subjects: &[String],
         at_index: u64,

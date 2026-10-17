@@ -88,7 +88,7 @@ fn page(
 }
 
 impl Store {
-    pub(super) fn operation_audit(
+    pub fn operation_audit(
         &self,
         observer: &mut dyn FnMut(Duration),
     ) -> Result<Vec<String>> {

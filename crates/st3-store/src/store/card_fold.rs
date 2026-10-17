@@ -4,14 +4,14 @@
 use super::*;
 
 #[path = "harness_health_capture.rs"]
-#[cfg(test)]
-mod health_capture;
+#[cfg(any(test, feature = "test-support"))]
+pub mod health_capture;
 
 /// Subjects per statement, so that no single statement holds the reader for the whole fleet.
 const CHUNK: usize = 256;
 
 /// What one fold has read at its snapshot, kept across its view and status passes.
-pub(super) struct CardReads {
+pub struct CardReads {
     index: u64,
     owned: Option<BTreeMap<String, BTreeSet<String>>>,
     desired: HashMap<String, Option<DesiredRow>>,
@@ -81,7 +81,7 @@ fn json_list<'a>(subjects: impl IntoIterator<Item = &'a String>) -> Result<Strin
 }
 
 impl CardReads {
-    pub(super) fn new(index: u64) -> Self {
+    pub fn new(index: u64) -> Self {
         Self { index, owned: None, desired: HashMap::new(), actual: HashMap::new() }
     }
 
@@ -294,7 +294,7 @@ impl CardReads {
 /// Each subject's newest claim in canonical order at or before `?2`, for the subjects `?1`.
 /// The accepted-time index gives each subject's claims newest time first, so SQLite sorts only
 /// the claims of the newest millisecond, not the subject's whole history.
-pub(super) fn newest_claims_sql() -> String {
+pub fn newest_claims_sql() -> String {
     canonical_sql(
         "SELECT subjects.value,
                 (SELECT id FROM claims INDEXED BY claims_subject_accepted_index
@@ -326,7 +326,7 @@ fn heads(connection: &Connection, subjects: &[String], index: u64) -> Result<Has
 
 impl Store {
     /// [`runtime_view_entry`] of each runtime of `subjects`, read a chunk at a time.
-    pub(super) fn runtime_view_entries(
+    pub fn runtime_view_entries(
         &self,
         connection: &Connection,
         subjects: &[String],
@@ -391,7 +391,7 @@ impl Store {
 
     /// The agent card status ([`ClaimsReduction::AgentCard`]) of each of `subjects` at
     /// `store_index`, read a chunk at a time.
-    pub(super) fn agent_card_statuses(
+    pub fn agent_card_statuses(
         &self,
         connection: &Connection,
         subjects: &[String],
@@ -465,7 +465,7 @@ impl Store {
                 }
             }
             for subject in chunk {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 SUBJECT_REDUCTIONS.with(|reductions| reductions.set(reductions.get() + 1));
                 let desired = reads.desired(connection, &subject)?;
                 let member = desired
@@ -526,13 +526,13 @@ impl Store {
 /// What the roster's per-card loop reads besides each agent's status, read for many agents at
 /// once: their harnesses and last activity, and which of them can have a suspension or a rollout
 /// to show, so that those readers run only for the agents that can have one.
-pub(crate) struct AgentCardReads {
+pub struct AgentCardReads {
     index: u64,
     harness: HashMap<String, Option<crate::model::CurrentHarnessView>>,
     activity: HashMap<String, Option<u128>>,
     suspensions: HashSet<String>,
     rollouts: HashSet<String>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     health: BTreeMap<String, health_capture::CardCapture>,
 }
 
@@ -541,8 +541,8 @@ impl AgentCardReads {
     /// its snapshot connection, after selecting desired/runtime claims and the
     /// harness at `self.index`. No caller is installed until native admission and
     /// source qualification can consume these candidates honestly.
-    #[cfg(test)]
-    fn prepare_health_chunk(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn prepare_health_chunk(
         &mut self,
         connection: &Connection,
         namespace: &str,
@@ -566,13 +566,13 @@ impl AgentCardReads {
 
     /// There is no fallback reader acquisition or attempt to fill an absent input.
     /// Candidate rows require native authority/coverage validation before reduction.
-    #[cfg(test)]
-    fn take_health(&mut self, subject: &str) -> Option<health_capture::CardCapture> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn take_health(&mut self, subject: &str) -> Option<health_capture::CardCapture> {
         self.health.remove(subject)
     }
 
     /// [`Store::observed_harness_at`] of `subject`.
-    pub(crate) fn take_harness(
+    pub fn take_harness(
         &mut self,
         store: &Store,
         subject: &str,
@@ -584,7 +584,7 @@ impl AgentCardReads {
     }
 
     /// [`Store::agent_last_activity_at`] of `subject` with the harness it was read with.
-    pub(crate) fn last_activity_at(
+    pub fn last_activity_at(
         &self,
         store: &Store,
         subject: &str,
@@ -598,14 +598,14 @@ impl AgentCardReads {
 
     /// Whether `subject` has a suspend or resume request, without which
     /// [`crate::suspension::current`] has nothing to show.
-    pub(crate) fn may_have_suspension(&self, subject: &str) -> bool {
+    pub fn may_have_suspension(&self, subject: &str) -> bool {
         smallclaims::touched::note_read(|| subject.to_owned());
         self.suspensions.contains(subject)
     }
 
     /// Whether `subject` is a member of an owned set or staged for one, without which
     /// [`crate::rollout::status`] has nothing to show.
-    pub(crate) fn may_have_rollout(&self, subject: &str) -> bool {
+    pub fn may_have_rollout(&self, subject: &str) -> bool {
         smallclaims::touched::note_read(|| subject.to_owned());
         self.rollouts.contains(subject)
     }
@@ -625,7 +625,7 @@ impl Store {
     /// statement. `actual_claims` holds, for the agents whose status was reduced at `index`,
     /// the actual-state claim it selected: an agent's newest runtime observation whenever it has
     /// one, so the harness read takes it by id instead of sorting the agent's observations.
-    pub(crate) fn agent_card_reads(
+    pub fn agent_card_reads(
         &self,
         subjects: &[String],
         index: u64,
@@ -638,7 +638,7 @@ impl Store {
             activity: HashMap::new(),
             suspensions: HashSet::new(),
             rollouts: HashSet::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             health: BTreeMap::new(),
         };
         // A harness view needs a runtime observation naming an incarnation; then a running one,

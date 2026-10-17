@@ -50,7 +50,7 @@ fn per_subject_card_status(
 
 /// Assert that the chunked fold and the per-subject reductions agree on `store` at `indexes`:
 /// each runtime view entry, each card reduction, and the cold roster status pass.
-pub(super) fn assert_card_fold_parity(store: &Store, indexes: &[u64]) {
+pub fn assert_card_fold_parity(store: &Store, indexes: &[u64]) {
     for &index in indexes {
         let connection = store.readers.get();
         let names = agent_subjects(&connection, index);

@@ -31,7 +31,7 @@ impl Store {
     /// belong to `fault_snapshot`, not this collection. Person attention reads stored step
     /// state, not effective wake, lease or execution-deadline state. Those clocks therefore
     /// cannot change this projection without another graph write.
-    pub(crate) fn attention_collection_snapshot(
+    pub fn attention_collection_snapshot(
         &self,
         person: Option<&str>,
         now: u128,
@@ -69,7 +69,7 @@ impl Store {
     /// The mission context of a person ask a mission step made: its mission, and the step that
     /// waits on the answer with its goal. `None` for a standalone ask or an update, which belong
     /// to no mission of their own.
-    pub(crate) fn person_ask_context(&self, subject: &str) -> Result<Option<Value>> {
+    pub fn person_ask_context(&self, subject: &str) -> Result<Option<Value>> {
         let connection = self.readers.get();
         let Some(ask) = person_work::request(&connection, subject)? else {
             return Ok(None);
@@ -115,7 +115,7 @@ impl Store {
     /// clears when the harness reports the prompt gone, however it was answered, or when the
     /// seat's runtime ends. Each seat costs one indexed read of its newest harness observation,
     /// and only a blocked seat reads its runtime and owner.
-    pub(super) fn harness_prompt_attention_items(
+    pub fn harness_prompt_attention_items(
         &self,
         person: Option<&str>,
         as_of: u128,
@@ -271,7 +271,7 @@ impl Store {
         Ok(items)
     }
 
-    pub(super) fn person_attention_items(
+    pub fn person_attention_items(
         &self,
         person: Option<&str>,
         as_of: u128,
@@ -292,7 +292,7 @@ impl Store {
 
     /// Whether `agent` is declared and not stopped or retired: the same test that lets an agent
     /// own a fault.
-    pub(crate) fn agent_is_live(&self, agent: &str) -> Result<bool> {
+    pub fn agent_is_live(&self, agent: &str) -> Result<bool> {
         let connection = self.readers.get();
         Ok(agent.starts_with("agent/")
             && current_desired_row(&connection, agent)?.is_some_and(|row| row.kind == "agent")
@@ -301,7 +301,7 @@ impl Store {
 
     /// The fleet's fault agent: the first live agent, by subject, whose declaration carries
     /// `handles-faults`. It takes each fault that no step assignee or agent requester owns.
-    pub(crate) fn fleet_fault_agent(&self) -> Result<Option<String>> {
+    pub fn fleet_fault_agent(&self) -> Result<Option<String>> {
         let connection = self.readers.get();
         let mut query = connection.prepare(
             "SELECT subject FROM desired WHERE kind='agent' AND EXISTS (
@@ -324,7 +324,7 @@ impl Store {
     /// published it, else the agent assigned to the failed step, else the requester of its run
     /// or of a run above it when that is an agent, else `fallback`. Only a live agent
     /// declaration owns a fault, and a faulted agent never owns its own fault.
-    pub(super) fn fault_owner(
+    pub fn fault_owner(
         &self,
         fault: &AttentionItemView,
         fallback: Option<&str>,
@@ -388,7 +388,7 @@ impl Store {
 
     /// Persist the observed episode on its operational subject, with declaration/incarnation
     /// fences. The compatibility view returned here is used only inside the reconciler.
-    pub(crate) fn record_operational_failure(
+    pub fn record_operational_failure(
         &self,
         episode: &str,
         input: &AttentionRequest,
@@ -396,7 +396,7 @@ impl Store {
         self.record_failure(episode, input, "observed")
     }
 
-    pub(crate) fn record_runtime_failure(
+    pub fn record_runtime_failure(
         &self,
         episode: &str,
         input: &AttentionRequest,
@@ -469,7 +469,7 @@ impl Store {
             .ok_or_else(|| St3Error::new("internal", "the failure was not recorded"))
     }
 
-    pub(crate) fn operational_failure(
+    pub fn operational_failure(
         &self,
         episode: &str,
     ) -> Result<Option<AttentionRequestView>> {
@@ -479,7 +479,7 @@ impl Store {
             .find(|failure| failure.subject == episode))
     }
 
-    pub(crate) fn pending_operational_failures(
+    pub fn pending_operational_failures(
         &self,
         actor: &str,
         origin: &str,
@@ -501,7 +501,7 @@ impl Store {
         Ok(failures)
     }
 
-    pub(crate) fn recover_operational_failure(
+    pub fn recover_operational_failure(
         &self,
         episode: &str,
         reason: &str,
@@ -1127,7 +1127,7 @@ impl Store {
     /// The broken exec gates of current run generations, each for the publisher it names. An
     /// item holds while its generation is current and live and its step has not ended, and
     /// closes when a revision replaces the generation.
-    pub(super) fn broken_gate_items(
+    pub fn broken_gate_items(
         &self,
         person: Option<&str>,
         as_of: u128,
@@ -1135,7 +1135,7 @@ impl Store {
         self.broken_gate_items_from_failures(person, as_of, self.operational_failures()?)
     }
 
-    pub(super) fn broken_gate_items_from_failures(
+    pub fn broken_gate_items_from_failures(
         &self,
         person: Option<&str>,
         as_of: u128,
@@ -1187,8 +1187,8 @@ impl Store {
     }
 
     // The independently folding operational reader is now used only by parity controls.
-    #[cfg(test)]
-    pub(super) fn operational_attention_items(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn operational_attention_items(
         &self,
         person: Option<&str>,
         as_of: u128,
@@ -1199,7 +1199,7 @@ impl Store {
 
     /// Return this call's history cut for the broken-gate reducer, without caching authority.
     /// Read it at its original first-use point, after the derived fault families below.
-    pub(super) fn operational_attention_items_with_failures(
+    pub fn operational_attention_items_with_failures(
         &self,
         person: Option<&str>,
         as_of: u128,
@@ -1443,7 +1443,7 @@ impl Store {
 }
 
 /// Derive one person step using the same source fences as the full reader.
-pub(super) fn person_attention_item(
+pub fn person_attention_item(
     connection: &Connection,
     subject: &str,
     as_of: u128,
@@ -1554,13 +1554,13 @@ pub(super) fn person_attention_item(
 }
 
 /// `subject` when it names an agent: only an agent has a conversation an item can belong to.
-pub(super) fn agent(subject: &str) -> Option<String> {
+pub fn agent(subject: &str) -> Option<String> {
     subject.starts_with("agent/").then(|| subject.to_owned())
 }
 
 /// The agent whose conversation an item about `step` or `run` belongs to: the agent assigned to
 /// the step, else the agent that requested its run, else none. A person's run has no agent.
-pub(super) fn conversation_agent(
+pub fn conversation_agent(
     connection: &Connection,
     step: Option<&str>,
     run: Option<&str>,
@@ -1609,19 +1609,19 @@ fn recorded_reason(connection: &Connection, key: &str) -> Result<Option<String>>
 }
 
 /// The idempotency key of the record that the screen prompt `claim` recorded is gone.
-pub(crate) fn screen_prompt_gone_key(claim: &str) -> String {
+pub fn screen_prompt_gone_key(claim: &str) -> String {
     format!("native-screen-prompt-gone:{claim}")
 }
 
 /// The idempotency key of the record that st pressed the keys of a person's answer to the screen
 /// prompt `claim` recorded. It is written before the keys, so they are never pressed twice.
-pub(crate) fn screen_prompt_delivered_key(claim: &str) -> String {
+pub fn screen_prompt_delivered_key(claim: &str) -> String {
     format!("native-screen-prompt-delivered:{claim}")
 }
 
 /// The idempotency key of the record that the terminal refused a key of a person's answer to the
 /// screen prompt `claim` recorded, after st recorded it delivered.
-pub(crate) fn screen_prompt_undelivered_key(claim: &str) -> String {
+pub fn screen_prompt_undelivered_key(claim: &str) -> String {
     format!("native-screen-prompt-undelivered:{claim}")
 }
 
@@ -1629,7 +1629,7 @@ impl Store {
     /// The screen-only prompt (see `st_drivers::blocking_screen::screen_prompt`) the seat's
     /// incarnation shows, as the reconciler last recorded it: the newest `native-screen-prompt`
     /// of that incarnation, unless it is gone. Its id, when it was recorded, and its fields.
-    pub(crate) fn open_screen_prompt(
+    pub fn open_screen_prompt(
         &self,
         seat: &str,
         incarnation: &str,
@@ -1639,13 +1639,13 @@ impl Store {
     }
 
     /// Whether a record with the idempotency key `key` exists.
-    pub(crate) fn operation_recorded(&self, key: &str) -> Result<bool> {
+    pub fn operation_recorded(&self, key: &str) -> Result<bool> {
         let connection = self.readers.get();
         recorded(&connection, key)
     }
 
     /// The person's answer to the screen prompt `claim` recorded, and whether st pressed its keys.
-    pub(crate) fn screen_prompt_answer(&self, claim: &str) -> Result<(Option<String>, bool)> {
+    pub fn screen_prompt_answer(&self, claim: &str) -> Result<(Option<String>, bool)> {
         let connection = self.readers.get();
         Ok((
             native_prompt_answer(&connection, claim)?,
@@ -2063,7 +2063,7 @@ fn open_screen_prompt(
 }
 
 /// The idempotency key of the record that a native prompt opened by `observation` is gone.
-pub(crate) fn native_prompt_gone_key(observation: &str) -> String {
+pub fn native_prompt_gone_key(observation: &str) -> String {
     format!("native-prompt-gone:{observation}")
 }
 
@@ -2076,7 +2076,7 @@ fn native_prompt_gone_operation(observation: &str) -> String {
 /// terminal: an answer recorded later would reach nobody. Claude ends the hook at its registered
 /// timeout (`hooks::claude_settings_registration`, a minute longer), which is part of every Claude
 /// seat's declaration: changing it restarts every seat on upgrade.
-pub(crate) const CLAUDE_PROMPT_ANSWER_WAIT_MS: u128 = 10 * 60 * 1000;
+pub const CLAUDE_PROMPT_ANSWER_WAIT_MS: u128 = 10 * 60 * 1000;
 
 /// Whether the prompt `harness` reports is of a kind st answers from a client: a permission prompt of
 /// Claude, whose hook waits for the answer, that names its tool; or of Codex, whose control
@@ -2131,7 +2131,7 @@ fn prompt_answers(harness: &Value, now: u128) -> Vec<String> {
 }
 
 /// Whether the prompt `harness` reports is Claude asking to approve its plan.
-pub(crate) fn plan_approval(harness: &Value) -> bool {
+pub fn plan_approval(harness: &Value) -> bool {
     harness["driver"] == "claude" && harness["ask"] == "permission" && harness["reason"] == "ExitPlanMode"
 }
 
@@ -2261,7 +2261,7 @@ fn native_prompt_answer(connection: &Connection, observation: &str) -> Result<Op
 /// Fold the native prompt's terminal-only release into the shared harness view.
 /// Driver heartbeats can restate the old blocked file after Esc/No; their
 /// unchanged episode must not resurrect a resolved hold in sender status/cards.
-pub(super) fn resolve_native_harness_at(
+pub fn resolve_native_harness_at(
     connection: &Connection,
     subject: &str,
     index: u64,

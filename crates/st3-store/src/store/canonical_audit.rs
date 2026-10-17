@@ -196,7 +196,7 @@ fn native_mailbox_ownership_changes_no_shared_projection_digest() {
     tx.commit().unwrap();
 }
 
-pub(super) fn shared_rows(store: &Store) -> BTreeMap<String, Vec<String>> {
+pub fn shared_rows(store: &Store) -> BTreeMap<String, Vec<String>> {
     let connection = store.readers.get();
     SHARED_TABLES
         .iter()

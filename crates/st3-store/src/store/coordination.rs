@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS local_coordination_backfill (
 );
 "#;
 
-pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(SCHEMA)?;
     let columns = |table: &str| -> Result<Vec<String>> {
         Ok(connection
@@ -59,7 +59,7 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn initialize(transaction: &Transaction<'_>) -> Result<()> {
+pub fn initialize(transaction: &Transaction<'_>) -> Result<()> {
     let maximum: u64 = transaction.query_row(
         "SELECT COALESCE((SELECT store_index FROM claims INDEXED BY claims_kind_index
          WHERE kind='message.sent' ORDER BY store_index DESC LIMIT 1),0)",
@@ -96,7 +96,7 @@ pub(super) fn initialize(transaction: &Transaction<'_>) -> Result<()> {
 /// a complete bootstrap's ceiling are all ones it just synced, the ceiling covers them too, so a
 /// reopen rechecks only sends an older binary wrote rather than every send since the last
 /// start. It reads at most one more send than it synced and otherwise leaves the ceiling alone.
-pub(super) fn cover_synced_sends(
+pub fn cover_synced_sends(
     transaction: &Transaction<'_>,
     synced: &BTreeSet<String>,
 ) -> Result<()> {
@@ -132,7 +132,7 @@ pub(super) fn cover_synced_sends(
     Ok(())
 }
 
-pub(super) fn sync(
+pub fn sync(
     transaction: &Transaction<'_>,
     subject: &str,
     sent: Option<(u64, &Value)>,
@@ -181,7 +181,7 @@ pub(super) fn sync(
 
 /// At most eight historical subjects per writer batch. No startup scan or read-side build.
 /// Live pending sends are maintained by the existing send projection, including replication.
-pub(super) fn backfill(transaction: &Transaction<'_>) -> Result<bool> {
+pub fn backfill(transaction: &Transaction<'_>) -> Result<bool> {
     let started = std::time::Instant::now();
     let (cursor, ceiling, complete): (u64, u64, bool) = transaction.query_row(
         "SELECT cursor,ceiling,complete FROM local_coordination_backfill WHERE singleton=1",

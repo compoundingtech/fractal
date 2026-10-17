@@ -311,7 +311,7 @@ pub fn apply_all(
     apply_all_checked(store, desired, host, &|_| Ok(()))
 }
 
-pub(crate) fn apply_all_checked(
+pub fn apply_all_checked(
     store: &Store,
     desired: &[&DesiredSubject],
     host: &str,

@@ -4,8 +4,8 @@
 use super::*;
 use smallclaims::ivm::{Definition, LocalChange, View, Views, source_cut};
 
-pub(crate) const PERSON_VIEW: &str = "st3.attention.person-steps.v1";
-pub(crate) const CUSTOM_VIEW: &str = "st3.attention.custom.v1";
+pub const PERSON_VIEW: &str = "st3.attention.person-steps.v1";
+pub const CUSTOM_VIEW: &str = "st3.attention.custom.v1";
 const PERSON_CHANGE: &str = "st3.attention.person.source";
 const CUSTOM_CHANGE: &str = "st3.attention.custom.source";
 const PERSON_CLOCK: &str = "st3.attention.person.clock";
@@ -45,7 +45,7 @@ CREATE TRIGGER IF NOT EXISTS attention_open_custom_delete AFTER DELETE ON custom
 END;
 "#;
 
-pub(crate) fn definitions() -> Vec<Box<dyn View>> {
+pub fn definitions() -> Vec<Box<dyn View>> {
     vec![Box::new(Family::Person), Box::new(Family::Custom)]
 }
 
@@ -386,7 +386,7 @@ fn resource(item: &AttentionItemView) -> Result<Value> {
 }
 
 /// Called only by the certified installer after source projections, never from a reader.
-pub(crate) fn flush(
+pub fn flush(
     tx: &Transaction<'_>,
     views: &Views,
     captured_time: u128,
@@ -450,7 +450,7 @@ fn dirty_page(connection: &Connection, limit: usize) -> Result<Vec<(String, Stri
         .query_map([limit], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
-pub(crate) fn clean(connection: &Connection, view: Option<&str>) -> Result<bool> {
+pub fn clean(connection: &Connection, view: Option<&str>) -> Result<bool> {
     let name = view.map(family).transpose()?.map(Family::name);
     Ok(!connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_attention_open_dirty WHERE (?1 IS NULL OR family=?1))",
@@ -462,7 +462,7 @@ pub(crate) fn clean(connection: &Connection, view: Option<&str>) -> Result<bool>
 /// Bounded explicit extraction for a fresh installation, outside GET/startup paths. The
 /// installer supplies the source snapshot/cursor, owns an unpublished lifetime, and fences
 /// all writes until catch-up and dependency certification finish. This is not publication.
-pub(crate) fn seed_page(
+pub fn seed_page(
     tx: &Transaction<'_>,
     view: &str,
     after: &str,
@@ -496,7 +496,7 @@ pub(crate) fn seed_page(
 
 /// Build a bounded page in the installer's unpublished lifetime. The owner must reject
 /// concurrent serving, finish all pages, verify complete source capture and then publish.
-pub(crate) fn backfill_page(
+pub fn backfill_page(
     tx: &Transaction<'_>,
     captured_time: u128,
     limit: usize,
@@ -539,7 +539,7 @@ pub(crate) fn backfill_page(
 /// Scheduled captured-time membership transitions. The owner passes its prior clock cut;
 /// backwards clocks require a replacement snapshot. Each page is bounded and advances only
 /// after commit/delivery. No timer, wall-clock read or polling fallback lives in this operator.
-pub(crate) fn clock_page(
+pub fn clock_page(
     tx: &Transaction<'_>,
     views: &Views,
     from: u128,
@@ -627,7 +627,7 @@ fn require_ready(connection: &Connection, views: &Views, view: &str) -> Result<(
 
 /// This is a family window, not the whole attention collection. Call inside the authorized
 /// snapshot, after checking that this family's availability is Ready at the same boundary.
-pub(crate) fn window(
+pub fn window(
     connection: &Connection,
     views: &Views,
     view: &str,
@@ -658,7 +658,7 @@ pub(crate) fn window(
         .collect()
 }
 
-pub(crate) fn row(
+pub fn row(
     connection: &Connection,
     views: &Views,
     view: &str,

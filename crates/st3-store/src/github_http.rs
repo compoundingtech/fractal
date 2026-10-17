@@ -14,11 +14,11 @@ use tokio::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 
-pub(crate) use crate::config::open_token_file;
+pub use crate::config::open_token_file;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 
-pub(crate) const GITHUB_AUTH_REMEDY: &str = "GitHub observers have no token; run `gh auth login` as the daemon account or export GH_TOKEN/GITHUB_TOKEN in that account's login-shell startup files. Check the daemon PATH with `st doctor`. No anonymous request was sent; failed or rejected credentials are checked again after a 30-second refresh backoff. HTTP requests are never retried.";
+pub const GITHUB_AUTH_REMEDY: &str = "GitHub observers have no token; run `gh auth login` as the daemon account or export GH_TOKEN/GITHUB_TOKEN in that account's login-shell startup files. Check the daemon PATH with `st doctor`. No anonymous request was sent; failed or rejected credentials are checked again after a 30-second refresh backoff. HTTP requests are never retried.";
 
 tokio::task_local! {
     /// The observer whose observation sends the GitHub requests in this task.
@@ -26,20 +26,20 @@ tokio::task_local! {
 }
 
 /// Count the GitHub requests `future` sends against `observer`.
-pub(crate) async fn spend_as<F: Future>(observer: String, future: F) -> F::Output {
+pub async fn spend_as<F: Future>(observer: String, future: F) -> F::Output {
     GITHUB_SPENDER.scope(observer, future).await
 }
 
 /// The reconciler supplies this task-local caller; shell variables and request
 /// headers cannot select an admission identity.
-pub(crate) fn github_spender() -> Option<String> {
+pub fn github_spender() -> Option<String> {
     GITHUB_SPENDER.try_with(Clone::clone).ok()
 }
 
 /// An acquired credential retains its identity so a late 401 cannot evict a newer acquisition.
 /// Deliberately has no Debug implementation: credentials never belong in diagnostics.
 #[derive(Clone)]
-pub(crate) enum GithubAuth {
+pub enum GithubAuth {
     Local {
         token: Arc<String>,
         cache: Option<Arc<TokenCache>>,
@@ -51,23 +51,23 @@ pub(crate) enum GithubAuth {
 }
 
 impl GithubAuth {
-    pub(crate) fn is_valid(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         match self {
             Self::Local { token, .. } => !token.trim().is_empty(),
             Self::Authorized { profile, .. } => !profile.trim().is_empty(),
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn test(token: &str) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test(token: &str) -> Self {
         Self::Local {
             token: Arc::new(token.into()),
             cache: None,
         }
     }
 
-    #[cfg(test)]
-    fn local_token(&self) -> &Arc<String> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn local_token(&self) -> &Arc<String> {
         match self {
             Self::Local { token, .. } => token,
             Self::Authorized { .. } => panic!("profile auth has no local token"),
@@ -156,14 +156,14 @@ fn read_token_file(file: File) -> Result<String> {
 }
 
 #[derive(Default)]
-pub(crate) struct TokenCache(Mutex<TokenState>);
+pub struct TokenCache(Mutex<TokenState>);
 
 // Failed logins or a permanently rejected exported token must not spawn one process per caller.
 const AUTH_REFRESH_BACKOFF: Duration = Duration::from_secs(30);
 
 impl TokenCache {
-    #[cfg(test)]
-    async fn acquire<F, Fut>(self: &Arc<Self>, lookup: F) -> Result<GithubAuth>
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn acquire<F, Fut>(self: &Arc<Self>, lookup: F) -> Result<GithubAuth>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<String>>,
@@ -278,7 +278,7 @@ fn token_cache() -> &'static Arc<TokenCache> {
 
 static SOURCE: OnceLock<Arc<crate::config::Config>> = OnceLock::new();
 
-pub(crate) fn configure(config: &crate::config::Config) -> Result<()> {
+pub fn configure(config: &crate::config::Config) -> Result<()> {
     config.github.validate()?;
     if let Some(known) = SOURCE.get() {
         anyhow::ensure!(
@@ -345,7 +345,7 @@ where
         .context(GITHUB_AUTH_REMEDY)
 }
 
-pub(crate) async fn github_auth() -> Result<GithubAuth> {
+pub async fn github_auth() -> Result<GithubAuth> {
     let config = configured_source(&SOURCE)?;
     auth_for_config(config.clone(), token_cache(), || async {
         tokio::task::spawn_blocking(crate::environment::snapshot).await?
@@ -361,7 +361,7 @@ fn configured_source(
         .context("GitHub credential source was not configured for this process")
 }
 
-pub(crate) async fn lookup_github_token(environment: &BTreeMap<String, String>) -> Result<String> {
+pub async fn lookup_github_token(environment: &BTreeMap<String, String>) -> Result<String> {
     if let Some(token) = ["GH_TOKEN", "GITHUB_TOKEN"]
         .into_iter()
         .filter_map(|name| environment.get(name))
@@ -394,7 +394,7 @@ fn request_resource(path: &str) -> &'static str {
 
 /// Send exactly once, including mutations. A 401 invalidates only the credential used here;
 /// another poll can acquire again after backoff. Never retry the original HTTP request.
-pub(crate) async fn send(
+pub async fn send(
     request: reqwest::RequestBuilder,
     auth: &GithubAuth,
 ) -> Result<reqwest::Response> {

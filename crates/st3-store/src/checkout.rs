@@ -17,7 +17,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const LOCAL_GIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
-pub(crate) struct BranchInUse {
+pub struct BranchInUse {
     branch: String,
     workspace: String,
 }
@@ -33,17 +33,17 @@ impl std::fmt::Display for BranchInUse {
 impl std::error::Error for BranchInUse {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Checkout {
-    pub(crate) repository: PathBuf,
-    pub(crate) base: String,
-    pub(crate) branch: String,
-    pub(crate) remove_at_run_end: bool,
+pub struct Checkout {
+    pub repository: PathBuf,
+    pub base: String,
+    pub branch: String,
+    pub remove_at_run_end: bool,
 }
 
 impl Checkout {
     /// An existing directory satisfies a checkout only when it is the declared repository's
     /// working tree on the declared branch. A plain directory must not bypass checkout creation.
-    pub(crate) fn validate_workspace(&self, workspace: &Path) -> Result<()> {
+    pub fn validate_workspace(&self, workspace: &Path) -> Result<()> {
         let repository = std::fs::canonicalize(&self.repository)
             .with_context(|| format!("repository {} is unavailable", self.repository.display()))?;
         let repository =
@@ -62,7 +62,7 @@ impl Checkout {
     }
 
     /// Read the checkout that an agent declaration asks for.
-    pub(crate) fn from_desired(desired: &Value) -> Option<Self> {
+    pub fn from_desired(desired: &Value) -> Option<Self> {
         let node = desired
             .get("children")?
             .as_array()?
@@ -82,7 +82,7 @@ impl Checkout {
     /// Create `workspace` as a worktree on the declared branch. A branch that already exists is
     /// checked out as it is; a new branch starts at the base. When the base names a remote
     /// branch, st3 fetches it first. A failed fetch leaves the local base and returns a warning.
-    pub(crate) fn create(&self, workspace: &Path) -> Result<Vec<String>> {
+    pub fn create(&self, workspace: &Path) -> Result<Vec<String>> {
         anyhow::ensure!(
             self.repository.is_absolute(),
             "checkout repository {} is not an absolute path",
@@ -160,7 +160,7 @@ impl Checkout {
 
     /// Remove a clean worktree. Git refuses a worktree with uncommitted or untracked changes,
     /// so that work stays on disk. The branch stays in the repository.
-    pub(crate) fn remove(&self, workspace: &Path) -> Result<()> {
+    pub fn remove(&self, workspace: &Path) -> Result<()> {
         self.git(
             &["worktree", "remove", &workspace.to_string_lossy()],
             LOCAL_GIT_TIMEOUT,
@@ -221,11 +221,11 @@ impl Checkout {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_support {
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use std::path::{Path, PathBuf};
 
-    pub(crate) fn git(directory: &Path, arguments: &[&str]) {
+    pub fn git(directory: &Path, arguments: &[&str]) {
         let status = crate::test_support::git()
             .arg("-C")
             .arg(directory)
@@ -241,7 +241,7 @@ pub(crate) mod test_support {
     }
 
     /// A bare origin with one commit on main, and a clone of it.
-    pub(crate) fn repository(root: &Path) -> PathBuf {
+    pub fn repository(root: &Path) -> PathBuf {
         let origin = root.join("origin.git");
         let seed = root.join("seed");
         let clone = root.join("repo");
@@ -274,7 +274,7 @@ pub(crate) mod test_support {
 
 /// Read Git's directory pointers on the owning host during reconciliation. Checks only the
 /// declared workspace and its ancestors, with no search through other host directories.
-pub(crate) fn workspace_repository(workspace: &Path) -> Option<PathBuf> {
+pub fn workspace_repository(workspace: &Path) -> Option<PathBuf> {
     let workspace = std::fs::canonicalize(workspace).ok()?;
     for root in workspace.ancestors() {
         let dot_git = root.join(".git");

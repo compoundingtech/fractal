@@ -2,7 +2,7 @@
 use super::*;
 use st3_schema::arrangements::{self as schema, Operation};
 
-pub(super) const SCHEMA: &str = r#"
+pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS arrangements (
     subject TEXT PRIMARY KEY, owner TEXT NOT NULL, created INTEGER NOT NULL DEFAULT 0,
     retired INTEGER NOT NULL DEFAULT 0, revision TEXT NOT NULL, winner BLOB NOT NULL,
@@ -27,7 +27,7 @@ fn heads(connection: &Connection, subject: &str) -> Result<BTreeMap<String, Head
 }
 fn register(head: &Head) -> Value { json!({"value":head.0,"revision":head.1}) }
 
-pub(super) fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
+pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
     let fields = schema_fields_for_body(&claim.kind, &claim.body)?;
     let operations = schema::operations(&claim.subject, &fields).map_err(anyhow::Error::new)?;
     let owner = schema::owner(&claim.subject).map_err(anyhow::Error::new)?;
@@ -114,7 +114,7 @@ fn resolved(heads: &BTreeMap<String, Head>) -> Value {
     json!({"parents":parents,"folders":folders})
 }
 
-pub(super) fn arrangement_at(connection: &Connection, subject: &str, through: u64) -> Result<Option<Value>> {
+pub fn arrangement_at(connection: &Connection, subject: &str, through: u64) -> Result<Option<Value>> {
     let row = connection.query_row("SELECT owner,created,retired,revision,updated_at,changed_index FROM arrangements WHERE subject=?1", [subject], |row| Ok((row.get::<_,String>(0)?,row.get::<_,bool>(1)?,row.get::<_,bool>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,u64>(5)?))).optional()?;
     let Some((owner,created,retired,revision,time,index)) = row else { return Ok(None); };
     anyhow::ensure!(index <= through, "arrangement snapshot frontier is stale; read current heads in a read snapshot");
@@ -137,7 +137,7 @@ fn resource(subject: &str, owner: &str, revision: &str, time: u128, heads: &BTre
         "body":{"version":1,"name":register(heads.get("name").context("created arrangement name")?),"folders":folders,"placements":placements},"resolved":resolved(heads),
         "updated_at":chrono::DateTime::from_timestamp_millis(i64::try_from(time).unwrap_or(i64::MAX)).unwrap_or(chrono::DateTime::UNIX_EPOCH).to_rfc3339_opts(chrono::SecondsFormat::Millis,true)}))
 }
-pub(super) fn arrangements_at(connection: &Connection, person: &str, through: u64) -> Result<Vec<Value>> {
+pub fn arrangements_at(connection: &Connection, person: &str, through: u64) -> Result<Vec<Value>> {
     let changed: u64 = connection.query_row("SELECT COALESCE(MAX(changed_index),0) FROM arrangements WHERE owner=?1", [person], |row| row.get(0))?;
     anyhow::ensure!(changed <= through, "arrangement collection snapshot frontier is stale; read current heads in a read snapshot");
     let mut statement = connection.prepare_cached("SELECT subject FROM arrangements WHERE owner=?1 AND created=1 AND retired=0 ORDER BY subject")?;
@@ -145,7 +145,7 @@ pub(super) fn arrangements_at(connection: &Connection, person: &str, through: u6
     subjects.into_iter().filter_map(|subject| arrangement_at(connection,&subject,through).transpose()).collect()
 }
 
-pub(super) fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), St3Error> {
+pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), St3Error> {
     if input.kind != "arrangement.edited" { return Ok(()); }
     let operations = schema::operations(&input.subject,&input.fields).map_err(|e| St3Error::new(e.code,e.message))?;
     let state = transaction.query_row("SELECT created,retired FROM arrangements WHERE subject=?1", [&input.subject], |row| Ok((row.get::<_,bool>(0)?,row.get::<_,bool>(1)?))).optional().map_err(internal)?;
@@ -205,12 +205,12 @@ pub(super) fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Resu
     Ok(())
 }
 
-pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
+pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     let ready: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='arrangement_heads_v1')", [], |row| row.get(0))?;
     if !ready { rebuild(transaction)?; transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('arrangement_heads_v1','1')", [])?; }
     Ok(())
 }
-pub(super) fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
+pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute("DELETE FROM arrangement_registers", [])?;
     transaction.execute("DELETE FROM arrangements", [])?;
     let mut statement = transaction.prepare("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='arrangement.edited' AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')")?;
@@ -226,7 +226,7 @@ impl Store {
     pub fn arrangement(&self, subject: &str, through: u64) -> Result<Option<Value>> {
         self.read_snapshot(|_| arrangement_at(&self.readers.get(),subject,through))
     }
-    pub(crate) fn arrangements_changed(&self, after: u64, through: u64) -> Result<bool> {
+    pub fn arrangements_changed(&self, after: u64, through: u64) -> Result<bool> {
         Ok(self.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM arrangements WHERE changed_index>?1 AND changed_index<=?2)",params![after,through.min(i64::MAX as u64)],|row| row.get(0))?)
     }
     pub fn edit_arrangement(&self, input: &ClaimInput, expected_subjects: &BTreeMap<String,String>) -> Result<ClaimRecord,St3Error> {

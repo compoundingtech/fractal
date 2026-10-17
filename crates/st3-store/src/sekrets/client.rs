@@ -72,7 +72,7 @@ impl Connection {
     }
 
     /// One request and its reply.
-    pub(crate) fn call(&self, request: &Request) -> Result<Reply> {
+    pub fn call(&self, request: &Request) -> Result<Reply> {
         self.request(request, &[])
     }
 

@@ -26,33 +26,33 @@ const MACHINES_RUNTIMES_LIMIT: usize = 64;
 
 /// One selection's published row.
 #[derive(Clone)]
-pub(crate) struct SummaryRow {
-    pub(crate) cut: u64,
-    pub(crate) published_at_unix_ms: u128,
-    pub(crate) row: Value,
+pub struct SummaryRow {
+    pub cut: u64,
+    pub published_at_unix_ms: u128,
+    pub row: Value,
 }
 
 /// What every selection's summary shares: each mission (`id`, `system`, `active`), the working
 /// agents and the machine counts, computed at `cut` and the clock `evaluated_at_unix_ms`, with
 /// the roster publication the agents were counted from.
 #[derive(Clone, Debug)]
-pub(crate) struct SummaryShared {
-    pub(crate) cut: u64,
-    pub(crate) evaluated_at_unix_ms: u128,
-    pub(crate) published_at_unix_ms: u128,
-    pub(crate) missions: Vec<(String, bool, bool)>,
-    pub(crate) working_agents: usize,
-    pub(crate) machines: Value,
-    pub(crate) agents_as_of: Option<Value>,
+pub struct SummaryShared {
+    pub cut: u64,
+    pub evaluated_at_unix_ms: u128,
+    pub published_at_unix_ms: u128,
+    pub missions: Vec<(String, bool, bool)>,
+    pub working_agents: usize,
+    pub machines: Value,
+    pub agents_as_of: Option<Value>,
 }
 
 /// What the shared counts were computed from: the graph cut, the roster revision and the clock
 /// period they were evaluated in. Equal inputs compute nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SummaryInputs {
-    pub(crate) cut: u64,
-    pub(crate) roster: u64,
-    pub(crate) period: u128,
+pub struct SummaryInputs {
+    pub cut: u64,
+    pub roster: u64,
+    pub period: u128,
 }
 
 /// The machines the shared counts were counted from and what they were read under: the graph
@@ -60,14 +60,14 @@ pub(crate) struct SummaryInputs {
 /// past their cut, the machines' hosts, states and transports still hold; their runtimes, work
 /// and update times may not, and the counts read none of those.
 #[derive(Clone)]
-pub(crate) struct SummaryMachines {
-    pub(crate) cut: u64,
-    pub(crate) period: u128,
-    pub(crate) conflicts: u64,
-    pub(crate) fleet: smallclaims::fleet::FleetView,
-    pub(crate) machines: Arc<Vec<Value>>,
+pub struct SummaryMachines {
+    pub cut: u64,
+    pub period: u128,
+    pub conflicts: u64,
+    pub fleet: smallclaims::fleet::FleetView,
+    pub machines: Arc<Vec<Value>>,
     /// The host each current runtime runs on, by runtime subject.
-    pub(crate) runtimes: Arc<BTreeMap<String, String>>,
+    pub runtimes: Arc<BTreeMap<String, String>>,
 }
 
 #[derive(Default)]
@@ -87,7 +87,7 @@ struct Lists {
 }
 
 #[derive(Default)]
-pub(crate) struct SummaryList {
+pub struct SummaryList {
     lists: Mutex<Lists>,
     forgotten: AtomicU64,
     /// The shared counts were computed once since the store opened.
@@ -97,7 +97,7 @@ pub(crate) struct SummaryList {
 }
 
 impl SummaryList {
-    pub(super) fn forget(&self) {
+    pub fn forget(&self) {
         let mut lists = self.lists.lock().unwrap_or_else(PoisonError::into_inner);
         self.forgotten.fetch_add(1, AtomicOrdering::AcqRel);
         lists.shared = None;
@@ -109,7 +109,7 @@ impl SummaryList {
 }
 
 /// What a summary window gets for its selection.
-pub(crate) enum PublishedSummary {
+pub enum PublishedSummary {
     /// The published row, with its cut and publication time.
     Row(u64, u128, Value),
     /// No row published yet: the window counts its own from the published shared counts and
@@ -122,7 +122,7 @@ pub(crate) enum PublishedSummary {
 impl Store {
     /// The row published for `person`, and note that a window reads that selection. Only while
     /// the attention list's refresher runs.
-    pub(crate) fn published_summary(&self, person: Option<&str>) -> PublishedSummary {
+    pub fn published_summary(&self, person: Option<&str>) -> PublishedSummary {
         if !self.attention_list_refresher_running() {
             return PublishedSummary::Unserved;
         }
@@ -148,7 +148,7 @@ impl Store {
     /// The selections windows read within `within_ms`, forgetting older ones, and the generation
     /// to publish under. With `waiting_only`, only the selections a window waits for (see
     /// `summary_selection_waiting`).
-    pub(crate) fn summary_selections(
+    pub fn summary_selections(
         &self,
         within_ms: u64,
         waiting_only: bool,
@@ -170,7 +170,7 @@ impl Store {
     }
 
     /// The newest shared counts and the inputs they were computed from, if any.
-    pub(crate) fn summary_shared(&self) -> Option<(Arc<SummaryShared>, SummaryInputs)> {
+    pub fn summary_shared(&self) -> Option<(Arc<SummaryShared>, SummaryInputs)> {
         self.smalltalk
             .summary_list
             .lists
@@ -183,24 +183,24 @@ impl Store {
     /// Mark the shared counts computed once since the store opened. Until they are (the
     /// complete roster they count agents from may not be published yet), the refresher keeps
     /// computing them with no window asking, so the first window is served at once.
-    pub(crate) fn start_summary_shared(&self) {
+    pub fn start_summary_shared(&self) {
         self.smalltalk.summary_list.started.store(true, AtomicOrdering::Release);
     }
 
     /// Note whether an attempt to compute the shared counts failed. Returns whether this begins
     /// a run of failures: the refresher retries every pass, and says so once per run.
-    pub(crate) fn note_summary_shared_failed(&self, failed: bool) -> bool {
+    pub fn note_summary_shared_failed(&self, failed: bool) -> bool {
         self.smalltalk.summary_list.failing.swap(failed, AtomicOrdering::AcqRel) != failed && failed
     }
 
     /// Whether the shared counts are still to be computed as the daemon starts.
-    pub(crate) fn summary_shared_starting(&self) -> bool {
+    pub fn summary_shared_starting(&self) -> bool {
         !self.smalltalk.summary_list.started.load(AtomicOrdering::Acquire)
     }
 
     /// Store newly computed shared counts. A computation that began before views were forgotten
     /// (`generation` is stale), or one older than the newest, stores nothing.
-    pub(crate) fn publish_summary_shared(
+    pub fn publish_summary_shared(
         &self,
         generation: u64,
         shared: Arc<SummaryShared>,
@@ -217,7 +217,7 @@ impl Store {
     }
 
     /// Whether a window waits for a selection the refresher has not computed yet.
-    pub(crate) fn summary_selection_waiting(&self) -> bool {
+    pub fn summary_selection_waiting(&self) -> bool {
         self.smalltalk
             .summary_list
             .lists
@@ -231,7 +231,7 @@ impl Store {
     /// Store one selection's row, or `None` when its shared counts could not be computed. Returns whether
     /// what its windows show changed: only then do they have anything to reread. A computation
     /// that began before views were forgotten (`generation` is stale) stores nothing.
-    pub(crate) fn publish_summary_row(
+    pub fn publish_summary_row(
         &self,
         generation: u64,
         person: &Option<String>,
@@ -265,7 +265,7 @@ impl Store {
     }
 
     /// The machines the shared counts were last counted from, if any.
-    pub(crate) fn summary_machines(&self) -> Option<SummaryMachines> {
+    pub fn summary_machines(&self) -> Option<SummaryMachines> {
         self.smalltalk
             .summary_list
             .lists
@@ -278,7 +278,7 @@ impl Store {
     /// Keep the machines read, or found to still hold, at `machines.cut`. A read that began
     /// before views were forgotten (`generation` is stale), or one older than the newest, keeps
     /// nothing.
-    pub(crate) fn keep_summary_machines(&self, generation: u64, machines: SummaryMachines) {
+    pub fn keep_summary_machines(&self, generation: u64, machines: SummaryMachines) {
         let list = &self.smalltalk.summary_list;
         let mut lists = list.lists.lock().unwrap_or_else(PoisonError::into_inner);
         if list.forgotten.load(AtomicOrdering::Acquire) != generation
@@ -291,7 +291,7 @@ impl Store {
 
     /// How many operations conflict. A conflict changes the status of the subjects its claims
     /// are about without a claim of their own.
-    pub(crate) fn conflicting_operations(&self) -> Result<u64> {
+    pub fn conflicting_operations(&self) -> Result<u64> {
         Ok(self
             .readers
             .get()
@@ -310,7 +310,7 @@ impl Store {
     /// runtimes change only those runtimes; the rest, most of a busy host's claims (harness
     /// reports, messages, documents), change none. Conflicting operations, fleet membership and
     /// replication successes change machines without a claim: the caller compares those.
-    pub(crate) fn summary_machines_hold(
+    pub fn summary_machines_hold(
         &self,
         after: u64,
         through: u64,

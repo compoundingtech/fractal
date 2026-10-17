@@ -10,7 +10,7 @@ use crate::model::{
 };
 
 /// What the graph holds, as far as the reference checks need it.
-pub(crate) trait Graph {
+pub trait Graph {
     /// Whether `subject` has a current declaration.
     fn declared(&self, subject: &str) -> Result<bool, St3Error>;
     /// Whether any revision of the mission is published.
@@ -34,7 +34,7 @@ const PROOF_RUN: &str = "migration-proof";
 const RUN_VALUE: &str = "st-run-value";
 
 /// Every reference in `intent` that resolves neither in the intent nor in `graph`.
-pub(crate) fn publication(
+pub fn publication(
     intent: &NormalizedIntent,
     graph: &impl Graph,
     host: &str,
@@ -67,7 +67,7 @@ pub(crate) fn publication(
 /// Every reference in the graph's ready missions and current declarations that no longer
 /// resolves. A mission's loop rounds are checked with it, since they share its run's
 /// declarations. Messages are history and are not checked.
-pub(crate) fn graph(
+pub fn graph(
     missions: &[MissionSpec],
     desired: &[DesiredSubject],
     graph: &impl Graph,

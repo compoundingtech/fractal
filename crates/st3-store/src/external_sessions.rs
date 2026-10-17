@@ -20,7 +20,7 @@ use sha2::{Digest as _, Sha256};
 use walkdir::WalkDir;
 
 const MAX_DISCOVERED_FILES: usize = 10_000;
-pub(crate) const MAX_EXPOSED_HISTORY: usize = 2_000;
+pub const MAX_EXPOSED_HISTORY: usize = 2_000;
 const MAX_METADATA_LINES: usize = 64;
 const MAX_TIMELINE_LINES: usize = 4_096;
 const MAX_TIMELINE_BYTES: u64 = 32 * 1024 * 1024;
@@ -33,7 +33,7 @@ const HISTORY_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum ExternalDriver {
+pub enum ExternalDriver {
     Codex,
     Claude,
     Pi,
@@ -42,7 +42,7 @@ pub(crate) enum ExternalDriver {
 }
 
 impl ExternalDriver {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
@@ -54,47 +54,47 @@ impl ExternalDriver {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct ExternalProcess {
-    pub(crate) pid: u32,
-    pub(crate) parent_pid: u32,
-    pub(crate) started_at_unix_ms: u128,
-    pub(crate) fingerprint: String,
-    pub(crate) cwd: Option<PathBuf>,
-    pub(crate) command: String,
-    pub(crate) exact_session: bool,
+pub struct ExternalProcess {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub started_at_unix_ms: u128,
+    pub fingerprint: String,
+    pub cwd: Option<PathBuf>,
+    pub command: String,
+    pub exact_session: bool,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ExternalSession {
-    pub(crate) id: String,
-    pub(crate) revision: String,
-    pub(crate) driver: ExternalDriver,
-    pub(crate) native_id: String,
-    pub(crate) transcript: PathBuf,
+pub struct ExternalSession {
+    pub id: String,
+    pub revision: String,
+    pub driver: ExternalDriver,
+    pub native_id: String,
+    pub transcript: PathBuf,
     /// The provider home owning this rollout, independent of the daemon launch environment.
-    pub(crate) codex_home: Option<PathBuf>,
-    pub(crate) cwd: Option<PathBuf>,
-    pub(crate) title: Option<String>,
-    pub(crate) started_at_unix_ms: u128,
-    pub(crate) updated_at_unix_ms: u128,
-    pub(crate) process: Option<ExternalProcess>,
+    pub codex_home: Option<PathBuf>,
+    pub cwd: Option<PathBuf>,
+    pub title: Option<String>,
+    pub started_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+    pub process: Option<ExternalProcess>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct UnresolvedProcess {
-    pub(crate) id: String,
-    pub(crate) revision: String,
-    pub(crate) driver: ExternalDriver,
-    pub(crate) process: ExternalProcess,
+pub struct UnresolvedProcess {
+    pub id: String,
+    pub revision: String,
+    pub driver: ExternalDriver,
+    pub process: ExternalProcess,
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct ExternalDiscovery {
-    pub(crate) sessions: Vec<ExternalSession>,
-    pub(crate) unresolved_processes: Vec<UnresolvedProcess>,
+pub struct ExternalDiscovery {
+    pub sessions: Vec<ExternalSession>,
+    pub unresolved_processes: Vec<UnresolvedProcess>,
 }
 
-pub(crate) enum ExternalConversation {
+pub enum ExternalConversation {
     Readable(ExternalSession),
     Unavailable(UnresolvedProcess),
 }
@@ -109,7 +109,7 @@ impl ExternalConversation {
 }
 
 impl ExternalDiscovery {
-    pub(crate) fn into_conversation(self, id: &str) -> Option<ExternalConversation> {
+    pub fn into_conversation(self, id: &str) -> Option<ExternalConversation> {
         if let Some(session) = self.sessions.into_iter().find(|session| session.id == id) {
             return Some(ExternalConversation::Readable(session));
         }
@@ -121,7 +121,7 @@ impl ExternalDiscovery {
 }
 
 #[derive(Debug)]
-pub(crate) struct AmbiguousSession(pub(crate) String);
+pub struct AmbiguousSession(pub String);
 
 impl std::fmt::Display for AmbiguousSession {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -148,7 +148,7 @@ struct SessionMetadata {
     revision: String,
 }
 
-pub(crate) fn discover(home: Option<&Path>, include_history: bool) -> Result<ExternalDiscovery> {
+pub fn discover(home: Option<&Path>, include_history: bool) -> Result<ExternalDiscovery> {
     let Some(home) = home else {
         return Ok(ExternalDiscovery::default());
     };
@@ -212,7 +212,7 @@ static HISTORY: LazyLock<(Mutex<HashMap<PathBuf, HistoryInventory>>, Condvar)> =
     LazyLock::new(|| (Mutex::new(HashMap::new()), Condvar::new()));
 
 /// Start reading saved transcripts off the request path, unless a read is already running.
-pub(crate) fn start_history_inventory(home: Option<&Path>) {
+pub fn start_history_inventory(home: Option<&Path>) {
     if let Some(home) = home {
         let mut inventories = HISTORY.0.lock().expect("history inventory mutex poisoned");
         start_history_refresh(inventories.entry(home.to_owned()).or_default(), home);
@@ -281,7 +281,7 @@ fn historical_files(home: &Path) -> Result<Arc<Vec<SessionMetadata>>> {
     }
 }
 
-pub(crate) fn discover_fresh(
+pub fn discover_fresh(
     home: Option<&Path>,
     include_history: bool,
 ) -> Result<ExternalDiscovery> {
@@ -443,11 +443,11 @@ fn filter_discovery(mut discovery: ExternalDiscovery, include_history: bool) -> 
     discovery
 }
 
-pub(crate) fn find(home: Option<&Path>, id: &str) -> Result<Option<ExternalSession>> {
+pub fn find(home: Option<&Path>, id: &str) -> Result<Option<ExternalSession>> {
     Ok(find_conversation(home, id)?.and_then(ExternalConversation::into_readable_session))
 }
 
-pub(crate) fn find_conversation(
+pub fn find_conversation(
     home: Option<&Path>,
     id: &str,
 ) -> Result<Option<ExternalConversation>> {
@@ -459,7 +459,7 @@ pub(crate) fn find_conversation(
 
 /// Resolve an already-bound managed transcript without inventorying every native session
 /// and process on the machine. The native ID comes from the wrapper binding, not a client.
-pub(crate) fn find_bound_transcript(
+pub fn find_bound_transcript(
     home: &Path,
     driver: ExternalDriver,
     native_id: &str,
@@ -488,7 +488,7 @@ fn claude_transcript_hint(hint: &Path, filename: &str) -> bool {
 /// seat's `CLAUDE_CONFIG_DIR` whatever account it runs on; it counts only if it names this
 /// session's file. `extra_roots` are further `projects` directories to search, such as the logins
 /// of declared accounts, for a seat whose binding recorded no path.
-pub(crate) fn find_bound_transcript_with(
+pub fn find_bound_transcript_with(
     home: &Path,
     driver: ExternalDriver,
     native_id: &str,
@@ -586,7 +586,7 @@ pub(crate) fn find_bound_transcript_with(
 /// Nothing here matches by workspace, recency, or a similar file name. Another seat's Claude has
 /// a different driver as its parent and an unmanaged Claude has no driver parent at all, so this
 /// cannot select another session's transcript. Any gap yields an explanation, not a guess.
-pub(crate) fn claude_session_of_managed_driver(
+pub fn claude_session_of_managed_driver(
     home: &Path,
     subject: &str,
     driver_token: &str,
@@ -778,7 +778,7 @@ fn linux_child_processes(pid: u32) -> BTreeSet<u32> {
 }
 
 /// Read only the exact pi-family transcript durably named by a native binding or import claim.
-pub(crate) fn find_bound_pi_family_transcript(
+pub fn find_bound_pi_family_transcript(
     driver: ExternalDriver,
     path: &Path,
     native_id: &str,
@@ -806,7 +806,7 @@ pub(crate) fn find_bound_pi_family_transcript(
 
 /// Find the newest transcript created by the current managed OMP incarnation.
 /// The directory is constructed from the declared seat, never from client input.
-pub(crate) fn find_managed_omp_transcript(
+pub fn find_managed_omp_transcript(
     directory: &Path,
     started_after_unix_ms: u128,
 ) -> Result<Option<ExternalSession>> {
@@ -857,7 +857,7 @@ pub(crate) fn find_managed_omp_transcript(
     Ok(None)
 }
 
-pub(crate) fn find_fresh(home: Option<&Path>, id: &str) -> Result<Option<ExternalSession>> {
+pub fn find_fresh(home: Option<&Path>, id: &str) -> Result<Option<ExternalSession>> {
     let Some(home) = home else {
         return Ok(None);
     };
@@ -866,7 +866,7 @@ pub(crate) fn find_fresh(home: Option<&Path>, id: &str) -> Result<Option<Externa
         .and_then(ExternalConversation::into_readable_session))
 }
 
-pub(crate) fn timestamp(unix_ms: u128) -> String {
+pub fn timestamp(unix_ms: u128) -> String {
     let millis = i64::try_from(unix_ms).unwrap_or(i64::MAX);
     DateTime::<Utc>::from_timestamp_millis(millis)
         .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
@@ -879,7 +879,7 @@ pub(crate) fn timestamp(unix_ms: u128) -> String {
 /// conversation bytes and is authenticated inside the owner content reference.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "format", rename_all = "kebab-case")]
-pub(crate) enum NativeLocator {
+pub enum NativeLocator {
     Jsonl {
         offset: u64,
         length: u64,
@@ -906,7 +906,7 @@ pub(crate) enum NativeLocator {
 }
 
 /// Read one identified native record, independent of the size of the session history.
-pub(crate) fn normalized_record(
+pub fn normalized_record(
     session: &ExternalSession,
     locator: &NativeLocator,
 ) -> Result<Vec<Value>> {
@@ -916,7 +916,7 @@ pub(crate) fn normalized_record(
 /// A native record larger than the caller's read budget. The record is refused before its
 /// body is allocated or normalized; callers never fall back to an unbounded read.
 #[derive(Debug)]
-pub(crate) struct RecordBudgetExceeded;
+pub struct RecordBudgetExceeded;
 
 impl std::fmt::Display for RecordBudgetExceeded {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -927,7 +927,7 @@ impl std::fmt::Display for RecordBudgetExceeded {
 impl std::error::Error for RecordBudgetExceeded {}
 
 /// `normalized_record` within `max_bytes` of native record bytes.
-pub(crate) fn normalized_record_bounded(
+pub fn normalized_record_bounded(
     session: &ExternalSession,
     locator: &NativeLocator,
     max_bytes: usize,
@@ -1085,22 +1085,22 @@ pub(crate) fn normalized_record_bounded(
 /// the user or the agent. Only opening the file can fail the whole read.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TimelineOrder {
+pub enum TimelineOrder {
     Sequence,
     TimestampSequence,
 }
 
 /// Native entries have rank 0; Small Talk messages have rank 1.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct TimelineKey {
-    pub(crate) timestamp: String,
-    pub(crate) sequence: u64,
-    pub(crate) rank: u8,
-    pub(crate) id: String,
+pub struct TimelineKey {
+    pub timestamp: String,
+    pub sequence: u64,
+    pub rank: u8,
+    pub id: String,
 }
 
 impl TimelineKey {
-    pub(crate) fn cmp_in(&self, other: &Self, order: TimelineOrder) -> std::cmp::Ordering {
+    pub fn cmp_in(&self, other: &Self, order: TimelineOrder) -> std::cmp::Ordering {
         compare_timeline_positions(
             (&self.timestamp, self.sequence, self.rank, &self.id),
             (&other.timestamp, other.sequence, other.rank, &other.id),
@@ -1129,7 +1129,7 @@ fn native_timeline_position(item: &Value) -> (&str, u64, u8, &str) {
     )
 }
 
-pub(crate) fn timeline_key(item: &Value, rank: u8) -> TimelineKey {
+pub fn timeline_key(item: &Value, rank: u8) -> TimelineKey {
     TimelineKey {
         timestamp: item["timestamp"].as_str().unwrap_or_default().to_owned(),
         sequence: item["sequence"].as_u64().unwrap_or_default(),
@@ -1138,16 +1138,16 @@ pub(crate) fn timeline_key(item: &Value, rank: u8) -> TimelineKey {
     }
 }
 
-pub(crate) struct TimelineSlice {
+pub struct TimelineSlice {
     /// Newest-first entries strictly before the supplied key.
-    pub(crate) items: Vec<Value>,
-    pub(crate) has_more: bool,
+    pub items: Vec<Value>,
+    pub has_more: bool,
     /// Source content generation: stable across appends, moved by every non-append rebuild.
-    pub(crate) generation: u64,
+    pub generation: u64,
 }
 
-#[cfg(test)]
-pub(crate) fn timeline_slice(
+#[cfg(any(test, feature = "test-support"))]
+pub fn timeline_slice(
     session: &ExternalSession,
     order: TimelineOrder,
     before: Option<&TimelineKey>,
@@ -1210,18 +1210,18 @@ const MAX_FOLDED_TRANSCRIPTS: usize = 16;
 const MAX_FOLDED_SOURCE_BYTES: usize = 96 * 1024 * 1024;
 type SharedLineFold = Arc<Mutex<LineTimelineFold>>;
 type LineFoldCache = VecDeque<(PathBuf, ExternalDriver, SharedLineFold, usize)>;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 static LINE_FOLDS: LazyLock<Mutex<LineFoldCache>> = LazyLock::new(Mutex::default);
 
 /// The fold cache serving `transcript`: the process-wide one, or under test the cache of the
 /// test's own scope, so parallel tests never evict or contend for each other's folds.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn line_folds(_transcript: &Path) -> &'static Mutex<LineFoldCache> {
     &LINE_FOLDS
 }
 
-#[cfg(test)]
-fn line_folds(transcript: &Path) -> Arc<Mutex<LineFoldCache>> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn line_folds(transcript: &Path) -> Arc<Mutex<LineFoldCache>> {
     static SCOPES: timeline_test_support::Scopes<Mutex<LineFoldCache>> =
         LazyLock::new(Mutex::default);
     timeline_test_support::scoped(&SCOPES, transcript, Mutex::default)
@@ -1247,15 +1247,15 @@ fn next_timeline_generation() -> u64 {
 
 /// Test-only determinism hooks: park one transcript refresh mid-read and observe readers
 /// queued on a contended fold. Nothing here is compiled into release builds.
-#[cfg(test)]
-pub(crate) mod timeline_test_support {
+#[cfg(any(test, feature = "test-support"))]
+pub mod timeline_test_support {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, LazyLock, Mutex};
 
     /// Per-scope instances of a process-wide budget or cache.
-    pub(crate) type Scopes<T> = LazyLock<Mutex<HashMap<PathBuf, Arc<T>>>>;
+    pub type Scopes<T> = LazyLock<Mutex<HashMap<PathBuf, Arc<T>>>>;
 
     /// A test's isolation scope: the temporary directory its transcripts live in. Paths
     /// outside the temporary directory share one scope.
@@ -1269,7 +1269,7 @@ pub(crate) mod timeline_test_support {
 
     /// The instance of a process-wide budget or cache for `path`'s scope, so each test owns
     /// its own and parallel tests cannot affect each other through global state.
-    pub(crate) fn scoped<T>(scopes: &Scopes<T>, path: &Path, create: impl FnOnce() -> T) -> Arc<T> {
+    pub fn scoped<T>(scopes: &Scopes<T>, path: &Path, create: impl FnOnce() -> T) -> Arc<T> {
         let mut scopes = scopes.lock().unwrap_or_else(|error| error.into_inner());
         Arc::clone(
             scopes
@@ -1300,7 +1300,7 @@ pub(crate) mod timeline_test_support {
     /// Park the next refresh of `path` until `release_refresh(path)`, so a test controls
     /// exactly when the fold's I/O completes while holding the fold. Gates are per path, so
     /// parallel tests never release each other's readers.
-    pub(crate) fn arm_refresh(path: &Path) {
+    pub fn arm_refresh(path: &Path) {
         let mut gates = gates();
         gates.insert(
             path.to_owned(),
@@ -1312,7 +1312,7 @@ pub(crate) mod timeline_test_support {
         REFRESH_ARRIVED.notify_all();
     }
 
-    pub(crate) fn wait_refresh_arrived(path: &Path) {
+    pub fn wait_refresh_arrived(path: &Path) {
         let mut gates = gates();
         while !gates.get(path).is_some_and(|gate| gate.arrived) {
             gates = REFRESH_ARRIVED
@@ -1321,7 +1321,7 @@ pub(crate) mod timeline_test_support {
         }
     }
 
-    pub(crate) fn release_refresh(path: &Path) {
+    pub fn release_refresh(path: &Path) {
         let mut gates = gates();
         if let Some(gate) = gates.get_mut(path) {
             gate.released = true;
@@ -1329,7 +1329,7 @@ pub(crate) mod timeline_test_support {
         REFRESH_ARRIVED.notify_all();
     }
 
-    pub(crate) fn gate_refresh(path: &Path) {
+    pub fn gate_refresh(path: &Path) {
         let mut gates = gates();
         loop {
             let Some(gate) = gates.get_mut(path) else {
@@ -1351,17 +1351,17 @@ pub(crate) mod timeline_test_support {
 
     /// Block until `count` readers are parked on a contended fold. They are guaranteed to
     /// arrive: the gated refresh holds that fold for as long as the test wants.
-    pub(crate) fn wait_fold_waiters(count: usize) {
+    pub fn wait_fold_waiters(count: usize) {
         while FOLD_WAITERS.load(Ordering::SeqCst) < count {
             std::thread::yield_now();
         }
     }
 
-    pub(crate) fn enter_contended() {
+    pub fn enter_contended() {
         FOLD_WAITERS.fetch_add(1, Ordering::SeqCst);
     }
 
-    pub(crate) fn leave_contended() {
+    pub fn leave_contended() {
         FOLD_WAITERS.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -1428,7 +1428,7 @@ fn lock_fold(fold: &SharedLineFold) -> std::sync::MutexGuard<'_, LineTimelineFol
     if let Ok(state) = fold.try_lock() {
         return state;
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     timeline_test_support::enter_contended();
     let state = match fold.lock() {
         Ok(state) => state,
@@ -1439,7 +1439,7 @@ fn lock_fold(fold: &SharedLineFold) -> std::sync::MutexGuard<'_, LineTimelineFol
             state
         }
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     timeline_test_support::leave_contended();
     state
 }
@@ -1448,13 +1448,13 @@ fn lock_fold(fold: &SharedLineFold) -> std::sync::MutexGuard<'_, LineTimelineFol
 /// line drivers share one, and `hold` waits for it before the caller takes any global read
 /// slot, so several viewers of one conversation queue on the fold instead of exhausting the
 /// bounded read budget an unrelated conversation still needs.
-pub(crate) struct LineTimeline {
+pub struct LineTimeline {
     fold: Option<SharedLineFold>,
 }
 
 impl LineTimeline {
     /// Resolves the shared fold without locking it and without transcript I/O.
-    pub(crate) fn acquire(session: &ExternalSession) -> Self {
+    pub fn acquire(session: &ExternalSession) -> Self {
         if session.driver == ExternalDriver::OpenCode {
             return Self { fold: None };
         }
@@ -1464,7 +1464,7 @@ impl LineTimeline {
     }
 
     /// Blocks for the fold while holding no caller resource.
-    pub(crate) fn hold(&self) -> LineTimelineHeld<'_> {
+    pub fn hold(&self) -> LineTimelineHeld<'_> {
         LineTimelineHeld {
             fold: self.fold.as_ref(),
             guard: self.fold.as_ref().map(lock_fold),
@@ -1472,13 +1472,13 @@ impl LineTimeline {
     }
 }
 
-pub(crate) struct LineTimelineHeld<'a> {
+pub struct LineTimelineHeld<'a> {
     fold: Option<&'a SharedLineFold>,
     guard: Option<std::sync::MutexGuard<'a, LineTimelineFold>>,
 }
 
 impl LineTimelineHeld<'_> {
-    pub(crate) fn read(&mut self, session: &ExternalSession) -> Result<Vec<Value>> {
+    pub fn read(&mut self, session: &ExternalSession) -> Result<Vec<Value>> {
         match self.guard.as_mut() {
             Some(state) => {
                 let result = state.read(session);
@@ -1490,7 +1490,7 @@ impl LineTimelineHeld<'_> {
         }
     }
 
-    pub(crate) fn slice(
+    pub fn slice(
         &mut self,
         session: &ExternalSession,
         order: TimelineOrder,
@@ -1509,7 +1509,7 @@ impl LineTimelineHeld<'_> {
     }
 }
 
-pub(crate) fn normalized_timeline(session: &ExternalSession) -> Result<Vec<Value>> {
+pub fn normalized_timeline(session: &ExternalSession) -> Result<Vec<Value>> {
     let timeline = LineTimeline::acquire(session);
     let mut held = timeline.hold();
     held.read(session)
@@ -1521,7 +1521,7 @@ pub(crate) fn normalized_timeline(session: &ExternalSession) -> Result<Vec<Value
 /// normalized_record on pinned content reads, rather than by scanning the entire transcript
 /// on every page.
 #[derive(Default)]
-pub(crate) struct LineTimelineFold {
+pub struct LineTimelineFold {
     identity: Option<FileIdentity>,
     last_record: Option<(u64, usize, [u8; 32])>,
     generation: u64,
@@ -1806,7 +1806,7 @@ impl LineTimelineFold {
             match reader.read_until(b'\n', &mut buffer) {
                 Ok(0) => break,
                 Ok(_) if buffer.last() == Some(&b'\n') => {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     timeline_test_support::gate_refresh(session.transcript.as_path());
                     let line = FoldedLine::new(self.consumed, self.next_line_number, buffer);
                     self.next_line_number += 1;
@@ -2302,12 +2302,12 @@ fn raw_bytes_block(sequence: u64, source_type: &str, bytes: &[u8]) -> Value {
         "payload":{"encoding":"base64","bytes":BASE64.encode(bytes),"text":String::from_utf8_lossy(bytes)}})
 }
 
-pub(crate) struct ImportSeat {
-    pub(crate) subject: String,
-    pub(crate) kdl: String,
+pub struct ImportSeat {
+    pub subject: String,
+    pub kdl: String,
 }
 
-pub(crate) fn import_seat(session: &ExternalSession) -> Result<ImportSeat> {
+pub fn import_seat(session: &ExternalSession) -> Result<ImportSeat> {
     let workspace = session
         .cwd
         .clone()
@@ -2420,7 +2420,7 @@ pub(crate) fn import_seat(session: &ExternalSession) -> Result<ImportSeat> {
     })
 }
 
-pub(crate) fn terminate_exact_process(
+pub fn terminate_exact_process(
     driver: ExternalDriver,
     expected: &ExternalProcess,
 ) -> Result<()> {
@@ -5023,19 +5023,19 @@ fn digest(value: &str) -> String {
 }
 
 /// Test support shared with the client API tests.
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) mod test_support {
+#[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
+pub mod test_support {
     use super::*;
 
     /// A stand-in for `st3 driver claude --subject <subject>` with one child, as the process
     /// fallback sees it: a shell whose arguments carry the driver's options.
-    pub(crate) struct FakeClaudeDriver {
-        pub(crate) driver: std::process::Child,
-        pub(crate) child: u32,
+    pub struct FakeClaudeDriver {
+        pub driver: std::process::Child,
+        pub child: u32,
     }
 
     impl FakeClaudeDriver {
-        pub(crate) fn start(subject: &str) -> Self {
+        pub fn start(subject: &str) -> Self {
             let bash = std::env::var_os("PATH")
                 .into_iter()
                 .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
@@ -5069,14 +5069,14 @@ pub(crate) mod test_support {
         }
 
         /// The evidence token the Claude wrapper inside this driver would mint now.
-        pub(crate) fn token(&self) -> String {
+        pub fn token(&self) -> String {
             let now = system_time_ms(SystemTime::now());
             format!("{}-{now}-0", self.driver.id())
         }
 
         /// Write the `~/.claude/sessions/<pid>.json` record Claude keeps for its process,
         /// with the child's real kernel start time unless `start` overrides it.
-        pub(crate) fn record_session(&self, home: &Path, session: &str, start: Option<&str>) {
+        pub fn record_session(&self, home: &Path, session: &str, start: Option<&str>) {
             let sessions = home.join(".claude/sessions");
             fs::create_dir_all(&sessions).unwrap();
             let start = start
@@ -5232,7 +5232,7 @@ mod tests {
     fn omp_parity_fixture_projects_all_views_without_losing_native_payloads() {
         for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {
             let mut items = Vec::new();
-            for (index, line) in include_str!("../fixtures/native-records/omp-parity.jsonl")
+            for (index, line) in include_str!("../../st3-daemon/fixtures/native-records/omp-parity.jsonl")
                 .lines()
                 .enumerate()
             {
@@ -5991,7 +5991,7 @@ mod tests {
 
     // Native OMP call/result pairs captured on 2026-10-02, with tool input/output redacted.
     fn omp_tool_result_fixture() -> Vec<Value> {
-        include_str!("../fixtures/omp-tool-results.jsonl")
+        include_str!("../../st3-daemon/fixtures/omp-tool-results.jsonl")
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
@@ -6020,7 +6020,7 @@ mod tests {
     fn omp_managed_stop_fixture_preserves_the_complete_checkpoint() {
         let mut items = Vec::new();
         let mut checkpoint = Value::Null;
-        for (offset, line) in include_str!("../fixtures/omp-resume/managed-stop-cancelled.jsonl")
+        for (offset, line) in include_str!("../../st3-daemon/fixtures/omp-resume/managed-stop-cancelled.jsonl")
             .lines()
             .enumerate()
         {
@@ -6730,7 +6730,7 @@ mod tests {
     #[test]
     fn omp_native_capture_pairs_authoritative_result_and_preserves_irc_sender() {
         // Captured 2026-10-01; input, output and sender text redacted, native IDs retained.
-        let fixture = include_str!("../fixtures/omp-native-events.jsonl")
+        let fixture = include_str!("../../st3-daemon/fixtures/omp-native-events.jsonl")
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
@@ -6893,7 +6893,7 @@ mod tests {
     #[test]
     fn omp_observed_admin_records_are_typed_events_with_native_timestamps() {
         // Native 2026-10-04 shapes; all payload strings and numeric usage are redacted.
-        for line in include_str!("../fixtures/omp-admin-events.jsonl").lines() {
+        for line in include_str!("../../st3-daemon/fixtures/omp-admin-events.jsonl").lines() {
             let entry: Value = serde_json::from_str(line).unwrap();
             let mut items = Vec::new();
             normalize_native_line(ExternalDriver::Omp, &entry, 16, "fallback", &mut items);
@@ -8200,23 +8200,23 @@ mod tests {
         let fixtures = [
             (
                 ExternalDriver::Codex,
-                include_str!("../fixtures/native-records/codex.jsonl"),
+                include_str!("../../st3-daemon/fixtures/native-records/codex.jsonl"),
             ),
             (
                 ExternalDriver::Claude,
-                include_str!("../fixtures/native-records/claude.jsonl"),
+                include_str!("../../st3-daemon/fixtures/native-records/claude.jsonl"),
             ),
             (
                 ExternalDriver::Omp,
-                include_str!("../fixtures/omp-resume/run4-08-after-retry.jsonl"),
+                include_str!("../../st3-daemon/fixtures/omp-resume/run4-08-after-retry.jsonl"),
             ),
             (
                 ExternalDriver::Pi,
-                include_str!("../fixtures/omp-resume/run4-08-after-retry.jsonl"),
+                include_str!("../../st3-daemon/fixtures/omp-resume/run4-08-after-retry.jsonl"),
             ),
             (
                 ExternalDriver::Omp,
-                include_str!("../fixtures/omp-tool-results.jsonl"),
+                include_str!("../../st3-daemon/fixtures/omp-tool-results.jsonl"),
             ),
         ];
         for (driver, fixture) in fixtures {

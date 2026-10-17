@@ -7,11 +7,11 @@ use serde_json::Value;
 
 use crate::github_http::GithubAuth;
 
-pub(crate) const PERFORMANCE_FAILURES_FIELD: &str = "main_performance_failures";
+pub const PERFORMANCE_FAILURES_FIELD: &str = "main_performance_failures";
 const WORKFLOW_PATH: &str = ".github/workflows/perf.yml";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub(crate) struct PerformanceFailure {
+pub struct PerformanceFailure {
     pub repository: String,
     pub run_id: u64,
     pub run_attempt: u64,
@@ -55,7 +55,7 @@ impl PerformanceFailure {
                 )
     }
 
-    pub(crate) fn from_facts(facts: &Value) -> Option<Self> {
+    pub fn from_facts(facts: &Value) -> Option<Self> {
         let failure: Self = serde_json::from_value(facts.clone()).ok()?;
         failure.valid().then_some(failure)
     }
@@ -96,7 +96,7 @@ impl PerformanceFailure {
     }
 }
 
-pub(super) async fn main_performance_failures(
+pub async fn main_performance_failures(
     client: &reqwest::Client,
     base: &str,
     repository: &str,

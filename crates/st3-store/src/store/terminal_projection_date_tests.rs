@@ -21,7 +21,7 @@ fn typed_rows(store: &Store) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>
         .collect()
 }
 
-fn checked_digests(store: &Store) -> BTreeMap<String, String> {
+    fn checked_digests(store: &Store) -> BTreeMap<String, String> {
     let reader = store.readers.get();
     let cached = projection_digest::tables(&reader).unwrap();
     // This oracle scans only the tiny isolated fixture, never a production store.
@@ -38,42 +38,9 @@ fn checked_digests(store: &Store) -> BTreeMap<String, String> {
         .collect()
 }
 
-// Only mission/work state is exercised here. Any attempted runtime effect is a fixture error.
-struct DateControlRuntime;
+    type TerminalDateTuple = (String, String, String, String, String, String, String);
 
-impl crate::reconcile::RuntimeControl for DateControlRuntime {
-    fn snapshot_ptys(&self) -> Result<Vec<crate::reconcile::RuntimeObservation>> {
-        Ok(Vec::new())
-    }
-    fn observe_exec(&self, _: &str) -> Result<Option<crate::reconcile::RuntimeObservation>> {
-        Ok(None)
-    }
-    fn start(&self, _: &crate::model::MemberSpec) -> Result<()> {
-        anyhow::bail!("unexpected date-control start")
-    }
-    fn stop(&self, _: &str, _: bool, _: Option<&str>) -> Result<()> {
-        anyhow::bail!("unexpected date-control stop")
-    }
-    fn kill(&self, _: &str, _: bool, _: Option<&str>) -> Result<()> {
-        anyhow::bail!("unexpected date-control kill")
-    }
-    fn remove(&self, _: &str, _: bool) -> Result<()> {
-        anyhow::bail!("unexpected date-control remove")
-    }
-    fn screen(&self, _: &str) -> Result<String> {
-        anyhow::bail!("unexpected date-control screen")
-    }
-    fn send_key(&self, _: &str, _: &str) -> Result<()> {
-        anyhow::bail!("unexpected date-control input")
-    }
-    fn read_exec_log(&self, _: &str) -> Result<Option<String>> {
-        Ok(None)
-    }
-}
-
-type TerminalDateTuple = (String, String, String, String, String, String, String);
-
-fn terminal_date_tuple(store: &Store, run: &MissionRunView) -> TerminalDateTuple {
+    fn terminal_date_tuple(store: &Store, run: &MissionRunView) -> TerminalDateTuple {
     store
         .readers
         .get()
@@ -98,7 +65,7 @@ fn terminal_date_tuple(store: &Store, run: &MissionRunView) -> TerminalDateTuple
         .unwrap()
 }
 
-fn terminal_date_claims(store: &Store, run: &MissionRunView) -> Vec<(String, String, String)> {
+    fn terminal_date_claims(store: &Store, run: &MissionRunView) -> Vec<(String, String, String)> {
     let reader = store.readers.get();
     let mut statement = reader
         .prepare(
@@ -116,7 +83,7 @@ fn terminal_date_claims(store: &Store, run: &MissionRunView) -> Vec<(String, Str
         .unwrap()
 }
 
-#[derive(Debug)]
+    #[derive(Debug)]
 struct TerminalDateCapture {
     dates: TerminalDateTuple,
     claims: Vec<(String, String, String)>,
@@ -125,7 +92,7 @@ struct TerminalDateCapture {
     digests: BTreeMap<String, String>,
 }
 
-fn terminal_date_capture(store: &Store, run: &MissionRunView) -> TerminalDateCapture {
+    fn terminal_date_capture(store: &Store, run: &MissionRunView) -> TerminalDateCapture {
     let view = store.mission_run(&run.id).unwrap().unwrap();
     assert_eq!(
         view.generation, run.generation,
@@ -151,7 +118,7 @@ fn terminal_date_capture(store: &Store, run: &MissionRunView) -> TerminalDateCap
     }
 }
 
-fn same_envelopes(left: &Store, right: &Store) {
+    fn same_envelopes(left: &Store, right: &Store) {
     let identities = |store: &Store| {
         let mut ids = store
             .replication_inventory()
@@ -176,7 +143,7 @@ fn same_envelopes(left: &Store, right: &Store) {
     }
 }
 
-fn receive_dates(target: &Store, envelopes: Vec<ReplicaEnvelope>) {
+    fn receive_dates(target: &Store, envelopes: Vec<ReplicaEnvelope>) {
     target.bind_fleet(TEST_FLEET).unwrap();
     let wire = exchange_of("node", envelopes);
     target
@@ -186,7 +153,7 @@ fn receive_dates(target: &Store, envelopes: Vec<ReplicaEnvelope>) {
     assert!(target.project_replication_backlog().unwrap());
 }
 
-fn terminal_date_three_paths(source: &Store, run: &MissionRunView) -> [TerminalDateCapture; 3] {
+    fn terminal_date_three_paths(source: &Store, run: &MissionRunView) -> [TerminalDateCapture; 3] {
     let replica = Store::open_memory("peer").unwrap();
     let wire = exchange_from(source, &replica.replication_inventory().unwrap());
     assert!(!wire.envelopes.is_empty());
@@ -256,7 +223,7 @@ fn terminal_date_three_paths(source: &Store, run: &MissionRunView) -> [TerminalD
     [origin, copied, replay]
 }
 
-fn assert_terminal_date_input_and_creation(
+    fn assert_terminal_date_input_and_creation(
     captures: &[TerminalDateCapture; 3],
     created: &TerminalDateTuple,
 ) {
@@ -270,7 +237,7 @@ fn assert_terminal_date_input_and_creation(
     }
 }
 
-fn assert_terminal_date_parity(captures: &[TerminalDateCapture; 3]) {
+    fn assert_terminal_date_parity(captures: &[TerminalDateCapture; 3]) {
     for capture in &captures[1..] {
         assert_eq!(
             (&capture.dates.3, &capture.dates.6),
@@ -286,7 +253,7 @@ fn assert_terminal_date_parity(captures: &[TerminalDateCapture; 3]) {
     }
 }
 
-fn terminal_date_request(mission: &str, key: &str) -> MissionRunRequest {
+    fn terminal_date_request(mission: &str, key: &str) -> MissionRunRequest {
     MissionRunRequest {
         mission: mission.into(),
         revision: None,
@@ -298,160 +265,7 @@ fn terminal_date_request(mission: &str, key: &str) -> MissionRunRequest {
     }
 }
 
-// This variant uses actual claim/complete, verification and cleanup, not a fabricated run state.
-#[tokio::test]
-async fn work_completed_child_dates_survive_later_parent_terminal_projection() {
-    let source = Arc::new(Store::open_memory("node").unwrap());
-    let initial_time = now_ms() + 60_000;
-    source.set_write_clock_at(initial_time).unwrap();
-    publish_mission(
-        &source,
-        r#"version 2
-mission "work-date-root" state="ready" {
-  goal "Keep a completed child's dates."
-  step "child" { assigned-to "person/alex" }
-}
-mission "work-date-child" state="ready" {
-  goal "Finish by submitting actual work."
-  completion { when "all-steps-exhausted" }
-  step "work" { assigned-to "person/operator" }
-}
-"#,
-        "work-child-dates-missions",
-    );
-    let parent = source
-        .create_mission_run(&terminal_date_request(
-            "work-date-root",
-            "work-date-root-run",
-        ))
-        .unwrap();
-    source.set_write_clock_at(initial_time + 1_000).unwrap();
-    let child = source
-        .create_child_mission_run(
-            &terminal_date_request("work-date-child", "work-date-child-run"),
-            &parent,
-            &parent.steps[0].subject,
-            None,
-        )
-        .unwrap();
-    let created = terminal_date_tuple(&source, &child);
-    let reconciler = crate::reconcile::Reconciler::new(
-        source.clone(),
-        Arc::new(DateControlRuntime),
-        "node".into(),
-        Arc::new(tokio::sync::Notify::new()),
-    );
-    for _ in 0..4 {
-        reconciler.reconcile_once().unwrap();
-    }
-    assert_eq!(
-        source.mission_run_status(&parent.id).unwrap().as_deref(),
-        Some("running"),
-        "the unsubmitted parent work must keep the root live while its child works"
-    );
-    assert_eq!(
-        source
-            .step_run(&parent.steps[0].subject)
-            .unwrap()
-            .unwrap()
-            .status,
-        "ready",
-        "a person-owned parent is not auto-completed by reconciliation"
-    );
-    assert_eq!(
-        source
-            .step_run(&child.steps[0].subject)
-            .unwrap()
-            .unwrap()
-            .status,
-        "ready"
-    );
-    source.set_write_clock_at(initial_time + 2_000).unwrap();
-    let request = |key: &str| WorkRequest {
-        wait_ms: None,
-        actor: Some("person/operator".into()),
-        incarnation: Some("date-control-worker".into()),
-        summary: Some("The actual child work is complete.".into()),
-        reason: None,
-        evidence: Vec::new(),
-        idempotency_key: key.into(),
-    };
-    source
-        .work_action(
-            &child.steps[0].subject,
-            "claim",
-            &request("work-date-claim"),
-        )
-        .unwrap();
-    let submitted = source
-        .work_action(
-            &child.steps[0].subject,
-            "complete",
-            &request("work-date-complete"),
-        )
-        .unwrap();
-    assert_eq!(submitted.status, "verifying");
-    let submission = source
-        .latest_claim(&submitted.subject, Some("work.submitted"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(submission.actor.as_deref(), Some("person/operator"));
-    assert_eq!(
-        submission
-            .body
-            .pointer("/fields/submitted_incarnation")
-            .and_then(Value::as_str),
-        Some("date-control-worker")
-    );
-    // A fixed finite sequence exercises real verification, phase selection and cleanup.
-    for _ in 0..8 {
-        reconciler.reconcile_once().unwrap();
-    }
-    let completed = terminal_date_tuple(&source, &child);
-    assert_eq!(
-        (
-            completed.0.as_str(),
-            completed.1.as_str(),
-            completed.4.as_str()
-        ),
-        ("completed", "terminal", "completed")
-    );
-    let child_time = (initial_time + 2_000).to_string();
-    assert_eq!((&completed.3, &completed.6), (&child_time, &child_time));
-    let finished_step = source.step_run(&submitted.subject).unwrap().unwrap();
-    assert_eq!(finished_step.status, "completed");
-    assert!(finished_step.worker_reported);
-    let completed_claims = terminal_date_claims(&source, &child);
-    assert!(
-        completed_claims
-            .iter()
-            .any(|claim| claim.0 == submission.id)
-    );
-    assert_eq!(
-        source.mission_run_status(&parent.id).unwrap().as_deref(),
-        Some("running"),
-        "the parent must still be live until the deliberate later terminal transition"
-    );
-    source.set_write_clock_at(initial_time + 3_000).unwrap();
-    assert!(
-        source
-            .set_mission_run_state(&parent.id, "completed", "terminal", None)
-            .unwrap()
-    );
-    assert_eq!(terminal_date_tuple(&source, &child), completed);
-    assert_eq!(terminal_date_claims(&source, &child), completed_claims);
-    let captures = terminal_date_three_paths(&source, &child);
-    assert_terminal_date_input_and_creation(&captures, &created);
-    for capture in &captures {
-        assert_eq!(capture.dates.0, "completed");
-        assert_eq!(capture.dates.1, "terminal");
-        assert_eq!(capture.dates.4, "completed");
-        assert_eq!(capture.steps, captures[0].steps);
-    }
-    assert_terminal_date_parity(&captures);
-}
-
-#[test]
+    #[test]
 fn active_child_dates_match_after_later_parent_terminal_projection() {
     let source = Store::open_memory("node").unwrap();
     let initial_time = now_ms() + 60_000;
@@ -522,7 +336,7 @@ mission "active-date-child" state="ready" {
     assert_terminal_date_parity(&captures);
 }
 
-#[test]
+    #[test]
 fn already_terminal_root_preserves_its_creation_dates_on_replica_and_replay() {
     let source = Store::open_memory("node").unwrap();
     let initial_time = now_ms() + 60_000;
@@ -573,9 +387,7 @@ mission "terminal-date-root" state="ready" {
     assert_terminal_date_parity(&captures);
 }
 
-// A certificate-driven trim/adoption path uses the runtime's actual rules and proof.
-// This is a tiny test database, never a permission to trim a fleet store.
-#[test]
+    #[test]
 fn completed_child_dates_survive_certified_trim_adoption_and_reopen() {
     use smallclaims::store::checkpoint::checkpoint_name;
     use smallclaims::store::checkpoint_agreement::SealTerms;

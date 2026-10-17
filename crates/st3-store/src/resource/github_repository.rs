@@ -26,7 +26,7 @@ use super::{
 };
 
 /// The data types a repository observer can emit.
-pub(crate) const DATA_TYPES: [&str; 5] = [
+pub const DATA_TYPES: [&str; 5] = [
     "pull_requests",
     "issues",
     "comments",
@@ -43,7 +43,7 @@ const SETTLED_PULL_REQUEST_CHECK: Duration = Duration::from_secs(15 * 60);
 const PULL_REQUEST_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// The most comments and reviews each item keeps in `recent_comments`, newest last.
-pub(crate) const RECENT_COMMENTS: usize = 20;
+pub const RECENT_COMMENTS: usize = 20;
 
 /// The most pages of a hundred items one REST listing reads in one poll.
 const LISTING_PAGES: usize = 10;
@@ -66,13 +66,13 @@ const WATERMARK_SKEW: Duration = Duration::from_secs(5 * 60);
 /// returned, so an unchanged listing returns nothing to record. A cursor from an older build
 /// names neither, and its first poll reads every open item.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct RepositoryCursor {
+pub struct RepositoryCursor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) items_since: Option<String>,
+    pub items_since: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) comments_since: Option<String>,
+    pub comments_since: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) seen: BTreeMap<String, String>,
+    pub seen: BTreeMap<String, String>,
     /// Open identities, and closed items awaiting their final detail read. Subject numbers
     /// stay at their original locations even when GitHub's node now lives elsewhere.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -173,7 +173,7 @@ fn body_digest(body: &str) -> String {
 /// The GitHub logins a body mentions, in order and without repeats. A mention is `@` followed by
 /// a login, after the start of the text or a character that cannot be part of an address or a
 /// word. A team (`@org/team`) is not a person.
-pub(crate) fn mentioned_logins(body: &str) -> Vec<String> {
+pub fn mentioned_logins(body: &str) -> Vec<String> {
     let characters = body.char_indices().collect::<Vec<_>>();
     let mut logins = Vec::new();
     for (position, (index, character)) in characters.iter().enumerate() {
@@ -242,7 +242,7 @@ fn recent_comment(
 }
 
 /// What tells one comment or review from another: its kind and its GitHub ID.
-pub(crate) fn recent_comment_key(entry: &Value) -> (String, u64) {
+pub fn recent_comment_key(entry: &Value) -> (String, u64) {
     (
         entry
             .get("kind")
@@ -256,7 +256,7 @@ pub(crate) fn recent_comment_key(entry: &Value) -> (String, u64) {
 /// The comments and reviews `known` and `seen` name together, once each, oldest first. A seen
 /// entry replaces a known one with the same key. `keep` cuts the oldest, so an unchanged item
 /// always has the same list.
-pub(crate) fn merge_recent_comments<'a>(
+pub fn merge_recent_comments<'a>(
     known: impl IntoIterator<Item = &'a Value>,
     seen: impl IntoIterator<Item = &'a Value>,
     keep: Option<usize>,
@@ -1148,7 +1148,7 @@ fn newest_updated_at<'a>(values: impl IntoIterator<Item = &'a Value>) -> Option<
         .map(str::to_owned)
 }
 
-pub(super) async fn observe_at(
+pub async fn observe_at(
     request: ObservationRequest,
     api_base: &str,
     token: Option<&GithubAuth>,
