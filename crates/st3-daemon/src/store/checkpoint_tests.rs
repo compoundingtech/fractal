@@ -3267,7 +3267,7 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
     let mut new_to_old = BTreeMap::new();
     for claim in &claims {
         // Rules version 16 added the harness question rule.
-        if super::checkpoint_rules::question_kind(&claim.kind) {
+        if claim.kind == st3_schema::harness_questions::OBSERVED {
             let slot = vec![claim.subject.clone(), claim.kind.clone()];
             assert_eq!(slot_of(claim).map(|(rule, slot)| (name(rule), slot)), Some(("question", slot)));
             continue;
