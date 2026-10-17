@@ -21,7 +21,7 @@ const RECOVERY: &str = "claude-channel-recovery";
 impl<R: RuntimeControl> Reconciler<R> {
     /// The driver rechecks attachment every second. After its detection window, allow another
     /// backoff window for a late MCP initialization before replacing the exact blocked runtime.
-    pub(super) fn reconcile_claude_channel_recovery(
+    pub fn reconcile_claude_channel_recovery(
         &self,
         subject: &DesiredSubject,
         member: &MemberSpec,

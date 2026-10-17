@@ -6,13 +6,13 @@ use std::sync::Condvar;
 
 // One held launch still leaves a slot for an unrelated seat. A conservative cap avoids
 // the simultaneous harness startup oversubscription documented in #2465.
-pub(super) const MAX_START_JOBS: usize = 2;
-pub(super) const OPERATION_TAG: &str = "st3.start-operation";
-pub(super) const OPERATION_ENV: &str = "ST3_START_OPERATION";
+pub const MAX_START_JOBS: usize = 2;
+pub const OPERATION_TAG: &str = "st3.start-operation";
+pub const OPERATION_ENV: &str = "ST3_START_OPERATION";
 
-pub(super) struct StartJobs {
+pub struct StartJobs {
     owner: String,
-    pub(super) live: Arc<(Mutex<HashSet<String>>, Condvar)>,
+    pub live: Arc<(Mutex<HashSet<String>>, Condvar)>,
 }
 impl Default for StartJobs {
     fn default() -> Self {
@@ -24,7 +24,7 @@ impl Default for StartJobs {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) struct PreparedStart {
+pub struct PreparedStart {
     pub subject: DesiredSubject,
     pub member: MemberSpec,
     pub launch_member: MemberSpec,
@@ -67,13 +67,13 @@ impl PreparedStart {
     }
 }
 
-pub(super) enum StartCompletion {
+pub enum StartCompletion {
     Superseded,
     Applied(Option<String>),
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
-    pub(super) fn dispatch_start(&self, mut prepared: PreparedStart) -> Result<bool> {
+    pub fn dispatch_start(&self, mut prepared: PreparedStart) -> Result<bool> {
         let id = uuid::Uuid::now_v7().to_string();
         prepared
             .launch_member
@@ -125,14 +125,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(true)
     }
 
-    pub(super) fn start_changed(&self, subject: &str) {
+    pub fn start_changed(&self, subject: &str) {
         self.incremental
             .touch(&format!("local-runtime-start:{subject}"));
         self.incremental.touch(subject);
         self.signal_changed();
     }
 
-    pub(super) fn start_queued_job(&self, operation: &RuntimeStartOperation) -> Result<()> {
+    pub fn start_queued_job(&self, operation: &RuntimeStartOperation) -> Result<()> {
         if operation.dispatched || operation.finished || operation.revoked_by.is_some() {
             return Ok(());
         }
@@ -245,7 +245,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    pub(super) fn revoke_start(&self, subject: &str) -> Result<()> {
+    pub fn revoke_start(&self, subject: &str) -> Result<()> {
         let Some(operation) = self.store.runtime_start_for(subject)? else {
             return Ok(());
         };
@@ -282,7 +282,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    pub(super) fn reconcile_start_jobs(&self) -> Result<()> {
+    pub fn reconcile_start_jobs(&self) -> Result<()> {
         for operation in self.store.pending_runtime_starts()? {
             let subject = operation.subject.clone();
             if reconcile_decision_admitted(&subject) {

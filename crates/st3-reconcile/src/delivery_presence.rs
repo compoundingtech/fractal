@@ -77,12 +77,12 @@ fn presence() -> &'static Presence {
 }
 
 /// Start the startup grace window now. The daemon calls this once when it serves its API.
-pub(crate) fn start() {
+pub fn start() {
     let _ = presence();
 }
 
 /// Record one mailbox poll's delivery report for `recipient`.
-pub(crate) fn record(recipient: &str, report: &str) {
+pub fn record(recipient: &str, report: &str) {
     let Ok(report) = serde_json::from_str::<Report>(report) else {
         return;
     };
@@ -101,7 +101,7 @@ pub(crate) fn record(recipient: &str, report: &str) {
 
 /// Title updates cannot establish delivery readiness. They can report the outer driver's
 /// attachment check, including a missing plugin for which no delivery process exists.
-pub(crate) fn record_fenced(fence: &crate::mailbox::Fence, raw: &str) -> bool {
+pub fn record_fenced(fence: &crate::mailbox::Fence, raw: &str) -> bool {
     let Ok(report) = serde_json::from_str::<Report>(raw) else {
         return false;
     };
@@ -131,7 +131,7 @@ pub(crate) fn record_fenced(fence: &crate::mailbox::Fence, raw: &str) -> bool {
     false
 }
 
-pub(crate) fn attachment(recipient: &str, incarnation: &str) -> Option<crate::mailbox::Fence> {
+pub fn attachment(recipient: &str, incarnation: &str) -> Option<crate::mailbox::Fence> {
     let beats = presence().beats.lock().ok()?;
     let beat = beats.get(recipient)?;
     let fence = beat.fence.as_ref()?;
@@ -146,7 +146,7 @@ pub(crate) fn attachment(recipient: &str, incarnation: &str) -> Option<crate::ma
 
 /// A metadata-free poll from a Unix peer proven to be this seat's native delivery process.
 /// This proves liveness, not that an old executable matches the installed binary.
-pub(crate) fn record_legacy(recipient: &str, transport: &str, pid: u32) {
+pub fn record_legacy(recipient: &str, transport: &str, pid: u32) {
     // A provider launched by an older driver has no title-side attachment monitor.
     if let Ok(mut monitors) = presence().monitors.lock() {
         monitors.remove(recipient);
@@ -170,19 +170,19 @@ pub(crate) fn record_legacy(recipient: &str, transport: &str, pid: u32) {
 
 /// How one seat's delivery path looks from this daemon.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Assessment {
-    pub(crate) state: &'static str,
-    pub(crate) reason: Option<String>,
-    pub(crate) polled_seconds_ago: Option<u64>,
-    pub(crate) transport: Option<String>,
+pub struct Assessment {
+    pub state: &'static str,
+    pub reason: Option<String>,
+    pub polled_seconds_ago: Option<u64>,
+    pub transport: Option<String>,
 }
 
 impl Assessment {
-    pub(crate) fn stale(&self) -> bool {
+    pub fn stale(&self) -> bool {
         self.state == "stale"
     }
 
-    pub(crate) fn to_value(&self) -> Value {
+    pub fn to_value(&self) -> Value {
         json!({
             "state": self.state,
             "reason": self.reason,
@@ -193,11 +193,11 @@ impl Assessment {
 }
 
 /// Assess the delivery path of a local native seat, independently of harness readiness.
-pub(crate) fn assess(recipient: &str, driver: &str) -> Assessment {
+pub fn assess(recipient: &str, driver: &str) -> Assessment {
     assess_selected(recipient, driver, None, false)
 }
 
-pub(crate) fn assess_current(recipient: &str, driver: &str, incarnation: Option<&str>) -> Assessment {
+pub fn assess_current(recipient: &str, driver: &str, incarnation: Option<&str>) -> Assessment {
     assess_selected(recipient, driver, incarnation, true)
 }
 
@@ -248,7 +248,7 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
 }
 
 /// A message view may include a local poll when one exists; absent remote evidence stays absent.
-pub(crate) fn known(recipient: &str) -> Option<Assessment> {
+pub fn known(recipient: &str) -> Option<Assessment> {
     let transport = presence()
         .monitors
         .lock()
@@ -393,7 +393,7 @@ fn assess_beat(
 }
 
 /// Recheck the initialized live delivery owner before replacing an unattached seat.
-pub(crate) fn claude_channel_attached(store: &crate::store::Store, subject: &str, incarnation: &str) -> bool {
+pub fn claude_channel_attached(store: &crate::store::Store, subject: &str, incarnation: &str) -> bool {
     attachment(subject, incarnation)
         .is_some_and(|fence| store.check_mailbox(&fence).is_ok())
 }

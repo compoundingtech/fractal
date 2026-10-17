@@ -32,7 +32,7 @@ pub use crate::config::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudg
 pub const IDLE_NUDGE_MIN_INTERVAL_MS: u128 = 2 * 60 * 60_000;
 
 /// The steps a seat holds: claimed by it and not yet submitted.
-pub(super) fn held_steps<'a>(agent: &str, work: &'a [StepRunView]) -> Vec<&'a StepRunView> {
+pub fn held_steps<'a>(agent: &str, work: &'a [StepRunView]) -> Vec<&'a StepRunView> {
     work.iter()
         .filter(|step| {
             step.claimant.as_deref() == Some(agent)
@@ -42,13 +42,13 @@ pub(super) fn held_steps<'a>(agent: &str, work: &'a [StepRunView]) -> Vec<&'a St
 }
 
 /// When the harness last finished a turn, if it is idle now.
-pub(super) fn idle_since(harness: &CurrentHarnessView) -> Option<u128> {
+pub fn idle_since(harness: &CurrentHarnessView) -> Option<u128> {
     (harness.is_ready() && matches!(harness.state.as_str(), "idle" | "ready"))
         .then_some(harness.since_unix_ms)
 }
 
 /// Whether the driver reports a clean boundary: no turn, ask, unsent input or background job.
-pub(super) fn harness_quiet(report: Option<&Value>) -> bool {
+pub fn harness_quiet(report: Option<&Value>) -> bool {
     report.is_some_and(|fields| {
         fields.get("quiescent").and_then(Value::as_bool) == Some(true)
             && fields
@@ -60,7 +60,7 @@ pub(super) fn harness_quiet(report: Option<&Value>) -> bool {
 
 /// One held step's back-off, from its last nudge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct StepBackoff {
+pub struct StepBackoff {
     /// When the step may get a quiet nudge; `None` when it was nudged in this idle period.
     pub quiet_due: Option<u128>,
     /// The step's last nudge, which an action must come after.
@@ -70,7 +70,7 @@ pub(super) struct StepBackoff {
 /// A step held through an idle period that began at `idle_since` may get a quiet nudge after the
 /// idle threshold and two hours after its last nudge; after a nudge in this idle period, only a
 /// new turn makes it eligible again.
-pub(super) fn step_backoff(
+pub fn step_backoff(
     idle_since: u128,
     after_ms: u64,
     last_nudge: Option<u128>,
@@ -89,7 +89,7 @@ pub(super) fn step_backoff(
 
 /// Whether an action may nudge a step: the step was not nudged in this idle period or since the
 /// action, and the action has settled.
-pub(super) fn action_nudges(backoff: &StepBackoff, action: &WaitAction, now: u128) -> bool {
+pub fn action_nudges(backoff: &StepBackoff, action: &WaitAction, now: u128) -> bool {
     backoff.quiet_due.is_some()
         && backoff
             .last_nudge
@@ -121,7 +121,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Nudge `agent` if it is idle-holding and due, or note when it will be.
-    pub(super) fn nudge_idle_holder(
+    pub fn nudge_idle_holder(
         &self,
         agent: &str,
         work: &[StepRunView],

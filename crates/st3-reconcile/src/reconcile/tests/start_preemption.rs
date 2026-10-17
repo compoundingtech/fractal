@@ -1,8 +1,9 @@
 //! A blocked backend start must leave the real reconcile loop free to stop it.
 use super::*;
-use tokio::sync::mpsc;
 
-struct BarrierRuntime {
+    use tokio::sync::mpsc;
+
+    struct BarrierRuntime {
     inner: FakeRuntime,
     store: Arc<Store>,
     entered: mpsc::UnboundedSender<()>,
@@ -18,7 +19,7 @@ struct BarrierRuntime {
     ending_unverified: AtomicBool,
 }
 
-impl RuntimeControl for BarrierRuntime {
+    impl RuntimeControl for BarrierRuntime {
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
         self.inner.snapshot_ptys()
     }
@@ -173,7 +174,7 @@ impl RuntimeControl for BarrierRuntime {
     }
 }
 
-impl BarrierRuntime {
+    impl BarrierRuntime {
     fn publish(&self, member: &MemberSpec) {
         self.inner.ptys.lock().unwrap().push(RuntimeObservation {
             runtime_id: member.runtime_id.clone(),
@@ -185,8 +186,9 @@ impl BarrierRuntime {
     }
 }
 
-struct ReleaseOnDrop(std::sync::mpsc::Sender<()>);
-impl Drop for ReleaseOnDrop {
+    struct ReleaseOnDrop(std::sync::mpsc::Sender<()>);
+
+    impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
         for _ in 0..8 {
             let _ = self.0.send(());
@@ -194,7 +196,7 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-async fn workers_done<R: RuntimeControl>(reconciler: &Arc<Reconciler<R>>) {
+    async fn workers_done<R: RuntimeControl>(reconciler: &Arc<Reconciler<R>>) {
     let live = reconciler.start_jobs.live.clone();
     tokio::time::timeout(
         Duration::from_secs(30),
@@ -210,9 +212,7 @@ async fn workers_done<R: RuntimeControl>(reconciler: &Arc<Reconciler<R>>) {
     .unwrap();
 }
 
-/// `sleep` as a program path. The Nix build sandbox has no `/bin/sleep`, so look it up on PATH
-/// and fall back to the usual location.
-fn sleep_program() -> String {
+    fn sleep_program() -> String {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|directory| directory.join("sleep"))
         .find(|candidate| candidate.is_file())
@@ -220,7 +220,7 @@ fn sleep_program() -> String {
         .unwrap_or_else(|| "/bin/sleep".into())
 }
 
-fn fixture(
+    fn fixture(
     publish_early: bool,
     honor_guard: bool,
 ) -> (
@@ -271,7 +271,7 @@ fn fixture(
     )
 }
 
-fn launch(reconciler: &Reconciler<BarrierRuntime>, subject: &str) -> bool {
+    fn launch(reconciler: &Reconciler<BarrierRuntime>, subject: &str) -> bool {
     let desired = reconciler
         .store
         .desired_subjects_named(&[subject.to_owned()])
@@ -287,7 +287,7 @@ fn launch(reconciler: &Reconciler<BarrierRuntime>, subject: &str) -> bool {
         .unwrap()
 }
 
-#[test]
+    #[test]
 fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.db");
@@ -375,7 +375,7 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
     assert!(runtime.starts.lock().unwrap().is_empty());
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() {
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(false, true);
     apply_source(
@@ -560,7 +560,7 @@ async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() 
     assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn operator_stop_preempts_a_blocked_start_in_the_real_loop() {
     let directory = tempfile::tempdir().unwrap();
     // Use a file store, like the daemon, so publishing beside a pass needs no retries.
@@ -666,7 +666,7 @@ agent "example/worker" { workspace "/tmp"; command "true" }
     );
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn unpublished_start_is_not_a_settled_stop_and_revoked_completion_is_suppressed() {
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(false, true);
     apply_source(
@@ -716,7 +716,7 @@ async fn unpublished_start_is_not_a_settled_stop_and_revoked_completion_is_suppr
     );
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn revoked_jobs_hold_capacity_and_completion_admits_a_queued_seat() {
     let (_directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
     apply_source(
@@ -780,7 +780,7 @@ async fn revoked_jobs_hold_capacity_and_completion_admits_a_queued_seat() {
     assert_eq!(store.runtime_start_counts().unwrap(), (0, 0));
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn a_late_revoked_runtime_is_stopped_by_provenance_and_a_replacement_survives() {
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(false, false);
     apply_source(
@@ -815,7 +815,7 @@ async fn a_late_revoked_runtime_is_stopped_by_provenance_and_a_replacement_survi
     );
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn an_owner_restart_never_replays_a_pending_launch_and_controls_bypass_its_lock() {
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, true);
     apply_source(
@@ -862,7 +862,7 @@ async fn an_owner_restart_never_replays_a_pending_launch_and_controls_bypass_its
     assert!(runtime.inner.starts.lock().unwrap().is_empty());
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn account_limit_enforcement_physically_stops_a_blocked_start() {
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, true);
     apply_source(
@@ -915,7 +915,7 @@ async fn account_limit_enforcement_physically_stops_a_blocked_start() {
     assert!(runtime.inner.starts.lock().unwrap().is_empty());
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn operator_stop_reaches_its_incarnation_fenced_kill_while_start_is_blocked() {
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, true);
     apply_source(
@@ -944,7 +944,7 @@ async fn operator_stop_reaches_its_incarnation_fenced_kill_while_start_is_blocke
     assert!(runtime.inner.starts.lock().unwrap().is_empty());
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn asynchronous_gate_start_failures_are_broken_checks_without_relaunch() {
     let (_directory, _store, runtime, reconciler, _release, _entered) = fixture(false, true);
     runtime.reject_gates.store(true, Ordering::Release);
@@ -1001,7 +1001,7 @@ async fn asynchronous_gate_start_failures_are_broken_checks_without_relaunch() {
     assert_eq!(runtime.inner.starts.lock().unwrap().len(), 2);
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn accepted_but_unverified_starts_retain_admission_until_exact_verification_or_retirement() {
     for revoke in [false, true] {
         let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, false);
@@ -1101,7 +1101,7 @@ async fn accepted_but_unverified_starts_retain_admission_until_exact_verificatio
     }
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn ended_pty_without_complete_retirement_proof_keeps_the_seat_busy() {
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, false);
     apply_source(
@@ -1141,7 +1141,7 @@ async fn ended_pty_without_complete_retirement_proof_keeps_the_seat_busy() {
     );
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn missing_or_repaired_original_request_prevents_real_native_start() {
     if crate::test_support::supervise_test() {
         return;
@@ -1260,7 +1260,7 @@ async fn missing_or_repaired_original_request_prevents_real_native_start() {
     }
 }
 
-#[test]
+    #[test]
 fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_seat() {
     if crate::test_support::supervise_test() {
         return;
@@ -1407,7 +1407,7 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
     }
 }
 
-#[test]
+    #[test]
 fn native_rollout_guard_rejection_proves_no_producer_was_created() {
     if crate::test_support::supervise_test() {
         return;
@@ -1471,7 +1471,7 @@ fn native_rollout_guard_rejection_proves_no_producer_was_created() {
     );
 }
 
-#[test]
+    #[test]
 fn native_pty_publication_guard_after_a_launcher_does_not_prove_producer_closure() {
     if crate::test_support::supervise_test() {
         return;
@@ -1528,7 +1528,7 @@ fn native_pty_publication_guard_after_a_launcher_does_not_prove_producer_closure
     );
 }
 
-#[test]
+    #[test]
 fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
     if crate::test_support::supervise_test() {
         return;
@@ -1600,20 +1600,19 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
     }
 }
 
-/// A real CLI producer returns failure while its detached child is held before
-/// publication. The FIFO and socket order effects; no observation polling is needed.
-struct NativeLatePty {
+    struct NativeLatePty {
     root: tempfile::TempDir,
     store: Arc<Store>,
     runtime: Arc<NativeRuntime>,
     reconciler: Reconciler<NativeRuntime>,
     desired: DesiredSubject,
+    #[allow(dead_code)]
     real_pty: std::path::PathBuf,
     gate: std::fs::File,
     ready: tokio::net::UnixListener,
 }
 
-impl NativeLatePty {
+    impl NativeLatePty {
     fn new() -> Self {
         use std::os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _};
         st_runtime::initialize_isolation(&BTreeMap::new());
@@ -1759,64 +1758,7 @@ exit 1
     }
 }
 
-#[tokio::test]
-async fn native_returned_pty_error_retains_unknown_and_visible_open_count() {
-    if crate::test_support::supervise_test() {
-        return;
-    }
-    use tower::ServiceExt as _;
-    let fixture = NativeLatePty::new();
-    assert!(fixture.dispatch().unwrap());
-    let operation = fixture.assert_open();
-    assert!(fixture.runtime.snapshot_ptys().unwrap().is_empty());
-    let state = fixture.root.path().join("state");
-    let app = crate::api::router(crate::api::AppState {
-        owning_person: None,
-        store: fixture.store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: tokio::sync::watch::channel(0).0,
-        node: "node".into(),
-        pty_root: state.join("pty"),
-        state_dir: state,
-        pty_binary: fixture.real_pty.clone(),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: crate::model::PlannerSpec::default(),
-    });
-    let response = app
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/v1/client/agents/agent/example/late")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let card: Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(card["value"]["runtime_start"]["operation_id"], operation.id);
-    assert_eq!(card["value"]["runtime_start"]["unresolved_jobs"], 1);
-    assert_eq!(card["value"]["runtime_start"]["revoked_unresolved_jobs"], 1);
-    assert_eq!(card["value"]["runtime_start"]["worker_running"], false);
-    assert_eq!(card["value"]["runtime_start"]["cleanup_verified"], false);
-    let failed = fixture
-        .store
-        .observations_for(&fixture.desired.subject, "runtime.action.failed")
-        .unwrap()
-        .pop()
-        .unwrap();
-    assert!(failed.body["fields"]["operation_status"].is_null());
-    assert_eq!(failed.body["fields"]["operation"], operation.id);
-}
-
-#[tokio::test]
+    #[tokio::test]
 async fn native_late_pty_publication_is_retired_by_exact_operation_and_incarnation() {
     if crate::test_support::supervise_test() {
         return;
@@ -1909,7 +1851,7 @@ async fn native_late_pty_publication_is_retired_by_exact_operation_and_incarnati
     );
 }
 
-#[tokio::test]
+    #[tokio::test]
 async fn unreadable_start_provenance_does_not_block_an_authorized_fenced_stop() {
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, false);
     apply_source(

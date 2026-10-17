@@ -12,11 +12,11 @@ use super::*;
 use serde_json::json;
 
 /// The scope of the fault a run records when its reporter cannot be told.
-pub(super) const REPORT_FAULT_SCOPE: &str = "report-to";
+pub const REPORT_FAULT_SCOPE: &str = "report-to";
 
 /// Who a run reports to and which events.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RunReport {
+pub struct RunReport {
     pub to: String,
     pub stalled_after_ms: u64,
     pub completed: bool,
@@ -45,7 +45,7 @@ impl RunEvent {
 
 /// The last sign of life in a run: its own last change, any step's last change or progress, and
 /// the end of any step's lease.
-pub(crate) fn run_activity(run: &MissionRunView) -> u128 {
+pub fn run_activity(run: &MissionRunView) -> u128 {
     run.steps
         .iter()
         .flat_map(|step| {
@@ -95,7 +95,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Who a run reports to: its latest `st missions report-to`, else what it was created with.
-    pub(super) fn run_report(&self, run: &str) -> Result<Option<RunReport>> {
+    pub fn run_report(&self, run: &str) -> Result<Option<RunReport>> {
         let claim = match self
             .store
             .latest_claim(run, Some(crate::store::RUN_REPORT_KIND))?
@@ -121,7 +121,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Tell the reporter what this run's phase calls for, and return when a run that has not
     /// stalled yet will have: the time to evaluate it again.
-    pub(super) fn report_run(
+    pub fn report_run(
         &self,
         run: &MissionRunView,
         report: &RunReport,

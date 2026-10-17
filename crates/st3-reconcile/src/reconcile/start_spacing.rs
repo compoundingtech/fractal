@@ -5,13 +5,13 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-pub(super) struct StartSpacing {
+pub struct StartSpacing {
     state: Mutex<State>,
     changed: Notify,
 }
 
 /// Dropping a run-loop attempt while spawn_blocking is queued cancels its admission.
-pub(super) struct QueuedAdmission(pub(super) Arc<AtomicBool>);
+pub struct QueuedAdmission(pub Arc<AtomicBool>);
 impl Default for QueuedAdmission {
     fn default() -> Self {
         Self(Arc::new(AtomicBool::new(true)))
@@ -50,7 +50,7 @@ impl State {
 }
 
 impl StartSpacing {
-    pub(super) fn set(&self, per_minute: u32) -> anyhow::Result<()> {
+    pub fn set(&self, per_minute: u32) -> anyhow::Result<()> {
         anyhow::ensure!(
             (1..=600).contains(&per_minute),
             "reconcile.max_passes_per_minute must be between 1 and 600"
@@ -65,20 +65,20 @@ impl StartSpacing {
 
     /// Called at blocking-work entry, before the pass clock or any database loan. A config
     /// reduction while spawn_blocking was queued must defer admission rather than begin early.
-    #[cfg(test)]
-    pub(super) fn last_start(&self) -> Option<Instant> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn last_start(&self) -> Option<Instant> {
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .last
     }
 
-    #[cfg(test)]
-    fn try_start(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn try_start(&self) -> bool {
         self.try_start_if(&AtomicBool::new(true))
     }
 
-    pub(super) fn try_start_if(&self, active: &AtomicBool) -> bool {
+    pub fn try_start_if(&self, active: &AtomicBool) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if !active.load(Ordering::Acquire) {
             return false;
@@ -91,7 +91,7 @@ impl StartSpacing {
         true
     }
 
-    pub(super) async fn wait(&self) {
+    pub async fn wait(&self) {
         loop {
             let changed = self.changed.notified();
             tokio::pin!(changed);

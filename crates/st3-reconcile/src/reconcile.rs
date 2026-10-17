@@ -1,5 +1,5 @@
 #[path = "reconcile_rollout.rs"]
-mod rollouts;
+pub mod rollouts;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::panic::AssertUnwindSafe;
@@ -33,13 +33,13 @@ use crate::resource::{
 };
 use crate::store::Store;
 
-mod channel_recovery;
-mod idle_nudge;
-mod placement;
-mod run_report;
-mod start_spacing;
-mod start_jobs;
-mod waits;
+pub mod channel_recovery;
+pub mod idle_nudge;
+pub mod placement;
+pub mod run_report;
+pub mod start_spacing;
+pub mod start_jobs;
+pub mod waits;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 
@@ -84,8 +84,8 @@ const GATE_POLL_PASS_INTERVAL: Duration = Duration::from_secs(60);
 const GATE_RECHECK_BASE_MS: u128 = 60_000;
 const GATE_RECHECK_MAX_MS: u128 = 15 * 60_000;
 /// How much of a gate check's output its result and attention item keep, from the end.
-pub(crate) const GATE_OUTPUT_LINES: usize = 40;
-pub(crate) const GATE_OUTPUT_BYTES: usize = 4_000;
+pub const GATE_OUTPUT_LINES: usize = 40;
+pub const GATE_OUTPUT_BYTES: usize = 4_000;
 const WORK_WAKE_MAX_ATTEMPTS: u32 = 3;
 // A new harness can spend longer than the retry sequence reading its boot
 // contract before it claims work. Keep the quick delivery retries, but do not
@@ -177,7 +177,7 @@ fn schedule_admission_ready(
             .any(|peer| peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static DECLARATION_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -279,8 +279,8 @@ fn calendar_occurrence(
 }
 
 /// Keep the existing Claude regression cases exercising the shared driver classifier.
-#[cfg(test)]
-fn claude_login_expired(screen: &str) -> Option<&str> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn claude_login_expired(screen: &str) -> Option<&str> {
     let matched = st_drivers::blocking_screen::detect("claude", screen)?;
     screen
         .lines()
@@ -465,7 +465,7 @@ impl NativeRuntime {
 /// The environment a started process gets: `declared` over the account's captured login-shell
 /// environment, with the st3 executable's directory and then the command recorder first on PATH.
 /// Members and `st missions check` both launch with it.
-pub(crate) fn member_environment(
+pub fn member_environment(
     declared: &BTreeMap<String, String>,
     executable: &Path,
     recorder: Option<&Path>,
@@ -884,8 +884,8 @@ pub trait FaultInjection: Send + Sync + 'static {
     fn fault(&self, scope: &str, subject: &str) -> Option<String>;
 }
 
-pub(crate) const FIRST_READINESS_FAULT_AFTER_MS: u128 = 120_000;
-pub(crate) use crate::model::FIRST_READINESS_FAULT_SCOPE;
+pub const FIRST_READINESS_FAULT_AFTER_MS: u128 = 120_000;
+pub use crate::model::FIRST_READINESS_FAULT_SCOPE;
 
 fn first_readiness_pending(run: &MissionRunView) -> bool {
     run.phase == "normal"
@@ -906,10 +906,10 @@ fn first_readiness_since(run: &MissionRunView) -> u128 {
 }
 
 type MemberWake = (DesiredSubject, String, MemberSpec);
-#[cfg(test)]
-type WorkWakeObserveHook = Box<dyn FnOnce(&crate::incremental::Incremental, bool) + Send>;
-#[cfg(test)]
-type BackgroundEntryHook =
+#[cfg(any(test, feature = "test-support"))]
+pub type WorkWakeObserveHook = Box<dyn FnOnce(&crate::incremental::Incremental, bool) + Send>;
+#[cfg(any(test, feature = "test-support"))]
+pub type BackgroundEntryHook =
     Arc<dyn Fn(bool, Option<tokio::time::Instant>, smallclaims::sqlite::work::SqliteWork) + Send + Sync>;
 
 /// Local observation retries never turn unreadable process state into a completed stop.
@@ -975,7 +975,7 @@ impl RestartWake {
 }
 
 pub struct Reconciler<R = NativeRuntime> {
-    store: Arc<Store>,
+    pub store: Arc<Store>,
     runtime: Arc<R>,
     host: String,
     endpoint: String,
@@ -990,14 +990,14 @@ pub struct Reconciler<R = NativeRuntime> {
     start_spacing: start_spacing::StartSpacing,
     start_jobs: start_jobs::StartJobs,
     #[cfg(any(test, feature = "test-support"))]
-    wait_for_test_starts: AtomicBool,
+    pub wait_for_test_starts: AtomicBool,
     /// When an idle seat that holds work is nudged; see `idle_nudge`.
     idle_nudge: Mutex<IdleNudgeSettings>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     background_dispatch_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     background_entry_hook: Option<BackgroundEntryHook>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     background_wake_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     armed_schedules: Arc<Mutex<std::collections::HashSet<String>>>,
     schedule_peers: Vec<String>,
@@ -1010,7 +1010,7 @@ pub struct Reconciler<R = NativeRuntime> {
     /// The gate runners the gate poll watches.
     gate_poll_runtimes: Arc<Mutex<BTreeSet<String>>>,
     /// What each item's last evaluation read, so a pass can tell what a change affects.
-    incremental: crate::incremental::Incremental,
+    pub incremental: crate::incremental::Incremental,
     /// Fail a pass that makes a correction an incremental pass would have missed (tests).
     strict_incremental: bool,
     /// Skip items nothing changed for, between periodic full passes. Off in test reconcilers,
@@ -1045,12 +1045,12 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Found launch evidence is immutable for one origin and incarnation. Missing evidence
     /// is checked again on a subject change or the existing full-pass safety interval.
     launched_members: Mutex<HashMap<(String, String, String), LaunchEvidence>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     launch_evidence_reads: std::sync::atomic::AtomicUsize,
     retired_predecessor_generations: Mutex<BTreeSet<String>>,
     /// The person whose published launch geometry terminal seats start at.
     person: Option<String>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     mission_declaration_parses: std::sync::atomic::AtomicUsize,
     file_watchers: Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
     file_watchers_used: Arc<Mutex<HashSet<String>>>,
@@ -1098,10 +1098,10 @@ pub struct Reconciler<R = NativeRuntime> {
     cleanup_deadline: Duration,
     /// Unit tests fail a pass that raises a fault unless they opt in, so an isolated error
     /// cannot hide inside a test that expects a clean pass.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     raised_faults: Mutex<Option<Vec<String>>>,
     /// Publish during a unit test after the work feed was observed, before wake selection.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     after_work_wake_observe: Mutex<Option<WorkWakeObserveHook>>,
 }
 
@@ -1173,11 +1173,11 @@ impl Reconciler<NativeRuntime> {
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(false),
             idle_nudge: Mutex::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             background_entry_hook: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             schedule_peers: Vec::new(),
@@ -1204,10 +1204,10 @@ impl Reconciler<NativeRuntime> {
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
             launched_members: Mutex::new(HashMap::new()),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
             retired_predecessor_generations: Mutex::new(BTreeSet::new()),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             mission_declaration_parses: std::sync::atomic::AtomicUsize::new(0),
             file_watchers: Arc::new(Mutex::new(HashMap::new())),
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
@@ -1235,9 +1235,9 @@ impl Reconciler<NativeRuntime> {
             screen_poll_every_ms: SCREEN_POLL_EVERY_MS,
             subagent_low_water: Mutex::new(0),
             cleanup_deadline: CLEANUP_DEADLINE,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             raised_faults: Mutex::new(Some(Vec::new())),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             after_work_wake_observe: Mutex::new(None),
         })
     }
@@ -1247,7 +1247,7 @@ impl Reconciler<NativeRuntime> {
 /// other value, such as `ST_SEAT_PRIORITY`, is a default that a seat's own declaration replaces.
 /// A terminal a person owns is the exception: it is theirs to drive, so it always runs at normal
 /// priority.
-fn overlay_runtime_environment(
+pub fn overlay_runtime_environment(
     subject: &str,
     member: &mut BTreeMap<String, String>,
     runtime: &BTreeMap<String, String>,
@@ -1317,11 +1317,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             #[cfg(any(test, feature = "test-support"))]
             wait_for_test_starts: AtomicBool::new(true),
             idle_nudge: Mutex::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             background_dispatch_hook: Default::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             background_entry_hook: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             schedule_peers: Vec::new(),
@@ -1348,10 +1348,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
             launched_members: Mutex::new(HashMap::new()),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
             retired_predecessor_generations: Mutex::new(BTreeSet::new()),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             mission_declaration_parses: std::sync::atomic::AtomicUsize::new(0),
             file_watchers: Arc::new(Mutex::new(HashMap::new())),
             file_watchers_used: Arc::new(Mutex::new(HashSet::new())),
@@ -1379,9 +1379,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             screen_poll_every_ms: 0,
             subagent_low_water: Mutex::new(0),
             cleanup_deadline: CLEANUP_DEADLINE,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             raised_faults: Mutex::new(Some(Vec::new())),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             after_work_wake_observe: Mutex::new(None),
         }
     }
@@ -1516,28 +1516,28 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Read free space for `paths` and this host's workspaces with `probe` on every pass.
-    #[cfg(test)]
-    fn with_disk_probe(mut self, paths: Vec<PathBuf>, probe: DiskProbe) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_disk_probe(mut self, paths: Vec<PathBuf>, probe: DiskProbe) -> Self {
         self.disk_probe = Some(probe);
         self.disk_paths = paths;
         self
     }
 
     /// Let passes raise faults, for a unit test of fault isolation itself.
-    #[cfg(test)]
-    fn tolerating_faults(self) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tolerating_faults(self) -> Self {
         *self.raised_faults.lock().unwrap() = None;
         self
     }
 
-    #[cfg(test)]
-    fn with_resource_provider(mut self, provider: Arc<dyn ResourceProvider>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_resource_provider(mut self, provider: Arc<dyn ResourceProvider>) -> Self {
         self.resource_provider = provider;
         self
     }
 
-    #[cfg(test)]
-    fn with_event_notify(mut self, event_notify: watch::Sender<u64>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_event_notify(mut self, event_notify: watch::Sender<u64>) -> Self {
         self.event_notify = event_notify;
         self
     }
@@ -1599,15 +1599,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                     self.start_spacing.wait().await;
                     let queued = start_spacing::QueuedAdmission::default();
                     let active = queued.0.clone();
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     if let Some(hook) = self.background_dispatch_hook.lock().unwrap().take() {
                         hook();
                     }
                     let outcome = self.blocking(move |this| {
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "test-support"))]
                         let admission_work = smallclaims::sqlite::work::SqliteWorkScope::start();
                         let admitted = this.start_spacing.try_start_if(&active);
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "test-support"))]
                         if let Some(hook) = &this.background_entry_hook {
                             hook(admitted, this.start_spacing.last_start(), admission_work.finish());
                         }
@@ -1654,7 +1654,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 quiet_pass_started = (!changed).then_some(started);
                 if !changed || pass == 63 {
                     crate::reconcile_telemetry::record_wake_passes(pass + 1, wake_cause);
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     if let Some(hook) = &self.background_wake_hook {
                         hook(pass + 1);
                     }
@@ -1781,7 +1781,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
-    pub(crate) fn reconcile_github_watches(&self, desired: &[DesiredSubject]) -> Result<()> {
+    pub fn reconcile_github_watches(&self, desired: &[DesiredSubject]) -> Result<()> {
         let now = now_ms();
         let mut next_deadline: Option<u128> = None;
         let mut used_observers = BTreeSet::new();
@@ -2120,7 +2120,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             Ok(value) => (Some(value), Ok(())),
             Err(error) => (None, Err(error)),
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let (Err(error), Some(raised)) = (&outcome, self.raised_faults.lock().unwrap().as_mut())
         {
             raised.push(format!("{subject} {scope}: {error:#}"));
@@ -3486,7 +3486,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // cancelled, so see their changes first.
         self.incremental.observe(&self.store)?;
         let skip_wakes = self.skip_unneeded && !self.incremental.take_full_pass("wake", now_ms());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(after) = self.after_work_wake_observe.lock().unwrap().take() {
             after(&self.incremental, skip_wakes);
         }
@@ -3541,7 +3541,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // Each of these items was already skipped on its own and the pass carried on. Only
             // the record of its fault is missing, so the host is faulted, not unreachable.
             let reason = format!("unrecorded item faults: {}", diagnostic_errors.join("; "));
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some(raised) = self.raised_faults.lock().unwrap().as_mut() {
                 raised.push(reason.clone());
             }
@@ -3556,7 +3556,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ]),
             )?;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(raised) = self.raised_faults.lock().unwrap().as_mut() {
             let raised = std::mem::take(raised);
             anyhow::ensure!(raised.is_empty(), "reconcile faults: {}", raised.join("; "));
@@ -5618,7 +5618,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// The desired revision whose launch configuration is current. Launch records, restart
     /// budgets, and crash-loop parking key on it, so a label-only revision inherits them.
-    fn launch_token(&self, subject: &str) -> Result<String> {
+    pub fn launch_token(&self, subject: &str) -> Result<String> {
         if let Some((incumbent, _)) =
             crate::rollout::pending_manual_launch(&self.store, subject)?
         {
@@ -5677,7 +5677,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 {
                     None
                 } else {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     self.launch_evidence_reads
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let member = self
@@ -5769,8 +5769,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn reconcile_stop(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reconcile_stop(
         &self,
         subject: &DesiredSubject,
         ptys: Option<&HashMap<String, RuntimeObservation>>,
@@ -6393,7 +6393,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(declared.clone());
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         DECLARATION_PARSES.with(|parses| parses.set(parses.get() + 1));
         let declared = self
             .store
@@ -8886,7 +8886,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Evaluate each active run on its own. A run that fails records a fault on that run, and
     /// every other run, including runs in cleanup, is still evaluated in the same pass.
-    fn evaluate_mission_runs(&self) -> Result<()> {
+    pub fn evaluate_mission_runs(&self) -> Result<()> {
         self.recording_writes(|| self.evaluate_mission_runs_pass())
     }
 
@@ -8904,7 +8904,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.evaluate_mission_run_ids(ids)
     }
 
-    fn evaluate_mission_run_ids(&self, ids: Vec<String>) -> Result<()> {
+    pub fn evaluate_mission_run_ids(&self, ids: Vec<String>) -> Result<()> {
         let mut active_generations = BTreeSet::new();
         let mut active_steps = BTreeSet::new();
         let mut changed = false;
@@ -12772,7 +12772,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let variables = crate::store::mission_run_variables(run, &mission.revision);
         let source = crate::mission::interpolate_kdl(source, &variables)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.mission_declaration_parses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut intent = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
@@ -15121,7 +15121,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let notify = self.notify.clone();
         let event_notify = self.event_notify.clone();
         let armed = self.armed_observers.clone();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let completion_fault = self.fault_injection.clone();
         let deadlines = self.observer_deadlines.clone();
         let cursors = self.observer_cursors.clone();
@@ -15187,7 +15187,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 // This UUID is the arm generation. The writer checks it inside the
                 // transaction; never keep the scheduler lock while waiting for Store I/O.
                 let current = || {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     if let Some(injection) = &completion_fault {
                         injection.fault("observer-completion-write", &observer_subject);
                     }
@@ -15353,7 +15353,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 active.remove(&operation);
                 drop(active);
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if let Some(injection) = &completion_fault {
                     injection.fault("observer-completion-finished", &observer_subject);
                 }
@@ -16714,8 +16714,8 @@ const RECONCILER_FAILING_TITLE: &str = "The reconciler is failing";
 
 /// How long a fault must last before it asks a person. st retries a faulted item on every pass,
 /// so most faults clear sooner and never reach anyone.
-#[cfg(test)]
-const FAULT_ATTENTION_AFTER_MS: u128 = 120_000;
+#[cfg(any(test, feature = "test-support"))]
+pub const FAULT_ATTENTION_AFTER_MS: u128 = 120_000;
 
 struct RuntimeStep<'a> {
     spec: &'a StepSpec,
@@ -16887,7 +16887,7 @@ fn run_variables(
     variables
 }
 
-pub(crate) fn expand_gate(
+pub fn expand_gate(
     gate: &mut GateSpec,
     variables: &BTreeMap<String, String>,
     run_workspace: &str,
@@ -17166,7 +17166,7 @@ fn work_wake_acknowledged(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn append_work_wake_message(
+pub fn append_work_wake_message(
     store: &Store,
     step: &StepRunView,
     agent: &str,
@@ -17265,7 +17265,7 @@ pub(crate) fn append_work_wake_message(
 }
 
 /// Tell `agent` about a fault it owns, once per fault episode.
-pub(crate) fn append_fault_message(
+pub fn append_fault_message(
     store: &Store,
     agent: &str,
     fault: &AttentionItemView,
@@ -17670,7 +17670,7 @@ enum UsedMissionOutcome {
 /// the daemon, and in between Linux names this process's image `PATH (deleted)`. Launching that
 /// name fails every start in the window and can hold a seat in a crash loop, so use the
 /// replacement installed at the original path.
-pub(crate) fn launch_executable() -> Result<PathBuf> {
+pub fn launch_executable() -> Result<PathBuf> {
     let current = std::env::current_exe()?;
     Ok(replaced_executable(&current).unwrap_or(current))
 }
@@ -17890,7 +17890,7 @@ fn terminal_exec_field_gate_failure(
 
 /// Impossible exit-code gates in an active run, including gates behind another pending gate.
 /// This is a read-only diagnostic and never records a gate verdict or changes work state.
-pub(crate) fn stuck_field_gates(
+pub fn stuck_field_gates(
     store: &Store,
     run: &MissionRunView,
     mission: &MissionSpec,
@@ -18015,7 +18015,7 @@ fn gate_result_reason(result: &crate::model::ClaimRecord, default: &str) -> Stri
 }
 
 /// The last `lines` lines of `output`, at most `bytes` long, cut at a character boundary.
-pub(crate) fn output_tail(output: &str, lines: usize, bytes: usize) -> String {
+pub fn output_tail(output: &str, lines: usize, bytes: usize) -> String {
     let trimmed = output.trim_end();
     let start = trimmed
         .char_indices()
@@ -18035,7 +18035,7 @@ pub(crate) fn output_tail(output: &str, lines: usize, bytes: usize) -> String {
 }
 
 /// `ms` in the largest whole unit a person reads at a glance: `90s`, `10m`, `2h`.
-pub(crate) fn render_duration_ms(ms: u64) -> String {
+pub fn render_duration_ms(ms: u64) -> String {
     match ms {
         ms if ms >= 3_600_000 && ms % 3_600_000 == 0 => format!("{}h", ms / 3_600_000),
         ms if ms >= 60_000 && ms % 60_000 == 0 => format!("{}m", ms / 60_000),
@@ -18046,7 +18046,7 @@ pub(crate) fn render_duration_ms(ms: u64) -> String {
 
 /// Why an exec gate check that ended this way cannot answer, or `None` when its exit status is an
 /// answer: 0 passes and 1 is not yet. `start_failure` says why it never ran to an exit.
-pub(crate) fn exec_check_broken(
+pub fn exec_check_broken(
     exit_code: Option<i64>,
     calls: &[String],
     start_failure: Option<&str>,
@@ -18092,12 +18092,13 @@ struct GateCheck<'a> {
     start_failure: Option<String>,
 }
 
-fn now_ms() -> u128 {
+pub fn now_ms() -> u128 {
     smallclaims::store::now_ms()
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
+    #![cfg_attr(not(test), allow(unused, dead_code))]
     #[test]
     fn a_seats_own_priority_replaces_the_installs() {
         use super::overlay_runtime_environment;
@@ -18135,12 +18136,11 @@ pub(crate) mod tests {
 
     mod channel_recovery;
     mod differential;
-    mod doctor_eligibility_tests;
     mod first_readiness_tests;
     mod gate_on_demand;
     mod github_watch_selection;
     mod incremental_deadlines;
-    pub(crate) mod mission_eval_reuse;
+    pub mod mission_eval_reuse;
     mod ownership_guard_tests;
     mod pull_request_run_tests;
     mod ready_idle_wake;
@@ -18499,21 +18499,21 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     }
 
     #[derive(Default)]
-    struct FakeRuntime {
+    pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
         before_snapshot: Mutex<Option<Box<dyn Fn() + Send>>>,
         before_observe_exec: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-        ptys: Mutex<Vec<RuntimeObservation>>,
+        pub ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
         logs: Mutex<HashMap<String, String>>,
         starts: Mutex<Vec<String>>,
-        failed_starts: Mutex<std::collections::HashSet<String>>,
+        pub failed_starts: Mutex<std::collections::HashSet<String>>,
         failed_observes: Mutex<std::collections::HashSet<String>>,
         observe_at: Mutex<Option<u128>>,
         failed_stops: Mutex<std::collections::HashSet<String>>,
-        started_members: Mutex<Vec<MemberSpec>>,
+        pub started_members: Mutex<Vec<MemberSpec>>,
         start_operations: Mutex<HashMap<(String, String), String>>,
-        stops: Mutex<Vec<String>>,
+        pub stops: Mutex<Vec<String>>,
         kills: Mutex<Vec<String>>,
         removes: Mutex<Vec<String>>,
         screen: Mutex<String>,
@@ -18568,7 +18568,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     #[test]
     fn unchanged_plain_harness_reapply_keeps_previous_build_revisions_and_running_seats() {
         let fixture: Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/harness-access-previous-build.json"
+            "../../st3-daemon/tests/fixtures/harness-access-previous-build.json"
         )).unwrap();
         let source = fixture["source"].as_str().unwrap();
         let current = parse_intent(source, "canary").unwrap();
@@ -19635,7 +19635,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         ));
     }
 
-    fn apply_source(store: &Store, source: &str, idempotency_key: &str) {
+    pub fn apply_source(store: &Store, source: &str, idempotency_key: &str) {
         let intent = parse_intent(source, "node").unwrap();
         let mission = store
             .mission(

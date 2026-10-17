@@ -45,7 +45,7 @@ pub fn host_repositories(store: &crate::store::Store, host: &str) -> Result<Host
     })
 }
 
-pub(crate) use crate::checkout::workspace_repository;
+pub use crate::checkout::workspace_repository;
 
 #[cfg(test)]
 mod tests {

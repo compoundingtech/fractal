@@ -2,7 +2,7 @@ use super::*;
 
 impl<R: RuntimeControl> Reconciler<R> {
     /// The local process belongs to this host even after its selected declaration moves away.
-    pub(super) fn reconcile_placement_away(
+    pub fn reconcile_placement_away(
         &self,
         subject: &DesiredSubject,
         ptys: Option<&HashMap<String, RuntimeObservation>>,
@@ -143,7 +143,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    pub(super) fn placement_start_evidence(&self, subject: &str) -> Result<Option<Vec<String>>> {
+    pub fn placement_start_evidence(&self, subject: &str) -> Result<Option<Vec<String>>> {
         let Some(token) = self.store.selected_desired_token(subject)? else {
             return Ok(Some(Vec::new()));
         };

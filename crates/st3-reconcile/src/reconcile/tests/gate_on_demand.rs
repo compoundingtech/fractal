@@ -1,7 +1,7 @@
 //! Round-local gate seats are admitted by real step readiness, rather than round creation.
 use super::*;
 
-const SOURCE: &str = r#"version 2
+    const SOURCE: &str = r#"version 2
 mission "orchid" state="ready" {
   goal "Refine a garden."
   loop "refine" {
@@ -21,14 +21,14 @@ mission "orchid" state="ready" {
   }
 }"#;
 
-struct Fixture {
+    struct Fixture {
     store: Arc<Store>,
     runtime: Arc<FakeRuntime>,
     reconciler: Reconciler<FakeRuntime>,
     round: MissionRunView,
 }
 
-impl Fixture {
+    impl Fixture {
     fn new(source: &str) -> Self {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&store, source, "publish");
@@ -193,7 +193,7 @@ impl Fixture {
     }
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_waits_for_builder_then_starts_once_and_receives_work() {
     let fixture = Fixture::new(SOURCE);
     fixture.action("build", "claim", "claim-build");
@@ -251,7 +251,7 @@ fn gate_on_demand_waits_for_builder_then_starts_once_and_receives_work() {
     assert_eq!(fixture.gate_starts(), 1);
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_restart_and_revision_preserve_build_and_gate_admission() {
     let mut fixture = Fixture::new(SOURCE);
     fixture.action("build", "claim", "claim-build");
@@ -297,7 +297,7 @@ fn gate_on_demand_restart_and_revision_preserve_build_and_gate_admission() {
     );
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_restart_restores_ready_step_without_an_existing_seat() {
     let mut fixture = Fixture::new(SOURCE);
     // Persist readiness as if the daemon ended between the readiness and seat writes.
@@ -315,7 +315,7 @@ fn gate_on_demand_restart_restores_ready_step_without_an_existing_seat() {
     fixture.action("gate", "claim", "restored-gate-claim");
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_release_and_failed_retry_keep_the_seat() {
     let mut fixture = Fixture::new(SOURCE);
     fixture.finish_build();
@@ -333,7 +333,7 @@ fn gate_on_demand_release_and_failed_retry_keep_the_seat() {
     assert!(fixture.runtime.stops.lock().unwrap().is_empty());
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_revision_during_pending_retry_keeps_admitted_seat() {
     let mut fixture = Fixture::new(SOURCE);
     fixture.finish_build();
@@ -382,7 +382,7 @@ fn gate_on_demand_revision_during_pending_retry_keeps_admitted_seat() {
     assert_eq!(fixture.gate_starts(), 1);
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_cancelled_build_leaves_no_gate_or_stop_declaration() {
     let fixture = Fixture::new(SOURCE);
     fixture
@@ -409,7 +409,7 @@ fn gate_on_demand_cancelled_build_leaves_no_gate_or_stop_declaration() {
     );
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_failed_build_leaves_no_gate_or_stop_declaration() {
     let fixture = Fixture::new(SOURCE);
     fixture.action("build", "claim", "claim-build");
@@ -434,7 +434,7 @@ fn gate_on_demand_failed_build_leaves_no_gate_or_stop_declaration() {
     );
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_dependency_predicate_blocks_seat_admission() {
     let source = SOURCE.replace(
         "depends-on { step \"build\" completed }",
@@ -464,7 +464,7 @@ fn gate_on_demand_dependency_predicate_blocks_seat_admission() {
     assert_eq!(fixture.gate_starts(), 1);
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_kdl_handoffs_can_address_the_deferred_declaration() {
     let handoff = r#"message "handoff" {
         from "builder"
@@ -505,7 +505,7 @@ fn gate_on_demand_kdl_handoffs_can_address_the_deferred_declaration() {
     }
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_other_kdl_recipients_still_require_delivery() {
     let source = SOURCE.replace(
         "step \"build\" { assigned-to \"agent/${ST_MISSION_RUN}/builder\" }",
@@ -545,7 +545,7 @@ fn gate_on_demand_other_kdl_recipients_still_require_delivery() {
     assert_eq!(fixture.gate_starts(), 1);
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_public_preview_keeps_undeclared_recipient_validation() {
     let fixture = Fixture::new(SOURCE);
     let source = r#"version 2
@@ -578,7 +578,7 @@ message "missing-handoff" { from "builder"; to "missing"; content "Check the gar
     assert!(!refused.message.contains("gate-handoff"));
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_shared_pooled_root_and_non_gate_seats_stay_eager() {
     let sources = [
         SOURCE.replace("agent/${ST_MISSION_RUN}/builder", "agent/${ST_MISSION_RUN}/gate"),
@@ -597,7 +597,7 @@ fn gate_on_demand_shared_pooled_root_and_non_gate_seats_stay_eager() {
     }
 }
 
-#[test]
+    #[test]
 fn gate_on_demand_baseline_predicate_blocks_seat_admission() {
     let source = SOURCE.replace("        retry { attempts 2 }", "        baseline \"review-ready\" { field \"state\" \"resource/garden-ready\" is \"ready\" }\n        retry { attempts 2 }");
     let fixture = Fixture::new(&source);
@@ -622,77 +622,4 @@ fn gate_on_demand_baseline_predicate_blocks_seat_admission() {
     fixture.settle();
     assert_eq!(fixture.step("gate").status, "ready");
     assert_eq!(fixture.gate_starts(), 1);
-}
-
-#[tokio::test]
-async fn gate_on_demand_builder_message_waits_in_the_gate_mailbox() {
-    let fixture = Fixture::new(SOURCE);
-    let gate = format!("agent/{}/gate", fixture.round.id);
-    use tower::ServiceExt;
-    let root = tempfile::tempdir().unwrap();
-    let state = crate::api::AppState {
-        owning_person: None,
-        store: fixture.store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: tokio::sync::watch::channel(0_u64).0,
-        node: "node".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    };
-    let response = crate::api::router(state)
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/v1/messages")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    serde_json::to_vec(&crate::model::MessageSendRequest {
-                        idempotency_key: "garden-handoff".into(),
-                        from: format!("agent/{}/builder", fixture.round.id),
-                        to: gate.clone(),
-                        content: "Review the garden.".into(),
-                        title: None,
-                        in_reply_to: None,
-                        tags: Vec::new(),
-                        attachments: Vec::new(),
-                    })
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let envelope: Value = serde_json::from_slice(&body).unwrap();
-    let message: crate::model::MessageView =
-        serde_json::from_value(envelope["value"].clone()).unwrap();
-    fixture.settle();
-    assert_eq!(
-        fixture.gate_starts(),
-        0,
-        "mail alone does not admit the gate"
-    );
-    assert_eq!(
-        fixture.store.messages(Some(&gate), false).unwrap()[0].content,
-        "Review the garden."
-    );
-    fixture.finish_build();
-    assert_eq!(fixture.gate_starts(), 1);
-    assert!(
-        fixture
-            .store
-            .messages(Some(&gate), false)
-            .unwrap()
-            .iter()
-            .any(|m| m.subject == message.subject && m.status == "sent")
-    );
 }

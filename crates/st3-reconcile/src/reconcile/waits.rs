@@ -18,11 +18,11 @@ use super::*;
 
 /// How long a pull request must stay out of the merge queue before leaving it counts. GitHub
 /// reports a queued pull request out of the queue for a minute or two while the queue rebuilds.
-pub(crate) const MERGE_QUEUE_EXIT_SETTLE_MS: u128 = 5 * 60_000;
+pub const MERGE_QUEUE_EXIT_SETTLE_MS: u128 = 5 * 60_000;
 
 /// Where a wait comes from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WaitSource {
+pub enum WaitSource {
     GithubWatch,
     PersonAsk,
     Gate,
@@ -32,7 +32,7 @@ pub(crate) enum WaitSource {
 }
 
 impl WaitSource {
-    pub(crate) fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::GithubWatch => "gh watch",
             Self::PersonAsk => "person ask",
@@ -46,7 +46,7 @@ impl WaitSource {
 
 /// One thing a seat waits on.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Wait {
+pub struct Wait {
     pub source: WaitSource,
     /// What is waited on: a thread, a step or a run.
     pub subject: String,
@@ -62,7 +62,7 @@ pub(crate) struct Wait {
 
 /// A movement on a wait that its seat was not woken for and needs to act on.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WaitAction {
+pub struct WaitAction {
     /// When the source saw it.
     pub at_unix_ms: u128,
     /// When it counts: after it has settled.
@@ -74,7 +74,7 @@ pub(crate) struct WaitAction {
 
 impl Wait {
     /// Until when this wait counts as something that will wake its seat; `None` once it does not.
-    pub(crate) fn holds_until(&self, quiet_ms: u64, now: u128) -> Option<u128> {
+    pub fn holds_until(&self, quiet_ms: u64, now: u128) -> Option<u128> {
         self.expected_by_unix_ms
             .or_else(|| {
                 self.last_moved_unix_ms
@@ -84,7 +84,7 @@ impl Wait {
     }
 
     /// The wait as a nudge names it.
-    pub(crate) fn describe(&self, now: u128) -> String {
+    pub fn describe(&self, now: u128) -> String {
         let moved = match (self.last_moved_unix_ms, &self.last_move) {
             (Some(at), Some(what)) => format!(
                 "last moved {} ago ({what})",
@@ -106,7 +106,7 @@ impl Wait {
 
 /// The waits that come from the seat's own steps, which the wake evaluation has already read:
 /// asks, gates and scheduled retries. Steps that depend on others are read separately.
-pub(crate) fn step_waits(agent: &str, work: &[StepRunView], now: u128) -> Vec<Wait> {
+pub fn step_waits(agent: &str, work: &[StepRunView], now: u128) -> Vec<Wait> {
     work.iter()
         .filter(|step| {
             step.claimant.as_deref() == Some(agent) || step.assigned_to.as_deref() == Some(agent)
@@ -144,7 +144,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// The seat's GitHub watches. A watch last moved when it last woke the seat, or when it
     /// began. A pull request that left the merge queue without merging, and stayed out, since then
     /// is an action.
-    pub(crate) fn github_waits(&self, agent: &str) -> Result<Vec<Wait>> {
+    pub fn github_waits(&self, agent: &str) -> Result<Vec<Wait>> {
         let mut waits = Vec::new();
         for watch in self.store.live_watches_of(agent)? {
             let woke = self
@@ -183,7 +183,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// The open runs that report to the seat. A run last moved when it last reported to the seat,
     /// or when it began.
-    pub(crate) fn report_to_waits(&self, agent: &str) -> Result<Vec<Wait>> {
+    pub fn report_to_waits(&self, agent: &str) -> Result<Vec<Wait>> {
         let mut waits = Vec::new();
         for (run, began) in self.store.open_mission_runs_reporting_to(agent)? {
             if self
@@ -217,7 +217,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Steps another seat holds that one of this seat's pending steps depends on, and gates such a
     /// step depends on.
-    pub(crate) fn depends_on_waits(&self, agent: &str, work: &[StepRunView]) -> Result<Vec<Wait>> {
+    pub fn depends_on_waits(&self, agent: &str, work: &[StepRunView]) -> Result<Vec<Wait>> {
         let pending = work
             .iter()
             .filter(|step| step.assigned_to.as_deref() == Some(agent) && step.status == "pending")
@@ -293,7 +293,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 }
 
-pub(crate) fn describe_age(ms: u128) -> String {
+pub fn describe_age(ms: u128) -> String {
     let minutes = ms / 60_000;
     match (minutes / 60, minutes % 60) {
         (0, 0) => format!("{}s", ms / 1_000),

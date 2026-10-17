@@ -26,11 +26,11 @@ pub use st3_store::client;
 pub use st3_kernel::config;
 pub use st3_kernel::conversation_search;
 pub mod creation;
-pub mod repositories;
+pub use st3_reconcile::repositories;
 pub(crate) use st3_kernel::disk;
 /// Answers the hooks an st3 seat's harness runs: `st driver-hook NAME`.
 pub mod delivery_hold;
-pub(crate) mod delivery_presence;
+pub use st3_reconcile::delivery_presence;
 pub mod driver_hook;
 pub use st3_store::environment;
 pub use st3_kernel::evidence;
@@ -47,7 +47,7 @@ pub use st3_kernel::gate_kinds;
 pub use st3_kernel::gate_report;
 pub use st3_store::github_watch;
 pub use st3_store::graph;
-pub mod handoff;
+pub use st3_reconcile::handoff;
 pub(crate) mod graph_watch_ivm;
 pub use st3_kernel::harness_events;
 pub use st3_kernel::hooks;
@@ -67,7 +67,7 @@ pub use st3_kernel::model;
 /// A driver relaunches its harness on the native session a suspended seat resumes.
 pub use st3_store::native_resume;
 /// Durable seat-scoped first native launch outcomes.
-pub mod native_seed;
+pub use st3_reconcile::native_seed;
 pub use st3_store::node_identity;
 pub mod objectives;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
@@ -77,16 +77,18 @@ pub use st3_telemetry::otel;
 pub use st3_telemetry::otel_client_class;
 pub use st3_telemetry::otlp;
 pub use st3_peer::peer;
-pub mod placement;
+pub use st3_reconcile::placement;
 pub use st3_store::person_request;
 pub use st3_kernel::pricing;
 pub use smallclaims::{performance, profile};
 pub use st3_kernel::projection;
 pub use st3_store::provenance;
-pub mod reconcile;
+pub use st3_reconcile::reconcile;
 pub(crate) use st3_telemetry::reconcile_telemetry;
 pub(crate) use st3_telemetry::relay_trace;
 pub use st3_kernel::rules;
+#[cfg(test)]
+pub(crate) use st3_kernel::publication;
 pub use st3_telemetry::recorder;
 /// Imports local command receipts into durable resource observations.
 pub use st3_store::recorder_receipts;
@@ -111,8 +113,7 @@ pub use st3_store::store;
 pub mod subagents;
 /// Suspends a quiet seat and resumes its own native session.
 pub use st3_store::suspension;
-pub(crate) use st3_kernel::publication;
-pub mod seat_snapshot;
+pub use st3_reconcile::seat_snapshot;
 pub use st3_telemetry::telemetry;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -120,6 +121,8 @@ pub mod test_support;
 mod kernel_tests;
 #[cfg(test)]
 mod peer_tests;
+#[cfg(test)]
+mod reconcile_tests;
 #[cfg(test)]
 mod store_tests;
 #[cfg(test)]

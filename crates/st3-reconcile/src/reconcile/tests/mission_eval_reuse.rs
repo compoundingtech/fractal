@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn fixture() -> (Arc<Store>, String) {
+pub fn fixture() -> (Arc<Store>, String) {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let steps = (0..20)
         .map(|index| format!("step \"work-{index}\" timeout=\"1h\" {{ title \"Investigate finding {index}\"; fresh-context }}\n"))

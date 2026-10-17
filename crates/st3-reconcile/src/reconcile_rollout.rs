@@ -2,7 +2,7 @@ use super::*;
 use crate::rollout::{self, Operation};
 
 impl<R: RuntimeControl> Reconciler<R> {
-    pub(super) fn rollout_render_guard(&self, subject: &DesiredSubject) -> Result<()> {
+    pub fn rollout_render_guard(&self, subject: &DesiredSubject) -> Result<()> {
         self.store.owned_desired_guard(subject)?;
         let Some(operation) = self.store.rollout(&subject.subject)? else {
             return Ok(());
@@ -33,7 +33,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Own the entire cutover before ordinary restart, suspension or restart policy can act.
-    pub(super) fn reconcile_rollout(
+    pub fn reconcile_rollout(
         &self,
         subject: &DesiredSubject,
         observed: Option<&RuntimeObservation>,
