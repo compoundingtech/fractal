@@ -3,23 +3,26 @@ import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { AgentActions } from './AgentActions.tsx'
-import { retainPane, workspaceView, workspaceViewNotice, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
+import { retainPane, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
+import { MISSIONS_REF } from './workspaceView.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import * as Aria from 'react-aria-components'
+import { UNSAFE_PortalProvider } from 'react-aria'
 import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import { SidebarAgentRow, ThreadHeader, ResizableSplit, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
 import { useFleet, useSubjectList, useConnection, useNow, useFeedInterest, useDataSource } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
+import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
 import type { ResourcePanelState } from '../shell/state.ts'
 import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
@@ -92,6 +95,7 @@ class ConversationPaneCodeBoundary extends React.Component<React.ComponentProps<
 const ChangesInspector = React.lazy(() => import('./ChangesInspector.tsx').then(module => ({ default: module.ChangesInspector })))
 // The terminal grid, fonts and native key encoder load only when a terminal pane opens.
 const TerminalDetail = React.lazy(() => import('../terminal/TerminalDetail.tsx').then((module) => ({ default: module.TerminalDetail })))
+const MissionsPane = React.lazy(() => import('../missions/MissionsPane.tsx').then((module) => ({ default: module.MissionsPane })))
 const DocumentPane = React.lazy(() => import('../documents/DocumentPane.tsx').then((module) => ({ default: module.DocumentPane })))
 
 const sidebarRatio = persistedAtom({ key: 'round2.sidebarRatio', schema: Schema.Number, defaultValue: 256 / 1440 })
@@ -119,11 +123,24 @@ const initialAgentFromUrl = () => {
   }
 }
 
+/**
+ * React Aria overlays (menus, popovers, tooltips, modals) portal into a host inside the themed
+ * root instead of document.body, where only the legacy document palette and fonts apply. The
+ * provider sits above the shell state, so its context value never changes on a switch and the
+ * portalled panes inherit it without a context scan.
+ */
+export function LiveAgentWorkspace(props: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void }) {
+  const overlayHost = React.useRef<HTMLDivElement>(null)
+  const getContainer = React.useCallback(() => overlayHost.current, [])
+  return <UNSAFE_PortalProvider getContainer={getContainer}><Workspace {...props} overlayHost={overlayHost} /></UNSAFE_PortalProvider>
+}
+
 /** One authoritative agent thread per workspace; local geometry never grants backend authority. */
-export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void }) {
+function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void; readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
   const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), now = useNow()
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
   const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [scheme, setScheme] = useAtom(palette)
+  React.useLayoutEffect(() => setTheme(scheme), [scheme])
   const viewport = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
   const location = React.useSyncExternalStore(subscribeLocation, locationState, locationState)
   const hoverOwner = React.useRef<HTMLElement | null>(null)
@@ -247,22 +264,27 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                       ))}
                     </nav>
                     {fleet._tag !== 'Observed' ? (
-                      <p role="status" data-wf-roster-reason={fleet._tag === 'Unavailable' ? fleet.reason : undefined} {...stylex.props(styles.notice)}>
-                        {fleet._tag === 'Waiting' ? 'Waiting for the agent roster.' : fleet.reason === 'ungranted' ? 'Read access to the agent roster has not been granted.' : fleet.reason === 'unsupported' ? 'This connection does not support the agent roster.' : 'The agent roster could not be loaded; reconnect and try again.'}
-                      </p>
+                      <SystemNotice
+                        scope="rail"
+                        kind={fleet._tag === 'Waiting' ? 'loading' : 'error'}
+                        connection={fleet._tag === 'Unavailable' && fleet.reason !== 'ungranted' && fleet.reason !== 'unsupported'}
+                        title={fleet._tag === 'Waiting' ? 'Loading agents' : fleet.reason === 'ungranted' ? 'No access to the agent roster' : fleet.reason === 'unsupported' ? 'Agent roster not supported' : 'Agent roster could not load'}
+                        {...(fleet._tag === 'Unavailable' && fleet.reason === 'unsupported' ? { detail: 'This connection does not offer it' } : fleet._tag === 'Unavailable' && fleet.reason === 'ungranted' ? { detail: 'Read access has not been granted' } : {})}
+                        data-wf-roster-reason={fleet._tag === 'Unavailable' ? fleet.reason : undefined}
+                      />
                     ) : stale ? (
-                      <p role="status" {...stylex.props(styles.notice)}>
-                        {fleet.coverage?._tag === 'Partial' ? 'Showing a partial roster · live updates pending' : 'Last observed roster · live updates pending'}
-                      </p>
+                      <SystemNotice scope="rail" kind="stale" connection title={fleet.coverage?._tag === 'Partial' ? 'Partial roster' : 'Last observed roster'} detail="Live updates pending" />
                     ) : null}
                     <footer {...stylex.props(styles.footer)}>
                       <Aria.Button onPress={() => setScheme(scheme === 'dark' ? 'light' : 'dark')} aria-label="Toggle color scheme" {...stylex.props(styles.iconButton)}>
                         {scheme === 'dark' ? '☀' : '☾'}
                       </Aria.Button>
+                      <Aria.Button onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} {...stylex.props(styles.textButton)}>
+                        Missions
+                      </Aria.Button>
                       <Aria.Button onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} {...stylex.props(styles.textButton)}>
                         Usage
                       </Aria.Button>
-                      <GatewayConnectionStatus />
                     </footer>
                   </>
                 )}
@@ -270,6 +292,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
               <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
               <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
                 <ThreadHeader terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} /></>} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} status={headerRow?.status} statusLabel={headerRow?.statusLabel} statusSince={headerRow?.statusSince} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} now={now} panelOpen={diffOpen} drawerOpen={selectedPane.includes('terminal/')} onTogglePanel={() => setDiffOpen((value) => !value)} onToggleDrawer={() => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }} />
+                <GatewayConnectionStatus />
                 {visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
                     <Aria.Button aria-pressed={selectedPane === 'thread'} onPress={() => navigate(current)} {...stylex.props(styles.textButton)}>
@@ -290,7 +313,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
               {diffOpen && openedTool === undefined && current !== '' ? (
                 <>
                   <ResizableSplit id="live-change-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Change panel width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setDiffOpen(false)} onReset={() => setPanelFraction(380 / viewport)} />
-                  <React.Suspense fallback={<aside aria-label="Changes" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}><p role="status" {...stylex.props(styles.notice)}>Loading captured changes…</p></aside>}>
+                  <React.Suspense fallback={<aside aria-label="Changes" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}><SystemNotice kind="loading" title="Loading captured changes" /></aside>}>
                     <ChangesInspector key={current} agentRef={current} width={panelSize} />
                   </React.Suspense>
                 </>
@@ -307,17 +330,18 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                   </aside>
                 </>
               ) : null}
+              <div ref={overlayHost} {...stylex.props(styles.overlayHost)} />
             </div>
           </ThreadHeaderSlotContext.Provider>
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} ux={ux} />, paneHost)}
+    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)}
   </>)
 }
 
 const assumedOnline = Atom.make({ _tag: 'Online' } as const)
-/** Decoded gateway sync, never the socket's raw lifecycle tag. */
+/** Decoded gateway sync, never the socket's raw lifecycle tag, as the one connection band under the thread header. */
 const GatewayConnectionStatus = () => {
   const source = useDataSource()
   const network = useAtomValue(source.network ?? assumedOnline)
@@ -328,13 +352,18 @@ const GatewayConnectionStatus = () => {
     ...observation, label: 'connection', now,
     socket: observation.status._tag !== 'Failed',
   })
-  const reconnecting = observation.status._tag === 'Stale' && observation.status.reason._tag === 'Reconnecting'
-  return <>
-    <span role="status" {...stylex.props(styles.connection)}>{network._tag === 'Offline' ? 'You are offline' : line?.text}</span>
-    {(reconnecting || network._tag === 'Offline') && source.reconnect !== undefined
-      ? <Aria.Button onPress={source.reconnect} {...stylex.props(styles.textButton)}>Reconnect now</Aria.Button>
-      : null}
-  </>
+  const status = observation.status
+  const reconnecting = status._tag === 'Stale' && status.reason._tag === 'Reconnecting'
+  // The band's title already says "Reconnecting"; its detail is the next try, after syncLine's grace delay.
+  const text = line === undefined ? undefined
+    : status._tag === 'Stale' && status.reason._tag === 'Reconnecting'
+      ? `Next try in ${Math.ceil(Math.max(0, status.reason.nextAt - now) / 1000)}s · attempt ${status.reason.attempt}`
+      : line.text
+  return <ConnectionStatus
+    state={network._tag === 'Offline' ? 'offline' : reconnecting ? 'reconnecting' : status._tag === 'Stale' ? 'stale' : status._tag === 'Failed' ? 'failed' : 'live'}
+    {...(text === undefined ? {} : { text })}
+    {...((reconnecting || network._tag === 'Offline') && source.reconnect !== undefined ? { onReconnect: source.reconnect } : {})}
+  />
 }
 
 /** The three most recently opened panes stay mounted in a stable DOM order; hidden ones skip
@@ -343,7 +372,7 @@ const GatewayConnectionStatus = () => {
  * evict their follows. Render-time history updates avoid a second committed selection.
  * Locking a pane costs O(its rows) in the browser, so the outgoing pane is only covered by the
  * opaque shown pane during the switch frame and locked after that frame paints. */
-export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool, onOpenDocument, ux }: { readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly ux?: UxTelemetry }) {
+export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool, onOpenDocument, onOpenAgent, ux }: { readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly onOpenAgent?: (ref: string) => void; readonly ux?: UxTelemetry }) {
   // Reading positions belong to this surface, not its three-pane DOM cache. A new
   // surface (including reload) starts following live; evicted panes keep memory here.
   const [viewportStore] = React.useState(() => new ViewportStore())
@@ -385,18 +414,23 @@ export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool
           <ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} ux={ux} visible={shown} />
         </div>
       })}
+      {view._tag === 'Missions' ? (
+        <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading missions" /></div>}>
+          <MissionsPane {...(onOpenAgent === undefined ? {} : { onOpenAgent })} />
+        </React.Suspense>
+      ) : null}
       {view._tag === 'Document' && onOpenDocument !== undefined ? (
-        <React.Suspense fallback={<p role="status" {...stylex.props(styles.empty)}>Loading document…</p>}>
+        <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading document" /></div>}>
           <DocumentPane key={view.ref} name={view.ref} onOpen={onOpenDocument} />
         </React.Suspense>
       ) : null}
-      {current === '' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
-        : view._tag === 'ViewUnavailable' ? <p role="status" {...stylex.props(styles.empty)}>{workspaceViewNotice(view)}</p>
+      {current === '' && view._tag !== 'Missions' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
+        : view._tag === 'ViewUnavailable' ? <div {...stylex.props(styles.paneNotice)}><SystemNotice kind="empty" title="View not available here" detail={view.reason.replace(/\.$/, '')} /></div>
           : null}
     </div>
     {current !== '' && view._tag === 'Terminal' ? (
       <section key={view.ref} aria-label="Terminal drawer" data-testid="terminal-pane" {...stylex.props(styles.terminalDrawer)}>
-        <React.Suspense fallback={<p role="status" {...stylex.props(styles.empty)}>Loading terminal…</p>}>
+        <React.Suspense fallback={<SystemNotice kind="loading" title="Loading terminal" />}>
           <TerminalDetail address={{ ref: view.ref, presentation: 'detail' }} visibility="visible" />
         </React.Suspense>
       </section>
@@ -414,6 +448,9 @@ export function LiveSidebarSearch({ value, onChange }: { readonly value: string;
 const styles = stylex.create({
   legacyBridge: { '--canvas': c.canvas, '--panel': c.raised, '--recess': c.message, '--ink': c.fg, '--muted': c.fgMuted, '--line': c.borderStrong, '--accent': c.primary, '--on-accent': c.onPrimary, '--selection': c.rowActive, '--good': c.done, '--warning': c.attention, '--danger': c.dangerFg, '--sans': t.fontSans, '--mono': t.fontMono },
   app: { display: 'flex', height: 'calc(100dvh - var(--wf-devbar-space, 0px))', width: '100%', overflow: 'hidden', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  // Out of flow, above the panes. Viewport-wide but zero-height: no hit area of
+  // its own, yet shrink-to-fit popovers get the viewport as available width.
+  overlayHost: { position: 'fixed', top: 0, left: 0, width: '100%', height: 0, zIndex: 20 },
   sidebar: { display: 'flex', flexDirection: 'column', flexShrink: 0, minHeight: 0, overflow: 'hidden', backgroundColor: c.sidebar },
   brand: { height: g.band, paddingInline: s.lg, display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
   iconButton: { width: 28, height: 28, display: 'inline-flex', justifyContent: 'center', alignItems: 'center', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer' },
@@ -430,7 +467,6 @@ const styles = stylex.create({
   skeletonName: { gridRow: '1', width: '68%' },
   skeletonHost: { gridRow: '2', width: '44%' },
   footer: { height: 40, display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0 },
-  connection: { marginLeft: 'auto', fontSize: t.denseSize, color: c.fgMuted },
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0 },
   body: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
   // Identical geometry in both states: revealing a pane must not invalidate its layout. Only
@@ -442,7 +478,8 @@ const styles = stylex.create({
   threadArea: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, flexBasis: 0, minWidth: 0, minHeight: 0 },
   terminalDrawer: { display: 'flex', flexDirection: 'column', flexGrow: 0, flexShrink: 0, flexBasis: '45%', minHeight: 160, minWidth: 0, overflow: 'hidden', backgroundColor: c.canvas, borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: c.border },
   tabs: { height: 32, display: 'flex', alignItems: 'center', gap: s.xs, paddingInline: s.lg, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border, flexShrink: 0 },
-  notice: { padding: s.lg, fontSize: t.metaSize, color: c.fgMuted },
+  // Hidden retained panes stay absolutely positioned and opaque; pane notices sit above them.
+  paneNotice: { position: 'relative', zIndex: 2 },
   empty: { position: 'relative', zIndex: 2, margin: 'auto', padding: s.section, color: c.fgMuted },
   changesPanel: { display: 'flex', flexDirection: 'column', flexShrink: 0, minWidth: 0, minHeight: 0, overflowY: 'auto', borderLeftWidth: 1, borderLeftStyle: 'solid', borderLeftColor: c.border },
   toolDetailHeader: { height: 40, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },

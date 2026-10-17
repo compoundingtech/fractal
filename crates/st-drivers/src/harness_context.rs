@@ -510,8 +510,9 @@ impl Writer {
         })
     }
 
-    /// Adopt the session's incarnation token, so sibling writer processes of one session agree on
-    /// the provenance they publish. Provenance only: nothing is fenced on it.
+    /// Adopt the session's incarnation token so sibling writers publish the same provenance.
+    /// Native observation outboxes require this token to match the current harness-state owner;
+    /// legacy context files retain provenance without fencing.
     pub fn with_session(mut self, token: impl Into<String>) -> Self {
         self.session = token.into();
         self
@@ -1548,7 +1549,7 @@ mod tests {
     /// both successful and failed renames consume or clean their temporary file.
     #[test]
     fn writes_stage_in_catalog_control_and_clean_up_after_success_or_failure() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::canonical_tempdir();
         let agent_dir = catalog(tmp.path());
         let staging = staging_dir(&agent_dir).unwrap();
         assert_eq!(

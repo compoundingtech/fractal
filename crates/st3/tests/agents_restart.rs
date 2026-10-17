@@ -183,7 +183,7 @@ impl Fixture {
         make_router: impl FnOnce(AppState) -> axum::Router,
     ) -> (Self, String) {
         let mission = matches!(shape, Shape::Mission | Shape::Step);
-        let root = tempfile::tempdir().unwrap();
+        let root = st3::test_support::canonical_tempdir();
         let store = Arc::new(Store::open(&root.path().join("graph.db"), "restart-test").unwrap());
         let notify = Arc::new(Notify::new());
         let runtime = Arc::new(Runtime::default());
@@ -274,6 +274,7 @@ impl Fixture {
         reconciler.reconcile_once().unwrap();
         reconciler.reconcile_once().unwrap();
         let state = AppState {
+            owning_person: None,
             store: store.clone(),
             notify,
             event_notify: watch::channel(0).0,
@@ -1455,8 +1456,9 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
         .unwrap()
         .unwrap()
         .0;
+    let initial_token = fixture.store.selected_desired_token(&subject).unwrap().unwrap();
     let seats = agent_subjects(&fixture.store);
-    assert_eq!(seats, [subject.clone()]);
+    assert_eq!(seats, std::slice::from_ref(&subject));
     // Starting a running mission seat changes nothing and says how to relaunch it.
     let running = succeeded(
         &st(
@@ -1515,6 +1517,7 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
         .unwrap()
         .unwrap()
         .0;
+    let restored_token = fixture.store.selected_desired_token(&subject).unwrap().unwrap();
     assert_eq!(
         serde_json::to_value(&before).unwrap(),
         serde_json::to_value(&after).unwrap()
@@ -1529,10 +1532,16 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
     assert_eq!(starts[0].workspace, starts[1].workspace);
     let environments: Vec<_> = starts
         .iter()
-        .map(|member| {
+        .zip([&initial_token, &restored_token])
+        .map(|(member, token)| {
             let mut environment = member.environment.clone();
             let operation = environment.remove("ST3_START_OPERATION").unwrap();
             assert_eq!(member.tags.get("st3.start-operation"), Some(&operation));
+            assert_eq!(
+                environment.remove(st3::suspension::LAUNCH_DESIRED_TOKEN_ENV).as_ref(),
+                Some(token),
+                "each launch must report the declaration that actually started it"
+            );
             environment
         })
         .collect();
