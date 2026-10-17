@@ -247,6 +247,18 @@ copies reference-free downloads and sources fetched by the run, plus the closure
 baseline, historical messaging channel and provider components. It leaves the installer-managed
 `/nix` directory intact. Cache failures emit a warning and let the job build normally.
 
+Genie uses a separate `nix6-genie-closure-...` entry keyed on its locked shell and cache policy.
+It retains the complete `nix print-dev-env .#genie` profile closure, including upstream-signed
+stdenv inputs such as Linux headers. The older selective archives cannot satisfy this key.
+Workspace CI and main's existing Genie warmer share it; only protected main publishes the archive.
+Genie's local cache initialization and closure save fail visibly. After saving, a hosted control
+copies the closure into an empty store with public substituters and builders disabled, checks
+every path's NAR hash, and verifies that removing a required cache entry makes the copy fail.
+The summary reports closure bytes, cache file bytes, path count and verification time; these are
+not billed cost or a claim of lower wall time. Cold seeds and evicted entries still need upstream
+downloads. A valid warm archive supplies the entire shell without the public NAR fetch that failed
+in run 38922273766/job 117046015044.
+
 The [original trial measurements](https://github.com/compoundingtech/smalltalk/pull/849#issuecomment-5936374396)
 recorded a warm run of 6m59s with this design, versus 8m49s to 9m30s with only the Cargo cache.
 That trial excluded the messaging matrix; current CI includes it. Caching the entire Nix store
@@ -283,7 +295,7 @@ environment variable that enables this behavior, even if the executable is renam
 Fixture command helpers clear inherited `ST_AGENT`/`ST3_*`; temporary-repository Git helpers
 isolate global/system config, hooks, signing and author identity on each command. Real
 repository commits keep the host's Git policy. Run the same suite from an agent seat with
-`nix develop --command cargo nextest run -p st3 --locked --profile ci --retries 0`.
+`nix develop --command cargo nextest run -p st3 -p st3-daemon --locked --profile ci --retries 0`.
 Provider fixtures that load st3 extensions publish their isolated hook set with
 `st3::hooks::ensure_installed`, preserving every declared asset and relative import.
 
@@ -362,6 +374,10 @@ Any crate/lint count above its baseline fails, including a newly introduced crat
 Removing warnings also requires lowering the baseline in the same pull request, so a later
 change cannot spend the removed warnings. CI checks that the committed counts do not increase
 relative to the event's immutable base SHA (PR base, merge-group base, or preceding main commit).
+When a crate is split out of another one, the new crate's warnings are the origin's: list it in
+`.github/clippy-splits.json` (`{"st3-daemon": "st3"}`), and against a base that lacks the new crate the
+two are compared together, so the split can move warnings between them and never add any. Once the base has the
+new crate it is an ordinary crate and the entry has no effect; `--update` applies the same rule.
 The first rollout permits a base without the file. There is no new required check:
 `linux-gate` already requires `linux-clippy`.
 
@@ -555,6 +571,21 @@ pages/popups, clears cookies and permissions, and clears every origin-storage ty
 for all observed HTTP(S) origins. Cookie/quota audits and a first-document
 local/session-storage audit reject residual state. Case-internal navigation may
 retain its own state; it is never inherited by another case.
+Worker contexts identify as Storybook's test runner (`StorybookTestRunner` in the
+user agent), as Storybook's own runner does: after each play the preview pauses
+animations at their end state for the a11y check instead of a fixed 100 ms sleep
+before waiting for them. A play that leaves UI opening after it returns (a hover
+card under the pointer) waits for that state itself rather than relying on the sleep.
+
+The gate takes three options, all unset in CI today (full set, a11y on, no budget).
+`KIT_PLAY_SET=critical` selects only stories tagged `critical` (an empty selection fails);
+`KIT_PLAY_A11Y=off` sets addon-a11y's own `a11y.manual` global so axe does not run, and
+each case must then carry no a11y report, while with a11y on each case must carry exactly
+one passed a11y report; `KIT_PLAY_MAX_SECONDS` is the set's wall-time budget: every case
+still runs and a run over budget fails (fix the cause; the budget is not raised). The
+receipt records the set, a11y mode, budget, and machine-wide CPU in core-minutes with
+the load averages (exact on a dedicated runner).
+`kit-play-gate.browser-test.mjs` proves these against a fixture build in real Chromium.
 
 `kit-play-isolation.browser-test.mjs` runs in the same kit-input-gated CI lane before
 the full play matrix. It exercises storage/service-worker/popup isolation, concurrent
@@ -1129,9 +1160,14 @@ skipped jobs and jobs without a Namespace runner are excluded. Each active job's
 from its first step to job completion, with unfinished jobs counted through the observation.
 The observation is repository-scoped; the workspace can also have jobs from other repositories.
 
-To refresh the capacity measurement, dispatch Workspace CI on `main`. Its `namespace-capacity`
-job publishes platform limits and current usage for `workflow_dispatch` to the job
-summary and retains the `namespace-capacity` artifact. It reports no workspace or account identity.
+To refresh the capacity measurement, dispatch `namespace-capacity.yml` on `main`:
+`gh workflow run namespace-capacity.yml --ref main`. The same workflow runs hourly at minute 17 UTC.
+Its only job uses one Namespace runner to publish platform limits, current usage and an observation
+timestamp to the job summary and the `namespace-capacity` artifact (retained for 30 days).
+The newest request replaces an older pending or running reading instead of accumulating a backlog.
+It performs no checkout, build or cache setup and reports no workspace or account identity.
+The read retains priority 3 and can wait for the same Namespace capacity it measures; a queued
+reading is not current quota evidence. Dispatching Workspace CI is no longer a capacity read.
 See Namespace's [resource limits](https://namespace.so/docs/architecture/compute/resource-limits)
 and [profile concurrency controls](https://namespace.so/docs/solutions/github-actions/runner-controls/concurrent-runners)
 for the scheduler's limits, and GitHub's [merge queue settings](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
@@ -1153,7 +1189,8 @@ every 15 seconds. A missing ref or a changed SHA on two consecutive successful l
 its own workflow, including queued Linux jobs and always-run summaries. Lookup failures retain work.
 Once all five required checks finish, the watcher exits normally; a ref removed by a successful
 merge therefore retains the completed workflow result used by main upkeep. It executes embedded
-workflow code without checking out queued PR code. Manual capacity reports still use Namespace.
+workflow code without checking out queued PR code. Capacity reports run separately in
+`namespace-capacity.yml` on Namespace.
 
 ## Namespace jobs that never start
 

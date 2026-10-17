@@ -77,7 +77,15 @@ oldest first, with its holder, start (`started_unix_ms`) and `held_ms`, so a stu
 before it ends. `holders` ranks up to 16 holders by writer time over the last hour (count, over
 target, total and max). `long_holds` and `long_reads` keep the last 64 writer holds and read
 transactions over the target in that hour, newest first; a long hold also gives its `kind`
-(`batch` or `lend`), `writes` and `longest_write_ms`. `open_reads` lists up to eight read
+(`batch` or `lend`), `writes` and `longest_write_ms`. The replication projection chunk's loan
+also says where its hold went: `stages` gives the time in each of `begin` (BEGIN IMMEDIATE),
+`chunk-read` (the frontier and chunk bounds), `incremental`, `replay`, `after-projection`,
+`health` (the projection_health write), `commit`, `rollback`, `callbacks` (the caller's progress
+and log sinks, which run under the writer) and `release` (giving the connection back, with the
+commit observers it runs). `unattributed_ms` is the rest: the handoff between the writer thread
+and the borrower. Its hold in progress names the `stage` it is in. Other holds carry no stages.
+`begin` and `chunk-read` are marked but no control slows them, so a small `unattributed_ms` does
+not by itself show that their marks are placed right. `open_reads` lists up to eight read
 snapshots open past the target now. `waiting` counts callers waiting for the writer and reads
 waiting for admission, and `threads` counts this process's threads, in all and by name. `st
 doctor` prints it as `slo/writer-hold`.
@@ -218,12 +226,12 @@ The socket's existing 30-second timer remains the delivery cadence for clock-onl
 This cache covers the six collections named above.
 
 A disposable local single-client cold-read comparison is available with:
-`cargo test -p st3 --lib shared_windows_local_single_client_cost -- --ignored --nocapture`.
+`cargo test -p st3-daemon --lib shared_windows_local_single_client_cost -- --ignored --nocapture`.
 It compares uncached, cold cached and warm reads for 100 glass rows under Unix and paired
 sessions, alternating case order and reporting aggregate wall/process CPU. Debug-profile
 fixture results do not measure deployed paired-client CPU or production tail latency.
 
-`cargo test -p st3 --lib mission_attention_projection_fixture_timing -- --ignored --nocapture`
+`cargo test -p st3-daemon --lib mission_attention_projection_fixture_timing -- --ignored --nocapture`
 compares 22 uncached projections with shared cold and 22 warm reads over 70 generated missions
 and person steps, asserting projection parity. Its stage profile separates mission attention-run
 selection, definition reads, run overviews, step previews and attention snapshot work. The
@@ -446,7 +454,7 @@ five seconds. A warning log and the `mailbox-wake-dispatcher` doctor check expos
 startup and whether routing is currently degraded. There is no debounce. `task mailbox-wake-dispatch`,
 `task mailbox-change-check` and `task mailbox-snapshot` expose the routing, checking and full-read
 costs separately in doctor and profiling counters. Run the isolated many-stream comparison with
-`cargo test --release -p st3 --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;
+`cargo test --release -p st3-daemon --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;
 `ST_MAILBOX_PROFILE_DIR` retains its generated store, latency/CPU results, doctor counters and
 profile. Its load client and daemon run in separate processes.
 
@@ -516,7 +524,7 @@ projection's frontier, full-card reads bypass shared cached rows and cold-build 
 they do not borrow stale queue fields from an earlier physical snapshot.
 
 The isolated 60-agent, six-mission, 60-step fixture counts canonical claim kinds and local samples:
-`cargo test -p st3 --lib agent_roster_typical_claim_kind_baseline -- --nocapture`.
+`cargo test -p st3-daemon --lib agent_roster_typical_claim_kind_baseline -- --nocapture`.
 Its frozen pre-incremental classification distinguishes the old cold fallback from the current
 selected-card build count. Full JSON parity, including queues, todos and usage, is checked by
 `agent_roster_seeded_claim_sequences_match_cold_json` with reproducible proptest sequences,
@@ -574,14 +582,14 @@ policy. Only recording traced requests perform the additional read-only snapshot
 its cost under claim churn remains unmeasured until the focused native receipt is available.
 
 The focused 70-agent, 20-session fixture reports card-status, usage, repeated-projection and
-incremental-update costs with `cargo test -p st3 --lib agent_roster_snapshot_fixture_timing --
+incremental-update costs with `cargo test -p st3-daemon --lib agent_roster_snapshot_fixture_timing --
 --ignored --nocapture`. It is a serial fixture micro-measure, not a load benchmark. CI's
 `perf-load` workload holds concurrent agents WS subscribers and measures first-snapshot
 latency against the roster's 300 ms budget.
 
 Normal tests include a small cached-versus-uncached roster comparison before and after local
 timeline activity, in both history modes. Run the heartbeat-only fixture with
-`cargo test -p st3 --lib agent_roster_heartbeat_only_local_stream_hit_rate -- --nocapture`:
+`cargo test -p st3-daemon --lib agent_roster_heartbeat_only_local_stream_hit_rate -- --nocapture`:
 it prints append/probe/hit counts, hit rate and elapsed time, requires every heartbeat probe to
 reuse the same immutable rows, and requires a subsequent timeline append to miss before rebuild.
 The normal warm HTTP fixture
@@ -803,7 +811,7 @@ not browser-specific back/forward-cache eligibility. This proves the early path 
 is loading; it does not promise that every network's WebSocket handshake outruns an already-cached
 bundle. Both commands close their ephemeral servers and browser sessions in `finally`.
 
-The daemon's existing [`CollectionSubscribe`](../../crates/st3/src/api/client_v0.rs)
+The daemon's existing [`CollectionSubscribe`](../../crates/st3-daemon/src/api/client_v0.rs)
 derives Serde deserialization without `deny_unknown_fields`, so the optional trace field
 is accepted and ignored by older servers.
 
