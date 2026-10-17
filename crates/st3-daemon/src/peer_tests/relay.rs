@@ -2634,6 +2634,109 @@ async fn a_gateway_lists_a_remote_agents_messages_from_its_owner_and_says_when_i
 }
 
 #[tokio::test]
+async fn owner_queue_relay_preserves_large_and_maximally_escaped_content() {
+    use st3_schema::harness_control::{Approval, Binding, Models, NativeState};
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("queue-owner").unwrap());
+    let intent = crate::graph::parse_intent(
+        "version 2\nagent \"queue-worker\" { workspace \"/tmp\"; command \"true\" }",
+        "queue-owner",
+    ).unwrap();
+    let planned = store.mission(&intent, crate::model::IntentInput { kdl: String::new(), source_name: None }).unwrap();
+    store.apply_as(&intent, &planned.subject_tokens, "queue-relay-declaration", Some("person/operator")).unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "agent/queue-owner.queue-worker".into(), kind: "runtime.observed".into(),
+        actor: Some("agent/queue-owner.queue-worker".into()),
+        fields: BTreeMap::from([
+            ("runtime_id".into(), serde_json::json!("native-runtime")),
+            ("incarnation_id".into(), serde_json::json!("incarnation-one")),
+            ("status".into(), serde_json::json!("running")),
+        ]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let fence = store.bind_mailbox(&crate::mailbox::Fence::new(
+        "agent/queue-owner.queue-worker", "incarnation-one", "delivery",
+    )).unwrap();
+    let binding = Binding {
+        desired_revision: store.harness_control_desired_revision(&fence).unwrap(),
+        incarnation_id: "incarnation-one".into(), session_id: "native-one".into(), turn_id: None,
+    };
+    store.observe_harness_control(&NativeState {
+        subject: "agent/queue-owner.queue-worker".into(), binding: binding.clone(), idle: false,
+        input_supported: true,
+        steer: Default::default(),
+        models: Models {
+            choices: Vec::new(), selected: None, atomic_model_effort: false,
+            revision: "models-one".into(), available: false, complete: true,
+            source: "native-extension-model-registry".into(),
+        },
+        approval: Approval { supported: false, reason: "unsupported".into() }, reason: None,
+    }, &fence).unwrap();
+    let socket = root.path().join("st3.sock");
+    let app = crate::api::AppState {
+    owning_person: None,
+        store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()),
+        event_notify: watch::channel(0_u64).0, node: "queue-owner".into(),
+        state_dir: root.path().into(), pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
+        client_relay: None, native_session_home: None,
+        planner_default: crate::model::PlannerSpec::default(),
+    };
+    let served = socket.clone();
+    let daemon = tokio::spawn(async move {
+        crate::api::serve_unix(&served, crate::api::router(app)).await
+    });
+    for _ in 0..200 {
+        if tokio::net::UnixStream::connect(&socket).await.is_ok() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let auth = FleetAuth::test("fleet-test", &[7; 32]);
+    let peer = PeerState::new(MainBackend::new(socket.to_path_buf()), "queue-owner".into(), auth,
+        FleetContext::legacy(BTreeSet::from(["queue-gateway".into()])));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let worker = tokio::spawn(async move {
+        axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await
+    });
+    let secret = root.path().join("fleet-secret");
+    fs::write(&secret, [7_u8; 32]).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let relay = ClientRelay::from_config(&Config {
+        node: "queue-gateway".into(), fleet_id: Some("fleet-test".into()),
+        shared_secret_file: Some(secret),
+        peers: vec![PeerConfig { name: "queue-owner".into(), url: format!("http://{address}") }],
+        ..Default::default()
+    }).unwrap().unwrap();
+    let content = "a".repeat(20 * 1024);
+    let accepted = relay.read("host/queue-owner", &ClientReadRequest {
+        authority_actor: "person/operator".into(), relay: None,
+        request: ClientReadOperation::HarnessQueueMutation {
+            action_id: "action/large-enqueue".into(), idempotency_key: "queue-relay-large-enqueue".into(),
+            parameters: serde_json::json!({"subject":"agent/queue-owner.queue-worker","binding":binding,
+                "queue_revision":0,"mutation":{"type":"enqueue","content":content,"lane":"follow_up"}}),
+        },
+    }).await.unwrap();
+    assert_eq!(accepted["status"], "accepted");
+    let entry_id = accepted["harness_control"]["entry_id"].as_str().unwrap();
+    assert_eq!(store.harness_control_queue("agent/queue-owner.queue-worker").unwrap().entries[0].content, content);
+    let escaped = "\u{1}".repeat(64 * 1024);
+    let replaced = relay.read("host/queue-owner", &ClientReadRequest {
+        authority_actor: "person/operator".into(), relay: None,
+        request: ClientReadOperation::HarnessQueueMutation {
+            action_id: "action/escaped-replace".into(), idempotency_key: "queue-relay-escaped-replace".into(),
+            parameters: serde_json::json!({"subject":"agent/queue-owner.queue-worker","binding":binding,
+                "queue_revision":1,"mutation":{"type":"replace","entry_id":entry_id,"content":escaped}}),
+        },
+    }).await.unwrap();
+    assert_eq!(replaced["status"], "applied");
+    let queue = store.harness_control_queue("agent/queue-owner.queue-worker").unwrap();
+    assert_eq!(queue.entries[0].id, entry_id);
+    assert_eq!(queue.entries[0].content, escaped);
+    worker.abort();
+    daemon.abort();
+}
+
+#[tokio::test]
 async fn a_relaying_worker_refuses_a_forged_path_and_a_spent_hop_limit() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");

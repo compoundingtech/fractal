@@ -196,6 +196,8 @@ pub mod summary_list;
 pub mod attention_ivm;
 pub mod backup;
 pub mod checkpoint_rules;
+pub mod harness_control;
+pub mod harness_model;
 pub mod harness_questions;
 pub mod checkpoint_status;
 pub mod mission_eligibility;

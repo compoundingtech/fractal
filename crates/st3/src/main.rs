@@ -71,6 +71,7 @@ mod fractal;
 #[cfg(test)]
 mod follow_tests;
 mod presentation;
+mod native_control_driver;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
@@ -15047,6 +15048,10 @@ struct PiChannelResume {
     session: String,
     #[serde(default)]
     native_session: Option<String>,
+    #[serde(default)]
+    controls: native_control_driver::NativeControls,
+    #[serde(default)]
+    control_fence: Option<st3::mailbox::Fence>,
     #[serde(default)]
     todo_outbox: Option<PathBuf>,
     // The latest validated hydration survives graph lag and binary replacement without rebinding.

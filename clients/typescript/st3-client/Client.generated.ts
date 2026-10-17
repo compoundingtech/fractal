@@ -7,6 +7,7 @@ import type {
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
+    HarnessQueueView, HarnessModelCatalogPage, HarnessControlOperationReceipt,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
     AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage,
 } from './Models.generated.ts';
@@ -495,6 +496,9 @@ export class St3Client {
     async notesList(): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes'); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options)); }
     async customSubjectsGet(id: string): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`); }
+    async harnessQueueGet(id: string, options: PageOptions = {}): Promise<EnvelopeOf<HarnessQueueView>> { return this.get(`/v1/client/harness-queue/${encodeURIComponent(id)}` + query(options)); }
+    async harnessModelsGet(id: string, options: PageOptions = {}): Promise<EnvelopeOf<HarnessModelCatalogPage>> { return this.get(`/v1/client/harness-models/${encodeURIComponent(id)}` + query(options)); }
+    async harnessControlReceiptGet(id: string, subject: string): Promise<EnvelopeOf<HarnessControlOperationReceipt>> { return this.get(`/v1/client/harness-control-receipts/${encodeURIComponent(id)}` + query({ subject })); }
     async hostRepositories(id: string): Promise<EnvelopeOf<HostRepositories>> { return this.get(`/v1/client/hosts/${encodeURIComponent(routedId(id))}/repositories`); }
     async setsList(options: ListOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/sets' + query(options)); }
     async setsGet(id: string): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/sets/${encodeURIComponent(routedId(id))}`); }
@@ -571,6 +575,8 @@ export class St3Client {
     async arrangementEdit(input: Omit<ActionOf<'arrangement.edit'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'arrangement.edit' } as ActionOf<'arrangement.edit'>); }
     async attentionResolve(input: Omit<ActionOf<'attention.resolve'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'attention.resolve' } as ActionOf<'attention.resolve'>); }
     async customReply(input: Omit<ActionOf<'custom.reply'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'custom.reply' } as ActionOf<'custom.reply'>); }
+    async harnessModelSet(input: Omit<ActionOf<'harness.model.set'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'harness.model.set' } as ActionOf<'harness.model.set'>); }
+    async harnessQueueMutate(input: Omit<ActionOf<'harness.queue.mutate'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'harness.queue.mutate' } as ActionOf<'harness.queue.mutate'>); }
     async laneApprove(input: Omit<ActionOf<'lane.approve'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.approve' } as ActionOf<'lane.approve'>); }
     async laneJoin(input: Omit<ActionOf<'lane.join'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.join' } as ActionOf<'lane.join'>); }
     async laneLeave(input: Omit<ActionOf<'lane.leave'>, 'api_version' | 'type'>): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.leave' } as ActionOf<'lane.leave'>); }

@@ -171,6 +171,19 @@ pub enum ClientReadOperation {
     },
     /// A portable suspended seat payload, read only for the exact fenced resume request.
     SeatSnapshot { subject: String, suspend_operation: String, resume_operation: String, offset: u64 },
+    HarnessQueue {
+        subject: String,
+        cursor: Option<String>,
+        limit: Option<usize>,
+    },
+    HarnessQueueMutation {
+        action_id: String,
+        idempotency_key: String,
+        parameters: Value,
+    },
+    HarnessModelMutation { action_id: String, idempotency_key: String, parameters: Value },
+    HarnessModels { subject: String, cursor: Option<String>, limit: Option<usize> },
+    HarnessControlReceipt { subject: String, operation_id: String },
     /// The directory this host gives a new agent that names no workspace.
     AgentWorkspace {
         identity: String,
@@ -225,6 +238,14 @@ impl ClientReadOperation {
                 Duration::from_millis((*wait_ms).min(CLIENT_READ_MAX_WAIT_MS))
             }
             _ => Duration::ZERO,
+        }
+    }
+
+    // The queue accepts 64 KiB of UTF-8; JSON control escaping can expand it sixfold.
+    fn request_byte_limit(&self) -> usize {
+        match self {
+            Self::HarnessQueueMutation { .. } => 512 * 1024,
+            _ => 16_384,
         }
     }
 }
@@ -775,7 +796,7 @@ impl ClientRelay {
             });
         let body = serde_json::to_vec(request)?;
         anyhow::ensure!(
-            body.len() <= 16_384,
+            body.len() <= request.request.request_byte_limit(),
             "the client read request exceeds its bound"
         );
         let digest = FleetAuth::body_digest(&body);
@@ -1202,10 +1223,14 @@ async fn receive_client_read(
     let mut diagnostic_root = None;
     let result: Result<serde_json::Value> = async {
         anyhow::ensure!(
-            body.len() <= 16_384,
+            body.len() <= 512 * 1024,
             "the client read request exceeds its bound"
         );
         let request: ClientReadRequest = serde_json::from_slice(&body)?;
+        anyhow::ensure!(
+            body.len() <= request.request.request_byte_limit(),
+            "the client read request exceeds its operation bound"
+        );
         if matches!(&request.request, ClientReadOperation::Timeline { .. }) {
             diagnostic = relay_trace::authenticated_peer(&request_digest, &sender);
             diagnostic_root = diagnostic.as_ref().map(relay_trace::Trace::guard);
@@ -1233,7 +1258,32 @@ async fn receive_client_read(
             }
         }
         let client = st3_client::Client::unix_as(state.backend().socket(), &request.authority_actor);
+        let queue_read = matches!(&request.request, ClientReadOperation::HarnessQueue { .. });
+        let queue_mutation = matches!(&request.request, ClientReadOperation::HarnessQueueMutation { .. });
         match request.request {
+            ClientReadOperation::HarnessQueue { subject, cursor, limit } | ClientReadOperation::HarnessModels { subject, cursor, limit } => {
+                let collection = if queue_read { "harness-queue" } else { "harness-models" };
+                let mut path = format!("/v1/client/{collection}/{}", urlencoding::encode(&subject));
+                let mut query = Vec::new();
+                if let Some(cursor) = cursor { query.push(format!("cursor={}", urlencoding::encode(&cursor))); }
+                if let Some(limit) = limit { query.push(format!("limit={limit}")); }
+                if !query.is_empty() { path.push('?'); path.push_str(&query.join("&")); }
+                let native = Client::unix_as(state.backend().socket(), &request.authority_actor)?;
+                native.get(&path).await
+            }
+            ClientReadOperation::HarnessQueueMutation { action_id, idempotency_key, parameters } | ClientReadOperation::HarnessModelMutation { action_id, idempotency_key, parameters } => {
+                let snapshot = client.capabilities().await?.snapshot;
+                let incarnation = parameters.pointer("/binding/incarnation_id").and_then(Value::as_str).context("harness binding requires incarnation")?;
+                let desired = parameters.pointer("/binding/desired_revision").and_then(Value::as_str).context("harness binding requires desired revision")?;
+                let action_type = if queue_mutation { "harness.queue.mutate" } else { "harness.model.set" };
+                let action = serde_json::json!({"api_version":st3_client::API_VERSION,"id":action_id,"type":action_type,"idempotency_key":idempotency_key,"fence":{"snapshot_id":snapshot.id,"runtime_incarnation":incarnation,"runtime_desired_revision":desired},"parameters":parameters});
+                let native = Client::unix_as(state.backend().socket(), &request.authority_actor)?;
+                native.post("/v1/client/actions", &action).await
+            }
+            ClientReadOperation::HarnessControlReceipt { subject, operation_id } => {
+                let native = Client::unix_as(state.backend().socket(), &request.authority_actor)?;
+                native.get(&format!("/v1/client/harness-control-receipts/{}?subject={}", urlencoding::encode(&operation_id), urlencoding::encode(&subject))).await
+            }
             ClientReadOperation::ConversationContent {
                 session_id,
                 reference,
@@ -1719,7 +1769,7 @@ pub fn smalltalk_routes(splice: RawSplice) -> Router<PeerState> {
     Router::new()
         .route(
             CLIENT_READ_PATH,
-            post(receive_client_read).layer(DefaultBodyLimit::max(16_384)),
+            post(receive_client_read).layer(DefaultBodyLimit::max(512 * 1024)),
         )
         .route(RAW_TERMINAL_PATH, get(receive_raw_terminal).layer(axum::Extension(splice)))
 }
