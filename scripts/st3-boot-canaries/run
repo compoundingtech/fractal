@@ -1110,10 +1110,10 @@ def run(args, root, evidence):
     node = Node(root, args.binary, args.harness)
     if args.scenario.startswith("channel-"):
         shorten = {"ST3_CLAUDE_ATTACH_WINDOW_MS": str(CHANNEL_ATTACH_WINDOW_MS)}
-        # channel-missing and channel-uninitialized wait for the transient blocked state, which
-        # lasts from detection to the first recovery restart: that is the backoff. Shortening it
-        # there would make a snapshot poll miss the state, so only channel-parked, which counts
-        # attempts, takes the short backoff.
+        # channel-uninitialized must initialize the channel inside the first backoff window, after
+        # the stand-in's poll and the daemon's attach report (measured up to about 2 s), so it
+        # keeps the production backoff; channel-missing keeps it too. Only channel-parked, which
+        # counts attempts, takes the short backoff.
         if args.scenario == "channel-parked":
             shorten["ST3_CLAUDE_CHANNEL_BACKOFF_MS"] = str(CHANNEL_BACKOFF_MS)
         node.env.update(shorten)
