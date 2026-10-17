@@ -1571,11 +1571,24 @@ fn record_request_latency(
 
 pub(crate) use crate::model::new_request_id;
 
+/// Milliseconds the client-facing clock runs ahead of the wall clock. Only the test-support
+/// build has it, so a test can cross a real freshness horizon without sleeping through it.
+#[cfg(feature = "test-support")]
+static CLIENT_CLOCK_SKEW_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(feature = "test-support")]
+pub(crate) fn set_client_clock_skew_ms(skew_ms: u64) {
+    CLIENT_CLOCK_SKEW_MS.store(skew_ms, std::sync::atomic::Ordering::SeqCst);
+}
+
 fn client_now_ms() -> u128 {
-    std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis()
+        .as_millis();
+    #[cfg(feature = "test-support")]
+    let now = now + u128::from(CLIENT_CLOCK_SKEW_MS.load(std::sync::atomic::Ordering::SeqCst));
+    now
 }
 
 fn client_snapshot_time(snapshot: &ClientSnapshot) -> u128 {
