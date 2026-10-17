@@ -17923,6 +17923,12 @@ fn render_client_work_detail(work: &st3_client::Work) -> String {
             "Person answer: {typed}: {} ({}, {})",
             response.summary, response.respondent, response.ask
         );
+        if let Some(sender_class) = &response.sender_class {
+            let _ = writeln!(output, "  Sender class: {sender_class}");
+        }
+        if let Some(grant) = &response.assistant_grant_id {
+            let _ = writeln!(output, "  Assistant grant: {grant}");
+        }
     }
     if let Some(usage) = &work.usage {
         let _ = writeln!(output, "Usage: {}", render_usage(usage));

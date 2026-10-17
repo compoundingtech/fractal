@@ -3522,6 +3522,10 @@ pub struct PersonAnswerRecord {
     pub respondent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acted_for: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_grant_id: Option<String>,
     pub answered_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<PersonAnswer>,

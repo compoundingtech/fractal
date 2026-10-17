@@ -187,7 +187,7 @@
     "max_arrangement_placements": 4096,
     "pairing_ttl_seconds": 300,
     "assistant_grant_default_ttl_seconds": 3600,
-    "assistant_grant_max_ttl_seconds": 86400,
+    "assistant_grant_max_ttl_seconds": 2592000,
     "default_assistant_response_bytes": 4096,
     "max_assistant_response_bytes": 16384
   },

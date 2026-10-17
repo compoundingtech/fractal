@@ -33,10 +33,11 @@ pub(in crate::api) async fn propose(State(state): State<AppState>, Extension(sna
             return Err(forbidden("assistant writes cannot supply person signatures"));
         }
         if request.action_type == "message.send" {
-            if ["from", "actor", "sender_class", "assistant_grant_id"].iter().any(|field| request.parameters.get(*field).is_some()) {
+            if ["from", "actor", "sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|field| request.parameters.get(*field).is_some()) {
                 return Err(forbidden("assistant message identity and provenance are server-owned"));
             }
         }
+
     }
     // Execute via the same fenced, idempotent typed action path as the owner's CLI/UI.
     let mut owner_session = ClientSession::local(Some(&owner))?;

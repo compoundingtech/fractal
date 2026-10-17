@@ -41,6 +41,13 @@ fn authorized_grant(connection: &Connection, origin: &str, authorization: &Assis
         || fields["expires_at_unix_ms"].as_u64().map(u128::from).is_none_or(|expiry| expiry <= now_ms())
         || !fields["scopes"].as_array().is_some_and(|scopes| scopes.iter().any(|scope| scope.as_str() == Some(&authorization.scope)))
     { return Err(denied()); }
+    if authorization.scope == "write.assistant.messages" {
+        let recipient = authorization.recipient.as_deref().filter(|id| id.starts_with("agent/"))
+            .ok_or_else(|| St3Error::new("forbidden", "assistant messages require an existing agent recipient"))?;
+        if current_desired_row(connection, recipient).map_err(internal)?.is_none_or(|row| row.kind != "agent") {
+            return Err(St3Error::new("forbidden", "assistant messages require an existing agent recipient"));
+        }
+    }
     Ok(granted)
 }
 
@@ -60,14 +67,42 @@ pub(super) fn refuse_unverified(kind: &str, actor: Option<&str>, from: Option<&s
 /// committed message against a receiver's missing, expired or revoked local grant.
 pub(super) fn validate_replicated(kind: &str, actor: Option<&str>, fields: &Value) -> Result<(), St3Error> {
     if kind != "message.sent" { return Ok(()); }
-    if fields.get("sender_class").is_none() && fields.get("assistant_grant_id").is_none() {
+    if ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().all(|key| fields.get(*key).is_none()) {
         return refuse_unverified(kind, actor, fields["from"].as_str(), false);
     }
     if fields["sender_class"] != "external-assistant"
         || !fields["assistant_grant_id"].as_str().is_some_and(|id| id.starts_with("assistant-grant/") && id.len() > "assistant-grant/".len())
-        || actor.is_none() || actor != fields["from"].as_str()
+        || actor != Some("assistant/chatgpt") || fields["from"] != "assistant/chatgpt"
+        || !fields["assistant_owner"].as_str().is_some_and(|owner| owner.starts_with("person/") && owner.matches('/').count() == 1)
+        || !fields["assistant_session_actor"].as_str().is_some_and(|session| {
+            session.strip_prefix("assistant/chatgpt/session/") == fields["assistant_grant_id"].as_str()
+        })
     {
         return Err(St3Error::new("assistant-send-refused", "replicated assistant provenance is inconsistent"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replicated_assistant_sender_keeps_owner_and_session_as_provenance_only() {
+        let fields = json!({
+            "from":"assistant/chatgpt", "sender_class":"external-assistant",
+            "assistant_grant_id":"assistant-grant/one", "assistant_owner":"person/ada",
+            "assistant_session_actor":"assistant/chatgpt/session/assistant-grant/one",
+        });
+        validate_replicated("message.sent", Some("assistant/chatgpt"), &fields).unwrap();
+        for (actor, patch) in [
+            ("person/ada", json!({"from":"person/ada"})),
+            ("assistant/chatgpt", json!({"assistant_owner":null})),
+            ("assistant/chatgpt", json!({"assistant_session_actor":"assistant/chatgpt/session/assistant-grant/other"})),
+        ] {
+            let mut forged = fields.clone();
+            forged.as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
+            assert!(validate_replicated("message.sent", Some(actor), &forged).is_err());
+        }
+    }
 }

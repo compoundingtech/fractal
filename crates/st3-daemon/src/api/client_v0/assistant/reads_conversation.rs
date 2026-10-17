@@ -82,7 +82,11 @@ async fn timeline(
     if parameters.get("session_id").is_some_and(|requested| requested != &session_id) {
         return Err(stale("the session is not the agent's current conversation"));
     }
-    let cursor = parameters.get("cursor").cloned();
+    let collection = if detail { "assistant.conversation-detail:" } else { "assistant.conversation-timeline:" };
+    let cursor = parameters.get("cursor").map(|cursor| {
+        cursor.strip_prefix(collection).map(str::to_owned)
+            .ok_or_else(|| stale("the cursor belongs to another assistant projection"))
+    }).transpose()?;
     if cursor.as_ref().is_some_and(|cursor| cursor.is_empty() || cursor.len() > 8192) {
         return Err(validation("conversation cursor must contain 1 through 8192 bytes"));
     }
@@ -99,10 +103,14 @@ async fn timeline(
     let snippet_bytes = SNIPPET_BYTES.min(max_bytes / limit);
     let items = native["items"].as_array().into_iter().flatten().take(limit)
         .map(|item| timeline_item(item, snippet_bytes)).collect::<Vec<_>>();
+    let mut projected_page = safe_page(&native["page"]);
+    if let Some(cursor) = projected_page["next_cursor"].as_str() {
+        projected_page["next_cursor"] = json!(format!("{collection}{cursor}"));
+    }
     Ok((snapshot.clone(), json!({
         "kind":if detail { "conversation-detail" } else { "conversation-timeline" },
         "agent_id":agent_id, "session_id":session_id, "current_session_id":session_id,
-        "items":items, "page":safe_page(&native["page"]),
+        "items":items, "page":projected_page,
     })))
 }
 

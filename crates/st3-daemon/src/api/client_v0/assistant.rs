@@ -425,6 +425,25 @@ mod tests {
         complete(state, challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap(),
                  &request, "fabric-loopback").await.unwrap().unwrap().0
     }
+    #[test]
+    fn assistant_grant_ttl_contract_matches_thirty_day_policy() {
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../../../docs/st3/client-v0/schemas/operations.json"
+        )).unwrap();
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        )).unwrap();
+        let maximum = operations["limits"]["assistant_grant_max_ttl_seconds"].as_u64().unwrap();
+        assert_eq!(maximum, 30 * 24 * 60 * 60);
+        for definition in ["AssistantPairingBegin", "AssistantGrantPolicy"] {
+            assert_eq!(schema["$defs"][definition]["properties"]["expires_in_seconds"]["maximum"], maximum);
+        }
+        let policy = request();
+        assert!(validate_policy(CLIENT_API_VERSION, &policy.scopes, maximum, true, "recorded consent").is_ok());
+        for seconds in [0, maximum + 1] {
+            assert!(validate_policy(CLIENT_API_VERSION, &policy.scopes, seconds, true, "recorded consent").is_err());
+        }
+    }
     #[tokio::test]
     async fn assistant_owner_reads_reject_forged_bound_unix_and_local_peers() {
         let root = tempfile::tempdir().unwrap();
