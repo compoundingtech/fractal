@@ -31,10 +31,12 @@ export const entryCases = {
 } satisfies { readonly [T in Exclude<TimelineEntry, { readonly type: UnknownCase }>['type']]: boolean }
 
 export type ViewContext = { readonly id: string; readonly at: string; readonly text: string; readonly harness: string }
-export type ViewMeaning = { readonly _tag: 'Tool' } | { readonly _tag: 'Drop' } | { readonly _tag: 'Item'; readonly item: ConversationItem }
+export type ViewMeaning = { readonly _tag: 'Tool' } | { readonly _tag: 'Drop' } | { readonly _tag: 'Shape' } | { readonly _tag: 'Item'; readonly item: ConversationItem }
 type ViewCases = { readonly [T in KnownViewType]: (view: ViewOf<T>, ctx: ViewContext) => ViewMeaning }
 const tool = (_view?: unknown, _ctx?: ViewContext): ViewMeaning => ({ _tag: 'Tool' })
 const drop = (_view?: unknown, _ctx?: ViewContext): ViewMeaning => ({ _tag: 'Drop' })
+/** The view adds nothing over its block, so the block's own shape decides the item. */
+const shape = (_view?: unknown, _ctx?: ViewContext): ViewMeaning => ({ _tag: 'Shape' })
 const item = (value: ConversationItem): ViewMeaning => ({ _tag: 'Item', item: value })
 const quiet = (ctx: ViewContext, text: string): ViewMeaning => item({ _tag: 'Notice', id: ctx.id, at: ctx.at, kind: 'event', text })
 const stopgap = (ctx: ViewContext) => q101OmpEnvelopeStopgap({ id: ctx.id, at: ctx.at, role: 'system', text: ctx.text })
@@ -88,6 +90,7 @@ export const viewCases = {
   session_exit: (view, ctx) => quiet(ctx, `Session ${view.kind}: ${view.reason}`),
   reset_boundary: (_view, ctx) => quiet(ctx, 'Session reset'),
   skill: (view, ctx) => quiet(ctx, `Skill: ${view.name}`),
+  omp_event: shape,
 } satisfies ViewCases
 export const viewMeaning = (view: KnownView, ctx: ViewContext): ViewMeaning =>
   Match.value(view).pipe(Match.discriminatorsExhaustive('type')({
@@ -97,5 +100,5 @@ export const viewMeaning = (view: KnownView, ctx: ViewContext): ViewMeaning =>
     ask: v => viewCases.ask(v, ctx), task: v => viewCases.task(v, ctx), hub: v => viewCases.hub(v, ctx), eval: v => viewCases.eval(v, ctx), generic: v => viewCases.generic(v, ctx),
     tool_start: v => viewCases.tool_start(v, ctx), credential_pin: v => viewCases.credential_pin(v, ctx),
     job: v => viewCases.job(v, ctx), irc: v => viewCases.irc(v, ctx), compaction: v => viewCases.compaction(v, ctx),
-    assistant_error: v => viewCases.assistant_error(v, ctx), model_change: v => viewCases.model_change(v, ctx), thinking_level: v => viewCases.thinking_level(v, ctx), title: v => viewCases.title(v, ctx), session_exit: v => viewCases.session_exit(v, ctx), reset_boundary: v => viewCases.reset_boundary(v, ctx), skill: v => viewCases.skill(v, ctx),
+    assistant_error: v => viewCases.assistant_error(v, ctx), model_change: v => viewCases.model_change(v, ctx), thinking_level: v => viewCases.thinking_level(v, ctx), title: v => viewCases.title(v, ctx), session_exit: v => viewCases.session_exit(v, ctx), reset_boundary: v => viewCases.reset_boundary(v, ctx), skill: v => viewCases.skill(v, ctx), omp_event: v => viewCases.omp_event(v, ctx),
   }))
