@@ -1670,6 +1670,7 @@ fn run(
     let notify = Arc::new(Notify::new());
     let (event_notify, _events) = watch::channel(0_u64);
     let state = AppState {
+        owning_person: None,
         store: store.clone(),
         notify: notify.clone(),
         event_notify: event_notify.clone(),
@@ -2707,7 +2708,7 @@ async fn send_one(context: &Context, name: &str) -> Result<(), String> {
             Ok(())
         }
         "person read fresh" => {
-            // What `st agents ls` always sends: it waits for one roster refresh by design.
+            // Explicit legacy freshness remains a separate load case; ordinary CLI lists no longer send it.
             match context.person.get::<Value>(&format!("/v1/client/agents?fresh=true&limit={ROSTER_LIMIT}")).await {
                 Ok(_) => Err("person read fresh".into()),
                 Err(error) => Err(format!("fresh agents: {error}")),
