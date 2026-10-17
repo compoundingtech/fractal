@@ -100,6 +100,19 @@ pub fn async_command(binary: impl AsRef<std::ffi::OsStr>) -> tokio::process::Com
     command(binary).into()
 }
 
+/// Whether this executable was built in the `release` profile (`target/release/deps/NAME`). The
+/// benchmark and load tests measure time, so they skip in the unoptimized dev and test profiles. They
+/// used `cfg!(debug_assertions)` for that, which stops meaning "unoptimized" now that the dev and test
+/// profiles build without debug assertions.
+pub fn optimized_build() -> bool {
+    std::env::current_exe().ok().is_some_and(|path| {
+        path.parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .is_some_and(|profile| profile == "release")
+    })
+}
+
 /// Run a process-spawning integration test inside a Linux subreaper. The outer
 /// test remains the guardian's liveness owner even when nextest kills it outright.
 /// Call first in the test body, before creating runtimes' tasks or fixture files.
