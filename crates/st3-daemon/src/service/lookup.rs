@@ -88,7 +88,7 @@ pub(super) fn native() -> Result<Services> {
             #[cfg(target_os = "linux")]
             {
                 let mut status = systemd_service_status(name)?;
-                status.installed |= systemd_path(name)?.exists();
+                status.installed |= systemd_path(name)?.is_file();
                 Ok(status)
             }
             #[cfg(target_os = "macos")]
@@ -184,5 +184,37 @@ mod tests {
             daemon: status("fractal.service", true, false),
             replication: status("fractal-replication.service", false, false),
         }).is_err());
+    }
+
+    #[test]
+    fn systemd_absence_and_missing_properties_never_invent_installed_units() {
+        for active in ["inactive", "failed"] {
+            let reply = format!("LoadState=not-found\nActiveState={active}\nSubState=dead\n");
+            let legacy = parse_systemd_service_status("smalltalk.service", &reply).unwrap();
+            let new = parse_systemd_service_status("fractal.service", &reply).unwrap();
+            assert!(!legacy.installed && !legacy.running);
+            assert!(!new.installed && !new.running);
+            assert!(!select(vec![legacy, new]).unwrap().installed);
+        }
+        for reply in [
+            "",
+            "manager diagnostic, not unit properties",
+            "LoadState=not-found\n",
+            "LoadState=not-found\nSubState=dead\n",
+            "ActiveState=inactive\nSubState=dead\n",
+            "LoadState=\nActiveState=inactive\nSubState=dead\n",
+            "LoadState=unknown\nActiveState=inactive\nSubState=dead\n",
+        ] {
+            assert!(parse_systemd_service_status("fractal.service", reply).is_err(), "{reply:?}");
+        }
+        // A manager-confirmed active service still counts after its unit file disappears.
+        let active = parse_systemd_service_status(
+            "fractal.service", "LoadState=not-found\nActiveState=active\nSubState=running\n",
+        ).unwrap();
+        assert!(!active.installed && active.running);
+        let loaded = parse_systemd_service_status(
+            "st3.service", "LoadState=loaded\nActiveState=inactive\nSubState=dead\n",
+        ).unwrap();
+        assert!(loaded.installed && !loaded.running);
     }
 }

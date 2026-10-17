@@ -933,18 +933,28 @@ fn systemd_service_status(name: &str) -> Result<ServiceStatus> {
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
+    parse_systemd_service_status(name, &stdout)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_systemd_service_status(name: &str, stdout: &str) -> Result<ServiceStatus> {
     let value = |key: &str| {
         stdout
             .lines()
             .find_map(|line| line.strip_prefix(&format!("{key}=")))
-            .unwrap_or("unknown")
+            .filter(|value| !value.is_empty())
+            .with_context(|| format!("systemctl show {name} omitted {key}"))
     };
-    let load = value("LoadState");
-    let active = value("ActiveState");
-    let sub = value("SubState");
+    let load = value("LoadState")?;
+    let active = value("ActiveState")?;
+    let sub = value("SubState")?;
+    anyhow::ensure!(
+        matches!(load, "loaded" | "error" | "masked" | "not-found" | "bad-setting" | "stub" | "merged"),
+        "systemctl show {name} returned an invalid LoadState: {load}"
+    );
     Ok(ServiceStatus {
         name: name.into(),
-        installed: load != "not-found" || active != "inactive",
+        installed: load != "not-found",
         running: active == "active",
         state: if load == "not-found" {
             "not-installed".into()
