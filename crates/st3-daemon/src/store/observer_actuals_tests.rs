@@ -31,6 +31,9 @@ fn read(store: &Store) -> (Option<Value>, u64) {
 fn observer_actuals_reuse_survives_other_subject_writes_without_history_reads() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(&directory.path().join("store.db"), "alder").unwrap();
+    // Establish replication health before warming reductions, as the daemon's initial
+    // projection pass does. This test measures subsequent incremental replication, not replay.
+    store.project_replication_backlog_with_log("observer-reuse/setup", |_| {}).unwrap();
     append(&store, SUBJECT, 10, json!({"facts":{"state":"open"},"carried":"kept"}));
     let first = read(&store);
     assert!(first.1 > 0);
@@ -297,4 +300,44 @@ fn observer_actuals_sealing_preserves_ranks_but_late_rank_changes_invalidate() {
     let changed = read(&store);
     assert!(changed.1 > 0);
     assert_eq!(changed.0.unwrap()["facts"]["state"], "open");
+}
+
+#[test]
+fn observer_actuals_full_replay_invalidates_a_warm_changed_subject() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("store.db"), "alder").unwrap();
+    store.project_replication_backlog_with_log("observer-reuse/setup", |_| {}).unwrap();
+    append(&store, SUBJECT, 10, json!({"facts":{"state":"open"}}));
+    let old = read(&store).0;
+    assert_eq!(read(&store).1, 0);
+    // Admit a changed source without running the runtime projector, as replication admission
+    // does before projection. Warm its actual fold so replay itself must discard a live entry.
+    store.set_write_clock_at(20).unwrap();
+    {
+        let mut writer = store.connection.write();
+        let transaction = writer.transaction().unwrap();
+        smallclaims::store::append_claim_record_tx(
+            &transaction, &store.origin, SUBJECT, "resource.observed", None,
+            &json!({"fields":{"facts":{"state":"closed"}}}), &[], None,
+        ).unwrap();
+        transaction.commit().unwrap();
+    }
+    let admitted = read(&store).0;
+    assert_ne!(admitted, old);
+    assert_eq!(admitted.as_ref().unwrap()["facts"]["state"], "closed");
+    assert_eq!(read(&store).1, 0);
+    store.connection.write().execute(
+        "DELETE FROM projection_health WHERE aggregate='graph'", []).unwrap();
+    assert_eq!(read(&store).1, 0, "health deletion alone does not mutate the actual fold");
+    let mut logs = Vec::new();
+    assert!(store.project_replication_backlog_with_log(
+        "observer-reuse/forced-replay", |line| logs.push(line.to_owned()),
+    ).unwrap());
+    assert!(logs.iter().any(|line| line.contains("reason=missing-health")),
+        "fixture must exercise full replay: {logs:?}");
+    let replayed = read(&store);
+    assert_eq!(replayed.0, admitted);
+    assert_ne!(replayed.0, old);
+    assert!(replayed.1 > 0, "full replay must discard even a warm changed-subject reduction");
+    assert_eq!(read(&store).1, 0);
 }
