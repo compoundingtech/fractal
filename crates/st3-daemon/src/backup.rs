@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::client::Endpoint;
 use crate::store::{CheckpointManifest, Store};
+use crate::message_body::BodyAttachment as _;
 
 pub use crate::store::backup_format::{
     FORMAT, Header, MessageBodyRecord, Record, RestoreReport, TableDigest, VERSION,

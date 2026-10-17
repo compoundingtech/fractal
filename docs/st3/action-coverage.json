@@ -87,9 +87,9 @@
     {
       "action": "prompt.respond",
       "tests": [
-        "crates/st3-daemon/src/store.rs::a_claude_permission_prompt_is_answered_once_by_its_person_while_it_waits",
+        "crates/st3-daemon/src/store/tests.rs::a_claude_permission_prompt_is_answered_once_by_its_person_while_it_waits",
         "crates/st3-daemon/src/driver_hook.rs::a_permission_hook_returns_the_persons_answer_and_nothing_else",
-        "crates/st3-daemon/src/store.rs::a_codex_permission_prompt_is_answered_and_records_its_driver",
+        "crates/st3-daemon/src/store/tests.rs::a_codex_permission_prompt_is_answered_and_records_its_driver",
         "crates/st-drivers/src/codex_app_server/tests.rs::an_approval_answered_in_st_is_sent_once_and_only_for_this_thread",
         "crates/st-drivers/src/codex_app_server/tests.rs::a_persons_answer_takes_each_approval_methods_own_decision_words"
       ],
@@ -473,7 +473,7 @@
       "description": "Replace this seat's handoff document from a file or standard input",
       "tests": [
         "crates/st3/tests/agents_restart.rs::a_seat_writes_and_reads_its_handoff_through_the_cli",
-        "crates/st3-daemon/src/api.rs::a_seat_writes_only_its_own_handoff"
+        "crates/st3-daemon/src/api/tests.rs::a_seat_writes_only_its_own_handoff"
       ],
       "verification": "real CLI over a private Unix socket; the daemon refuses another seat's handoff"
     },
@@ -2182,7 +2182,7 @@
       "command": "st ui",
       "description": "Open the terminal interface with spaces or classic layout; plain st opens it for humans on two terminals",
       "tests": [
-        "crates/st3/src/main.rs::terminal_ui_arguments_and_help_match_the_documented_surface",
+        "crates/st3/src/terminal_ui_tests.rs::terminal_ui_arguments_and_help_match_the_documented_surface",
         "crates/st3/tests/typed_keys.rs::shifted_keys_are_typed_as_a_keyboard_protocol_terminal_sends_them",
         "crates/st3/tests/client_only.rs::daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member"
       ],
