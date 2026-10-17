@@ -214,7 +214,7 @@ fn observer_actuals_production_sources_forbid_implicit_replacement_deletes() {
             "INSERT INTO {table}(id) VALUES(1) ON CONFLICT(id) DO UPDATE SET id=excluded.id"
         )));
     }
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"));
     let mut pending = vec![manifest.join("src"), manifest.parent().unwrap().join("smallclaims/src")];
     while let Some(path) = pending.pop() {
         for entry in std::fs::read_dir(&path).unwrap() {
