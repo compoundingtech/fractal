@@ -41,7 +41,9 @@ pub use st3_kernel::fleet;
 /// Silent messages are stored and readable without waking the recipient.
 pub mod silent;
 /// `st missions check`: run a mission file's exec gates once, now, the way a run would.
+pub(crate) mod declaration_syntax;
 pub mod gate_check;
+pub(crate) mod gate_parse;
 pub use st3_kernel::gate_kinds;
 pub use st3_kernel::gate_report;
 pub mod github_watch;
