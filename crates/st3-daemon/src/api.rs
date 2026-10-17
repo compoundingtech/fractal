@@ -1662,7 +1662,7 @@ fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> V
 
 fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
     // An ended list publishes nothing until the daemon restarts.
-    if matches!(code, Some(published_lists::WORK_LIST_ENDED | "runtime-list-ended")) {
+    if matches!(code, Some(published_lists::WORK_LIST_ENDED | client_v0::published_missions::ENDED | "runtime-list-ended")) {
         return false;
     }
     // An unconfirmed mutation needs the exact original request, not a generic
@@ -1736,6 +1736,8 @@ fn client_error_code(code: Option<&str>) -> String {
         | "page-cursor-expired"
         | "agent-roster-cut-not-ready"
         | "rate-limited"
+        | "mission-list-not-ready"
+        | "mission-list-ended"
         | "runtime-not-local"
         | "runtime-authority-indeterminate"
         | "runtime-list-not-ready"
