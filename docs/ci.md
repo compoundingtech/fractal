@@ -572,6 +572,13 @@ workflow-level path filters. `linux-gate` does not depend on them.
   prints `none selected` and runs no app test on the pull request (typecheck and the merge gate still
   cover it). The lane
   `App unit test selection` pins these rules.
+  After the install the lanes run as four parallel streams on the runner's four vCPUs
+  (`stream_scenarios`, `stream_checks`, `stream_app`, `stream_kit` in `scripts/ci-fractal-web`);
+  each stream is a sequence of mostly single-threaded lanes and its output is printed whole
+  once all four have finished, in the job summary's lane table as the streams' wall time. The
+  generated changelog registry is written atomically and only when it differs, so the streams'
+  parallel readers are safe. The SDK frame CPU budgets (which measure CPU time) and the strict
+  plays (which use every vCPU, and need the Storybook build) run alone afterwards.
   App, UI kit, Storybook, browser and performance lanes join the script with the
   packages that add them. The detector separately emits `kit-inputs`: app-only changes
   skip kit play-index contracts, Storybook and strict browser plays; kit source,
