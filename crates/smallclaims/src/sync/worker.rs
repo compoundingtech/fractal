@@ -1084,7 +1084,11 @@ async fn dial_peer<B: Backend>(
     // once, even though the peer dialed in recently.
     let mut moving = false;
     let mut route = 0_usize;
+    let mut preferred_retry = None;
     let mut last_http_success = None;
+    // Routes whose one early attempt after an outage is spent, until a probe sees them down again
+    // or an exchange over them succeeds. See `wait_peer_retry`.
+    let mut early_spent = BTreeSet::new();
     let mut refused = Vec::<(Route, tokio::time::Instant)>::new();
     let mut last_attempt_unix_ms = crate::store::now_ms();
     loop {
@@ -1167,6 +1171,10 @@ async fn dial_peer<B: Backend>(
             let routes = routes.borrow_and_update();
             let now = tokio::time::Instant::now();
             refused.retain(|(route, until)| routes.contains(route) && *until > now);
+            if preferred_retry.is_some_and(|deadline| now >= deadline) {
+                route = 0;
+                preferred_retry = None;
+            }
             (0..routes.len())
                 .map(|offset| routes[(route.wrapping_add(offset)) % routes.len()].clone())
                 .find(|candidate| !refused.iter().any(|(route, _)| route == candidate))
@@ -1254,6 +1262,9 @@ async fn dial_peer<B: Backend>(
                 attempt_started,
                 last_http_success.as_ref(),
                 &http,
+                // No route was dialled, so no route was found unanswering.
+                None,
+                &mut early_spent,
             )
             .await
             {
@@ -1267,9 +1278,19 @@ async fn dial_peer<B: Backend>(
         };
         match exchange_via(&http, &backend, &node, &peer, &auth, &fleet, carrier).await {
             Ok(moved) => {
+                if route > 0 {
+                    // Keep a working fallback while a transient preferred-route failure cools
+                    // down. Busy successful exchanges must not keep postponing its retry.
+                    preferred_retry.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + worker_interval(Duration::from_secs(60))
+                    });
+                } else {
+                    preferred_retry = None;
+                }
                 if is_http {
                     last_http_success = Some((peer.url.clone(), tokio::time::Instant::now()));
                 }
+                early_spent.remove(&peer.url);
                 backoff = PeerBackoff::default();
                 must_send = false;
                 record_worker(&backend, &name, "idle", attempt_unix_ms, None).await;
@@ -1358,6 +1379,8 @@ async fn dial_peer<B: Backend>(
                     },
                     last_http_success.as_ref(),
                     &http,
+                    (is_http && exchange_unanswered(&error)).then_some(peer.url.as_str()),
+                    &mut early_spent,
                 )
                 .await
                 {
@@ -1417,6 +1440,22 @@ fn fabric_refusal_delay_with_jitter(jitter: u16) -> Duration {
     Duration::from_millis(1800 * (800 + u64::from(jitter) % 401))
 }
 
+/// Whether an exchange failed before the peer sent any response head: its connection could not
+/// be made, or was closed, reset or aborted before an answer. reqwest 0.12.28 with hyper 1.11.0
+/// reports these as a connect error, or as a request error with no status that is not a
+/// timeout. A timeout after connecting is not this: that peer was reached and stalled. Neither
+/// is any answer, however it failed (an error status, a redirect loop, a body cut off after its
+/// head), nor a fault building the request here.
+fn exchange_unanswered(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .any(|error| {
+            error.is_connect()
+                || (error.is_request() && error.status().is_none() && !error.is_timeout())
+        })
+}
+
 /// Failed connections have no graph wake dependency: unrelated local writes must not
 /// turn an absent member into a hot loop. Jitter spreads fleet retries across an hour.
 #[derive(Default)]
@@ -1454,6 +1493,8 @@ async fn wait_peer_retry<B: Backend>(
     attempt_started: tokio::time::Instant,
     last_http_success: Option<&(String, tokio::time::Instant)>,
     http: &reqwest::Client,
+    unanswered: Option<&str>,
+    early_spent: &mut BTreeSet<String>,
 ) -> bool {
     let started = tokio::time::Instant::now();
     let mut deadline = started + delay;
@@ -1518,7 +1559,20 @@ async fn wait_peer_retry<B: Backend>(
                     .timeout(PEER_PROBE_TIMEOUT).send().await.is_ok()
             }, if probe_url.is_some() => {
                 next_probe = tokio::time::Instant::now() + PEER_PROBE_INTERVAL;
-                if alive {
+                let probed = probe_url.unwrap();
+                if !alive {
+                    // The route is down: its next recovery may be retried early once more.
+                    early_spent.remove(probed.as_str());
+                } else if unanswered == Some(probed.as_str()) && !early_spent.contains(probed.as_str()) {
+                    // The failed exchange got no answer on this route, and the route answers
+                    // now: the outage has ended, so retry now rather than up to 30 seconds after
+                    // the failure. Once per outage: a later failure keeps the cap below until a
+                    // probe sees the route down again. The backoff count is kept.
+                    early_spent.insert(probed.clone());
+                    record_worker(backend, name, "backoff", last_attempt_unix_ms,
+                        Some(Duration::ZERO)).await;
+                    return false;
+                } else {
                     // Transport is alive, but another expensive exchange has just failed.
                     // Retain backoff and allow at most one attempt every 30 seconds at the cap.
                     // A cheap probe is not authenticated activity. It must not refresh
@@ -2438,6 +2492,36 @@ async fn post_signed<B: Backend>(
     .into())
 }
 
+/// What an unsigned refusal from `peer` says: its status and, only for the bodies this protocol's
+/// own unsigned refusals carry or for a size refusal, a fixed reason. Any other body is counted,
+/// never quoted, since nothing vouches for what it contains.
+fn unsigned_refusal(peer: &str, status: StatusCode, body: &[u8]) -> String {
+    let reason = [
+        (
+            "replication request body:",
+            "it could not read the request body (larger than it accepts, or not valid deflate)",
+        ),
+        (
+            "replication authentication failed:",
+            "it could not authenticate the request",
+        ),
+    ]
+    .into_iter()
+    .find(|(prefix, _)| body.starts_with(prefix.as_bytes()))
+    .map(|(_, reason)| reason)
+    .or_else(|| {
+        (status == StatusCode::PAYLOAD_TOO_LARGE)
+            .then_some("the request body is larger than it accepts")
+    });
+    match reason {
+        Some(reason) => format!("peer {peer} refused the exchange with an unsigned {status}: {reason}"),
+        None => format!(
+            "peer {peer} answered an unsigned {status} ({} body bytes, not shown)",
+            body.len()
+        ),
+    }
+}
+
 /// Send one signed request to a peer path and return the peer's verified answer, as
 /// `post_signed` does for an exchange.
 #[allow(clippy::too_many_arguments)]
@@ -2494,6 +2578,12 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     // A build older than a path answers an unsigned 404.
     if status == StatusCode::NOT_FOUND && headers.get(HEADER_SIGNATURE).is_none() {
         anyhow::bail!("peer {} runs a build without `{path}`", peer.name);
+    }
+    // Any other refusal without the fleet's signature is reported by its status, before the
+    // signature check would report only a missing header and hide why the exchange failed. Its
+    // body is never trusted as data; an unsigned success still fails the signature check below.
+    if !status.is_success() && headers.get(HEADER_SIGNATURE).is_none() {
+        anyhow::bail!(unsigned_refusal(&peer.name, status, &bytes));
     }
     let bytes = if deflated(&headers) {
         inflate(&bytes)?
@@ -2581,3 +2671,6 @@ mod tests;
 #[cfg(test)]
 #[path = "transport_error_tests.rs"]
 mod transport_error_tests;
+#[cfg(test)]
+#[path = "unsigned_refusal_tests.rs"]
+mod unsigned_refusal_tests;
