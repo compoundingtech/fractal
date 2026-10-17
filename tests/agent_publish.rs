@@ -788,7 +788,6 @@ fn bundle_workspace_descendants_are_not_publication_input() {
     assert!(fs::read_dir(published_workspace).unwrap().next().is_none());
 }
 
-#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 #[ignore = "https://github.com/compoundingtech/st2/issues/498"]
 fn spec_publish_crash_stages_only_in_the_control_plane() {
@@ -858,7 +857,6 @@ fn spec_publish_crash_stages_only_in_the_control_plane() {
     );
 }
 
-#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 #[ignore = "https://github.com/compoundingtech/st2/issues/498"]
 fn publish_post_commit_generation_failure_is_fenced_and_recovered() {
@@ -928,7 +926,6 @@ fn publish_post_commit_generation_failure_is_fenced_and_recovered() {
     assert!(!catalog.join(".st2/catalog-generation-incomplete").exists());
 }
 
-#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 #[ignore = "https://github.com/compoundingtech/st2/issues/498"]
 fn success_receipt_requires_exact_locked_readback() {
@@ -979,7 +976,6 @@ fn success_receipt_requires_exact_locked_readback() {
     assert!(!catalog.join(".st2/catalog-generation").exists());
 }
 
-#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 #[ignore = "https://github.com/compoundingtech/st2/issues/498"]
 fn success_receipt_requires_locked_full_catalog_readmission() {
@@ -1036,7 +1032,6 @@ fn success_receipt_requires_locked_full_catalog_readmission() {
     assert!(!catalog.join(".st2/catalog-generation").exists());
 }
 
-#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 #[ignore = "https://github.com/compoundingtech/st2/issues/498"]
 fn control_directory_swap_cannot_redirect_publication_staging() {
@@ -1092,7 +1087,6 @@ fn control_directory_swap_cannot_redirect_publication_staging() {
     assert!(retained.join("catalog-generation").is_file());
 }
 
-#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 #[ignore = "https://github.com/compoundingtech/st2/issues/498"]
 fn intermediate_host_swap_cannot_redirect_publication_outside_the_catalog() {
@@ -1184,7 +1178,6 @@ fn compile_agent_is_not_a_cli_writer_anymore() {
     assert!(!completions.contains("compile-agent"));
 }
 
-#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 #[ignore = "https://github.com/compoundingtech/st2/issues/498"]
 fn concurrent_publishers_serialize_and_only_one_wins_the_cas() {
