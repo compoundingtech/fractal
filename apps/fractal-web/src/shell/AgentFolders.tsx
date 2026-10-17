@@ -615,6 +615,11 @@ const BoundFolderRow = ({ node }: { readonly node: SidebarNode }) => {
   </div>
 }
 
+interface CachedBoundElement {
+  readonly node: SidebarNode
+  readonly element: AgentFolderTreeItem
+}
+
 /** The live host owns roster presentation and arrangement edits; RAC owns hierarchy and focus. */
 const BoundAgentFolders = (props: AgentFoldersProps) => {
   const treeRef = React.useRef<SidebarTreeHandle>(null)
@@ -661,17 +666,34 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
     onRootDrop: event => applyDrop({ ...event, target: { type: 'root' } }),
   }), [foldersById, dropTarget, applyDrop])
   const { dragAndDropHooks } = useDragAndDrop<AgentFolderTreeItem>(dragOptions)
+  // Status names replace only their owning RAC item, retaining sibling measurement keys.
+  const elements = React.useMemo(() => new Map<string, CachedBoundElement>(), [props.onSelect])
   const items = React.useMemo(() => {
-    const render = (node: SidebarNode, depth: number): AgentFolderTreeItem => ({
-      id: node.id, depth, textValue: node.label,
-      accessibleName: props.accessibleNames?.get(node.id),
-      agentRef: node._tag === 'Agent' ? node.subject : undefined,
-      onAction: node._tag === 'Agent' ? () => props.onSelect?.(node.id) : undefined,
-      children: node._tag === 'Agent' ? undefined : node.children.map(child => render(child, depth + 1)),
-      render: () => <BoundFolderRow node={node} />,
-    })
-    return props.tree.map(node => render(node, 0))
-  }, [props.tree, props.onSelect, props.accessibleNames])
+    const retained = new Set<string>()
+    const render = (node: SidebarNode, depth: number): AgentFolderTreeItem => {
+      retained.add(node.id)
+      const cached = elements.get(node.id)
+      const children = node._tag === 'Agent' ? undefined : node.children.map(child => render(child, depth + 1))
+      const accessibleName = props.accessibleNames?.get(node.id)
+      const agentRef = node._tag === 'Agent' ? node.subject : undefined
+      const sameChildren = children === undefined ? cached?.element.children === undefined
+        : cached?.element.children !== undefined && sameElements(cached.element.children, children)
+      if (cached !== undefined && cached.node._tag === node._tag && cached.element.depth === depth &&
+        cached.element.textValue === node.label && cached.element.accessibleName === accessibleName &&
+        cached.element.agentRef === agentRef && sameChildren &&
+        (node._tag === 'Agent' || (cached.node._tag !== 'Agent' && cached.node.collapsed === node.collapsed))) return cached.element
+      const element: AgentFolderTreeItem = {
+        id: node.id, depth, textValue: node.label, accessibleName, agentRef, children,
+        onAction: node._tag === 'Agent' ? () => props.onSelect?.(node.id) : undefined,
+        render: () => <BoundFolderRow node={node} />,
+      }
+      elements.set(node.id, { node, element })
+      return element
+    }
+    const next = props.tree.map(node => render(node, 0))
+    for (const key of elements.keys()) if (!retained.has(key)) elements.delete(key)
+    return next
+  }, [props.tree, props.onSelect, props.accessibleNames, elements])
   const expandAncestors = (selected: string) => {
     const path: Exclude<SidebarNode, { readonly _tag: 'Agent' }>[] = []
     const find = (nodes: readonly SidebarNode[]): boolean => {

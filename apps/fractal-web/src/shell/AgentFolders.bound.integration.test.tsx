@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import type { AgentFoldersProps, SidebarNode } from '../folders/sidebarContract.ts'
 import { SidebarAgentRow, sidebarRowAccessibleName } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import * as sidebarKit from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { sidebarRow } from '../web/sidebarRow.ts'
 import { fleetFromAgents } from '../data/projections.ts'
 import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
@@ -84,6 +85,36 @@ describe('bound live folder tree', () => {
       await key('ArrowRight')
       expect(view.toggles).toContainEqual({ id: 'alpha', collapsed: false })
     } finally { await view.dispose() }
+  })
+  it('retains sibling RAC item identities when one accessible status or roster label changes', async () => {
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    const one: SidebarNode = { _tag: 'Agent', id: 'agent/one', subject: 'agent/one', label: 'One' }
+    const two: SidebarNode = { _tag: 'Agent', id: 'agent/two', subject: 'agent/two', label: 'Two' }
+    const props: Omit<AgentFoldersProps, 'tree' | 'accessibleNames'> = {
+      canDrop: () => ({ ok: true }), onMove: () => {}, onCreateFolder: () => {}, onRenameFolder: () => {}, onDeleteFolder: () => {}, onToggleCollapsed: () => {},
+      renderAgent: node => <span>{node.label}</span>,
+    }
+    const tree = vi.spyOn(sidebarKit, 'SidebarTree')
+    const items = () => tree.mock.calls.at(-1)![0].items
+    try {
+      await React.act(async () => root.render(<AgentFolders {...props} tree={[one, two]} accessibleNames={new Map([[one.id, 'One, idle'], [two.id, 'Two, idle']])} />))
+      const before = items()
+      await React.act(async () => root.render(<AgentFolders {...props} tree={[one, two]} accessibleNames={new Map([[one.id, 'One, working'], [two.id, 'Two, idle']])} />))
+      const status = items()
+      expect(status[0]).not.toBe(before[0])
+      expect(status[1]).toBe(before[1])
+      expect(host.querySelector('[role="row"][aria-label="One, working"]')).not.toBeNull()
+      await React.act(async () => root.render(<AgentFolders {...props} tree={[{ ...one, label: 'Renamed One' }, { ...two }]} accessibleNames={new Map([[one.id, 'Renamed One, working'], [two.id, 'Two, idle']])} />))
+      expect(items()[0]).not.toBe(status[0])
+      expect(items()[1]).toBe(before[1])
+      expect(host.querySelector('[role="row"][aria-label="Renamed One, working"]')).not.toBeNull()
+    } finally {
+      tree.mockRestore()
+      await React.act(async () => root.unmount())
+      host.remove()
+    }
   })
   it('retains the native owning row name after RAC repositions memoized content', async () => {
     const host = document.createElement('div')
