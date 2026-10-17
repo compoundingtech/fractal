@@ -5024,6 +5024,7 @@ dependencies = [
  "serde_json",
  "smallclaims",
  "st-drivers",
+ "st3-client",
  "st3-kernel",
  "tempfile",
  "tokio",
