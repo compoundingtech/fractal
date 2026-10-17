@@ -1,3 +1,7 @@
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
 use std::fs;
 use std::process::Command;
 
