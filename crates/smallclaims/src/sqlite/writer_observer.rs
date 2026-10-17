@@ -182,6 +182,11 @@ impl MutationState {
         self.replacing_authorizer.store(false, Ordering::Relaxed);
     }
 
+    pub(crate) fn reverify(self: &Arc<Self>, connection: &Connection) {
+        self.schema_dirty.store(true, Ordering::Relaxed);
+        self.resolved(connection);
+    }
+
     pub(crate) fn resolved(self: &Arc<Self>, connection: &Connection) {
         if !connection.is_autocommit() {
             return;

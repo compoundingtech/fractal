@@ -123,7 +123,7 @@ fn observer_actuals_lru_is_bounded() {
         CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
         CREATE TABLE replica_records(claim_id TEXT,position INTEGER);
         CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);").unwrap();
-    let serial = cache.seed(&connection).unwrap();
+    let serial = cache.seed(&connection, || cache.coverage_verified()).unwrap();
     for index in 0..LIMIT + 10 {
         cache.read(&connection, &format!("resource/{index}"), serial).unwrap();
     }
@@ -235,4 +235,33 @@ fn observer_actuals_production_sources_forbid_implicit_replacement_deletes() {
             }
         }
     }
+}
+
+#[test]
+fn observer_actuals_external_ddl_requires_verified_physical_coverage() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.db");
+    let store = Store::open(&path, "alder").unwrap();
+    let id = append(&store, SUBJECT, 10, json!({"facts":{"state":"open"}}));
+    read(&store);
+    assert_eq!(read(&store).1, 0);
+    let external = Connection::open(&path).unwrap();
+    external.execute_batch(
+        "DROP TABLE projection_digest_repaired_claims;
+         CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY) WITHOUT ROWID;"
+    ).unwrap();
+    assert!(read(&store).1 > 0);
+    assert!(read(&store).1 > 0, "external unsupported DDL must latch reuse off");
+    external.execute(
+        "INSERT INTO projection_digest_repaired_claims VALUES (?1)", [&id]).unwrap();
+    let repaired = read(&store);
+    assert_eq!(repaired.0, None);
+    assert!(repaired.1 > 0);
+    assert!(read(&store).1 > 0, "external repair writes must not bypass the coverage latch");
+    external.execute_batch(
+        "DROP TABLE projection_digest_repaired_claims;
+         CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);"
+    ).unwrap();
+    assert!(read(&store).1 > 0);
+    assert_eq!(read(&store).1, 0, "external recovery requires positive dispatcher verification");
 }

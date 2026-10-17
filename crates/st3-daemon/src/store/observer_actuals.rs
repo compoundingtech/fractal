@@ -41,11 +41,28 @@ impl Actuals {
     }
 
     /// Called while holding the autocommit writer, before opening the preparation snapshot.
-    pub(super) fn seed(&self, connection: &Connection) -> Result<u64> {
+    pub(super) fn seed(&self, connection: &Connection, reverify: impl FnOnce()) -> Result<u64> {
         let native = (
             connection.query_row("PRAGMA main.data_version", [], |row| row.get(0))?,
             connection.query_row("PRAGMA main.schema_version", [], |row| row.get(0))?,
         );
+        let changed = {
+            let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.native != Some(native) {
+                // External DDL bypasses the dispatcher's authorizer. Clearing entries alone
+                // cannot establish that subsequent row notifications still cover the fold.
+                state.coverage_failed = true;
+                state.clear();
+                state.serial = state.serial.wrapping_add(1);
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            // This must run without the cache mutex: verification publishes callbacks here.
+            reverify();
+        }
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if state.native != Some(native) || state.global {
             state.clear();
