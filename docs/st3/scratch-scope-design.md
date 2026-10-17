@@ -18,15 +18,15 @@ membership change, document write, credential use or service operation.
 This read uses main `2bc2ed54a900d884c99781b2a0ebc531e531d2e5` on 2026-10-14. It is source
 evidence, not an installed-build or runtime test receipt.
 
-* [main.rs](../../crates/st3/src/main.rs): `fleet_person` requires a person path for invite;
-  `run_fleet` can found a fleet without that helper. Create and join already lock the state
+* [main.rs](../../crates/st3/src/main.rs) and [fleet_cli.rs](../../crates/st3/src/fleet_cli.rs): `fleet_person`
+  requires a person path for invite; `run_fleet` can found a fleet without that helper. Create and join already lock the state
   admission boundary. A separate state directory alone supplies no agent bootstrap authority.
-* [api.rs](../../crates/st3/src/api.rs): `harness_ancestor` and `guard_bound_request` bind Linux
+* [api.rs](../../crates/st3-api/src/api.rs): `harness_ancestor` and `guard_bound_request` bind Linux
   harness requests to their agent. Invite creation and revocation require `concrete_person`.
   The non-Linux ancestry helper returns `None`; it cannot authenticate a Mac scratch owner.
 * [setup.rs](../../crates/st3/src/setup.rs): setup refuses an agent process. Do not remove
   `ST_AGENT` or send a person actor to evade this check.
-* [fixture.rs](../../crates/st3/src/fixture.rs), [test_support.rs](../../crates/st3/src/test_support.rs)
+* [fixture.rs](../../crates/st3/src/fixture.rs), [test_support.rs](../../crates/st3-store/src/test_support.rs)
   and [Cargo.toml](../../crates/st3/Cargo.toml) provide a separate, non-installed
   `st3-fixture` executable requiring `test-support`. It initializes test state that disables
   ancestry binding in its server and clears seat environment in fixture subprocess helpers.

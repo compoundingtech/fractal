@@ -41,7 +41,11 @@ pub mod prepared_envelope;
 mod replica_record;
 pub use operation_metadata::OperationMetadata;
 #[cfg(test)]
+mod exchange_budget_tests;
+#[cfg(test)]
 mod projection_busy_tests;
+#[cfg(test)]
+mod projection_stage_tests;
 #[cfg(test)]
 mod receive_writer_tests;
 #[cfg(test)]
@@ -1023,7 +1027,12 @@ impl Store {
         )?;
         let committed_index = Arc::new(AtomicU64::new(index));
         Ok(Self {
-            connection: WriterConnection::new(connection, committed_index.clone()),
+            connection: match runtime.writer_observer() {
+                Some(observer) => WriterConnection::new_with_observer(
+                    connection, committed_index.clone(), observer,
+                )?,
+                None => WriterConnection::new(connection, committed_index.clone()),
+            },
             readers,
             committed_index,
             seeded_batch_rowid: AtomicI64::new(seeded_batch_rowid),
@@ -1202,6 +1211,38 @@ pub struct PeerSyncProgress {
     pub last_failed_exchange: Option<crate::replication::ReplicationExchangeTransport>,
     /// How many envelopes this node held when it took the last measurement.
     pub measured_inventory_envelopes: u64,
+    /// What the open window's measurements were compared against.
+    pub window_basis: InventoryBasis,
+}
+
+/// What a measured difference is relative to. When it changes, the number of envelopes the peer
+/// holds that this node lacks can fall without any receipt, so a window that spans the change
+/// measures no rate.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InventoryBasis {
+    /// The peer's newest stable checkpoint, `None` from a peer that advertises none.
+    pub peer_checkpoint: Option<String>,
+    /// This node's inventory generation at the measurement's snapshot
+    /// (`ReplicationSnapshot::inventory_generation`). Trimming or adopting a checkpoint deletes
+    /// envelopes and changes checkpoint tombstones, which moves it; so does any other change
+    /// below the inventory's tail. Read from the snapshot the difference was measured against,
+    /// so it is cut-consistent with it and costs no read.
+    pub local_inventory_generation: i64,
+    /// Whether the peer sent a compact inventory, compared range by range.
+    pub compact: bool,
+}
+
+impl InventoryBasis {
+    /// Whether `next` measures against a different basis than this window's. A peer that
+    /// advertises no checkpoint (an older build) keeps the window: only the guard in
+    /// [`ReplicationPeerSync::closing_rate_per_second`] then bounds a drop it cannot see. A
+    /// peer that starts advertising one changes the basis, so an upgrade resets the window
+    /// once.
+    fn changed_to(&self, next: &InventoryBasis) -> bool {
+        self.local_inventory_generation != next.local_inventory_generation
+            || self.compact != next.compact
+            || (next.peer_checkpoint.is_some() && self.peer_checkpoint != next.peer_checkpoint)
+    }
 }
 
 impl PeerSyncProgress {
@@ -1217,10 +1258,29 @@ impl PeerSyncProgress {
     }
 
     /// Record one receipt from the peer and, when the peer's inventory allowed it, the measured
-    /// difference `(peer_only, local_only)`. Rates are sampled over windows of at least
-    /// `REPLICATION_SYNC_WINDOW_MS` and smoothed so one slow exchange does not swing the estimate.
+    /// difference `(peer_only, local_only)`, against an unchanging basis.
     pub fn observe(&mut self, received: usize, difference: Option<(u64, u64)>, now: u128) {
+        let basis = self.window_basis.clone();
+        self.observe_on(received, difference, basis, now);
+    }
+
+    /// Record one receipt and measurement, made against `basis`. Rates are sampled over windows
+    /// of at least `REPLICATION_SYNC_WINDOW_MS` and smoothed so one slow exchange does not swing
+    /// the estimate. A window in which nothing arrived, or the gap did not shrink, sets that
+    /// rate to zero rather than halving an older one, and the next window starts fresh from its
+    /// own sample. A window longer than `REPLICATION_SYNC_STALE_MS`, or one whose basis changed,
+    /// measures no rate.
+    pub fn observe_on(
+        &mut self,
+        received: usize,
+        difference: Option<(u64, u64)>,
+        basis: InventoryBasis,
+        now: u128,
+    ) {
         self.window_received = self.window_received.saturating_add(received as u64);
+        // A receipt whose inventory could not be compared counts toward the open window's
+        // arrivals but compares nothing: neither the window nor its basis changes, and the next
+        // comparable measurement is judged against the basis the window opened with.
         let Some((peer_only, local_only)) = difference else {
             return;
         };
@@ -1228,12 +1288,27 @@ impl PeerSyncProgress {
         sync.peer_only_envelopes = peer_only;
         sync.local_only_envelopes = local_only;
         sync.measured_at_unix_ms = now;
+        if self.window_started_at_unix_ms != 0 && self.window_basis.changed_to(&basis) {
+            // A checkpoint or a change of comparison moved the count, not catching up.
+            sync.receive_rate_per_second = None;
+            sync.catch_up_rate_per_second = None;
+            self.window_started_at_unix_ms = 0;
+        }
         let elapsed = now.saturating_sub(self.window_started_at_unix_ms);
         if self.window_started_at_unix_ms != 0 && elapsed >= REPLICATION_SYNC_WINDOW_MS {
             if elapsed <= REPLICATION_SYNC_STALE_MS {
                 let seconds = elapsed as f64 / 1000.0;
+                // A zero sample stands alone, and a rate after a zero starts again from its own
+                // sample: averaging either way would keep half of a rate that no longer holds.
                 let smooth = |previous: Option<f64>, sample: f64| {
-                    Some(previous.map_or(sample, |previous| (previous + sample) / 2.0))
+                    if sample <= 0.0 {
+                        return Some(0.0);
+                    }
+                    Some(
+                        previous
+                            .filter(|previous| *previous > 0.0)
+                            .map_or(sample, |previous| (previous + sample) / 2.0),
+                    )
                 };
                 sync.receive_rate_per_second = smooth(
                     sync.receive_rate_per_second,
@@ -1242,6 +1317,10 @@ impl PeerSyncProgress {
                 let caught_up = self.window_peer_only as f64 - peer_only as f64;
                 sync.catch_up_rate_per_second =
                     smooth(sync.catch_up_rate_per_second, caught_up.max(0.0) / seconds);
+            } else {
+                // Measurements this far apart say nothing about the current rates.
+                sync.receive_rate_per_second = None;
+                sync.catch_up_rate_per_second = None;
             }
             self.window_started_at_unix_ms = 0;
         }
@@ -1249,11 +1328,12 @@ impl PeerSyncProgress {
             self.window_started_at_unix_ms = now;
             self.window_peer_only = peer_only;
             self.window_received = 0;
+            self.window_basis = basis;
         }
         sync.estimated_catch_up_seconds = if peer_only == 0 {
             Some(0)
         } else {
-            sync.catch_up_rate_per_second
+            sync.closing_rate_per_second()
                 .filter(|rate| rate.is_finite() && *rate > 0.0)
                 .map(|rate| (peer_only as f64 / rate).ceil())
                 .filter(|seconds| {
@@ -1301,6 +1381,15 @@ impl PeerSyncProgress {
     pub fn view(&self, now: u128) -> Option<ReplicationPeerSync> {
         let mut sync = self.measured.clone()?;
         sync.stale = now.saturating_sub(sync.measured_at_unix_ms) >= PEER_QUIET_EXCHANGE_MS;
+        // A measurement no exchange has renewed for `PEER_QUIET_EXCHANGE_MS`, including one
+        // followed only by receipts whose inventory could not be compared, keeps its counts and
+        // time, marked stale, but no current rate or forecast. The stored rates stay, so the
+        // next comparable window smooths from them; `REPLICATION_SYNC_STALE_MS` expires those.
+        if sync.stale {
+            sync.receive_rate_per_second = None;
+            sync.catch_up_rate_per_second = None;
+            sync.estimated_catch_up_seconds = None;
+        }
         sync.catching_up = sync.peer_only_envelopes > REPLICATION_EXCHANGE_ENVELOPE_LIMIT as u64
             && now.saturating_sub(sync.measured_at_unix_ms) <= REPLICATION_SYNC_STALE_MS;
         sync.graph_compared_at_unix_ms = self.graph_compared_at_unix_ms;
@@ -3732,6 +3821,110 @@ const ADMISSION_WRITER_BUDGET: std::time::Duration = std::time::Duration::from_m
 /// queued lease renewals and messages behind its entire incremental projection.
 pub const PROJECTION_CHUNK_CLAIMS: usize = 128;
 
+/// The most bytes one exchange's JSON may take before compression: the limit a peer inflates to
+/// (`MAX_EXCHANGE_BYTES`), less room for the signed answer that wraps it. A page is chosen by
+/// count, and a page of large envelopes can pass the limit; the peer then refuses the whole body
+/// and the same page is chosen again, so nothing moves.
+pub const REPLICATION_EXCHANGE_BODY_BUDGET: usize = crate::sync::MAX_EXCHANGE_BYTES - 1024 * 1024;
+
+/// Keep only the leading envelopes of `exchange` that fit its serialized body within `budget`
+/// bytes, everything else in it included. The ones dropped stay missing at the peer, so a later
+/// exchange chooses them again. An envelope too large to send even alone is a typed error rather
+/// than an exchange that silently carries nothing.
+///
+/// A page whose upper bound already fits is kept without measuring; otherwise each envelope is
+/// measured as serde writes it, counting bytes without keeping them.
+pub fn fit_exchange_body(exchange: &mut ReplicationExchange, budget: usize) -> Result<()> {
+    let envelopes = std::mem::take(&mut exchange.envelopes);
+    // The body without envelopes includes their empty brackets; each kept envelope adds its own
+    // serialized bytes and, after the first, one separating comma.
+    let base = serialized_len(&*exchange)?;
+    if base > budget {
+        exchange.envelopes = envelopes;
+        // Nothing here is dropped to fit: the inventory, digests and signatures are what the
+        // peer needs to compare at all, so an exchange whose metadata alone passes the budget
+        // is refused as it is, with its size, for the path that built it to be bounded.
+        return Err(St3Error::new(
+            "replication-exchange-metadata-too-large",
+            format!(
+                "the exchange without envelopes takes {base} bytes, past {budget}: inventory \
+                 listing {} identities and {} range digests, {} signature requests, {} signatures",
+                exchange.inventory.envelopes.len(),
+                exchange.inventory.buckets.len(),
+                exchange.signature_requests.len(),
+                exchange.signatures.len()
+            ),
+        )
+        .into());
+    }
+    if envelopes.is_empty() {
+        return Ok(());
+    }
+    let bound = envelopes.iter().try_fold(base, |total, envelope| {
+        total.checked_add(envelope_size_bound(envelope).checked_add(1)?)
+    });
+    if bound.is_some_and(|bound| bound <= budget) {
+        exchange.envelopes = envelopes;
+        return Ok(());
+    }
+    let mut size = base;
+    let mut kept = 0;
+    for envelope in &envelopes {
+        let added = serialized_len(envelope)?.saturating_add(usize::from(kept > 0));
+        match size.checked_add(added) {
+            Some(next) if next <= budget => size = next,
+            _ => break,
+        }
+        kept += 1;
+    }
+    if kept == 0 {
+        let first = &envelopes[0];
+        return Err(St3Error::new(
+            "replication-envelope-too-large",
+            format!(
+                "envelope {} {} of {} cannot be sent: its exchange body would pass {budget} bytes",
+                first.writer, first.sequence, first.hash
+            ),
+        )
+        .into());
+    }
+    exchange.envelopes = envelopes;
+    exchange.envelopes.truncate(kept);
+    Ok(())
+}
+
+/// An upper bound on one envelope's serialized length: JSON escapes a byte of a string as at
+/// most six, the payload goes as base64, and the field names, numbers, nulls and punctuation
+/// take under 256 bytes.
+fn envelope_size_bound(envelope: &ReplicaEnvelope) -> usize {
+    let strings = envelope.writer.len()
+        + envelope.hash.len()
+        + envelope.previous_hash.as_ref().map_or(0, String::len)
+        + envelope.member_key.as_ref().map_or(0, String::len)
+        + envelope.signature.as_ref().map_or(0, String::len);
+    strings
+        .saturating_mul(6)
+        .saturating_add(envelope.payload.wire_len_bound())
+        .saturating_add(256)
+}
+
+/// How many bytes serde writes for `value`, without keeping them.
+fn serialized_len<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize> {
+    struct Counting(usize);
+    impl std::io::Write for Counting {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counting = Counting(0);
+    serde_json::to_writer(&mut counting, value)?;
+    Ok(counting.0)
+}
+
 /// The most envelopes this build takes in one exchange, which it says in each inventory it
 /// sends. Admission commits once per pass, so a page this size admits well within the peer
 /// request timeout, and a first sync needs a few dozen exchanges instead of hundreds.
@@ -4662,6 +4855,7 @@ pub fn sync_progress_estimates_catch_up_from_net_progress() {
 pub fn sync_progress_omits_forecasts_outside_safe_integer_seconds() {
     let mut progress = PeerSyncProgress {
         measured: Some(ReplicationPeerSync {
+            receive_rate_per_second: Some(1.0),
             catch_up_rate_per_second: Some(1.0),
             ..Default::default()
         }),
@@ -4694,12 +4888,240 @@ pub fn sync_progress_omits_stalled_forecasts_and_recovers_on_progress() {
     assert_eq!(sync.peer_only_envelopes, 9_000);
     assert_eq!(sync.local_only_envelopes, 3);
     assert!(sync.catching_up);
-    assert!(sync.catch_up_rate_per_second.unwrap() > 0.0);
+    assert_eq!(sync.catch_up_rate_per_second, Some(0.0));
+    assert_eq!(sync.receive_rate_per_second, Some(0.0));
+    assert_eq!(sync.closing_rate_per_second(), Some(0.0));
 
+    // The stall left both rates at zero, so the next window starts fresh from its own sample:
+    // 1,000 envelopes arrive and close the gap in one window.
     progress.observe(1_000, Some((8_000, 3)), 621_000);
+    let rate = 1_000.0 / (REPLICATION_SYNC_WINDOW_MS as f64 / 1000.0);
     let sync = progress.view(621_000).unwrap();
-    assert_eq!(sync.estimated_catch_up_seconds, Some(160));
+    assert_eq!(sync.receive_rate_per_second, Some(rate));
+    assert_eq!(sync.catch_up_rate_per_second, Some(rate));
+    assert_eq!(sync.closing_rate_per_second(), Some(rate));
+    assert_eq!(
+        sync.estimated_catch_up_seconds,
+        Some((8_000.0 / rate).ceil() as u64)
+    );
     assert_eq!(sync.peer_only_envelopes, 8_000);
+}
+
+#[cfg(test)]
+const SYNC_WINDOW_SECONDS: f64 = REPLICATION_SYNC_WINDOW_MS as f64 / 1000.0;
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_forecasts_nothing_while_the_gap_grows() {
+    let window = REPLICATION_SYNC_WINDOW_MS;
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((15_000, 0)), 1_000);
+    // One window closes 1,000 envelopes.
+    progress.observe(1_000, Some((14_000, 0)), 1_000 + window);
+    let fast = 1_000.0 / SYNC_WINDOW_SECONDS;
+    assert_eq!(
+        progress.view(1_000 + window).unwrap().estimated_catch_up_seconds,
+        Some((14_000.0 / fast).ceil() as u64)
+    );
+    // Then the peer writes faster than this node receives: the gap grows 22 a window.
+    for step in 1..=3 {
+        progress.observe(1, Some((14_000 + step as u64 * 22, 0)), 1_000 + window * (step + 1));
+    }
+    let sync = progress.view(1_000 + window * 4).unwrap();
+    assert_eq!(sync.catch_up_rate_per_second, Some(0.0));
+    assert_eq!(sync.estimated_catch_up_seconds, None, "{sync:?}");
+    assert!(sync.catching_up);
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_forecasts_no_faster_than_envelopes_arrive() {
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((15_872, 0)), 1_000);
+    // The measured gap falls by 1,220 while one envelope arrives: a checkpoint on the peer or a
+    // narrower comparison, not catching up.
+    progress.observe(1, Some((14_652, 0)), 1_000 + REPLICATION_SYNC_WINDOW_MS);
+    let received = 1.0 / SYNC_WINDOW_SECONDS;
+    let sync = progress.view(1_000 + REPLICATION_SYNC_WINDOW_MS).unwrap();
+    assert_eq!(sync.catch_up_rate_per_second, Some(1_220.0 / SYNC_WINDOW_SECONDS));
+    assert_eq!(sync.receive_rate_per_second, Some(received));
+    assert_eq!(sync.closing_rate_per_second(), Some(received));
+    assert_eq!(
+        sync.estimated_catch_up_seconds,
+        Some((14_652.0 / received).ceil() as u64)
+    );
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_forgets_both_rates_after_a_long_gap_between_measurements() {
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((10_000, 0)), 1_000);
+    progress.observe(1_000, Some((9_000, 0)), 1_000 + REPLICATION_SYNC_WINDOW_MS);
+    assert!(progress.view(1_000 + REPLICATION_SYNC_WINDOW_MS).unwrap().estimated_catch_up_seconds.is_some());
+    // The next measurement comes after more than the stale window, with a larger gap.
+    let later = 1_000 + REPLICATION_SYNC_WINDOW_MS + REPLICATION_SYNC_STALE_MS + 1;
+    progress.observe(0, Some((12_000, 0)), later);
+    let sync = progress.view(later).unwrap();
+    assert_eq!(sync.receive_rate_per_second, None);
+    assert_eq!(sync.catch_up_rate_per_second, None);
+    assert_eq!(sync.estimated_catch_up_seconds, None, "{sync:?}");
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_drops_the_forecast_of_a_measurement_gone_quiet() {
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((10_000, 0)), 1_000);
+    let measured = 1_000 + REPLICATION_SYNC_WINDOW_MS;
+    progress.observe(1_000, Some((9_000, 0)), measured);
+    // Receipts whose inventory could not be compared keep the last measurement.
+    progress.observe(5, None, measured + 1_000);
+    assert!(progress.view(measured + 1_000).unwrap().estimated_catch_up_seconds.is_some());
+    let quiet = progress.view(measured + PEER_QUIET_EXCHANGE_MS).unwrap();
+    assert!(quiet.stale);
+    assert_eq!(quiet.peer_only_envelopes, 9_000);
+    assert_eq!(quiet.measured_at_unix_ms, measured);
+    assert_eq!(quiet.receive_rate_per_second, None);
+    assert_eq!(quiet.catch_up_rate_per_second, None);
+    assert_eq!(quiet.estimated_catch_up_seconds, None);
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_view_withdraws_rates_with_no_new_measurement() {
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((10_000, 0)), 1_000);
+    let measured = 1_000 + REPLICATION_SYNC_WINDOW_MS;
+    progress.observe(1_000, Some((9_000, 0)), measured);
+    let rate = 1_000.0 / SYNC_WINDOW_SECONDS;
+    let fresh = progress.view(measured + PEER_QUIET_EXCHANGE_MS - 1).unwrap();
+    assert!(!fresh.stale);
+    assert_eq!(fresh.closing_rate_per_second(), Some(rate));
+    // No observe at all: only time passes.
+    let quiet = progress.view(measured + PEER_QUIET_EXCHANGE_MS).unwrap();
+    assert!(quiet.stale);
+    assert_eq!((quiet.peer_only_envelopes, quiet.measured_at_unix_ms), (9_000, measured));
+    assert_eq!(quiet.closing_rate_per_second(), None);
+    assert_eq!(quiet.estimated_catch_up_seconds, None);
+    // The stored rates stay for the next comparable window, which averages with them.
+    progress.observe(1_000, Some((8_000, 0)), measured + REPLICATION_SYNC_WINDOW_MS);
+    let next = progress.view(measured + REPLICATION_SYNC_WINDOW_MS).unwrap();
+    assert_eq!(next.closing_rate_per_second(), Some(rate));
+    assert_eq!(next.estimated_catch_up_seconds, Some((8_000.0 / rate).ceil() as u64));
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_stale_view_of_nothing_missing_keeps_counts_but_no_forecast() {
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((10_000, 0)), 1_000);
+    let measured = 1_000 + REPLICATION_SYNC_WINDOW_MS;
+    progress.observe(10_000, Some((0, 2)), measured);
+    assert_eq!(progress.view(measured).unwrap().estimated_catch_up_seconds, Some(0));
+    let quiet = progress.view(measured + PEER_QUIET_EXCHANGE_MS).unwrap();
+    assert!(quiet.stale);
+    assert_eq!(
+        (quiet.peer_only_envelopes, quiet.local_only_envelopes, quiet.measured_at_unix_ms),
+        (0, 2, measured)
+    );
+    assert_eq!(
+        (quiet.receive_rate_per_second, quiet.catch_up_rate_per_second),
+        (None, None)
+    );
+    assert_eq!(quiet.estimated_catch_up_seconds, None);
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_forecasts_nothing_from_an_unknown_arrival_rate() {
+    let mut progress = PeerSyncProgress {
+        measured: Some(ReplicationPeerSync {
+            catch_up_rate_per_second: Some(100.0),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    progress.observe(0, Some((9_000, 0)), 1_000);
+    let sync = progress.view(1_000).unwrap();
+    assert_eq!(sync.receive_rate_per_second, None);
+    assert_eq!(sync.closing_rate_per_second(), None);
+    assert_eq!(sync.estimated_catch_up_seconds, None);
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_measures_no_rate_across_a_change_of_inventory_basis() {
+    let basis = |peer: Option<&str>, compact: bool| InventoryBasis {
+        peer_checkpoint: peer.map(str::to_owned),
+        local_inventory_generation: 7,
+        compact,
+    };
+    let window = REPLICATION_SYNC_WINDOW_MS;
+    for (case, next, rate) in [
+        // The peer adopted a newer checkpoint: its count fell by what the checkpoint dropped.
+        ("checkpoint moved", basis(Some("checkpoint/b"), true), None),
+        // The comparison switched from ranges to a full listing.
+        ("comparison changed", basis(Some("checkpoint/a"), false), None),
+        // This node trimmed or adopted a checkpoint: its own inventory generation moved.
+        (
+            "local inventory changed",
+            InventoryBasis {
+                local_inventory_generation: 8,
+                ..basis(Some("checkpoint/a"), true)
+            },
+            None,
+        ),
+        // An older peer advertises no checkpoint: the window stays, bounded by arrivals.
+        ("older peer", basis(None, true), Some(1.0 / SYNC_WINDOW_SECONDS)),
+        ("unchanged", basis(Some("checkpoint/a"), true), Some(1.0 / SYNC_WINDOW_SECONDS)),
+    ] {
+        let mut progress = PeerSyncProgress::default();
+        progress.observe_on(0, Some((10_000, 0)), basis(Some("checkpoint/a"), true), 1_000);
+        progress.observe_on(1, Some((9_000, 0)), next, 1_000 + window);
+        let sync = progress.view(1_000 + window).unwrap();
+        assert_eq!(sync.closing_rate_per_second(), rate, "{case}: {sync:?}");
+    }
+    // Receipts that could not be compared leave the window and its basis alone, so a later
+    // comparable measurement on a moved checkpoint still discards the window.
+    let mut progress = PeerSyncProgress::default();
+    progress.observe_on(0, Some((10_000, 0)), basis(Some("checkpoint/a"), true), 1_000);
+    progress.observe_on(400, None, basis(Some("checkpoint/b"), true), 1_000 + window / 2);
+    progress.observe_on(600, Some((9_000, 0)), basis(Some("checkpoint/b"), true), 1_000 + window);
+    let sync = progress.view(1_000 + window).unwrap();
+    assert_eq!(
+        (sync.receive_rate_per_second, sync.catch_up_rate_per_second),
+        (None, None)
+    );
+    assert_eq!(sync.estimated_catch_up_seconds, None);
+    assert_eq!(sync.peer_only_envelopes, 9_000);
+    // A peer that starts advertising a checkpoint changes the basis once, as on an upgrade.
+    let mut progress = PeerSyncProgress::default();
+    progress.observe_on(1, Some((10_000, 0)), basis(None, true), 1_000);
+    progress.observe_on(1_000, Some((9_000, 0)), basis(Some("checkpoint/a"), true), 1_000 + window);
+    assert_eq!(progress.view(1_000 + window).unwrap().catch_up_rate_per_second, None);
+}
+
+#[cfg(test)]
+#[test]
+pub fn sync_progress_keeps_a_steady_forecast_and_reports_caught_up() {
+    let window = REPLICATION_SYNC_WINDOW_MS;
+    let mut progress = PeerSyncProgress::default();
+    progress.observe(0, Some((10_000, 0)), 1_000);
+    for step in 1..=3_u64 {
+        // Every arrival closes the gap: 500 envelopes a window.
+        progress.observe(500, Some((10_000 - step * 500, 0)), 1_000 + step as u128 * window);
+    }
+    let rate = 500.0 / SYNC_WINDOW_SECONDS;
+    let sync = progress.view(1_000 + 3 * window).unwrap();
+    assert_eq!(sync.receive_rate_per_second, Some(rate));
+    assert_eq!(sync.catch_up_rate_per_second, Some(rate));
+    assert_eq!(sync.estimated_catch_up_seconds, Some((8_500.0 / rate).ceil() as u64));
+    progress.observe(8_500, Some((0, 0)), 1_000 + 4 * window);
+    assert_eq!(
+        progress.view(1_000 + 4 * window).unwrap().estimated_catch_up_seconds,
+        Some(0)
+    );
 }
 
 pub fn collect_referenced_blobs(
@@ -5533,10 +5955,7 @@ impl Store {
             let current_projection_generation = projection_digest::generation(&reader)?;
             let envelope_rowid = max_envelope_rowid(&reader)?;
             let inventory_generation = inventory_generation::current(&reader)?;
-            Ok(store
-                .replication_snapshot
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+            Ok(crate::read_budget::lock_sync(&store.replication_snapshot)?
                 .as_ref()
                 .filter(|snapshot| {
                     snapshot.store_index == store_index
@@ -5551,10 +5970,7 @@ impl Store {
         if let Some(snapshot) = current(self)? {
             return Ok(snapshot);
         }
-        let _building = self
-            .replication_snapshot_build
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _building = crate::read_budget::lock_sync(&self.replication_snapshot_build)?;
         if let Some(snapshot) = current(self)? {
             return Ok(snapshot);
         }
@@ -5569,11 +5985,7 @@ impl Store {
         &self,
         connection: &Connection,
     ) -> Result<Arc<ReplicationSnapshot>> {
-        let previous = self
-            .replication_snapshot
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let previous = crate::read_budget::lock_sync(&self.replication_snapshot)?.take();
         // The six-table digest stays on the legacy peer wire format. Its generation lets us
         // retain compatibility without rescanning those tables for unrelated source changes.
         let graph_generation = graph_generation(connection)?;
@@ -5634,6 +6046,7 @@ impl Store {
                 };
                 let mut touched = BTreeSet::new();
                 for (rowid, identity) in additions {
+                    crate::read_budget::check()?;
                     max_rowid = max_rowid.max(rowid);
                     touched.insert((
                         identity.writer.clone(),
@@ -5643,6 +6056,7 @@ impl Store {
                 }
                 // Only the ranges that gained an envelope need a new digest.
                 for (writer, start) in &touched {
+                    crate::read_budget::check()?;
                     let bucket = inventory.bucket(inventory.range(writer, *start));
                     match buckets.binary_search_by(|existing| {
                         (existing.writer.as_str(), existing.start).cmp(&(writer.as_str(), *start))
@@ -5676,7 +6090,9 @@ impl Store {
         } else {
             full(connection)?
         };
+        crate::read_budget::check()?;
         inventory.resume_digest(&buckets, &mut digest_prefixes, resume_from);
+        crate::read_budget::check()?;
         // Envelope hashes already commit the complete payload (and chain metadata). The
         // inventory digest therefore commits the authority log without hex-encoding and hashing
         // every payload again on each graph change.
@@ -5712,10 +6128,7 @@ impl Store {
                     row.get(0)
                 })?,
         });
-        *self
-            .replication_snapshot
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(snapshot.clone());
+        *crate::read_budget::lock_sync(&self.replication_snapshot)? = Some(snapshot.clone());
         Ok(snapshot)
     }
 
@@ -5762,10 +6175,27 @@ impl Store {
         remote: &ReplicationInventory,
         signature_requests: &[ReplicaEnvelopeId],
     ) -> Result<ReplicationExchange> {
+        self.export_replication_exchange_within(
+            fleet_id,
+            remote,
+            signature_requests,
+            REPLICATION_EXCHANGE_BODY_BUDGET,
+        )
+    }
+
+    /// `export_replication_exchange_answering`, with the body cut to `budget` bytes.
+    fn export_replication_exchange_within(
+        &self,
+        fleet_id: &str,
+        remote: &ReplicationInventory,
+        signature_requests: &[ReplicaEnvelopeId],
+        budget: usize,
+    ) -> Result<ReplicationExchange> {
         let mut exchange = self.export_replication_difference(fleet_id, remote)?;
         let _timing = time_stage(&self.replication_timers.export);
         exchange.signatures = self.replication_signatures_for(signature_requests)?;
         exchange.signature_requests = self.replication_signature_requests()?;
+        fit_exchange_body(&mut exchange, budget)?;
         Ok(exchange)
     }
 
@@ -6198,7 +6628,12 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let progress = sync.entry(relay.to_owned()).or_default();
-        progress.observe(received, difference, now);
+        let basis = InventoryBasis {
+            peer_checkpoint: input.inventory.checkpoint.as_ref().map(|checkpoint| checkpoint.id.clone()),
+            local_inventory_generation: snapshot.inventory_generation,
+            compact: !input.inventory.buckets.is_empty(),
+        };
+        progress.observe_on(received, difference, basis, now);
         if difference.is_some() {
             progress.measured_inventory_envelopes = snapshot.inventory.envelopes.len() as u64;
         }
@@ -6731,7 +7166,17 @@ impl Store {
         let mut chunked = false;
         let mut processed = 0_u64;
         loop {
+            // Each chunk's loan records where its hold went. The scope ends when the loan does,
+            // so the tail verdict pass after it is its own hold. No other writer loan is asked
+            // for on this thread inside the scope: none comes before `write()`, and a second one
+            // while this loan is held would wait on itself. Every caller sink below runs
+            // through `progress_staged` or `log_staged`, charged to `callbacks`.
+            let stages = crate::windows::holds::Stages::begin();
+            let mut progress_staged =
+                |update: ProjectionProgress| stages.during("callbacks", || progress(update));
+            let mut log_staged = |line: &str| stages.during("callbacks", || log(line));
             let mut connection = self.connection.write();
+            stages.enter("begin");
             // Acquire SQLite's write lock before reading a snapshot. A deferred upgrade can
             // fail immediately when the independent WAL checkpoint connection holds that lock.
             let transaction = connection
@@ -6743,13 +7188,14 @@ impl Store {
                         let error = error.with_detail("projection_stage", "begin-immediate")
                             .with_detail("projection_frontier_unknown", true);
                         // No transaction exists from which to read the committed frontier.
-                        self.log_projection_failure(&error, phase, 0, target, &mut log);
+                        self.log_projection_failure(&error, phase, 0, target, &mut log_staged);
                         return error;
                     }
                     // No transaction began: surface the typed error, preserving the entry
                     // deferred generation and attempt time. The daemon also schedules retry.
                     error
                 })?;
+            stages.enter("chunk-read");
             let frontier: u64 = transaction
                 .query_row(
                     "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
@@ -6768,7 +7214,7 @@ impl Store {
                     |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, u64>(1)?)),
                 )?;
             let through = through.unwrap_or(target.max(frontier));
-            progress(ProjectionProgress {
+            progress_staged(ProjectionProgress {
                 phase: "project-incremental",
                 frontier,
                 target,
@@ -6778,6 +7224,7 @@ impl Store {
             let result = (|| -> Result<bool, St3Error> {
                 // Non-contention incremental failures retain the full replay fallback,
                 // which quarantines claims it cannot project. SQLite contention defers below.
+                stages.enter("incremental");
                 transaction
                     .execute_batch("SAVEPOINT project_incremental")
                     .map_err(internal)?;
@@ -6806,14 +7253,14 @@ impl Store {
                                         details,
                                     };
                                     self.log_projection_failure(
-                                        &error, phase, frontier, target, &mut log,
+                                        &error, phase, frontier, target, &mut log_staged,
                                     );
                                     Some(reason.to_owned())
                                 }
                             }
                         }
                         Err(error) => {
-                            self.log_projection_failure(&error, phase, frontier, target, &mut log);
+                            self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                             if error.is_sqlite_contention() {
                                 // Roll back the whole chunk below. Replaying the same claims
                                 // cannot repair a connection lock and would lengthen its hold.
@@ -6834,14 +7281,15 @@ impl Store {
                 drop(incremental);
                 let projected = fallback_reason.is_none();
                 if let Some(reason) = fallback_reason {
-                    log(&full_replay_log_line(phase, &reason, frontier, target));
+                    log_staged(&full_replay_log_line(phase, &reason, frontier, target));
+                    stages.enter("replay");
                     #[cfg(any(test, feature = "test-support"))]
                     FULL_REPLAYS.with(|replays| replays.set(replays.get() + 1));
                     let _replay = crate::profile::span("projection/full-replay");
                     crate::profile::note("projection: full replay");
                     self.runtime
                         .replay_from_nothing_with_progress(&transaction, &mut |stage| {
-                            progress(ProjectionProgress {
+                            progress_staged(ProjectionProgress {
                                 phase: stage.phase,
                                 frontier,
                                 target,
@@ -6850,23 +7298,25 @@ impl Store {
                             });
                         }).map_err(|error| {
                             let error = error.with_detail("projection_stage", "full-replay");
-                            self.log_projection_failure(&error, phase, frontier, target, &mut log);
+                            self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                             error
                         })?;
                 } else {
                     crate::profile::note("projection: incremental");
                 }
+                stages.enter("after-projection");
                 self.runtime
                     .after_projection(&transaction)
                     .map_err(|error| {
                         let error = error.with_detail("projection_stage", "after-projection");
-                        self.log_projection_failure(&error, phase, frontier, target, &mut log);
+                        self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                         error
                     })?;
                 Ok(!projected)
             })();
             match result {
                 Ok(replayed) => {
+                    stages.enter("health");
                     // A fallback replay folds the whole log, including anything admitted after
                     // this pass started. An incremental chunk advances only its bounded frontier.
                     let through = if replayed {
@@ -6881,11 +7331,12 @@ impl Store {
                         error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
                     params![through, now_ms().to_string()],
                 )?;
+                    stages.enter("commit");
                     transaction.commit()?;
                     if !replayed {
                         processed += count;
                     }
-                    progress(ProjectionProgress {
+                    progress_staged(ProjectionProgress {
                         phase: "projection-committed",
                         frontier: through,
                         target,
@@ -6897,7 +7348,9 @@ impl Store {
                     // mistake its not-yet-committed claims for an empty backlog.
                     let projection_state =
                         self.replication_projection_state.load(Ordering::Acquire);
+                    stages.enter("release");
                     drop(connection);
+                    drop(stages);
                     // Readers may have cached the preceding prefix at the same admitted store
                     // index. Its projection changed even when no additional claim arrived.
                     chunked |= through < target;
@@ -6936,6 +7389,7 @@ impl Store {
                     return Ok(true);
                 }
                 Err(error) => {
+                    stages.enter("rollback");
                     transaction.rollback()?;
                     if error.is_sqlite_contention() {
                         // Preserve committed health/frontier, not all process state: entry
@@ -6943,8 +7397,10 @@ impl Store {
                         // time, so the existing catch-up throttle applies. A daemon retry is
                         // scheduled separately; receive/wake passes can also recover sooner.
                         self.note_projection_contention();
+                        stages.enter("release");
                         return Ok(false);
                     }
+                    stages.enter("health");
                     connection.execute(
                     "INSERT INTO projection_health(aggregate, status, error_code, error_message, updated_at_unix_ms)
                      VALUES ('graph', 'stale', ?1, ?2, ?3)
@@ -6952,6 +7408,7 @@ impl Store {
                         error_message=excluded.error_message, updated_at_unix_ms=excluded.updated_at_unix_ms",
                     params![error.code, error.message, now_ms().to_string()],
                 )?;
+                    stages.enter("release");
                     return Ok(false);
                 }
             }
