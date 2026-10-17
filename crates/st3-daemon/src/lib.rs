@@ -29,6 +29,7 @@ pub mod repositories;
 pub(crate) use st3_kernel::disk;
 /// Answers the hooks an st3 seat's harness runs: `st driver-hook NAME`.
 pub mod delivery_hold;
+pub(crate) mod delivery_presence;
 pub mod driver_hook;
 pub mod environment;
 pub use st3_kernel::evidence;
@@ -101,6 +102,7 @@ pub mod rollout;
 pub use st3_kernel::seat_queue;
 /// Runs any CLI with credentials no seat can read, through a gateway the sekrets user owns.
 pub mod sekrets;
+pub mod sekrets_daemon;
 pub mod service;
 pub use st3_kernel::skill;
 pub mod slo;
@@ -122,6 +124,7 @@ mod kernel_tests;
 pub mod terminal_fabric;
 pub use st3_kernel::terminal_binding;
 /// Runs each agent as its own Unix user, in its own namespaces and root-owned cgroup.
+pub mod tile_registry;
 pub mod tiles;
 
 pub use graph::{parse_intent, validate_mission_runtimes};

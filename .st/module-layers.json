@@ -5,12 +5,8 @@
     ["changes", "store"],
     ["graph", "mission"],
     ["peer", "api"],
-    ["reconcile", "api"],
-    ["rollout", "native_resume"],
     ["rollout", "store"],
     ["rollout", "suspension"],
-    ["sekrets", "store"],
-    ["suspension", "store"],
-    ["tiles", "sekrets"]
+    ["suspension", "store"]
   ]
 }

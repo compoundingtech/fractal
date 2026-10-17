@@ -67,6 +67,24 @@ pub fn new_request_id() -> String {
     )
 }
 
+/// `person/ada` → `ada`, when the name is a valid word (`sekrets`, `tile_registry`).
+pub fn person_name(person: &str) -> Option<&str> {
+    person
+        .strip_prefix("person/")
+        .filter(|name| valid_word(name))
+}
+
+/// A sekrets or tile name: lowercase letters, digits, `-`, `_` and `.`, 64 bytes at most, not
+/// starting with `.` or `-`.
+pub fn valid_word(word: &str) -> bool {
+    !word.is_empty()
+        && word.len() <= 64
+        && !word.starts_with(['.', '-'])
+        && word.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.')
+        })
+}
+
 /// The fault scope of the scheduler's first-readiness fault (`reconcile`).
 pub const FIRST_READINESS_FAULT_SCOPE: &str = "scheduler/first-readiness";
 
