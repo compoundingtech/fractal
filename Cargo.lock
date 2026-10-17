@@ -5022,6 +5022,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "st3-github"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "futures-util",
+ "hex",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smallclaims",
+ "st-runtime",
+ "st3-github",
+ "st3-secrets",
+ "tempfile",
+ "tokio",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
 name = "st3-kernel"
 version = "0.1.0"
 dependencies = [
@@ -5217,6 +5242,7 @@ dependencies = [
  "st-drivers",
  "st-runtime",
  "st3-client",
+ "st3-github",
  "st3-kernel",
  "st3-schema",
  "st3-secrets",

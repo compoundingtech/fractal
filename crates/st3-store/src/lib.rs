@@ -12,6 +12,7 @@ mod ci_test_paths;
 pub use st3_kernel::*;
 pub use st3_telemetry::*;
 pub use st3_secrets::*;
+pub use st3_github::*;
 pub use smallclaims::{performance, profile};
 
 #[cfg(any(test, feature = "test-support"))]
@@ -19,7 +20,6 @@ pub mod test_support;
 
 
 pub mod backup;
-pub mod checkout;
 pub mod external_sessions;
 pub mod recorder_receipts;
 pub mod remote_terminal;
@@ -28,10 +28,7 @@ pub mod blobs;
 pub mod changes;
 pub mod client_values;
 pub mod declaration_syntax;
-pub mod environment;
 pub mod gate_parse;
-pub mod github_http;
-pub mod github_watch;
 pub mod graph;
 pub mod mailbox;
 pub mod maintenance;
@@ -42,10 +39,8 @@ pub mod native_resume;
 pub mod person_request;
 pub mod provenance;
 pub mod references;
-pub mod resource;
 pub mod rollout;
 pub mod sekrets_daemon;
-pub mod silent;
 pub mod store;
 pub mod suspension;
 
