@@ -724,7 +724,7 @@ impl Store {
             let claim = append_claim_tx(tx, &self.origin, &subject, kind, Some(&input.actor), &body, &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             if let Some(ask) = ask.as_ref().filter(|a| !cancel && a.body["fields"]["origin_step"].is_null() && !is_update(a)) {
-                send_answer_tx(tx, &self.origin, ask, &claim, &summary, answer.as_ref())?;
+                send_answer_tx(tx, &self.origin, ask, &claim, &summary, answer.as_ref(), authorization)?;
             }
             if let Some(origin) = ask.as_ref().and_then(|a| a.body["fields"]["origin_step"].as_str()) {
                 if let Some(origin_view) = step(tx, origin).map_err(internal)? {
@@ -955,6 +955,7 @@ fn send_answer_tx(
     response: &ClaimRecord,
     summary: &str,
     answer: Option<&Value>,
+    authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
 ) -> Result<(), St3Error> {
     let Some(requester) = ask.actor.as_deref() else {
         return Ok(());
@@ -1004,13 +1005,16 @@ fn send_answer_tx(
     }
     let mut body = json!({"fields": {"from": "daemon/runtime", "to": requester, "content": content, "status": "sent",
         "title": format!("Answered: {title}"), "in_reply_to": null, "tags": tags}, "evidence": [response.id]});
-    if response.body["fields"]["sender_class"] == "external-assistant" {
+    if let Some(authorization) = authorization {
+        body["fields"]["from"] = json!("assistant/chatgpt");
+        body["fields"]["assistant_owner"] = json!(authorization.owner);
+        body["fields"]["assistant_session_actor"] = json!(authorization.actor);
         body["fields"]["sender_class"] = json!("external-assistant");
         body["fields"]["assistant_grant_id"] = response.body["fields"]["assistant_grant_id"].clone();
         // The answer's grant was authorized in this same writer transaction. Preserve its
         // server-established provenance without entering the unverified generic writer.
         super::retirements::admit_recipient(tx, Some(requester))?;
-        append_admitted_claim_tx(tx, origin, &subject, "message.sent", Some("daemon/runtime"), &body,
+        append_admitted_claim_tx(tx, origin, &subject, "message.sent", Some("assistant/chatgpt"), &body,
             &[], None).map_err(claim_append_error)?;
         return Ok(());
     }
@@ -1707,7 +1711,7 @@ mission "person-work" state="ready" {{
         let grant_id = "assistant-grant/projection-test";
         let authorization = super::super::assistant_write::AssistantWriteAuthorization {
             grant_subject: "custom/client/assistant-projection-test".into(),
-            actor: "assistant/chatgpt".into(),
+            actor: format!("assistant/chatgpt/session/{grant_id}"),
             owner: "person/avery".into(),
             policy_revision: 1,
             scope: "write.assistant.answers".into(),
@@ -1755,6 +1759,24 @@ mission "person-work" state="ready" {{
         check(&store);
         store.replay_replication_graph().unwrap();
         check(&store);
+        input.step = None;
+        input.new_run = Some("standalone-notification".into());
+        input.idempotency_key = "standalone-notification".into();
+        let standalone = store.ask_person(&input).unwrap();
+        let item = store.attention_items(Some("person/avery")).unwrap()
+            .into_iter().find(|item| item.subject == standalone.subject).unwrap();
+        store.finish_person_step_authorized(&PersonStepResponse {
+            delegation: None, subject: standalone.subject, actor: "person/avery".into(),
+            summary: String::new(), evidence: vec![], episode: Some(item.episode),
+            idempotency_key: "standalone-notification-answer".into(),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+        }, false, Some(&authorization)).unwrap();
+        let notification = store.messages(Some("agent/alder.asker"), true).unwrap().into_iter()
+            .find(|message| message.assistant_grant_id.as_deref() == Some(grant_id)).unwrap();
+        let claim = store.latest_claim(&notification.subject, Some("message.sent")).unwrap().unwrap();
+        super::super::assistant_write::validate_replicated(&claim.kind, claim.actor.as_deref(), &claim.body["fields"]).unwrap();
+        assert!(matches!(classify_replicated_claim_with_registry(&claim, st3_schema::registry()).unwrap(),
+            ReplicatedClaimAdmission::Valid));
     }
 
     /// A structured ask shows its request to the person, takes only a named answer, and gives
