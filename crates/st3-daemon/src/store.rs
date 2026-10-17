@@ -22,6 +22,9 @@ mod trace_principal;
 #[cfg(test)]
 mod accountable_tests;
 pub mod custom;
+pub mod assistant_write;
+#[cfg(feature = "test-support")]
+pub mod assistant_write_gate;
 pub mod declarations;
 pub mod retirements;
 pub mod directive_notes;
@@ -56,6 +59,7 @@ mod owned_sets_tests;
 mod usage_fold_tests;
 mod resources;
 mod resource_preparation;
+mod observer_actuals;
 #[cfg(test)]
 mod resource_preparation_fence_tests;
 mod github_workflow_failures;
@@ -721,6 +725,9 @@ WHERE kind='runtime.observed';
 CREATE INDEX IF NOT EXISTS claims_client_pairing_actor_index
 ON claims(json_extract(body, '$.fields.session_actor'))
 WHERE kind='custom.client.pairing-completed';
+CREATE INDEX IF NOT EXISTS claims_assistant_v1_credential_index
+ON claims(json_extract(body, '$.fields.credential_hash'), store_index)
+WHERE kind='custom.client.assistant.v1.granted';
 -- A runtime incarnation's claims about a subject by acceptance time, so when a session began
 -- and last changed are two seeks instead of a read of every claim the subject has. The
 -- expression is INCARNATION_OF_CLAIM, which queries repeat so the planner uses this index.
@@ -838,6 +845,8 @@ CREATE INDEX IF NOT EXISTS desired_owner_run_index ON desired(owner_run, subject
 CREATE INDEX IF NOT EXISTS desired_claim_index ON desired(claim_id);
 CREATE INDEX IF NOT EXISTS desired_agent_subject_index ON desired(subject) WHERE kind='agent';
 CREATE INDEX IF NOT EXISTS desired_agent_host_index ON desired(json_extract(member, '$.host'), subject) WHERE kind='agent';
+-- Filtered mail candidate discovery must not walk unrelated desired resources.
+CREATE INDEX IF NOT EXISTS desired_message_subject_index ON desired(subject) WHERE kind='message';
 
 -- Watch subjects encode OWNER/REPO/NUMBER followed by the recipient (which may contain slashes).
 -- Seek that suffix so an idle seat never scans the fleet's declarations.
@@ -4353,6 +4362,22 @@ impl Store {
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), St3Error> {
         self.graph.append_claim_outcome(input)
+    }
+
+    pub(crate) fn append_assistant_claim_outcome(
+        &self,
+        input: &ClaimInput,
+        authorization: &assistant_write::AssistantWriteAuthorization,
+    ) -> Result<(ClaimRecord, bool), St3Error> {
+        if input.kind != "message.sent" || authorization.scope != "write.assistant.messages"
+            || authorization.recipient.as_deref() != input.fields.get("to").and_then(Value::as_str)
+            || input.actor.as_deref() != Some("assistant/chatgpt")
+            || input.fields.get("from").and_then(Value::as_str) != Some("assistant/chatgpt")
+        { return Err(St3Error::new("forbidden", "assistant authorization does not bind this message")); }
+        #[cfg(feature = "test-support")]
+        let _gate = assistant_write_gate::pause(&authorization.grant_subject)?;
+        append_claim_with_commit_context(&self.graph, input, None, None, None, None,
+            ClaimCommitContext { assistant: Some(authorization), ..Default::default() })
     }
 
     pub(crate) fn append_claim_fenced_outcome(
@@ -8498,7 +8523,8 @@ const LOCAL_OBSERVATION_FLOOR_QUERY: &str =
     "SELECT COALESCE(MIN(+id), (SELECT COALESCE(MAX(id), 0) + 1 FROM local_observations))
      FROM local_observations WHERE after_store_index >= ?1";
 
-const LOCAL_OBSERVATION_ID_PREFIX: &str = "local-observation/";
+use st3_kernel::model::LOCAL_OBSERVATION_ID_PREFIX;
+pub use st3_kernel::model::local_observation_position;
 
 fn local_retention(kind: &str) -> bool {
     st3_schema::registry()
@@ -9360,18 +9386,6 @@ fn local_observation_id(origin: &str, id: i64) -> String {
     format!("{LOCAL_OBSERVATION_ID_PREFIX}{origin}/{id}")
 }
 
-/// The local log position of a record that `append_local_observation` or a local
-/// observation read produced; `None` for a claim.
-pub fn local_observation_position(record: &ClaimRecord) -> Option<u64> {
-    record
-        .id
-        .strip_prefix(LOCAL_OBSERVATION_ID_PREFIX)?
-        .rsplit_once('/')?
-        .1
-        .parse()
-        .ok()
-}
-
 /// Claims in store order, each local observation after the claim it follows.
 pub fn claim_log_order(record: &ClaimRecord) -> (u64, u64) {
     (
@@ -10076,6 +10090,10 @@ pub(crate) fn append_claim_tx(
     predecessors: &[String],
     forced_batch: Option<&str>,
 ) -> Result<ClaimRecord> {
+    let fields = body.get("fields").unwrap_or(body);
+    assistant_write::refuse_unverified(kind, actor, fields.get("from").and_then(Value::as_str),
+        ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| fields.get(*key).is_some()))
+        .map_err(anyhow::Error::new)?;
     // Daemon notifications already inside a larger transaction use the same admission seam
     // as API sends. Replication inserts authenticated history through its separate import path.
     if kind == retirements::KIND {
@@ -10478,6 +10496,10 @@ fn message_view_tx(
         subject: subject.into(),
         from,
         to,
+        sender_class: field("sender_class").filter(|class| class == "external-assistant"),
+        assistant_grant_id: if actual.get("sender_class").and_then(Value::as_str) == Some("external-assistant") {
+            field("assistant_grant_id")
+        } else { None },
         content: field("content")
             .or_else(|| child("content"))
             .unwrap_or_default(),
@@ -10990,21 +11012,36 @@ fn mailbox_harness_ended(
     Ok(true)
 }
 
-/// See [`Store::changes_since`].
-#[derive(Clone, Debug, Default)]
-pub struct ChangeFeed {
-    pub index: u64,
-    pub local: i64,
-    pub changes: Vec<Change>,
+pub use crate::incremental::{Change, ChangeFeed};
+
+impl crate::otlp::ObservationSource for Store {
+    fn export_cursor(&self) -> Result<u64> {
+        self.otlp_export_cursor()
+    }
+
+    fn observations_after(&self, cursor: u64, limit: usize) -> Result<Vec<ClaimRecord>> {
+        self.local_observations_after(cursor, limit)
+    }
+
+    fn save_export_cursor(
+        self: Arc<Self>,
+        cursor: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+        Box::pin(async move {
+            let store = self.clone();
+            self.connection
+                .write_workers()
+                .spawn_blocking(move || store.set_otlp_export_cursor(cursor))
+                .await??;
+            Ok(())
+        })
+    }
 }
 
-/// One new claim or local observation.
-#[derive(Clone, Debug)]
-pub struct Change {
-    pub subject: String,
-    pub kind: String,
-    pub actor: Option<String>,
-    pub body: String,
+impl crate::incremental::ChangeSource for Store {
+    fn changes_since(&self, index: u64, local: i64) -> Result<ChangeFeed> {
+        Store::changes_since(self, index, local)
+    }
 }
 
 fn change_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Change> {
@@ -14256,6 +14293,7 @@ fn classify_replicated_claim_with_registry(
             "terminal retirement must name its writing owner and actor",
         ));
     }
+    assistant_write::validate_replicated(&claim.kind, claim.actor.as_deref(), claim.body.get("fields").unwrap_or(&claim.body))?;
     crate::terminal_binding::validate_claim(&claim.kind, &claim.body, claim.actor.as_deref())?;
     st3_schema::accountable::validate_claim(&claim.subject, &claim.kind, &claim.body, claim.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
@@ -20784,10 +20822,11 @@ type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), St3Error> + Sync + '
 
 #[derive(Default)]
 struct ClaimCommitContext<'a> {
-    admission: Option<&'a ClaimAdmission<'a>>,
     signature: Option<&'a str>,
     // Only retire_agent supplies the declaration, owner and rollout admission together.
     retirement_writer: bool,
+    admission: Option<&'a ClaimAdmission<'a>>,
+    assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
 }
 
 fn append_claim_with_commit_context(
@@ -20814,6 +20853,11 @@ fn append_claim_with_commit_context(
         }
         Ok(())
     };
+    if context.assistant.is_none() {
+        assistant_write::refuse_unverified(&input.kind, input.actor.as_deref(),
+            input.fields.get("from").and_then(Value::as_str),
+            ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| input.fields.contains_key(*key)))?;
+    }
     validate_claim_input(input)?;
     if local_retention(&input.kind)
         || (input.actor.is_none() && system_local_retention(&input.kind))
@@ -20823,11 +20867,21 @@ fn append_claim_with_commit_context(
     if latest_retention(&input.kind) {
         return append_latest_observation_fenced(graph, input, now_ms(), event_runtime);
     }
-    let operation = claim_operation(input)?;
     // One claim in a savepoint of the writer's next batch; its caller hears back once that
     // batch commits.
     graph.connection
         .batched(|transaction| -> Result<(ClaimRecord, bool), St3Error> {
+            let mut assistant_input;
+            let input = if let Some(authorization) = context.assistant {
+                let grant_id = assistant_write::authorize_grant(transaction, &graph.origin, authorization)?;
+                assistant_input = input.clone();
+                assistant_input.fields.insert("sender_class".into(), json!("external-assistant"));
+                assistant_input.fields.insert("assistant_grant_id".into(), json!(grant_id));
+                assistant_input.fields.insert("assistant_owner".into(), json!(authorization.owner));
+                assistant_input.fields.insert("assistant_session_actor".into(), json!(authorization.actor));
+                &assistant_input
+            } else { input };
+            let operation = claim_operation(input)?;
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
             }

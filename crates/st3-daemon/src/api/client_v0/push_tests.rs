@@ -51,7 +51,7 @@ async fn device_push_summary_is_secret_free_and_pairing_revoke_deletes_the_local
     let state = tests::test_state_named(root.path(), "push-device-test");
     pair(&state);
     let session = ClientSession::local(Some(PERSON)).unwrap();
-    let capability = capabilities(&session)
+    let capability = capabilities(&state, &session)
         .into_iter()
         .find(|entry| entry["id"] == "push-registration")
         .unwrap();
@@ -123,14 +123,14 @@ fn push_registration_capability_is_granted_only_on_the_pairing_issuer() {
         .claims
         .remove(0);
     let session = paired_client_session(&state, &grant, "fabric-loopback", false).unwrap();
-    let capability = capabilities(&session)
+    let capability = capabilities(&state, &session)
         .into_iter()
         .find(|entry| entry["id"] == "push-registration")
         .unwrap();
     assert_eq!(capability["state"], "granted");
     grant.origin = "another-member".into();
     let session = paired_client_session(&state, &grant, "fabric-loopback", false).unwrap();
-    let capability = capabilities(&session)
+    let capability = capabilities(&state, &session)
         .into_iter()
         .find(|entry| entry["id"] == "push-registration")
         .unwrap();
