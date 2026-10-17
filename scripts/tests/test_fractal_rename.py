@@ -17,6 +17,8 @@ class DisplayStringsTest(unittest.TestCase):
             self.assertNotRegex(rewritten, r'Smalltalk|Small Talk', path)
             self.assertEqual(RENAME['rewrite_display'](rewritten, literals), (rewritten, 0), path)
         self.assertEqual(len(paths), len(set(paths)))
+        rules = {path: literals for _, path, literals in RENAME['DISPLAY_RULES']}
+        self.assertEqual(rules['crates/st3-schema/src/lib.rs'], rules['docs/st3/schema.md'])
 
     def test_durable_identities_and_stored_names_are_not_rules(self):
         preserved = '''smalltalk com.compoundingtech.smalltalk SmalltalkRuntime

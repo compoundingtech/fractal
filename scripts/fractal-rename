@@ -65,6 +65,7 @@ DISPLAY_RULES = (
     ("CLI", "docs/st3/onboarding-guide.md", ("accomplish in Smalltalk today?",)),
     ("CLI", "docs/st3/action-coverage.json", ("folded tools, Small Talk.",)),
     ("CLI", "crates/st3-schema/src/lib.rs", ("A Small Talk message.",)),
+    ("Coupled docs", "docs/st3/schema.md", ("A Small Talk message.",)),
     ("TUI", "crates/stui/src/ui/checklist.rs", (
         "Smalltalk setup", "Smalltalk runs your AI agents", "Smalltalk Assistant",
     )),
