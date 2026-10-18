@@ -25,7 +25,7 @@ fn staged_binary_reports_gate_without_state_and_rejects_extra_arguments() {
     assert!(output.stderr.is_empty());
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
-        serde_json::json!({"kind": "checkpoint-space-gate-capabilities", "version": 1})
+        serde_json::json!({"kind": "checkpoint-space-gate-capabilities", "version": 2})
     );
     assert_eq!(output.stdout.iter().filter(|&&byte| byte == b'\n').count(), 1);
 

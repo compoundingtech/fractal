@@ -5,6 +5,7 @@
 use super::{ProofOwnership, REACTION_MARGIN, SpaceGuard, filesystem};
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OpenFlags, ffi};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, OsStr};
 use std::mem::{align_of, size_of};
 use std::os::raw::{c_char, c_int, c_void};
@@ -39,6 +40,9 @@ struct Window {
     scratch_pending: u128,
     temp_pending: u128,
     temp_total_requested: u128,
+    total_requested: u128,
+    requests_since_refresh: u128,
+    file_sizes: HashMap<usize, u128>,
     calls: u64,
     refreshes: u64,
     max_request: u128,
@@ -57,6 +61,11 @@ struct Data {
     files: AtomicUsize,
     self_test_refuse: AtomicBool,
     self_test_hits: AtomicUsize,
+    copy_phase: AtomicBool,
+    vacuum_phase: AtomicBool,
+    copy_limit: Mutex<u128>,
+    journal_pages: AtomicUsize,
+    sector_size: AtomicUsize,
     #[cfg(test)]
     simulate_unavailable: AtomicBool,
     #[cfg(test)]
@@ -75,6 +84,57 @@ pub(in crate::store) struct ProofVfs {
 }
 
 impl ProofVfs {
+    pub(in crate::store) fn check_clone_source(&self) -> Result<()> {
+        self.data
+            .as_ref()
+            .expect("registered proof VFS")
+            .guard
+            .check_clone_source()
+    }
+    pub(in crate::store) fn check_cloned_files(&self, main: &Path, wal: &Path) -> Result<()> {
+        self.data
+            .as_ref()
+            .expect("registered proof VFS")
+            .guard
+            .check_cloned_files(main, wal)
+    }
+    pub(in crate::store) fn vacuum_copy(&self) -> Result<()> {
+        let data = self.data.as_ref().expect("registered proof VFS");
+        data.guard.check_vacuum_source()?;
+        *data
+            .copy_limit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = data.guard.vacuum_cap;
+        data.vacuum_phase.store(true, Ordering::Release);
+        Ok(())
+    }
+    pub(in crate::store) fn copy_limit(&self) -> u128 {
+        *self
+            .data
+            .as_ref()
+            .expect("registered proof VFS")
+            .copy_limit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    pub(in crate::store) fn begin_proof(&self, connection: &Connection) -> Result<()> {
+        self.refresh_journal_pages(connection)?;
+        self.data
+            .as_ref()
+            .expect("registered proof VFS")
+            .copy_phase
+            .store(false, Ordering::Release);
+        Ok(())
+    }
+    pub(in crate::store) fn refresh_journal_pages(&self, connection: &Connection) -> Result<()> {
+        let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        self.data
+            .as_ref()
+            .expect("registered proof VFS")
+            .journal_pages
+            .store(usize::try_from(pages)?, Ordering::Release);
+        Ok(())
+    }
     pub(in crate::store) fn register(guard: &SpaceGuard) -> Result<Self> {
         // SAFETY: SQLite keeps the default VFS registered for the process lifetime.
         let base = unsafe { ffi::sqlite3_vfs_find(ptr::null()) };
@@ -114,6 +174,11 @@ impl ProofVfs {
             files: AtomicUsize::new(0),
             self_test_refuse: AtomicBool::new(false),
             self_test_hits: AtomicUsize::new(0),
+            copy_phase: AtomicBool::new(true),
+            vacuum_phase: AtomicBool::new(false),
+            copy_limit: Mutex::new(guard.copy_bound),
+            journal_pages: AtomicUsize::new(usize::try_from(guard.initial_journal_pages)?),
+            sector_size: AtomicUsize::new(65536),
             #[cfg(test)]
             simulate_unavailable: AtomicBool::new(false),
             #[cfg(test)]
@@ -240,6 +305,15 @@ impl Drop for ProofVfs {
 }
 
 impl Data {
+    fn rounded(&self, bytes: u128, class: Class) -> u128 {
+        let granule = if class == Class::Temp {
+            self.guard.temp_granule
+        } else {
+            self.guard.granule
+        };
+        let page = self.guard.page_size.max(granule);
+        bytes.saturating_add(page - 1) / page * page
+    }
     fn refuse(&self, message: String) -> c_int {
         let scratch_state = filesystem(&self.guard.scratch);
         let live_state = filesystem(&self.guard.live);
@@ -253,6 +327,9 @@ impl Data {
         let scratch_available = scratch_state
             .as_ref()
             .map(|state| state.available.to_string())
+            .unwrap_or_else(|error| format!("UNKNOWN ({error})"));
+        let scratch_allocated = super::existing_scratch_bytes(&self.guard.scratch)
+            .map(|value| value.to_string())
             .unwrap_or_else(|error| format!("UNKNOWN ({error})"));
         let scratch_deficit = scratch_state
             .as_ref()
@@ -268,8 +345,9 @@ impl Data {
             .map(|state| required_live.saturating_sub(state.available).to_string())
             .unwrap_or_else(|_| "UNKNOWN".into());
         let reason = format!(
-            "checkpoint scratch refused before SQLite write: {message}; scratch={} available={} required={} deficit={} budget={}; live={} available={} reserve={} reaction_margin={} required={} deficit={}; controlling component=proof VFS",
+            "checkpoint scratch refused before SQLite write: {message}; scratch={} observed_st_blocks_bytes={} available={} required={} deficit={} budget={}; live={} available={} reserve={} reaction_margin={} required={} deficit={}; controlling component=proof VFS",
             self.guard.scratch.display(),
+            scratch_allocated,
             scratch_available,
             scratch_required,
             scratch_deficit,
@@ -312,7 +390,14 @@ impl Data {
         }
     }
 
-    fn before_write(&self, class: Class, kind: Kind, amount: u128) -> c_int {
+    fn before_write(
+        &self,
+        file_key: usize,
+        class: Class,
+        kind: Kind,
+        amount: u128,
+        end: u128,
+    ) -> c_int {
         if self
             .guard
             .failure
@@ -343,6 +428,47 @@ impl Data {
             .window
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let copy_limit = *self
+            .copy_limit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if kind == Kind::Data
+            && class == Class::Scratch
+            && self.copy_phase.load(Ordering::Acquire)
+            && end > copy_limit
+        {
+            let terms = if self.vacuum_phase.load(Ordering::Acquire) {
+                format!(
+                    "S={} Delta_tree_pages={} Delta_pointer_pages={} G_w_pages={} excess_over_S={} charged_to=E_d",
+                    self.guard.snapshot_logical,
+                    self.guard.vacuum_tree_pages,
+                    self.guard.vacuum_pointer_pages,
+                    self.guard.vacuum_wal_pages,
+                    end.saturating_sub(self.guard.snapshot_logical)
+                )
+            } else {
+                format!("C_clone={}", self.guard.copy_bound)
+            };
+            return self.refuse(format!(
+                "checkpoint copy exceeds guarded C: eof={end} C={copy_limit} {terms}"
+            ));
+        }
+        if kind == Kind::Journal && class == Class::Scratch {
+            let pages = self.journal_pages.load(Ordering::Acquire) as u128;
+            let journal_limit = pages
+                .saturating_mul(self.guard.page_size.saturating_add(8))
+                .saturating_add(
+                    2 * self
+                        .guard
+                        .page_size
+                        .max(self.sector_size.load(Ordering::Acquire) as u128),
+                );
+            if end > journal_limit {
+                return self.refuse(format!(
+                    "checkpoint journal exceeds J(Q): eof={end} Q={pages} J={journal_limit}"
+                ));
+            }
+        }
         window.calls += 1;
         match kind {
             Kind::Data => window.data_writes += 1,
@@ -350,9 +476,9 @@ impl Data {
             Kind::Temp => window.temp_writes += 1,
         }
         window.max_request = window.max_request.max(amount);
+        window.total_requested = window.total_requested.saturating_add(amount);
         let temp_separate = self.guard.temp_device != self.guard.scratch_device;
-        let pending = window.scratch_pending + window.temp_pending;
-        if !window.ready || pending + amount > WINDOW {
+        if !window.ready || window.requests_since_refresh.saturating_add(amount) > WINDOW {
             let started = Instant::now();
             if let Err(error) = self.guard.check_now() {
                 return self.refuse(error.to_string());
@@ -373,38 +499,52 @@ impl Data {
             }
             window.scratch_pending = 0;
             window.temp_pending = 0;
+            window.requests_since_refresh = 0;
             window.ready = true;
             window.refreshes += 1;
             window.refresh_ns += started.elapsed().as_nanos();
         }
+        let old_size = *window.file_sizes.get(&file_key).unwrap_or(&0);
+        let growth = self
+            .rounded(end, class)
+            .saturating_sub(self.rounded(old_size, class));
+        // Charge the possible new allocation before forwarding. Retaining a charge after a
+        // failed underlying write is conservative; repeated writes to the same pages cost 0.
+        window.file_sizes.insert(file_key, old_size.max(end));
+        window.requests_since_refresh = window.requests_since_refresh.saturating_add(amount);
         if class == Class::Temp {
             let proposed = window.temp_total_requested.saturating_add(amount);
-            if temp_separate
-                && proposed.max(window.temp_used + window.temp_pending + amount)
-                    > self.guard.temp_budget
-            {
-                return self.refuse(format!("checkpoint proof SQLite temp budget refused before write: temp={} requested={} budget={}", self.guard.temp.display(), proposed, self.guard.temp_budget));
+            let temp_peak = window
+                .temp_used
+                .saturating_add(window.temp_pending)
+                .saturating_add(growth);
+            let shared_peak = window
+                .scratch_used
+                .saturating_add(window.scratch_pending)
+                .saturating_add(window.temp_pending)
+                .saturating_add(growth);
+            if temp_separate && temp_peak > self.guard.temp_budget {
+                return self.refuse(format!("checkpoint proof SQLite temp budget refused before write: temp={} possible_peak_growth={} logical_highwater={} cumulative_requested={} budget={}", self.guard.temp.display(), temp_peak, end, window.total_requested, self.guard.temp_budget));
             }
-            if !temp_separate
-                && window.scratch_used + window.scratch_pending + proposed > self.guard.budget
-            {
-                return self.refuse(format!("checkpoint proof scratch/temp budget refused before write: scratch={} allocated_or_requested={} budget={}", self.guard.scratch.display(), window.scratch_used + window.scratch_pending + proposed, self.guard.budget));
+            if !temp_separate && shared_peak > self.guard.budget {
+                return self.refuse(format!("checkpoint proof scratch/temp budget refused before write: scratch={} possible_peak_growth={} logical_highwater={} cumulative_requested={} budget={}", self.guard.scratch.display(), shared_peak, end, window.total_requested, self.guard.budget));
             }
             window.temp_total_requested = proposed;
-            window.temp_pending += amount;
+            window.temp_pending = window.temp_pending.saturating_add(growth);
         } else {
-            let proposed = window.scratch_used
-                + window.scratch_pending
-                + amount
-                + if temp_separate {
+            let proposed = window
+                .scratch_used
+                .saturating_add(window.scratch_pending)
+                .saturating_add(growth)
+                .saturating_add(if temp_separate {
                     0
                 } else {
-                    window.temp_total_requested
-                };
+                    window.temp_pending
+                });
             if proposed > self.guard.budget {
-                return self.refuse(format!("checkpoint proof scratch budget refused before write: scratch={} allocated_or_requested={} budget={}", self.guard.scratch.display(), proposed, self.guard.budget));
+                return self.refuse(format!("checkpoint proof scratch budget refused before write: scratch={} possible_peak_growth={} logical_highwater={} cumulative_requested={} budget={}", self.guard.scratch.display(), proposed, end, window.total_requested, self.guard.budget));
             }
-            window.scratch_pending += amount;
+            window.scratch_pending = window.scratch_pending.saturating_add(growth);
         }
         ffi::SQLITE_OK
     }
@@ -504,6 +644,27 @@ unsafe extern "C" fn open(
         }
         return data.refuse("checkpoint proof VFS requires complete SQLite io methods v3".into());
     }
+    let mut initial_size: ffi::sqlite3_int64 = 0;
+    let size_rc = unsafe { methods.xFileSize.unwrap()(inner, &mut initial_size) };
+    if size_rc != ffi::SQLITE_OK || initial_size < 0 {
+        unsafe { methods.xClose.unwrap()(inner) };
+        return data.refuse("checkpoint proof VFS could not measure opened file".into());
+    }
+    if kind == Kind::Data && class == Class::Scratch {
+        let sector = unsafe { methods.xSectorSize.unwrap()(inner) };
+        if sector <= 0 || sector > 65536 {
+            unsafe { methods.xClose.unwrap()(inner) };
+            return data.refuse(format!(
+                "checkpoint proof VFS unsupported SQLite sector size {sector}"
+            ));
+        }
+        data.sector_size.store(sector as usize, Ordering::Release);
+    }
+    data.window
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .file_sizes
+        .insert(inner as usize, initial_size as u128);
     unsafe {
         (file as *mut WrappedFile).write(WrappedFile {
             file: ffi::sqlite3_file {
@@ -521,6 +682,14 @@ unsafe extern "C" fn open(
 
 unsafe extern "C" fn close(file: *mut ffi::sqlite3_file) -> c_int {
     let wrapped = unsafe { wrapped(file) };
+    {
+        let mut window = unsafe { &*wrapped.data }
+            .window
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        window.file_sizes.remove(&(wrapped.inner as usize));
+        window.file_sizes.remove(&((wrapped.inner as usize) ^ 1));
+    }
     let rc = unsafe { ((*(*wrapped.inner).pMethods).xClose.unwrap())(wrapped.inner) };
     unsafe { &*wrapped.data }
         .files
@@ -585,8 +754,19 @@ unsafe extern "C" fn write(
     offset: ffi::sqlite3_int64,
 ) -> c_int {
     let wrapped = unsafe { wrapped(file) };
-    let rc =
-        unsafe { &*wrapped.data }.before_write(wrapped.class, wrapped.kind, amt.max(0) as u128);
+    if amt < 0 || offset < 0 {
+        return ffi::SQLITE_IOERR_WRITE;
+    }
+    let Some(end) = (offset as u128).checked_add(amt as u128) else {
+        return ffi::SQLITE_FULL;
+    };
+    let rc = unsafe { &*wrapped.data }.before_write(
+        wrapped.inner as usize,
+        wrapped.class,
+        wrapped.kind,
+        amt as u128,
+        end,
+    );
     if rc != ffi::SQLITE_OK {
         return rc;
     }
@@ -602,9 +782,11 @@ unsafe extern "C" fn truncate(file: *mut ffi::sqlite3_file, new_size: ffi::sqlit
     }
     if new_size > old_size {
         let rc = unsafe { &*wrapped.data }.before_write(
+            wrapped.inner as usize,
             wrapped.class,
             wrapped.kind,
             (new_size - old_size) as u128,
+            new_size as u128,
         );
         if rc != ffi::SQLITE_OK {
             return rc;
@@ -679,9 +861,11 @@ unsafe extern "C" fn file_control(
         let hint = unsafe { *(arg as *const ffi::sqlite3_int64) };
         if hint > old_size {
             let rc = unsafe { &*wrapped.data }.before_write(
+                wrapped.inner as usize,
                 wrapped.class,
                 wrapped.kind,
                 (hint - old_size) as u128,
+                hint as u128,
             );
             if rc != ffi::SQLITE_OK {
                 return rc;
@@ -706,9 +890,11 @@ unsafe extern "C" fn shm_map(
             }
         } else {
             let rc = unsafe { &*wrapped.data }.before_write(
+                (wrapped.inner as usize) ^ 1,
                 wrapped.class,
-                wrapped.kind,
+                Kind::Temp,
                 page_size.max(0) as u128,
+                (page.max(0) as u128 + 1) * page_size.max(0) as u128,
             );
             if rc != ffi::SQLITE_OK {
                 return rc;
@@ -798,7 +984,6 @@ mod tests {
     use super::*;
     use crate::store::checkpoint_space::{allocated, sqlite_temp_dir};
     use std::fs;
-    use std::os::unix::ffi::OsStrExt as _;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -813,10 +998,21 @@ mod tests {
             temp,
             scratch_device: scratch_fs.device,
             temp_device: temp_fs.device,
-            initial_available: scratch_fs.available,
+            initial_available: 0, // fixture budget is local; parallel builds change host free bytes
             initial_scratch_allocated: super::super::existing_scratch_bytes(scratch).unwrap(),
             initial_temp_available: temp_fs.available,
             initial_wal_allocated: 0,
+            page_size: 4096,
+            granule: 4096,
+            temp_granule: 4096,
+            copy_bound: u128::MAX,
+            vacuum_cap: u128::MAX,
+            vacuum_tree_pages: 0,
+            vacuum_pointer_pages: 0,
+            vacuum_wal_pages: 0,
+            vacuum_source_logical: Arc::new(Mutex::new(4096)),
+            snapshot_logical: 4096,
+            initial_journal_pages: 1,
             budget,
             temp_budget: u128::MAX / 2,
             reserve: 0,
@@ -910,7 +1106,7 @@ mod tests {
         assert!(allocated(&copy).unwrap() <= 132 * 1024);
         let (calls, refreshes, max_request, refresh_ns, data_writes, journal_writes, temp_writes) =
             vfs.metrics();
-        assert!(calls > 0 && refreshes > 0 && max_request > 0);
+        assert!(calls > 0 && refreshes > 0 && max_request > 0, "{message}");
         assert!(data_writes > 0, "VACUUM destination bypassed the proof VFS");
         eprintln!(
             "checkpoint VFS VACUUM fixture: calls={calls} refreshes={refreshes} max_request={max_request} statvfs_refresh_ns={refresh_ns} data_writes={data_writes} journal_writes={journal_writes} temp_writes={temp_writes}"
@@ -918,6 +1114,109 @@ mod tests {
         vfs.check_closed().unwrap();
         owner.finish(&copy).unwrap();
         assert!(!copy.exists());
+    }
+
+    #[test]
+    fn source_growth_past_vacuum_cap_refuses_before_copy_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.sqlite3");
+        let source = Connection::open(&live).unwrap();
+        source
+            .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE payload(bytes BLOB);")
+            .unwrap();
+        let (_, _, page_size, pages, _, btrees, _) = super::super::live_size(&live).unwrap();
+        let scratch = dir.path().join("scratch");
+        let owner = ProofOwnership::acquire(&scratch).unwrap();
+        let mut guard = guard(&live, &scratch, 4 * 1024 * 1024);
+        guard.page_size = page_size;
+        guard.snapshot_logical = page_size * pages;
+        guard.vacuum_tree_pages = 2 * btrees;
+        guard.vacuum_wal_pages = 1;
+        guard.vacuum_cap =
+            guard.snapshot_logical + page_size * (guard.vacuum_tree_pages + guard.vacuum_wal_pages);
+        let vfs = ProofVfs::register(&guard).unwrap();
+        vfs.self_test(&owner, &scratch.join("proof-vfs-test.sqlite3"))
+            .unwrap();
+        source
+            .execute("INSERT INTO payload VALUES (zeroblob(131072))", [])
+            .unwrap();
+        let copy = scratch.join("proof-copy.sqlite3");
+        let writes_before = vfs.metrics().4;
+        let error = vfs.vacuum_copy().unwrap_err().to_string();
+        assert!(
+            error.contains("source grew beyond WAL allowance"),
+            "{error}"
+        );
+        assert!(super::super::live_size(&live).unwrap().3 * page_size > guard.vacuum_cap);
+        assert_eq!(vfs.metrics().4, writes_before);
+        assert!(!copy.exists());
+        drop(source);
+        vfs.check_closed().unwrap();
+    }
+
+    #[test]
+    fn incremental_auto_vacuum_uses_pointer_map_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.sqlite3");
+        let source = Connection::open(&live).unwrap();
+        source
+            .execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")
+            .unwrap();
+        let mut reserve_bytes: c_int = 32;
+        // SQLite's RESERVE_BYTES file control persists byte 20 of the page-1 header.
+        // SAFETY: the connection and mutable integer remain valid for this synchronous call.
+        let rc = unsafe {
+            ffi::sqlite3_file_control(
+                source.handle(),
+                c"main".as_ptr(),
+                ffi::SQLITE_FCNTL_RESERVE_BYTES,
+                (&mut reserve_bytes as *mut c_int).cast::<c_void>(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK);
+        source.execute_batch("VACUUM;").unwrap();
+        source
+            .execute_batch(
+                "CREATE TABLE payload(bytes BLOB); INSERT INTO payload VALUES (zeroblob(32768));",
+            )
+            .unwrap();
+        let (_, _, page_size, pages, auto_vacuum, btrees, usable_page_size) =
+            super::super::live_size(&live).unwrap();
+        assert_eq!(auto_vacuum, 2);
+        assert_eq!(usable_page_size, page_size - 32);
+        let (tree_pages, pointer_pages) =
+            super::super::vacuum_structural_pages(usable_page_size, pages, auto_vacuum, btrees)
+                .unwrap();
+        assert!(pointer_pages > 0);
+        let scratch = dir.path().join("scratch");
+        let owner = ProofOwnership::acquire(&scratch).unwrap();
+        let mut guard = guard(&live, &scratch, 4 * 1024 * 1024);
+        guard.page_size = page_size;
+        guard.snapshot_logical = page_size * pages;
+        guard.vacuum_tree_pages = tree_pages;
+        guard.vacuum_pointer_pages = pointer_pages;
+        guard.vacuum_wal_pages = 0;
+        guard.vacuum_cap = guard.snapshot_logical + page_size * (tree_pages + pointer_pages);
+        let vfs = ProofVfs::register(&guard).unwrap();
+        vfs.self_test(&owner, &scratch.join("proof-vfs-test.sqlite3"))
+            .unwrap();
+        vfs.vacuum_copy().unwrap();
+        let copy = scratch.join("proof-copy.sqlite3");
+        owner.mark(&copy).unwrap();
+        let input = Connection::open_with_flags_and_vfs(
+            &live,
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+            vfs.name(),
+        )
+        .unwrap();
+        input
+            .execute("VACUUM INTO ?1", [copy.to_string_lossy()])
+            .unwrap();
+        drop(input);
+        guard.check_copied_image(&copy, &vfs).unwrap();
+        assert!(vfs.metrics().4 > 0);
+        vfs.check_closed().unwrap();
+        owner.finish(&copy).unwrap();
     }
 
     #[test]
@@ -1028,6 +1327,7 @@ mod tests {
             );
         }
         db.execute_batch("PRAGMA mmap_size=0; PRAGMA journal_mode=DELETE; PRAGMA temp_store=FILE; PRAGMA cache_size=1;").unwrap();
+        vfs.begin_proof(&db).unwrap();
         let mmap: i64 = db
             .query_row("PRAGMA mmap_size", [], |row| row.get(0))
             .unwrap();
@@ -1108,7 +1408,7 @@ mod tests {
         fs::write(&live, [0; 4096]).unwrap();
         let scratch = dir.path().join("scratch");
         let owner = ProofOwnership::acquire(&scratch).unwrap();
-        let guard = guard(&live, &scratch, 1024 * 1024);
+        let guard = guard(&live, &scratch, 64 * 1024);
         let vfs = ProofVfs::register(&guard).unwrap();
         let copy = scratch.join("proof-mmap-control.sqlite3");
         owner.mark(&copy).unwrap();
@@ -1140,17 +1440,35 @@ mod tests {
         };
         assert_eq!(rc, ffi::SQLITE_OK);
         assert_eq!(requested, 0);
-        let mut mapped = 1usize as *mut c_void;
+        let mut mapped = std::ptr::dangling_mut::<c_void>();
         let rc = unsafe { io.xFetch.unwrap()(file, 0, 4096, &mut mapped) };
         assert_eq!(rc, ffi::SQLITE_OK);
         assert!(mapped.is_null());
         let bytes = [7u8; 4096];
         let rc = unsafe { io.xWrite.unwrap()(file, bytes.as_ptr().cast(), 4096, 0) };
-        assert_eq!(rc, ffi::SQLITE_OK);
+        assert_eq!(rc, ffi::SQLITE_OK, "{:?}", guard.failure.lock().unwrap());
+        for _ in 0..100 {
+            assert_eq!(
+                unsafe { io.xWrite.unwrap()(file, bytes.as_ptr().cast(), 4096, 0) },
+                ffi::SQLITE_OK
+            );
+        }
         let window = data.window.lock().unwrap();
-        assert_eq!(window.data_writes, 1);
+        assert_eq!(window.data_writes, 101);
         assert_eq!(window.scratch_pending, 4096);
         drop(window);
+        let one = [7u8; 1];
+        assert_eq!(
+            unsafe { io.xWrite.unwrap()(file, one.as_ptr().cast(), 1, 4096) },
+            ffi::SQLITE_OK
+        );
+        assert_eq!(data.window.lock().unwrap().scratch_pending, 8192);
+        // This request crosses a third page. Refusal precedes the underlying write.
+        assert_eq!(
+            unsafe { io.xWrite.unwrap()(file, one.as_ptr().cast(), 1, 64 * 1024) },
+            ffi::SQLITE_FULL
+        );
+        assert_eq!(fs::metadata(&copy).unwrap().len(), 4097);
         assert_eq!(unsafe { io.xClose.unwrap()(file) }, ffi::SQLITE_OK);
         unsafe { ffi::sqlite3_free(file.cast()) };
         vfs.check_closed().unwrap();

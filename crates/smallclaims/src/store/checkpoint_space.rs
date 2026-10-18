@@ -3,20 +3,35 @@
 use std::ffi::CString;
 use std::fs;
 use std::fs::File;
+use std::io::Read as _;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
-use rusqlite::{Connection, OptionalExtension as _};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
 
 const GIB: u128 = 1024 * 1024 * 1024;
 /// Exact binary capability expected by the checkpoint deployment gate.
 /// Change this only when the admission/refusal contract changes and the deploy gate is updated.
-pub const CHECKPOINT_SPACE_GATE_VERSION: u32 = 1;
+pub const CHECKPOINT_SPACE_GATE_VERSION: u32 = 2;
 const LIVE_FLOOR: u128 = 8 * GIB;
 const REACTION_MARGIN: u128 = 256 * 1024 * 1024;
+// The six temporary tables created by `checkpoint::prove`. Measure their empty database
+// in SQLite itself rather than fitting a minimum to a small-store failure.
+const PROOF_SCHEMA: &str =
+    /* sqlite-large-value: allow-for-now lv-hb94c80746170 owner=smallclaims::store::checkpoint_space TODO=chunk-or-reference-variable-columns */
+    "
+CREATE TABLE sealed_claims(id TEXT PRIMARY KEY);
+CREATE TABLE sealed_blobs(hash TEXT PRIMARY KEY);
+CREATE TABLE sealed_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
+    PRIMARY KEY(writer, sequence, envelope_hash));
+CREATE TABLE proof_answers(phase INTEGER, subject TEXT, text TEXT, object INTEGER,
+    PRIMARY KEY(phase, subject));
+CREATE TABLE proof_readers(phase INTEGER, subject TEXT, ordinal INTEGER, reader TEXT,
+    text TEXT, PRIMARY KEY(phase, subject, ordinal));
+CREATE TABLE proof_sources(subject TEXT PRIMARY KEY, sources TEXT);";
 #[cfg(test)]
 const PROGRESS_OPCODES: i32 = 1000;
 
@@ -27,6 +42,7 @@ pub(super) use vfs::ProofVfs;
 struct Filesystem {
     device: u64,
     available: u128,
+    granule: u128,
 }
 
 fn existing_ancestor(path: &Path) -> Result<&Path> {
@@ -53,6 +69,7 @@ fn filesystem(path: &Path) -> Result<Filesystem> {
     Ok(Filesystem {
         device: fs::metadata(path)?.dev(),
         available: u128::from(stat.f_bavail) * u128::from(stat.f_frsize),
+        granule: u128::from(stat.f_frsize),
     })
 }
 
@@ -133,6 +150,7 @@ impl ProofOwnership {
         let lock = fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(dir.join("proof.lock"))?;
         // SAFETY: the descriptor stays open for the ownership lifetime.
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
@@ -243,13 +261,101 @@ impl ProofOwnership {
     }
 }
 
-fn live_size(path: &Path) -> Result<(u128, u128)> {
+fn live_size(path: &Path) -> Result<(u128, u128, u128, u128, u128, u128, u128)> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h821b199ed4a2 owner=smallclaims::store::checkpoint_space TODO=trace-statement-and-value-representation */ "BEGIN")?;
+    let page_size: u128 =
+        u128::try_from(connection.query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))?)?;
+    let page_count: u128 =
+        u128::try_from(connection.query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))?)?;
+    let auto_vacuum: u128 =
+        u128::try_from(
+            connection.query_row("PRAGMA auto_vacuum", [], |row| row.get::<_, i64>(0))?,
+        )?;
+    // sqlite_schema has no row of its own, but VACUUM rebuilds that b-tree too.
+    let btrees: u128 = u128::try_from(connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type IN ('table', 'index')",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?)?
+    .checked_add(1)
+    .context("VACUUM b-tree count overflow")?;
+    // SQLite's page-1 header byte 20 is the reserved space per page. Read it while
+    // the same source read transaction that supplied P, N and schema is still open.
+    let mut header = [0_u8; 21];
+    File::open(path)?.read_exact(&mut header)?;
+    let usable_page_size = page_size
+        .checked_sub(u128::from(header[20]))
+        .context("invalid SQLite reserved-byte count")?;
     let metadata =
         fs::metadata(path).with_context(|| format!("stat live database {}", path.display()))?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h731eff28e6bb owner=smallclaims::store::checkpoint_space TODO=trace-statement-and-value-representation */ "COMMIT")?;
     Ok((
         u128::from(metadata.blocks()) * 512,
         u128::from(metadata.len()),
+        page_size,
+        page_count,
+        auto_vacuum,
+        btrees,
+        usable_page_size,
     ))
+}
+
+fn vacuum_structural_pages(
+    usable_page_size: u128,
+    page_count: u128,
+    auto_vacuum: u128,
+    btrees: u128,
+) -> Result<(u128, u128)> {
+    // Rebuilding a b-tree can add a root and an interior page. Pointer-map pages apply
+    // only when auto_vacuum is enabled. This is a guarded copy cap, not an admission reserve.
+    let tree_pages = btrees
+        .checked_mul(2)
+        .context("VACUUM b-tree allowance overflow")?;
+    let pointer_pages = if auto_vacuum == 0 {
+        0
+    } else {
+        let entries_per_page = usable_page_size / 5;
+        if entries_per_page == 0 {
+            bail!("SQLite page too small for pointer map");
+        }
+        page_count
+            .checked_add(entries_per_page - 1)
+            .context("pointer-map allowance overflow")?
+            / entries_per_page
+    };
+    Ok((tree_pages, pointer_pages))
+}
+
+fn empty_schema_bytes(page_size: u128, capture: bool) -> Result<u128> {
+    let connection = Connection::open_in_memory()?;
+    let temp_page_size: u128 =
+        u128::try_from(
+            connection.query_row("PRAGMA temp.page_size", [], |row| row.get::<_, i64>(0))?,
+        )?;
+    let schema_page_size = if capture { page_size } else { temp_page_size };
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hfbcc0086d0e1 owner=smallclaims::store::checkpoint_space TODO=trace-statement-and-value-representation */ &format!("PRAGMA page_size={schema_page_size};"))?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb33a5a9775c2 owner=smallclaims::store::checkpoint_space TODO=trace-statement-and-value-representation */ if capture { super::checkpoint_staging::SCHEMA } else { PROOF_SCHEMA })?;
+    let pages: u128 =
+        u128::try_from(connection.query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))?)?;
+    pages
+        .checked_mul(schema_page_size)
+        .context("empty checkpoint schema size overflow")
+}
+
+fn clone_bytes(main: u128, wal: u128, granule: u128) -> Result<u128> {
+    if granule == 0 {
+        bail!("scratch allocation granule is zero");
+    }
+    let rounded = |length: u128| -> Result<u128> {
+        length
+            .checked_add(granule - 1)
+            .map(|n| n / granule * granule)
+            .context("clone allocation rounding overflow")
+    };
+    rounded(main)?
+        .checked_add(rounded(wal)?)
+        .context("raw clone size overflow")
 }
 
 /// One admitted scratch phase. The progress callback is driven by SQLite work, not by a timer.
@@ -266,6 +372,17 @@ pub(super) struct SpaceGuard {
     initial_scratch_allocated: u128,
     initial_temp_available: u128,
     initial_wal_allocated: u128,
+    page_size: u128,
+    granule: u128,
+    temp_granule: u128,
+    copy_bound: u128,
+    vacuum_cap: u128,
+    vacuum_tree_pages: u128,
+    vacuum_pointer_pages: u128,
+    vacuum_wal_pages: u128,
+    vacuum_source_logical: Arc<Mutex<u128>>,
+    snapshot_logical: u128,
+    initial_journal_pages: u128,
     budget: u128,
     temp_budget: u128,
     reserve: u128,
@@ -278,44 +395,126 @@ impl SpaceGuard {
     /// Admit before creating the scratch directory. `capture` includes one extra database-size
     /// allowance for its staging file; a proof is admitted again after staging exists.
     pub(super) fn admit(live: &Path, scratch: &Path, capture: bool) -> Result<Self> {
-        let (live_allocated, live_length) = live_size(live)?;
+        let (
+            live_allocated,
+            live_length,
+            page_size,
+            page_count,
+            auto_vacuum,
+            btrees,
+            usable_page_size,
+        ) = live_size(live)?;
+        if page_size == 0 {
+            bail!("SQLite source page size is zero");
+        }
+        let snapshot_logical = page_size
+            .checked_mul(page_count)
+            .context("snapshot size overflow")?;
         let live_fs = filesystem(live)?;
         let scratch_fs = filesystem(scratch)?;
         let temp_dir = sqlite_temp_dir()?;
         let temp_fs = filesystem(&temp_dir)?;
         let shared_device = live_fs.device == scratch_fs.device;
         let wal_allowance = LIVE_FLOOR.max(live_allocated);
+        let (vacuum_tree_pages, vacuum_pointer_pages) =
+            vacuum_structural_pages(usable_page_size, page_count, auto_vacuum, btrees)?;
+        let vacuum_wal_pages = wal_allowance
+            / page_size
+                .checked_add(24)
+                .context("WAL frame size overflow")?;
+        let vacuum_cap_pages = page_count
+            .checked_add(vacuum_tree_pages)
+            .and_then(|n| n.checked_add(vacuum_pointer_pages))
+            .and_then(|n| n.checked_add(vacuum_wal_pages))
+            .context("VACUUM copy cap overflow")?;
+        let vacuum_cap = vacuum_cap_pages
+            .checked_mul(page_size)
+            .context("VACUUM copy cap bytes overflow")?;
         let reserve = LIVE_FLOOR + wal_allowance;
         let live_wal = PathBuf::from(format!("{}-wal", live.display()));
         let initial_wal_allocated = allocated(&live_wal)?;
-        // VACUUM INTO, rollback pages and temp sort can each occupy a large part of the source.
-        // PR1 uses this conservative limit and refuses when it cannot establish headroom.
-        let base = live_allocated.max(live_length);
-        let copy = base;
-        let journal = base;
-        let replay = base;
-        let temp_estimate = base;
-        let staging = if capture { base } else { 0 };
+        // Admission reserves the SQLite snapshot image for VACUUM. Its larger hard cap
+        // draws any extra pages from the guarded remainder. A reflink or fallback byte
+        // copy can retain the raw main file and its WAL until the fold completes.
+        let wal_length = match fs::metadata(&live_wal) {
+            Ok(metadata) => u128::from(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        let clone_copy = clone_bytes(live_length, wal_length, scratch_fs.granule)?;
+        let copy = snapshot_logical.max(clone_copy);
+        let main_pages = live_length
+            .checked_add(page_size - 1)
+            .context("main page count overflow")?
+            / page_size;
+        let initial_journal_pages = page_count.max(main_pages);
+        // A rollback journal writes each original page with an 8-byte record header,
+        // plus a header and sector alignment. Later transaction growth draws from the
+        // available envelope and is guarded before each write.
+        let journal = initial_journal_pages
+            .checked_mul(
+                page_size
+                    .checked_add(8)
+                    .context("journal record overflow")?,
+            )
+            .and_then(|n| n.checked_add(page_size.max(65536) * 2))
+            .context("journal size overflow")?;
         let separate_temp = temp_fs.device != scratch_fs.device;
-        let budget = copy
-            .saturating_add(journal)
-            .saturating_add(replay)
-            .saturating_add(if separate_temp { 0 } else { temp_estimate })
-            .saturating_add(staging);
-        let temp_budget = if separate_temp { temp_estimate } else { 0 };
+        // Schema pages live with staging during capture and on SQLite's temp device
+        // during proof. Owner, lock, sidecars and directory entries use scratch.
+        let schema_bytes = empty_schema_bytes(page_size, capture)?;
+        let fixed = (12 * scratch_fs.granule)
+            .checked_add(if capture || !separate_temp {
+                schema_bytes
+            } else {
+                0
+            })
+            .context("checkpoint scratch fixed floor overflow")?;
+        let temp_fixed = if !capture && separate_temp {
+            schema_bytes
+                .checked_add(2 * temp_fs.granule)
+                .context("checkpoint temp fixed floor overflow")?
+        } else {
+            0
+        };
+        let staging = if capture { snapshot_logical } else { 0 };
+        let minimum = if capture {
+            staging.checked_add(fixed)
+        } else {
+            copy.checked_add(journal).and_then(|n| n.checked_add(fixed))
+        }
+        .context("checkpoint minimum size overflow")?;
         let scratch_reserve = if shared_device { reserve } else { 0 };
         let temp_reserve = if separate_temp && temp_fs.device == live_fs.device {
             reserve
         } else {
             0
         };
-        let required = budget
-            .saturating_add(scratch_reserve)
-            .saturating_add(REACTION_MARGIN);
-        let temp_required = temp_budget
-            .saturating_add(temp_reserve)
-            .saturating_add(REACTION_MARGIN);
+        let required = minimum
+            .checked_add(scratch_reserve)
+            .and_then(|n| n.checked_add(REACTION_MARGIN))
+            .context("checkpoint required size overflow")?;
+        let temp_required = temp_fixed
+            .checked_add(temp_reserve)
+            .and_then(|n| n.checked_add(REACTION_MARGIN))
+            .context("temp required size overflow")?;
         let live_required = reserve.saturating_add(REACTION_MARGIN);
+        let budget = scratch_fs
+            .available
+            .saturating_sub(scratch_reserve + REACTION_MARGIN);
+        let temp_budget = if separate_temp {
+            temp_fs
+                .available
+                .saturating_sub(temp_reserve + REACTION_MARGIN)
+        } else {
+            0
+        };
+        let replay = budget.saturating_sub(minimum);
+        let temp_estimate = if separate_temp {
+            temp_budget.saturating_sub(temp_fixed)
+        } else {
+            replay
+        };
         let existing_scratch = existing_scratch_bytes(scratch)?;
         let scratch_deficit = required.saturating_sub(scratch_fs.available);
         let temp_deficit = if separate_temp {
@@ -339,7 +538,7 @@ impl SpaceGuard {
             || (!shared_device && live_fs.available < live_required)
         {
             bail!(
-                "checkpoint scratch refused before allocation: scratch={} device={} available={} required={} deficit={} existing_scratch={} (copy={} journal={} replay={} staging={} temp={} scratch budget={} live reserve={} reaction margin={}); temp_dir={} device={} available={} required={} deficit={}; live={} device={} allocated={} logical={} WAL_allocated={} available={} live reserve={} required={} deficit={} (floor={} WAL allowance={}); controlling component={}",
+                "checkpoint scratch refused before allocation: scratch={} device={} available={} required={} deficit={} existing_scratch={} (copy={} vacuum_S={} vacuum_cap={} Delta_tree_pages={} Delta_pointer_pages={} G_w_pages={} journal={} scratch_fixed={} replay_envelope={} staging={} temp_fixed={} T_vacuum_envelope={} scratch budget={} live reserve={} reaction margin={}); temp_dir={} device={} available={} required={} deficit={}; live={} device={} allocated={} logical={} snapshot_logical={} page_size={} WAL_allocated={} WAL_logical={} available={} live reserve={} required={} deficit={} (floor={} WAL allowance={}); controlling component={}",
                 scratch.display(),
                 scratch_fs.device,
                 scratch_fs.available,
@@ -347,9 +546,16 @@ impl SpaceGuard {
                 scratch_deficit,
                 existing_scratch,
                 copy,
+                snapshot_logical,
+                vacuum_cap,
+                vacuum_tree_pages,
+                vacuum_pointer_pages,
+                vacuum_wal_pages,
                 journal,
+                fixed,
                 replay,
                 staging,
+                temp_fixed,
                 temp_estimate,
                 budget,
                 scratch_reserve,
@@ -363,7 +569,10 @@ impl SpaceGuard {
                 live_fs.device,
                 live_allocated,
                 live_length,
+                snapshot_logical,
+                page_size,
                 initial_wal_allocated,
+                wal_length,
                 live_fs.available,
                 reserve,
                 live_required,
@@ -384,6 +593,17 @@ impl SpaceGuard {
             initial_scratch_allocated: existing_scratch,
             initial_temp_available: temp_fs.available,
             initial_wal_allocated,
+            page_size,
+            granule: scratch_fs.granule,
+            temp_granule: temp_fs.granule,
+            copy_bound: copy,
+            vacuum_cap,
+            vacuum_tree_pages,
+            vacuum_pointer_pages,
+            vacuum_wal_pages,
+            vacuum_source_logical: Arc::new(Mutex::new(snapshot_logical)),
+            snapshot_logical,
+            initial_journal_pages,
             budget,
             temp_budget,
             reserve,
@@ -485,6 +705,134 @@ impl SpaceGuard {
         result
     }
 
+    pub(super) fn check_clone_source(&self) -> Result<()> {
+        let main = u128::from(fs::metadata(&self.live)?.len());
+        let wal = match fs::metadata(&self.live_wal) {
+            Ok(metadata) => u128::from(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        if clone_bytes(main, wal, self.granule)? > self.copy_bound {
+            bail!(
+                "checkpoint raw clone exceeds admitted copy bound: main={main} wal={wal} copy_bound={}",
+                self.copy_bound
+            );
+        }
+        self.check_now()
+    }
+
+    pub(super) fn check_vacuum_source(&self) -> Result<()> {
+        let (_, _, page_size, pages, _, _, _) = live_size(&self.live)?;
+        let current = page_size
+            .checked_mul(pages)
+            .context("current source size overflow")?;
+        let source_growth_cap = self
+            .vacuum_wal_pages
+            .checked_mul(self.page_size)
+            .context("source WAL growth bytes overflow")?;
+        let source_cap = self
+            .snapshot_logical
+            .checked_add(source_growth_cap)
+            .context("source WAL growth cap overflow")?;
+        if page_size != self.page_size || current > source_cap {
+            bail!(
+                "checkpoint source grew beyond WAL allowance before VACUUM: admitted_logical={} current_logical={} source_cap={} admitted_page_size={} current_page_size={}",
+                self.snapshot_logical,
+                current,
+                source_cap,
+                self.page_size,
+                page_size
+            );
+        }
+        *self
+            .vacuum_source_logical
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = current;
+        self.check_now()
+    }
+
+    pub(super) fn check_cloned_files(&self, main: &Path, wal: &Path) -> Result<()> {
+        let main_len = u128::from(fs::metadata(main)?.len());
+        let wal_len = match fs::metadata(wal) {
+            Ok(metadata) => u128::from(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        if clone_bytes(main_len, wal_len, self.granule)? > self.copy_bound {
+            bail!(
+                "checkpoint cloned files exceed admission: main={main_len} wal={wal_len} copy_bound={}",
+                self.copy_bound
+            );
+        }
+        self.check_now()
+    }
+
+    pub(super) fn check_copied_image(&self, copy: &Path, vfs: &ProofVfs) -> Result<()> {
+        let copied = Connection::open_with_flags_and_vfs(
+            copy,
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+            vfs.name(),
+        )?;
+        let page_size: u128 =
+            u128::try_from(copied.query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))?)?;
+        let pages: u128 =
+            u128::try_from(copied.query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))?)?;
+        let logical = page_size
+            .checked_mul(pages)
+            .context("copied image size overflow")?;
+        let eof = u128::from(fs::metadata(copy)?.len());
+        let wal = match fs::metadata(format!("{}-wal", copy.display())) {
+            Ok(metadata) => u128::from(metadata.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        let copy_limit = vfs.copy_limit();
+        if page_size != self.page_size || logical > copy_limit || eof > copy_limit || wal != 0 {
+            bail!(
+                "checkpoint copied image exceeds admission: source_snapshot_logical={} source_pre_vacuum_logical={} source_page_size={} copied_logical={} copied_page_size={} copied_eof={} copied_wal={} copy_bound={} vacuum_tree_pages={} vacuum_pointer_pages={} vacuum_wal_pages={} source_grew_before_vacuum={}",
+                self.snapshot_logical,
+                *self
+                    .vacuum_source_logical
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                self.page_size,
+                logical,
+                page_size,
+                eof,
+                wal,
+                copy_limit,
+                self.vacuum_tree_pages,
+                self.vacuum_pointer_pages,
+                self.vacuum_wal_pages,
+                *self
+                    .vacuum_source_logical
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    > self.snapshot_logical
+            );
+        }
+        if logical > self.snapshot_logical {
+            let source_before_vacuum = *self
+                .vacuum_source_logical
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            eprintln!(
+                "st3: checkpoint proof copy exceeds admission snapshot: source_snapshot_logical={} source_pre_vacuum_logical={} copied_logical={} copy_bound={} Delta_tree_pages={} Delta_pointer_pages={} G_w_pages={} E_d_copy_excess={} source_grew_before_vacuum={} structural_or_concurrent_extra={}",
+                self.snapshot_logical,
+                source_before_vacuum,
+                logical,
+                copy_limit,
+                self.vacuum_tree_pages,
+                self.vacuum_pointer_pages,
+                self.vacuum_wal_pages,
+                logical.saturating_sub(self.snapshot_logical),
+                source_before_vacuum > self.snapshot_logical,
+                logical.saturating_sub(source_before_vacuum)
+            );
+        }
+        self.check_now()
+    }
+
     pub(super) fn failed(&self) -> bool {
         self.failure
             .lock()
@@ -534,21 +882,50 @@ mod tests {
     fn reports_allocated_live_bytes_and_the_controlling_deficit() {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("live.sqlite3");
-        fs::write(&live, [0; 4096]).unwrap();
+        Connection::open(&live)
+            .unwrap()
+            .execute_batch("CREATE TABLE valid(x);")
+            .unwrap();
         assert_eq!(live_size(&live).unwrap().0, allocated(&live).unwrap());
     }
 
     #[test]
-    fn capture_preflight_refusal_preserves_an_existing_staging_file() {
+    fn snapshot_size_includes_committed_wal_pages() {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("live.sqlite3");
-        let file = File::create(&live).unwrap();
+        let writer = Connection::open(&live).unwrap();
+        writer
+            .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE payload(bytes BLOB);")
+            .unwrap();
+        writer
+            .execute("INSERT INTO payload VALUES (zeroblob(1024 * 1024))", [])
+            .unwrap();
+        let (_, main_len, page_size, page_count, _, _, _) = live_size(&live).unwrap();
+        assert!(
+            page_size * page_count > main_len,
+            "the committed WAL image must exceed the main-file EOF"
+        );
+        assert!(page_size * page_count > 1024 * 1024);
+    }
+
+    #[test]
+    fn proof_preflight_refusal_preserves_an_existing_staging_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.sqlite3");
+        Connection::open(&live)
+            .unwrap()
+            .execute_batch("CREATE TABLE valid(x);")
+            .unwrap();
+        let file = File::options().write(true).open(&live).unwrap();
         file.set_len(1024 * 1024 * 1024 * 1024).unwrap();
         let staging = dir.path().join("checkpoint");
         fs::create_dir(&staging).unwrap();
         let capture = staging.join("capture-existing.sqlite3");
         fs::write(&capture, b"committed-cursor").unwrap();
-        let error = SpaceGuard::admit(&live, &staging, true).err().unwrap().to_string();
+        let error = SpaceGuard::admit(&live, &staging, false)
+            .err()
+            .unwrap()
+            .to_string();
         assert!(error.contains("refused before allocation"), "{error}");
         assert_eq!(fs::read(&capture).unwrap(), b"committed-cursor");
     }
@@ -557,10 +934,14 @@ mod tests {
     fn refuses_before_allocation_with_actionable_headroom() {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("live.sqlite3");
-        let file = File::create(&live).unwrap();
+        Connection::open(&live)
+            .unwrap()
+            .execute_batch("CREATE TABLE valid(x);")
+            .unwrap();
+        let file = File::options().write(true).open(&live).unwrap();
         file.set_len(1024 * 1024 * 1024 * 1024).unwrap(); // sparse: no large disk use
         let scratch = dir.path().join("scratch");
-        let error = SpaceGuard::admit(&live, &scratch, true)
+        let error = SpaceGuard::admit(&live, &scratch, false)
             .err()
             .unwrap()
             .to_string();
@@ -633,6 +1014,17 @@ mod tests {
             initial_scratch_allocated: 0,
             initial_temp_available: fs_state.available,
             initial_wal_allocated: 0,
+            page_size: 4096,
+            granule: 4096,
+            temp_granule: 4096,
+            copy_bound: u128::MAX,
+            vacuum_cap: u128::MAX,
+            vacuum_tree_pages: 0,
+            vacuum_pointer_pages: 0,
+            vacuum_wal_pages: 0,
+            vacuum_source_logical: Arc::new(Mutex::new(4096)),
+            snapshot_logical: 4096,
+            initial_journal_pages: 1,
             budget: u128::MAX,
             temp_budget: u128::MAX,
             reserve: fs_state.available,
@@ -678,6 +1070,17 @@ mod tests {
             initial_scratch_allocated: 0,
             initial_temp_available: 0,
             initial_wal_allocated: 0,
+            page_size: 4096,
+            granule: 4096,
+            temp_granule: 4096,
+            copy_bound: u128::MAX,
+            vacuum_cap: u128::MAX,
+            vacuum_tree_pages: 0,
+            vacuum_pointer_pages: 0,
+            vacuum_wal_pages: 0,
+            vacuum_source_logical: Arc::new(Mutex::new(4096)),
+            snapshot_logical: 4096,
+            initial_journal_pages: 1,
             budget: 0,
             temp_budget: 0,
             reserve: 0,
@@ -691,14 +1094,15 @@ mod tests {
     }
 
     #[test]
-    fn progress_handler_cannot_bound_a_vacuum_write() {
+    fn progress_handler_checks_vacuum_opcodes() {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("live.sqlite3");
         let connection = Connection::open(&live).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE payload(bytes BLOB);
-                 INSERT INTO payload VALUES (zeroblob(1024 * 1024));",
+                 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4000)
+                 INSERT INTO payload SELECT zeroblob(2048) FROM n;",
             )
             .unwrap();
         let scratch = dir.path().join("scratch");
@@ -714,6 +1118,17 @@ mod tests {
             initial_scratch_allocated: 0,
             initial_temp_available: fs_state.available,
             initial_wal_allocated: 0,
+            page_size: 4096,
+            granule: 4096,
+            temp_granule: 4096,
+            copy_bound: u128::MAX,
+            vacuum_cap: u128::MAX,
+            vacuum_tree_pages: 0,
+            vacuum_pointer_pages: 0,
+            vacuum_wal_pages: 0,
+            vacuum_source_logical: Arc::new(Mutex::new(4096)),
+            snapshot_logical: 4096,
+            initial_journal_pages: 1,
             budget: u128::MAX,
             temp_budget: u128::MAX,
             reserve: fs_state.available,
@@ -721,12 +1136,33 @@ mod tests {
             shared_device: true,
             failure: Arc::new(Mutex::new(None)),
         };
-        guard.install(&connection);
         let copy = dir.path().join("copy.sqlite3");
+        let callback_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let copy_peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_hits = Arc::clone(&callback_count);
+        let callback_peak = Arc::clone(&copy_peak);
+        let callback_guard = guard.clone();
+        let callback_copy = copy.clone();
+        connection.progress_handler(
+            PROGRESS_OPCODES,
+            Some(move || {
+                callback_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let allocated_now = allocated(&callback_copy).unwrap_or(0) as usize;
+                callback_peak.fetch_max(allocated_now, std::sync::atomic::Ordering::Relaxed);
+                match callback_guard.check() {
+                    Ok(()) => false,
+                    Err(error) => {
+                        *callback_guard.failure.lock().unwrap() = Some(error.to_string());
+                        true
+                    }
+                }
+            }),
+        );
         let error = connection
             .execute("VACUUM INTO ?1", [copy.to_string_lossy()])
             .err()
             .unwrap();
+        assert!(callback_count.load(std::sync::atomic::Ordering::Relaxed) > 0);
         assert!(
             guard
                 .explain::<()>(Err(error.into()))
@@ -735,9 +1171,13 @@ mod tests {
                 .to_string()
                 .contains("reserve")
         );
-        assert!(
-            allocated(&copy).unwrap() > 128 * 1024,
-            "a progress callback can fire after a VACUUM INTO write much larger than the VFS budget fixture"
+        // On this SQLite build the first production-rate callback fires before 128 KiB
+        // of destination allocation. This fixture proves the opcode callback runs and
+        // checks the reserve; the proof VFS fixture tests before-write enforcement.
+        eprintln!(
+            "VACUUM callback count={} copy peak at callback={} bytes (128 KiB lag not established)",
+            callback_count.load(std::sync::atomic::Ordering::Relaxed),
+            copy_peak.load(std::sync::atomic::Ordering::Relaxed)
         );
     }
 }

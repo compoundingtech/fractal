@@ -7,40 +7,13 @@ writer even when the scratch filesystem is full or the copy is interrupted. This
 storage change in the [checkpoint capture design](checkpoint-capture.md). A later change will
 construct the proof database from only the sealed cut.
 
-Before it creates a capture or proof scratch directory, the store reads allocated live DB bytes
-(`st_blocks * 512`), logical DB length, free bytes on the scratch device (`statvfs`), and free
-bytes on the live device. It resolves SQLite's temporary directory from the process-wide override
-and the bundled Unix VFS search order (`SQLITE_TMPDIR`, `TMPDIR`, `/var/tmp`, `/usr/tmp`, `/tmp`,
-current directory). If the temp device differs from scratch, it checks that device separately.
-An existing staging file is already reflected in available space and is reported as allocated
-scratch; the estimate covers new allocation.
+Before it creates a capture or proof scratch directory, the gate opens a SQLite read snapshot and measures page size `P`, page count `N`, and logical image `S=P*N`. Committed WAL pages are included in that SQLite image. It separately measures main-file allocation and length, WAL length and allocation, and available bytes on the live, scratch, and resolved SQLite temp devices. The temp directory follows SQLite's process override and Unix VFS search order. Existing staging is already reflected in available space.
 
-The default live reserve is **8 GiB plus max(8 GiB, allocated live DB bytes)**. The second term is
-the allowance for WAL growth while a proof runs. Ops owns any future increase; no configuration
-change is part of this change. The scratch estimate uses the greater of live allocated bytes and
-logical length for each of copy, journal, replay and sorter space; capture adds one more such term
-for staging. Where devices differ, the sorter estimate is charged to SQLite's temp device. A
-256 MiB reaction margin is added to each device. The gate reports available, required, deficit,
-reserve and each estimated component. A host may refuse every proof under this conservative
-policy; that is a capacity deficit to surface before restarting its checkpoint, not a proof pass.
+The live reserve remains **8 GiB plus max(8 GiB, allocated live DB bytes)**, including the WAL growth allowance. The proof admission derives a minimum from a copy bound `C`, initial rollback-journal bound `J(N)`, and an empty proof-schema floor `F`. `C` covers the larger of the SQLite snapshot image and the rounded raw main-plus-WAL clone until WAL fold. The VACUUM branch reserves `S` at admission and has a separate guarded destination cap `S + (2*B + pointer_map_pages + G_w)*P`: `B` is the count of table and index b-trees in the same snapshot as `P,N`, plus the `sqlite_schema` b-tree; `pointer_map_pages` is zero without auto-vacuum and otherwise `ceil(N / (usable_page_size/5))`; `G_w = floor(wal_growth_allowance/(P+24))` converts the existing live WAL growth allowance to whole frames. The two-page b-tree term allows a rebuilt tail leaf and interior/root page; the pointer-map term covers auto-vacuum layout. This is an enforced refusal cap, not a guarantee that VACUUM will succeed. Destination growth above `S` draws from the enforced remainder on the scratch device, and growth beyond the cap is refused before its write. For a 4 KiB-page store under 8 GiB allocated main-file size, the existing 8 GiB WAL allowance yields `G_w = 2,084,935` pages, so it dominates the 654-page b-tree term in the current schema. The practical limit is the scratch device remainder `E_d`: available bytes minus its live reserve (which already contains the WAL allowance), 256 MiB reaction margin, and admitted minimum. The unit tests inject smaller caps to exercise refusal. Capture also reserves one staging image. The journal includes a page and record header per protected page plus header and sector slack. A 256 MiB reaction margin is retained on each device. VACUUM sorter files and later proof or replay growth draw from the remaining admitted capacity on their actual device, including SQLite's resolved temp device. The gate can refuse while physical headroom remains, and the refusal names the controlling device and term.
 
-For a proof, a uniquely named SQLite VFS wraps the platform default only on that proof's
-connections. It charges each requested `xWrite` before forwarding it, refuses requests above
-16 MiB, and refreshes `statvfs` and allocated-byte counts after at most 16 MiB of requested
-writes. Its 256 MiB margin covers at most 16 MiB of writes between checks plus one accepted
-16 MiB request, leaving 224 MiB for allocation rounding and concurrent activity. It guards
-allocation-capable truncate, shared-memory map and file-size hints as well. Every guarded
-connection sets `mmap_size=0`. SQLite's sorter separately requests a positive mmap limit for
-its temporary file, so the proof VFS forces that file's limit to zero and returns no mapping
-from `xFetch`; the sorter continues through wrapped `xRead` and guarded `xWrite`. An over-budget
-self-test write must be refused before the copy starts. SQLite temp writes are charged by
-requested bytes, including overwrites, so the guard
-may refuse a proof with physical headroom still available. On refusal the connection closes
-without more SQL and the disposable proof and sidecars
-are removed with checked errors. There is no atomic guarantee against another process consuming
-the remaining margin between a check and a write. A project quota would supply that stronger
-guarantee. `ENOSPC` is still an abort path, never a verification claim. A seal published before
-the proof attempt remains in place.
+For a proof, a uniquely named SQLite VFS wraps the platform default on proof connections. It tracks each file's rounded logical high-water and charges possible new growth once; repeated writes at the same offset add no peak charge. Cumulative `xWrite` requests are diagnostics, while `st_blocks` and `statvfs` remain separate measurements of observed allocation and free bytes. The VFS refuses a projected crossing before forwarding an allocation-capable write, truncate, shared-memory map, or size hint. It caps a clone at admitted `C`, a VACUUM destination at its separately derived cap, and a rollback journal at `J(Q)` with `Q` refreshed from the proof copy before later transactions. The canonical sealed-claims ordering runs in one explicit `BEGIN IMMEDIATE`/`COMMIT` transaction, so its journal peak is governed by the one `J(Q)` bound. A 16 MiB request cap and 256 MiB reaction margin remain. An over-budget self-test must refuse before copying. After either VACUUM or a reflink clone and WAL fold, the copy's SQLite page count and EOF are measured again against admission. The source-WAL allowance stays independent of proof scratch and temp accounting.
+
+Every proof connection disables mmap. The VFS also prevents the SQLite sorter from mapping its temp file; sorter reads and writes stay wrapped. A refusal closes the connection without more SQL, then removes the disposable copy and sidecars with checked errors. Other processes may consume free space between checks, so `ENOSPC` remains an abort path and never a verification claim. A seal published before the proof attempt remains in place.
 
 Resumable capture staging keeps the default SQLite VFS and is charged one full live DB-size
 allowance up front. Its capture phases check available space at phase boundaries. A VFS refusal
@@ -81,12 +54,12 @@ Ops took one read-only filesystem census at 16:13 UTC on 2026-10-16. The daemon'
 
 ## Staged binary capability for deployment
 
-`CHECKPOINT_SPACE_GATE_VERSION` is the fixed integer `1`, exported from
+`CHECKPOINT_SPACE_GATE_VERSION` is the fixed integer `2`, exported from
 `smallclaims::store` through `st3::store`. The staged `st3` binary answers
 `--checkpoint-space-gate-capabilities` with exactly one JSON line:
 
 ```json
-{"kind":"checkpoint-space-gate-capabilities","version":1}
+{"kind":"checkpoint-space-gate-capabilities","version":2}
 ```
 
 The flag runs before instance activation, configuration, daemon connection or database access.

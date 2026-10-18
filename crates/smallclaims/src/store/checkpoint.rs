@@ -981,6 +981,7 @@ fn prove(
     let _completion = super::checkpoint_completion::Completion::work();
     runtime.checkpoint_preflight()?;
     let mut connection = open_checkpoint_copy(copy, vfs)?;
+    if let Some(vfs) = vfs { vfs.begin_proof(&connection)?; }
     input.attach(&connection)?;
     let mut transaction = connection.transaction()?;
     // A VFS refusal latches SQLITE_FULL. The disposable copy is removed after this function
@@ -1002,7 +1003,11 @@ fn prove(
     runtime.clear_checkpoint_projections(&transaction)?;
     let transaction = if commit_preparation {
         transaction.commit()?;
+        if let Some(vfs) = vfs { vfs.refresh_journal_pages(&connection)?; }
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb13e43c5dd77 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ "BEGIN IMMEDIATE")?;
         keep_sealed_claims_in_canonical_order(&connection)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h77d273449aaf owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ "COMMIT")?;
+        if let Some(vfs) = vfs { vfs.refresh_journal_pages(&connection)?; }
         let mut transaction = connection.transaction()?;
         if vfs.is_some() { transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore); }
         transaction
@@ -1653,6 +1658,7 @@ impl Store {
         if !self.shared_memory && self.clone_store_to(copy, vfs)? {
             return Ok(StoreCopy::Clone);
         }
+        if let Some(vfs) = vfs { vfs.vacuum_copy()?; }
         // `VACUUM INTO` reads the whole store in one transaction on a connection of its own, which
         // holds the WAL pinned for as long as the copy takes. Register it, so a pinned-WAL
         // report can name it: it was the one pin with no live read to blame.
@@ -1692,13 +1698,18 @@ impl Store {
         let connection = self.readers.get();
         let snapshot = connection.unchecked_transaction()?;
         snapshot.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get::<_, i64>(0))?;
+        if let Some(vfs) = vfs { vfs.check_clone_source()?; }
         let store = clone_file(&self.path, copy);
+        if let Some(vfs) = vfs { vfs.check_clone_source()?; }
         let wal = store.as_ref().map(|()| match clone_file(&wal, &copy_wal) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !wal.exists() => Ok(()),
             result => result,
         });
         snapshot.commit()?;
         drop(connection);
+        if let (Some(vfs), Ok(Ok(()))) = (vfs, &wal) {
+            vfs.check_cloned_files(copy, &copy_wal)?;
+        }
         match wal {
             Ok(Ok(())) => {}
             // A failed clone leaves nothing behind, so only the store clone needs removing.
@@ -1805,6 +1816,9 @@ impl Store {
         let result = (|| {
             if let Some(space) = &space { space.check_now()?; }
             self.copy_store_to_guarded(&copy, vfs.as_ref())?;
+            if let (Some(space), Some(vfs)) = (&space, &vfs) {
+                space.check_copied_image(&copy, vfs)?;
+            }
             prove_on_scratch_copy(&*self.runtime, &copy, input, vfs.as_ref())
         })();
         if let Some(vfs) = &vfs
