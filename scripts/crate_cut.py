@@ -1082,19 +1082,29 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels):
             elif segs[0] == "self":
                 segs = ["crate"] + f_path + segs[1:]
             absolute = _resolve_use(segs, f_path[:-1] + ["_"])
+            extra = None
             if absolute is not None:
                 hit = None
                 for k in range(len(absolute), 0, -1):
                     if tuple(absolute[:k]) in shared_of:
                         hit = (k, shared_of[tuple(absolute[:k])])
                         break
+                test_only = any(seg == "tests" or seg.endswith("_tests") for seg in absolute[:-1])
                 if hit is not None:
                     leaf = segs[-1]
-                    if leaf != "*" and leaf not in shared_names.get(tuple(absolute[: hit[0]]), set()):
+                    if leaf == "*":
+                        extra = ["crate"] + hit[1] + absolute[hit[0]:]  # the shared module's items too
+                    elif leaf in shared_names.get(tuple(absolute[: hit[0]]), set()):
+                        segs = ["crate"] + hit[1] + absolute[hit[0]:]
+                        test_only = False
+                    else:
                         continue  # not extracted: it stays in the cfg(test) module
-                    segs = ["crate"] + hit[1] + absolute[hit[0]:]
-                elif any(seg == "tests" or seg.endswith("_tests") for seg in absolute[:-1]):
-                    continue  # exists only for cfg(test)
+                if test_only:
+                    segs = None  # exists only for cfg(test)
+            if extra is not None:
+                keep.append((extra, None))
+            if segs is None:
+                continue
             mod = segs[-2] if len(segs) >= 2 else None
             if (mod, segs[-1]) in pairs:
                 continue
