@@ -322,7 +322,7 @@ fn state_dir() -> Option<PathBuf> {
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
         })?;
-    Some(base.join("st3"))
+    Some(st3_client::product_dirs::resolve(base.join("st3"), base.join("fractal")))
 }
 
 #[cfg(test)]
@@ -347,6 +347,7 @@ mod tests {
 
     fn state(root: &Path) -> st3::api::AppState {
         st3::api::AppState {
+            owning_person: None,
             store: Arc::new(st3::store::Store::open_memory("attach-node").unwrap()),
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0_u64).0,

@@ -9,7 +9,8 @@ import type { Agent } from '../data/source.ts'
 
 // An agent's actions, as stui's agent actions menu offers them (crates/stui/src/ui/screens.rs,
 // `agent_actions`): what can be done to it now, in the same order and words. What changes the
-// seat asks to confirm first; starting or resuming does not.
+// seat asks to confirm first; starting or resuming does not. Interrupt only stops the current turn,
+// as the composer's Stop and Esc do, so it does not ask either.
 
 export type AgentActionKey = 'interrupt' | AgentControl | 'copy'
 
@@ -28,7 +29,7 @@ export const agentActions = (agent: { readonly state?: string; readonly activity
   const running = agent.state !== undefined && RUNNING.has(agent.state)
   return [
     ...(running && agent.activity === 'working'
-      ? [{ key: 'interrupt', label: 'Interrupt', what: 'stop its current turn, as Esc does in its own screen', confirm: true } as const]
+      ? [{ key: 'interrupt', label: 'Interrupt', what: 'stop its current turn, as Esc does in its own screen', confirm: false } as const]
       : []),
     ...(running
       ? ([
@@ -121,7 +122,7 @@ const styles = stylex.create({
   danger: { borderWidth: 1, borderStyle: 'solid', borderColor: c.dangerFg, color: c.dangerFg },
   popover: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 100 },
   menu: { padding: s.xs, outline: 'none', maxWidth: 360 },
-  menuItem: { display: 'flex', flexDirection: 'column', gap: 2, padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover } },
+  menuItem: { display: 'flex', flexDirection: 'column', gap: 2, padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-focus-visible])': { outlineWidth: 2, outlineStyle: 'solid', outlineColor: c.fgMuted, outlineOffset: -2 } },
   label: { color: c.fg },
   what: { margin: 0, color: c.fgMuted, fontSize: t.denseSize },
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0, 0, 0, 0.4)' },

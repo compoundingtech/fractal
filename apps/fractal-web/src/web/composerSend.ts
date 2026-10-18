@@ -38,6 +38,7 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
     : !readable ? 'Messages can be sent once this conversation loads.' : undefined
   const dispatch = async (content: string, attachments: AttachmentSendRequest['parameters']['attachments'], retryKey?: string) => {
     if (source.attachments === undefined || grants.messageSend !== 'granted') return
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     const request = {
       api_version: 'st3.client.v0', type: 'message.send', id: `action/${crypto.randomUUID()}`,
       parameters: { to: agentRef, content, tags: [], attachments },
@@ -66,7 +67,7 @@ export const composerSendBinding = ({ source, agentRef, grants, readable, items,
         if (disabledReason !== undefined) return
         await dispatch(message.content.filter(part => part.type === 'text').map(part => part.text).join('\n'), [])
       },
-      // Deliberately no onCancel: runtime.signal is not a send-cancel contract.
+      // Deliberately no onCancel: runtime.signal is not a send-cancel contract. The pane wires Stop to the agent's interrupt.
     },
     retry: async (item) => {
       if (item._tag !== 'Text' || (item.sendState?._tag !== 'Failed' && item.sendState?._tag !== 'Unconfirmed')

@@ -14,6 +14,7 @@ use tokio::sync::{Notify, watch};
 
 fn test_state(root: &Path) -> AppState {
     AppState {
+        owning_person: None,
         store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
@@ -30,12 +31,55 @@ fn test_state(root: &Path) -> AppState {
 }
 
 #[tokio::test]
+async fn ordinary_agent_list_and_tree_cli_send_no_freshness_barrier() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    for (args, path) in [
+        (vec!["agents", "ls", "--limit", "5"], "/v1/client/agents?limit=5"),
+        (vec!["agents", "tree", "--limit", "5"], "/v1/client/agents?limit=5"),
+        (vec!["agents", "ls", "--limit", "5", "--status", "running"],
+            "/v1/client/agents?limit=5&status=running"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("roster.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).await.unwrap(), 1);
+                request.push(byte[0]);
+            }
+            let response = serde_json::json!({
+                "api_version":"st3.client.v0", "request_id":"request/plain-roster",
+                "snapshot":{"id":"snapshot/old", "host_id":"host/fixture", "store_index":1,
+                    "projection_version":"client-projection.v0", "created_at":"2026-10-16T00:00:00Z"},
+                "value":{"kind":"page", "collection":"agents", "filters":{}, "items":[],
+                    "page":{"limit":5, "has_more":false}}
+            }).to_string();
+            stream.write_all(format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response.len(), response).as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap().lines().next().unwrap().to_owned()
+        });
+        let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
+        command.kill_on_drop(true).env_remove("ST_AGENT").env_remove("ST_MISSION_RUN")
+            .args(["--endpoint", socket.to_str().unwrap(), "--daemon-wait", "0", "--json"])
+            .args(args);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+            .await.expect("a plain listing must not wait for another publication").unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(server.await.unwrap(), format!("GET {path} HTTP/1.1"));
+    }
+}
+
+#[tokio::test]
 async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secrets() {
     use ring::{
         rand::SystemRandom,
         signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, Ed25519KeyPair},
     };
-    use st3_client::{Client, Fence, MessageSendParameters, PairingBegin, device::Profile};
+    use st3_client::{Client, Fence, MessageSendParameters, PersonPairingBegin, device::Profile};
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::process::Stdio;
@@ -90,14 +134,11 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     };
     for algorithm in ["ed25519", "p256"] {
         for import in [false, true] {
-            let challenge = local
-                .pairing_begin(&PairingBegin {
-                    api_version: st3_client::API_VERSION.into(),
-                    device_name: "CLI device".into(),
-                    person_id: "person/avery".into(),
-                    full_control: Some(true),
-                    scopes: None,
-                })
+            let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+            device_name: "CLI device".into(),
+            person_id: "person/avery".into(),
+            full_control: Some(true),
+            scopes: None, })
                 .await
                 .unwrap()
                 .value;
@@ -242,14 +283,11 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
             );
         }
     }
-    let challenge = local
-        .pairing_begin(&PairingBegin {
-            api_version: st3_client::API_VERSION.into(),
-            device_name: "Display".into(),
-            person_id: "person/avery".into(),
-            full_control: None,
-            scopes: None,
-        })
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(),
+    device_name: "Display".into(),
+    person_id: "person/avery".into(),
+    full_control: None,
+    scopes: None, })
         .await
         .unwrap()
         .value;
@@ -276,10 +314,8 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     assert!(!loaded.devices[0].allow_public_http);
     assert!(loaded.devices[0].session.device_key_chain.is_empty());
     assert!(loaded.devices[0].person_root_fingerprint.is_some());
-    let challenge = local.pairing_begin(&PairingBegin {
-        api_version: st3_client::API_VERSION.into(), device_name: "Explicit unpinned CLI".into(),
-        person_id: "person/avery".into(), full_control: Some(true), scopes: None,
-    }).await.unwrap().value;
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: st3_client::API_VERSION.into(), device_name: "Explicit unpinned CLI".into(),
+    person_id: "person/avery".into(), full_control: Some(true), scopes: None, }).await.unwrap().value;
     let unpinned_profile = root.path().join("unpinned/devices.json");
     let output = run(vec!["devices".into(), "complete".into(), base.clone(), challenge.pairing_id,
         "--unpinned".into(), "--profile".into(), unpinned_profile.to_str().unwrap().into()], challenge.code).await.unwrap();
@@ -309,8 +345,7 @@ async fn run_cli_mode(socket: &Path, json: bool, args: &[&str]) -> Output {
         let mut command = st3::test_support::command(binary);
         // These are operator commands. A harness running the suite must not lend its own seat
         // identity, which scopes `work ls` and fences agent actors.
-        command
-            .env_remove("ST_AGENT")
+        command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .arg("--endpoint")
             .arg(socket);
@@ -366,7 +401,7 @@ fn person_admission_exception_is_local_reversible_and_never_spawns_the_producer(
     std::fs::set_permissions(&producer, std::fs::Permissions::from_mode(0o700)).unwrap();
     let run = |action: &str, agent: bool| {
         let mut command = std::process::Command::new(test_bin!("st3"));
-        command.env_remove("ST_AGENT").env_remove("ST_MISSION_RUN")
+        command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
             .arg("--json").args(["admission", action, "omp", "--binary"])
             .arg(&producer).arg("--state-dir").arg(root.path().join("state"));
         if action == "override" { command.args(["--reason", "local offline probe exception"]); }
@@ -2549,8 +2584,7 @@ async fn run_queue_cli(socket: &Path, config_home: &Path, json: bool, args: &[&s
     tokio::task::spawn_blocking(move || {
         let mut command = st3::test_support::command(binary);
         // Queue operator commands use the fixture's person, not the invoking harness seat.
-        command
-            .env_remove("ST_AGENT")
+        command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .env("XDG_CONFIG_HOME", config_home)
             .arg("--endpoint")
@@ -3196,8 +3230,7 @@ async fn run_lane_cli(
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
         let mut command = st3::test_support::command(binary);
-        command
-            .env_remove("ST_AGENT")
+        command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .env("XDG_CONFIG_HOME", config_home)
             .arg("--endpoint")
@@ -3723,7 +3756,7 @@ async fn agent_declaration(socket: &Path, subject: &str) -> st3::model::DesiredS
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agents_start_preserves_command_declarations_and_refuses_harness_options() {
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::canonical_tempdir();
     let (socket, server) = serve_creation_api(root.path(), None).await;
     for (name, launch) in [
         ("command", r#"command "omp --model original""#),
@@ -3992,7 +4025,7 @@ async fn new_agent_explains_ready_starting_and_waiting_states_and_preserves_json
         (Some("blocked"), false),
         (Some("ready"), true),
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = st3::test_support::canonical_tempdir();
         let (socket, server) = serve_creation_api(root.path(), harness).await;
         let workspace = root.path().to_str().unwrap();
         let output = run_cli_mode(
@@ -4744,8 +4777,7 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
     std::fs::create_dir_all(config_root.join("st3")).unwrap();
     std::fs::write(config_root.join("st3/config.toml"),
         "node = 'fixture'\nseat_priority = 'normal'\nfuture_root = 'never-print-this'\n[github]\nfuture_nested = 'also-private'\n").unwrap();
-    let output = st3::test_support::command(test_bin!("st3-fixture"))
-        .env_remove("ST_AGENT")
+    let output = st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &config_root)
@@ -4786,8 +4818,7 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
         assert!(!text.contains("never-print-this"));
         assert!(!text.contains("also-private"));
     }
-    let strict = st3::test_support::command(test_bin!("st3-fixture"))
-        .env_remove("ST_AGENT")
+    let strict = st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &config_root)
@@ -4814,8 +4845,7 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
         "node = 'fixture'\nseat_priority = 'normal'\n",
     )
     .unwrap();
-    let valid = st3::test_support::command(test_bin!("st3-fixture"))
-        .env_remove("ST_AGENT")
+    let valid = st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &config_root)
@@ -4843,8 +4873,7 @@ fn setup_rejects_unknown_config_before_any_rewrite() {
     let path = root.path().join("config.toml");
     let original = b"# retain this text\nnode = 'fixture'\nfuture_root = 'fixture-secret'\n[github]\nfuture_nested = true\n";
     std::fs::write(&path, original).unwrap();
-    let output = st3::test_support::command(test_bin!("st3-fixture"))
-        .env_remove("ST_AGENT")
+    let output = st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -4905,8 +4934,7 @@ fn local_state_commands_reject_unknown_config_before_using_default_state() {
         vec!["service", "status"],
     ];
     for args in cases {
-        let output = st3::test_support::command(test_bin!("st3-fixture"))
-            .env_remove("ST_AGENT")
+        let output = st3::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .env("HOME", root.path())
             .env("XDG_CONFIG_HOME", &config_root)

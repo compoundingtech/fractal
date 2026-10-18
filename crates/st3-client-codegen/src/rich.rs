@@ -11,6 +11,7 @@ const KEYWORDS: &[&str] = &[
     "$comment",
     "description",
     "title",
+    "default",
     "examples",
     "type",
     "properties",
@@ -50,6 +51,18 @@ type Defs = Map<String, Value>;
 
 fn js(value: &Value) -> String {
     value.to_string()
+}
+
+/// Lists of this many string cases or more are written one case per line, so two changes that add
+/// different cases merge instead of conflicting on the one line that held them all.
+pub const ONE_PER_LINE_FROM: usize = 8;
+
+fn js_cases(values: &[Value]) -> String {
+    if values.len() < ONE_PER_LINE_FROM {
+        return js(&Value::Array(values.to_vec()));
+    }
+    let lines = values.iter().map(js).collect::<Vec<_>>();
+    format!("[\n  {}\n]", lines.join(",\n  "))
 }
 
 // ------------------------------------------------------------------ normalization
@@ -160,7 +173,7 @@ fn literal_values(test: &Value) -> Option<Vec<Value>> {
         .or_else(|| test.get("enum").and_then(Value::as_array).cloned())
 }
 
-/// Inline `allOf`, distribute an `allOf` base over a sibling `oneOf`, and expand `if`/`then` on one
+/// Inline `allOf`, distribute object siblings over `oneOf`, and expand `if`/`then` on one
 /// enum property into a `oneOf` of complete branches. An open discriminator adds one fallback
 /// branch whose tag is `{ type: string, not: { enum: known } }`.
 /// Predicates on independent properties stay as object relationship assertions instead.
@@ -192,8 +205,18 @@ fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
         };
         node.insert(key.clone(), child);
     }
-    let Some(all_of) = node.remove("allOf") else {
-        return Ok(Value::Object(node));
+    let all_of = match node.remove("allOf") {
+        Some(parts) => parts,
+        None
+            if node.contains_key("oneOf")
+                && (node.get("type").and_then(Value::as_str) == Some("object")
+                    || ["properties", "required", "additionalProperties"]
+                        .iter()
+                        .any(|key| node.contains_key(*key))) =>
+        {
+            json!([])
+        }
+        None => return Ok(Value::Object(node)),
     };
     let parts = all_of.as_array().context("allOf")?;
     let (conditionals, plain): (Vec<&Value>, Vec<&Value>) =
@@ -425,16 +448,21 @@ fn subject_ref(object: &Map<String, Value>, families: &Value) -> Result<String> 
 
 fn emit_string(object: &Map<String, Value>) -> Result<String> {
     let mut excluded = None;
+    let mut excluded_pattern = None;
     if let Some(not) = object.get("not") {
         let only = not.as_object().filter(|n| n.len() == 1);
         if let Some(known) = only.and_then(|n| n.get("enum")).and_then(Value::as_array) {
             return Ok(format!("unknownCase({})", js(&Value::Array(known.clone()))));
         }
-        // `not: { const }` excludes one value from an otherwise plain string.
-        excluded = Some(
-            only.and_then(|n| n.get("const"))
-                .context("only `not: { enum }` and `not: { const }` are translated")?,
-        );
+        // `not: { pattern }` excludes a family of values (sibling collections) from a plain string.
+        if let Some(pattern) = only.and_then(|n| n.get("pattern")) {
+            excluded_pattern = Some(pattern.as_str().context("`not.pattern` must be a string")?);
+        } else {
+            // `not: { const }` excludes one value from an otherwise plain string.
+            excluded = Some(only.and_then(|n| n.get("const")).context(
+                "only `not: { enum }`, `not: { const }` and `not: { pattern }` are translated",
+            )?);
+        }
     }
     let mut schema = match object.get("x-st-ref") {
         Some(families) => subject_ref(object, families)?,
@@ -467,6 +495,13 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
             "{schema}.check(Schema.makeFilter((value: string) => value !== {}, {{ expected: {} }}))",
             js(value),
             js(&json!(format!("a string other than {value}")))
+        );
+    }
+    if let Some(pattern) = excluded_pattern {
+        schema = format!(
+            "{schema}.check(Schema.makeFilter((value: string) => !new RegExp({}, \"u\").test(value), {{ expected: {} }}))",
+            js(&json!(pattern)),
+            js(&json!(format!("a string not matching {pattern}")))
         );
     }
     if let Some(brand) = object.get("x-st-brand") {
@@ -534,6 +569,7 @@ fn emit(value: &Value, cx: &mut Cx) -> Result<String> {
     let Some(object) = value.as_object() else {
         return match value {
             Value::Bool(true) => Ok("Schema.Unknown".into()),
+            Value::Bool(false) => Ok("Schema.Never".into()),
             other => bail!("unsupported schema {other}"),
         };
     };
@@ -585,16 +621,13 @@ fn emit(value: &Value, cx: &mut Cx) -> Result<String> {
         if known.is_empty() || known.iter().any(|value| !value.is_string()) {
             bail!("open enum must contain known string cases");
         }
-        return Ok(format!("openEnum({})", js(&Value::Array(known))));
+        return Ok(format!("openEnum({})", js_cases(&known)));
     }
     if let Some(constant) = object.get("const") {
         return Ok(format!("Schema.Literal({})", js(constant)));
     }
     if let Some(values) = object.get("enum").and_then(Value::as_array) {
-        return Ok(format!(
-            "Schema.Literals({})",
-            js(&Value::Array(values.clone()))
-        ));
+        return Ok(format!("Schema.Literals({})", js_cases(values)));
     }
     for combinator in ["oneOf", "anyOf"] {
         let Some(branches) = object.get(combinator).and_then(Value::as_array) else {
@@ -1090,7 +1123,7 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
     })
 }
 
-/// The single-const discriminator shared by every branch, if all values are unique.
+/// The required single-const discriminator shared by every branch, if all values are unique.
 fn tagged_by(branches: &[Value], cx: &Cx) -> Option<String> {
     let resolved: Vec<&Value> = branches
         .iter()
@@ -1103,6 +1136,12 @@ fn tagged_by(branches: &[Value], cx: &Cx) -> Option<String> {
     first
         .keys()
         .find(|key| {
+            if !resolved.iter().all(|branch| {
+                branch.get("required").and_then(Value::as_array)
+                    .is_some_and(|required| required.iter().any(|name| name.as_str() == Some(key.as_str())))
+            }) {
+                return false;
+            }
             let values: Option<Vec<&Value>> = resolved
                 .iter()
                 .map(|branch| branch.get("properties")?.get(key.as_str())?.get("const"))
@@ -1152,6 +1191,9 @@ fn is_object(value: &Value) -> bool {
 fn recursive_type(value: &Value, encoded: bool) -> Result<String> {
     if value == &Value::Bool(true) {
         return Ok("unknown".into());
+    }
+    if value == &Value::Bool(false) {
+        return Ok("never".into());
     }
     let object = value.as_object().context("recursive schema")?;
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
@@ -1209,7 +1251,14 @@ fn recursive_type(value: &Value, encoded: bool) -> Result<String> {
         Some("string") if !encoded && codec == Some("redacted") => {
             "Redacted.Redacted<string>".into()
         }
-        Some("string") if !encoded && object.contains_key("not") => "UnknownCase".into(),
+        Some("string")
+            if !encoded
+                && object
+                    .get("not")
+                    .is_some_and(|not| not.get("pattern").is_none()) =>
+        {
+            "UnknownCase".into()
+        }
         Some("string") => {
             let mut ty = "string".to_owned();
             if !encoded {
@@ -1564,6 +1613,7 @@ pub fn models(schema: &Value) -> Result<String> {
             &mut order,
         )?;
     }
+    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     let mut out = format!(
         "// @generated by st3-client-codegen; do not edit.\n// Sources: docs/st3/client-v0/schemas/client-v0.schema.json, operations.json\n// Generator: crates/st3-client-codegen/src/rich.rs\n// Regenerate: cargo run -p st3-client-codegen; verify: cargo run -p st3-client-codegen -- --check\nimport {{ DateTime, Duration, Schema, SchemaTransformation }} from \"effect\"\n\nexport const API_VERSION = \"st3.client.v0\" as const\nconst DATE_TIME = new RegExp({}, \"u\")\n{PRELUDE}\n",
         js(&json!(DATE_TIME))
@@ -1584,6 +1634,39 @@ pub fn models(schema: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disjoint_object_unions_support_forbidden_fields_and_documented_defaults() {
+        let schema = json!({
+            "x-st-integers": "json-safe",
+            "$defs": {
+                "Duration": { "type": "integer", "minimum": 1, "maximum": 86400, "default": 3600 },
+                "Challenge": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": { "kind": { "const": "pairing-challenge" }, "grant_kind": { "enum": ["person", "assistant"] }, "person_id": { "type": "string" } },
+                    "oneOf": [
+                        { "required": ["person_id"], "properties": { "grant_kind": { "const": "person" } } },
+                        { "required": ["grant_kind"], "properties": { "grant_kind": { "const": "assistant" }, "person_id": false } }
+                    ]
+                }
+            }
+        });
+        let normalized = normalize(&schema["$defs"]["Challenge"], &Map::new()).unwrap();
+        for branch in normalized["oneOf"].as_array().unwrap() {
+            assert_eq!(branch["properties"]["kind"], json!({ "const": "pairing-challenge" }));
+            assert!(branch["required"].as_array().unwrap().contains(&json!("kind")));
+            assert_eq!(branch["additionalProperties"], json!(false));
+        }
+        let mut with_all_of = schema["$defs"]["Challenge"].clone();
+        with_all_of["allOf"] = json!([]);
+        assert_eq!(normalize(&with_all_of, &Map::new()).unwrap(), normalized);
+        let rendered = models(&schema).unwrap();
+        assert!(rendered.contains("Schema.Never"));
+        assert!(rendered.contains("Schema.Union"));
+        assert!(!rendered.contains("Schema.toTaggedUnion(\"grant_kind\")"));
+        assert_eq!(recursive_type(&Value::Bool(false), false).unwrap(), "never");
+    }
 
     fn conditional_schema() -> Value {
         json!({

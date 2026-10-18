@@ -12,6 +12,8 @@ pub use ui::screens::{HOME_IDLE_TEXT, HOME_UNKNOWN_TEXT};
 pub use ui::checklist;
 pub use version::display_version;
 
+#[cfg(test)]
+use st3::EvidenceStore;
 use st3_feed as feed;
 #[cfg(test)]
 use st3_feed::terminal_screen_fence;
@@ -113,7 +115,12 @@ fn configured_person() -> Result<Option<String>> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-    base.map(|base| person_from_config(&base.join("st3/config.toml")))
+    base.map(|base| {
+        person_from_config(
+            &st3_client::product_dirs::resolve(base.join("st3"), base.join("fractal"))
+                .join("config.toml"),
+        )
+    })
         .transpose()
         .map(Option::flatten)
 }
@@ -146,24 +153,56 @@ fn terminal_closed(revents: libc::c_short) -> bool {
     }
     false
 }
+/// How many looks, a tenth of a second apart, a terminal must keep looking closed before the
+/// watch below ends stui. A terminal that is really gone stays gone; the macOS test in
+/// `terminal_closed` (readable with nothing queued) can also hold for an instant while another
+/// thread of this process drains the keys that made it readable.
+const HANGUP_LOOKS: u32 = 10;
+
+/// Whether the terminal is gone, given one more look: `closed` says this look found it closed,
+/// `definite` that it did so by a hang-up the system reported (a closed look that cannot be a
+/// race). `run` counts the looks in a row that found it closed.
+fn hangup_confirmed(run: &mut u32, closed: bool, definite: bool) -> bool {
+    if !closed {
+        *run = 0;
+        return false;
+    }
+    *run += 1;
+    definite || *run >= HANGUP_LOOKS
+}
 fn watch_terminal_hangup() {
     // crossterm can loop inside event::poll (Darwin) or event::read (Linux) on PTY EOF and
     // never return to the main loop's terminal check; a stui left like that spins at full CPU
     // and keeps polling the daemon for hours. A separate poller observes the hangup without
     // consuming input. Once the PTY is gone there is no terminal left to restore, so end the
     // process even if crossterm is stuck.
+    //
+    // Nathan, 2026-10-17: stui on a macOS laptop ended again and again with no panic, no signal and no
+    // line in exits.log (`silent_exits` in its counters, a draft restored as unclean). This
+    // thread was the one place that ends the process without a trace, and on macOS a single
+    // look at "readable, nothing queued" was enough. It now needs the look to hold for a
+    // second, and says so in exits.log when it does end stui.
     std::thread::spawn(|| {
+        let mut run = 0;
         loop {
             let mut fd = libc::pollfd {
                 fd: 0,
                 events: libc::POLLIN,
                 revents: 0,
             };
-            if unsafe { libc::poll(&mut fd, 1, 100) } > 0 && terminal_closed(fd.revents) {
+            let closed = unsafe { libc::poll(&mut fd, 1, 100) } > 0 && terminal_closed(fd.revents);
+            let definite = closed && fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0;
+            if closed {
+                // A closed terminal answers at once; keep the looks a tenth of a second apart.
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if hangup_confirmed(&mut run, closed, definite) {
                 std::thread::sleep(Duration::from_millis(25));
                 if stdin_hung_up() {
+                    ui::lastrun_terminal_gone();
                     std::process::exit(0);
                 }
+                run = 0;
             }
         }
     });
@@ -999,6 +1038,27 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn a_closed_look_that_does_not_hold_never_ends_stui_and_a_hangup_does() {
+        let mut run = 0;
+        // Looks that find the terminal closed now and then, with keys arriving between them,
+        // never add up.
+        for _ in 0..1_000 {
+            for _ in 0..HANGUP_LOOKS - 1 {
+                assert!(!hangup_confirmed(&mut run, true, false));
+            }
+            assert!(!hangup_confirmed(&mut run, false, false));
+        }
+        // One that holds for the whole second ends it.
+        for _ in 0..HANGUP_LOOKS - 1 {
+            assert!(!hangup_confirmed(&mut run, true, false));
+        }
+        assert!(hangup_confirmed(&mut run, true, false));
+        // A hang-up the system reports is not a race and needs no second look.
+        let mut run = 0;
+        assert!(hangup_confirmed(&mut run, true, true));
+    }
+
+    #[test]
     fn the_timing_log_starts_with_the_wall_clock_instant_its_times_count_from() {
         let at = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_791_443_946_902);
         let line: serde_json::Value = serde_json::from_str(&timing_start_line(at)).unwrap();
@@ -1303,6 +1363,7 @@ mission "release" state="ready" {
                 })
                 .unwrap();
             let state = st3::api::AppState {
+                owning_person: None,
                 store: store.clone(),
                 notify: Arc::new(tokio::sync::Notify::new()),
                 event_notify: tokio::sync::watch::channel(0_u64).0,

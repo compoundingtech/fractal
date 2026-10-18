@@ -16,7 +16,7 @@ import os
 import re
 import tomllib
 
-SOURCE_DIRS = ("crates/st3-core/src", "crates/st3-daemon/src", "crates/st3/src")
+SOURCE_DIRS = ("crates/st3-core/src", "crates/st3-kernel/src", "crates/st3-telemetry/src", "crates/st3-secrets/src", "crates/st3-seats-base/src", "crates/st3-delivery-base/src", "crates/st3-missions-base/src", "crates/st3-github-base/src", "crates/st3-store/src", "crates/st3-evidence/src", "crates/st3-github/src", "crates/st3-peer/src", "crates/st3-reconcile/src", "crates/st3-api/src", "crates/st3-daemon/src", "crates/st3/src")
 ENTRY_FILES = {"lib", "main", "fixture"}
 TEST_ONLY_MODULES = {"test_support"}
 REEXPORTS = {
@@ -30,14 +30,39 @@ REEXPORTS = {
 LAYERS_FILE = ".st/module-layers.json"
 _TEST_PATH = re.compile(r"(_tests?\.rs$|/tests?\.rs$|/tests/)")
 _CFG_TEST = re.compile(
-    r"#\[cfg\(\s*(?:test|all\(test[^)]*\))\s*\)\]\s*(?:#\[[^\]]*\]\s*)*"
+    r"#\[cfg\(\s*(?:test|all\(test[^)]*\)|any\(test,\s*feature\s*=\s*\"test-support\"\))\s*\)\]\s*(?:#\[[^\]]*\]\s*)*"
     r"(?:pub(?:\([^)]*\))?\s+)?(?:mod\s+\w+\s*\{|fn\s|use\s|impl|const|static|struct|enum|mod\s+\w+;|async fn|type|trait)"
 )
 
 
 def strip_comments(source):
-    source = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
-    return re.sub(r"//[^\n]*", "", source)
+    """Remove line and (nested) block comments, leaving string and char literals intact."""
+    out, cursor, start = [], 0, 0
+    while cursor < len(source):
+        skipped = _skip_literal(source, cursor)
+        if skipped != cursor:
+            cursor = skipped
+            continue
+        if source.startswith("//", cursor):
+            out.append(source[start:cursor])
+            end = source.find("\n", cursor)
+            cursor = start = len(source) if end < 0 else end
+            continue
+        if source.startswith("/*", cursor):
+            out.append(source[start:cursor])
+            depth, cursor = 1, cursor + 2
+            while cursor < len(source) and depth:
+                if source.startswith("/*", cursor):
+                    depth, cursor = depth + 1, cursor + 2
+                elif source.startswith("*/", cursor):
+                    depth, cursor = depth - 1, cursor + 2
+                else:
+                    cursor += 1
+            start = cursor
+            continue
+        cursor += 1
+    out.append(source[start:])
+    return "".join(out)
 
 
 def drop_cfg_test(source):
@@ -55,6 +80,10 @@ def drop_cfg_test(source):
             continue
         depth, cursor = 0, position
         while cursor < len(source):
+            skipped = _skip_literal(source, cursor)
+            if skipped != cursor:
+                cursor = skipped
+                continue
             if source[cursor] == "{":
                 depth += 1
             elif source[cursor] == "}":
@@ -63,6 +92,34 @@ def drop_cfg_test(source):
                     break
             cursor += 1
         index = cursor + 1
+
+
+_RAW_STRING = re.compile(r'b?r(#*)"')
+_CHAR = re.compile(r"b?'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]{1,6}\}|.)|[^\\'\n])'")
+
+
+def _skip_literal(source, cursor):
+    """The index after a string, raw string or char literal starting at `cursor`, else `cursor`.
+    Braces inside literals (KDL and JSON in test fixtures) must not close the item being skipped."""
+    raw = _RAW_STRING.match(source, cursor)
+    if raw and (cursor == 0 or not (source[cursor - 1].isalnum() or source[cursor - 1] == "_")):
+        end = source.find('"' + raw.group(1), raw.end())
+        return len(source) if end < 0 else end + 1 + len(raw.group(1))
+    char = source[cursor]
+    if char == '"' or (char == "b" and source[cursor + 1:cursor + 2] == '"'):
+        index = cursor + (2 if char == "b" else 1)
+        while index < len(source):
+            if source[index] == "\\":
+                index += 2
+                continue
+            if source[index] == '"':
+                return index + 1
+            index += 1
+        return len(source)
+    literal = _CHAR.match(source, cursor)
+    if literal and (cursor == 0 or not (source[cursor - 1].isalnum() or source[cursor - 1] == "_")):
+        return literal.end()
+    return cursor
 
 
 def path_targets(source):
@@ -186,12 +243,89 @@ def layers(edges):
 BINARY_SIDE_CRATES = ("stui", "st3-conversation-ui")
 
 
+def client_alias_findings(manifest_path, workspace_dependencies):
+    """Reject renamed client dependencies after resolving workspace inheritance."""
+    if not os.path.isfile(manifest_path):
+        return []
+    with open(manifest_path, "rb") as handle:
+        manifest = tomllib.load(handle)
+    problems = []
+
+    def inspect(table, location=()):
+        for key, value in table.items():
+            if not isinstance(value, dict):
+                continue
+            if key in ("dependencies", "dev-dependencies", "build-dependencies"):
+                for name, spec in value.items():
+                    resolved = workspace_dependencies.get(name, {}) \
+                        if isinstance(spec, dict) and spec.get("workspace") is True else spec
+                    package = resolved.get("package", name) if isinstance(resolved, dict) else name
+                    if name != "st3-client" and package == "st3-client":
+                        section = ".".join((*location, key))
+                        problems.append(
+                            f"{manifest_path}: [{section}] aliases st3-client as {name}; "
+                            "the client dependency must retain its canonical name"
+                        )
+            else:
+                inspect(value, (*location, key))
+
+    inspect(manifest)
+    return problems
+
+
+def client_boundary_findings(root):
+    """The kernel and telemetry may not reach the standalone client's API."""
+    problems = []
+    workspace_dependencies = {}
+    workspace_manifest = os.path.join(root, "Cargo.toml")
+    if os.path.isfile(workspace_manifest):
+        with open(workspace_manifest, "rb") as handle:
+            workspace_dependencies = tomllib.load(handle).get("workspace", {}).get("dependencies", {})
+    for crate in ("st3-kernel", "st3-telemetry"):
+        crate_directory = os.path.join(root, "crates", crate)
+        problems.extend(client_alias_findings(
+            os.path.join(crate_directory, "Cargo.toml"), workspace_dependencies
+        ))
+        for target in ("src", "tests", "benches", "examples"):
+            for base, _, names in os.walk(os.path.join(crate_directory, target)):
+                for name in sorted(names):
+                    if not name.endswith(".rs"):
+                        continue
+                    path = os.path.join(base, name)
+                    with open(path, errors="replace") as handle:
+                        source = strip_comments(handle.read())
+                    # Literals (including source snippets in tests) do not name a crate.
+                    code, cursor = [], 0
+                    while cursor < len(source):
+                        end = _skip_literal(source, cursor)
+                        if end != cursor:
+                            code.append("".join("\n" if c == "\n" else " " for c in source[cursor:end]))
+                            cursor = end
+                        else:
+                            code.append(source[cursor])
+                            cursor += 1
+                    source = "".join(code)
+                    for match in re.finditer(r"\bst3_client\b", source):
+                        allowed = False
+                        # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-state-dirs-fractal — DELETE at contraction — #3032
+                        # The standalone client owns the single R11 directory resolver.
+                        allowed = re.match(r"\s*::\s*product_dirs\b", source[match.end():]) is not None
+                        # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-state-dirs-fractal
+                        if not allowed:
+                            line = source.count("\n", 0, match.start()) + 1
+                            problems.append(
+                                f"{os.path.relpath(path, root)}:{line}: forbidden st3_client reference"
+                            )
+    return problems
+
+
 def crate_findings(root):
     """Facts about the st3 and st3-daemon packages that docs/st3/crate-contract.md promises.
 
     They apply once crates/st3-daemon exists: the library does not depend on a binary-side crate,
-    the two packages carry the same version (the library reports CARGO_PKG_VERSION), and their
-    build.rs files are the same (both read the ST3_FIXTURE_* variables for the same feature).
+    the two packages carry the same version (the library reports CARGO_PKG_VERSION), a dependency both
+    manifests name is declared the same, and their build.rs files are the same (both read the
+    ST3_FIXTURE_* variables for the same feature).
     """
     daemon = os.path.join(root, "crates", "st3-daemon")
     if not os.path.isfile(os.path.join(daemon, "Cargo.toml")):
@@ -206,9 +340,35 @@ def crate_findings(root):
     if library["package"]["version"] != binary["package"]["version"]:
         problems.append(f"crates/st3-daemon version {library['package']['version']} differs from "
                         f"crates/st3 version {binary['package']['version']}")
-    for name in BINARY_SIDE_CRATES:
-        if name in library.get("dependencies", {}):
-            problems.append(f"crates/st3-daemon depends on {name}, which is binary-side")
+    for section in ("dependencies", "build-dependencies"):
+        for key, spec in library.get(section, {}).items():
+            name = spec.get("package", key) if isinstance(spec, dict) else key
+            if name in BINARY_SIDE_CRATES:
+                problems.append(f"crates/st3-daemon depends on {name}, which is binary-side")
+    # Both manifests list the library's dependencies, so a bump in one that the other misses would put
+    # two versions of a crate into the build: a dependency named in both must be declared the same.
+    for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+        for key, spec in sorted(library.get(section, {}).items()):
+            other = binary.get(section, {}).get(key)
+            if other is not None and other != spec:
+                problems.append(f"{key} in [{section}] differs between crates/st3-daemon ({spec}) and crates/st3 ({other})")
+    # A nextest filter that names package st3 and not st3-daemon silently stops matching the library's
+    # tests once they live in st3-daemon; only filters for the binary-side integration tests may do so.
+    nextest = os.path.join(root, ".config", "nextest.toml")
+    if os.path.isfile(nextest):
+        with open(nextest, "rb") as handle:
+            config = tomllib.load(handle)
+        for profile, body in config.get("profile", {}).items():
+            filters = [(f"profile.{profile}.default-filter", body["default-filter"])] if "default-filter" in body else []
+            for kind in ("overrides", "scripts"):
+                for index, entry in enumerate(body.get(kind, [])):
+                    if "filter" in entry:
+                        filters.append((f"profile.{profile}.{kind}[{index}]", entry["filter"]))
+            for where, expression in filters:
+                if re.search(r"package\(=?st3\)", expression) and "st3-daemon" not in expression \
+                        and "binary(=integration)" not in expression:
+                    problems.append(f".config/nextest.toml {where} names package st3 but not st3-daemon, "
+                                    "so it no longer selects the library's tests")
     build = [os.path.join(d, "build.rs") for d in (daemon, os.path.join(root, "crates", "st3"))]
     contents = []
     for path in build:
@@ -235,7 +395,7 @@ def findings(root):
     cycle = find_cycle(without(edges, allowed & present))
     if cycle:
         problems.append("module cycle outside the allowlist: " + " -> ".join(cycle))
-    return problems + crate_findings(root)
+    return problems + crate_findings(root) + client_boundary_findings(root)
 
 
 def reverse_closure(edges, start):

@@ -1,6 +1,9 @@
 //! Product actions over the real client/CLI Unix transport, with disk-backed daemon restarts.
 #![cfg(unix)]
 
+use st3::EvidenceStore;
+use st3::OwnedSetsStore;
+use st3::GitChangesStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -477,6 +480,7 @@ impl Daemon {
 
     fn state(root: &Path, node: &str) -> AppState {
         AppState {
+            owning_person: None,
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
@@ -691,9 +695,7 @@ impl Daemon {
                 "--json",
                 "--daemon-wait",
                 "0",
-            ])
-            .env_remove("ST_AGENT")
-            .env_remove("ST3_INCARNATION")
+            ]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_INCARNATION").env_remove("FRACTAL_INCARNATION")
             .env_remove("ST_MISSION_RUN")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("GH_TOKEN")
@@ -3975,7 +3977,8 @@ def start():
     child = subprocess.Popen([os.environ['ST3_COVERAGE_BINARY'], 'up', '--config', str(root / 'config/st3/config.toml'), '--pty-binary', str(root / 'bin/pty')], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
     pid_file.write_text(str(child.pid))
 if 'show' in args:
-    if 'st3-replication.service' in args and not (root / 'config/systemd/user/st3-replication.service').exists():
+    unit = next((arg for arg in args if arg.endswith('.service')), '')
+    if not (root / 'config/systemd/user' / unit).is_file():
         print('LoadState=not-found\nActiveState=inactive\nSubState=dead')
         sys.exit(4)
     print('LoadState=loaded\nActiveState=active\nSubState=running')

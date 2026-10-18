@@ -1,8 +1,8 @@
-# Smalltalk client UI contract
+# Fractal client UI contract
 
 For package choices and a runnable client, see [Build your own client](build-your-own.md).
 
-What every Smalltalk client shows and does. Three clients implement it: the terminal UI
+What every Fractal client shows and does. Three clients implement it: the terminal UI
 (`crates/stui/src/ui`), the iOS app (`apps/ios`, the Expo way) and the web app, Fractal
 (`apps/fractal-web`). Each part of the contract has one lead:
 
@@ -43,7 +43,7 @@ Every screen is judged by these.
    why, and offers no approval.
 2. **The conversation is the product.** One stream per agent, rendered like pi: the person's
    messages as tinted blocks, replies as real Markdown, tool calls as small boxes tinted by
-   outcome and collapsed to their last lines, Smalltalk mail in the same stream. It is stable:
+   outcome and collapsed to their last lines, Fractal mail in the same stream. It is stable:
    a refresh that changes nothing moves nothing, new content only appends, and the view follows
    the end only while the reader is at the end.
 3. **Everything visible is actionable.** Every tab, row, name and button responds to a tap.
@@ -164,7 +164,7 @@ The phone tabs are Now, Resources, Fleet, and Spaces.
     the real message (load it by the item's source id: the attention item carries only a
     generic title); Reply, Mark read, Remind me later (kept on the device only).
 - Confirm destructive or binding actions (approve, cancel, reject, resolve) with a second tap.
-- **Chat about this** sends a *new* Smalltalk message to the agent involved (or the chief of
+- **Chat about this** sends a *new* Fractal message to the agent involved (or the chief of
   staff when no agent is), titled `About: <item title>`, with the item's id, title and mission
   as context. The card shows that thread's replies.
 
@@ -180,7 +180,7 @@ The phone tabs are Now, Resources, Fleet, and Spaces.
 - Selecting an agent shows its conversation (see below) and a composer. A details panel shows
   what it holds now (mission › step, the step's goal, since when), its subagents, what is queued
   next, and how it runs (harness and state, runtime, host, worktree, parent, fault).
-- An agent on another host may show only its Smalltalk mail, not its transcript; say so.
+- An agent on another host may show only its Fractal mail, not its transcript; say so.
 - An agent not started by st: show its saved transcript when st can identify it; otherwise
   explain in plain words why there is no conversation. A found process whose native session
   is unidentified opens into this explanatory state, not a missing-session error. OMP internal
@@ -263,7 +263,7 @@ fixtures pin, and a Fractal PR that changes the fixtures changes the projection 
 
 Rules every client follows; `transcripts/*.expected.json` checks the cleaning.
 
-- Merge the harness timeline and the agent's Smalltalk messages, ordered by time.
+- Merge the harness timeline and the agent's Fractal messages, ordered by time.
 - Claude and Codex add markup for the model. Turn it into what it means:
   - `<task-notification>` → one event line: `background task <status>: <summary>`.
   - `<channel …>` (an st delivery) → `delivered to the agent: <subject> · from <sender>`; the
@@ -287,6 +287,64 @@ Rules every client follows; `transcripts/*.expected.json` checks the cleaning.
   conversation's messages, drop the pending copy. If the send fails, show it red with the reason.
 - Read a fresh snapshot right before every action and retry once on `StaleFence`: a graph that
   moved is not the person's problem.
+
+### Images
+
+An image is shown as it was sent, wherever it appears: a message's attachments, an image in a
+harness transcript, a card or a request. The bytes stay with the owner of the message
+([attachments](../st3/attachments.md)), so before they arrive the image is a placeholder that
+names its type and real size and says it is loading. An owner that cannot be reached says so on
+the image itself, never a blank and never a spinner that does not end. The placeholder never
+shows a file path. Its open action opens the image in the person's own viewer or saves it where
+they choose. A terminal that draws images draws it inline; any other terminal shows half blocks
+or the placeholder, never raw escape bytes.
+
+#### Audit, 2026-10-13
+
+`scripts/conversation-images-audit/run` reproduces every case on an isolated instance. It
+seeds the cases, joins a second host that owns one image, and opens stui under a pseudo-terminal
+that answers stui's capability query as kitty, iTerm2 or a sixel terminal would, or not at all,
+both inside and outside tmux. `run capture` writes the timelines a client reads to
+`fixtures/clients/conversation-images/`. `ios-views.mjs` feeds those timelines to the view model
+the iOS feed draws (`conversationEntries`). The iOS app was not built: the iOS column comes
+from that view model, the components that draw it, `tsc` and the existing view tests. The st
+under test is release `ed31cfe`; main at `4f763ce` has no change to any path below.
+
+| Case | Terminal UI | iOS | Cause of each miss |
+|---|---|---|---|
+| Message with images (`st conversations send --attach`) | One line per image, `▣ garden.png · 71 KB  open`. Never drawn inline, in any terminal. | 200×150 box loaded at once; `🖼 name · size…` until then. | stui: the mail renderer draws no pictures (`st3-conversation-ui/src/conversation.rs`, "a terminal draws no pictures here"), so no inline load exists for mail. iOS: `MailImageView` loads on mount, not when visible (FlatList overscan reads too), unlike transcript images. |
+| Open a message image | Saves to `$XDG_STATE_HOME/st3/stui/attachments/received/<sha>.png` and flashes the path. It runs `xdg-open` only when `DISPLAY` or `WAYLAND_DISPLAY` is set. | No open or save action. | stui: `attach::show` opens only on a local display; the person cannot choose where it is saved. iOS: `MailImageView` has no press or share action. |
+| Agent sends a person an image | Refused: `people do not have inboxes`, for `send` and `reply` alike. | Same. | By design, mail goes to agents. An agent shows a person an image only through its transcript (see the tool-result rows). |
+| Discord-bridge import (`external/discord/user/…` → agent) | Text only, no image line, until the person clicks the mail open. | Image shown, as for any message. | stui: mail between two others folds to two lines (`conversation.rs:124`, `mail_lines`), which drop its images with no marker. |
+| Claude transcript, image in the person's turn | `image · Ctrl+Enter details · Ctrl+U load inline` row, then `[image application/octet-stream, size unknown]`. Loads with Ctrl+Up then Ctrl+U, or by itself in kitty and iTerm2. | A `[image · load from owner]` text row, then a box: `Image`, `Loading image…`, the image. | Both: the server's continuation names `application/octet-stream` and no size (`conversation_blocks.rs`, `image_media`), though the native block names its type and its bytes are at hand. iOS: the fallback text is shown as the person's words besides the box. |
+| Claude tool result with an image (`Read` of a PNG) | `[image]` under the call; Ctrl+U and Ctrl+Enter load nothing. | Box under the call; loads when visible. | stui: the tool result's block is `tool_output` with `body_ref`; the image reference is in `body.content[].content`, which `Content::index` (`stui/src/ui/content.rs`) never reads, since it reads only block payloads, continuations and metadata. This is how an agent shows a person an image. |
+| Codex transcript (`input_image`, `view_image` result) | Both are `image` rows inside a "3 tool calls" bundle; each loads with Ctrl+U. | `[image · load from owner]` text rows with boxes. | stui: a person's pasted image counts and folds as a tool call. Both: type and size unknown before load, as above. |
+| st delivery echoed in a transcript (`<attachment path=…/>`) | The raw element, file path included. | The same raw text in the mail body. | Neither client reads the `attachment` element of the delivery envelope (`docs/st3/attachments.md`, "Delivery to a seat"). The path is private and the image is not offered. |
+| Huge image (6000×4000 PNG, 623 KB) in a transcript | Drawn; stui grows from 36 MB to 108 MB resident (200 MB peak) and keeps it after the tab is left. | Whole file as a base64 data URI in a 200×150 box. | stui: the decoded image is held at full size (`Loaded::Image`). The draw path clones it to build the terminal protocol (`Content::draw_image`) at each new size. It is released on hide, collapse or eviction, not when it leaves the screen. iOS: no downscale; mail images keep up to 24 data URIs. |
+| Alert card, decision or feedback form | Subjects are text: `north bed sketch  message/…`, `blob/<sha>`; Markdown `![alt](url)` reads `!north bed`. | Same text; `![alt](url)` reads `!` and a link. | The request schema has no image field (`person_request.rs`: `attachments` is refused, and no subject kind is an image). Neither Markdown renderer draws images. |
+| Image owned by another host, reachable | Same line as a local image; `open` fetches it from the owner. | Same box; the claim's size is shown before it loads. | Both drop `origin`, so neither can say whose it is. |
+| Image owned by another host, unreachable | `Not done: pond cannot be reached right now` flashes for about two seconds; the line itself does not change. | `🖼 name · size` and the server's message, with no retry; transcript images get Retry. | stui: the failure is a transient flash, not a state of the image. iOS: `MailImageView` reads again only when its row mounts again; remote-unavailable and expired are not told apart. |
+
+Terminals: each profile answers the query as that terminal does. Outside tmux, the pseudo-terminal
+is the terminal. Inside tmux, tmux 3 runs inside it with `allow-passthrough` set by
+ratatui-image.
+
+| Terminal answer | Outside tmux | Inside tmux |
+|---|---|---|
+| kitty (`TERM=xterm-kitty`, answers the graphics query) | Queried; kitty graphics; the first visible image loads by itself | Queried through passthrough; kitty Unicode placeholders; loads by itself |
+| iTerm2 (`TERM_PROGRAM=iTerm.app`) | Queried; one iTerm2 inline image; loads by itself | Not queried; half blocks after Ctrl+U |
+| sixel (DA1 lists attribute 4) | Not queried; half blocks after Ctrl+U | Not queried; half blocks after Ctrl+U |
+| Answers nothing | Half blocks after Ctrl+U; no escape bytes in the conversation | The same |
+
+Cause: stui sends the capability query only to terminals it knows by name
+(`attach::graphics_terminal`: `TERM` names kitty, Ghostty or WezTerm, `TERM_PROGRAM` names
+iTerm2, WezTerm or Ghostty, or `KITTY_WINDOW_ID` is set). A sixel terminal is never asked, and
+neither is iTerm2 inside tmux, where `TERM_PROGRAM` is `tmux`. No kitty, iTerm2 or sixel terminal
+was installed on the audit host, so each was checked by its answer to the query.
+
+Typing and key-to-redraw were not measured here. `st ui --slo` printed no samples for the
+isolated instance after a clean quit, because the counters are written hourly. The terminal-UI
+change measures them before and after with an image on screen.
 
 ## Presentation projections
 
@@ -333,7 +391,8 @@ covers the time from the commit that changes an input to the publication that ca
 p99 1500 ms, since refreshers fold at most once a second. Its paths are `publish missions`,
 `publish agents` and `publish attention`, timed by the refresher: each publication that advances
 its cut is one sample, from the first claim this node committed after the previous cut to the
-new publication. Replicated claims carry another node's clock and start no sample, and
+new publication. Replicated claims carry another node's clock and start no sample, a
+publication more than 10,000 claims after the previous one (a catch-up) is none, and
 attention's first publication after no window read it (attention folds only while one does)
 is none either. Both targets appear on
 `GET /v1/client/request-latency` and in `st doctor`. `daemon_load` keeps its 300 ms
@@ -343,22 +402,29 @@ projection within 2 KiB, and an attention projection within 16 KiB including its
 
 ### Mission
 
-Served on the `missions` collection as `Mission.presentation`, on `GET /v1/client/missions` and
-on `GET /v1/client/missions/{*id}`. The summary's mission counts read the same projection.
+Served on the `missions` collection as `Mission.presentation`, and on `GET /v1/client/missions`
+and `GET /v1/client/missions/{*id}`. The missions refresher computes it with
+`st3-ui-model::missions::present` as it folds each card. A mission detail read copies the
+published card's presentation and computes none. Until st has published an agents roster (an
+empty published roster counts), nothing says which agent queues a ready step: a card whose word
+would hinge on that (`unclaimed`, `queued`, `unstaffed`) carries no presentation, and every other
+card carries one read without agents. The first roster refolds every card. At startup it follows
+the roster head at once; after the projections are replaced it waits until something reads the
+agents list, so no bound on that wait is promised.
 
 | Field | Meaning |
 |---|---|
 | `word` | The mission word: one of the thirteen `mission` ids in `words.json`. |
 | `system` | The mission is st's own or a standing observer (see [Graph flags](#graph-flags)). |
-| `who` | Who must act now: `{kind, agent, label}`. `kind` is `you`, `agent`, `st` or `nobody`. |
-| `steps[]` | The steps of the open runs, or of the latest run when none is open, in display order: `{id, path, title, word, owner, note, attempts, blockers[], keep_open}`. The step `word` is one of `needs_you`, `done`, `working`, `ready`, `waiting`, `cancelled`, `failed` or `pending`. `owner` is `{kind, agent, label}`, as in `who`. |
+| `who` | Who must act now: `{kind, person, agent, label}`. `kind` is `person` (with `person`), `agent` (with `agent`), `st` or `nobody`. Every reader sees the same row; a client says "you" when the person is its reader. |
+| `steps[]` | The steps of the open runs, or of the latest run when none is open, in display order: `{id, path, title, word, owner, note, attempts, blockers[], keep_open}`. The step `word` is one of `needs_you`, `done`, `working`, `ready`, `waiting`, `cancelled`, `failed` or `pending`. `owner` is shaped like `who`. |
 | `stuck` | For stalled, failed, unstaffed and queued missions: `{step, word, attempts, blockers[], agent}`. The step is the first one that is failed, ready or waiting. `agent` is that step's seat (its claimant, else the agent queuing it) as `{id, label, state}`. Otherwise `null`. |
 | `queued_behind` | For a ready step waiting on a busy agent: `{agent, label, busy_with}`, where `busy_with` is the `{mission, path, label}` it holds. When the agent is not busy, `state` replaces `busy_with`. Otherwise `null`. |
 | `card` | `what-you-can-do` (stalled, failed, unstaffed), `nothing-to-do` (queued), or `null`. |
 | `actions[]` | What a person can do: `{id, action, target, confirm}`. `id` is `retry-step` (`work.retry`), `restart-agent` (`agent.start`, or `runtime.restart` for a running seat), `cancel-run` (`mission.cancel`, `confirm: true`) or `chat` (`message.send` to the stuck agent). Clients run these actions instead of printing CLI hints. |
 | `progress`, `last_progress`, `settled_at` | `{done, total}`; the latest progress summary of a step in hand; and the time it completed, failed or was cancelled (else `null`). |
 
-Precedence is the one in `st3-ui-model::missions::adapt` today, first match wins: an open human
+Precedence (`st3-ui-model::missions::word`, shared with the terminal UI's own adapter), first match wins: an open human
 gate on the mission (decision); no runs (not_started); a blocked mission or step (stalled);
 completed (done); a failed mission or step (failed); cancelled; only keep-open steps still
 running (watching); a step claimed, working or verifying (working); a ready unclaimed step,
@@ -366,16 +432,18 @@ which is unstaffed when its queuing agent is stopped, failed or faulted, queued 
 queues it, and unclaimed otherwise; a waiting or pending step (held); standing, running, ready or
 draft (idle); otherwise done.
 
-`who` is `you` for decision; the stuck or working step's seat (its claimant, else the agent
-queuing it) for working, queued, unstaffed, stalled and failed; `st` when only agentless steps
-are open; and `nobody` otherwise.
+`who` is the person the open gate waits on for decision; the working step's owner for working
+and watching (`st` for an agentless step); the stuck step's seat for queued, unstaffed, stalled
+and failed; and `nobody` otherwise.
 
 The existing `must_act` (`you`, `agent`, `system`, `blocked`, `nobody`) stays on the row for
 older clients. `who` replaces it for display.
 
-**Inputs:** the mission's runs, steps and worker leases; open human-gate attention on it; and the
-state, fault and queue of every agent that claims or queues one of its steps. The missions
-refresher refolds on the first two today, and must also refold when one of those agents changes.
+**Inputs:** the mission's runs, steps and worker leases; the open human gates on it; and the
+state, fault, held step and queue of every agent that claims, is assigned or queues one of its
+steps, from the newest published agents roster. The missions refresher refolds a mission when any
+of these change: its claims and leases as before, a gate opening or closing, and an agent of its
+changing in a newer roster. A roster publication wakes the refresher.
 
 **Today, and what the projection settles:**
 
@@ -529,7 +597,7 @@ and Fractal (`apps/fractal-web/src/data/arrangements.ts`) follow this rule.
 The conversation follow (`stream conversation`, `GET /v1/client/sessions/{*id}` and
 `conversation.changes`) gains `entries`: the cleaned conversation, in the `*.expected.json`
 shape `{id, body: {kind, value}}` plus its time. The daemon derives it with
-`st3-conversation-ui`'s `adapt::conversation` as it joins the timeline and the Smalltalk mail,
+`st3-conversation-ui`'s `adapt::conversation` as it joins the timeline and the Fractal mail,
 and revises entries by id. A delta carries only the entries it changes. Raw frames stay for
 clients that have not moved. The transcript fixtures pin `entries`, and the web app leads it as
 [above](#who-leads-the-conversation). It is a `person-read` path already. It ships last, after a
