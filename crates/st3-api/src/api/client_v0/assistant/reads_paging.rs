@@ -23,16 +23,15 @@ pub(super) async fn page(
     // policy revision. Authorization still precedes every first and subsequent page.
     let collection = format!("assistant.{projection}:{binding}");
     let cursor = query.cursor.as_deref().map(decode_client_cursor).transpose()?;
-    if let Some(cursor) = &cursor {
-        if cursor.collection != collection
+    if let Some(cursor) = &cursor
+        && (cursor.collection != collection
             || cursor.snapshot.id != snapshot.id
             || cursor.snapshot.store_index != snapshot.store_index
             || limit.is_some_and(|limit| limit != cursor.limit)
             || !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&cursor.limit)
-            || cursor.expires_at_unix_ms < client_now_ms()
-        {
-            return Err(client_page_expired("the assistant cursor does not match this collection, grant, policy, or snapshot"));
-        }
+            || cursor.expires_at_unix_ms < client_now_ms())
+    {
+        return Err(client_page_expired("the assistant cursor does not match this collection, grant, policy, or snapshot"));
     }
     let person = owner(state)?;
     let reader = state.clone();
@@ -62,7 +61,10 @@ fn read_page(
     let offset = cursor.as_ref().map_or(0, |cursor| cursor.offset);
     let mut after_key = None;
     let (snapshot, items, has_more, marker) = if projection.starts_with("missions") {
-        let marker = "assistant-mission-keyset".to_owned();
+        // Recheck bounded claim metadata, not cards. Read-authorization receipts and
+        // unrelated custom claims must not invalidate every signed continuation.
+        check_mission_source(state, cursor.as_ref(), index)?;
+        let marker = "assistant-mission-keyset-v2".to_owned();
         check_source(&cursor, &marker)?;
         let mut keys = state.store.mission_collection_page_at(
             false, 0, limit.saturating_add(1),
@@ -71,9 +73,9 @@ fn read_page(
         let has_more = keys.len() > limit;
         keys.truncate(limit);
         let ids = keys.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
-        // Assistant rows do not expose must_act, so do not scan every human attention run
-        // merely to compute that unused native presentation field.
-        let cards = mission_list_cards_with(&state.store, &ids, now, &BTreeSet::new())
+        // Hydrate only selected missions, explicitly retaining their relevant live run
+        // even when it is older than the native recent-run preview.
+        let cards = assistant_mission_list_cards_with(&state.store, &ids, now)
             .map_err(ApiError::internal)?;
         after_key = keys.last().map(|(id, time)| (*time, id.clone()));
         (snapshot, mission_rows(&cards, rich).map_err(ApiError::internal)?, has_more, marker)
@@ -141,6 +143,35 @@ fn read_page(
         sync: client_sync_notice(state), replicated: None,
     };
     Ok((snapshot, serde_json::to_value(page).map_err(ApiError::internal)?))
+}
+
+fn check_mission_source(state: &AppState, cursor: Option<&ClientPageCursor>, index: u64) -> Result<(), ApiError> {
+    let Some(cursor) = cursor else { return Ok(()); };
+    const CHANGE_LIMIT: usize = 512;
+    let connection = state.store.readers.get();
+    let mut statement = connection.prepare_cached(
+        "SELECT subject,kind FROM claims WHERE store_index>?1 AND store_index<=?2
+         ORDER BY store_index LIMIT ?3",
+    ).map_err(ApiError::internal)?;
+    let mut changes = statement.query(
+        rusqlite::params![cursor.snapshot.store_index, index, CHANGE_LIMIT + 1],
+    ).map_err(ApiError::internal)?;
+    let mut count = 0;
+    while let Some(change) = changes.next().map_err(ApiError::internal)? {
+        let subject = change.get_ref(0).map_err(ApiError::internal)?.as_str().map_err(ApiError::internal)?;
+        let kind = change.get_ref(1).map_err(ApiError::internal)?.as_str().map_err(ApiError::internal)?;
+        // Use the canonical registry's subject families, including all step claims
+        // (standalone person asks can create missions). Repairs can replace old inputs.
+        let family = st3_schema::registry().subject(subject).map(|spec| spec.family.as_str());
+        if count == CHANGE_LIMIT
+            || matches!(family, Some("mission" | "mission-run" | "step-run" | "run-generation" | "revision-proposal"))
+            || matches!(kind, "repair.applied" | "record.repaired")
+        {
+            return Err(client_page_expired("mission inputs changed; restart pagination"));
+        }
+        count += 1;
+    }
+    Ok(())
 }
 
 fn check_source(cursor: &Option<ClientPageCursor>, marker: &str) -> Result<(), ApiError> {

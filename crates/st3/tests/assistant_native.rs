@@ -31,6 +31,9 @@ impl Harness {
         store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
         let source = format!("version 2\nagent \"native.worker\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"native-mission\" state=\"ready\" {{ goal \"Native integration mission\"; }}", root.path());
         store.apply_internal(&st3::graph::parse_intent(&source, "assistant-native").unwrap(), "native-seed").unwrap();
+        // There is no daemon task in this harness. Register its production publication
+        // surface; pair() explicitly performs the attention refresh before reading it.
+        store.start_attention_list_refresher().unwrap();
         let state = AppState {
             owning_person: Some(OWNER.into()), store,
             notify: Arc::new(tokio::sync::Notify::new()),
@@ -73,6 +76,17 @@ impl Harness {
         assert_eq!(paired.grant.issuer, OWNER);
         assert_eq!(paired.principal, AssistantPrincipal::Chatgpt);
         assert_eq!(paired.grant.minimal_read_mode, AssistantMinimalReadMode::CallerBoundAllow);
+        if self.state.store.published_attention_list().is_none() {
+            let (status, unavailable) = self.assistant(&paired, "GET", "/v1/client/assistant/summary", &()).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{unavailable}");
+            assert_eq!(unavailable["code"], "attention-not-ready");
+        }
+        // Complete the same publication step the daemon performs at startup, including
+        // an empty owner view. Pairing alone does not make attention ready.
+        st3::api::refresh_attention_list(&self.state.store).unwrap();
+        let publication = self.state.store.published_attention_list()
+            .expect("the fixture must publish attention before assistant reads");
+        assert_eq!(publication.cut, self.state.store.index().unwrap());
         let (status, summary) = self.assistant(&paired, "GET", "/v1/client/assistant/summary", &()).await;
         assert_eq!(status, StatusCode::OK, "fresh pairing must read without a policy call: {summary}");
         for id in [paired.grant.id.as_str(), paired.grant.id.trim_start_matches("assistant-grant/")] {
@@ -156,6 +170,19 @@ fn grant_path(paired: &AssistantPairedSession, suffix: &str) -> String {
 }
 fn grant_subject(paired: &AssistantPairedSession) -> String {
     format!("custom/client/assistant-v1-{}", paired.grant.id.trim_start_matches("assistant-grant/"))
+}
+
+#[tokio::test]
+async fn fresh_pairing_reads_an_explicitly_published_empty_attention_view() {
+    let h = Harness::new();
+    assert!(h.state.store.attention_list_refresher_running());
+    assert!(h.state.store.published_attention_list().is_none());
+    let paired = h.pair().await;
+    let publication = h.state.store.published_attention_list().unwrap();
+    assert!(publication.owners.get(OWNER).is_none_or(|rows| rows.is_empty()));
+    let (status, attention) = h.assistant(&paired, "GET", "/v1/client/assistant/attention", &()).await;
+    assert_eq!(status, StatusCode::OK, "{attention}");
+    assert!(attention["value"]["items"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

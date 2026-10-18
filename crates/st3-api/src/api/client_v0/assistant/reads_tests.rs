@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "reads_cursor_tests.rs"]
+mod cursor_tests;
+
 const OWNER: &str = "person/operator";
 const AGENT: &str = "agent/reads-fixture.worker";
 const MISSION: &str = "mission/reads-fixture-mission";
@@ -309,6 +312,86 @@ fn published_attention_projection_allowlists_metadata_and_keeps_rich_content_on_
     assert_eq!(rich["evidence"], source["targets"]);
     assert!(rich.get("unrecognized").is_none());
     assert_eq!(rich["id"], metadata["id"]);
+}
+
+#[tokio::test]
+async fn attention_updates_keep_native_payload_in_rich_and_content_reads_only() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    fleet(&state, root.path(), true);
+    let missions = read(&state, "missions", &[], MAX_RESPONSE_BYTES).await.unwrap();
+    let run = page_items(&missions, "assistant.missions").iter()
+        .find(|item| item["id"] == MISSION).unwrap()["run_id"].as_str().unwrap();
+    let request = json!({"version": 1, "type": "update", "about": run});
+    let update = state.store.ask_person(&serde_json::from_value(json!({
+        "person": OWNER, "actor": AGENT, "title": SECRET, "reason": INJECTION,
+        "idempotency_key": "reads-fixture-update",
+        "request": request,
+    })).unwrap()).unwrap();
+    crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
+    let (_, _, native) = published_assistant_attention_rows(
+        &state.store, state.store.index().unwrap(), OWNER,
+    ).unwrap();
+    let native = native.iter().find(|row| row["source_id"] == update.subject).unwrap();
+    assert!(native.get("request").is_none());
+    assert_eq!(native["update"], request);
+    let rich = read(&state, "attention-rich", &[], MAX_RESPONSE_BYTES).await.unwrap();
+    let rich = page_items(&rich, "assistant.attention-rich").iter()
+        .find(|row| row["target_id"] == update.subject).unwrap();
+    assert_eq!(rich["request"], request);
+    let content = read(&state, "attention-content", &[("alert_id", &update.subject)], MAX_RESPONSE_BYTES)
+        .await.unwrap();
+    assert_eq!(content["request"], request);
+    let metadata = read(&state, "attention", &[], MAX_RESPONSE_BYTES).await.unwrap();
+    assert_no_source_text(&metadata);
+    for row in page_items(&metadata, "assistant.attention") {
+        assert!(row.get("request").is_none());
+        assert!(row.get("update").is_none());
+    }
+}
+
+#[tokio::test]
+async fn summary_agent_states_match_list_delivery_presence_without_building_cards() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.start_agent_roster_refresher().unwrap();
+    state.store.start_attention_list_refresher().unwrap();
+    crate::api::published_attention::refresh_attention_list(&state.store).unwrap();
+    let local = client_host_id(state.store.origin());
+    let now = client_now_ms();
+    let mut cards = Vec::new();
+    for (driver, transport) in [
+        ("claude", "claude-channel"), ("codex", "app-server"),
+        ("opencode", "opencode-server"), ("pi", "pi-channel"), ("omp", "omp-channel"),
+    ] {
+        for host in [local.as_str(), "host/remote-presence-fixture"] {
+            let id = format!("agent/summary-presence.{driver}.{}", if host == local { "local" } else { "remote" });
+            crate::delivery_presence::record(&id, &json!({
+                "transport": transport, "ready": false, "reason": "fixture unavailable",
+            }).to_string());
+            cards.push(json!({
+                "id": id, "driver": driver, "host_id": host, "state": "running",
+                "harness_state": "working", "incarnation_id": "summary-presence",
+                "_status_source": {
+                    "state": "working", "incarnation_id": "summary-presence",
+                    "claim": "claim/summary-presence", "observed_at_unix_ms": now,
+                },
+            }));
+        }
+    }
+    let index = state.store.index().unwrap();
+    state.store.cached_agent_resources_for(index, false, None, |_| Ok(cards)).unwrap();
+    let agents = read(&state, "agents", &[], MAX_RESPONSE_BYTES).await.unwrap();
+    let mut counts = BTreeMap::<String, u64>::new();
+    for agent in page_items(&agents, "assistant.agents") {
+        *counts.entry(agent["runtime_state"].as_str().unwrap().to_owned()).or_default() += 1;
+    }
+    assert_eq!(counts, BTreeMap::from([("running".into(), 5), ("waiting".into(), 5)]));
+    let builds = state.store.agent_resources_builds_for_test();
+    let summary = read(&state, "summary", &[], MAX_RESPONSE_BYTES).await.unwrap();
+    assert_eq!(summary["counts"]["agent_states"], json!(counts));
+    assert_eq!(state.store.agent_resources_builds_for_test(), builds);
+    assert_no_source_text(&summary);
 }
 
 #[test]

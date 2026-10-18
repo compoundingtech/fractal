@@ -220,7 +220,7 @@ impl Store {
         // Seek once per distinct mission, not once per historical run. Latest and live
         // state are indexed probes; only shallow mission keys reach the final sort.
         let mut statement = connection.prepare(
-            /* sqlite-large-value: allow-for-now lv-h9ce2460afeb1 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ "WITH RECURSIVE run_missions(mission_id) AS (
+            /* sqlite-large-value: allow-for-now lv-hcf8090320e4a owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ "WITH RECURSIVE run_missions(mission_id) AS (
                 SELECT MIN(mission_id) FROM mission_runs
                 UNION ALL
                 SELECT (SELECT MIN(mission_id) FROM mission_runs WHERE mission_id>run_missions.mission_id)
@@ -325,7 +325,7 @@ impl Store {
              )
              SELECT state,COUNT(*) FROM projected GROUP BY state",
         );
-        connection.prepare_cached(&sql)?
+        connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he8c8a96f10dc owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &sql)?
             .query_map(params![
                 at_unix_ms.saturating_sub(RECENTLY_ENDED_MS) as i64,
                 crate::model::FIRST_READINESS_FAULT_SCOPE
@@ -349,7 +349,7 @@ impl Store {
              JOIN claims c ON c.id=d.claim_id WHERE d.mission_id IN ({placeholders})"
         );
         let bare = ids.iter().map(|id| id.trim_start_matches("mission/"));
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-he8c8a96f10dc owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &sql)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfe4b3ae6eb7a owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &sql)?;
         statement
             .query_map(rusqlite::params_from_iter(bare), |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -2956,7 +2956,7 @@ impl Store {
             .map(|id| id.trim_start_matches("mission/"))
             .collect::<Vec<_>>();
         connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hfe4b3ae6eb7a owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &sql)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2dc1417b6963 owner=st3_store::store::missions TODO=trace-statement-and-value-representation */ &sql)?
             .query_map([serde_json::to_string(&ids)?], mission_run_header_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)

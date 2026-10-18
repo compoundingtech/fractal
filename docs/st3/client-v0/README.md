@@ -1283,6 +1283,12 @@ policy revision, snapshot and page size. A changed or unavailable publication re
 `page-cursor-expired`; before the first attention or agent publication, reads requiring it
 return the corresponding view-not-ready error. Summary reads count grouped mission states
 and published attention/agent state inputs, without building collection cards.
+Mission cursors also bind the store claim cut: changed mission inputs or more than 512
+intervening claims expire the sequence with `page-cursor-expired`, because mutable sort
+keys can cross the cursor. Read receipts alone do not invalidate a continuation.
+Mission metadata retains the relevant live run even outside the native recent-run preview.
+Summary agent states include
+delivery-presence downgrades, and rich attention/content preserve update request payloads.
 
 The issuer is sealed from the configured owner at trusted-local begin and preserved through
 gateway completion; remote callers cannot select or replace it. Assistant clients validate

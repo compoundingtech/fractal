@@ -77,6 +77,22 @@ Pagination binds the exact projection class, grant, policy revision, snapshot an
 
 Native mission membership seeks distinct mission IDs and their latest/live headers through additive SQLite indexes rather than ranking all historical runs. Sorting still visits shallow mission keys; only the selected page builds cards. Existing stores install the seek indexes on open, and older binaries can safely ignore them.
 
+Mission cursors bind the store claim cut and inspect at most 513 intervening claim headers. Changed mission inputs or more than 512 intervening claims return `page-cursor-expired`, since an updated mission can move across the mutable sort key; unrelated read-authorization receipts do not themselves invalidate a continuation. Clients restart rather than silently losing that mission. Mission metadata selects the latest live run, falling back to the latest terminal run, independently of the native three-run preview. Summary agent-state counts apply the same scalar delivery-presence assessment as agent pages; rich attention and exact-alert content retain update-type request payloads.
+
+Mission invalidation uses the canonical subject families from `st3_schema::registry()`, not substring matching:
+
+| Source input | Cursor treatment |
+| --- | --- |
+| Mission definitions/revisions/publication and retirement (`mission`) | Expire: changes membership, definition content, fallback phase/time or revision. |
+| Run creation/state/current generation/root phase and readiness faults (`mission-run`) | Expire: changes latest/live selection, sorting, membership, phase, run identity or blocked state. |
+| Step state/assignee/lease, person asks and mission products (`step-run`) | Expire conservatively: changes selected-run scalars; standalone asks can also create mission membership. |
+| Generation/proposal adoption (`run-generation`, `revision-proposal`) | Expire conservatively: can replace the selected run's generation, revision and steps. |
+| Canonical replacement/repair (`repair.applied`, `record.repaired`) | Expire conservatively: can replace earlier mission inputs. |
+| Agent runtime, harness observations and delivery presence (`agent`), host availability and unrelated custom/read receipts | Do not expire by themselves: assistant mission membership/order comes only from mission definitions and runs; agent IDs come from step assignee/claimant, not current agent presence. Presence affects agent pages/summary, not mission filtering/order. Any resulting mission/step state change is covered above. |
+| Wall-clock grace/lease expiry | Keep the original cursor snapshot time, so passage of time alone cannot move membership or change lease assessment within the sequence. |
+
+The original claim cut remains fixed across pages. The guard reads at most 513 intervening subject/kind headers, without source bodies or card construction. Exactly 512 unrelated claims remain valid; the 513th conservatively expires the cursor even when unrelated.
+
 Content responses default to 4 KiB and have a hard maximum of 16 KiB UTF-8 including envelope overhead; configuration may lower these limits. Content reads do not stream, follow attachments, or silently fetch entire bodies. Over-budget requests fail rather than automatically paginate.
 
 Assistant principals are denied every other route and stream, including generic messages, timelines, search, declarations, documents, history, events, and terminal WebSockets. Every mutation is denied in A/B, including `observations.report`, `prompt.respond`, and ordinary message lifecycle operations. Native/legacy alternate routes cannot bypass scope or proof enforcement.

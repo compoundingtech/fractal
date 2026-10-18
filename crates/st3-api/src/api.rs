@@ -3070,31 +3070,32 @@ fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
 /// still has a transport to assess. A running seat with a stale path becomes `waiting`; an
 /// already-waiting seat retains its harness block and ask details.
 fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
-    const NATIVE_DRIVERS: [&str; 5] = ["claude", "codex", "opencode", "pi", "omp"];
-    let Some(driver) = item
-        .get("driver")
-        .and_then(Value::as_str)
-        .filter(|driver| NATIVE_DRIVERS.contains(driver))
-        .map(str::to_owned)
-    else {
+    let Some(assessment) = agent_delivery_presence(item, item["state"].as_str(), local_host) else {
         return;
     };
-    let local = item.get("host_id").and_then(Value::as_str) == Some(local_host);
-    let live = matches!(
-        item.get("state").and_then(Value::as_str),
-        Some("running" | "waiting")
-    );
-    if !local || !live {
-        return;
-    }
-    let Some(recipient) = item.get("id").and_then(Value::as_str) else {
-        return;
-    };
-    let assessment = delivery_presence::assess_current(recipient, &driver, item["incarnation_id"].as_str());
     if assessment.stale() {
         item["state"] = Value::String("waiting".into());
     }
     item["delivery"] = assessment.to_value();
+}
+
+/// Share the live/local/native eligibility with scalar readers such as assistant summary
+/// counts. Assess the published inputs without constructing a card or delivery JSON.
+fn agent_delivery_presence(
+    item: &Value,
+    runtime: Option<&str>,
+    local_host: &str,
+) -> Option<delivery_presence::Assessment> {
+    const NATIVE_DRIVERS: [&str; 5] = ["claude", "codex", "opencode", "pi", "omp"];
+    let driver = item["driver"].as_str().filter(|driver| NATIVE_DRIVERS.contains(driver))?;
+    if item["host_id"].as_str() != Some(local_host)
+        || !matches!(runtime, Some("running" | "waiting"))
+    {
+        return None;
+    }
+    Some(delivery_presence::assess_current(
+        item["id"].as_str()?, driver, item["incarnation_id"].as_str(),
+    ))
 }
 
 #[cfg(any(test, feature = "test-support"))]

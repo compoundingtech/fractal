@@ -67,7 +67,7 @@ pub async fn project(
                 .ok_or_else(|| ApiError::not_found("owner alert absent"))?;
             Ok((client_snapshot_at(state, cut), json!({
                 "id": item["source_id"], "episode": item["episode"], "kind": item["attention_kind"],
-                "title": item["title"], "detail": item["detail"], "request": item["request"],
+                "title": item["title"], "detail": item["detail"], "request": attention_request(item),
             })))
         },
         "conversation-content" => Ok((snapshot.clone(), conversation(state, parameters, max_bytes).await?)),
@@ -176,13 +176,14 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
                 reader.store.request_agent_roster_refresh();
             }
             let mut agent_states = BTreeMap::<&str, u64>::new();
+            let local_host = client_host_id(reader.store.origin());
             for agent in agents.iter() {
                 if ident(agent["id"].as_str()).is_some_and(|id| id.starts_with("agent/")) {
                     let reported = agent["harness_state"].as_str();
                     let age = agent["_status_source"]["observed_at_unix_ms"].as_u64()
                         .map(|at| u64::try_from(now.saturating_sub(u128::from(at))).unwrap_or(u64::MAX));
-                    // The scalar state rules of overlay_agent_resources/overlay_down; no card
-                    // or presentation is constructed just to count it.
+                    // The scalar state rules of overlay_agent_resources/overlay_down, followed
+                    // by the same local delivery assessment; no card is built just to count it.
                     let mut runtime = agent["state"].as_str();
                     if age.is_some_and(|age| age > 90_000)
                         && matches!(reported, Some("ready" | "idle")) && runtime == Some("running")
@@ -203,6 +204,11 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
                         {
                             runtime = Some("down");
                         }
+                    }
+                    if agent_delivery_presence(agent, runtime, &local_host)
+                        .is_some_and(|assessment| assessment.stale())
+                    {
+                        runtime = Some("waiting");
                     }
                     *agent_states.entry(closed(runtime, AGENT_STATES)).or_default() += 1;
                 }
@@ -228,6 +234,14 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
     .await?
 }
 
+/// Native cards put informational person-step requests in `update`, not `request`.
+/// Rich/content assistant reads retain that payload under their existing request field;
+/// metadata never calls this helper or copies either source field.
+fn attention_request(item: &Value) -> &Value {
+    item.get("request").filter(|request| !request.is_null())
+        .unwrap_or(&item["update"])
+}
+
 /// Translate one published native attention row; metadata never copies source prose.
 fn attention_row(item: &Value, rich: bool) -> anyhow::Result<Value> {
     let episode = ident(item["episode"].as_str()).unwrap_or_default();
@@ -251,7 +265,7 @@ fn attention_row(item: &Value, rich: bool) -> anyhow::Result<Value> {
     if rich {
         row["title"] = item["title"].clone();
         row["detail"] = item["detail"].clone();
-        row["request"] = item["request"].clone();
+        row["request"] = attention_request(item).clone();
         row["target_id"] = item["source_id"].clone();
         row["evidence"] = item["targets"].clone();
     }

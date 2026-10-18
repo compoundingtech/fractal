@@ -18281,10 +18281,11 @@ fn mission_collection_keyset_preserves_zero_run_and_live_run_semantics() {
     {
         let connection = store.connection.lock().unwrap();
         connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hd8a26219eb33 owner=st3_store::store::tests TODO=prepare-body-and-predecessor-values */
             "UPDATE claims SET accepted_at_unix_ms='900' WHERE id=(SELECT claim_id FROM mission_definitions WHERE mission_id='zero')",
             [],
         ).unwrap();
-        connection.execute("UPDATE mission_definitions SET state='retired' WHERE mission_id='retired'", []).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-ha11b012de9e6 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_definitions SET state='retired' WHERE mission_id='retired'", []).unwrap();
         for (id, mission, status, created, updated) in [
             ("live-standing", "live", "standing", "1", "800"),
             ("live-running", "live", "running", "2", "800"),
@@ -18298,6 +18299,7 @@ fn mission_collection_keyset_preserves_zero_run_and_live_run_semantics() {
             ("orphan-terminal", "orphan", "standing", "1", "900"),
         ] {
             connection.execute(
+                /* sqlite-large-value: allow-for-now lv-hd21324b91838 owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */
                 "INSERT INTO mission_runs(id,mission_id,initial_revision,current_generation_id,
                  root_revision,root_run_id,workspace,requester,inputs,mode,status,phase,
                  created_at_unix_ms,updated_at_unix_ms)
@@ -18326,6 +18328,7 @@ fn mission_collection_keyset_preserves_zero_run_and_live_run_semantics() {
     }
     // Standing alone also overrides the newer terminal header.
     store.connection.lock().unwrap().execute(
+        /* sqlite-large-value: allow-for-now lv-h8a32d697e56e owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */
         "DELETE FROM mission_runs WHERE id='live-running'", [],
     ).unwrap();
     assert!(collect(false).contains(&"mission/live".to_owned()));
@@ -18338,6 +18341,7 @@ fn mission_collection_seek_indexes_upgrade_existing_stores() {
     {
         let store = Store::open(&path, "node").unwrap();
         store.connection.lock().unwrap().execute_batch(
+            /* sqlite-large-value: allow-for-now lv-hba12767afe9e owner=st3_store::store::tests TODO=bound-or-reference-values-and-reclamation */
             "DROP INDEX mission_runs_collection_latest_index;
              DROP INDEX mission_runs_collection_live_index;",
         ).unwrap();
