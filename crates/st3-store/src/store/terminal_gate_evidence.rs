@@ -1,6 +1,12 @@
 //! Dormant, test-registered negative operator. This module is absent from non-test builds.
 //! Inputs are eight fixture-supplied selected facts, NOT a native authority certificate.
 //! No production extractor, trigger, registration, seed, flush or Doctor call exists here.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::terminal_gate_evidence_shared::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::terminal_gate_evidence_shared::{INPUT_BYTES, NON_SELECTING, STRUCTURAL_MARKERS, id, preflight};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Deserialize;
@@ -10,19 +16,6 @@ use smallclaims::ivm::install::{Mutation, Namespace, Operator};
 pub const VIEW: &str = "test.terminal-exec-gates.v1";
 pub const SOURCE: &str = "test.selected-terminal-facts.v1";
 const MEMBERS: usize = 64;
-const INPUT_BYTES: usize = 16 * 1024;
-const STRUCTURAL_MARKERS: usize = 72;
-// These kinds participate in actual-state folding but do not select the runtime observation.
-// No wildcard is accepted: a new runtime.action kind requires a source-policy review.
-const NON_SELECTING: &[&str] = &[
-    "runtime.action.requested",
-    "runtime.action.succeeded",
-    "runtime.action.failed",
-    "runtime.action.deadline-reached",
-    "runtime.reconcile-decision",
-    "runtime.restart-window-reset",
-];
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Facts {
@@ -105,51 +98,6 @@ struct Domain {
     complete: bool,
     origin: String,
     kinds: Vec<String>,
-}
-
-// Byte, depth and allocation-marker limits precede serde's allocation. Count only syntax,
-// including object/array openings and value separators, outside escaped string contents.
-fn preflight(raw: &str) -> Result<()> {
-    ensure!(raw.len() <= INPUT_BYTES, "terminal input byte cap");
-    let (mut quoted, mut escaped, mut depth, mut markers) = (false, false, 0usize, 0usize);
-    for byte in raw.bytes() {
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                quoted = false;
-            }
-            continue;
-        }
-        match byte {
-            b'"' => quoted = true,
-            b'{' | b'[' => {
-                depth += 1;
-                markers += 1;
-            }
-            b'}' | b']' => {
-                depth = depth.checked_sub(1).context("terminal input syntax")?;
-            }
-            b',' => markers += 1,
-            _ => (),
-        }
-        ensure!(
-            depth <= 8 && markers <= STRUCTURAL_MARKERS,
-            "terminal input structure cap"
-        );
-    }
-    ensure!(!quoted && depth == 0, "terminal input syntax");
-    Ok(())
-}
-
-fn id(value: &str) -> Result<()> {
-    ensure!(
-        !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control),
-        "terminal identifier refused"
-    );
-    Ok(())
 }
 
 fn expanded_subject(f: &Facts) -> Result<Option<String>> {
@@ -410,3 +358,18 @@ pub mod tests;
 
 #[cfg(test)]
 mod native_source;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod native_source_shared;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod native_source_tests_shared;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod native_source_transaction_hooks_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod native_source_transaction_hooks_operator_error_shared_seats;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod native_source_transaction_hooks_tests_shared_seats;

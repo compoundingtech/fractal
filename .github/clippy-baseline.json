@@ -56,15 +56,18 @@
       "clippy::type_complexity": 3,
       "clippy::useless_format": 1
     },
+    "st3-seats": {
+      "clippy::cloned_ref_to_slice_refs": 4,
+      "clippy::needless_question_mark": 1,
+      "clippy::type_complexity": 2
+    },
     "st3-store": {
-      "clippy::cloned_ref_to_slice_refs": 5,
+      "clippy::cloned_ref_to_slice_refs": 1,
       "clippy::collapsible_if": 13,
       "clippy::double_ended_iterator_last": 1,
       "clippy::needless_borrow": 1,
-      "clippy::needless_question_mark": 1,
       "clippy::redundant_closure": 1,
-      "clippy::too_many_arguments": 1,
-      "clippy::type_complexity": 2
+      "clippy::too_many_arguments": 1
     },
     "st3-ui-model": {
       "clippy::field_reassign_with_default": 4

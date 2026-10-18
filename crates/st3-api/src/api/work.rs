@@ -1,3 +1,4 @@
+use crate::SeatsStoreCore;
 use super::*;
 
 /// Only a locally bound harness may recover a missing work fence from its own runtime.

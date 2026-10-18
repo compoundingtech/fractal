@@ -5,6 +5,7 @@
 //! terminal, so they must wait the outage out silently, never exit for it, and resume from the
 //! graph once the daemon is back. Each test here owns its daemon, socket, and state directories.
 
+use st3::SeatsStore;
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::unix::process::CommandExt as _;

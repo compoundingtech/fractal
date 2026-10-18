@@ -1,3 +1,12 @@
+use crate::AccountsStore;
+use crate::EvidenceSeatsStore;
+use crate::RetirementsStore;
+use crate::RosterAdmissionStore;
+use crate::SeatStatusStore;
+use crate::SeatsStore;
+use crate::SeatsStoreCore;
+use crate::EvidenceStore;
+use crate::PublishedViewsStore;
 use super::*;
 use crate::model::DesiredSubject;
 use axum::http::HeaderMap;
@@ -146,7 +155,6 @@ mod push_tests;
 const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
 const CONVERSATION_SUBPROTOCOL: &str = "st3.client.conversation.v0";
 const COLLECTION_SUBPROTOCOL: &str = "st3.client.collections.v0";
-const TERMINAL_CAPABILITY_PROTOCOL_PREFIX: &str = "st3.cap.";
 pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
 
 pub async fn request_latency(
@@ -344,14 +352,12 @@ pub async fn collection_stream(
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
-    if protocols != [COLLECTION_SUBPROTOCOL] {
-        return Err(validation(
-            "the collection WebSocket requires exactly st3.client.collections.v0",
-        ));
-    }
+    let selected = super::wire_names::selected_protocol(&protocols, COLLECTION_SUBPROTOCOL)
+        .ok_or_else(|| validation("the collection WebSocket requires exactly one supported collections protocol"))?
+        .to_owned();
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     Ok(websocket
-        .protocols([COLLECTION_SUBPROTOCOL])
+        .protocols([selected])
         .on_upgrade(move |socket| collection_stream_socket(socket, state, session, presence, upgrade)))
 }
 
@@ -5780,14 +5786,15 @@ pub fn message_provenance(state: &AppState, claim: &ClaimRecord) -> Option<Value
     {
         return None;
     }
-    let verdict = state.store.claim_verdict(&claim.id).ok()?;
-    let mut provenance = json!({"verdict": verdict.name()});
+    let authorization = state.store.claim_authorization(&claim.id).ok()?;
+    let verdict = authorization.verdict;
+    let mut provenance = json!({"verdict": verdict.name(), "authorization_model": authorization.model});
     if let smallclaims::principal::Verdict::Held(reason)
     | smallclaims::principal::Verdict::Invalid(reason) = &verdict
     {
         provenance["reason"] = json!(reason);
     }
-    if let Some(signature) = state.store.claim_signature(&claim.id).ok().flatten() {
+    if let Some(signature) = authorization.signature {
         provenance["signer"] = json!(signature.signer);
         provenance["key"] = json!(signature.key);
         let label = signature
@@ -8140,11 +8147,9 @@ pub async fn conversation_stream(
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
-    if protocols != [CONVERSATION_SUBPROTOCOL] {
-        return Err(validation(
-            "the conversation WebSocket requires exactly st3.client.conversation.v0",
-        ));
-    }
+    let selected = super::wire_names::selected_protocol(&protocols, CONVERSATION_SUBPROTOCOL)
+        .ok_or_else(|| validation("the conversation WebSocket requires exactly one supported conversation protocol"))?
+        .to_owned();
     let session_id = conversation_session_id(&state, &id)?;
     let snapshot = new_client_snapshot(&state);
     let remote = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
@@ -8171,7 +8176,7 @@ pub async fn conversation_stream(
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     presence.follow("conversation", format!("conversation:{id}"));
     Ok(websocket
-        .protocols([CONVERSATION_SUBPROTOCOL])
+        .protocols([selected])
         .on_upgrade(move |socket| async move {
             let _presence = presence;
             conversation_stream_socket(socket, state, session, session_id, query.after, remote, (upgrade, first_frame)).await
@@ -8728,7 +8733,7 @@ pub async fn pairing_begin(
             "the pairing person must match the authenticated Unix person",
         ));
     }
-    if request.api_version != CLIENT_API_VERSION
+    if !super::wire_names::api_version(&request.api_version)
         || request.device_name.trim().is_empty()
         || request.device_name.len() > 120
         || !request.person_id.starts_with("person/")
@@ -8824,6 +8829,25 @@ pub struct PairingComplete {
     key_storage: Option<String>,
 }
 
+/// Proof bytes and their authorization model come from one pinned snapshot. The model
+/// label does not make legacy proofs evidence for the corrected candidate semantics.
+fn signature_grant_proofs(state: &AppState, ids: &[String]) -> Result<Option<Vec<Value>>, ApiError> {
+    state.store.read_snapshot(|_| {
+        let mut proofs=Vec::new();
+        for id in ids {
+            let Some(grant)=state.store.claim_by_id(id)? else { return Ok(None); };
+            let authorization=state.store.claim_authorization(id)?;
+            let Some(signature)=authorization.signature else { return Ok(None); };
+            proofs.push(json!({
+                "id":grant.id,"batch_id":grant.batch_id,"subject":grant.subject,"kind":grant.kind,
+                "origin":grant.origin,"actor":grant.actor,"body":grant.body,"predecessors":grant.predecessors,
+                "signature":signature,"authorization_model":authorization.model,
+            }));
+        }
+        Ok(Some(proofs))
+    }).map_err(ApiError::internal)
+}
+
 fn pairing_root_proof(state: &AppState, person: &str) -> Result<Option<Value>, ApiError> {
     let Some((_, id)) = state
         .store
@@ -8841,21 +8865,8 @@ fn pairing_root_proof(state: &AppState, person: &str) -> Result<Option<Value>, A
             "the member cannot produce a verifiable person-root grant; the pairing code was not consumed. Inspect the member's signing history",
         )
     };
-    let grant = state
-        .store
-        .claim_by_id(&id)
-        .map_err(ApiError::internal)?
-        .ok_or_else(cannot_prove)?;
-    let signature = state
-        .store
-        .claim_signature(&id)
-        .map_err(ApiError::internal)?
-        .ok_or_else(cannot_prove)?;
-    let proof = json!({
-        "id": grant.id, "batch_id": grant.batch_id, "subject": grant.subject,
-        "kind": grant.kind, "origin": grant.origin, "actor": grant.actor,
-        "body": grant.body, "predecessors": grant.predecessors, "signature": signature,
-    });
+    let proof=signature_grant_proofs(state, &[id])?.ok_or_else(cannot_prove)?
+        .into_iter().next().ok_or_else(cannot_prove)?;
     st3_client::device::verify_person_root_key_proof(person, &proof, None)
         .map_err(|_| cannot_prove())?;
     Ok(Some(proof))
@@ -8916,7 +8927,7 @@ pub async fn pairing_complete(
     AxumPath(id): AxumPath<String>,
     Json(request): Json<PairingComplete>,
 ) -> Result<Json<Value>, ApiError> {
-    if request.api_version != CLIENT_API_VERSION || request.device_public_key.len() < 32 {
+    if !super::wire_names::api_version(&request.api_version) || request.device_public_key.len() < 32 {
         return Err(validation(
             "the pairing completion has an invalid version or public key",
         ));
@@ -9037,24 +9048,7 @@ pub async fn pairing_complete(
                     "the member cannot produce verifiable enrollment grants; the pairing code was not consumed. Inspect the member's signing history",
                 )
             };
-            let mut proofs = Vec::new();
-            for id in &chain {
-                let grant = state
-                    .store
-                    .claim_by_id(id)
-                    .map_err(ApiError::internal)?
-                    .ok_or_else(cannot_prove)?;
-                let signature = state
-                    .store
-                    .claim_signature(id)
-                    .map_err(ApiError::internal)?
-                    .ok_or_else(cannot_prove)?;
-                proofs.push(json!({
-                    "id": grant.id, "batch_id": grant.batch_id, "subject": grant.subject,
-                    "kind": grant.kind, "origin": grant.origin, "actor": grant.actor,
-                    "body": grant.body, "predecessors": grant.predecessors, "signature": signature,
-                }));
-            }
+            let proofs=signature_grant_proofs(&state, &chain)?.ok_or_else(cannot_prove)?;
             st3_client::device::verify_device_key_proofs(&person_id, &chain, &proofs, key)
                 .map_err(|_| cannot_prove())?;
             Some((chain, proofs))
@@ -9441,29 +9435,14 @@ pub async fn terminal_stream(
         .map(str::trim)
         .filter(|protocol| !protocol.is_empty())
         .collect::<Vec<_>>();
-    let normative_count = protocols
-        .iter()
-        .filter(|protocol| **protocol == TERMINAL_SUBPROTOCOL)
-        .count();
-    let secondary = protocols
-        .iter()
-        .filter(|protocol| **protocol != TERMINAL_SUBPROTOCOL)
-        .copied()
-        .collect::<Vec<_>>();
-    let stream_capability = secondary
-        .first()
-        .and_then(|protocol| protocol.strip_prefix(TERMINAL_CAPABILITY_PROTOCOL_PREFIX))
-        .filter(|capability| !capability.is_empty());
-    if normative_count != 1 || secondary.len() != 1 || stream_capability.is_none() {
-        return Err(ApiError {
-            status: StatusCode::BAD_REQUEST,
-            code: "validation-failed".into(),
-            message: format!(
-                "the terminal WebSocket must request exactly `{TERMINAL_SUBPROTOCOL}` plus one `st3.cap.*` capability protocol"
-            ),
-            details: Box::default(),
-        });
-    }
+    let (selected, stream_capability) =
+        super::wire_names::terminal_protocol(&protocols, TERMINAL_SUBPROTOCOL, false)
+            .ok_or_else(|| ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "validation-failed".into(),
+                message: "the terminal WebSocket requires one supported terminal protocol plus one capability protocol".into(),
+                details: Box::default(),
+            })?;
     let follow = prepare_terminal_follow(
         &state,
         &session,
@@ -9474,7 +9453,7 @@ pub async fn terminal_stream(
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     presence.follow("terminal", format!("terminal:{id}"));
     Ok(websocket
-        .protocols([TERMINAL_SUBPROTOCOL])
+        .protocols([selected.to_owned()])
         .on_upgrade(move |socket| async move {
             let _presence = presence;
             follow.run(state, TerminalSink::Socket(Box::new(socket)), upgrade, first_frame).await
@@ -12247,7 +12226,7 @@ fn validate_action_admission(
     session: &ClientSession,
     request: &ActionRequest,
 ) -> Result<(), ApiError> {
-    if request.api_version != CLIENT_API_VERSION
+    if !super::wire_names::api_version(&request.api_version)
         || !request.id.starts_with("action/")
         || !(16..=256).contains(&request.idempotency_key.len())
     {
@@ -15905,6 +15884,112 @@ mission "differential" state="ready" {
         assert_eq!(cut["body"]["code"], "timeline-entry-too-large");
         assert!(cut["body"]["message"].as_str().unwrap().contains("st truncated"));
         assert!(serde_json::to_vec(cut).unwrap().len() < 1024);
+    }
+
+    #[test]
+    fn signature_state_faults_are_visible_in_doctor_and_fault_snapshot() {
+        use smallclaims::{
+            fleet::MemberKey,
+            principal::{ClaimSignature, content_digest},
+            store::{append_claim_record_tx, principals::store_claim_signature_tx},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let key = Arc::new(MemberKey::generate().unwrap().0);
+        state.store.set_node_key(key.clone()).unwrap();
+        let claim = {
+            let mut connection = state.store.connection.write();
+            let tx = connection.transaction().unwrap();
+            let claim = append_claim_record_tx(
+                &tx,
+                &state.store.origin,
+                "note/signature-state",
+                "example.note",
+                None,
+                &json!({"fields":{"text":"Diagnostic fault visibility"}}),
+                &[],
+                None,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            claim
+        };
+        state.store.replication_snapshot().unwrap();
+        let genuine = state.store.claim_signature(&claim.id).unwrap().unwrap();
+        let content = content_digest(
+            &claim.subject,
+            &claim.kind,
+            claim.actor.as_deref(),
+            &claim.body,
+        );
+        {
+            let mut connection = state.store.connection.write();
+            let tx = connection.transaction().unwrap();
+            for _ in 1..65 {
+                let signature = ClaimSignature::sign(
+                    &key,
+                    &content,
+                    &genuine.signer,
+                    None,
+                    vec![],
+                    genuine.signed_at_unix_ms,
+                );
+                store_claim_signature_tx(&tx, &claim.id, &signature).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        state.store.judge_claims(true).unwrap();
+        let codes = || {
+            doctor_report(&state)
+                .unwrap()
+                .0
+                .checks
+                .into_iter()
+                .map(|check| check.name)
+                .collect::<Vec<_>>()
+        };
+        assert!(codes().contains(&"signature-candidate-count".into()));
+        assert!(
+            state
+                .store
+                .fault_snapshot(u128::MAX)
+                .unwrap()
+                .iter()
+                .any(|fault| fault.item.title == "signature-candidate-count"
+                    && fault.item.detail.contains(&state.store.origin))
+        );
+        state
+            .store
+            .connection
+            .write()
+            .execute(
+                "UPDATE claim_signature_migration SET phase='envelopes',cursor=0 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert!(codes().contains(&"signature-migration-incomplete".into()));
+        assert!(
+            state
+                .store
+                .fault_snapshot(u128::MAX)
+                .unwrap()
+                .iter()
+                .any(|fault| fault.item.title == "signature-migration-incomplete")
+        );
+        state
+            .store
+            .fail_signature_migration("fixture corrupt local payload")
+            .unwrap();
+        assert!(codes().contains(&"signature-state-corrupt".into()));
+        assert!(
+            state
+                .store
+                .fault_snapshot(u128::MAX)
+                .unwrap()
+                .iter()
+                .any(|fault| fault.item.title == "signature-state-corrupt")
+        );
+        assert!(state.store.claim_by_id(&claim.id).unwrap().is_some());
     }
 
     #[test]

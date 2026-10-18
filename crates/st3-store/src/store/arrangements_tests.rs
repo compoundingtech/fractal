@@ -1,24 +1,16 @@
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::arrangements_tests_shared_seats::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::arrangements_tests_shared_seats::{A, B, SUBJECT, append, create, input};
 use super::arrangements::*;
 use super::tests::{exchange_from, exchange_of, receive_and_project};
 use super::*;
 
-const SUBJECT: &str = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
-const A: &str = "019a0000-0000-7000-8000-000000000010";
-const B: &str = "019a0000-0000-7000-8000-000000000020";
 const C: &str = "019a0000-0000-7000-8000-000000000030";
-fn input(operations: Value) -> ClaimInput {
-    ClaimInput { subject: SUBJECT.into(), kind: "arrangement.edited".into(), actor: Some("person/ada".into()),
-        fields: serde_json::from_value(json!({"owner":"person/ada","operations":operations})).unwrap(),
-        evidence: vec![], expected_subject: None, idempotency_key: None }
-}
-fn append(store: &Store, operations: Value) -> ClaimRecord { store.append_client_claim(&input(operations)).unwrap() }
 fn sync(source: &Store, target: &Store) { receive_and_project(target,&source.origin,&exchange_from(source,&ReplicationInventory::default())); }
 fn layout(store: &Store) -> Value { store.arrangement(SUBJECT,u64::MAX).unwrap().unwrap() }
-fn create(store: &Store) {
-    append(store,json!([{"op":"create","name":"Work"},{"op":"folder.create","id":A,"name":"A","parent":null,"key":"a0"},
-        {"op":"folder.create","id":B,"name":"B","parent":null,"key":"a1"}]));
-}
-
 #[test]
 fn inventory_revision_is_transactional_owner_scoped_and_persists_across_replay() {
     let directory = tempfile::tempdir().unwrap();
@@ -51,34 +43,6 @@ fn inventory_revision_is_transactional_owner_scoped_and_persists_across_replay()
     drop(store);
     let reopened = Store::open(&path, "inventory-revisions").unwrap();
     assert_eq!(reopened.arrangement_inventory_revision("person/ada").unwrap(), 4);
-}
-
-#[test]
-fn historical_status_reads_skip_arrangements_changed_after_the_frontier() {
-    let store = Store::open_memory("historical-arrangements").unwrap();
-    create(&store);
-    store.append_claim(&ClaimInput {
-        subject: "resource/historical".into(), kind: "resource.observed".into(), actor: None,
-        fields: serde_json::from_value(json!({"kind":"custom.test.historical","value":"before"})).unwrap(),
-        evidence: vec![], expected_subject: None, idempotency_key: None,
-    }).unwrap();
-    let frontier = store.index().unwrap();
-    append(&store, json!([{"op":"rename","name":"After frontier"}]));
-    let status = store.status_at(None, None, Some(frontier)).unwrap();
-    assert!(status.subjects.iter().all(|subject| subject.subject != SUBJECT));
-    assert!(status.subjects.iter().any(|subject| subject.subject == "resource/historical"));
-    let history = store.status_history(None, None, Some(frontier)).unwrap();
-    assert!(history.subjects.iter().all(|subject| subject.subject != SUBJECT));
-    assert!(history.subjects.iter().any(|subject| subject.subject == "resource/historical"));
-    let prefix = store
-        .status_for_subject_prefix_at(
-            "arrangement/",
-            Some(frontier),
-            false,
-            crate::store::ClaimsReduction::Summary,
-        )
-        .unwrap();
-    assert!(prefix.subjects.is_empty());
 }
 
 #[test]
