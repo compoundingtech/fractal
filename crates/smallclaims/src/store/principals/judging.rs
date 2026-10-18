@@ -13,16 +13,16 @@ pub(super) fn rank(verdict: &Verdict) -> u8 {
 pub(super) fn candidate_count(connection: &Connection, claim_id: &str) -> Result<u64> {
     Ok(connection
         .prepare_cached("SELECT candidates FROM claim_signature_counts WHERE claim_id=?1")?
-        .query_row([claim_id], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h5a2bf49b2f3f owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0))
         .optional()?
         .unwrap_or(0))
 }
 pub(super) fn complete(connection: &Connection, claim_id: &str) -> Result<bool> {
     Ok(connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM claim_signature_judging p JOIN claim_signature_counts c USING(claim_id) WHERE p.claim_id=?1 AND p.complete=1 AND p.dirty=0 AND p.blocked=0 AND p.candidate_count=c.candidates)")?
-        .query_row([claim_id],|row|row.get(0))?)
+        .query_row(/* sqlite-large-value: allow-for-now lv-h4cf561874b59 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id],|row|row.get(0))?)
 }
 pub(super) fn validate_cached(connection: &Connection, row: &ClaimRow) -> Result<()> {
-    let (content,signature,verdict,reason)=connection.prepare_cached("SELECT content_digest,best_signature,best_verdict,best_reason FROM claim_signature_judging WHERE claim_id=?1")?.query_row([&row.id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,Option<String>>(3)?)))?;
+    let (content,signature,verdict,reason)=connection.prepare_cached("SELECT content_digest,best_signature,best_verdict,best_reason FROM claim_signature_judging WHERE claim_id=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-h11b4260d91f2 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [&row.id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,Option<String>>(3)?)))?;
     anyhow::ensure!(
         content == content_digest(&row.subject, &row.kind, row.actor.as_deref(), &row.body),
         "signature-state-corrupt: claim content differs from completed judgment"
@@ -46,7 +46,7 @@ pub(super) fn validate_cached(connection: &Connection, row: &ClaimRow) -> Result
 
 pub(super) fn unavailable(connection: &Connection, claim_id: &str) -> Result<Option<String>> {
     let count = candidate_count(connection, claim_id)?;
-    let pending: bool=connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM claim_signature_judging WHERE claim_id=?1 AND (complete=0 OR dirty=1 OR blocked=1))")?.query_row([claim_id],|row|row.get(0))?;
+    let pending: bool=connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM claim_signature_judging WHERE claim_id=?1 AND (complete=0 OR dirty=1 OR blocked=1))")?.query_row(/* sqlite-large-value: allow-for-now lv-h6199c4573f91 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id],|row|row.get(0))?;
     if pending || (count > CANDIDATE_PAGE as u64 && !complete(connection, claim_id)?) {
         return Ok(Some(format!(
             "signature-judgment-incomplete: {claim_id} has {count} candidates"
@@ -70,7 +70,7 @@ pub(super) fn advance(
     };
     let roots_digest = crate::hash::canonical_hash(roots)?;
     let previous=connection.prepare_cached("SELECT candidate_count,roots_digest,last_signature,best_signature,best_verdict,best_reason,complete,dirty,blocked FROM claim_signature_judging WHERE claim_id=?1")?
-        .query_row([claim_id],|row|Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,Option<String>>(4)?,row.get::<_,Option<String>>(5)?,row.get::<_,bool>(6)?,row.get::<_,bool>(7)?,row.get::<_,bool>(8)?))).optional()?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h5c7fa1bc38b3 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id],|row|Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,Option<String>>(4)?,row.get::<_,Option<String>>(5)?,row.get::<_,bool>(6)?,row.get::<_,bool>(7)?,row.get::<_,bool>(8)?))).optional()?;
     let (last, mut best, mut blocked) = match previous {
         Some((n, root, last, signature, verdict, reason, false, false, blocked))
             if n == count && root == roots_digest =>
@@ -94,7 +94,7 @@ pub(super) fn advance(
             // Retained candidates can become relevant again. Keep their dependency
             // superset incrementally; clearing/rebuilding it here would make a single
             // loan proportional to the whole candidate set. Forget/recheck own cleanup.
-            connection.prepare_cached("INSERT INTO claim_signature_judging(claim_id,candidate_count,roots_digest,content_digest,last_signature,complete,dirty) VALUES (?1,?2,?3,?4,'',0,0) ON CONFLICT(claim_id) DO UPDATE SET candidate_count=excluded.candidate_count,roots_digest=excluded.roots_digest,content_digest=excluded.content_digest,last_signature='',best_signature=NULL,best_verdict=NULL,best_reason=NULL,complete=0,dirty=0,notified=0,blocked=0")?.execute(params![claim_id,count,roots_digest,content_digest(&row.subject,&row.kind,row.actor.as_deref(),&row.body)])?;
+            connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h85728a5c3b07 owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO claim_signature_judging(claim_id,candidate_count,roots_digest,content_digest,last_signature,complete,dirty) VALUES (?1,?2,?3,?4,'',0,0) ON CONFLICT(claim_id) DO UPDATE SET candidate_count=excluded.candidate_count,roots_digest=excluded.roots_digest,content_digest=excluded.content_digest,last_signature='',best_signature=NULL,best_verdict=NULL,best_reason=NULL,complete=0,dirty=0,notified=0,blocked=0")?.execute(/* sqlite-large-value: allow-for-now lv-h86161607bbb6 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ params![claim_id,count,roots_digest,content_digest(&row.subject,&row.kind,row.actor.as_deref(),&row.body)])?;
             (String::new(), None, false)
         }
     };
@@ -110,9 +110,9 @@ pub(super) fn advance(
     for link in &links {
         connection
             .prepare_cached(
-                "INSERT OR IGNORE INTO claim_verdict_links(link,claim_id) VALUES (?1,?2)",
+                /* sqlite-large-value: allow-for-now lv-h85bbaa862d7c owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_links(link,claim_id) VALUES (?1,?2)",
             )?
-            .execute(params![link, claim_id])?;
+            .execute(/* sqlite-large-value: allow-for-now lv-h618b3370f56f owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ params![link, claim_id])?;
     }
     if let Some(signature) = signature {
         let text = serde_json::to_string(&signature)?;
@@ -134,11 +134,11 @@ pub(super) fn advance(
                     Some(signature.as_str()),
                 )
             });
-    connection.prepare_cached("UPDATE claim_signature_judging SET last_signature=?1,best_signature=?2,best_verdict=?3,best_reason=?4,complete=?5,blocked=?6 WHERE claim_id=?7")?.execute(params![through,best_signature,best_name,best_reason,finished,blocked,claim_id])?;
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hec805028307d owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET last_signature=?1,best_signature=?2,best_verdict=?3,best_reason=?4,complete=?5,blocked=?6 WHERE claim_id=?7")?.execute(/* sqlite-large-value: allow-for-now lv-h070bbbc92435 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ params![through,best_signature,best_name,best_reason,finished,blocked,claim_id])?;
     if !finished {
         connection
-            .prepare_cached("INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)")?
-            .execute([claim_id])?;
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h8ef495ef23ca owner=smallclaims::store::principals::judging TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)")?
+            .execute(/* sqlite-large-value: allow-for-now lv-h81fa36b9b7b4 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id])?;
         return Ok((None, texts.len()));
     }
     if count != 0 && best.is_none() {

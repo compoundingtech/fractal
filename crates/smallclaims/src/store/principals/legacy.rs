@@ -52,7 +52,7 @@ pub(super) fn stored_signature(
 ) -> Result<Option<ClaimSignature>> {
     let text = connection
         .prepare_cached("SELECT signature FROM legacy_claim_signatures WHERE claim_id=?1")?
-        .query_row([claim_id], |row| row.get::<_, String>(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h3667190f640c owner=smallclaims::store::principals::legacy TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0))
         .optional()?;
     text.map(|text| Ok(serde_json::from_str(&text)?))
         .transpose()
@@ -67,10 +67,10 @@ pub(super) fn store_claim_signature_tx(
 ) -> Result<()> {
     let stored = connection
         .prepare_cached(
-            "INSERT OR IGNORE INTO legacy_claim_signatures(claim_id, signer, key, nonce, signature)
+            /* sqlite-large-value: allow-for-now lv-hb88f0e6eb898 owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO legacy_claim_signatures(claim_id, signer, key, nonce, signature)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h8c24f195a00a owner=smallclaims::store::principals::legacy TODO=trace-statement-and-value-representation */ params![
             claim_id,
             signature.signer,
             signature.key,
@@ -80,9 +80,9 @@ pub(super) fn store_claim_signature_tx(
     if stored != 0 {
         connection
             .prepare_cached(
-                "INSERT OR IGNORE INTO legacy_claim_verdict_fresh(claim_id) VALUES (?1)",
+                /* sqlite-large-value: allow-for-now lv-h7e617af16bb5 owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO legacy_claim_verdict_fresh(claim_id) VALUES (?1)",
             )?
-            .execute([claim_id])?;
+            .execute(/* sqlite-large-value: allow-for-now lv-hb5d0c6d8b7ed owner=smallclaims::store::principals::legacy TODO=trace-statement-and-value-representation */ [claim_id])?;
     }
     Ok(())
 }
@@ -227,7 +227,7 @@ impl Facts for StoreFacts<'_> {
 pub(super) fn cached_verdict(connection: &Connection, claim_id: &str) -> Result<Option<Verdict>> {
     Ok(connection
         .prepare_cached("SELECT verdict, reason FROM legacy_claim_verdicts WHERE claim_id=?1")?
-        .query_row([claim_id], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h399991ef029c owner=smallclaims::store::principals::legacy TODO=trace-statement-and-value-representation */ [claim_id], |row| {
             Ok(verdict_from(&row.get::<_, String>(0)?, row.get(1)?))
         })
         .optional()?)
@@ -311,21 +311,21 @@ fn write_verdict_tx(
 ) -> Result<bool> {
     let previous = cached_verdict(connection, claim_id)?;
     connection
-        .prepare_cached("DELETE FROM legacy_claim_verdict_links WHERE claim_id=?1")?
-        .execute([claim_id])?;
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h8999e0d929e5 owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM legacy_claim_verdict_links WHERE claim_id=?1")?
+        .execute(/* sqlite-large-value: allow-for-now lv-h9535d7753dd2 owner=smallclaims::store::principals::legacy TODO=trace-statement-and-value-representation */ [claim_id])?;
     for link in links {
         connection
             .prepare_cached(
-                "INSERT OR IGNORE INTO legacy_claim_verdict_links(link, claim_id) VALUES (?1, ?2)",
+                /* sqlite-large-value: allow-for-now lv-h81ae8c9dc295 owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO legacy_claim_verdict_links(link, claim_id) VALUES (?1, ?2)",
             )?
-            .execute(params![link, claim_id])?;
+            .execute(/* sqlite-large-value: allow-for-now lv-hb8eae595c5f6 owner=smallclaims::store::principals::legacy TODO=trace-statement-and-value-representation */ params![link, claim_id])?;
     }
     connection
         .prepare_cached(
-            "INSERT OR REPLACE INTO legacy_claim_verdicts(claim_id, verdict, reason, signer, on_behalf)
+            /* sqlite-large-value: allow-for-now lv-h3509af875937 owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO legacy_claim_verdicts(claim_id, verdict, reason, signer, on_behalf)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h06ef722d87ed owner=smallclaims::store::principals::legacy TODO=trace-statement-and-value-representation */ params![
             claim_id,
             verdict.name(),
             verdict.reason(),
@@ -339,10 +339,10 @@ fn write_verdict_tx(
 fn queue_linked_tx(connection: &Connection, link: &str) -> Result<()> {
     connection
         .prepare_cached(
-            "INSERT OR IGNORE INTO legacy_claim_verdict_queue(claim_id)
+            /* sqlite-large-value: allow-for-now lv-h306e605aa500 owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO legacy_claim_verdict_queue(claim_id)
              SELECT claim_id FROM legacy_claim_verdict_links WHERE link=?1",
         )?
-        .execute([link])?;
+        .execute(/* sqlite-large-value: allow-for-now lv-h1cb47a19f4af owner=smallclaims::store::principals::legacy TODO=trace-statement-and-value-representation */ [link])?;
     Ok(())
 }
 
@@ -380,7 +380,7 @@ pub(super) fn judge_claims(store: &Store, check_roots: bool) -> Result<usize> {
         let contention=error.downcast_ref::<St3Error>().is_some_and(St3Error::is_sqlite_contention)
             || error.downcast_ref::<rusqlite::Error>().is_some_and(|error|matches!(error,rusqlite::Error::SqliteFailure(code,_) if matches!(code.code,rusqlite::ErrorCode::DatabaseBusy|rusqlite::ErrorCode::DatabaseLocked)));
         if !contention {
-            store.connection.write().execute("UPDATE claim_signature_migration SET legacy_fault=?1 WHERE id=1 AND serving_legacy=1",[format!("{error:#}")])?;
+            store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h84df06b98d77 owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET legacy_fault=?1 WHERE id=1 AND serving_legacy=1",[format!("{error:#}")])?;
         }
     }
     result
@@ -421,15 +421,15 @@ fn judge_claims_inner(store: &Store, check_roots: bool) -> Result<usize> {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for claim_id in &fresh {
             transaction
-                .prepare_cached("DELETE FROM legacy_claim_verdict_fresh WHERE claim_id=?1")?
-                .execute([claim_id])?;
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h07d1e5302cdc owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM legacy_claim_verdict_fresh WHERE claim_id=?1")?
+                .execute(/* sqlite-large-value: allow-for-now lv-hd166a6e238e2 owner=smallclaims::store::principals::legacy TODO=trace-statement-and-value-representation */ [claim_id])?;
             // A new delegation, revocation or reused nonce changes what relied on it.
             queue_affected_by_tx(&transaction, claim_id)?;
             transaction
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO legacy_claim_verdict_queue(claim_id) VALUES (?1)",
+                    /* sqlite-large-value: allow-for-now lv-he69a7f7121fc owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO legacy_claim_verdict_queue(claim_id) VALUES (?1)",
                 )?
-                .execute([claim_id])?;
+                .execute(/* sqlite-large-value: allow-for-now lv-hc2cf962e1ae5 owner=smallclaims::store::principals::legacy TODO=trace-statement-and-value-representation */ [claim_id])?;
         }
         let queued = transaction
             .prepare_cached("SELECT claim_id FROM legacy_claim_verdict_queue LIMIT ?1")?
@@ -438,8 +438,8 @@ fn judge_claims_inner(store: &Store, check_roots: bool) -> Result<usize> {
         let memo = RefCell::new(BTreeMap::new());
         for claim_id in &queued {
             transaction
-                .prepare_cached("DELETE FROM legacy_claim_verdict_queue WHERE claim_id=?1")?
-                .execute([claim_id])?;
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha2f452e1bae5 owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM legacy_claim_verdict_queue WHERE claim_id=?1")?
+                .execute(/* sqlite-large-value: allow-for-now lv-hbf43ce2ae08d owner=smallclaims::store::principals::legacy TODO=trace-statement-and-value-representation */ [claim_id])?;
             let Some(signature) = stored_signature(&transaction, claim_id)? else {
                 continue;
             };

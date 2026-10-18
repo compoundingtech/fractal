@@ -238,7 +238,7 @@ impl PreparedPage {
         const SCHEMA_TABLES: usize = 256;
         const FK_ROWS: usize = 128;
         let mut statement = db.prepare(
-            /* sqlite-large-value: allow-for-now lv-h4faf1f3ee80c owner=smallclaims::ivm::install::prepared TODO=trace-statement-and-value-representation */ "WITH inventory AS MATERIALIZED (
+            /* sqlite-large-value: allow-for-now lv-hab8b98d376f8 owner=smallclaims::ivm::install::prepared TODO=trace-statement-and-value-representation */ "WITH inventory AS MATERIALIZED (
                SELECT name,sql IS NULL OR instr(upper(sql),'REFERENCES')>0 AS possible_fk
                FROM main.sqlite_schema WHERE type='table' ORDER BY name LIMIT 257
              )

@@ -30,7 +30,7 @@ use crate::principal::{
 };
 
 /// The tables of this module, created with the store's schema.
-pub const PRINCIPAL_SCHEMA: &str = r#"
+pub const PRINCIPAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h56821e2a865f owner=smallclaims::store::principals TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS claim_signatures (
     claim_id TEXT PRIMARY KEY,
     signer TEXT NOT NULL,
@@ -189,8 +189,8 @@ fn position(connection: &Connection, claim_id: &str) -> Result<Option<Position>>
     let count = components.len();
     let sql = format!("SELECT {} FROM claims WHERE id=?1", components.join(", "));
     Ok(connection
-        .prepare_cached(&sql)?
-        .query_row([claim_id], |row| {
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h9aea6e0e7e48 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ &sql)?
+        .query_row(/* sqlite-large-value: allow-for-now lv-hd6bc18dda34a owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| {
             (0..count)
                 .map(|index| row.get::<_, SqlValue>(index))
                 .collect::<rusqlite::Result<Vec<_>>>()
@@ -202,7 +202,7 @@ fn position(connection: &Connection, claim_id: &str) -> Result<Option<Position>>
 fn stored_signature(connection: &Connection, claim_id: &str) -> Result<Option<ClaimSignature>> {
     let text = connection
         .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
-        .query_row([claim_id], |row| row.get::<_, String>(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-hccb25d68371e owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0))
         .optional()?;
     text.map(|text| Ok(serde_json::from_str(&text)?))
         .transpose()
@@ -217,7 +217,7 @@ pub fn store_claim_signature_tx(
 ) -> Result<()> {
     let writer: Option<String> = connection.prepare_cached(
         "SELECT batches.origin FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.id=?1"
-    )?.query_row([claim_id], |row| row.get(0)).optional()?;
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-ha3c5feea65a0 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0)).optional()?;
     store_carried_signature_tx(
         connection,
         claim_id,
@@ -248,7 +248,7 @@ pub(super) fn store_inventory_signature_tx(
     writer: Option<&str>,
 ) -> Result<()> {
     let origin = if writer.is_none() {
-        connection.prepare_cached("SELECT batches.origin FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.id=?1")?.query_row([claim_id], |row| row.get::<_, String>(0)).optional()?
+        connection.prepare_cached("SELECT batches.origin FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.id=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-h134e5aef5050 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0)).optional()?
     } else {
         None
     };
@@ -276,25 +276,25 @@ fn store_candidate_tx(
     let text = serde_json::to_string(signature)?;
     let added = connection
         .prepare_cached(
-            "INSERT OR IGNORE INTO claim_signature_candidates(claim_id,signature,key,nonce)
+            /* sqlite-large-value: allow-for-now lv-h16586c1e56da owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_candidates(claim_id,signature,key,nonce)
          VALUES (?1,?2,?3,?4)",
         )?
-        .execute(params![claim_id, text, signature.key, signature.nonce])?;
+        .execute(/* sqlite-large-value: allow-for-now lv-h7609ad2c9eca owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id, text, signature.key, signature.nonce])?;
     connection.prepare_cached(
-        "INSERT OR IGNORE INTO claim_signature_sources(claim_id,signature,writer) VALUES (?1,?2,?3)"
-    )?.execute(params![claim_id,text,writer])?;
+        /* sqlite-large-value: allow-for-now lv-h8b1d8ca0d39f owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_sources(claim_id,signature,writer) VALUES (?1,?2,?3)"
+    )?.execute(/* sqlite-large-value: allow-for-now lv-h6519e4b72b76 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id,text,writer])?;
     if added == 0 {
         return Ok(());
     }
     connection
-        .prepare_cached("UPDATE claim_signature_judging SET dirty=1,notified=0 WHERE claim_id=?1")?
-        .execute([claim_id])?;
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h7650541fb6ca owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1,notified=0 WHERE claim_id=?1")?
+        .execute(/* sqlite-large-value: allow-for-now lv-ha2e9111d7319 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
     let row = claim_row(connection, claim_id)?;
     if let Some(row) = row.as_ref()
         && signature_matches(row, signature)
     {
-        let used=connection.prepare_cached("INSERT OR IGNORE INTO claim_signature_nonce_uses(claim_id,key,nonce) VALUES (?1,?2,?3)")?
-            .execute(params![claim_id,signature.key,signature.nonce])?;
+        let used=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hfd04ef25b0f3 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signature_nonce_uses(claim_id,key,nonce) VALUES (?1,?2,?3)")?
+            .execute(/* sqlite-large-value: allow-for-now lv-h23f9772ef4a9 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![claim_id,signature.key,signature.nonce])?;
         if used != 0 {
             queue_linked_tx(
                 connection,
@@ -309,10 +309,10 @@ fn store_candidate_tx(
     // Thereafter this facade is updated only by the current-authority candidate fold.
     connection
         .prepare_cached(
-            "INSERT OR IGNORE INTO claim_signatures(claim_id,signer,key,nonce,signature)
+            /* sqlite-large-value: allow-for-now lv-h3ef3e2963c54 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_signatures(claim_id,signer,key,nonce,signature)
          VALUES (?1,?2,?3,?4,?5)",
         )?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h3d338a6f6764 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
             claim_id,
             signature.signer,
             signature.key,
@@ -320,8 +320,8 @@ fn store_candidate_tx(
             text
         ])?;
     connection
-        .prepare_cached("INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) VALUES (?1)")?
-        .execute([claim_id])?;
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h974754085cbf owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) VALUES (?1)")?
+        .execute(/* sqlite-large-value: allow-for-now lv-h314ea5b7655f owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
     Ok(())
 }
 
@@ -410,14 +410,14 @@ fn attach_expected_signature_inner_tx(
             "SELECT signature FROM expected_claim_signatures
              WHERE subject=?1 AND kind=?2 AND actor=?3",
         )?
-        .query_row(params![subject, kind, actor], |row| row.get::<_, String>(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-hd18f6fae02cc owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![subject, kind, actor], |row| row.get::<_, String>(0))
         .optional()?;
     if let Some(text) = expected {
         transaction
             .prepare_cached(
-                "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind=?2 AND actor=?3",
+                /* sqlite-large-value: allow-for-now lv-h72e4ba49a7d3 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind=?2 AND actor=?3",
             )?
-            .execute(params![subject, kind, actor])?;
+            .execute(/* sqlite-large-value: allow-for-now lv-h213133341fb4 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![subject, kind, actor])?;
         if let Ok(signature) = serde_json::from_str::<ClaimSignature>(&text) {
             // API validation precedes this writer loan. Recheck nonce use against the
             // serving model in the claim transaction, including an intervening cutover.
@@ -456,7 +456,7 @@ struct ClaimRow {
 fn claim_row(connection: &Connection, claim_id: &str) -> Result<Option<ClaimRow>> {
     Ok(connection
         .prepare_cached("SELECT id, subject, kind, actor, body FROM claims WHERE id=?1")?
-        .query_row([claim_id], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h683d859bacef owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| {
             Ok(ClaimRow {
                 id: row.get(0)?,
                 subject: row.get(1)?,
@@ -511,7 +511,7 @@ impl Store {
             .readers
             .get()
             .prepare_cached("SELECT candidates FROM claim_signature_counts WHERE claim_id=?1")?
-            .query_row([claim_id], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-hab4cfb09b8f9 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0))
             .optional()?
             .unwrap_or(0))
     }
@@ -520,7 +520,7 @@ impl Store {
             .readers
             .get()
             .prepare_cached("SELECT candidates FROM claim_signature_writer_counts WHERE writer=?1")?
-            .query_row([writer], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h5fbe338e2956 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [writer], |row| row.get(0))
             .optional()?
             .unwrap_or(0))
     }
@@ -549,7 +549,7 @@ impl Store {
             });
         }
         let connection = self.readers.get();
-        let pending:u64=connection.prepare_cached("SELECT COUNT(*) FROM claim_signature_judging INDEXED BY claim_signature_judging_pending WHERE complete=0 OR dirty=1 OR blocked=1")?.query_row([],|row|row.get(0))?;
+        let pending:u64=connection.prepare_cached("SELECT COUNT(*) FROM claim_signature_judging INDEXED BY claim_signature_judging_pending WHERE complete=0 OR dirty=1 OR blocked=1")?.query_row(/* sqlite-large-value: allow-for-now lv-ha7a25e3cb8cb owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [],|row|row.get(0))?;
         if pending != 0 {
             let sample=connection.prepare_cached("SELECT claim_id FROM claim_signature_judging INDEXED BY claim_signature_judging_pending WHERE complete=0 OR dirty=1 OR blocked=1 ORDER BY claim_id LIMIT 20")?.query_map([],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             faults.push(SignatureStateFault {code:"signature-judgment-incomplete".into(),subject:format!("host/{}",self.origin),detail:format!("{pending} claims have pending bounded candidate judgment; first {} claim ids: {sample:?}; serving model is {}; candidate authority remains Held until affected pages reconcile",sample.len(),if migration.serving_legacy { "legacy (P0 exposed)" } else { "candidate" })});
@@ -768,7 +768,7 @@ impl Facts for StoreFacts<'_> {
 fn cached_verdict(connection: &Connection, claim_id: &str) -> Result<Option<Verdict>> {
     Ok(connection
         .prepare_cached("SELECT verdict, reason FROM claim_verdicts WHERE claim_id=?1")?
-        .query_row([claim_id], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-hf0974ef66e69 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| {
             Ok(verdict_from(&row.get::<_, String>(0)?, row.get(1)?))
         })
         .optional()?)
@@ -904,9 +904,9 @@ fn write_verdict_tx(
     let previous_signature = stored_signature(connection, claim_id)?;
     connection
         .prepare_cached(
-            "UPDATE claim_signatures SET signer=?1,key=?2,nonce=?3,signature=?4 WHERE claim_id=?5",
+            /* sqlite-large-value: allow-for-now lv-h5f8142f84899 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signatures SET signer=?1,key=?2,nonce=?3,signature=?4 WHERE claim_id=?5",
         )?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-h63d55e8c184c owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
             signature.signer,
             signature.key,
             signature.nonce,
@@ -917,10 +917,10 @@ fn write_verdict_tx(
     // verdict never reads, deletes or rewrites the full link set.
     connection
         .prepare_cached(
-            "INSERT OR REPLACE INTO claim_verdicts(claim_id, verdict, reason, signer, on_behalf)
+            /* sqlite-large-value: allow-for-now lv-h3af9bdc217e6 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO claim_verdicts(claim_id, verdict, reason, signer, on_behalf)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )?
-        .execute(params![
+        .execute(/* sqlite-large-value: allow-for-now lv-he60e299d0182 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![
             claim_id,
             verdict.name(),
             verdict.reason(),
@@ -929,14 +929,14 @@ fn write_verdict_tx(
         ])?;
     let notify: bool = connection
         .prepare_cached("SELECT notified=0 FROM claim_signature_judging WHERE claim_id=?1")?
-        .query_row([claim_id], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h7f915a30389b owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get(0))
         .optional()?
         .unwrap_or(false);
     let ready = !matches!(verdict,Verdict::Held(reason) if reason.starts_with("signature-judgment-incomplete:"));
     if ready {
         connection
-            .prepare_cached("UPDATE claim_signature_judging SET notified=1 WHERE claim_id=?1")?
-            .execute([claim_id])?;
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hbe00773d6819 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET notified=1 WHERE claim_id=?1")?
+            .execute(/* sqlite-large-value: allow-for-now lv-h4f2bc9087eab owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
     }
     Ok(previous.as_ref() != Some(verdict)
         || previous_signature.as_ref() != Some(signature)
@@ -951,8 +951,8 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
     // Absence of a formerly live nonce use can make a retained candidate valid again.
     // Queue its dependents before deleting the relation, in the deletion transaction.
     // The indexed join includes non-winning cryptographic uses, not just the facade.
-    connection.prepare_cached("UPDATE claim_signature_judging SET dirty=1,notified=0 WHERE claim_id IN (SELECT l.claim_id FROM claim_signature_nonce_uses n CROSS JOIN claim_verdict_links l ON l.link='nonce:'||n.key||'|'||n.nonce WHERE n.claim_id=?1)")?.execute([claim_id])?;
-    connection.prepare_cached("INSERT OR IGNORE INTO claim_verdict_queue(claim_id) SELECT l.claim_id FROM claim_signature_nonce_uses n CROSS JOIN claim_verdict_links l ON l.link='nonce:'||n.key||'|'||n.nonce WHERE n.claim_id=?1")?.execute([claim_id])?;
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd26d59e3827d owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1,notified=0 WHERE claim_id IN (SELECT l.claim_id FROM claim_signature_nonce_uses n CROSS JOIN claim_verdict_links l ON l.link='nonce:'||n.key||'|'||n.nonce WHERE n.claim_id=?1)")?.execute(/* sqlite-large-value: allow-for-now lv-h4207bd94c16e owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4ff355fec1f2 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) SELECT l.claim_id FROM claim_signature_nonce_uses n CROSS JOIN claim_verdict_links l ON l.link='nonce:'||n.key||'|'||n.nonce WHERE n.claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h871e734931b2 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
     queue_affected_by_tx(connection, claim_id)?;
     if legacy::active(connection)? {
         legacy::queue_affected_by_tx(connection, claim_id)?;
@@ -961,8 +961,8 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
     if legacy::present(connection)? {
         for table in legacy::TABLES {
             rows += connection
-                .prepare_cached(&format!("DELETE FROM {table} WHERE claim_id=?1"))?
-                .execute([claim_id])?;
+                .prepare_cached(&format!(/* sqlite-large-value: allow-for-now lv-h682b64691597 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE claim_id=?1"))?
+                .execute(/* sqlite-large-value: allow-for-now lv-h1a31bc53b2c8 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
         }
     }
     for table in [
@@ -976,21 +976,21 @@ pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result
         "claim_verdict_fresh",
     ] {
         rows += connection
-            .prepare_cached(&format!("DELETE FROM {table} WHERE claim_id=?1"))?
-            .execute([claim_id])?;
+            .prepare_cached(&format!(/* sqlite-large-value: allow-for-now lv-hf6676f3ba393 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE claim_id=?1"))?
+            .execute(/* sqlite-large-value: allow-for-now lv-h8f30a91548fa owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
     }
     Ok(rows)
 }
 
 /// Queue every verdict linked to `link`.
 fn queue_linked_tx(connection: &Connection, link: &str) -> Result<()> {
-    connection.prepare_cached("UPDATE claim_signature_judging SET dirty=1 WHERE claim_id IN (SELECT claim_id FROM claim_verdict_links WHERE link=?1)")?.execute([link])?;
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h49b3f0ec0be5 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_judging SET dirty=1 WHERE claim_id IN (SELECT claim_id FROM claim_verdict_links WHERE link=?1)")?.execute(/* sqlite-large-value: allow-for-now lv-h70b485176b21 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [link])?;
     connection
         .prepare_cached(
-            "INSERT OR IGNORE INTO claim_verdict_queue(claim_id)
+            /* sqlite-large-value: allow-for-now lv-h223cb02a73f3 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id)
              SELECT claim_id FROM claim_verdict_links WHERE link=?1",
         )?
-        .execute([link])?;
+        .execute(/* sqlite-large-value: allow-for-now lv-h166860a6fb5a owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [link])?;
     Ok(())
 }
 
@@ -1117,7 +1117,7 @@ impl Store {
             let connection = self.connection.write();
             connection
                 .execute(
-                    "INSERT OR REPLACE INTO expected_claim_signatures(subject, kind, actor, signature)
+                    /* sqlite-large-value: allow-for-now lv-h29f3aefa1eb9 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO expected_claim_signatures(subject, kind, actor, signature)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![key.0, key.1, key.2, text],
                 )
@@ -1128,7 +1128,7 @@ impl Store {
         let connection = self.connection.write();
         connection
             .execute(
-                "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind=?2 AND actor=?3",
+                /* sqlite-large-value: allow-for-now lv-h57caa6e1f61e owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind=?2 AND actor=?3",
                 params![key.0, key.1, key.2],
             )
             .map_err(internal)?;
@@ -1263,7 +1263,7 @@ impl Store {
         self.keyring.set_node(Some(key));
         let connection = self.connection.write();
         connection.execute(
-            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+            /* sqlite-large-value: allow-for-now lv-h66ada43b6645 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![OWN_NODE_KEY, public],
         )?;
@@ -1395,7 +1395,7 @@ impl Store {
         self.connection
             .write()
             .execute(
-                "INSERT OR REPLACE INTO held_keys(public_key, principal, role, chain)
+                /* sqlite-large-value: allow-for-now lv-hc16319dc28f4 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO held_keys(public_key, principal, role, chain)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![
                     key.public(),
@@ -1494,7 +1494,7 @@ impl Store {
                 "SELECT EXISTS(SELECT 1 FROM claim_verdict_fresh)
                      OR EXISTS(SELECT 1 FROM claim_verdict_queue)",
             )?
-            .query_row([], |row| row.get(0))?)
+            .query_row(/* sqlite-large-value: allow-for-now lv-ha76b0c3b2d8f owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
     }
 
     /// Judge every signed claim admitted since the last pass and every queued one. With
@@ -1567,15 +1567,15 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for claim_id in &fresh {
                 transaction
-                    .prepare_cached("DELETE FROM claim_verdict_fresh WHERE claim_id=?1")?
-                    .execute([claim_id])?;
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-hfa4112c13a2b owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_verdict_fresh WHERE claim_id=?1")?
+                    .execute(/* sqlite-large-value: allow-for-now lv-h28d625e3f51a owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
                 // A new delegation, revocation or reused nonce changes what relied on it.
                 queue_affected_by_tx(&transaction, claim_id)?;
                 transaction
                     .prepare_cached(
-                        "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)",
+                        /* sqlite-large-value: allow-for-now lv-hdb329af360b2 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_queue(claim_id) VALUES (?1)",
                     )?
-                    .execute([claim_id])?;
+                    .execute(/* sqlite-large-value: allow-for-now lv-h9c7ea890a098 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
             }
             let queued = transaction
                 .prepare_cached("SELECT claim_id FROM claim_verdict_queue LIMIT ?1")?
@@ -1588,8 +1588,8 @@ impl Store {
                     break;
                 }
                 transaction
-                    .prepare_cached("DELETE FROM claim_verdict_queue WHERE claim_id=?1")?
-                    .execute([claim_id])?;
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h9b345496e02d owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_verdict_queue WHERE claim_id=?1")?
+                    .execute(/* sqlite-large-value: allow-for-now lv-h29105e98503c owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
                 // A signature can arrive for a claim a checkpoint has since dropped.
                 if claim_row(&transaction, claim_id)?.is_none() {
                     continue;
@@ -1752,11 +1752,11 @@ impl Store {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
             transaction.execute_batch(
-                "DELETE FROM claim_signature_judging; DELETE FROM claim_verdicts; DELETE FROM claim_verdict_links;
+                /* sqlite-large-value: allow-for-now lv-h617a09575246 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_signature_judging; DELETE FROM claim_verdicts; DELETE FROM claim_verdict_links;
                  DELETE FROM claim_verdict_queue;
                  INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) SELECT DISTINCT claim_id FROM claim_signature_candidates;",
             )?;
-            transaction.execute("DELETE FROM meta WHERE key=?1", params![VERDICT_ROOTS])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-ha0cfaa1ec5cc owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", params![VERDICT_ROOTS])?;
             transaction.commit()?;
         }
         self.judge_claims(true)?;
@@ -1793,17 +1793,17 @@ impl Store {
 fn set_meta_tx(connection: &Connection, key: &str, value: &str) -> Result<()> {
     connection
         .prepare_cached(
-            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+            /* sqlite-large-value: allow-for-now lv-hfd8ac25bca92 owner=smallclaims::store::principals TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         )?
-        .execute(params![key, value])?;
+        .execute(/* sqlite-large-value: allow-for-now lv-h02841b9e96c0 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![key, value])?;
     Ok(())
 }
 
 /// The rules as the graph holds them: for each `rule/NAME`, its latest [`crate::rules::RULE_SET`]
 /// claim in canonical order.
 pub fn current_rules_tx(connection: &Connection) -> Result<Vec<crate::rules::NamedRule>> {
-    let mut statement = connection.prepare_cached(&format!(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6c81103a624c owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ &format!(
         "SELECT claims.subject, claims.id, claims.body FROM claims
          WHERE claims.kind=?1 ORDER BY {CANONICAL_ORDER}"
     ))?;
@@ -1857,7 +1857,7 @@ pub fn rules_gate_tx(
     }
     let any: bool = transaction
         .prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE kind=?1)")?
-        .query_row([crate::rules::RULE_SET], |row| row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h0b18afb3307a owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [crate::rules::RULE_SET], |row| row.get(0))?;
     if !any {
         return Ok(());
     }
@@ -1928,7 +1928,7 @@ impl Store {
     /// The newest audit records, of one rule or of all, newest first.
     pub fn rule_audits(&self, rule: Option<&str>, limit: usize) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(&format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h483f134075db owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.kind=?1 AND (?2 IS NULL OR claims.subject=?2)
              ORDER BY claims.store_index DESC LIMIT ?3"
@@ -1978,8 +1978,8 @@ fn nonce_used_in_model(
         "SELECT EXISTS(SELECT 1 FROM claim_signature_nonce_uses WHERE key=?1 AND nonce=?2)"
     };
     Ok(connection
-        .prepare_cached(sql)?
-        .query_row(params![key, nonce], |row| row.get(0))?)
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf9d562de9ebc owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ sql)?
+        .query_row(/* sqlite-large-value: allow-for-now lv-hc3493cbfe828 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ params![key, nonce], |row| row.get(0))?)
 }
 
 pub(crate) fn serving_signature(

@@ -78,18 +78,18 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<()> {
             "claim_verdict_queue",
             "claim_verdict_fresh",
         ] {
-            transaction.execute_batch(&format!("ALTER TABLE {table} RENAME TO legacy_{table};"))?;
+            transaction.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h722971331ea1 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE {table} RENAME TO legacy_{table};"))?;
         }
     }
-    transaction.execute_batch(PRINCIPAL_SCHEMA)?;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hdffe34d55f09 owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ PRINCIPAL_SCHEMA)?;
     // Compatibility with the earlier unpublished candidate-schema revision.
     let has_model: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('claim_signature_migration') WHERE name='serving_legacy')", [], |row| row.get(0))?;
     if !has_model {
-        transaction.execute_batch("ALTER TABLE claim_signature_migration ADD COLUMN serving_legacy INTEGER NOT NULL DEFAULT 0 CHECK(serving_legacy IN (0,1));")?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h6fb8658a1947 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE claim_signature_migration ADD COLUMN serving_legacy INTEGER NOT NULL DEFAULT 0 CHECK(serving_legacy IN (0,1));")?;
     }
     let has_presence: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('claim_signature_migration') WHERE name='legacy_present')", [], |row|row.get(0))?;
     if !has_presence {
-        transaction.execute_batch("ALTER TABLE claim_signature_migration ADD COLUMN legacy_present INTEGER NOT NULL DEFAULT 0 CHECK(legacy_present IN (0,1));")?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h766cb1f13e91 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE claim_signature_migration ADD COLUMN legacy_present INTEGER NOT NULL DEFAULT 0 CHECK(legacy_present IN (0,1));")?;
     }
     for column in [
         "started_at_unix_ms",
@@ -98,16 +98,16 @@ pub(crate) fn initialize_schema(connection: &Connection) -> Result<()> {
     ] {
         let has:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('claim_signature_migration') WHERE name=?1)",[column],|row|row.get(0))?;
         if !has {
-            transaction.execute_batch(&format!("ALTER TABLE claim_signature_migration ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0;"))?;
+            transaction.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h4f21f149db3f owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE claim_signature_migration ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0;"))?;
         }
     }
     let has_legacy_fault: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('claim_signature_migration') WHERE name='legacy_fault')",[],|row|row.get(0))?;
     if !has_legacy_fault {
         transaction
-            .execute_batch("ALTER TABLE claim_signature_migration ADD COLUMN legacy_fault TEXT;")?;
+            .execute_batch(/* sqlite-large-value: allow-for-now lv-h0b6c2706008f owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE claim_signature_migration ADD COLUMN legacy_fault TEXT;")?;
     }
     initialize_selection(&transaction)?;
-    transaction.execute("UPDATE claim_signature_migration SET started_at_unix_ms=?1,advanced_at_unix_ms=?1 WHERE id=1 AND started_at_unix_ms=0",[i64::try_from(now_ms())?])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf8a3a869aa34 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET started_at_unix_ms=?1,advanced_at_unix_ms=?1 WHERE id=1 AND started_at_unix_ms=0",[i64::try_from(now_ms())?])?;
     // Previously released builds accept only versions through 19. Commit the incompatibility marker
     // with the renamed relations, before any later runtime-schema work can fail.
     let version: u32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -133,7 +133,7 @@ pub(crate) fn initialize_selection(connection: &Connection) -> Result<()> {
     } else {
         "claim_signatures"
     };
-    connection.execute_batch(&format!("INSERT OR IGNORE INTO claim_signature_migration(id,phase,cursor,legacy_through,envelopes_through,serving_legacy,legacy_present,started_at_unix_ms,advanced_at_unix_ms)
+    connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h9beb92a94c6d owner=smallclaims::store::principals::migration TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO claim_signature_migration(id,phase,cursor,legacy_through,envelopes_through,serving_legacy,legacy_present,started_at_unix_ms,advanced_at_unix_ms)
         SELECT 1,CASE WHEN legacy=0 AND envelopes=0 THEN 'done' ELSE 'legacy' END,0,legacy,envelopes,
                CASE WHEN legacy=0 AND envelopes=0 THEN 0 ELSE {presence} END,{presence},{now},{now}
         FROM (SELECT COALESCE((SELECT MAX(rowid) FROM {table}),0) AS legacy,
@@ -143,7 +143,7 @@ pub(crate) fn initialize_selection(connection: &Connection) -> Result<()> {
 
 fn state(connection: &Connection) -> Result<SignatureMigration> {
     let report=connection.prepare_cached("SELECT phase,cursor,legacy_through,envelopes_through,fault,envelope_row,claim_offset,serving_legacy,started_at_unix_ms,advanced_at_unix_ms,completed_work,legacy_fault FROM claim_signature_migration WHERE id=1")?
-        .query_row([], |row| Ok(SignatureMigration {
+        .query_row(/* sqlite-large-value: allow-for-now lv-hce707025d424 owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ [], |row| Ok(SignatureMigration {
             phase: row.get(0)?, cursor: row.get(1)?, legacy_through: row.get(2)?,
             envelopes_through: row.get(3)?, fault: row.get(4)?, processed: 0, envelope_row:row.get(5)?,claim_offset:row.get(6)?,serving_legacy:row.get(7)?, started_at_unix_ms:row.get::<_,u64>(8)? as u128, advanced_at_unix_ms:row.get::<_,u64>(9)? as u128, completed_work:row.get(10)?,legacy_fault:row.get(11)?,
         }))?;
@@ -174,14 +174,14 @@ pub(super) fn judging_available(connection: &Connection) -> Result<bool> {
 
 pub(super) fn record_fault(connection: &Connection, reason: &str) -> Result<()> {
     connection.execute(
-        "UPDATE claim_signature_migration SET fault=?1 WHERE id=1",
+        /* sqlite-large-value: allow-for-now lv-h2cab6e9906c3 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET fault=?1 WHERE id=1",
         [reason],
     )?;
     Ok(())
 }
 
 pub(super) fn finish_judging(connection: &Connection) -> Result<()> {
-    connection.execute("UPDATE claim_signature_migration SET phase='done',serving_legacy=0 WHERE id=1 AND phase='judging' AND cursor=0 AND envelope_row=0 AND claim_offset=0 AND fault IS NULL AND NOT EXISTS(SELECT 1 FROM claim_verdict_queue) AND NOT EXISTS(SELECT 1 FROM claim_verdict_fresh)", [])?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-he88ecac26d82 owner=smallclaims::store::principals::migration TODO=chunk-or-reference-exact-wire-values */ "UPDATE claim_signature_migration SET phase='done',serving_legacy=0 WHERE id=1 AND phase='judging' AND cursor=0 AND envelope_row=0 AND claim_offset=0 AND fault IS NULL AND NOT EXISTS(SELECT 1 FROM claim_verdict_queue) AND NOT EXISTS(SELECT 1 FROM claim_verdict_fresh)", [])?;
     Ok(())
 }
 
@@ -231,7 +231,7 @@ impl Store {
             } else {
                 "claim_signatures"
             };
-            let rows=self.readers.get().prepare_cached(&format!("SELECT rowid,claim_id,signature FROM {table} WHERE rowid>?1 AND rowid<=?2 ORDER BY rowid LIMIT ?3"))?
+            let rows=self.readers.get().prepare_cached(/* sqlite-large-value: allow-for-now lv-h35d80536dc09 owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ &format!("SELECT rowid,claim_id,signature FROM {table} WHERE rowid>?1 AND rowid<=?2 ORDER BY rowid LIMIT ?3"))?
                 .query_map(params![captured.cursor,captured.legacy_through,LEGACY_PAGE as i64],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             for (rowid, claim_id, text) in rows {
                 match serde_json::from_str::<ClaimSignature>(&text) {
@@ -252,7 +252,7 @@ impl Store {
             let mut claims = 0;
             while envelopes < ENVELOPE_PAGE && claims < CLAIM_PAGE {
                 let metadata=self.readers.get().prepare_cached("SELECT rowid,writer,sequence,envelope_hash,previous_hash,accepted_at_unix_ms,receipt_state,batch_id FROM replica_envelopes WHERE rowid>?1 AND rowid<=?2 ORDER BY rowid LIMIT 1")?
-                    .query_row(params![through,captured.envelopes_through],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,u64>(2)?,row.get::<_,String>(3)?,row.get::<_,Option<String>>(4)?,row.get::<_,String>(5)?,row.get::<_,String>(6)?,row.get::<_,Option<String>>(7)?))).optional()?;
+                    .query_row(/* sqlite-large-value: allow-for-now lv-h45099bc68005 owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ params![through,captured.envelopes_through],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,u64>(2)?,row.get::<_,String>(3)?,row.get::<_,Option<String>>(4)?,row.get::<_,String>(5)?,row.get::<_,String>(6)?,row.get::<_,Option<String>>(7)?))).optional()?;
                 let Some((rowid, writer, sequence, hash, previous, accepted, receipt, batch)) =
                     metadata
                 else {
@@ -280,7 +280,7 @@ impl Store {
                             .readers
                             .get()
                             .prepare_cached("SELECT payload FROM replica_envelopes WHERE rowid=?1")?
-                            .query_row([rowid], |row| row.get(0))?;
+                            .query_row(/* sqlite-large-value: allow-for-now lv-h9e0cde6f9bc0 owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ [rowid], |row| row.get(0))?;
                         let raw = bytes.bytes()?;
                         let expected = crate::hash::replica_envelope_hash(
                             &writer,
@@ -356,7 +356,7 @@ impl Store {
         // Rejecting a damaged page leaves both its cursor and its inventory unchanged.
         if let Some(fault) = &fault {
             tx.execute(
-                "UPDATE claim_signature_migration SET fault=?1,legacy_fault=CASE WHEN serving_legacy=1 AND phase='legacy' THEN ?1 ELSE legacy_fault END WHERE id=1",
+                /* sqlite-large-value: allow-for-now lv-h98db04117bde owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET fault=?1,legacy_fault=CASE WHEN serving_legacy=1 AND phase='legacy' THEN ?1 ELSE legacy_fault END WHERE id=1",
                 [fault],
             )?;
         } else {
@@ -371,9 +371,9 @@ impl Store {
                 }
                 store_inventory_signature_tx(&tx, &claim_id, &signature, writer.as_deref())?;
                 tx.prepare_cached(
-                    "INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) VALUES (?1)",
+                    /* sqlite-large-value: allow-for-now lv-h2f5d92441add owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO claim_verdict_fresh(claim_id) VALUES (?1)",
                 )?
-                .execute([claim_id])?;
+                .execute(/* sqlite-large-value: allow-for-now lv-h5b2db7e3d25f owner=smallclaims::store::principals::migration TODO=trace-statement-and-value-representation */ [claim_id])?;
             }
             if count == 0 {
                 let next = if captured.phase == "legacy" {
@@ -382,12 +382,12 @@ impl Store {
                     "judging"
                 };
                 tx.execute(
-                    "UPDATE claim_signature_migration SET phase=?1,cursor=0,envelope_row=0,claim_offset=0 WHERE id=1",
+                    /* sqlite-large-value: allow-for-now lv-hddb494091a22 owner=smallclaims::store::principals::migration TODO=chunk-or-reference-exact-wire-values */ "UPDATE claim_signature_migration SET phase=?1,cursor=0,envelope_row=0,claim_offset=0 WHERE id=1",
                     [next],
                 )?;
             } else {
                 tx.execute(
-                    "UPDATE claim_signature_migration SET cursor=?1,envelope_row=?2,claim_offset=?3 WHERE id=1",
+                    /* sqlite-large-value: allow-for-now lv-h36f05ab1eda2 owner=smallclaims::store::principals::migration TODO=chunk-or-reference-exact-wire-values */ "UPDATE claim_signature_migration SET cursor=?1,envelope_row=?2,claim_offset=?3 WHERE id=1",
                     params![through,envelope_row,offset as i64],
                 )?;
             }
@@ -413,7 +413,7 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
         self.connection.write().execute(
-            "UPDATE claim_signature_migration SET fault=NULL,legacy_fault=NULL WHERE id=1",
+            /* sqlite-large-value: allow-for-now lv-hedd9a4ccf337 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET fault=NULL,legacy_fault=NULL WHERE id=1",
             [],
         )?;
         Ok(())
@@ -431,9 +431,9 @@ impl Store {
         }
         for table in legacy::TABLES {
             let removed = if table == "legacy_claim_verdict_links" {
-                tx.execute("DELETE FROM legacy_claim_verdict_links WHERE (link,claim_id) IN (SELECT link,claim_id FROM legacy_claim_verdict_links LIMIT 64)", [])?
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h36dec80b365d owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM legacy_claim_verdict_links WHERE (link,claim_id) IN (SELECT link,claim_id FROM legacy_claim_verdict_links LIMIT 64)", [])?
             } else {
-                tx.execute(&format!("DELETE FROM {table} WHERE claim_id IN (SELECT claim_id FROM {table} LIMIT 64)"), [])?
+                tx.execute(&format!(/* sqlite-large-value: allow-for-now lv-h5ccb434f9185 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE claim_id IN (SELECT claim_id FROM {table} LIMIT 64)"), [])?
             };
             if removed != 0 {
                 tx.commit()?;
@@ -441,19 +441,19 @@ impl Store {
             }
         }
         for table in legacy::TABLES {
-            tx.execute_batch(&format!("DROP TABLE {table};"))?;
+            tx.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-ha9be26003c2f owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE {table};"))?;
         }
         tx.execute(
-            "UPDATE claim_signature_migration SET legacy_present=0 WHERE id=1",
+            /* sqlite-large-value: allow-for-now lv-h84c70d11e971 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET legacy_present=0 WHERE id=1",
             [],
         )?;
-        tx.execute("DELETE FROM meta WHERE key='claim_verdict_roots'", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-he1c1b0fd451d owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='claim_verdict_roots'", [])?;
         tx.commit()?;
         Ok(false)
     }
 }
 
 pub(super) fn note_work(connection: &Connection, work: usize) -> Result<()> {
-    connection.execute("UPDATE claim_signature_migration SET completed_work=completed_work+?1,advanced_at_unix_ms=?2 WHERE id=1 AND phase<>'done'",params![i64::try_from(work)?,i64::try_from(now_ms())?])?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h25919a7d0fc5 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET completed_work=completed_work+?1,advanced_at_unix_ms=?2 WHERE id=1 AND phase<>'done'",params![i64::try_from(work)?,i64::try_from(now_ms())?])?;
     Ok(())
 }
