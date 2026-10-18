@@ -3777,7 +3777,7 @@ async fn agents_start_preserves_command_declarations_and_refuses_harness_options
         value(
             &run_cli(
                 &socket,
-                &["apply", "--no-gate-check", source.to_str().unwrap(),
+                &["apply", "--no-gate-check", "--restart-now", source.to_str().unwrap(),
                 "--as",
                 "person/avery",],
             )
@@ -3891,7 +3891,7 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
     value(
         &run_cli(
             &socket,
-            &["apply", "--no-gate-check", source.to_str().unwrap(),
+            &["apply", "--no-gate-check", "--restart-now", source.to_str().unwrap(),
             "--as",
             "person/avery",],
         )

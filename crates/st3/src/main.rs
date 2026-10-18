@@ -2592,7 +2592,7 @@ struct LaneMarkArgs {
     actor: Option<String>,
 }
 
-#[derive(Args, Default)]
+#[derive(Args)]
 struct ApplyRestartArgs {
     /// Restart changed running seats only at a proven idle point with no open ask.
     #[arg(long, conflicts_with = "restart_now")]
@@ -2603,6 +2603,13 @@ struct ApplyRestartArgs {
     /// Alert and hold after this safe-point wait; never force a busy seat to restart.
     #[arg(long, default_value = "30m")]
     restart_max_wait: String,
+}
+
+impl Default for ApplyRestartArgs {
+    /// The same arguments as no restart flags: defer, with the thirty-minute default wait.
+    fn default() -> Self {
+        Self { defer_restart: false, restart_now: false, restart_max_wait: "30m".into() }
+    }
 }
 
 impl ApplyRestartArgs {

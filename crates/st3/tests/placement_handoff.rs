@@ -991,6 +991,18 @@ async fn agents_apply_moves_are_fenced_and_start_json_names_the_phase() {
     amber.declare("amber", true, "initial");
     amber.pass();
     amber.pass();
+    // A move's source host must advertise deferred apply before the destination publishes it.
+    amber.store.append_claim(&st3::model::ClaimInput {
+        subject: "daemon/amber".into(),
+        kind: "daemon.started".into(),
+        actor: None,
+        fields: serde_json::from_value(serde_json::json!({
+            "status": "running", "features": {"apply_deferred_restart": 1}
+        })).unwrap(),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
     amber.sync_to(&cobalt);
     let path = cobalt.root.path().join("move.kdl");
     std::fs::write(
