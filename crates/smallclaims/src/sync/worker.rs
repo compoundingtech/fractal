@@ -1663,7 +1663,7 @@ async fn receive_exchange<B: Backend>(
     body: Bytes,
 ) -> Response {
     let body = if deflated(&headers) {
-        match inflate(&body) {
+        match inflate(&body, "an exchange request") {
             Ok(body) => Bytes::from(body),
             Err(error) => {
                 return (
@@ -2001,7 +2001,10 @@ async fn fetch_checkpoint_manifest_page(
     let headers = response.headers().clone();
     let bytes = response.bytes().await?.to_vec();
     let bytes = if deflated(&headers) {
-        inflate(&bytes)?
+        inflate(
+            &bytes,
+            &format!("the checkpoint manifest page from peer {}", peer.name),
+        )?
     } else {
         bytes
     };
@@ -2640,7 +2643,7 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
         anyhow::bail!(unsigned_refusal(&peer.name, status, &bytes));
     }
     let bytes = if deflated(&headers) {
-        inflate(&bytes)?
+        inflate(&bytes, &format!("the answer to `{path}` from peer {}", peer.name))?
     } else {
         bytes
     };
