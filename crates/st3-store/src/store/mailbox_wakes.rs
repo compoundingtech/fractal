@@ -174,9 +174,9 @@ impl Store {
                 }
             };
             let routed = wakes.clone();
-            tokio::spawn(async move {
+            tokio::spawn(crate::task_cpu::account("mailbox.wake_dispatch", async move {
                 dispatch(weak, routed, events, cursor).await;
-            });
+            }));
             wakes
         });
         wakes.subscribe(fence)
@@ -215,7 +215,7 @@ impl Store {
                 "SELECT COALESCE((SELECT MAX(store_index) FROM claims),0),
                     COALESCE((SELECT MAX(id) FROM local_observations),0)",
             )?
-            .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))?)
+            .query_row(/* sqlite-large-value: allow-for-now lv-h1e0925b834e5 owner=st3_store::store::mailbox_wakes TODO=trace-statement-and-value-representation */ [], |r| Ok((r.get(0)?, r.get(1)?)))?)
     }
 
     fn mailbox_wake_batch(
@@ -292,7 +292,7 @@ async fn dispatch(
             let Some(store) = store.upgrade() else {
                 return;
             };
-            match tokio::task::spawn_blocking(move || store.mailbox_wake_cursor()).await {
+            match tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.wake_dispatch", || store.mailbox_wake_cursor())).await {
                 Ok(Ok(at)) => {
                     // Start at the current head, never at zero. Re-read every subscriber once
                     // to cover writes skipped while initial cursor acquisition was unavailable.
@@ -315,7 +315,7 @@ async fn dispatch(
             };
             let at = cursor.expect("cursor acquired before dispatch");
             let result = tokio::task::spawn_blocking(move || {
-                crate::profile::task("task mailbox-wake-dispatch", || {
+                crate::task_cpu::profiled_blocking("mailbox.wake_dispatch", || {
                     store.mailbox_wake_batch(at)
                 })
             })
@@ -574,7 +574,7 @@ mod tests {
             "unrelated declaration",
         ] {
             let store = Store::open_memory("node").unwrap();
-            crate::mailbox::tests::ready(&store, "boot");
+            crate::store::mailbox_tests::ready(&store, "boot");
             let fence = store
                 .bind_mailbox(&Fence::new("agent/eval.worker", "boot", "delivery"))
                 .unwrap();

@@ -1,5 +1,6 @@
 #[path = "reconcile_rollout.rs"]
 pub mod rollouts;
+use crate::{GithubStore, WatchesStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::panic::AssertUnwindSafe;
@@ -1441,7 +1442,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let notify = self.notify.clone();
             let events = self.event_notify.clone();
             let incoming = self.incoming_resumes.clone();
-            tokio::spawn(async move {
+            tokio::spawn(crate::task_cpu::account("seat.snapshot_transfer", async move {
                 let result = crate::seat_snapshot::transfer(
                     store.clone(),
                     relay,
@@ -1477,7 +1478,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     state.join("replication.wake"),
                     uuid::Uuid::now_v7().to_string(),
                 );
-            });
+            }));
         }
         Ok(())
     }
@@ -1676,7 +1677,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         work: impl FnOnce(&Self) -> T + Send + 'static,
     ) -> T {
         let this = self.clone();
-        match self.store.connection.write_workers().spawn_blocking(move || work(&this)).await {
+        match self.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("reconcile", || work(&this))).await {
             Ok(value) => value,
             Err(error) => std::panic::resume_unwind(error.into_panic()),
         }
@@ -1688,7 +1689,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut delay = Duration::from_secs(1);
         loop {
             let started = std::time::Instant::now();
-            let Err(error) = tokio::spawn(self.clone().run()).await else {
+            let Err(error) = tokio::spawn(crate::task_cpu::account("reconcile", self.clone().run())).await else {
                 return;
             };
             if !error.is_panic() {
@@ -8607,7 +8608,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let notify = self.notify.clone();
         let delayed = self.delayed_restarts.clone();
         let subject = subject.to_owned();
-        handle.spawn(async move {
+        handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
             let delay = until.saturating_sub(now_ms()).min(u64::MAX as u128) as u64;
             tokio::time::sleep(Duration::from_millis(delay)).await;
             {
@@ -8629,7 +8630,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Some(restart_wake_kind(&subject)),
             );
             notify.notify_one();
-        });
+        }));
     }
 
     /// Observe only the invocation, never the borrowed shell's lifecycle as an agent exit.
@@ -13640,7 +13641,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let notify = self.notify.clone();
         let armed = self.step_deadlines.clone();
         let key = key.to_owned();
-        handle.spawn(async move {
+        handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
             tokio::time::sleep(Duration::from_millis(remaining)).await;
             {
                 let mut armed = armed.lock().unwrap_or_else(PoisonError::into_inner);
@@ -13650,7 +13651,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             crate::reconcile_telemetry::record_wake(wake, None);
             notify.notify_one();
-        });
+        }));
     }
 
     /// Why a run-owned stop must wait for `seat`: it holds a message nobody has read, or work in a
@@ -13976,7 +13977,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let host = self.host.clone();
         let started_at = self.started_at_unix_ms;
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
+            handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
                 let delay = scheduled_at.saturating_sub(now_ms() as i64).max(0) as u64;
                 tokio::time::sleep(Duration::from_millis(delay)).await;
                 if store
@@ -14126,7 +14127,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(&operation);
                 signal_changed(&notify, &event_notify);
-            });
+            }));
         } else {
             self.armed_schedules
                 .lock()
@@ -15168,7 +15169,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let agent_workspaces = agent_workspaces.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
+            handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
                 // `None` when the selected revision cannot be read, which is no declaration change.
                 let revision_current = || store.selected_desired_revision(&observer_subject).ok()
                     .map(|selected| selected.as_deref() == Some(revision.as_str()));
@@ -15417,7 +15418,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 next_check = completed_deadline.expect("continuing polls have a deadline");
                 }
-            });
+            }));
         } else {
             self.armed_observers
                 .lock()
@@ -15581,11 +15582,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if let Ok(handle) = tokio::runtime::Handle::try_current() {
                         let notify = self.notify.clone();
                         let remaining = (*duration_ms as u128).saturating_sub(elapsed) as u64;
-                        handle.spawn(async move {
+                        handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
                             tokio::time::sleep(Duration::from_millis(remaining)).await;
                             crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::TimerGate, None);
                             notify.notify_one();
-                        });
+                        }));
                     }
                     GateOutcome::Pass
                 }
@@ -16157,7 +16158,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let armed = self.gate_poll_armed.clone();
             let runtimes = self.gate_poll_runtimes.clone();
             let runtime = self.runtime.clone();
-            handle.spawn(async move {
+            handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
                 let armed_at = tokio::time::Instant::now();
                 loop {
                     tokio::time::sleep(GATE_POLL_INTERVAL).await;
@@ -16166,13 +16167,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .unwrap_or_else(PoisonError::into_inner)
                         .clone();
                     let runtime = runtime.clone();
-                    let all_running = tokio::task::spawn_blocking(move || {
+                    let all_running = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("reconcile.gate_poll", || {
                         watched.iter().all(|runtime_id| {
                             runtime.observe_exec(runtime_id).is_ok_and(|observation| {
                                 observation.is_some_and(|item| item.status == "running")
                             })
                         })
-                    })
+                    }))
                     .await
                     .unwrap_or(false);
                     if !all_running || armed_at.elapsed() >= GATE_POLL_PASS_INTERVAL {
@@ -16186,7 +16187,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 armed.store(false, Ordering::Release);
                 crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::TimerGatePoll, None);
                 notify.notify_one();
-            });
+            }));
         }
     }
 
@@ -16275,11 +16276,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     smallclaims::touched::note_due(now_ms().saturating_add(100));
                     if let Ok(handle) = tokio::runtime::Handle::try_current() {
                         let notify = self.notify.clone();
-                        handle.spawn(async move {
+                        handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
                             tokio::time::sleep(Duration::from_millis(100)).await;
                             crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::TimerLlmGate, None);
                             notify.notify_one();
-                        });
+                        }));
                     }
                     return Ok(GateOutcome::Pending);
                 }
@@ -16365,11 +16366,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let notify = self.notify.clone();
                 let remaining = (time_limit_ms as u128).saturating_sub(elapsed) as u64;
-                handle.spawn(async move {
+                handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
                     tokio::time::sleep(Duration::from_millis(remaining)).await;
                     crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::TimerLlmGate, None);
                     notify.notify_one();
-                });
+                }));
             }
             return Ok(GateOutcome::Pending);
         }
@@ -18626,7 +18627,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
 
     #[test]
     fn unchanged_plain_harness_reapply_keeps_previous_build_revisions_and_running_seats() {
-        let fixture: Value = serde_json::from_str(include_str!(
+        let fixture: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-he6b9d3eedfcd owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
             "../../st3-daemon/tests/fixtures/harness-access-previous-build.json"
         )).unwrap();
         let source = fixture["source"].as_str().unwrap();
@@ -21985,7 +21986,7 @@ mission "feedback-review" state="ready" {
             {
                 let mut writer = store.connection.write();
                 let tx = writer.transaction().unwrap();
-                tx.execute("DELETE FROM local_publication_starts", [])
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h3ba9f26e1ed8 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_publication_starts", [])
                     .unwrap();
                 tx.rollback().unwrap();
             }
@@ -21999,32 +22000,32 @@ mission "feedback-review" state="ready" {
                 let tx = writer.transaction().unwrap();
                 match mutation {
                     "local-trim" => {
-                        tx.execute("DELETE FROM local_observations WHERE subject=?1 AND kind='runtime.action.succeeded'", [subject]).unwrap();
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h9f826e5caec4 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE subject=?1 AND kind='runtime.action.succeeded'", [subject]).unwrap();
                     }
                     "shared-trim" => {
-                        tx.execute("DELETE FROM claims WHERE id=?1", [&receipt.id])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-he7e152c041a8 owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&receipt.id])
                             .unwrap();
                     }
                     "definition-trim" => {
                         // Native trimming retires operation identities before their
                         // canonical claims. Preserve that foreign-key ordering here.
                         tx.execute(
-                            "DELETE FROM operations WHERE canonical_claim_id=?1",
+                            /* sqlite-large-value: allow-for-now lv-h68e30ed2b008 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE canonical_claim_id=?1",
                             [&token],
                         )
                         .unwrap();
-                        tx.execute("DELETE FROM claims WHERE id=?1", [&token])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h9f7299386c3e owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&token])
                             .unwrap();
                     }
                     "definition-repair" => {
                         tx.execute(
-                            "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
+                            /* sqlite-large-value: allow-for-now lv-hf78d437f20fa owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
                             [&token],
                         )
                         .unwrap();
                     }
                     "replay" => {
-                        tx.execute("DELETE FROM local_publication_bootstrap", [])
+                        tx.execute(/* sqlite-large-value: allow-for-now lv-h4fe1ade331da owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_publication_bootstrap", [])
                             .unwrap();
                     }
                     _ => unreachable!(),
@@ -26971,9 +26972,9 @@ schedule "cycle" {{
             "step_path" => "'ghost'".into(),
             _ => column.clone(),
         }).collect::<Vec<_>>().join(",");
-        connection.execute(&format!("INSERT INTO step_runs ({}) SELECT {select} FROM step_runs LIMIT 1", columns.join(",")), []).unwrap();
-        connection.execute("DELETE FROM meta WHERE key='occurrence_creation_projection_rules'", []).unwrap();
-        connection.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES
+        connection.execute(&format!(/* sqlite-large-value: allow-for-now lv-h477443b3b34f owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs ({}) SELECT {select} FROM step_runs LIMIT 1", columns.join(",")), []).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h6c9aeb7c32a1 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='occurrence_creation_projection_rules'", []).unwrap();
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7b22422f1cd5 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES
             ('canonical_shared_projection_rules','2'), ('work_extended_projection_rules','1');").unwrap();
         drop(connection);
         let upgraded = Store::open(&copy, "ivory").unwrap();
@@ -33633,7 +33634,7 @@ observer "repo" {
         crate::store::configure_projection_writer(&connection).unwrap();
         connection
             .execute(
-                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-h89c5142ff1d1 owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                 rusqlite::params![(now_ms() - 3_600_001).to_string(), old.id],
             )
             .unwrap();
@@ -34128,7 +34129,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
             crate::store::configure_projection_writer(&connection).unwrap();
             connection
                 .execute(
-                    "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                    /* sqlite-large-value: allow-for-now lv-h6ce76ec8b9fb owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                     rusqlite::params![
                         (now_ms() - FAULT_ATTENTION_AFTER_MS - 1).to_string(),
                         fault.id
@@ -38971,9 +38972,9 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     fn assert_claude_prompt_screen_resolution(restart: bool, see_dialog: bool) {
         let fixture = |name: &str| -> String {
             match name {
-                "claude-working.txt" => include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt"),
-                "claude-permission-dialog.txt" => include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-permission-dialog.txt"),
-                "claude-permission-refused.txt" => include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-permission-refused.txt"),
+                "claude-working.txt" => /* sqlite-large-value: allow-for-now lv-h77d3068340d4 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt"),
+                "claude-permission-dialog.txt" => /* sqlite-large-value: allow-for-now lv-h4d12287f9727 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-permission-dialog.txt"),
+                "claude-permission-refused.txt" => /* sqlite-large-value: allow-for-now lv-h396d9bae4905 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-permission-refused.txt"),
                 _ => unreachable!("{name}"),
             }
             .into()
@@ -39076,8 +39077,8 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     /// screen moves on.
     #[test]
     fn a_screen_only_prompt_is_an_alert_and_its_answer_is_pressed_into_the_dialog_once() {
-        let mcp = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-mcp-server.txt");
-        let working = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
+        let mcp = /* sqlite-large-value: allow-for-now lv-h37971c4ddd6b owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-mcp-server.txt");
+        let working = /* sqlite-large-value: allow-for-now lv-h17575a2c74b2 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
         let store = Arc::new(Store::open_memory("node").unwrap());
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
@@ -39184,7 +39185,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     /// back for the person to finish in the terminal, saying why, and offers no answer.
     #[test]
     fn a_screen_prompt_answer_the_terminal_refused_part_way_goes_back_to_the_person() {
-        let trust = include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-trust.txt");
+        let trust = /* sqlite-large-value: allow-for-now lv-hbb8d5d2da8d1 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-trust.txt");
         let store = Arc::new(Store::open_memory("node").unwrap());
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
@@ -39271,8 +39272,8 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     /// while the dialog is on screen: Claude does not take a hook's allow for a plan.
     #[test]
     fn a_plan_approved_from_a_client_is_approved_in_its_dialog_once() {
-        let plan = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-plan-dialog.txt");
-        let working = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
+        let plan = /* sqlite-large-value: allow-for-now lv-h27368ac5df4c owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-plan-dialog.txt");
+        let working = /* sqlite-large-value: allow-for-now lv-h4534ae01fadd owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
         let store = Arc::new(Store::open_memory("node").unwrap());
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
@@ -39352,7 +39353,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     #[test]
     fn codex_update_skip_is_once_per_episode_and_requires_current_screen_and_incarnation() {
         let menu =
-            include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt");
+            /* sqlite-large-value: allow-for-now lv-h2963143a3b13 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt");
         for case in [
             "skip",
             "send-failed",
@@ -39516,19 +39517,19 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         for (driver, screen, code) in [
             (
                 "claude",
-                include_str!(
+                /* sqlite-large-value: allow-for-now lv-h8f0e65b36c60 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
                     "../../st-drivers/tests/fixtures/blocking-screens/claude-wide-footer.txt"
                 ),
                 "provider-auth-expired",
             ),
             (
                 "codex",
-                include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-login.txt"),
+                /* sqlite-large-value: allow-for-now lv-h70d6fd0f599c owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-login.txt"),
                 "provider-auth-expired",
             ),
             (
                 "codex",
-                include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt")
+                /* sqlite-large-value: allow-for-now lv-h493f3f1745e7 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt")
                     .split("enter continue")
                     .next()
                     .unwrap(),
@@ -39536,12 +39537,12 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             ),
             (
                 "pi",
-                include_str!("../../st-drivers/tests/fixtures/blocking-screens/pi-no-key.txt"),
+                /* sqlite-large-value: allow-for-now lv-h91fbd820cdba owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/pi-no-key.txt"),
                 "provider-auth-expired",
             ),
             (
                 "omp",
-                include_str!("../../st-drivers/tests/fixtures/blocking-screens/omp-no-key.txt"),
+                /* sqlite-large-value: allow-for-now lv-hb9d750a6c83c owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/omp-no-key.txt"),
                 "provider-auth-expired",
             ),
         ] {
@@ -39637,13 +39638,13 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
 
             if driver == "claude" {
                 for login_screen in [
-                    include_str!(
+                    /* sqlite-large-value: allow-for-now lv-h4f3ec5adc2f4 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
                         "../../st-drivers/tests/fixtures/blocking-screens/claude-login.txt"
                     ),
-                    include_str!(
+                    /* sqlite-large-value: allow-for-now lv-he9ec12118b27 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
                         "../../st-drivers/tests/fixtures/blocking-screens/claude-authenticating.txt"
                     ),
-                    include_str!(
+                    /* sqlite-large-value: allow-for-now lv-h3ad4136f5595 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
                         "../../st-drivers/tests/fixtures/blocking-screens/claude-code-prompt.txt"
                     ),
                 ] {
@@ -39741,11 +39742,11 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
 
             if driver == "codex" {
                 let next = if code == "provider-auth-expired" {
-                    include_str!(
+                    /* sqlite-large-value: allow-for-now lv-h339947247d46 owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!(
                         "../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt"
                     ).split("enter continue").next().unwrap()
                 } else {
-                    include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-login.txt")
+                    /* sqlite-large-value: allow-for-now lv-hae98777c5efd owner=st3_reconcile::reconcile TODO=trace-statement-and-value-representation */ include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-login.txt")
                 };
                 runtime
                     .screens
@@ -40325,7 +40326,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .lock()
             .unwrap()
             .execute_batch(
-                "CREATE TRIGGER fail_session_start BEFORE INSERT ON claims
+                /* sqlite-large-value: allow-for-now lv-h1ed1b65f008c owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER fail_session_start BEFORE INSERT ON claims
                  WHEN NEW.kind='message.sent'
                  BEGIN SELECT RAISE(ABORT, 'injected session-start failure'); END;",
             )
@@ -40340,7 +40341,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .connection
             .lock()
             .unwrap()
-            .execute_batch("DROP TRIGGER fail_session_start")
+            .execute_batch(/* sqlite-large-value: allow-for-now lv-h36ce2ba3fbe2 owner=st3_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_session_start")
             .unwrap();
         reconciler
             .deliver_session_start(&desired.subject, "worker-three")
@@ -43241,7 +43242,7 @@ mission "gated" state="ready" {
         crate::store::configure_projection_writer(&connection).unwrap();
         connection
             .execute(
-                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-hf5e65e6d2b33 owner=st3_reconcile::reconcile TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                 rusqlite::params![
                     (now_ms() - WORK_WAKE_EXHAUST_GRACE_MS - 1).to_string(),
                     sent.id
