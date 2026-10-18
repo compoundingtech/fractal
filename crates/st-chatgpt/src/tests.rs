@@ -210,7 +210,7 @@ async fn alert_answer_maps_to_work_done_and_returns_direct_action_result_unchang
         bearer: "test-only-answer-credential".into(),
     };
     let arguments = json!({
-        "action_id":"action/answer", "idempotency_key":"answer-key",
+        "action_id":"action/answer", "idempotency_key":"answer-key-0000001",
         "fence":{"snapshot_id":"snapshot/before-answer"},
         "alert_id":"step-run/test/ask", "episode":"claim/ask", "option":"yes",
         "summary":"Proceed with the selected option"
@@ -222,7 +222,7 @@ async fn alert_answer_maps_to_work_done_and_returns_direct_action_result_unchang
     assert_eq!(headers["authorization"], "Bearer test-only-answer-credential");
     assert_eq!(body, json!({
         "api_version":"st3.client.v0", "id":"action/answer", "type":"work.done",
-        "idempotency_key":"answer-key", "fence":{"snapshot_id":"snapshot/before-answer"},
+        "idempotency_key":"answer-key-0000001", "fence":{"snapshot_id":"snapshot/before-answer"},
         "parameters":{"target_id":"step-run/test/ask", "episode":"claim/ask",
             "summary":"Proceed with the selected option", "answer":{"id":"yes"}}
     }));
