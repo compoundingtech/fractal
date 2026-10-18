@@ -1,5 +1,5 @@
 import type { ActionOf, ConversationSearchHit, TimelineMessageBody } from './Models.generated.ts';
-import type { ClientOptions, TraceContext } from './Client.generated.ts';
+import type { ClientOptions, RequestOptions, St3Client, TraceContext } from './Client.generated.ts';
 
 const traceContext: TraceContext = {
     traceparent: '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01',
@@ -8,6 +8,15 @@ const traceContext: TraceContext = {
 const tracedOptions: ClientOptions = { baseUrl: 'https://example.test', traceContext: () => traceContext };
 const untracedOptions: ClientOptions = { baseUrl: 'https://example.test', traceContext: () => undefined };
 void [tracedOptions, untracedOptions];
+
+declare const cancellationClient: St3Client;
+declare const cancellationOptions: RequestOptions;
+void cancellationClient.arrangementsList('person/example', {}, cancellationOptions);
+void cancellationClient.arrangementsGet('example', 'arrangement-id', cancellationOptions);
+void cancellationClient.notesList(cancellationOptions);
+void cancellationClient.customSubjectsList({}, cancellationOptions);
+void cancellationClient.publicationDefinition('mission/example', cancellationOptions);
+void cancellationClient.conversationContentChunk('session/example', 'reference', 0, cancellationOptions);
 
 const valid: ActionOf<'launch.approve'> = {
     api_version: 'st3.client.v0',
@@ -85,6 +94,11 @@ void searchHit;
 // Rust None and TypeScript omission are both supported wire shapes.
 import type { CollectionCommand, CollectionFrame } from './Models.generated.ts';
 const nullFilters: CollectionCommand = { kind: 'subscribe', id: 'agents', collection: 'agents', person: null, actor: null, status: null };
+const exactAgent: CollectionCommand = { kind: 'subscribe', id: 'details', collection: 'agents', agent: 'agent/example/worker', limit: 1 };
+const noExactAgent: CollectionCommand = { ...exactAgent, agent: null };
+// @ts-expect-error Exact agent selectors are supported by agents only.
+const agentOnWork: CollectionCommand = { kind: 'subscribe', id: 'work', collection: 'work', agent: 'agent/example/worker' };
+void [exactAgent, noExactAgent, agentOnWork];
 const currentTerminal: CollectionCommand = { kind: 'subscribe', id: 'term', collection: 'terminal', terminal: 'terminal/example', capability: 'proof' };
 const nullIncarnation: CollectionCommand = { ...currentTerminal, incarnation: null };
 const collectionResync: CollectionFrame = { kind: 'resync', id: 'agents', code: 'internal', message: 'Retry', retryable: true };

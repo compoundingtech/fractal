@@ -386,12 +386,36 @@ async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
 }
 
 #[tokio::test]
-async fn outbound_rust_collection_commands_conform_with_none_options() {
+async fn outbound_rust_collection_commands_conform_with_none_and_exact_agent() {
     use axum::extract::ws::WebSocketUpgrade;
     use futures_util::StreamExt as _;
     let validator = contract_validator("CollectionCommand");
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    // A stub daemon: older until `advertise` is set, then one that grants the exact selector.
+    let advertise = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let advertised = advertise.clone();
     let app = axum::Router::new().route(
+        "/v1/client/capabilities",
+        axum::routing::get(move || {
+            let granted = advertised.load(std::sync::atomic::Ordering::SeqCst);
+            async move {
+                let capabilities = if granted {
+                    serde_json::json!([{"id":st3_client::EXACT_AGENT_SELECTOR_CAPABILITY, "version":1, "state":"granted"}])
+                } else {
+                    serde_json::json!([{"id":"collections", "version":1, "state":"granted"}])
+                };
+                axum::Json(serde_json::json!({
+                    "api_version":"st3.client.v0", "request_id":"request/capabilities",
+                    "snapshot":{"id":"snapshot/host/1/a", "host_id":"host/example", "store_index":1,
+                        "projection_version":"client-projection.v0", "created_at":"2026-10-17T00:00:00Z"},
+                    "value":{"kind":"capabilities", "session_actor":"person/example", "transport":"fabric-loopback",
+                        "capabilities":capabilities,
+                        "limits":{"max_page_items":200, "max_event_items":500, "max_response_bytes":1048576, "max_wait_ms":30000},
+                        "event_cursor":"event-cursor/example/1", "oldest_event_cursor":"event-cursor/example/0", "schemas":[]},
+                }))
+            }
+        }),
+    ).route(
         "/v1/client/collections/stream",
         axum::routing::get(move |upgrade: WebSocketUpgrade| {
             let sender = sender.clone();
@@ -422,18 +446,45 @@ async fn outbound_rust_collection_commands_conform_with_none_options() {
         .subscribe("agents", "agents", 100, None, None)
         .await
         .unwrap();
+    // An older daemon is never sent the selector: the client refuses before sending.
+    let refused = client
+        .subscribe_agent(&mut stream, "refused", "agent/example/worker", None)
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains(st3_client::EXACT_AGENT_SELECTOR_CAPABILITY),
+        "{refused}"
+    );
+    advertise.store(true, std::sync::atomic::Ordering::SeqCst);
+    client
+        .subscribe_agent(&mut stream, "selected", "agent/example/worker", None)
+        .await
+        .unwrap();
     stream.subscribe_glasses("glasses").await.unwrap();
     stream
         .subscribe_terminal("term", "terminal/example", None, "synthetic-capability")
         .await
         .unwrap();
-    for expected in ["agents", "glasses", "term"] {
+    for expected in ["agents", "selected", "glasses", "term"] {
         let command = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(command["id"], expected);
         assert_conforms(&validator, "actual Rust None command", &command);
+        if expected == "selected" {
+            assert_eq!(command["agent"], "agent/example/worker");
+            let mut wrong_collection = command.clone();
+            wrong_collection["collection"] = serde_json::json!("work");
+            assert!(!validator.is_valid(&wrong_collection));
+            for invalid in ["worker", "person/worker", "agent/", "agent/bad id"] {
+                let mut malformed = command.clone();
+                malformed["agent"] = serde_json::json!(invalid);
+                assert!(!validator.is_valid(&malformed));
+            }
+        } else {
+            assert!(command.get("agent").is_none());
+        }
         let mut omitted = command.clone();
         if expected == "term" {
             assert_eq!(command.get("incarnation"), Some(&Value::Null));
@@ -467,6 +518,7 @@ async fn outbound_rust_collection_commands_conform_with_none_options() {
         }] = serde_json::json!(false);
         assert!(!validator.is_valid(&bad_type));
     }
+    assert!(receiver.try_recv().is_err(), "the refused subscription sent nothing");
     stream.close().await;
     server.abort();
 }
@@ -1089,6 +1141,7 @@ fn event_feeds_are_contiguous_and_terminal_streams_replace_whole_screens() {
 
 fn test_state(root: &Path) -> AppState {
     AppState {
+        owning_person: None,
         // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
         store: Arc::new(
             Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
@@ -2927,6 +2980,10 @@ mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside 
             client_json_person(app.clone(), "/v1/client/capabilities", agent).await;
         for capability in capabilities["value"]["capabilities"].as_array().unwrap() {
             let id = capability["id"].as_str().unwrap();
+            if id == "assistant.grants.v1" {
+                assert_eq!(capability["state"], "ungranted", "{agent}: {capability}");
+                continue;
+            }
             if capability["state"] == "unavailable" || id.contains("glass") {
                 continue;
             }
@@ -4611,4 +4668,76 @@ async fn terminal_filters_are_acknowledged_only_on_terminal_pages() {
         serde_json::json!({"owner": "agent/lookup/alder", "state": "running"})
     );
     assert_eq!(terminals["value"]["items"].as_array().unwrap().len(), 1);
+}
+
+/// Schema shape only: fixtures carry placeholder pins and an intentionally invalid signature, so
+/// this proves nothing about Ed25519 verification, nonce replay or pin equality (daemon tests do).
+#[test]
+fn assistant_read_fixtures_conform_and_malformed_proofs_and_pins_do_not() {
+    let envelope = contract_validator("Envelope");
+    for name in [
+        "assistant-summary.json",
+        "assistant-attention-page.json",
+        "assistant-mission-page.json",
+        "assistant-agent-page.json",
+        "assistant-conversation-content.json",
+        "assistant-terminal-content.json",
+    ] {
+        assert_conforms(&envelope, name, &fixture(name));
+    }
+    // An empty assistant page must not also read as a generic resource Page.
+    let mut empty = fixture("assistant-attention-page.json");
+    empty["value"]["items"] = serde_json::json!([]);
+    assert_conforms(&envelope, "empty assistant attention page", &empty);
+    // The summary carries counts and as_of only; the fixed owner never appears in it.
+    let mut summary = fixture("assistant-summary.json");
+    summary["value"]["person_id"] = serde_json::json!("person/operator");
+    assert!(!contract_validator("AssistantSummary").is_valid(&summary["value"]));
+
+    let proof = contract_validator("ScgReadAuthorization");
+    assert_conforms(&proof, "SCG read authorization", &fixture("assistant-read-authorization.json"));
+    for (pointer, value) in [
+        ("/signature", serde_json::json!("too-short")),
+        ("/payload/identity", serde_json::json!("claude")),
+        ("/payload/projection", serde_json::json!("status")),
+        ("/payload/request_digest", serde_json::json!("8AF8FF220CA571D9BB06E960970592116147A5BB0AD3D3C330306496B1B3DAA3")),
+        ("/payload/max_response_bytes", serde_json::json!(16385)),
+        ("/payload/parameters/start", serde_json::json!(0)),
+        ("/payload/issuer", serde_json::json!("assistant/chatgpt")),
+    ] {
+        let mut malformed = fixture("assistant-read-authorization.json");
+        *malformed.pointer_mut(pointer).unwrap() = value;
+        assert!(!proof.is_valid(&malformed), "{pointer} must be rejected");
+    }
+    let mut extra = fixture("assistant-read-authorization.json");
+    extra["payload"]["person_id"] = serde_json::json!("person/operator");
+    assert!(!proof.is_valid(&extra));
+
+    let trust = contract_validator("AssistantReadTrustRequest");
+    assert_conforms(&trust, "read trust request", &fixture("assistant-read-trust.json"));
+    for (field, value) in [
+        ("shim_public_key", serde_json::json!("c2hvcnQ")),
+        ("attestor_public_key", serde_json::json!("placeholder+attestor/pin=not-a-real-key-00")),
+        ("default_response_bytes", serde_json::json!(4097)),
+        ("max_response_bytes", serde_json::json!(16385)),
+        ("api_version", serde_json::json!("st3.client.v1")),
+    ] {
+        let mut malformed = fixture("assistant-read-trust.json");
+        malformed[field] = value;
+        assert!(!trust.is_valid(&malformed), "{field} must be rejected");
+    }
+    let operations = json(asset_root().join("schemas/operations.json"));
+    let assistant_reads = operations["reads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|read| read["path"].as_str().unwrap().starts_with("/v1/client/assistant/"))
+        .collect::<Vec<_>>();
+    assert_eq!(assistant_reads.len(), 6);
+    for read in assistant_reads {
+        assert_eq!(read["proof_header"], "x-st3-scg-read-authorization", "{read}");
+        assert_eq!(read["minimal_read_mode"], "approval-once", "{read}");
+        assert_eq!(read["max_response_bytes"], 16384, "{read}");
+        assert!(read["scope"].as_str().unwrap().starts_with("read.assistant."), "{read}");
+    }
 }

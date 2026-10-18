@@ -13,6 +13,22 @@ The client uses standard `fetch`, so callers can supply a fetch implementation a
 
 The default transport binds `globalThis.fetch` to `globalThis`, preserving the receiver required by browser implementations. Supplying `fetchImpl` overrides that default without rebinding the custom implementation.
 
+Every HTTP method accepts a final optional `RequestOptions` argument (`{ signal?: AbortSignal }`).
+Existing query options and optional defaults keep their positions: for example,
+`runtimesGet(id, { signal })`, `messageSend(input, { signal })`, and
+`resourcesList(filters, pageOptions, { signal })`. Cancellation is checked before fetching
+and after asynchronous credentials/discovery; the signal stays attached to native fetch while
+the JSON body is consumed. Cancellation does not prove an action was not delivered and never retries it.
+
+`collectionStream` resolves to the pre-open command surface. Its optional `onOpen` callback
+reports actual WebSocket readiness once, before buffered commands flush. Commands issued inside
+`onOpen` queue behind prior commands, preserving cancellation and replacement order. Closing or
+throwing during `onOpen` discards the queue. Known frame envelopes
+are structurally validated before `onFrame`; resource rows and timeline entries remain raw for
+tolerant per-row decoding. Unknown kinds and additive fields remain available to consumers.
+Malformed framing and exceptions from `onFrame` or `onOpen` close the socket and reach `onEnd(error)`
+once instead of escaping the WebSocket event handler.
+
 Run the client checks from the repository root with Node 24 and Corepack:
 
 ```sh
@@ -80,6 +96,10 @@ const strictDecode = St3Schema.decodeUnknownEffect(St3Schema.ErrorCode, 'strict'
 ```
 
 The synchronous and effectful decode helpers default to tolerant mode: unknown enum values survive as `UnknownCase`, excess struct keys are ignored, and `null` on an optional nonnullable field becomes absence. Strict mode rejects unknown enum cases, excess struct keys, and those optional nonnullable nulls. Declared nullable fields decode to `Option` in both modes; optional nullable fields equate missing with null, and `None` encodes as null. Required nonnullable fields reject null in both modes. Arbitrary JSON bags are not interpreted as unknown enum cases merely because they contain `_tag` and `raw`.
+
+Object constraints beside `oneOf` apply to every generated branch, including shared required fields and discriminators. Tolerant decoding may ignore future keys, but does not relax those shared constraints or forbidden branch fields; a capabilities response cannot also decode as a pairing challenge.
+
+Source break for general pairing callers: `PairingBegin` and `PairedSession` are now untagged unions (`PersonPairingBegin | AssistantPairingBegin`, `PersonPairedSession | AssistantPairedSession`), so callers that read `person_id` or person-only fields off the generic types must narrow to the person variant first; `person_id` is optional on shared projections such as `Device`. Person-only callers can switch to the `PersonPairingBegin`/`PersonPairedSession` types and keep their existing shape. The Rust person variants enforce `deny_unknown_fields`.
 
 Inline semantic keywords provide branded strings and subject references, UTC instants, durations, and redacted credentials. Integer codecs reject unsafe JavaScript integers on decode and encode. Duration codecs round to whole wire units on encode; second durations preserve exact safe-integer units without overflowing millisecond precision. Recursive Glass layouts remain validated through suspended schemas.
 
