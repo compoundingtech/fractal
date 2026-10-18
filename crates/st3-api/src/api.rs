@@ -82,6 +82,7 @@ mod harness_health_controls;
 #[cfg(test)]
 mod harness_health_output_controls;
 mod delivery_probes;
+mod end_reason;
 mod github_watch;
 mod harness_events;
 mod harness_control;
@@ -2705,6 +2706,27 @@ fn client_agent_resources_cached(
     })
 }
 
+/// One agent's card for an exact agent selector, folded in its own projection rather than
+/// borrowed from the fleet roster.
+fn client_exact_agent_resources(
+    store: &Store,
+    history: bool,
+    snapshot_index: u64,
+    agent: &str,
+) -> anyhow::Result<Vec<Value>> {
+    store.cached_exact_agent_resources(snapshot_index, history, agent, |changed| {
+        // A selected cold card needs only its own queue metadata, never roster refs.
+        let metadata = changed.filter(|(_, previous)| previous.is_empty())
+            .map(|(subjects, _)| agent_queue_metadata(store, subjects)).transpose()?;
+        let changed = changed.map(|(subjects, previous)| {
+            (subjects, metadata.as_deref().unwrap_or(previous))
+        });
+        let mut items = client_agent_resources_selected(store, history, snapshot_index, changed)?;
+        add_agent_todos(store, &mut items, snapshot_index)?;
+        Ok(items)
+    })
+}
+
 // Freeze membership, ordering and the inexpensive declaration/queue metadata. The expensive
 // status, usage, fault and activity reductions are needed only for the returned page.
 fn client_agent_page_refs(store: &Store, history: bool, index: u64) -> anyhow::Result<Vec<Value>> {
@@ -2715,7 +2737,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
     let connection = store.readers.get();
     let (subjects, desired) = crate::otel::roster_phase("membership", || -> anyhow::Result<_> {
         let mut subjects = connection
-            .prepare_cached(crate::store::RANGE_SUBJECTS)?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd2b2337a153e owner=st3_api::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
             .query_map(rusqlite::params![index, "agent/", "agent0"], |row| {
                 row.get::<_, String>(0)
             })?
@@ -3033,10 +3055,20 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
 /// Each seat's running subagents: open, with a lease that runs past this read. A lease runs out
 /// without a claim, so this is read per request rather than cached with the agents.
 fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
-    let mut running = BTreeMap::<String, Vec<Value>>::new();
+    if items.is_empty() {
+        return Ok(());
+    }
+    let now = client_now_ms() as u64;
     let subagents = crate::otel::roster_phase("subagent_leases", || {
-        store.running_subagents(client_now_ms() as u64)
+        if items.len() == 1 {
+            let mut subagents = store.open_subagents(items[0]["id"].as_str().unwrap_or_default())?;
+            subagents.retain(|subagent| !subagent.expired_at(now));
+            Ok(subagents)
+        } else {
+            store.running_subagents(now)
+        }
     })?;
+    let mut running = BTreeMap::<String, Vec<Value>>::new();
     for subagent in subagents {
         running
             .entry(subagent.agent.clone())
@@ -3214,6 +3246,7 @@ fn client_agent_cards_presented(
         .collect::<BTreeMap<_, _>>();
     let usage_summaries = store.usage_summaries_at(&agent_subjects, Some(snapshot_index))?;
     let member_faults = store.member_reconcile_faults_for(&agent_subjects, snapshot_index)?;
+    let retired_subjects = store.retired_owned_subjects_at(snapshot_index)?;
     let mailbox_faults = match store.mailbox_faults_for(&agent_subjects, snapshot_index) {
         Ok(faults) => Some(faults),
         Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.code == "read-deadline") => None,
@@ -3384,7 +3417,7 @@ fn client_agent_cards_presented(
                 && subject.reachability == "indeterminate"
                 && matches!(observed, Some("running" | "ready" | "working" | "idle"));
             let suspension = if card_reads.may_have_suspension(&subject.subject) {
-                crate::suspension::current(store, &subject.subject)?
+                crate::suspension::current_at(store, &subject.subject, Some(snapshot_index))?
             } else {
                 None
             };
@@ -3430,6 +3463,20 @@ fn client_agent_cards_presented(
                     })
                 })
                 .unwrap_or_default();
+            let desired_claim = subject.desired_token.as_deref()
+                .filter(|_| subject.kind.as_deref() == Some("stop"))
+                .map(|claim| store.claim_by_id(claim)).transpose()?.flatten();
+            let terminal_harness = if subject.harness.is_none()
+                && matches!(fields.and_then(|fields| fields.get("status")).and_then(Value::as_str), Some("exited" | "stopped"))
+            {
+                store.terminal_harness_at(&subject.subject, snapshot_index)?
+            } else { None };
+            let original_suspend = suspension.as_ref()
+                .filter(|state| state.action == "resume" && state.phase == "suspended")
+                .and_then(|state| state.suspend_operation_id.as_deref())
+                .map(|request| crate::suspension::completed_suspend_at(store, request, snapshot_index))
+                .transpose()?.flatten();
+            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), retired_subjects.contains(&subject.subject), &updated_at);
             let name = crate::model::effective_agent_name(
                 &subject.subject, subject.desired.as_ref(),
             ).to_owned();
@@ -3455,6 +3502,7 @@ fn client_agent_cards_presented(
                 "owner_run_id": subject.owner_run,
                 "driver": driver,
                 "harness_state": harness_state.as_deref().map(|state| if state == "needs-login" { "unauthenticated" } else { state }),
+                "end_reason": end_reason,
                 "harness_error_state": (harness_state.as_deref() == Some("needs-login")).then_some("needs-login"),
                 "since": subject.harness.as_ref().map(|harness| client_timestamp(harness.since_unix_ms)),
                 "_status_source": subject.harness,
@@ -5007,7 +5055,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
         let connection = store.readers.get();
         crate::otel::roster_phase("membership", || -> anyhow::Result<Vec<String>> {
             Ok(connection
-                .prepare_cached(crate::store::RANGE_SUBJECTS)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha0efb6efb83f owner=st3_api::api TODO=trace-statement-and-value-representation */ crate::store::RANGE_SUBJECTS)?
                 .query_map(rusqlite::params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?)
         })
@@ -5714,7 +5762,7 @@ pub fn start_agent_roster(state: &AppState) {
         return;
     };
     let store = state.store.clone();
-    tokio::spawn(async move {
+    tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
         let mut head = true;
         loop {
             let started = tokio::time::Instant::now();
@@ -5732,7 +5780,7 @@ pub fn start_agent_roster(state: &AppState) {
                 let submitted = crate::otel::export_enabled().then(Instant::now);
                 match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
                     roster_worker(true, submitted, None, || {
-                        let result = crate::performance::task("roster/warm", || warm_agent_roster(&reader));
+                        let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
                         (result, crate::otel::take_roster_attributes())
                     })
                 })).await {
@@ -5752,7 +5800,7 @@ pub fn start_agent_roster(state: &AppState) {
                 _admission.enter_worker();
                 // The first fold publishes only what windows and first pages show; the rest
                 // follows at once.
-                crate::performance::task("roster/refresh", || if first {
+                crate::task_cpu::performance_blocking("published_list.agents", || if first {
                     reader.answer_agent_roster_requests(|| {
                         reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
                     })
@@ -5803,7 +5851,7 @@ pub fn start_agent_roster(state: &AppState) {
             }
             wake.notified().await;
         }
-    });
+    }));
 }
 
 /// The local daemon binds a Unix peer to the harness identity inherited by that peer or one of
