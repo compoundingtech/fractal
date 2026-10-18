@@ -2062,6 +2062,160 @@ async fn legacy_hmac_only_receipt_ack_cannot_complete_leave() {
     server.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_leave_receipt_and_policy_reconcile_obey_lock_order() {
+    const CHILD: &str = "ST_TEST_RECEIPT_RECONCILE_LOCK_ORDER";
+    if std::env::var_os(CHILD).is_none() {
+        // Isolate Fabric socket discovery without mutating this process's environment.
+        let fabric_home = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sync::worker::tests::concurrent_leave_receipt_and_policy_reconcile_obey_lock_order",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("FABRIC_HOME", fabric_home.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated lock-order regression failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let mut fixture = leave_fixture();
+    let root = tempfile::tempdir().unwrap();
+    let settings = FleetFile {
+        fleet_id: fixture.leaving_auth.fleet_id().into(),
+        node: Some("a".into()),
+        ..FleetFile::default()
+    };
+    settings.save(root.path()).unwrap();
+    crate::fleet::join::write_private(&settings.node_key_path(root.path()), &fixture.anchor_bytes)
+        .unwrap();
+    fixture.receiver.fleet.state_dir = Some(root.path().to_path_buf());
+    let departure = fixture
+        .leaving
+        .export_replication_exchange(&settings.fleet_id, &ReplicationInventory::default())
+        .unwrap();
+    receive_from_peer(
+        &fixture.receiver.backend,
+        &fixture.receiver.fleet,
+        "b",
+        &settings.fleet_id,
+        &departure,
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let refusal = fixture
+        .receiver
+        .fleet
+        .accept(&Sender {
+            name: "b".into(),
+            member_key: Some(fixture.key.public().to_owned()),
+            member_signature_valid: true,
+        })
+        .unwrap_err();
+    let digest = FleetAuth::body_digest(b"leave-exchange");
+    let response = signed_refusal(&fixture.receiver, &digest, &refusal).unwrap();
+    let proof_headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_owned()))
+        .collect();
+    let proof_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let proof = LeaveProof {
+        body: String::from_utf8(proof_body.to_vec()).unwrap(),
+        headers: proof_headers,
+        request_digest: digest,
+    };
+    let body = serde_json::to_vec(&proof).unwrap();
+    let headers = fixture
+        .leaving_auth
+        .request_headers_for(LEAVE_RECEIPT_PATH, "b", &body)
+        .unwrap();
+    let socket = crate::fleet::fabric_reconcile::control_socket().unwrap();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(socket).unwrap();
+    let reconcile_fleet = fixture.receiver.fleet.clone();
+    let reconcile_settings = settings.clone();
+    let directory = root.path().to_path_buf();
+    let own = fixture.receiver.fleet.own_key.clone().unwrap();
+    // Drop aborts both async tasks on timeout, releasing the flock so no blocking
+    // receipt writer can keep the test runtime alive after the assertion fails.
+    let mut tasks = tokio::task::JoinSet::new();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tasks.spawn(async move {
+            assert!(
+                reconcile_fabric_policy(&directory, &reconcile_settings, &own, &reconcile_fleet)
+                    .await
+                    .unwrap()
+            );
+            StatusCode::OK
+        });
+        // A control request proves reconcile already holds the settings flock.
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = String::new();
+        BufReader::new(&mut stream)
+            .read_line(&mut request)
+            .await
+            .unwrap();
+        let receiver = fixture.receiver.clone();
+        tasks.spawn(async move {
+            receive_leave_receipt(State(receiver), headers, Bytes::from(body))
+                .await
+                .status()
+        });
+        // Force receipt to own fleet.leave while its durable write waits for the flock.
+        loop {
+            if fixture.receiver.fleet.leave.try_lock().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let reply = serde_json::json!({
+            "type": "runtime_peers",
+            "reply": {
+                "snapshot": null,
+                "mutation": null,
+                "error": {
+                    "code": "runtime_peers_disabled",
+                    "class": "refusal",
+                    "message": "test daemon disabled"
+                }
+            }
+        });
+        let mut bytes = serde_json::to_vec(&reply).unwrap();
+        bytes.push(b'\n');
+        stream.write_all(&bytes).await.unwrap();
+        drop(stream);
+        while let Some(result) = tasks.join_next().await {
+            assert_eq!(result.unwrap(), StatusCode::OK);
+        }
+        assert!(
+            fixture
+                .receiver
+                .fleet
+                .leave
+                .lock()
+                .await
+                .completed
+                .contains(fixture.key.public())
+        );
+    })
+    .await
+    .expect("receipt and reconcile deadlocked across leave state and the settings flock");
+}
+
 #[tokio::test]
 async fn withheld_receipt_expires_after_restart_without_confirming_the_sender() {
     let mut fixture = leave_fixture();

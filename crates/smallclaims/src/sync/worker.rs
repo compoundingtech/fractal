@@ -69,6 +69,8 @@ struct LeaveProof {
 }
 
 async fn save_leave_state(fleet: &FleetContext, state: &LeaveState) -> Result<()> {
+    // Lock order is leave state -> settings flock. Settings-flock holders must
+    // use an earlier leave snapshot, never acquire fleet.leave while holding it.
     if let Some(directory) = &fleet.state_dir {
         let directory = directory.clone();
         let own = fleet.own_key.clone();
@@ -1412,8 +1414,8 @@ async fn reconcile_fabric_policy(
 ) -> Result<bool> {
     let view = fleet.view.read().expect("fleet view lock poisoned").clone();
     let decision_time = crate::store::now_ms();
-    let retained =
-        retained_leave_members_at(&view, own_key, &*fleet.leave.lock().await, decision_time);
+    let leave = fleet.leave.lock().await.clone();
+    let retained = retained_leave_members_at(&view, own_key, &leave, decision_time);
     let Some(_lock) = lock_current_settings(state_dir, settings).await? else {
         return Ok(false);
     };
@@ -1433,7 +1435,7 @@ async fn reconcile_fabric_policy(
         },
         Err(error) => crate::fleet::fabric_reconcile::error_status(&error),
     };
-    annotate_leave_expiry(&mut status, &view, &*fleet.leave.lock().await, decision_time);
+    annotate_leave_expiry(&mut status, &view, &leave, decision_time);
     let path = state_dir.join("fleet/fabric-reconcile.json");
     let bytes = serde_json::to_vec(&status)?;
     tokio::task::spawn_blocking(move || {
