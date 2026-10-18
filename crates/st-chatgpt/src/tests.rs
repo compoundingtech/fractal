@@ -57,7 +57,7 @@ fn writes_publish_action_identity_constraints() {
         let properties = &published["inputSchema"]["properties"];
         assert_eq!(properties["action_id"]["pattern"], "^action/");
         assert_eq!(properties["action_id"]["description"], "Unique per intended action, e.g. action/<short-slug>; reuse the same value on a retry");
-        assert_eq!(properties["idempotency_key"]["pattern"], r"^[ -~]{16,256}(?![\s\S])");
+        assert_eq!(properties["idempotency_key"]["pattern"], "^[ -~]{16,256}$");
         assert!(properties["idempotency_key"].get("minLength").is_none());
         assert!(properties["idempotency_key"].get("maxLength").is_none());
         assert_eq!(properties["idempotency_key"]["description"], "16-256 printable ASCII chars only (stricter than daemon byte-length bounds); reuse the exact value on retries of the same action");

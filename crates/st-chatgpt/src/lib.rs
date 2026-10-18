@@ -59,8 +59,7 @@ const IDEMPOTENCY_KEY_MAX_LENGTH: usize = 256;
 const IDEMPOTENCY_KEY_CHAR_RANGE: std::ops::RangeInclusive<u8> = b' '..=b'~';
 
 fn idempotency_key_pattern() -> String {
-    // Unlike $, the final assertion cannot match before a trailing line terminator.
-    format!("^[{}-{}]{{{IDEMPOTENCY_KEY_MIN_LENGTH},{IDEMPOTENCY_KEY_MAX_LENGTH}}}(?![\\s\\S])",
+    format!("^[{}-{}]{{{IDEMPOTENCY_KEY_MIN_LENGTH},{IDEMPOTENCY_KEY_MAX_LENGTH}}}$",
         char::from(*IDEMPOTENCY_KEY_CHAR_RANGE.start()), char::from(*IDEMPOTENCY_KEY_CHAR_RANGE.end()))
 }
 
