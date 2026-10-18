@@ -1,8 +1,8 @@
 {
   "order": [
     "attention",
-    "missions",
     "delivery",
+    "missions",
     "seats",
     "evidence"
   ],
