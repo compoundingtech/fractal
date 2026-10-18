@@ -10239,6 +10239,17 @@ fn render_replication_peers(
                     at.saturating_sub(now).div_ceil(1000)
                 );
             }
+            if let Some(preferred) = worker.route_is_preferred {
+                let route = if preferred { "preferred" } else { "fallback" };
+                let _ = writeln!(output, "  route {route}");
+            }
+            if let Some(at) = worker.preferred_retry_at_unix_ms {
+                let _ = writeln!(
+                    output,
+                    "  preferred route retry in {}s (unix ms {at})",
+                    at.saturating_sub(now).div_ceil(1000)
+                );
+            }
         }
         if !peer.differing_tables.is_empty() {
             let _ = writeln!(
@@ -17688,6 +17699,12 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
     let worker = std::thread::Builder::new()
         .name("st3-wal-checkpoint".into())
         .spawn(move || {
+            // The WAL's own file, measured apart from the frames a checkpoint reports.
+            let wal_path = {
+                let mut wal = path.clone().into_os_string();
+                wal.push("-wal");
+                PathBuf::from(wal)
+            };
             let mut connection = None;
             let mut last_error_log: Option<Instant> = None;
             let mut retry_interval = WAL_CHECKPOINT_INTERVAL;
@@ -17731,6 +17748,10 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                 let duration_ms = started.elapsed().as_millis();
                 let report = result.as_ref().ok();
                 smallclaims::sqlite::telemetry::wal_checkpoint_observed(&store.readers, report);
+                smallclaims::windows::wal::observe(
+                    report,
+                    std::fs::metadata(&wal_path).ok().map(|metadata| metadata.len()),
+                );
                 let stuck = pin.observe(report);
                 let abnormal = abnormal_wal_checkpoint(report) || stuck >= WAL_PIN_REPORT_AFTER;
                 st3::otel::record_wal_checkpoint(trace_started, report, abnormal);
