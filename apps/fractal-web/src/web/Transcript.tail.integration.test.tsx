@@ -137,6 +137,16 @@ const scrollUp = async (top: number) => {
 }
 
 describe('tail-first transcript mounting', () => {
+  it.each([3, 6].flatMap(count => [440, 1440].map(width => ({ count, width }))))('keeps all $count turns mounted at $width px even when the short history overflows', async ({ count, width }) => {
+    viewportWidth = width
+    const entries = turns.slice(0, count)
+    await render(transcript(entries))
+    expect(lane().scrollHeight).toBeGreaterThan(2 * lane().clientHeight)
+    expect(renderedRows(lane()).map(row => row.dataset.itemId)).toEqual(entries.map(turn => turn.id))
+    expect(container.querySelector('[data-testid="transcript-history-earlier"]')).toBeNull()
+    expect(container.querySelector('[data-testid="transcript-history-all"]')).toBeNull()
+  })
+
   it('pins the latest rows before the first animation frame, including after a conversation switch', async () => {
     await act(async () => { root.render(viewport('A')) })
     expect(lane().scrollTop).toBe(lane().scrollHeight - lane().clientHeight)

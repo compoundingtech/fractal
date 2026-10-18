@@ -362,16 +362,20 @@ export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HT
   readonly children?: React.ReactNode | ((startIndex: number, revealRow: (id: string, preservePosition?: boolean) => void, materializing: boolean) => React.ReactNode)
 }
 
+const historyBatchSize = 4
+
 export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, children, contentProps, stateKey, scrollToBottomKey, initialTailCount, active = true, renderHeader, ...props }: EmbraceScrollViewportProps) {
   const store = React.useContext(ViewportStoreContext)
   const saved = stateKey === undefined ? undefined : store?.get(stateKey)
   const rememberedFirstId = saved?.following === false ? saved.firstRenderedId : undefined
   const [controller] = React.useState(() => new ViewportController(stateKey === undefined ? undefined : store?.get(stateKey)))
-  const [window, setWindow] = React.useState(() => ({ key: stateKey, firstId: rememberedFirstId ?? items[initialTailCount === undefined ? 0 : Math.max(0, items.length - initialTailCount)]?.id }))
+  // Do not defer a short conversation that fits within the tail plus one history batch.
+  const initialStart = initialTailCount === undefined || items.length <= initialTailCount + historyBatchSize ? 0 : items.length - initialTailCount
+  const [window, setWindow] = React.useState(() => ({ key: stateKey, firstId: rememberedFirstId ?? items[initialStart]?.id }))
   const [revealTarget, setRevealTarget] = React.useState<{ readonly key: string | undefined; readonly id: string }>()
   const savedFirstId = window.key === stateKey ? window.firstId : rememberedFirstId
   const savedIndex = savedFirstId === undefined ? -1 : items.findIndex(item => item.id === savedFirstId)
-  const startIndex = initialTailCount === undefined ? 0 : savedIndex >= 0 ? savedIndex : Math.max(0, items.length - initialTailCount)
+  const startIndex = initialStart === 0 ? 0 : savedIndex >= 0 ? savedIndex : initialStart
   const firstId = items[startIndex]?.id
   const targetIndex = revealTarget?.key === stateKey ? items.findIndex(item => item.id === revealTarget?.id) : -1
   const materializing = targetIndex >= 0 && targetIndex < startIndex
@@ -386,7 +390,7 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
     if (!active || !materializing) return
     const frame = requestAnimationFrame(() => {
       controller.prepareMaterialize()
-      setWindow({ key: stateKey, firstId: items[Math.max(targetIndex, startIndex - 4)]?.id })
+      setWindow({ key: stateKey, firstId: items[Math.max(targetIndex, startIndex - historyBatchSize)]?.id })
     })
     return () => cancelAnimationFrame(frame)
   }, [active, controller, items, materializing, startIndex, stateKey, targetIndex])
@@ -414,7 +418,7 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
     const windowChanged = controller.firstRenderedId !== firstId
     controller.firstRenderedId = firstId
     if (window.key !== stateKey || window.firstId === undefined && firstId !== undefined) setWindow({ key: stateKey, firstId })
-    controller.loadEarlier = !active || materializing || startIndex === 0 ? undefined : () => setWindow({ key: stateKey, firstId: items[Math.max(0, startIndex - 4)]?.id })
+    controller.loadEarlier = !active || materializing || startIndex === 0 ? undefined : () => setWindow({ key: stateKey, firstId: items[Math.max(0, startIndex - historyBatchSize)]?.id })
     if (windowChanged) controller.settle()
     controller.schedule()
     return () => { controller.loadEarlier = undefined }
