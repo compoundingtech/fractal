@@ -1,9 +1,9 @@
 {
   "order": [
-    "attention",
     "delivery",
     "missions",
     "seats",
+    "attention",
     "evidence"
   ],
   "domains": {
