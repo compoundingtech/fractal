@@ -1,5 +1,11 @@
 {
-  "order": ["attention", "missions", "delivery", "seats", "evidence"],
+  "order": [
+    "attention",
+    "missions",
+    "delivery",
+    "seats",
+    "evidence"
+  ],
   "domains": {
     "evidence": [
       "store/(evidence|owned_sets|publication|publication_facts|published_views|terminal_gate_evidence)(\\.rs|/.*)",
@@ -24,5 +30,12 @@
       "graph\\.rs",
       "references\\.rs"
     ]
+  },
+  "crates": {
+    "attention": "st3-attention",
+    "missions": "st3-missions",
+    "delivery": "st3-delivery",
+    "seats": "st3-seats",
+    "evidence": "st3-evidence"
   }
 }

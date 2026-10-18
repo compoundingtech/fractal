@@ -1221,6 +1221,11 @@ def wire_crate(args, top_mods):
         t = t.replace(f'{lower} = {{ path = "../{lower}" }}', f'{crate} = {{ path = "../{crate}" }}', 1)
         t = t.replace(f'"{lower}/test-support"', f'"{crate}/test-support"', 1)
         open(up, "w").write(t)
+        for f in _src_files([f"crates/{upper}/src"]):
+            t = Path(f).read_text()
+            nt = re.sub(r"\b" + re.escape(lower.replace("-", "_")) + r"::", ident + "::", t)
+            if nt != t:
+                Path(f).write_text(nt)
         ul = f"crates/{upper}/src/lib.rs"
         t = open(ul).read()
         t = t.replace(f"pub use {lower.replace('-', '_')}::*;", f"pub use {ident}::*;", 1)
@@ -1491,10 +1496,10 @@ def main(argv=None):
             p.add_argument("--show")
         else:
             p.add_argument("--layer", required=True)
-            p.add_argument("--crate", required=True)
-            p.add_argument("--lower", required=True)
+            p.add_argument("--crate")
+            p.add_argument("--lower")
             p.add_argument("--src-dir", dest="src_dir")
-            p.add_argument("--upper", default="st3-github")
+            p.add_argument("--upper")
             p.add_argument("--description", default="A domain of the store")
     args = ap.parse_args(argv)
     if args.cmd == "fix":
@@ -1504,9 +1509,24 @@ def main(argv=None):
     config = load_config(args.config)
     pins = [l.strip() for l in open(args.pins)] if args.pins and os.path.exists(args.pins) else []
     nodes, files, tfiles = load(args.src)
+    existing = {lay: name for lay, name in config.get("crates", {}).items() if os.path.isdir(f"crates/{name}/src")}
+    layer_of = {lay: i + 1 for i, lay in enumerate(config["order"])}
+    current = layer_of.get(getattr(args, "layer", None), 0)
+    for lay, name in existing.items():
+        if layer_of[lay] > current and f"crates/{name}/src={lay}" not in args.above:
+            args.above.append(f"crates/{name}/src={lay}")
     for spec in args.above:
         path, lay = spec.split("=")
         load(path, nodes=nodes, fixed=config["order"].index(lay) + 1)
+    if args.cmd == "apply":
+        below = [(layer_of[l], n) for l, n in existing.items() if layer_of[l] < current]
+        above = [(layer_of[l], n) for l, n in existing.items() if layer_of[l] > current]
+        if not args.lower:
+            args.lower = max(below)[1] if below else "st3-store"
+        if not args.upper:
+            args.upper = min(above)[1] if above else "st3-github"
+        if not args.crate:
+            args.crate = config["crates"][args.layer]
     build_refs(nodes)
     comp, order = plan(nodes, config, pins)
     if args.cmd == "plan":
