@@ -20,6 +20,7 @@ pub use st3_kernel::boot;
 /// Git-backed change metadata and exact-OID atomic state transitions.
 pub use st3_github::changes;
 pub use st3_evidence::{EvidenceStore, OwnedSetsStore, PublicationFactsStore, PublicationStore, PublishedViewsStore};
+pub use st3_seats::{AccountsStore, EvidenceSeatsStore, HarnessQuestionsStore, LimitsStore, RetirementsStore, RevisionSeatsStore, RolloutsStore, RosterAdmissionStore, RuntimeStartsStore, SeatStatusStore, SeatsStore, SeatsStoreCore, SekretsDaemonStore, StopDeferralStore, SubagentsStore, TracePrincipalStore};
 pub use st3_github::{GitChangesStore, GithubStore, IdleHoldsStore, WatchesStore};
 pub use st3_api::claude_channel;
 pub use st3_store::client;
@@ -91,11 +92,11 @@ pub use st3_telemetry::recorder_report;
 pub use st3_store::remote_terminal;
 pub use st3_store::render;
 pub use st3_store::resource;
-pub use st3_store::rollout;
+pub use st3_seats::rollout;
 pub use st3_kernel::seat_queue;
 /// Runs any CLI with credentials no seat can read, through a gateway the sekrets user owns.
 pub use st3_store::sekrets;
-pub use st3_store::sekrets_daemon;
+pub use st3_seats::sekrets_daemon;
 pub mod service;
 pub use st3_kernel::skill;
 pub use st3_telemetry::slo;
@@ -104,8 +105,7 @@ pub use st3_store::startup;
 pub use st3_telemetry::startup_telemetry;
 pub use st3_evidence::store;
 pub mod subagents;
-/// Suspends a quiet seat and resumes its own native session.
-pub use st3_store::suspension;
+pub use st3_seats::suspension;
 pub use st3_reconcile::seat_snapshot;
 pub use st3_telemetry::telemetry;
 pub use smallclaims::task_cpu;
@@ -130,7 +130,9 @@ pub mod tiles;
 #[cfg(test)]
 pub(crate) use st3_telemetry::relay_trace;
 #[cfg(test)]
-pub(crate) use st3_store::{checkout, external_sessions};
+pub(crate) use st3_store::checkout;
+#[cfg(test)]
+pub(crate) use st3_seats::external_sessions;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
 pub use model::{NormalizedIntent, St3Error};

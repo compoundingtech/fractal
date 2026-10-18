@@ -57,6 +57,8 @@ export const SidebarToolbar = ({
     document.addEventListener('keydown', listener)
     return () => document.removeEventListener('keydown', listener)
   }, [])
+  // The accessible name starts with the visible text (WCAG 2.5.3 label in name), count included.
+  const needsMeLabel = `Needs me${needsMeCount === undefined ? '' : ` · ${needsMeCount}`}`
   const parsedQuery = parseSidebarQuery(filters.query)
   const activeCount =
     Number(filters.hideEnded) +
@@ -69,12 +71,12 @@ export const SidebarToolbar = ({
     <div ref={shortcut} {...stylex.props(styles.toolbar)}>
       <div {...stylex.props(styles.controls)}>
         <ToggleButton
-          aria-label="Needs me only"
+          aria-label={`${needsMeLabel} only`}
           isSelected={filters.needsMe}
           onChange={(needsMe) => update({ ...filters, needsMe })}
           {...stylex.props(styles.toggle)}
         >
-          Needs me{needsMeCount === undefined ? '' : ` · ${needsMeCount}`}
+          {needsMeLabel}
         </ToggleButton>
         <ToggleButton
           aria-label="Show finished agents"

@@ -1,4 +1,5 @@
 //! Each fixture serves an isolated daemon over its own Unix socket and durable graph.
+use st3::SeatsStoreCore;
 use st3::OwnedSetsStore;
 use std::{path::Path, sync::Arc, time::Duration};
 

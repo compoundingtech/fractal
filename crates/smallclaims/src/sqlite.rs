@@ -107,6 +107,28 @@ fn configured_read_cache_kib(value: Option<&str>) -> usize {
         .unwrap_or(READ_CACHE_KIB)
 }
 
+/// How much of the store file each reader maps, in MiB. In WAL mode SQLite drops a reader's whole
+/// page cache when its next transaction sees any commit, so on a busy store every request
+/// fetched every page it touched again with one `read()` call each: 87,500 calls a second
+/// across 73 readers on dev3 (#3343). A mapped page is the kernel's one shared copy and costs
+/// no call. The default covers any store; the bundled SQLite's ceiling is raised to match.
+pub const READ_MMAP_MIB: u64 = 1 << 20;
+
+pub fn read_mmap_mib() -> u64 {
+    static MMAP: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+        configured_read_mmap_mib(std::env::var("SMALLCLAIMS_READ_MMAP_MIB").ok().as_deref())
+    });
+    *MMAP
+}
+
+/// `SMALLCLAIMS_READ_MMAP_MIB=0` turns mapping off; invalid values use the default.
+fn configured_read_mmap_mib(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value <= READ_MMAP_MIB)
+        .unwrap_or(READ_MMAP_MIB)
+}
+
 /// Idle retention ceiling, not a limit on concurrent reads or open connections.
 /// `MAX_IDLE_READ_CONNECTIONS`, or `SMALLCLAIMS_MAX_IDLE_READ_CONNECTIONS` when that parses.
 pub fn max_idle_read_connections() -> usize {
@@ -2017,6 +2039,7 @@ pub fn open_read_connection(path: &Path, shared_memory: bool) -> Result<Connecti
          PRAGMA query_only = ON;",
     )?;
     connection.pragma_update(None, "cache_size", -(read_cache_kib() as i64))?;
+    connection.pragma_update(None, "mmap_size", (read_mmap_mib() << 20) as i64)?;
     configure_read_cancellation(&connection);
     Ok(connection)
 }
@@ -2458,6 +2481,60 @@ mod tests {
                 .unwrap();
             assert_eq!(cache, -(read_cache_kib() as i64));
         }
+    }
+
+    #[test]
+    fn reader_mmap_override_accepts_zero_and_rejects_values_past_the_ceiling() {
+        for invalid in [None, Some(""), Some("bad"), Some("-1"), Some("1048577")] {
+            assert_eq!(configured_read_mmap_mib(invalid), READ_MMAP_MIB);
+        }
+        assert_eq!(configured_read_mmap_mib(Some("0")), 0);
+        assert_eq!(configured_read_mmap_mib(Some("4096")), 4096);
+    }
+
+    /// #3343: in WAL mode any commit empties every reader's page cache. A reader must then get
+    /// its pages from its mapping of the store, not with one `read()` call per page.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reader_after_a_commit_maps_the_store_instead_of_reading_each_page() {
+        fn thread_reads() -> u64 {
+            std::fs::read_to_string("/proc/thread-self/io")
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("syscr: "))
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE payload(id INTEGER PRIMARY KEY, value BLOB);
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<2000)
+                 INSERT INTO payload SELECT i, randomblob(3000) FROM n;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        let reader = open_read_connection(&path, false).unwrap();
+        // The bundled SQLite must allow the whole default, not clamp it to its 2 GiB default.
+        let mapped: i64 = reader.query_row("PRAGMA mmap_size", [], |row| row.get(0)).unwrap();
+        assert_eq!(mapped as u64, read_mmap_mib() << 20);
+        let scan = || {
+            let total: i64 = reader
+                .query_row("SELECT sum(length(value)) FROM payload", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(total, 2000 * 3000);
+        };
+        scan();
+        writer.execute("UPDATE payload SET value=randomblob(3000) WHERE id=1", []).unwrap();
+        let before = thread_reads();
+        scan();
+        let reads = thread_reads() - before;
+        // About 2,000 pages: one read() each without the mapping, a few WAL frames with it.
+        assert!(reads < 50, "a scan after one commit made {reads} read() calls");
     }
 
     #[test]
