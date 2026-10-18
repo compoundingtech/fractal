@@ -1,3 +1,5 @@
+use crate::RolloutsStore;
+use crate::SeatsStore;
 use crate::OwnedSetsStore;
 use super::*;
 

@@ -899,7 +899,7 @@ fn merge_json(current: &mut Value, patch: Value, union_arrays: bool) {
     }
 }
 
-fn name(node: &Value) -> Option<&str> {
+pub fn name(node: &Value) -> Option<&str> {
     node.get("name").and_then(Value::as_str)
 }
 
