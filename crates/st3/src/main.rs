@@ -5923,6 +5923,21 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     // Nor does the first session list wait to read every native transcript's header.
     st3::api::start_native_session_discovery(&state);
+    let gateway = if config.client_web.is_some() || config.usage.is_some() {
+        let web = st3::api::client_web::ClientWeb::new_with_usage(
+            config.client_web.clone(),
+            config.usage.clone(),
+            &state,
+        )?;
+        st3::api::fabric_router_with_web(state.clone(), web)
+    } else {
+        fabric_router(state.clone())
+    };
+    let limit = axum::Extension(st3::api::ClientSubscriptionLimit(
+        config.client_subscription_limit,
+    ));
+    let local = router(state.clone()).layer(limit);
+    let gateway = gateway.layer(limit);
     // Nor does the first agents roster read fold every agent's card.
     st3::api::start_agent_roster(&state);
     // Nor does an attention window fold every person's attention.
@@ -6008,13 +6023,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
         }
     };
     tokio::try_join!(
-        st3::api::serve_reserved_unix_with_ready(
-            local_reserved,
-            router(state.clone()),
-            true,
-            ready
-        ),
-        st3::api::serve_reserved_unix_with_ready(gateway_reserved, fabric_router(state), false, ready),
+        st3::api::serve_reserved_unix_with_ready(local_reserved, local, true, ready),
+        st3::api::serve_reserved_unix_with_ready(gateway_reserved, gateway, false, ready),
     )?;
     telemetry.shutdown();
     Ok(())

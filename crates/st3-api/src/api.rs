@@ -74,6 +74,7 @@ mod message_bodies;
 mod client_adapters;
 mod client_presence;
 mod client_v0;
+pub mod client_web;
 mod custom;
 use crate::delivery_presence;
 pub mod agent_harness;
@@ -163,6 +164,16 @@ pub fn raw_terminal_owner_splice(
 }
 
 pub use crate::delivery_presence::claude_channel_attached;
+
+/// Maximum simultaneous subscriptions held by one collection WebSocket.
+#[derive(Clone, Copy)]
+pub struct ClientSubscriptionLimit(pub usize);
+
+impl Default for ClientSubscriptionLimit {
+    fn default() -> Self {
+        Self(st3_kernel::config::DEFAULT_CLIENT_SUBSCRIPTION_LIMIT)
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -472,6 +483,11 @@ pub fn fabric_router(state: AppState) -> Router {
     router_for_transport(state, ClientTransportBoundary::FabricLoopback)
 }
 
+/// Serve an optional browser bundle and relays at the paired gateway boundary.
+pub fn fabric_router_with_web(state: AppState, web: Arc<client_web::ClientWeb>) -> Router {
+    client_web::wrap(fabric_router(state), web)
+}
+
 fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> Router {
     crate::slo::install();
     let app = Router::new()
@@ -614,6 +630,12 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route(
             "/v1/client/collections/stream",
             get(client_v0::collection_stream),
+        )
+        .route("/v1/client/usage/quota", get(client_web::usage_quota))
+        .route("/v1/client/usage/history", get(client_web::usage_history))
+        .route(
+            "/v1/client/telemetry/traces",
+            post(client_web::telemetry_traces),
         )
         .route("/v1/client/actions", post(client_v0::action))
         .route("/v1/client/assistant/propose", post(client_v0::assistant::propose))

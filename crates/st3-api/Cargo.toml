@@ -11,6 +11,7 @@ test-support = ["st3-reconcile/test-support"]
 
 [dependencies]
 st3-reconcile = { path = "../st3-reconcile" }
+st3-kernel = { path = "../st3-kernel" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
@@ -19,12 +20,14 @@ futures-util = "0.3"
 getrandom = "0.3"
 hex = "0.4"
 hmac = "0.12"
+html-escape = "0.2"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 kdl = "6"
 libc = "0.2"
 libghostty-vt = "=0.2.1"
+lol_html = "2"
 notify = "8"
 opentelemetry = "0.30"
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
@@ -51,6 +54,7 @@ tracing-opentelemetry = "0.31"
 tower = { version = "0.5", features = ["util"] }
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
+walkdir = "2"
 
 [dev-dependencies]
 st3_api_self = { package = "st3-api", path = ".", features = ["test-support"] }

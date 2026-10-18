@@ -313,7 +313,7 @@ mod tests {
                     upgrade.on_upgrade(move |socket| {
                         let windows = collection_windows::Windows::attach(&state.store);
                         collection_stream_socket_with_reader(
-                            socket, state, ClientSession::local(Some("person/ada")).unwrap(), None,
+                            socket, state, ClientSession::local(Some("person/ada")).unwrap(), None, no_trace(),
                             move |state, session, request, permit| {
                                 let windows = windows.clone();
                                 let completed = completed.clone();

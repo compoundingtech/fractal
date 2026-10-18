@@ -1308,6 +1308,7 @@ mod tests {
                             state,
                             ClientSession::local(Some("person/ada")).unwrap(),
                             None,
+                            no_trace(),
                             move |state, session, request, permit| {
                                 let windows = windows.clone();
                                 async move {
