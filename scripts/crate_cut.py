@@ -1199,6 +1199,26 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
         ppath = os.path.join(src_dir, parent)
         ptext = Path(ppath).read_text()
         Path(ppath).write_text(ptext.rstrip("\n") + "\n\n" + "\n".join(decls))
+    # a shared module is only reachable if every module on the way to it exists in a test-support build
+    done = set()
+    for (rel, cont) in shares:
+        parts = module_path(rel)
+        for k in range(len(parts) - 1, 0, -1):
+            child = parts[k - 1]
+            parent = ("/".join(parts[: k - 1]) + ".rs") if k > 1 else "lib.rs"
+            if (parent, child) in done:
+                continue
+            done.add((parent, child))
+            ppath = os.path.join(src_dir, parent)
+            if not os.path.exists(ppath):
+                continue
+            ptext = Path(ppath).read_text()
+            dec = next((x for x in ri.parse(ptext) if x.kind == "mod" and x.name == child and x.text.rstrip().endswith(";")), None)
+            if dec is None:
+                continue
+            for a_, b_, rep in sorted(set(_widen_item_edits(ptext, dec)), reverse=True):
+                ptext = ptext[:a_] + rep + ptext[b_:]
+            Path(ppath).write_text(ptext)
 
 
 def apply_cut(args, nodes, files, tfiles, order):
@@ -1557,6 +1577,15 @@ def wire_crate(args, top_mods):
     if getattr(args, "traits", None):
         dl = dl.replace("pub use st3_github::{GitChangesStore", "pub use %s::{%s};\npub use st3_github::{GitChangesStore" % (ident, ", ".join(sorted(args.traits))), 1)
     open("crates/st3-daemon/src/lib.rs", "w").write(dl)
+    # code that named the crate below directly (`st3_store::store::..`) now goes through the daemon's re-export
+    pat = re.compile(r"\b" + re.escape(lower.replace("-", "_")) + r"::(" + "|".join(map(re.escape, top_mods)) + r")\b")
+    for f in _src_files(["crates/st3-daemon/src"]):
+        if f.endswith("/lib.rs") and f.count("/") == 3:
+            continue
+        t = Path(f).read_text()
+        nt = pat.sub(r"crate::\1", t)
+        if nt != t:
+            Path(f).write_text(nt)
     print("wired", crate)
 
 
