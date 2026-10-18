@@ -1,3 +1,9 @@
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::tests_shared::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::tests_shared::{TEST_FLEET, exchange_from, receive_and_project};
 use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
@@ -15,8 +21,6 @@ mod terminal_projection_date_tests {
 mod mission_eval_reuse_tests {
     /* sqlite-large-value: allow-for-now lv-h8994de728686 owner=st3_store::store::tests TODO=trace-statement-and-value-representation */ include!("mission_eval_reuse_tests.rs");
 }
-
-const TEST_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
 
 mod run_capacity_tests {
     use super::*;
@@ -2779,39 +2783,6 @@ fn rewrite_envelope(
         payload: bytes.into(),
         ..envelope.clone()
     }
-}
-
-pub fn receive_and_project(
-    target: &Store,
-    relay: &str,
-    exchange: &ReplicationExchange,
-) -> ReplicationAdmission {
-    target.bind_fleet(TEST_FLEET).expect("target fleet");
-    target
-        .receive_replication_exchange(relay, TEST_FLEET, exchange)
-        .expect("replication receipt");
-    let admission = target
-        .validate_replication_backlog()
-        .expect("replication admission");
-    target
-        .apply_replication_repairs()
-        .expect("replication repairs");
-    assert!(
-        target
-            .project_replication_backlog()
-            .expect("replication projection")
-    );
-    admission
-}
-
-pub fn exchange_from(
-    source: &Store,
-    remote: &ReplicationInventory,
-) -> ReplicationExchange {
-    source.bind_fleet(TEST_FLEET).expect("source fleet");
-    source
-        .export_replication_exchange(TEST_FLEET, remote)
-        .expect("replication exchange")
 }
 
 fn expire_work_lease_by_claim(store: &Store, subject: &str, actor: &str, incarnation: &str) {

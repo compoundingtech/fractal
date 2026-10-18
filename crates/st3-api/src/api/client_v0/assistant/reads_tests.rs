@@ -3,6 +3,9 @@ use super::*;
 #[path = "reads_cursor_tests.rs"]
 mod cursor_tests;
 
+#[path = "reads_envelope_tests.rs"]
+mod envelope_tests;
+
 const OWNER: &str = "person/operator";
 const AGENT: &str = "agent/reads-fixture.worker";
 const MISSION: &str = "mission/reads-fixture-mission";
@@ -893,5 +896,115 @@ fn encoded_lengths_count_json_escapes_and_utf8_bytes() {
         "Ünïcødé 決定", "\"\\\n\r\t\u{8}\u{c}\u{0}\u{1}\u{1f}", "plain / text",
     ] {
         assert_eq!(encoded_len(text) + 2, serde_json::to_vec(text).unwrap().len(), "{text:?}");
+    }
+}
+
+/// Exercise the shared page builder and the real response framer, including a final
+/// source page that previously had no cursor and therefore was not cached.
+#[tokio::test]
+async fn assistant_pages_pack_whole_items_and_resume_at_the_exact_budget_boundary() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let snapshot = new_client_snapshot(&state);
+    let context = response_body::Context {
+        state: state.clone(), client_request: true, observation_report: false,
+        request_id: "request/00000000-0000-0000-0000-000000000000".into(),
+        client_snapshot: Some(snapshot.clone()), server: None, roster: false,
+    };
+    for collection in ["assistant.attention", "assistant.attention-rich", "assistant.missions",
+        "assistant.missions-rich", "assistant.agents", "assistant.agents-rich"] {
+        let items = vec![
+            json!({"id":"item/first","title":"a".repeat(700)}),
+            json!({"id":"item/second","title":"決定\n\"".repeat(180)}),
+            json!({"id":"item/third","title":"c".repeat(900)}),
+            json!({"id":"item/fourth","title":"d".repeat(400)}),
+        ];
+        let query = ClientListQuery { limit: Some(4), ..Default::default() };
+        let full = client_page_read(&state, &snapshot, collection, items.clone(), &query, true).unwrap();
+        let full_bytes = serde_json::to_vec(&json!({
+            "api_version":CLIENT_API_VERSION, "request_id":context.request_id,
+            "snapshot":snapshot, "value":full
+        })).unwrap().len();
+        let exact = client_page_read_bounded(&state, &snapshot, collection, items.clone(),
+            &query, true, Some((&context, full_bytes))).unwrap();
+        assert_eq!(exact.items, items);
+        assert!(!exact.page.has_more);
+        let mut page = client_page_read_bounded(&state, &snapshot, collection, items.clone(),
+            &query, true, Some((&context, full_bytes - 1))).unwrap();
+        assert!(page.items.len() < items.len());
+        assert!(page.page.has_more);
+        let larger = client_page_read(&state, &snapshot, collection, items.clone(),
+            &ClientListQuery { limit: Some(page.items.len() + 1), ..Default::default() }, true).unwrap();
+        let larger_bytes = serde_json::to_vec(&json!({
+            "api_version":CLIENT_API_VERSION, "request_id":context.request_id,
+            "snapshot":snapshot, "value":larger
+        })).unwrap().len();
+        assert!(larger_bytes >= full_bytes, "the next whole item must not fit");
+        let mut delivered = Vec::new();
+        loop {
+            assert_eq!(page.page.limit, 4);
+            let framed = serde_json::to_vec(&json!({
+                "api_version":CLIENT_API_VERSION, "request_id":context.request_id,
+                "snapshot":snapshot, "value":page
+            })).unwrap();
+            assert!(framed.len() < full_bytes);
+            delivered.extend(page.items.clone());
+            let Some(cursor) = page.page.next_cursor else { break };
+            assert_eq!(decode_client_cursor(&cursor).unwrap().offset, delivered.len());
+            page = client_page_read_bounded(&state, &snapshot, collection, Vec::new(),
+                &ClientListQuery { cursor: Some(cursor), ..Default::default() },
+                false, Some((&context, full_bytes - 1))).unwrap();
+        }
+        assert_eq!(delivered, items);
+        let single = vec![items[0].clone()];
+        let single_page = client_page_read(&state, &snapshot, collection, single.clone(), &query, true).unwrap();
+        let single_bytes = serde_json::to_vec(&json!({
+            "api_version":CLIENT_API_VERSION, "request_id":context.request_id,
+            "snapshot":snapshot, "value":single_page
+        })).unwrap().len();
+        assert_eq!(client_page_read_bounded(&state, &snapshot, collection, single.clone(),
+            &query, true, Some((&context, single_bytes))).unwrap().items, single);
+        let error = client_page_read_bounded(&state, &snapshot, collection, single,
+            &query, true, Some((&context, single_bytes - 1))).unwrap_err();
+        assert!(error.message.contains("item/first"));
+        let oversized = vec![json!({"id":"item/oversized","title":"x".repeat(MAX_RESPONSE_BYTES)})];
+        let error = client_page_read_bounded(&state, &snapshot, collection, oversized,
+            &query, true, Some((&context, MAX_RESPONSE_BYTES))).unwrap_err();
+        assert_eq!(error.code, "response-budget-exceeded");
+        assert!(error.message.contains("not even one whole item fits"));
+        assert!(error.message.contains("item/oversized"));
+    }
+}
+
+#[tokio::test]
+async fn assistant_pages_reject_cursor_limits_and_offsets_outside_the_cached_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let snapshot = new_client_snapshot(&state);
+    let context = response_body::Context {
+        state: state.clone(), client_request: true, observation_report: false,
+        request_id: "request/test".into(), client_snapshot: Some(snapshot.clone()),
+        server: None, roster: false,
+    };
+    let items = (0..CLIENT_MAX_PAGE_ITEMS + 2)
+        .map(|index| json!({"id":format!("item/{index}"),"title":"x".repeat(100)}))
+        .collect::<Vec<_>>();
+    let first = client_page_read_bounded(&state, &snapshot, "assistant.attention-rich", items,
+        &ClientListQuery { limit: Some(1), ..Default::default() }, true,
+        Some((&context, MAX_RESPONSE_BYTES))).unwrap();
+    let cursor = decode_client_cursor(first.page.next_cursor.as_deref().unwrap()).unwrap();
+    for (limit, offset) in [
+        (0, 1), (CLIENT_MAX_PAGE_ITEMS + 1, 1), (usize::MAX, 1),
+        (1, CLIENT_MAX_PAGE_ITEMS + 2), (1, CLIENT_MAX_PAGE_ITEMS + 3), (1, usize::MAX),
+        (usize::MAX, usize::MAX),
+    ] {
+        let mut invalid = cursor.clone();
+        invalid.limit = limit;
+        invalid.offset = offset;
+        let error = client_page_read_bounded(&state, &snapshot, "assistant.attention-rich", Vec::new(),
+            &ClientListQuery { cursor: Some(encode_client_cursor(&invalid).unwrap()), ..Default::default() },
+            false, Some((&context, 1024))).unwrap_err();
+        assert_eq!((error.status, error.code.as_str()), (StatusCode::GONE, "page-cursor-expired"),
+            "limit={limit} offset={offset}");
     }
 }

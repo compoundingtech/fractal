@@ -2,6 +2,7 @@
 //! cursors reference an existing publication. Only the offline agent path caches shallow refs.
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn page(
     state: &AppState,
     snapshot: &ClientSnapshot,
@@ -9,6 +10,7 @@ pub(super) async fn page(
     parameters: &BTreeMap<String, String>,
     max_bytes: usize,
     binding: &str,
+    context: &response_body::Context,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     allow(parameters, METADATA_FIELDS, max_bytes)?;
     let limit = parameters.get("limit").map(|limit| {
@@ -37,8 +39,9 @@ pub(super) async fn page(
     let reader = state.clone();
     let snapshot = snapshot.clone();
     let projection = projection.to_owned();
+    let context = context.clone();
     blocking_store(move || reader.store.clone().read_snapshot(|index| {
-        Ok(read_page(&reader, snapshot, &projection, &collection, &person, &query, cursor, index))
+        Ok(read_page(&reader, snapshot, &projection, &collection, &person, &query, cursor, index, &context, max_bytes))
     })).await?
 }
 
@@ -52,6 +55,8 @@ fn read_page(
     query: &ClientListQuery,
     cursor: Option<ClientPageCursor>,
     index: u64,
+    context: &response_body::Context,
+    max_bytes: usize,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
     let snapshot = if cursor.is_some() { snapshot } else { client_snapshot_at(state, index) };
     let now = client_snapshot_time(&snapshot);
@@ -59,12 +64,17 @@ fn read_page(
     let limit = cursor.as_ref().map_or(query.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS), |cursor| cursor.limit);
     let expires = cursor.as_ref().map_or_else(|| client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS), |cursor| cursor.expires_at_unix_ms);
     let offset = cursor.as_ref().map_or(0, |cursor| cursor.offset);
-    let mut after_key = None;
+    let mut delivered_keys = Vec::new();
     let (snapshot, items, has_more, marker) = if projection.starts_with("missions") {
         // Recheck bounded claim metadata, not cards. Read-authorization receipts and
         // unrelated custom claims must not invalidate every signed continuation.
         check_mission_source(state, cursor.as_ref(), index)?;
-        let marker = "assistant-mission-keyset-v2".to_owned();
+        // Admission can precede projection, and full replay can replace projections at
+        // the same claim cut. Both fences share the page's pinned SQLite snapshot.
+        let frontier = state.store.attention_projection_frontier().map_err(ApiError::internal)?;
+        let generation = smallclaims::store::graph_generation(&state.store.readers.get())
+            .map_err(ApiError::internal)?;
+        let marker = format!("assistant-mission-keyset-v3:{frontier:?}:{generation}");
         check_source(&cursor, &marker)?;
         let mut keys = state.store.mission_collection_page_at(
             false, 0, limit.saturating_add(1),
@@ -77,7 +87,7 @@ fn read_page(
         // even when it is older than the native recent-run preview.
         let cards = assistant_mission_list_cards_with(&state.store, &ids, now)
             .map_err(ApiError::internal)?;
-        after_key = keys.last().map(|(id, time)| (*time, id.clone()));
+        delivered_keys = keys.into_iter().map(|(id, time)| (time, id)).collect();
         (snapshot, mission_rows(&cards, rich).map_err(ApiError::internal)?, has_more, marker)
     } else if projection.starts_with("attention") {
         let (cut, published_at, rows) = published_assistant_attention_rows(&state.store, index, person)
@@ -117,31 +127,41 @@ fn read_page(
         let refs = if cursor.is_some() { Vec::new() } else {
             client_agent_page_refs(&state.store, false, index).map_err(ApiError::internal)?
         };
-        let mut page = client_page_read(state, &snapshot, collection, refs, query, true)?;
-        let cards = client_agent_cards_for_page(&state.store, false, snapshot.store_index, &page.items, &snapshot.created_at)?;
-        page.items = agent_rows(&cards, rich);
-        page.collection = format!("assistant.{projection}");
+        let page = client_page_read_projected(
+            state, &snapshot, collection, &format!("assistant.{projection}"), refs, query,
+            Some((context, max_bytes)), |refs| {
+                let cards = client_agent_cards_for_page(
+                    &state.store, false, snapshot.store_index, &refs, &snapshot.created_at,
+                )?;
+                Ok(agent_rows(&cards, rich))
+            },
+        )?;
         return Ok((snapshot, serde_json::to_value(page).map_err(ApiError::internal)?));
     };
-    let next_cursor = if has_more {
-        Some(encode_client_cursor(&ClientPageCursor {
-            snapshot: snapshot.clone(), collection: collection.to_owned(),
-            offset: offset.saturating_add(items.len()), limit,
-            history: false, person: None, actor: None, owner_run: None,
-            status: None, owner: None, state: None, native_only: false,
-            items_digest: marker, before_index: None, after_key,
-            expires_at_unix_ms: expires,
-        })?)
-    } else { None };
-    let page = ClientResourcePage {
-        kind: "page".into(), collection: format!("assistant.{projection}"),
-        filters: client_page_filters("", query), items,
-        page: ClientPageInfo {
-            limit, has_more, next_cursor,
-            cursor_expires_at: has_more.then(|| client_timestamp(expires)),
-        },
-        sync: client_sync_notice(state), replicated: None,
-    };
+    let fetched = items.len();
+    let page = client_pack_page(&snapshot, items, Some((context, max_bytes)), |count| {
+        let has_more = has_more || count < fetched;
+        let next_cursor = if has_more {
+            Some(encode_client_cursor(&ClientPageCursor {
+                snapshot: snapshot.clone(), collection: collection.to_owned(),
+                offset: offset.saturating_add(count), limit,
+                history: false, person: None, actor: None, owner_run: None,
+                status: None, owner: None, state: None, native_only: false,
+                items_digest: marker.clone(), before_index: None,
+                after_key: count.checked_sub(1).and_then(|last| delivered_keys.get(last)).cloned(),
+                expires_at_unix_ms: expires,
+            })?)
+        } else { None };
+        Ok(ClientResourcePage {
+            kind: "page".into(), collection: format!("assistant.{projection}"),
+            filters: client_page_filters("", query), items: Vec::new(),
+            page: ClientPageInfo {
+                limit, has_more, next_cursor,
+                cursor_expires_at: has_more.then(|| client_timestamp(expires)),
+            },
+            sync: client_sync_notice(state), replicated: None,
+        })
+    })?;
     Ok((snapshot, serde_json::to_value(page).map_err(ApiError::internal)?))
 }
 

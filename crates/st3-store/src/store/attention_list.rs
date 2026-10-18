@@ -15,12 +15,12 @@ pub const PUBLISHED_VIEWS: [&str; 4] = ["attention", "glasses", "arrangements", 
 /// A view whose refresh has failed this long is withdrawn: its windows read for themselves, as
 /// before, until it publishes again. Once published, a window rereads only on publication, so
 /// a view that stopped publishing must not stay served.
-const WITHDRAW_AFTER_MS: u64 = 30_000;
+pub const WITHDRAW_AFTER_MS: u64 = 30_000;
 
 #[derive(Default)]
-struct ViewHealth {
+pub struct ViewHealth {
     /// When its refreshes began failing, in Unix ms; 0 while they succeed.
-    failing_since: AtomicU64,
+    pub failing_since: AtomicU64,
     withdrawn: AtomicBool,
 }
 
@@ -110,7 +110,7 @@ pub struct AttentionList {
     pairings_checked: AtomicU64,
     /// Set when the refresher task ends: no view is served after that.
     stopped: AtomicBool,
-    health: [ViewHealth; PUBLISHED_VIEWS.len()],
+    pub health: [ViewHealth; PUBLISHED_VIEWS.len()],
     /// Folds by cause: the first claim kind that could change attention, `clock`, `projection`,
     /// `first` or `many`. Republishing the same rows at a newer cut is not a fold.
     folds: Mutex<BTreeMap<String, u64>>,

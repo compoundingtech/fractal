@@ -16,9 +16,9 @@ use super::common::*;
 use anyhow::Result;
 use rusqlite::params;
 use smallclaims::store::now_ms;
-use st3_store::store::attention_list::*;
-use st3_store::store::checkpoint_rules;
-use st3_store::store::*;
+use crate::store::attention_list::*;
+use crate::store::checkpoint_rules;
+use crate::store::*;
 use crate::model::PersonStepResponse;
 use crate::store::person_work::tests::fixture;
 

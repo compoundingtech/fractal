@@ -2,6 +2,7 @@
 //! only allowlisted identifiers, closed enums, counts and timestamps out of it, so titles,
 //! goals, previews, paths and other free text in source rows never reach an assistant.
 //! Content reads return one bounded text range of one exactly named resource.
+use crate::EvidenceStore;
 use super::*;
 use crate::api::published_attention::{
     published_assistant_attention_rows, published_view_not_ready,
@@ -41,6 +42,7 @@ const TERMINAL_FIELDS: &[&str] = &[
 /// Project one assistant read with the snapshot its rows were read in. `parameters` are the
 /// exact decoded query parameters the read authorization names; the person is the
 /// configured owner, never a parameter. A cursor or content read keeps `snapshot`.
+#[cfg(test)]
 pub async fn project(
     state: &AppState,
     snapshot: &ClientSnapshot,
@@ -49,13 +51,31 @@ pub async fn project(
     max_bytes: usize,
     binding: &str,
 ) -> Result<(ClientSnapshot, Value), ApiError> {
+    let context = response_body::Context {
+        state: state.clone(), client_request: true, observation_report: false,
+        request_id: "request/00000000-0000-0000-0000-000000000000".into(),
+        client_snapshot: Some(snapshot.clone()), server: None, roster: false,
+    };
+    project_with_context(state, snapshot, projection, parameters, max_bytes, binding, &context).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn project_with_context(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    projection: &str,
+    parameters: &BTreeMap<String, String>,
+    max_bytes: usize,
+    binding: &str,
+    context: &response_body::Context,
+) -> Result<(ClientSnapshot, Value), ApiError> {
     match projection {
         "summary" => {
             allow(parameters, SUMMARY_FIELDS, max_bytes)?;
             summary(state).await
         }
         "attention" | "attention-rich" | "missions" | "missions-rich" | "agents" | "agents-rich" =>
-            page(state, snapshot, projection, parameters, max_bytes, binding).await,
+            page(state, snapshot, projection, parameters, max_bytes, binding, context).await,
         "attention-content" => {
             allow(parameters, &["alert_id","max_response_bytes"], max_bytes)?;
             let id = required(parameters, "alert_id")?;

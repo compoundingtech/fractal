@@ -1431,6 +1431,6 @@ fn the_agent_card_fold_matches_per_subject_reductions_after_a_trim() {
     assert!(trimmed, "the fixture reached a trim");
     for node in [&alder, &birch] {
         let indexes = (0..=node.index().unwrap()).collect::<Vec<_>>();
-        super::card_fold_tests::assert_card_fold_parity(node, &indexes);
+        crate::store::card_fold_tests_shared::assert_card_fold_parity(node, &indexes);
     }
 }
