@@ -112,7 +112,7 @@ async fn identifier_mission_sql_membership_matches_projection_policy() {
         String::new(), "café".into(), "release#2".into(), "mission/foo".into(),
         "nested/._:-@+=~".into(), "決定".into(), "😀".into(), "\u{80}".into(),
         "é".repeat(124), "é".repeat(125),
-        "a".repeat(248), "b".repeat(249), "c".repeat(250),
+        "a".repeat(247), "b".repeat(248), "c".repeat(249),
     ]);
     // Deterministic generated strings exercise combinations as well as individual
     // ASCII characters, without a second allowlist implementing the expected policy.
@@ -140,8 +140,9 @@ async fn identifier_mission_sql_membership_matches_projection_policy() {
     // nonempty, policy-valid full identifier mission/. Filter the returned full ID.
     assert_eq!(ident(Some("")), None);
     assert!(expected.iter().any(|(id, _)| id == "mission/"));
-    for (raw, allowed) in [("a".repeat(248), true), ("b".repeat(249), true), ("c".repeat(250), false)] {
-        assert_eq!(expected.iter().any(|(id, _)| id == &format!("mission/{raw}")), allowed);
+    for (raw, allowed) in [("a".repeat(247), true), ("b".repeat(248), true), ("c".repeat(249), false)] {
+        assert_eq!(expected.iter().any(|(id, _)| id == &format!("mission/{raw}")), allowed,
+            "full identifier byte length {}", "mission/".len() + raw.len());
     }
     let selected = state.store.assistant_mission_collection_page_at(
         false, 0, ids.len() + 1, None, now,

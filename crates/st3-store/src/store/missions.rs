@@ -2,7 +2,7 @@ use super::*;
 
 // One query preserves the native collection's indexed latest/live probes and shallow
 // key sort. Assistant membership matches reads::ident before pagination/hydration:
-// mission/ contributes seven allowed ASCII bytes; '-' is literal at the GLOB class end.
+// mission/ contributes eight allowed ASCII bytes; '-' is literal at the GLOB class end.
 // GLOB stops at NUL, so reject it explicitly. API regression tests exercise this SQL
 // against the canonical identifier policy, including every ASCII byte.
 const MISSION_COLLECTION_PAGE_SQL: &str = "WITH RECURSIVE run_missions(mission_id) AS (
@@ -25,7 +25,7 @@ const MISSION_COLLECTION_PAGE_SQL: &str = "WITH RECURSIVE run_missions(mission_i
     SELECT id FROM mission_runs WHERE mission_id=ids.mission_id AND status IN ('running','standing')
     ORDER BY status LIMIT 1)
  WHERE (NOT ?7 OR (
-       length(CAST(ids.mission_id AS BLOB)) + 7 BETWEEN 1 AND 256
+       length(CAST(ids.mission_id AS BLOB)) + length('mission/') BETWEEN 1 AND 256
        AND instr(ids.mission_id,char(0))=0
        AND ids.mission_id NOT GLOB '*[^a-zA-Z0-9/._:@+=~-]*'))
    AND (?5 IS NULL OR CAST(COALESCE(latest.updated_at_unix_ms,published.accepted_at_unix_ms, '0') AS INTEGER) < ?5
