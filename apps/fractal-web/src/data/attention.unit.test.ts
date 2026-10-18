@@ -19,6 +19,6 @@ it.each(attentionAnswerFixtures)('Needs me filter uses answerability for $name, 
     workspace: { id: item.source_id, title: 'Synthetic', host: 'synthetic', layout: dailyDriver, unread: [], notifications: [] },
     agent: undefined, status: 'waiting' as const, needsMe,
   }
-  expect(matchesRow({ row, filters: { ...defaultFilters, needsMe: true }, context: '' })).toBe(waiting)
-  expect(matchesRow({ row, filters: defaultFilters, context: '' })).toBe(true)
+  expect(matchesRow({ row, filters: { ...defaultFilters, needsMe: true } })).toBe(waiting)
+  expect(matchesRow({ row, filters: defaultFilters })).toBe(true)
 })
