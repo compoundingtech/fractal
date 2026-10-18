@@ -954,6 +954,9 @@ def apply_cut(args, nodes, files, tfiles, order):
         if len(parts) > 1:
             children["/".join(parts[:-1]) + ".rs"].add(parts[-1])
     removed = collections.defaultdict(list)
+    existing_traits = set()
+    for f in _src_files(sorted(glob_dirs("crates/*/src"))):
+        existing_traits |= set(re.findall(r"(?m)^pub trait (\w+)", Path(f).read_text()))
     traits_out = []
     out_files = {}
     top_mods = sorted({module_path(rel)[0] for rel in mod_files})
@@ -985,6 +988,8 @@ def apply_cut(args, nodes, files, tfiles, order):
         if method_nodes:
             stem = module_path(rel)[-1]
             trait = camel(args.layer if stem == "store" else stem) + ("StoreCore" if stem == "store" else "Store")
+            if trait in existing_traits:  # a split file: the trait of the crate below keeps the plain name
+                trait = camel(stem if stem != "store" else "core") + camel(args.layer) + "Store"
             pieces.append(make_trait(trait, sorted([n.item for n in method_nodes], key=lambda it: it.start)))
             stats["traits"] += 1
             traits_out.append((mp, trait))
@@ -1261,6 +1266,12 @@ def wire_crate(args, top_mods):
     open("crates/st3-daemon/src/lib.rs", "w").write(dl)
     print("wired", crate)
 
+
+
+def glob_dirs(pattern):
+    import glob
+
+    return glob.glob(pattern)
 
 
 def _cargo_json(extra):
