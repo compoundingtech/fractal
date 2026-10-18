@@ -182,6 +182,8 @@ export const ActionCommon = /*#__PURE__*/ (() => Schema.Struct({
   "type": Schema.Literals([
   "arrangement.edit",
   "custom.reply",
+  "harness.queue.mutate",
+  "harness.model.set",
   "prompt.respond",
   "attention.resolve",
   "review.approve",
@@ -371,6 +373,46 @@ export const DeviceSignature = /*#__PURE__*/ (() => Schema.Struct({
 export type DeviceSignature = typeof DeviceSignature.Type
 export type DeviceSignatureEncoded = typeof DeviceSignature.Encoded
 
+export const HarnessBinding = /*#__PURE__*/ (() => Schema.Struct({
+  "desired_revision": Schema.String,
+  "incarnation_id": Schema.String,
+  "session_id": Schema.String,
+  "turn_id": Schema.OptionFromNullOr(Schema.String)
+}).annotate({ identifier: "HarnessBinding" }))()
+export type HarnessBinding = typeof HarnessBinding.Type
+export type HarnessBindingEncoded = typeof HarnessBinding.Encoded
+
+export const HarnessModelParameters = /*#__PURE__*/ (() => Schema.Struct({
+  "binding": HarnessBinding,
+  /** Omitted when no effort change is requested; explicit null is not accepted. */
+  "effort": optionalKey(Schema.String).annotate({ description: "Omitted when no effort change is requested; explicit null is not accepted." }),
+  "model_id": Schema.String,
+  "model_revision": Schema.String,
+  "provider": Schema.String,
+  "subject": Schema.String
+}).annotate({ identifier: "HarnessModelParameters" }))()
+export type HarnessModelParameters = typeof HarnessModelParameters.Type
+export type HarnessModelParametersEncoded = typeof HarnessModelParameters.Encoded
+
+/** Follow-up input is held by the owner until native idle dispatch. Enqueue with lane steer and promote are rejected with native-pre-dequeue-api-unavailable while the reported steer capability is unsupported. */
+export const HarnessQueueMutation = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "content": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(65536)), "lane": Schema.Literals(["follow_up","steer"]), "type": Schema.Literal("enqueue") }),
+  Schema.Struct({ "before_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "entry_id": Schema.String, "type": Schema.Literal("move") }),
+  Schema.Struct({ "entry_id": Schema.String, "type": Schema.Literals(["cancel","promote"]) }),
+  Schema.Struct({ "content": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(65536)), "entry_id": Schema.String, "type": Schema.Literal("replace") })
+], { mode: "oneOf" }).annotate({ identifier: "HarnessQueueMutation", description: "Follow-up input is held by the owner until native idle dispatch. Enqueue with lane steer and promote are rejected with native-pre-dequeue-api-unavailable while the reported steer capability is unsupported." }))()
+export type HarnessQueueMutation = typeof HarnessQueueMutation.Type
+export type HarnessQueueMutationEncoded = typeof HarnessQueueMutation.Encoded
+
+export const HarnessQueueParameters = /*#__PURE__*/ (() => Schema.Struct({
+  "binding": HarnessBinding,
+  "mutation": HarnessQueueMutation,
+  "queue_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "subject": Schema.String
+}).annotate({ identifier: "HarnessQueueParameters" }))()
+export type HarnessQueueParameters = typeof HarnessQueueParameters.Type
+export type HarnessQueueParametersEncoded = typeof HarnessQueueParameters.Encoded
+
 export const Attachment = /*#__PURE__*/ (() => Schema.Struct({
   "blob": Schema.String.check(Schema.isPattern(new RegExp("^blob/[0-9a-f]{64}$", "u"))),
   "media_type": Schema.Literals(["image/png","image/jpeg","image/gif","image/webp"]),
@@ -496,6 +538,10 @@ export type TerminalCreateParametersEncoded = typeof TerminalCreateParameters.En
 export const ActionRequest = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": ArrangementEditParameters, "type": Schema.Literal("arrangement.edit") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": CustomReplyParameters, "type": Schema.Literal("custom.reply") }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": HarnessQueueParameters, "type": Schema.Literal("harness.queue.mutate") }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": HarnessModelParameters, "type": Schema.Literal("harness.model.set") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": PromptRespondParameters, "type": Schema.Literal("prompt.respond") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentCreateParameters, "type": Schema.Literal("agent.create") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
@@ -559,6 +605,58 @@ export const ActionRequest = /*#__PURE__*/ (() => Schema.Union([
 export type ActionRequest = typeof ActionRequest.Type
 export type ActionRequestEncoded = typeof ActionRequest.Encoded
 
+export const HarnessInputResult = /*#__PURE__*/ (() => Schema.Struct({
+  "native_event": Schema.Literals(["message_start","message_end"]),
+  "turn_id": Schema.OptionFromNullOr(Schema.String)
+}).annotate({ identifier: "HarnessInputResult" }))()
+export type HarnessInputResult = typeof HarnessInputResult.Type
+export type HarnessInputResultEncoded = typeof HarnessInputResult.Encoded
+
+export const HarnessModelResult = /*#__PURE__*/ (() => Schema.Struct({
+  "atomic_model_effort": Schema.Literal(false),
+  "effective_effort": Schema.OptionFromNullOr(Schema.String),
+  "id": Schema.OptionFromNullOr(Schema.String),
+  "provider": Schema.OptionFromNullOr(Schema.String)
+}).annotate({ identifier: "HarnessModelResult" }))()
+export type HarnessModelResult = typeof HarnessModelResult.Type
+export type HarnessModelResultEncoded = typeof HarnessModelResult.Encoded
+
+export const HarnessNativeResult = /*#__PURE__*/ (() => Schema.Union([
+  HarnessInputResult,
+  HarnessModelResult
+], { mode: "oneOf" }).annotate({ identifier: "HarnessNativeResult" }))()
+export type HarnessNativeResult = typeof HarnessNativeResult.Type
+export type HarnessNativeResultEncoded = typeof HarnessNativeResult.Encoded
+
+export const HarnessOutcome = /*#__PURE__*/ (() => Schema.Literals(["accepted","dispatched","applied","rejected","indeterminate","cancelled"]).annotate({ identifier: "HarnessOutcome" }))()
+export type HarnessOutcome = typeof HarnessOutcome.Type
+export type HarnessOutcomeEncoded = typeof HarnessOutcome.Encoded
+
+export const HarnessControlReceipt = /*#__PURE__*/ (() => Schema.Struct({
+  "binding": HarnessBinding,
+  "entry_id": Schema.OptionFromNullOr(Schema.String),
+  "operation_id": Schema.String,
+  "queue_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "reason": Schema.OptionFromNullOr(Schema.String),
+  "result": Schema.OptionFromNullOr(HarnessNativeResult),
+  "status": HarnessOutcome,
+  "subject": Schema.String
+}).annotate({ identifier: "HarnessControlReceipt" }))()
+export type HarnessControlReceipt = typeof HarnessControlReceipt.Type
+export type HarnessControlReceiptEncoded = typeof HarnessControlReceipt.Encoded
+
+export const HarnessModelReceipt = /*#__PURE__*/ (() => Schema.Struct({
+  "binding": HarnessBinding,
+  "model_revision": Schema.String,
+  "operation_id": Schema.String,
+  "reason": Schema.OptionFromNullOr(Schema.String),
+  "result": Schema.OptionFromNullOr(HarnessModelResult),
+  "status": HarnessOutcome,
+  "subject": Schema.String
+}).annotate({ identifier: "HarnessModelReceipt" }))()
+export type HarnessModelReceipt = typeof HarnessModelReceipt.Type
+export type HarnessModelReceiptEncoded = typeof HarnessModelReceipt.Encoded
+
 /** RFC 3339 UTC instant; servers emit millisecond precision with `Z`. */
 export const Timestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso)).annotate({ identifier: "Timestamp", description: "RFC 3339 UTC instant; servers emit millisecond precision with `Z`." }))()
 export type Timestamp = typeof Timestamp.Type
@@ -584,10 +682,12 @@ export const ActionResult = /*#__PURE__*/ (() => Schema.Struct({
   "action_id": Id,
   "affected_ids": Schema.Array(Id).check(Schema.isUnique()),
   "arrangement_revision": optionalKey(Revision),
+  "harness_control": optionalKey(HarnessControlReceipt),
+  "harness_model": optionalKey(HarnessModelReceipt),
   "kind": Schema.Literal("action-result"),
   "operation_id": Id,
   "snapshot_id": Id,
-  "status": Schema.Literals(["accepted","completed","rejected"]),
+  "status": Schema.Literals(["accepted","completed","rejected","dispatched","applied","indeterminate","cancelled"]),
   "terminal_attachment": Schema.OptionFromOptionalNullOr(TerminalAttachment, NULL_NONE)
 }).annotate({ identifier: "ActionResult" }))()
 export type ActionResult = typeof ActionResult.Type
@@ -3610,6 +3710,123 @@ export const EventPage = /*#__PURE__*/ (() => Schema.Struct({
 export type EventPage = typeof EventPage.Type
 export type EventPageEncoded = typeof EventPage.Encoded
 
+export const HarnessControlOperationReceipt = /*#__PURE__*/ (() => Schema.Union([
+  HarnessControlReceipt,
+  HarnessModelReceipt
+], { mode: "oneOf" }).annotate({ identifier: "HarnessControlOperationReceipt" }))()
+export type HarnessControlOperationReceipt = typeof HarnessControlOperationReceipt.Type
+export type HarnessControlOperationReceiptEncoded = typeof HarnessControlOperationReceipt.Encoded
+
+export const HarnessModelChoice = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Schema.String,
+  "provider": Schema.String,
+  "reasoning": Schema.Boolean,
+  "supported_efforts": Schema.Array(Schema.String)
+}).annotate({ identifier: "HarnessModelChoice" }))()
+export type HarnessModelChoice = typeof HarnessModelChoice.Type
+export type HarnessModelChoiceEncoded = typeof HarnessModelChoice.Encoded
+
+export const HarnessSelectedModel = /*#__PURE__*/ (() => Schema.Struct({
+  /** Configured policy as reported natively; unknown when native observation cannot establish it. */
+  "configured_effort": Schema.String.annotate({ description: "Configured policy as reported natively; unknown when native observation cannot establish it." }),
+  /** Observed native effective effort; distinct from configured policy. */
+  "effective_effort": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Observed native effective effort; distinct from configured policy." }),
+  "id": Schema.String,
+  "provider": Schema.String
+}).annotate({ identifier: "HarnessSelectedModel" }))()
+export type HarnessSelectedModel = typeof HarnessSelectedModel.Type
+export type HarnessSelectedModelEncoded = typeof HarnessSelectedModel.Encoded
+
+export const HarnessModelCatalogPage = /*#__PURE__*/ (() => Schema.Struct({
+  "atomic_model_effort": Schema.Literal(false),
+  "available": Schema.Boolean,
+  "choices": Schema.Array(HarnessModelChoice).check(Schema.isMaxLength(100)),
+  "complete": Schema.Boolean,
+  "cursor": Schema.OptionFromNullOr(Schema.String),
+  "model_revision": Schema.String,
+  "schema": Schema.Literal("harness-models.v1"),
+  "selected": Schema.OptionFromNullOr(HarnessSelectedModel),
+  "source": Schema.String,
+  "subject": Schema.String,
+  "total": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "HarnessModelCatalogPage" }))()
+export type HarnessModelCatalogPage = typeof HarnessModelCatalogPage.Type
+export type HarnessModelCatalogPageEncoded = typeof HarnessModelCatalogPage.Encoded
+
+export const HarnessApproval = /*#__PURE__*/ (() => Schema.Struct({
+  "reason": Schema.Literal("native-live-approval-api-unavailable"),
+  "supported": Schema.Literal(false)
+}).annotate({ identifier: "HarnessApproval" }))()
+export type HarnessApproval = typeof HarnessApproval.Type
+export type HarnessApprovalEncoded = typeof HarnessApproval.Encoded
+
+export const HarnessModelsSummary = /*#__PURE__*/ (() => Schema.Struct({
+  "atomic_model_effort": Schema.Literal(false),
+  "available": Schema.Boolean,
+  "catalog_path": Schema.String,
+  "complete": Schema.Boolean,
+  "revision": Schema.String,
+  "selected": Schema.OptionFromNullOr(HarnessSelectedModel),
+  "source": Schema.String
+}).annotate({ identifier: "HarnessModelsSummary" }))()
+export type HarnessModelsSummary = typeof HarnessModelsSummary.Type
+export type HarnessModelsSummaryEncoded = typeof HarnessModelsSummary.Encoded
+
+export const HarnessSteerCapability = /*#__PURE__*/ (() => Schema.Struct({
+  "reason": Schema.Literal("native-pre-dequeue-api-unavailable"),
+  "state": Schema.Literal("unsupported")
+}).annotate({ identifier: "HarnessSteerCapability" }))()
+export type HarnessSteerCapability = typeof HarnessSteerCapability.Type
+export type HarnessSteerCapabilityEncoded = typeof HarnessSteerCapability.Encoded
+
+export const HarnessControlState = /*#__PURE__*/ (() => Schema.Struct({
+  "approval": HarnessApproval,
+  "binding": HarnessBinding,
+  "idle": Schema.Boolean,
+  "input_supported": Schema.Boolean,
+  "models": HarnessModelsSummary,
+  "reason": Schema.OptionFromNullOr(Schema.String),
+  "steer": HarnessSteerCapability,
+  "subject": Schema.String
+}).annotate({ identifier: "HarnessControlState" }))()
+export type HarnessControlState = typeof HarnessControlState.Type
+export type HarnessControlStateEncoded = typeof HarnessControlState.Encoded
+
+export const HarnessQueueEntry = /*#__PURE__*/ (() => Schema.Struct({
+  "actor": Schema.String,
+  "binding": HarnessBinding,
+  "content": Schema.String,
+  "id": Schema.String,
+  "lane": Schema.Literals(["follow_up","steer"]),
+  "operation_id": Schema.String,
+  "reason": Schema.OptionFromNullOr(Schema.String),
+  "result": Schema.OptionFromNullOr(HarnessNativeResult),
+  "status": HarnessOutcome
+}).annotate({ identifier: "HarnessQueueEntry" }))()
+export type HarnessQueueEntry = typeof HarnessQueueEntry.Type
+export type HarnessQueueEntryEncoded = typeof HarnessQueueEntry.Encoded
+
+export const HarnessQueue = /*#__PURE__*/ (() => Schema.Struct({
+  "authority": Schema.Literal("owner"),
+  /** This bounded page of owner-pending inputs. */
+  "entries": Schema.Array(HarnessQueueEntry).check(Schema.isMaxLength(100)).annotate({ description: "This bounded page of owner-pending inputs." }),
+  "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "HarnessQueue" }))()
+export type HarnessQueue = typeof HarnessQueue.Type
+export type HarnessQueueEncoded = typeof HarnessQueue.Encoded
+
+export const HarnessQueueView = /*#__PURE__*/ (() => Schema.Struct({
+  "cursor": Schema.OptionFromNullOr(Schema.String),
+  "native": Schema.OptionFromNullOr(HarnessControlState),
+  "queue": HarnessQueue,
+  "schema": Schema.Literal("harness-queue.v1"),
+  "subject": Schema.String,
+  /** All owner-pending entries, not only the entries in this page. */
+  "total": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "All owner-pending entries, not only the entries in this page." })
+}).annotate({ identifier: "HarnessQueueView" }))()
+export type HarnessQueueView = typeof HarnessQueueView.Type
+export type HarnessQueueViewEncoded = typeof HarnessQueueView.Encoded
+
 export const MailBacklog = /*#__PURE__*/ (() => Schema.Struct({
   "cleanup_command": Schema.String,
   "count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -3782,7 +3999,7 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, AssistantGrant, AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
+  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, HarnessQueueView, HarnessModelCatalogPage, HarnessControlOperationReceipt, PairingChallenge, PairedSession, AssistantGrant, AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
@@ -3841,7 +4058,26 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "long-message-signature-unsupported",
   "response-budget-exceeded",
   "content-not-text",
-  "internal"
+  "internal",
+  "stale-harness-control",
+  "unsupported-harness-control",
+  "missing-queue-entry",
+  "already-dispatched",
+  "invalid-queue-content",
+  "invalid-idempotency-key",
+  "stale-queue",
+  "queue-full",
+  "invalid-queue-move",
+  "queue-revision-exhausted",
+  "stale-queue-cursor",
+  "queue-metadata-too-large",
+  "queue-entry-too-large",
+  "unsupported-harness-model",
+  "stale-harness-model",
+  "unavailable-harness-model",
+  "unsupported-harness-effort",
+  "harness-control-busy",
+  "native-pre-dequeue-api-unavailable"
 ]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
 export type ErrorCode = typeof ErrorCode.Type
 export type ErrorCodeEncoded = typeof ErrorCode.Encoded

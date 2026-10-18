@@ -211,6 +211,21 @@ fn rust_operation_methods(
         let id = read["id"].as_str().context("read id")?;
         let path = read["path"].as_str().context("read path")?;
         let method = action_method(id);
+        if matches!(id, "harness-queue.get" | "harness-models.get") {
+            let response = read["response"].as_str().context("read response")?;
+            let collection = path
+                .strip_prefix("/v1/client/")
+                .and_then(|path| path.strip_suffix("/{id}"))
+                .context("harness page route must end with /{id}")?;
+            writeln!(out, "    pub async fn {method}(&self, id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<{response}>, ClientError> {{ self.list_internal_with_filters(&format!(\"{collection}/{{}}\", percent_encode_segment(id)), cursor, limit, false, &[]).await }}")?;
+            continue;
+        }
+        if id == "harness-control-receipt.get" {
+            let response = read["response"].as_str().context("read response")?;
+            let route = path.replace("{id}", "{}");
+            writeln!(out, "    pub async fn {method}(&self, id: &str, subject: &str) -> Result<Envelope<{response}>, ClientError> {{ self.get(&format!(\"{route}?subject={{}}\", percent_encode_segment(id), percent_encode_segment(subject))).await }}")?;
+            continue;
+        }
         if id == "arrangements.list" {
             writeln!(out, "    pub async fn arrangements_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ArrangementPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
             continue;
@@ -400,6 +415,14 @@ fn swift_operation_methods(
                 | "agent-queue.get"
         ) {
             continue;
+        } else if matches!(id, "harness-queue.get" | "harness-models.get") {
+            let response = read["response"].as_str().context("read response")?;
+            let route = path.trim_start_matches('/').replace("{id}", "\\(routedID)");
+            writeln!(out, "    public func {method}(id: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<{response}> {{ let routedID = Self.encodedPathSegment(id); var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"{route}\", query: query) }}")?;
+        } else if id == "harness-control-receipt.get" {
+            let response = read["response"].as_str().context("read response")?;
+            let route = path.trim_start_matches('/').replace("{id}", "\\(routedID)");
+            writeln!(out, "    public func {method}(id: String, subject: String) async throws -> Envelope<{response}> {{ let routedID = Self.encodedPathSegment(id); return try await get(\"{route}\", query: [.init(name: \"subject\", value: subject)]) }}")?;
         } else if id == "conversation-content.chunk" {
             writeln!(
                 out,
@@ -1345,11 +1368,27 @@ fn typescript_operation_methods(
             writeln!(out, "    async {method}(params: {request}, proof: ScgReadAuthorization, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.assistantRead<{response}>('{projection}', params, proof, requestOptions); }}")?;
             continue;
         }
-        let route = if path.contains("{id}") {
+        let route = if matches!(id, "harness-queue.get" | "harness-models.get" | "harness-control-receipt.get") {
+            path.replace("{id}", "${encodeURIComponent(id)}")
+        } else if path.contains("{id}") {
             path.replace("{id}", "${encodeURIComponent(routedId(id))}")
         } else {
             path.to_owned()
         };
+        if matches!(id, "harness-queue.get" | "harness-models.get") {
+            writeln!(
+                out,
+                "    async {method}(id: string, options: PageOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}` + query(options)); }}"
+            )?;
+            continue;
+        }
+        if id == "harness-control-receipt.get" {
+            writeln!(
+                out,
+                "    async {method}(id: string, subject: string): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}` + query({{ subject }})); }}"
+            )?;
+            continue;
+        }
         if id == "arrangements.list" {
             writeln!(out, "    async arrangementsList(person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }}), undefined, requestOptions); }}")?;
             continue;

@@ -13,6 +13,8 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case arrangementEdit = "arrangement.edit"
     case attentionResolve = "attention.resolve"
     case customReply = "custom.reply"
+    case harnessModelSet = "harness.model.set"
+    case harnessQueueMutate = "harness.queue.mutate"
     case laneApprove = "lane.approve"
     case laneJoin = "lane.join"
     case laneLeave = "lane.leave"
@@ -65,6 +67,9 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case notesList = "notes.list"
     case customSubjectsList = "custom-subjects.list"
     case customSubjectsGet = "custom-subjects.get"
+    case harnessQueueGet = "harness-queue.get"
+    case harnessModelsGet = "harness-models.get"
+    case harnessControlReceiptGet = "harness-control-receipt.get"
     case hostRepositories = "host.repositories"
     case setsList = "sets.list"
     case setsGet = "sets.get"
@@ -138,6 +143,9 @@ public let st3ClientReadPaths: [ReadOperation: String] = [
     .notesList: "/v1/client/notes",
     .customSubjectsList: "/v1/client/custom-subjects",
     .customSubjectsGet: "/v1/client/custom-subjects/{id}",
+    .harnessQueueGet: "/v1/client/harness-queue/{id}",
+    .harnessModelsGet: "/v1/client/harness-models/{id}",
+    .harnessControlReceiptGet: "/v1/client/harness-control-receipts/{id}",
     .hostRepositories: "/v1/client/hosts/{id}/repositories",
     .setsList: "/v1/client/sets",
     .setsGet: "/v1/client/sets/{id}",

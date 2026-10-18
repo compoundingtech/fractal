@@ -17,6 +17,8 @@ export type ActionCommon = {
   type: 
   "arrangement.edit"
   | "custom.reply"
+  | "harness.queue.mutate"
+  | "harness.model.set"
   | "prompt.respond"
   | "attention.resolve"
   | "review.approve"
@@ -78,10 +80,12 @@ export type ActionResult = {
   action_id: Id;
   affected_ids: Array<Id>;
   arrangement_revision?: Revision;
+  harness_control?: HarnessControlReceipt;
+  harness_model?: HarnessModelReceipt;
   kind: "action-result";
   operation_id: Id;
   snapshot_id: Id;
-  status: "accepted" | "completed" | "rejected";
+  status: "accepted" | "completed" | "rejected" | "dispatched" | "applied" | "indeterminate" | "cancelled";
   terminal_attachment?: (TerminalAttachment | null);
 };
 
@@ -1262,7 +1266,7 @@ export type Envelope = {
   api_version: "st3.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | HarnessQueueView | HarnessModelCatalogPage | HarnessControlOperationReceipt | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -1319,6 +1323,25 @@ export type ErrorCode = (
   | "response-budget-exceeded"
   | "content-not-text"
   | "internal"
+  | "stale-harness-control"
+  | "unsupported-harness-control"
+  | "missing-queue-entry"
+  | "already-dispatched"
+  | "invalid-queue-content"
+  | "invalid-idempotency-key"
+  | "stale-queue"
+  | "queue-full"
+  | "invalid-queue-move"
+  | "queue-revision-exhausted"
+  | "stale-queue-cursor"
+  | "queue-metadata-too-large"
+  | "queue-entry-too-large"
+  | "unsupported-harness-model"
+  | "stale-harness-model"
+  | "unavailable-harness-model"
+  | "unsupported-harness-effort"
+  | "harness-control-busy"
+  | "native-pre-dequeue-api-unavailable"
  | string);
 
 export type ErrorEnvelope = {
@@ -1403,9 +1426,174 @@ export type GlassTab = {
 
 export type GoldenResourceSet = Array<Resource>;
 
+export type HarnessApproval = {
+  reason: "native-live-approval-api-unavailable";
+  supported: false;
+};
+
+export type HarnessBinding = {
+  desired_revision: string;
+  incarnation_id: string;
+  session_id: string;
+  turn_id: string | null;
+};
+
+export type HarnessControlOperationReceipt = (HarnessControlReceipt | HarnessModelReceipt);
+
+export type HarnessControlReceipt = {
+  binding: HarnessBinding;
+  entry_id: string | null;
+  operation_id: string;
+  queue_revision: number;
+  reason: string | null;
+  result: (HarnessNativeResult | null);
+  status: HarnessOutcome;
+  subject: string;
+};
+
+export type HarnessControlState = {
+  approval: HarnessApproval;
+  binding: HarnessBinding;
+  idle: boolean;
+  input_supported: boolean;
+  models: HarnessModelsSummary;
+  reason: string | null;
+  steer: HarnessSteerCapability;
+  subject: string;
+};
+
+export type HarnessInputResult = {
+  native_event: "message_start" | "message_end";
+  turn_id: string | null;
+};
+
+export type HarnessModelCatalogPage = {
+  atomic_model_effort: false;
+  available: boolean;
+  choices: Array<HarnessModelChoice>;
+  complete: boolean;
+  cursor: string | null;
+  model_revision: string;
+  schema: "harness-models.v1";
+  selected: (HarnessSelectedModel | null);
+  source: string;
+  subject: string;
+  total: number;
+};
+
+export type HarnessModelChoice = {
+  id: string;
+  provider: string;
+  reasoning: boolean;
+  supported_efforts: Array<string>;
+};
+
+export type HarnessModelParameters = {
+  binding: HarnessBinding;
+  effort?: string;
+  model_id: string;
+  model_revision: string;
+  provider: string;
+  subject: string;
+};
+
+export type HarnessModelReceipt = {
+  binding: HarnessBinding;
+  model_revision: string;
+  operation_id: string;
+  reason: string | null;
+  result: (HarnessModelResult | null);
+  status: HarnessOutcome;
+  subject: string;
+};
+
+export type HarnessModelResult = {
+  atomic_model_effort: false;
+  effective_effort: string | null;
+  id: string | null;
+  provider: string | null;
+};
+
+export type HarnessModelsSummary = {
+  atomic_model_effort: false;
+  available: boolean;
+  catalog_path: string;
+  complete: boolean;
+  revision: string;
+  selected: (HarnessSelectedModel | null);
+  source: string;
+};
+
+export type HarnessNativeResult = (HarnessInputResult | HarnessModelResult);
+
+export type HarnessOutcome = "accepted" | "dispatched" | "applied" | "rejected" | "indeterminate" | "cancelled";
+
 export type HarnessPhase = {
   name: string;
   tasks: Array<HarnessTask>;
+};
+
+export type HarnessQueue = {
+  authority: "owner";
+  entries: Array<HarnessQueueEntry>;
+  revision: number;
+};
+
+export type HarnessQueueEntry = {
+  actor: string;
+  binding: HarnessBinding;
+  content: string;
+  id: string;
+  lane: "follow_up" | "steer";
+  operation_id: string;
+  reason: string | null;
+  result: (HarnessNativeResult | null);
+  status: HarnessOutcome;
+};
+
+export type HarnessQueueMutation = ({
+  content: string;
+  lane: "follow_up" | "steer";
+  type: "enqueue";
+} | {
+  before_id?: string | null;
+  entry_id: string;
+  type: "move";
+} | {
+  entry_id: string;
+  type: "cancel" | "promote";
+} | {
+  content: string;
+  entry_id: string;
+  type: "replace";
+});
+
+export type HarnessQueueParameters = {
+  binding: HarnessBinding;
+  mutation: HarnessQueueMutation;
+  queue_revision: number;
+  subject: string;
+};
+
+export type HarnessQueueView = {
+  cursor: string | null;
+  native: (HarnessControlState | null);
+  queue: HarnessQueue;
+  schema: "harness-queue.v1";
+  subject: string;
+  total: number;
+};
+
+export type HarnessSelectedModel = {
+  configured_effort: string;
+  effective_effort: string | null;
+  id: string;
+  provider: string;
+};
+
+export type HarnessSteerCapability = {
+  reason: "native-pre-dequeue-api-unavailable";
+  state: "unsupported";
 };
 
 export type HarnessTask = {
@@ -3322,6 +3510,8 @@ export type ActionRequest =
   reason?: string;
 }; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'custom.reply'; parameters: CustomReplyParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'harness.model.set'; parameters: HarnessModelParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'harness.queue.mutate'; parameters: HarnessQueueParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'lane.approve'; parameters: {
   anchor_id?: Id;
   detail?: string;

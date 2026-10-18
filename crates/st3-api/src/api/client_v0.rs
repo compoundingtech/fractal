@@ -115,6 +115,8 @@ fn record_subscription_page(value: &Value, bytes: usize) {
 use smallclaims::fifo::{Kind, Queue};
 
 pub mod raw_terminal;
+pub mod harness_control;
+pub mod harness_model;
 pub mod resources;
 pub mod search;
 pub mod arrangements;
@@ -2708,6 +2710,8 @@ const LIMITED_PAIRING_SCOPES: &[&str] = &[
     "control.launches",
 ];
 const ACTIONS: &[&str] = &[
+    "harness.model.set",
+    "harness.queue.mutate",
     "arrangement.edit",
     "attention.resolve",
     "review.approve",
@@ -2767,6 +2771,8 @@ const ACTIONS: &[&str] = &[
 ];
 const AVAILABLE_ACTIONS: &[&str] = &[
     "custom.reply",
+    "harness.model.set",
+    "harness.queue.mutate",
     "prompt.respond",
     "arrangement.edit",
     "review.approve",
@@ -10344,6 +10350,10 @@ pub struct ActionRequest {
 }
 
 fn action_scope(action: &str) -> Option<&'static str> {
+    if action == "harness.model.set" { return Some("control.runtimes"); }
+    if action == "harness.queue.mutate" {
+        return Some("control.runtimes");
+    }
     if matches!(
         action,
         "agent.create"
@@ -12199,6 +12209,14 @@ fn validate_action_admission(
     session: &ClientSession,
     request: &ActionRequest,
 ) -> Result<(), ApiError> {
+    validate_action_scope(session, request)?;
+    validate_action_actor(session, request)
+}
+
+fn validate_action_scope(
+    session: &ClientSession,
+    request: &ActionRequest,
+) -> Result<(), ApiError> {
     if request.api_version != CLIENT_API_VERSION
         || !request.id.starts_with("action/")
         || !(16..=256).contains(&request.idempotency_key.len())
@@ -12220,7 +12238,13 @@ fn validate_action_admission(
     }
     let scope = action_scope(&request.action_type)
         .ok_or_else(|| validation("the action type is unknown"))?;
-    require_scope(session, scope)?;
+    require_scope(session, scope)
+}
+
+fn validate_action_actor(
+    session: &ClientSession,
+    request: &ActionRequest,
+) -> Result<(), ApiError> {
     // Snapshot provenance is checked, while freshness belongs to the action's own
     // revision, generation, incarnation, or screen checks.
     let read_only_terminal_lifecycle = matches!(
@@ -12351,6 +12375,19 @@ async fn action_inner(
     // The message-send wrapper validates before reserving its gate and capacity.
     // Other actions retain their original admission order here.
     if reserved_gate.is_none() {
+        if matches!(
+            request.action_type.as_str(),
+            "harness.queue.mutate" | "harness.model.set"
+        ) {
+            // Harness control carries its own native-binding and person checks.
+            validate_action_scope(&session, &request)?;
+            validate_fence(&state, &request.fence)?;
+            return Ok(Json(if request.action_type == "harness.queue.mutate" {
+                harness_control::mutate(&state, &session, &request).await?
+            } else {
+                harness_model::mutate(&state, &session, &request).await?
+            }));
+        }
         validate_action_admission(&session, &request)?;
     }
     let gate = action_gate(&state, &session, &request.idempotency_key);

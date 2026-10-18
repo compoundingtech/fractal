@@ -215,6 +215,8 @@ order from the same admitted claims.
 | `local_git_change_records` | Local | Local Git change observation records and cursors. |
 | `local_glass_head_dirty` | Local | Glass heads whose published read needs refresh. |
 | `local_glass_head_pending` | Local | Glass-head projection work queue. |
+| `local_harness_control_state`, `local_harness_control_queue` | Local | Source-fenced native state and owner-held pending input queue for this daemon's live driver. Never replicated or included in shared projection digests. |
+| `local_harness_control_operations`, `local_harness_model_operations`, `local_harness_control_dispatch` | Local | Host-owned durable control/model receipt ledgers and the single unresolved native dispatch reservation. Restart preserves outcomes without transferring native execution authority to replicas. |
 | `local_idle_messages` | Local | Disposable message delivery and source-wake index, maintained by claim writes and backfilled in bounded startup batches. Excluded from replicated projection digests. |
 | `local_latest_slots` | Local | Local latest-retention publication slots and pending local observation pointers. |
 | `local_limit_stops` | Local | Seats this node's limits policy stopped, once per account and weekly window. |

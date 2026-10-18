@@ -177,13 +177,18 @@ fn forwarded_deadline(operation: &crate::peer::ClientReadOperation) -> Option<Du
     // would turn a completed mutation into an apparently failed read.
     use crate::peer::ClientReadOperation;
     match operation {
-        ClientReadOperation::TerminalControl { .. } => None,
+        ClientReadOperation::TerminalControl { .. }
+        | ClientReadOperation::HarnessQueueMutation { .. }
+        | ClientReadOperation::HarnessModelMutation { .. } => None,
         ClientReadOperation::ConversationChanges { .. }
         | ClientReadOperation::TerminalScreenChange { .. } => Some(ORDINARY + operation.wait()),
         ClientReadOperation::ConversationContent { .. }
         | ClientReadOperation::Timeline { .. }
         | ClientReadOperation::TerminalScreen { .. }
         | ClientReadOperation::SeatSnapshot { .. }
+        | ClientReadOperation::HarnessQueue { .. }
+        | ClientReadOperation::HarnessModels { .. }
+        | ClientReadOperation::HarnessControlReceipt { .. }
         | ClientReadOperation::AgentWorkspace { .. }
         | ClientReadOperation::Blob { .. }
         | ClientReadOperation::Messages { .. } => Some(ORDINARY),
