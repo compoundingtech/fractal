@@ -940,7 +940,7 @@ def apply_cut(args, nodes, files, tfiles, order):
     for n in moved:
         by_file[n.file].append(n)
     # module files to write: moved files and their ancestors
-    mod_files = set(by_file) | set(facade_blocks) | {r for r in test_decls if r in files}
+    mod_files = (set(by_file) | set(facade_blocks) | {r for r in test_decls if r in files}) - {"lib.rs"}
     for rel in list(mod_files):
         parts = module_path(rel)
         for k in range(1, len(parts)):
@@ -1170,6 +1170,7 @@ def apply_cut(args, nodes, files, tfiles, order):
            "",
            "pub use %s::*;" % lower, ""]
     lib += ["pub mod %s;" % m for m in top_mods]
+    lib += test_decls.get("lib.rs", [])
     lib += [""] + ["pub use %s::%s;" % (mp, t) for mp, t in traits_out]
     os.makedirs(new_src, exist_ok=True)
     open(os.path.join(new_src, "lib.rs"), "w").write("\n".join(lib) + "\n")
@@ -1444,6 +1445,9 @@ def cmd_sweep(args):
     removed = 0
     for rnd in range(args.rounds):
         out = subprocess.run(["cargo", "check", "--workspace", "--all-targets", "--keep-going", "--message-format=json"], capture_output=True, text=True).stdout
+        if any('"level":"error"' in l for l in out.split("\n") if l.startswith("{")):
+            print("sweep: the workspace does not build; fix it first")
+            return 1
         spans = collections.defaultdict(set)
         for line in out.split("\n"):
             try:
