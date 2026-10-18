@@ -40,8 +40,8 @@ fn text(value: &Value) -> String {
 }
 
 fn long_document() -> String {
-    let fixture: Value =
-        serde_json::from_str(include_str!("../../../../fixtures/clients/documents-v1.json")).unwrap();
+    let path = test_env!("CARGO_MANIFEST_DIR", "/../../fixtures/clients/documents-v1.json");
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     fixture["links"][0]["text"].as_str().unwrap().to_owned()
 }
 
