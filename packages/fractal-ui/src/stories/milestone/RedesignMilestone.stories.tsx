@@ -1,9 +1,10 @@
 /**
- * Redesign milestone 1 (RM1) — workshop only.
+ * Redesign milestone 1 (RM1) — accepted RM1 reference (2026-10-18); the live app ports slices separately.
  *
  * Composes approved picks (SR-2, WF-1, RC-1, RC-3, SG-1) and the decided layout calls (RM1-Q1…Q7) with new shell states:
- * roster loading, empty, roster error, thread unavailable, stale, no-match, an empty main area and a command palette. No
- * open question remains, so the only args are scheme and state. The composer is deliberately untouched.
+ * roster loading, empty, roster error, thread unavailable, stale, no-match, an empty main area and a command palette. The
+ * thread pane and the docked Changes split are the kit `Pane` and `DockedSplit`. No open question remains, so the only
+ * args are scheme and state. The composer is deliberately untouched.
  */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
@@ -21,7 +22,7 @@ const meta: Meta<Args> = {
   title: 'Fractal UI/Redesign milestone',
   parameters: {
     layout: 'fullscreen',
-    docs: { description: { component: `Workshop-only milestone. Decided: ${lockedDecisions.map(decision => decision.id).join(', ')}. Nothing here is the accepted live design.` } },
+    docs: { description: { component: `Accepted RM1 reference; live app ports slices separately. Decided: ${lockedDecisions.map(decision => decision.id).join(', ')}.` } },
   },
   args: { scheme: 'dark', state: 'slice' },
   argTypes: {

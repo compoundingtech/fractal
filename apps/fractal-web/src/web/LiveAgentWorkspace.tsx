@@ -17,7 +17,7 @@ import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import { SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, NarrowSheet, NarrowActionRow, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, SidebarQueryContext, sidebarRowAccessibleName, SystemNotice, ConnectionStatus, ThreadHeader, ResizableSplit, DockedSplit, NarrowSheet, NarrowActionRow, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
 // Deep import: the assistant-ui barrel would pull the transcript graph into the eager shell.
 import { Icon as CompositionIcon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
@@ -350,6 +350,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const panelSize = dragPanel ?? Math.min(maxPanel, Math.max(240, Math.round(panelFraction * viewport)))
   const maxSidebar = Math.max(208, Math.min(440, viewport - 640))
   const agentName = agent?.name ?? current.split('/').at(-1) ?? 'Conversation'
+  const changesWorkspace = agent?.workspace._tag === 'Known' ? JSON.stringify([agent.host, agent.workspace.value]) : current
   const terminalOpen = selectedPane.includes('terminal/')
   const toggleTerminal = () => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }
   const agentHeaderActions = current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} /></>
@@ -424,6 +425,11 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                 </aside>
                 <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
               </>}
+              <DockedSplit persistKey={`live.${changesWorkspace}.changes`} label="Resize changes" onCollapse={() => setDiffOpen(false)} dock={!narrow && diffOpen && openedTool === undefined && current !== '' ? (
+                <React.Suspense fallback={<aside aria-label="Changes" {...stylex.props(styles.changesPanel, styles.sheetPanel)}><SystemNotice kind="loading" title="Loading captured changes" /></aside>}>
+                  <ChangesInspector key={current} agentRef={current} width="dock" onClose={() => setDiffOpen(false)} />
+                </React.Suspense>
+              ) : undefined}>
               <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
                 <ClockedThreadHeader agent={agent} stale={stale} narrow={narrow} sidebarCollapsed={narrow} onToggleSidebar={() => setAgentsOpen(true)} sidebarSheet={{ open: agentsOpen, id: agentsSheetId }} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={narrow ? undefined : agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrow ? narrowDetailsOpen : diffOpen} drawerOpen={terminalOpen} onTogglePanel={narrow ? () => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) } : () => setDiffOpen((value) => !value)} onToggleDrawer={toggleTerminal} />
                 <GatewayConnectionStatus />
@@ -444,14 +450,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
                 ) : null}
                 <div ref={setPaneHost} {...stylex.props(styles.body)} />
               </section>
-              {!narrow && diffOpen && openedTool === undefined && current !== '' ? (
-                <>
-                  <ResizableSplit id="live-change-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Change panel width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setDiffOpen(false)} onReset={() => setPanelFraction(380 / viewport)} />
-                  <React.Suspense fallback={<aside aria-label="Changes" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}><SystemNotice kind="loading" title="Loading captured changes" /></aside>}>
-                    <ChangesInspector key={current} agentRef={current} width={panelSize} />
-                  </React.Suspense>
-                </>
-              ) : null}
+              </DockedSplit>
               {!narrow && openedTool !== undefined && current !== '' ? (
                 <>
                   <ResizableSplit id="live-tool-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Tool detail panel width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setOpenedTool(undefined)} onReset={() => setPanelFraction(380 / viewport)} />

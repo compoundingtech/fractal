@@ -214,6 +214,14 @@ boundary. `LiveHeader.integration.test.tsx` exercises the actual shell and kit i
 with decoded public conversation frames; `capturedChanges.unit.test.ts` guards the
 capture, count, provenance and selection rules.
 
+On desktop, the shared kit `DockedSplit` places captured Changes beside the thread.
+Both panes use the compact 32 px header. The separator clamps to 320–720 px:
+arrow keys resize by 8 px (Shift: 32 px), Home/End select the bounds, Enter closes,
+and double-click restores the default. Width persists in browser storage per reported
+host/workspace, with the conversation identity used when the workspace is unknown.
+Pointer resize updates a CSS variable and separator ARIA values without re-rendering
+the thread. Closing Changes unmounts its lazy inspector and releases its demand.
+
 ## Fractal web composer
 
 The conversation pane mounts the kit's `EmbraceComposer`. Its app-side binding lives in

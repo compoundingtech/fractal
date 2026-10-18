@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Dock captured Changes beside the Fractal thread with shared compact pane headers and a keyboard-accessible, workspace-persisted 320–720 px split.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Browser layout widths are stored per reported host and workspace; agents without a reported workspace use their conversation identity. Captured changes remain successful-tool observations, not current working-tree state." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

@@ -4,6 +4,7 @@ import { Button } from 'react-aria-components'
 import { interactionVars as interaction, colorVars as c, typeVars as t, radiusVars as r, geometryVars as g } from '../composition-tokens.stylex'
 import { SidebarStatus as StatusGlyph } from '../sidebar/SidebarStatus'
 import { Icon } from './Icons'
+import { paneHeaderStyles } from './Pane'
 import type { AgentStatus } from '../sidebar/model'
 
 /**
@@ -152,12 +153,12 @@ export function ThreadHeader({
   onToggleSidebar?: () => void
   /** The expand toggle opens the sidebar as a sheet (narrow hosts): its open state and dialog id, for `aria-expanded`/`aria-controls`. */
   sidebarSheet?: { readonly open: boolean; readonly id: string }
-  /** The host is below its drawer breakpoint: the header keeps the breadcrumb and status, the host crumb may shrink, and one Agent details button opens `panelOpen`'s sheet. */
+  /** The host is below its drawer breakpoint: the header keeps its 52px band, the breadcrumb and status, the host crumb may shrink, and one Agent details button opens `panelOpen`'s sheet. Wide hosts get the shared 32px pane header. */
   narrow?: boolean
 }) {
   const terminalReasonId = React.useId()
   return (
-    <header data-testid="thread-header" {...stylex.props(styles.header)}>
+    <header data-testid="thread-header" {...stylex.props(styles.header, !narrow && paneHeaderStyles.header)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
         <button type="button" aria-label="Expand sidebar" title="Expand sidebar" onClick={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { 'aria-haspopup': 'dialog' as const, 'aria-expanded': sidebarSheet.open, ...(sidebarSheet.open ? { 'aria-controls': sidebarSheet.id } : {}) })} {...stylex.props(styles.ghostMd)}>
           <Icon name="chevron-right" />

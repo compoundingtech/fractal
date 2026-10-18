@@ -5,6 +5,7 @@ import { diffPanelVars as diffColor, interactionVars as interaction, surfaceVars
 import { surfaceOptions } from '../composition-model'
 import { Icon } from './Icons'
 import { Button, IconButton, Tooltip } from './Controls'
+import { PaneHeader } from './Pane'
 import { HighlightedSource, languageFromPath } from './Markdown'
 import { ThemePortal } from '../taste/ThemePortal'
 
@@ -29,6 +30,10 @@ export interface DiffPanelProps {
   revealRequest?: DiffRevealRequest
   onOpenSurface?: (key: string) => void
   onClose?: () => void
+  /** Accessible name of the close button; defaults to `Close ${title}`. */
+  closeLabel?: string
+  /** Provenance or source controls shown directly under the header, above the diff toolbar; scrolls within a bounded band. */
+  info?: React.ReactNode
   turns?: readonly DiffTurn[]
 }
 
@@ -118,7 +123,7 @@ function FileDiff({ file, landmarkContext, collapsed, onToggle, layout, wrap, hi
   </section>
 }
 
-export const DiffPanel = React.memo(function DiffPanel({ open, width = '100%', title = 'Changes', landmarkContext, diff, path, added, removed, currentTurnFiles, branchFiles, revealRequest, onOpenSurface, onClose, turns }: DiffPanelProps) {
+export const DiffPanel = React.memo(function DiffPanel({ open, width = '100%', title = 'Changes', landmarkContext, diff, path, added, removed, currentTurnFiles, branchFiles, revealRequest, onOpenSurface, onClose, closeLabel, info, turns }: DiffPanelProps) {
   const [scope, setScope] = React.useState<DiffScope>('branch')
   const [layout, setLayout] = React.useState<'unified' | 'split'>('unified')
   const [wrap, setWrap] = React.useState(false)
@@ -149,8 +154,9 @@ export const DiffPanel = React.memo(function DiffPanel({ open, width = '100%', t
   if (!open) return null
   return <ThemePortal><aside aria-label={landmarkContext ? `${title}, ${landmarkContext}` : title} data-testid="diff-panel" {...stylex.props(styles.panel, styles.width(width))}>
     <Tabs selectedKey={surfaceKey} onSelectionChange={key => { setSurfaceKey(String(key)); onOpenSurface?.(String(key)) }} {...stylex.props(styles.tabRoot)}>
-      <div {...stylex.props(styles.surfaceHead)}><h2 {...stylex.props(styles.title)}>{title}</h2><TabList aria-label="Surfaces" {...stylex.props(styles.tabs)}>{surfaceOptions.map(option => <Tab key={option.key} id={option.key} {...stylex.props(styles.tab)}>{option.label}</Tab>)}</TabList>{onClose && <IconButton icon="x" label={`Close ${title}`} onPress={onClose} />}</div>
+      <PaneHeader testId="diff-panel-header" actions={onClose && <IconButton icon="x" label={closeLabel ?? `Close ${title}`} onPress={onClose} />}><h2 {...stylex.props(styles.title)}>{title}</h2><TabList aria-label="Surfaces" {...stylex.props(styles.tabs)}>{surfaceOptions.map(option => <Tab key={option.key} id={option.key} {...stylex.props(styles.tab)}>{option.label}</Tab>)}</TabList></PaneHeader>
       <TabPanel id="diff" {...stylex.props(styles.body)}>
+        {info === undefined ? null : <div data-testid="diff-panel-info" {...stylex.props(styles.info)}>{info}</div>}
         <div role="toolbar" aria-label="Diff options" {...stylex.props(styles.toolbar)}>
           <Select aria-label="Change scope" selectedKey={selectedScope} disabledKeys={scopes.filter(choice => !choice.available).map(choice => choice.id)} onSelectionChange={key => { if (key === 'current' || key === 'branch') setScope(key) }}><AriaButton {...stylex.props(styles.scopePicker)}><SelectValue /><Icon name="chevron-down" /></AriaButton><Popover {...stylex.props(styles.popover)}><ListBox items={scopes}>{choice => <ListBoxItem id={choice.id} textValue={choice.label} {...stylex.props(styles.option)}>{choice.label}{!choice.available ? <span {...stylex.props(styles.unavailable)}> — Not supplied</span> : null}</ListBoxItem>}</ListBox></Popover></Select>
           <span {...stylex.props(styles.fileCount)}>{files.length} {files.length === 1 ? 'file' : 'files'}</span>{totalAdded !== 0 && <span {...stylex.props(styles.added)}>+{totalAdded}</span>}{totalRemoved !== 0 && <span {...stylex.props(styles.removed)}>−{totalRemoved}</span>}<span {...stylex.props(styles.spacer)} />
@@ -172,8 +178,8 @@ const styles = stylex.create({
   panel: { flexShrink: 0, height: '100%', backgroundColor: surface.canvas, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' },
   width: (width: number | string) => ({ width }),
   tabRoot: { display: 'flex', flexDirection: 'column', minHeight: 0, height: '100%' },
-  surfaceHead: { minHeight: g.controlLg, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
-  title: { margin: 0, fontSize: t.uiSize, fontWeight: t.weightMedium, color: text.fg, flexShrink: 0 },
+  title: { margin: 0, paddingInline: s.sm, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, color: text.fg, flexShrink: 0 },
+  info: { flexShrink: 0, maxHeight: '40%', overflowY: 'auto', boxSizing: 'border-box', borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   tabs: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0, overflowX: 'auto' },
   tab: { height: g.controlSm, maxWidth: g.tabMax, display: 'inline-flex', alignItems: 'center', paddingInline: s.md, color: text.fgMuted, borderRadius: r.control, fontSize: t.metaSize, whiteSpace: 'nowrap', flexShrink: 0, cursor: 'pointer', ':hover': { color: text.fg }, ':is([data-selected])': { backgroundColor: surface.rowActive, color: text.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   body: { display: 'flex', flexDirection: 'column', minHeight: 0, flexGrow: 1 },
