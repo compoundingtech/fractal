@@ -9,7 +9,7 @@ export type ObservedClock =
 
 /** Retain the last live clock sample while transport is unavailable. Recovery resumes wall time.
  * Atom self-retention shares one clock across rows and retained panes, without a React subscription. */
-export const createObservedClock = (source: Pick<DataSource, 'now' | 'clock' | 'connection' | 'network'> & {
+export const createObservedClock = (source: Pick<DataSource, 'now' | 'connection' | 'network'> & {
   readonly sync?: Pick<NonNullable<DataSource['sync']>, 'gateway'>
 }): Atom.Atom<ObservedClock> =>
   Atom.make((get): ObservedClock => {
@@ -19,8 +19,7 @@ export const createObservedClock = (source: Pick<DataSource, 'now' | 'clock' | '
     const paused = network?._tag === 'Offline' || connection._tag !== 'Live' || (sync !== undefined && sync.status._tag !== 'Live')
     if (paused) {
       const previous = Option.getOrUndefined(get.self<ObservedClock>())
-      // A live source's `now` atom is minute-coarse, so the pause instant is read from its fresh clock.
-      return previous?._tag === 'Paused' ? previous : { _tag: 'Paused', now: source.clock?.now() ?? previous?.now ?? get(source.now) }
+      return previous?._tag === 'Paused' ? previous : { _tag: 'Paused', now: previous?.now ?? get(source.now) }
     }
     return { _tag: 'Live', now: get(source.now) }
   }).pipe(Atom.keepAlive)

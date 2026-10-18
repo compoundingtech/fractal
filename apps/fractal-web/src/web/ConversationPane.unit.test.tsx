@@ -26,7 +26,9 @@ vi.mock('../data/react.tsx', async () => {
   useConversationSync: (ref: string) => { source.conversationSync(ref); return source.sync },
   useDataSource: () => ({ agents, conversationInterest: undefined, retryConversation: source.retryConversation }),
   useFeedInterest: source.feedInterest,
-  useObservedNow: () => ({ _tag: 'Live', now: 1000 }),
+  useNow: () => 1000,
+  useNowSnapshot: () => 1000,
+  usePausedNow: () => undefined,
   useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', terminalInput: 'ungranted' }),
   useAttention: () => ({ _tag: 'Waiting' }),
   })
@@ -201,7 +203,8 @@ describe('ConversationPane kit composition', () => {
       ts.forEachChild(node, visit)
     }
     visit(tree)
-    expect(intrinsicElements).toEqual(['div', 'div', 'div'])
+    // The empty-publication placeholder adds the fourth div.
+    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div'])
     expect(pane).toContain("style={{ display: 'contents' }}")
     const workspace = readFileSync(new URL('./LiveAgentWorkspace.tsx', import.meta.url), 'utf8')
     expect(workspace).toContain('createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} />, paneHost)')

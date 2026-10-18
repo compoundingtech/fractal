@@ -16,7 +16,6 @@ import {
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
-import { systemClock } from '@smalltalk/fractal-ui/human-time/clock'
 
 /** One SDK runtime and one frame writer for the application's retained live projections. */
 import { incrDebug, setDebug } from '../telemetry/meters.tsx'
@@ -182,7 +181,7 @@ export const liveSource = ({
     discovery: client,
     registry,
   })
-  const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: systemClock.now })
+  const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
   const runtime = ManagedRuntime.make(
     St3Live({
       ...options,
@@ -1076,7 +1075,6 @@ export const liveSource = ({
       label: 'gateway',
       gateway: new URL(baseUrl).host,
       now: wallClock,
-      clock: systemClock,
       grants,
       contentSearch: gatewayContentSearch(client),
       attachments: { ...attachments, send: (request) => retainConversation(request.parameters.to).send(request) },

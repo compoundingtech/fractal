@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import { RegistryContext, useAtom, useAtomValue } from '@effect/atom-react'
@@ -53,10 +54,11 @@ export const ConversationHeaderActions = ({ agentRef, ux }: { readonly agentRef:
   const [cache, setCache] = React.useState<'retained' | 'cold'>('cold')
   const onOpenChange = (open: boolean) => {
     if (open) {
+      markStart('resources_panel', { key: agentRef })
       setCache(registry.get(atoms.resources(agentRef))._tag === 'Observed' ? 'retained' : 'cold')
       setOpening(ux?.beginOpen({ surface: 'resources' }))
     }
-    else { opening?.cancel(); setOpening(undefined) }
+    else { cancelMeasure('resources_panel'); opening?.cancel(); setOpening(undefined) }
     setResourcesOpen(open)
   }
   const shellCommit = React.useCallback((node: HTMLElement | null) => {
@@ -106,6 +108,10 @@ const ResourceContents = ({ agentRef, resources, opening, cache }: {
     if (queue._tag !== 'Waiting') opening?.phase('queue')
     if (resources._tag !== 'Waiting' && queue._tag !== 'Waiting') return opening?.contentCommitted()
   }, [opening, cache, resources._tag, queue._tag])
+  const settled = queue._tag === 'Observed' && resources._tag === 'Observed' && !resources.value.loadingMore
+  React.useLayoutEffect(() => {
+    if (settled) return measureEnd('resources_panel', agentRef)
+  }, [agentRef, settled])
   return <div {...stylex.props(styles.contents)}>
     <section aria-label="Todos">
       <h2 {...stylex.props(styles.sectionTitle)}>Todos</h2>
@@ -159,5 +165,5 @@ const styles = stylex.create({
   resourceMetadata: { display: 'flex', justifyContent: 'space-between', gap: s.md, fontSize: t.metaSize, color: c.fgMuted },
   popover: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 100 },
   menu: { padding: s.xs, outline: 'none' },
-  menuItem: { padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-selected])': { color: c.primary } },
+  menuItem: { padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-focus-visible])': { outlineWidth: 2, outlineStyle: 'solid', outlineColor: c.fgMuted, outlineOffset: -2 }, ':is([data-selected])': { color: c.primary } },
 })

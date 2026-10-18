@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { FocusScope } from 'react-aria'
-import { borderVars as border, elevationVars as elevation, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { borderVars as border, elevationVars as elevation, geometryVars as g, interactionVars as interaction, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 
 export interface SidePanelProps {
   /** Landmark name; the panel is a labelled complementary region, never a dialog. */
@@ -52,6 +52,11 @@ const styles = stylex.create({
     width: 380, maxWidth: 'calc(100vw - 24px)', minHeight: 0,
     backgroundColor: surface.raised, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize,
     borderInlineStartWidth: 1, borderInlineStartStyle: 'solid', borderInlineStartColor: border.borderStrong,
-    boxShadow: elevation.dialog, outline: 'none',
+    boxShadow: elevation.dialog,
+    // Programmatic open focus stays quiet; keyboard focus on the region paints the kit ring inside its edge.
+    outlineStyle: { default: 'none', ':focus-visible': 'solid' },
+    outlineWidth: { default: null, ':focus-visible': g.focusRing },
+    outlineColor: { default: null, ':focus-visible': interaction.focusRing },
+    outlineOffset: { default: null, ':focus-visible': `calc(-1 * ${g.focusRing})` },
   },
 })

@@ -5,80 +5,8 @@ import stylex from '@stylexjs/unplugin'
 
 const server = await createServer({ configFile: false, root: new URL('../../', import.meta.url).pathname, plugins: [stylex.vite({ useCSSLayers: false })], optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true } })
 after(() => server.close())
-const { createSystemClock } = await server.ssrLoadModule('/src/time/clock.tsx')
 const { formatClock, formatDay, formatDuration, formatRelative, nextCivilChange, nextCountdownChange, nextDurationChange, nextRelativeChange, earliestChange } = await server.ssrLoadModule('/src/time/human-time.ts')
 const { syncLine, syncLineNextChange } = await server.ssrLoadModule('/src/assistant-ui/st3-views/sync-line.ts')
-
-/** A host whose timers and visibility the test drives. */
-const pageHost = (start = 0) => {
-  let time = start, hidden = false, nextId = 0
-  const timers = new Map()
-  const listeners = new Set()
-  return {
-    host: {
-      now: () => time,
-      setTimer: (run, ms) => { timers.set(++nextId, { at: time + ms, run }); return nextId },
-      clearTimer: id => { timers.delete(id) },
-      hidden: () => hidden,
-      onVisibilityChange: listener => { listeners.add(listener); return () => listeners.delete(listener) },
-    },
-    armedAt: () => [...timers.values()].map(timer => timer.at).sort((a, b) => a - b),
-    listeners: () => listeners.size,
-    advance: to => {
-      for (;;) {
-        const [id, timer] = [...timers].sort(([, a], [, b]) => a.at - b.at)[0] ?? []
-        if (id === undefined || timer.at > to) break
-        timers.delete(id)
-        time = timer.at
-        timer.run()
-      }
-      time = to
-    },
-    setHidden: value => { hidden = value; for (const listener of [...listeners]) listener() },
-  }
-}
-
-test('one shared timer wakes only the subscribers that are due', () => {
-  const page = pageHost()
-  const clock = createSystemClock(page.host)
-  const wakes = []
-  let minuteDue = 60_000
-  clock.subscribe(() => { wakes.push(['minute', clock.now()]); minuteDue += 60_000 }, () => minuteDue)
-  clock.subscribe(() => wakes.push(['once', clock.now()]), () => wakes.some(([name]) => name === 'once') ? undefined : 90_000)
-  assert.deepEqual(page.armedAt(), [60_000])
-  page.advance(10 * 60_000)
-  assert.deepEqual(wakes, [['minute', 60_000], ['once', 90_000], ...Array.from({ length: 9 }, (_, index) => ['minute', (index + 2) * 60_000])])
-  assert.deepEqual(page.armedAt(), [11 * 60_000])
-})
-
-test('a subscriber with no deadline arms nothing; the last unsubscribe releases timer and visibility listener', () => {
-  const page = pageHost()
-  const clock = createSystemClock(page.host)
-  const stopIdle = clock.subscribe(() => assert.fail('an idle subscriber must not wake on a timer'), () => undefined)
-  assert.deepEqual(page.armedAt(), [])
-  const stop = clock.subscribe(() => {}, () => 5_000)
-  assert.deepEqual(page.armedAt(), [5_000])
-  stop()
-  assert.deepEqual(page.armedAt(), [])
-  stopIdle()
-  assert.equal(page.listeners(), 0)
-})
-
-test('hidden pages arm nothing and becoming visible wakes every subscriber once', () => {
-  const page = pageHost()
-  const clock = createSystemClock(page.host)
-  const wakes = []
-  let due = 60_000
-  clock.subscribe(() => { wakes.push(['a', clock.now()]); due = (Math.floor(clock.now() / 60_000) + 1) * 60_000 }, () => due)
-  clock.subscribe(() => wakes.push(['b', clock.now()]), () => undefined)
-  page.setHidden(true)
-  assert.deepEqual(page.armedAt(), [])
-  page.advance(30 * 60_000 + 5_000)
-  assert.deepEqual(wakes, [])
-  page.setHidden(false)
-  assert.deepEqual(wakes, [['a', 30 * 60_000 + 5_000], ['b', 30 * 60_000 + 5_000]])
-  assert.deepEqual(page.armedAt(), [31 * 60_000])
-})
 
 const zone = { locale: 'en-GB', timeZone: 'Europe/Berlin' }
 const base = Date.parse('2026-10-14T21:47:13.250Z')

@@ -1,4 +1,5 @@
 import { useAtomValue } from '@effect/atom-react'
+import { SystemNotice } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import type * as St3 from '@smalltalk/st3-client/schema'
 import * as stylex from '@stylexjs/stylex'
 import { DateTime } from 'effect'
@@ -6,10 +7,8 @@ import * as React from 'react'
 import * as Aria from 'react-aria-components'
 
 import { ago } from '../../../../clients/typescript/st3-views/time.ts'
-import { earliestChange, nextCivilChange, nextDurationChange } from '@smalltalk/fractal-ui/human-time/format'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource, useNow } from '../data/react.tsx'
-import type { Feed } from '../data/source.ts'
 import { hiddenByDefault, missionWord, presentMission, sortMissions, type MissionPresentation, type PresentedStep, type StepWord } from './presentation.ts'
 
 // The Missions screen: every mission with its word and who must act, in the contract's order,
@@ -23,20 +22,12 @@ type Row = { readonly mission: St3.Mission; readonly presentation: MissionPresen
 
 const startOfDay = (now: number) => { const day = new Date(now); day.setHours(0, 0, 0, 0); return day.getTime() }
 
-const unavailable = (feed: Extract<Feed<unknown>, { _tag: 'Unavailable' }>) =>
-  feed.reason === 'ungranted' ? 'Read access to missions has not been granted.'
-    : feed.reason === 'unsupported' ? 'This connection does not support missions.'
-      : 'Missions could not be loaded; reconnect and try again.'
-
 export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: string) => void }): React.ReactNode => {
   const source = useDataSource()
   const missions = useAtomValue(source.missions)
   const agents = useAtomValue(source.agents)
   const attention = useAtomValue(source.attention)
-  const now = useNow(now => earliestChange(now, [
-    nextCivilChange(now),
-    ...(missions._tag === 'Observed' ? missions.value.map(mission => nextDurationChange(DateTime.toEpochMillis(mission.updated_at), now, { maxUnits: 1 })) : []),
-  ]))
+  const now = useNow()
   const [all, setAll] = React.useState(false)
   const [open, setOpen] = React.useState<string>()
   const rows = React.useMemo((): readonly Row[] => {
@@ -60,9 +51,14 @@ export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: str
         ) : null}
       </header>
       <div {...stylex.props(styles.body)}>
-        {missions._tag === 'Waiting' ? <p role="status" {...stylex.props(styles.notice)}>Loading missions…</p>
-          : missions._tag === 'Unavailable' ? <p role="status" {...stylex.props(styles.notice)}>{unavailable(missions)}</p>
-            : shown.length === 0 ? <p role="status" {...stylex.props(styles.notice)}>{rows.length === 0 ? 'No missions.' : 'Nothing running today.'}</p>
+        {missions._tag === 'Waiting' ? <SystemNotice kind="loading" title="Loading missions" />
+          : missions._tag === 'Unavailable' ? <SystemNotice
+            kind="error"
+            connection={missions.reason !== 'ungranted' && missions.reason !== 'unsupported'}
+            title={missions.reason === 'ungranted' ? 'No access to missions' : missions.reason === 'unsupported' ? 'Missions not supported' : 'Missions could not load'}
+            {...(missions.reason === 'ungranted' ? { detail: 'Read access has not been granted' } : missions.reason === 'unsupported' ? { detail: 'This connection does not offer them' } : {})}
+          />
+            : shown.length === 0 ? <SystemNotice kind="empty" title={rows.length === 0 ? 'No missions' : 'Nothing running today'} />
               : (
                 <ul {...stylex.props(styles.list)}>
                   {shown.map(({ mission, presentation }) => {

@@ -5,9 +5,8 @@ import { RegistryContext } from '@effect/atom-react'
 import { DetailsPane, Workbench } from '@smalltalk/fractal-ui/assistant-ui'
 import type { DetailsLayoutIntent, DetailsVariants, WorkbenchLayout, WorkbenchResources } from '@smalltalk/fractal-ui/assistant-ui'
 import type { SyncStatus } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-status.ts'
-import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { useGatewaySync } from '../data/react.tsx'
-import { useClockTime, useClockWake } from '@smalltalk/fractal-ui/human-time/clock'
+import { colorVars as c, geometryVars as g, interactionVars as interaction, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { useClockDeadline, useGatewaySync, useNowSnapshot } from '../data/react.tsx'
 import { syncLineNextChange } from '@smalltalk/fractal-ui/assistant-ui/sync-status'
 import { earliestChange } from '@smalltalk/fractal-ui/human-time/format'
 import { useDetailsSections, useDetailsSupplement } from '../extensions/build.ts'
@@ -70,7 +69,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
   const [inspectedUri, setInspectedUri] = React.useState<string>()
   const portalContainer = React.useRef<HTMLDivElement>(null)
   const resource = suppliedSections.flatMap(section => section.items._tag === 'Known' ? section.items.value : []).find(item => item.uri === inspectedUri)
-  const now = useClockTime()
+  const now = useNowSnapshot()
   const [requestedAt] = React.useState(now)
   const gateway = useGatewaySync()
   const scopedRoot = native.trace.nativeSessionId._tag === 'Known' ? native.trace.nativeSessionId.value : undefined
@@ -103,7 +102,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
         ? gateway?.status._tag === 'Stale' ? gateway.status : { _tag: 'Stale', reason: { _tag: 'Unknown' }, ...(native.observedAt === undefined ? {} : { lastLiveAt: native.observedAt }) }
         : gateway?.status ?? { _tag: 'Live', since: native.observedAt ?? requestedAt })
   const receivedAt = supplement._tag === 'Observed' && supplement.freshness === 'stale' ? supplement.value.receivedAtMs : undefined
-  useClockWake(earliestChange(now, [
+  useClockDeadline(earliestChange(now, [
     syncLineNextChange({ status, label: 'agent details', now, observedAt: native.observedAt ?? requestedAt }),
     receivedAt === undefined ? undefined : receivedAt + (Math.floor(Math.max(0, now - receivedAt) / 1000) + 1) * 1000,
   ]))
@@ -137,7 +136,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
 const styles = stylex.create({
   root: { flexShrink: 0, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflow: 'hidden', backgroundColor: c.canvas, color: c.fg },
   closeBar: { display: 'flex', justifyContent: 'flex-end', flexShrink: 0, padding: s.xs },
-  close: { fontSize: t.metaSize, color: c.fgMuted, backgroundColor: 'transparent', borderWidth: 0, padding: s.xs },
+  close: { fontSize: t.metaSize, color: c.fgMuted, backgroundColor: 'transparent', borderWidth: 0, padding: s.xs, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   content: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, flexGrow: 1, overflowY: 'auto' },
   coverage: { margin: 0, padding: s.sm, fontSize: t.metaSize, color: c.fgMuted, overflowWrap: 'anywhere', flexShrink: 0 },
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0, 0, 0, 0.4)' },

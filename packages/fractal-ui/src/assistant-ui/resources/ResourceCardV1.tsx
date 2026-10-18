@@ -3,7 +3,7 @@
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import { Button, Dialog, Heading, Modal, ModalOverlay, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
-import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { interactionVars as interaction, surfaceVars as surface, textVars as ink, borderVars as border, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import type { ResourceData as TasteResource, ResourceFile as TasteFile, ResourceState as TasteState, ResourceMetadata } from './resource-model.ts'
 import { Icon, type IconName } from '../composition/Icons'
 export type ResourceVariant = 'RC-1' | 'RC-2' | 'RC-3'
@@ -98,7 +98,7 @@ export function ResourceChipV1({ resource, file, onOpen }: { resource: TasteReso
 }
 const styles = stylex.create({
   card: { position: 'relative', borderRadius: r.md, overflow: 'hidden', minWidth: 0 }, wash: { backgroundColor: surface.washSubtle }, outline: { borderWidth: 1, borderStyle: 'solid', borderColor: border.border },
-  summary: { minHeight: g.footer, display: 'flex', alignItems: 'center', gap: s.md, width: '100%', paddingInline: s.lg, backgroundColor: surface.transparent, color: ink.fgSoft, borderWidth: 0, textAlign: 'left', cursor: 'pointer', fontFamily: t.fontSans, fontSize: t.uiSize, ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: -2 } },
+  summary: { minHeight: g.footer, display: 'flex', alignItems: 'center', gap: s.md, width: '100%', paddingInline: s.lg, backgroundColor: surface.transparent, color: ink.fgSoft, borderWidth: 0, textAlign: 'left', cursor: 'pointer', fontFamily: t.fontSans, fontSize: t.uiSize, ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -2 } },
   title: { flexGrow: 1, minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }, count: { fontFamily: t.fontMono, fontSize: t.metaSize, flexShrink: 0, minWidth: '4ch', textAlign: 'right' }, action: { width: g.footer, flexShrink: 0, textAlign: 'right', whiteSpace: 'nowrap' }, added: { color: ink.fgMuted }, removed: { color: ink.fgMuted }, detail: { fontSize: t.metaSize, color: ink.fgMuted, lineHeight: t.metaLeading },
   priorityRow: { boxSizing: 'border-box', minWidth: 0, gap: s.xs, paddingInline: s.sm },
   priorityTitle: { flexBasis: 0, flexShrink: 0 },
@@ -120,12 +120,12 @@ const styles = stylex.create({
   titleReservation: (width: number) => ({ minWidth: width }),
   numericMeta: { fontFamily: t.fontMono },
   priorityCount: { minWidth: 0, marginInlineStart: s.xs },
-  file: { width: '100%', minHeight: g.toolRow, paddingInline: s.lg, display: 'flex', alignItems: 'center', gap: s.md, backgroundColor: surface.transparent, color: ink.fgMuted, borderWidth: 0, cursor: 'pointer', textAlign: 'left', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: -2 } },
-  path: { fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading }, chips: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: s.md }, chip: { display: 'inline-flex', alignItems: 'center', verticalAlign: 'baseline', boxSizing: 'border-box', height: s.xxl, lineHeight: t.metaLeading, gap: s.md, paddingBlock: s.zero, paddingInline: s.sm, borderRadius: r.sm, borderWidth: 0, backgroundColor: surface.controlFill, color: ink.fgSoft, fontFamily: t.fontMono, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outline: `2px solid ${accent.primary}` } },
+  file: { width: '100%', minHeight: g.toolRow, paddingInline: s.lg, display: 'flex', alignItems: 'center', gap: s.md, backgroundColor: surface.transparent, color: ink.fgMuted, borderWidth: 0, cursor: 'pointer', textAlign: 'left', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: -2 } },
+  path: { fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading }, chips: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: s.md }, chip: { display: 'inline-flex', alignItems: 'center', verticalAlign: 'baseline', boxSizing: 'border-box', height: s.xxl, lineHeight: t.metaLeading, gap: s.md, paddingBlock: s.zero, paddingInline: s.sm, borderRadius: r.sm, borderWidth: 0, backgroundColor: surface.controlFill, color: ink.fgSoft, fontFamily: t.fontMono, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   hover: { maxWidth: 'min(480px, calc(100vw - 24px))', padding: s.lg, backgroundColor: surface.raised, color: ink.fg, borderRadius: r.md, borderWidth: 1, borderStyle: 'solid', borderColor: border.borderStrong, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.uiLeading, zIndex: 10 }, preview: { margin: 0, marginTop: s.md, padding: s.md, backgroundColor: surface.codeBg, borderRadius: r.sm, fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   icon: { flexShrink: 0 }, hoverTitle: { fontWeight: 600, fontSize: t.uiSize, margin: s.zero }, meta: { minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' },
   overlay: { position: 'fixed', inset: 0, zIndex: 20, backgroundColor: surface.scrim, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: s.xl },
   modal: { width: g.modalMax, maxWidth: '100%', maxHeight: '80dvh', overflowY: 'auto', backgroundColor: surface.raised, color: ink.fg, borderRadius: r.md, borderWidth: 1, borderStyle: 'solid', borderColor: border.borderStrong },
   dialog: { padding: s.xl, display: 'flex', flexDirection: 'column', gap: s.md, fontFamily: t.fontSans, outline: 'none' },
-  close: { alignSelf: 'flex-end', padding: s.md, borderRadius: r.sm, borderWidth: 0, backgroundColor: surface.controlFill, color: ink.fg, cursor: 'pointer', ':focus-visible': { outline: `2px solid ${accent.primary}` } },
+  close: { alignSelf: 'flex-end', padding: s.md, borderRadius: r.sm, borderWidth: 0, backgroundColor: surface.controlFill, color: ink.fg, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
 })

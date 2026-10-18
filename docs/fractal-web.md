@@ -14,7 +14,7 @@ or contact an agent-selected tracking endpoint.
 The policy is:
 
 ```text
-default-src 'self'; script-src 'self' 'wasm-unsafe-eval' <inline-script SHA-256 hashes>; style-src 'self' 'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o=' 'sha256-gYiS/BvZvRcK27JIXTuwhZ3hs2+VJ1X+2gUlE+farlg='; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws://<page-authority> wss://<page-authority> <configured collector origins>; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
+default-src 'self'; script-src 'self' 'wasm-unsafe-eval' <inline-script SHA-256 hashes>; style-src 'self' 'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o=' 'sha256-gYiS/BvZvRcK27JIXTuwhZ3hs2+VJ1X+2gUlE+farlg=' <inline-stylesheet SHA-256 hashes>; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws://<page-authority> wss://<page-authority> <configured collector origins>; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
 ```
 
 `'wasm-unsafe-eval'` lets the terminal key encoder compile its WebAssembly module.
@@ -25,11 +25,16 @@ connect, the server's deployment identity, and Vite's development React-refresh
 preamble. There is no script `unsafe-inline` or `unsafe-eval` exception. Compiled
 StyleX CSS and fonts are same-origin. Only `style-src-attr` needs `unsafe-inline`:
 StyleX variable values, resizable widths and React Aria positioning are runtime
-style attributes whose changing values cannot use fixed hashes. The two style
+style attributes whose changing values cannot use fixed hashes. The two fixed style
 hashes authorize React Aria 3.52.1's fixed pressable touch-action and iOS modal
 overscroll stylesheets (`usePress` and `usePreventScroll`); recheck them when
-upgrading React Aria. Production and preview admit no other inline stylesheet
-elements. Vite development additionally allows `style-src-elem 'self' 'unsafe-inline'`
+upgrading React Aria. Inline-stylesheet hashes cover the `<style>` elements of the
+trusted application HTML: the themed first-paint shell, which must apply before any
+bundle stylesheet loads. Production and preview admit no other inline stylesheet
+elements, and no `data:` stylesheet. The bundle stylesheets (application CSS and
+compiled StyleX) are deferred `media="print"` links that a hashed bootstrap enables
+together once all have loaded; the app renders only then.
+Vite development additionally allows `style-src-elem 'self' 'unsafe-inline'`
 for its injected stylesheets and
 `worker-src 'self' blob:` for Vite's HMR reconnect SharedWorker. These development
 exceptions do not relax `img-src` or production's script/worker policy.
@@ -209,13 +214,13 @@ prefetch the resource and queue reads.
 Closing releases UI demand, while the intent-created read keeps polling for 60 seconds
 so a reopen shows the retained observation.
 
-Live time labels share a visibility-aware deadline clock instead of a global 1 Hz
-render cadence. Each view schedules its next displayed duration/age or synchronization
-threshold; hidden pages arm no timer and catch up once on return. Native Details keeps
-main's existing formatting and observation guards. Atom-side invalidation runs once
-per wall minute, retaining the pending minute until its callback fires. Fixture `now`
-atoms remain externally driven. Conversation presentation time freezes on transport
-loss without changing the source's independent freshness verdict.
+Live time labels tick in their own leaves (`useClockLabel`) on the source clock; parent
+panels read `useNowSnapshot` and do not subscribe. The Details panel pairs its snapshot
+with `useClockDeadline`, so it re-renders only when its next displayed duration/age or
+synchronization threshold is reached. Native Details keeps main's existing formatting and
+observation guards. Conversation presentation time freezes on transport loss (the
+transcript's leaves receive the last live sample as `fixedNow`) without changing the
+source's independent freshness verdict.
 
 ## Fractal web transcript switch paint
 

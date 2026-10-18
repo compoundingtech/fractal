@@ -2,8 +2,7 @@ import { RegistryContext, useAtomValue } from '@effect/atom-react'
 import { DateTime, Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
-import { useClockTime, useClockWake } from '@smalltalk/fractal-ui/human-time/clock'
-import { useAgent, useAgentRow, useDataSource, useSubjectList } from '../data/react.tsx'
+import { useAgent, useAgentRow, useClockDeadline, useDataSource, useNowSnapshot, useSubjectList } from '../data/react.tsx'
 import { nativeSessionStartReason, projectNativeDetails, type NativeDetailsObservation } from '../data/nativeDetails.ts'
 import { unavailable, type DataSource, type Feed } from '../data/source.ts'
 import type * as Native from '@smalltalk/st3-client/schema'
@@ -55,7 +54,7 @@ export const guardedSessionTiming = ({ input, source, agentRef }: { readonly inp
 export const useNativeDetails = ({ agentRef }: { readonly agentRef: string }): NativeDetailsObservation => {
   const source = useDataSource()
   const registry = React.useContext(RegistryContext)
-  const now = useClockTime()
+  const now = useNowSnapshot()
   const agent = useAgent(agentRef)
   const row = useAgentRow(agentRef)
   const selected = row._tag === 'Observed' ? row.value : undefined
@@ -87,6 +86,6 @@ export const useNativeDetails = ({ agentRef }: { readonly agentRef: string }): N
       (row._tag === 'Observed' && row.freshness === 'stale')) source.reconnect?.()
   }
   const observation = projectNativeDetails({ agentRef, agent, row, session, period, declarations, missions, queue, needsMe, now, onRetry })
-  useClockWake(observation.nextChangeAt)
+  useClockDeadline(observation.nextChangeAt)
   return observation
 }

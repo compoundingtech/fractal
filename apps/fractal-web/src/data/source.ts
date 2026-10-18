@@ -32,7 +32,6 @@ import type { MessageSendInput } from '@st3/sdk/effect'
 import type { ConnectionState } from '@st3/sdk/effect'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
 import * as Atom from 'effect/reactivity/Atom'
-import { systemClock, type HumanClock } from '@smalltalk/fractal-ui/human-time/clock'
 
 import type { ConversationItem } from '../conversation/model.ts'
 import type { ProposedMissionFields } from '../missions/model.ts'
@@ -253,10 +252,8 @@ export interface DataSource {
   /** Status bar / live picker bar text, e.g. `fixtures` or `dev gateway · read-only`. */
   readonly label: string
   readonly gateway?: string
-  /** Fixture time, or a minute-coarse invalidation for live atom-side projections. */
+  /** Fixtures: the world's fixed base time. Live: `wallClock`. Every relative timestamp reads this. */
   readonly now: Atom.Atom<number>
-  /** Live views wake at their own label deadlines; fixtures follow their now atom. */
-  readonly clock?: HumanClock
   readonly grants: Atom.Atom<Grants>
   /** Native operations are optional in fixture adapters, never fabricated locally. */
   readonly contentSearch?: ContentSearchPort
@@ -358,13 +355,9 @@ export const unavailable = ({
   ...(retryable === undefined ? {} : { retryable }),
 })
 
-const minute = 60_000
-/** Keep the pending minute until it fires; recomputing it while scheduling would skip every tick. */
-export const minuteClock = (clock: HumanClock): Atom.Atom<number> => Atom.make((get) => {
-  const nextMinute = () => (Math.floor(clock.now() / minute) + 1) * minute
-  let pending = nextMinute()
-  get.addFinalizer(clock.subscribe(() => { pending = nextMinute(); get.setSelf(clock.now()) }, () => pending))
-  return clock.now()
+/** Live sources' clock for ages and countdowns; ticks once a second while observed. */
+export const wallClock: Atom.Atom<number> = Atom.make((get) => {
+  const timer = setInterval(() => get.setSelf(Date.now()), 1000)
+  get.addFinalizer(() => clearInterval(timer))
+  return Date.now()
 })
-
-export const wallClock: Atom.Atom<number> = minuteClock(systemClock)

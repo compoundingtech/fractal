@@ -1,10 +1,9 @@
 import type { SidebarAgentRowData, SidebarAgentStatus } from '@smalltalk/fractal-ui/assistant-ui'
 import type { Agent } from '../data/source.ts'
-import { earliestChange, nextDurationChange } from '@smalltalk/fractal-ui/human-time/format'
 
 /** Presentation of one actual roster observation. No per-row reads or inferred usage. */
-export const sidebarRow = ({ agent, stale, now }: {
-  readonly agent: Agent; readonly stale: boolean; readonly now: number
+export const sidebarRow = ({ agent, stale }: {
+  readonly agent: Agent; readonly stale: boolean
 }): SidebarAgentRowData => {
   const status: SidebarAgentStatus = stale ? 'stale' : agent.state === 'retired' ? 'retired'
     : agent.state === 'suspended' ? 'suspended'
@@ -12,7 +11,7 @@ export const sidebarRow = ({ agent, stale, now }: {
     : agent.state === 'desired' || agent.state === 'starting' ? 'pending'
     : !agent.connected ? 'offline' : agent.activity === 'errored' ? 'stale' : agent.activity
   const validTimestamp = (value: number | undefined) => value !== undefined && Number.isFinite(value) &&
-    Number.isFinite(now) && value <= now && value >= 0 && value <= 8640000000000000 ? value : undefined
+    value >= 0 && value <= 8640000000000000 ? value : undefined
   const lastActivityAt = validTimestamp(agent.lastActivityAt._tag === 'Known' ? agent.lastActivityAt.value : undefined)
   const statusSince = validTimestamp(agent.statusSince)
   const knownStatuses = ['idle', 'working', 'waiting', 'errored', 'retired', 'suspended', 'stopped', 'ended', 'desired', 'starting', 'offline']
@@ -27,8 +26,3 @@ export const sidebarRow = ({ agent, stale, now }: {
     lastTurn: lastActivityAt === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', kind: 'activity', at: lastActivityAt },
   }
 }
-
-/** Compact ages change at their displayed unit; future observation fences wake when reached. */
-export const sidebarRowNextChange = (agent: Agent, now: number): number | undefined =>
-  earliestChange(now, [agent.statusSince, agent.lastActivityAt._tag === 'Known' ? agent.lastActivityAt.value : undefined].flatMap(at =>
-    at === undefined ? [] : [at, nextDurationChange(at, now, { maxUnits: 1 })]))

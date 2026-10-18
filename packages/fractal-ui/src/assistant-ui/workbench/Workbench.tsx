@@ -7,7 +7,7 @@ import {
   surfaceVars as sf,
   textVars as tx,
   borderVars as bd,
-  accentVars as ac,
+  interactionVars as interaction,
   typeVars as t,
   radiusVars as r,
   spaceVars as s,
@@ -544,7 +544,7 @@ const styles = stylex.create({
   splitBelow: { flexDirection: 'column' },
   splitPane: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflow: 'hidden', flexBasis: 'calc(var(--split-ratio) * 100%)', flexGrow: 0, flexShrink: 0 },
   splitPaneGrow: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflow: 'hidden', flexGrow: 1, flexBasis: 0 },
-  separatorBase: { position: 'relative', zIndex: 1, flexShrink: 0, touchAction: 'none', backgroundColor: bd.borderStrong, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ac.primary, outlineOffset: `calc(-1 * ${g.focusOffset})` } },
+  separatorBase: { position: 'relative', zIndex: 1, flexShrink: 0, touchAction: 'none', backgroundColor: bd.borderStrong, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusOffset})` } },
   separatorV: { width: g.hairline, alignSelf: 'stretch', cursor: 'col-resize', '::after': { content: '""', position: 'absolute', insetInline: `calc(-1 * ${g.separatorHitSlop})`, insetBlock: 0 } },
   separatorH: { height: g.hairline, width: '100%', cursor: 'row-resize', '::after': { content: '""', position: 'absolute', insetInline: 0, insetBlock: `calc(-1 * ${g.separatorHitSlop})` } },
   group: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', containerType: 'inline-size', containerName: 'pane-mount' },
@@ -571,7 +571,7 @@ const styles = stylex.create({
   dialogActions: { display: 'flex', justifyContent: 'flex-end', gap: s.sm },
   // Inside the modal, focus is always shown: the dialog moves focus to Cancel programmatically, which
   // a pointer-opened dialog would otherwise leave without a ring.
-  dialogButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: g.controlMd, width: 'auto', paddingInline: s.md, flexShrink: 0, whiteSpace: 'nowrap', fontSize: t.metaSize, fontFamily: t.fontSans, lineHeight: t.metaLeading, borderWidth: g.hairline, borderStyle: 'solid', borderColor: bd.borderStrong, borderRadius: r.control, backgroundColor: sf.controlFill, color: tx.fg, cursor: 'pointer', ':hover': { backgroundColor: sf.rowHover }, ':focus': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ac.primary, outlineOffset: g.hairline } },
+  dialogButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: g.controlMd, width: 'auto', paddingInline: s.md, flexShrink: 0, whiteSpace: 'nowrap', fontSize: t.metaSize, fontFamily: t.fontSans, lineHeight: t.metaLeading, borderWidth: g.hairline, borderStyle: 'solid', borderColor: bd.borderStrong, borderRadius: r.control, backgroundColor: sf.controlFill, color: tx.fg, cursor: 'pointer', ':hover': { backgroundColor: sf.rowHover }, ':focus': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } },
   destructive: { color: st.dangerFg, borderColor: st.danger, ':hover': { color: st.dangerFg, backgroundColor: st.dangerMuted } },
   groupActions: { marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: s.xs2, flexShrink: 0 },
   // Header content widths below 280px (240px panes and narrower) fold the four group actions into one menu.
@@ -580,7 +580,7 @@ const styles = stylex.create({
   groupMenuPopover: { backgroundColor: sf.raised, color: tx.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: bd.border, borderRadius: r.md },
   groupMenu: { display: 'flex', flexDirection: 'column', padding: s.xs2, outlineStyle: 'none', fontFamily: t.fontSans, fontSize: t.metaSize },
   groupMenuItem: { paddingInline: s.sm, paddingBlock: s.xs, borderRadius: r.sm, color: tx.fg, cursor: 'pointer', outlineStyle: 'none', ':focus': { backgroundColor: sf.rowHover } },
-  ghostMd: { width: g.controlMd, height: g.controlMd, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderWidth: 0, backgroundColor: sf.transparent, color: tx.fgMuted, borderRadius: r.control, cursor: 'pointer', ':hover': { backgroundColor: sf.rowHover, color: tx.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ac.primary, outlineOffset: g.focusOffset } },
+  ghostMd: { width: g.controlMd, height: g.controlMd, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderWidth: 0, backgroundColor: sf.transparent, color: tx.fgMuted, borderRadius: r.control, cursor: 'pointer', ':hover': { backgroundColor: sf.rowHover, color: tx.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   tabPanel: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', outlineStyle: 'none' },
   pane: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
   paneScroll: { flexGrow: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' },

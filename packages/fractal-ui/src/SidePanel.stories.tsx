@@ -4,7 +4,7 @@ import type { Meta, StoryObj } from '@storybook/react'
 import { Button } from 'react-aria-components'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { SidePanel, assistantDarkTheme, compositionLightTheme, liveAccentTheme } from './assistant-ui/shell.ts'
-import { colorVars as c, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, geometryVars as g, interactionVars as interaction, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex.ts'
 
 const PanelSurface = ({ scheme = 'dark', width = 1440, initiallyOpen = false }: { readonly scheme?: 'dark' | 'light'; readonly width?: number; readonly initiallyOpen?: boolean }) => {
   const [open, setOpen] = React.useState(initiallyOpen)
@@ -69,7 +69,7 @@ const styles = stylex.create({
   workspace: { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: s.md, padding: s.lg, overflowY: 'auto' },
   header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: s.md },
   transcript: { margin: 0, paddingInlineStart: s.lg, display: 'flex', flexDirection: 'column', gap: s.sm },
-  button: { paddingBlock: s.xs, paddingInline: s.md, borderWidth: 0, borderRadius: 6, backgroundColor: c.rowHover, color: c.fg, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outline: `2px solid ${c.primary}` } },
+  button: { paddingBlock: s.xs, paddingInline: s.md, borderWidth: 0, borderRadius: 6, backgroundColor: c.rowHover, color: c.fg, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   panelHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: s.lg, borderBottom: `1px solid ${c.border}` },
   panelBody: { flex: '1 1 0', minHeight: 0, padding: s.lg, overflowY: 'auto' },
   title: { fontSize: t.uiSize, marginBlock: s.md },

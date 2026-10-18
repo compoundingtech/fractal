@@ -1,5 +1,4 @@
 import { RegistryContext, useAtomValue } from '@effect/atom-react'
-import { HumanClockProvider, useClockTime, useClockWake, type HumanClock } from '@smalltalk/fractal-ui/human-time/clock'
 /** Shared derivations over generated rows, installed once per data source. */
 import type { Agent as AgentRow, Attention, Mission } from '@smalltalk/st3-client/schema'
 import * as Atom from 'effect/reactivity/Atom'
@@ -7,6 +6,7 @@ import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { createContext, type ReactNode, useContext } from 'react'
 import * as React from 'react'
 
+import { HumanClockProvider, useClockLabel } from '../../../../packages/fractal-ui/src/time/clock.tsx'
 import type { MissionView } from '../missions/model.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
 import { createProjections } from './projections.ts'
@@ -203,7 +203,10 @@ export const DataSourceProvider = ({
     value = derive(source)
     derived.set(source, value)
   }
-  const clock = React.useMemo<HumanClock>(() => source.clock ?? ({ now: () => registry.get(source.now), subscribe: onTick => registry.subscribe(source.now, onTick) }), [source, registry])
+  const clock = React.useMemo(() => ({
+    now: () => registry.get(source.now),
+    subscribe: (onTick: () => void) => registry.subscribe(source.now, onTick),
+  }), [registry, source.now])
   return (
     <RegistryContext.Provider value={registry}>
       <DataContext.Provider value={value}><HumanClockProvider clock={clock}>{children}</HumanClockProvider></DataContext.Provider>
@@ -341,19 +344,21 @@ export const useTerminal = (terminalRef: string) =>
 export const useEnvelope = (ref: string) => useAtomValue(useDataSource().envelope(ref))
 /** Observe source gateway events. */
 export const useEvents = () => useAtomValue(useDataSource().events)
-/** Read wall time; wake only when this view's output can next change. */
-export const useNow = (next?: (now: number) => number | undefined): number => {
-  const now = useClockTime()
-  useClockWake(next?.(now))
-  return now
+/** Observe the source clock. */
+export const useNow = (): number => useAtomValue(useDataSource().now)
+/** Capture fallback observation timestamps without subscribing the containing content tree. */
+export const useNowSnapshot = (): number => useContext(RegistryContext).get(useDataSource().now)
+/**
+ * Re-render once the source clock reaches `at`. Ticks before it only re-check a leaf clock label,
+ * so a panel pairing this with useNowSnapshot renders at its next visible change, not every tick.
+ * The pending label names its deadline: React keeps a re-render only when a hook's value changed.
+ */
+export const useClockDeadline = (at: number | undefined): void => {
+  useClockLabel(now => at === undefined ? '' : now >= at ? 'due' : String(at))
 }
 const pausedAt = (clock: ObservedClock): number | undefined => clock._tag === 'Paused' ? clock.now : undefined
-/** Freeze presentation time on transport loss without substituting it for data freshness. */
-export const useObservedNow = (next?: (now: number) => number | undefined): ObservedClock => {
-  const paused = useAtomValue(useData().observedClock, pausedAt)
-  const now = useNow(paused === undefined ? next : undefined)
-  return paused === undefined ? { _tag: 'Live', now } : { _tag: 'Paused', now: paused }
-}
+/** Frozen presentation time on transport loss, without substituting it for data freshness; undefined while live. */
+export const usePausedNow = (): number | undefined => useAtomValue(useData().observedClock, pausedAt)
 const clockState = (clock: ObservedClock): ObservedClock['_tag'] => clock._tag
 export const useObservedClockState = (): ObservedClock['_tag'] =>
   useAtomValue(useData().observedClock, clockState)
