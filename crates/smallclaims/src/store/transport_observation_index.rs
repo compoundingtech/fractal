@@ -19,7 +19,9 @@ pub const ORIGINAL_QUERY: &str =
 
 static ORIGINAL_SQL: LazyLock<String> = LazyLock::new(|| canonical_sql(ORIGINAL_QUERY));
 
-const INSTALL: &str = r#"
+// Capture copies claim identifiers, subject, origin and timestamp into TEXT columns
+// and seek keys without a byte-size proof; it never copies body or predecessors.
+const INSTALL: &str = /* sqlite-large-value: allow-for-now lv-hb806bfc38d25 owner=smallclaims::store::transport_observation_index TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS transport_observation_index (
     claim_id TEXT PRIMARY KEY,
     subject TEXT NOT NULL,
@@ -106,7 +108,9 @@ pub fn indexed_query() -> &'static str {
 
 pub fn latest(connection: &Connection, subject: &str, origin: &str) -> Result<Option<(String, String)>> {
     let query = if ready(connection)? { indexed_query() } else { &ORIGINAL_SQL };
-    Ok(connection.prepare_cached(query)?.query_row(params![subject, origin], |row| {
+    // Both query choices fetch one full inline body and timestamp. LIMIT 1 bounds
+    // rows, not bytes: this hot-path read has no body-size proof.
+    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h389042a7d9e8 owner=smallclaims::store::transport_observation_index TODO=trace-statement-and-value-representation */ query)?.query_row(/* sqlite-large-value: allow-for-now lv-h7e34d2a4ccc6 owner=smallclaims::store::transport_observation_index TODO=trace-statement-and-value-representation */ params![subject, origin], |row| {
         Ok((row.get(0)?, row.get(1)?))
     }).optional()?)
 }
@@ -124,7 +128,8 @@ pub fn advance(connection: &WriterConnection) -> Result<Page> {
     let acquired = Instant::now();
     let transaction = writer.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if !installed {
-        transaction.execute_batch(INSTALL)?;
+        // Executes the schema/capture template above, including its variable keys.
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0efe90e42a9b owner=smallclaims::store::transport_observation_index TODO=trace-statement-and-value-representation */ INSTALL)?;
     }
     let (high_water, cursor, complete): (i64, i64, bool) = transaction.query_row(
         "SELECT high_water, cursor, ready FROM transport_observation_backfill WHERE singleton=1",
@@ -143,6 +148,8 @@ pub fn advance(connection: &WriterConnection) -> Result<Page> {
     )?;
     let copied = if let Some(end) = end {
         transaction.execute(
+            // At most PAGE_SIZE claim rows, but copied TEXT values have no byte cap.
+            /* sqlite-large-value: allow-for-now lv-hd43bf62e6984 owner=smallclaims::store::transport_observation_index TODO=prepare-body-and-predecessor-values */
             "INSERT OR IGNORE INTO transport_observation_index
              SELECT id, subject, origin, accepted_at_unix_ms FROM claims
              WHERE store_index>?1 AND store_index<=?2 AND kind='transport.observed'",
@@ -151,6 +158,8 @@ pub fn advance(connection: &WriterConnection) -> Result<Page> {
     } else { 0 };
     let done = end.is_none_or(|end| end >= high_water);
     transaction.execute(
+        // Only an i64 cursor and boolean readiness flag in the singleton row.
+        /* sqlite-large-value: allow-for-now lv-hcaf37daca2bb owner=smallclaims::store::transport_observation_index TODO=bound-or-reference-values-and-reclamation */
         "UPDATE transport_observation_backfill SET cursor=?1, ready=?2 WHERE singleton=1",
         params![end.unwrap_or(high_water), done],
     )?;
