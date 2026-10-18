@@ -262,7 +262,7 @@ fn capture_with_work(
     let mut rows = BTreeMap::new();
     if !ids.is_empty() {
         smallclaims::read_budget::check()?;
-        let mut statement = connection.prepare_cached(METADATA_SQL)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-ha3108aa3c511 owner=st3_store::store::harness_health_capture TODO=trace-statement-and-value-representation */ METADATA_SQL)?;
         statement.reset_status(StatementStatus::VmStep);
         let mut items = statement.query(params![
             serde_json::to_string(&ids)?,
@@ -318,7 +318,7 @@ fn capture_with_work(
             .iter()
             .map(|request| request.subject)
             .collect::<Vec<_>>();
-        let mut statement = connection.prepare_cached(OUTPUT_SQL)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd44ee58ea234 owner=st3_store::store::harness_health_capture TODO=trace-statement-and-value-representation */ OUTPUT_SQL)?;
         statement.reset_status(StatementStatus::VmStep);
         let mut items = statement.query(params![
             serde_json::to_string(&subjects)?,
@@ -487,7 +487,7 @@ fn pending_candidates(
     // an oversized candidate still consumes a slot and cannot count as pending.
     // No MIN, desired expansion, reminder walk, full projection or recursive walk.
     smallclaims::read_budget::check()?;
-    let mut statement = connection.prepare_cached(PENDING_SQL)?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3fa32dd450b9 owner=st3_store::store::harness_health_capture TODO=trace-statement-and-value-representation */ PENDING_SQL)?;
     statement.reset_status(StatementStatus::VmStep);
     let mut items = statement.query(params![
         serde_json::to_string(&scopes)?,

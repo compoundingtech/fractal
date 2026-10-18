@@ -614,6 +614,18 @@ export const AgentDelivery = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentDelivery = typeof AgentDelivery.Type
 export type AgentDeliveryEncoded = typeof AgentDelivery.Encoded
 
+export const AgentEndReason = /*#__PURE__*/ (() => Schema.Struct({
+  "actor": optionalKey(Schema.String),
+  "diagnostic": optionalKey(Schema.String),
+  "ended_at": Timestamp,
+  "exit_code": optionalKey(Schema.Int),
+  "exit_signal": optionalKey(Schema.String),
+  "kind": Schema.Literals(["completed","stopped-by-person","stopped-by-agent","crashed","harness-exited","host-lost","retired"]),
+  "reason": optionalKey(Schema.String)
+}).annotate({ identifier: "AgentEndReason" }))()
+export type AgentEndReason = typeof AgentEndReason.Type
+export type AgentEndReasonEncoded = typeof AgentEndReason.Encoded
+
 export const AgentHandoff = /*#__PURE__*/ (() => Schema.Struct({
   "desired_token": Schema.String,
   "destination": Schema.String,
@@ -920,6 +932,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   /** When a `down` seat began waiting for a session; null in every other state. */
   "down_since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When a `down` seat began waiting for a session; null in every other state." }),
   "driver": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** Derived terminal reason; absent when evidence is missing or stale. Never infer completion from absence. */
+  "end_reason": Schema.OptionFromOptionalNullOr(AgentEndReason, NULL_NONE).annotate({ description: "Derived terminal reason; absent when evidence is missing or stale. Never infer completion from absence." }),
   /** Current member reconcile failure; cleared by a successful pass. */
   "fault": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Current member reconcile failure; cleared by a successful pass." }),
   /** Placement handoff phase; the destination waits for former hosts to acknowledge their stopped runtimes. */
@@ -1760,7 +1774,9 @@ export type ClientConnectionsEncoded = typeof ClientConnections.Encoded
 
 export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
-  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","agents","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), /** Follow exactly this current agent rather than the bounded fleet window. */
+"agent": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE).annotate({ description: "Follow exactly this current agent rather than the bounded fleet window." }), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */
 "subject": optionalKey(ArrangementId) }),
   Schema.Struct({ "capability": Schema.String, "collection": Schema.Literal("terminal"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "kind": Schema.Literal("subscribe"), "terminal": Id }),
