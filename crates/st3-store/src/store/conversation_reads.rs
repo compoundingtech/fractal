@@ -96,6 +96,18 @@ fn conversation_owner_at(connection: &Connection, subject: String, through: u64)
 }
 
 impl Store {
+    /// Read one immutable canonical message's text without copying an oversized payload.
+    /// `Some((size, None))` distinguishes a budget refusal from a missing/non-text claim.
+    pub fn conversation_message_text_bounded(&self, id: &str, max_bytes: usize) -> Result<Option<(usize, Option<String>)>> {
+        self.readers.get().prepare_cached(
+            "WITH message AS (SELECT CASE WHEN json_type(body,'$.fields') IS NULL
+                THEN json_extract(body,'$.content') ELSE json_extract(body,'$.fields.content') END AS text
+                FROM claims WHERE id=?1 AND kind='message.sent')
+             SELECT length(CAST(text AS BLOB)), CASE WHEN length(CAST(text AS BLOB))<=?2 THEN text END
+             FROM message WHERE typeof(text)='text'",
+        )?.query_row(params![id, max_bytes], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(Into::into)
+    }
+
     /// Resolve one conversation identity without constructing the owner collection.
     pub fn conversation_owner_at(&self, subject: &str, through: u64) -> Result<Owner> {
         selected_index(self.index()?, Some(through)).map_err(anyhow::Error::new)?;

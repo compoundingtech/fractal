@@ -329,6 +329,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canonical_message_sent_replies_supply_readable_short_and_long_handles() {
+        for text in ["ACK canonical short".to_owned(), format!("ACK canonical long {}", "reply body ".repeat(900))] {
+            let root = tempfile::tempdir().unwrap();
+            let (state, session_id, _, _) = super::super::tests::managed_conversation(root.path(), "unrelated native text");
+            state.store.append_claim(&ClaimInput {
+                subject:"message/canonical-reply".into(), kind:"message.sent".into(), actor:Some("agent/reads-codex".into()),
+                fields:serde_json::from_value(json!({"from":"agent/reads-codex", "to":"person/operator",
+                    "session_id":session_id, "status":"sent", "content":text})).unwrap(),
+                evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+            }).unwrap();
+            let snapshot = new_client_snapshot(&state);
+            let (_, timeline) = project(&state, &snapshot, "conversation-timeline",
+                &parameters(&[("agent_id","agent/reads-codex")]), MAX_RESPONSE_BYTES).await.unwrap();
+            let item = timeline["items"].as_array().unwrap().iter()
+                .find(|item| item["text"].as_str().is_some_and(|text| text.starts_with("ACK canonical")))
+                .expect("the canonical message.sent content is projected");
+            let handle = item["read"].as_object().expect("canonical replies have content handles");
+            let query = handle.iter().map(|(key, value)| (key.clone(),
+                value.as_str().map_or_else(|| value.to_string(), str::to_owned))).collect();
+            let (_, content) = super::super::project(&state, &snapshot, "conversation-content", &query,
+                MAX_RESPONSE_BYTES, "conversation-test-binding").await.unwrap();
+            assert!(text.starts_with(content["text"].as_str().unwrap()));
+            assert_eq!(content["reference"], handle["reference"]);
+            let reference = unbind_reference(handle["reference"].as_str().unwrap(), "conversation-test-binding").unwrap();
+            let (full, revision) = super::super::super::super::conversation_blocks::assistant_text(
+                &state, &session_id, &reference, MAX_RESPONSE_BYTES).unwrap();
+            assert_eq!(full, text);
+            assert_eq!(revision, 1);
+            assert_eq!(super::super::super::super::conversation_blocks::assistant_text(
+                &state, "session/foreign", &reference, MAX_RESPONSE_BYTES).unwrap_err().code, "conversation-content-invalidated");
+            if text.len() > DEFAULT_RESPONSE_BYTES {
+                assert_eq!(super::super::super::super::conversation_blocks::assistant_text(
+                    &state, &session_id, &reference, DEFAULT_RESPONSE_BYTES).unwrap_err().code, "response-budget-exceeded");
+            }
+            let (_, listing) = project(&state, &snapshot, "conversations", &BTreeMap::new(), MAX_RESPONSE_BYTES).await.unwrap();
+            assert!(listing["items"].as_array().unwrap().iter().any(|item| item["read"].is_object()));
+        }
+    }
+
+    #[tokio::test]
     async fn conversation_discovery_output_alone_feeds_content_read() {
         let root = tempfile::tempdir().unwrap();
         let (state, _, _, _) = super::super::tests::managed_conversation(root.path(), "a short agent reply");
