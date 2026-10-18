@@ -5018,7 +5018,7 @@ fn system_time_ms(value: SystemTime) -> u128 {
         .as_millis()
 }
 
-fn digest(value: &str) -> String {
+pub fn digest(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 

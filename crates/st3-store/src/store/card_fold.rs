@@ -20,7 +20,7 @@ pub struct CardReads {
 
 /// A subject's folded actual state and its selected actual-state claim: the claim, its origin
 /// and the rival observations it must descend from to hold alone.
-struct ActualState {
+pub struct ActualState {
     latest: Option<Value>,
     source: Option<(String, String, Vec<String>)>,
 }

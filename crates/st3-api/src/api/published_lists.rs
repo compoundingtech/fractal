@@ -4,6 +4,8 @@
 //! refolds only the rows whose claims changed; a fold from nothing reads in short snapshots. A
 //! read serves the newest publication under its own cut and never folds.
 
+use crate::EvidenceStore;
+use crate::PublishedViewsStore;
 use super::*;
 use crate::store::mission_list::{MissionRows, RosterFleet};
 use crate::store::work_list::{WorkRow, WorkRows};
