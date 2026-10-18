@@ -20,7 +20,7 @@ fn fixture() -> Connection {
     smallclaims::sqlite::observe(&mut connection);
     connection
         .execute_batch(
-            "CREATE TABLE claims(store_index INTEGER PRIMARY KEY,subject TEXT,kind TEXT);
+            /* sqlite-large-value: allow-for-now lv-hee6939fe6ac4 owner=st3_store::store::message_versions::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims(store_index INTEGER PRIMARY KEY,subject TEXT,kind TEXT);
          CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
          CREATE TABLE desired(subject TEXT PRIMARY KEY,claim_id TEXT NOT NULL);
          INSERT INTO claims VALUES(4,'message/a','message.sent'),(9,'message/a','message.closed'),
@@ -37,11 +37,11 @@ fn batch_versions_match_point_reads_with_missing_duplicate_and_replaced_inputs()
     let subjects = ["message/b", "message/missing", "message/a", "message/a"];
     for change in [
         "SELECT 1",
-        "UPDATE desired SET claim_id='desired/replaced' WHERE subject='message/a'",
-        "DELETE FROM desired WHERE subject='message/a'",
-        "DELETE FROM claims WHERE store_index=9",
+        /* sqlite-large-value: allow-for-now lv-hdd496f25557f owner=st3_store::store::message_versions::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET claim_id='desired/replaced' WHERE subject='message/a'",
+        /* sqlite-large-value: allow-for-now lv-h04e75cc65b2b owner=st3_store::store::message_versions::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='message/a'",
+        /* sqlite-large-value: allow-for-now lv-ha1886f7237a9 owner=st3_store::store::message_versions::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE store_index=9",
     ] {
-        connection.execute_batch(change).unwrap();
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hfbd917b5e2b6 owner=st3_store::store::message_versions::tests TODO=trace-statement-and-value-representation */ change).unwrap();
         let expected = subjects
             .iter()
             .map(|subject| point(&connection, subject).unwrap())
@@ -49,7 +49,7 @@ fn batch_versions_match_point_reads_with_missing_duplicate_and_replaced_inputs()
         assert_eq!(read(&connection, &subjects).unwrap(), expected);
     }
     connection
-        .execute_batch("INSERT INTO desired VALUES('message/a',X'ff')")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hb8cdba1abe82 owner=st3_store::store::message_versions::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired VALUES('message/a',X'ff')")
         .unwrap();
     assert!(
         point(&connection, "message/a").is_err(),
@@ -94,13 +94,13 @@ fn batch_metadata_uses_only_supplied_subject_seeks() {
     let connection = fixture();
     connection
         .execute_batch(
-            "WITH RECURSIVE n(x) AS (SELECT 10 UNION ALL SELECT x+1 FROM n WHERE x<10000)
+            /* sqlite-large-value: allow-for-now lv-he9f55dec265c owner=st3_store::store::message_versions::tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE n(x) AS (SELECT 10 UNION ALL SELECT x+1 FROM n WHERE x<10000)
         INSERT INTO claims SELECT x,'unrelated/'||x,'message.sent' FROM n;",
         )
         .unwrap();
     let sql = format!("EXPLAIN QUERY PLAN {QUERY}");
     let plan = connection
-        .prepare(&sql)
+        .prepare(/* sqlite-large-value: allow-for-now lv-hf0bf92a24a80 owner=st3_store::store::message_versions::tests TODO=trace-statement-and-value-representation */ &sql)
         .unwrap()
         .query_map(["[\"message/a\",\"message/missing\"]"], |row| {
             row.get::<_, String>(3)

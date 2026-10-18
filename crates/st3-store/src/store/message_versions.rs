@@ -24,7 +24,7 @@ pub(super) fn read(connection: &Connection, subjects: &[&str]) -> Result<Vec<Ver
     if subjects.is_empty() {
         return Ok(Vec::new());
     }
-    let mut statement = connection.prepare_cached(QUERY)?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7235977b1568 owner=st3_store::store::message_versions TODO=trace-statement-and-value-representation */ QUERY)?;
     let mut rows = statement.query([serde_json::to_string(subjects)?])?;
     let mut versions = Vec::with_capacity(subjects.len());
     for ordinal in 0..subjects.len() {
