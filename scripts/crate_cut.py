@@ -1386,7 +1386,7 @@ def apply_cut(args, nodes, files, tfiles, order):
     widen = collections.defaultdict(dict)
     macro_exports = collections.defaultdict(dict)  # lower file -> {start: item}
     macro_imports = collections.defaultdict(set)  # destination file -> macro names
-    for n in moved + mtests + test_copies:
+    for n in moved + mtests + test_copies + [u for ns in test_shares.values() for u in ns]:
         for r in n.refs:
             t = nodes[r]
             if t.kind == "macro_rules" and r not in moved_ids and t.fixed is None and not t.test:
