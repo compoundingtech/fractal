@@ -1212,7 +1212,7 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
             names = sorted({n.name for n in ns if n.name})
             if names:
                 stem = module_path(rel)[-1]
-                renames.append((re.compile(r"\b" + re.escape(stem) + r"::(" + "|".join(map(re.escape, names)) + r")\b(?!::)"), "crate::" + "::".join(_shared_path(rel, ()))))
+                renames.append((re.compile(r"(?<![\w:])(?:super::)*" + re.escape(stem) + r"::(" + "|".join(map(re.escape, names)) + r")\b(?!::)"), "crate::" + "::".join(_shared_path(rel, ()))))
     if renames:
         for f in _src_files([src_dir]):
             t = Path(f).read_text()
