@@ -1125,7 +1125,7 @@ def _shared_uses(uses, rel, cont, items, shares, dev, pairs, test_rels, root="cr
     return out
 
 
-def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_rels, includers):
+def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_rels, includers, dest_src=None, dest_root=None):
     """Extract the lower test items the moved tests need into a shared module next to their file, gated by
     test-support, and re-export it where the items were (`pub use`), so old paths keep resolving."""
     added_decls = collections.defaultdict(list)
@@ -1232,6 +1232,15 @@ def apply_shares(shares, share_imports, src_dir, lower_files, pairs, dev, test_r
                 nt = pat.sub(lambda m, target=target: target + "::" + m.group(1), nt)
             if nt != t:
                 Path(f).write_text(nt)
+        if dest_src:
+            # the same paths in the new crate go through the crate below by name
+            for f in _src_files([dest_src]):
+                t = Path(f).read_text()
+                nt = t
+                for pat, target in renames:
+                    nt = pat.sub(lambda m, target=target: dest_root + target[len("crate"):] + "::" + m.group(1), nt)
+                if nt != t:
+                    Path(f).write_text(nt)
     # a shared module is only reachable if every module on the way to it exists in a test-support build
     done = set()
     for (rel, cont) in shares:
@@ -1480,7 +1489,7 @@ def apply_cut(args, nodes, files, tfiles, order):
         if n.test and n.kind == "macro_call":
             for m in re.finditer(r'include!\("([^"]+)"\)', n.item.text):
                 includers[os.path.normpath(os.path.join(os.path.dirname(n.file), m.group(1)))] = (n.file, n.container)
-    apply_shares(test_shares, test_share_imports, args.src_dir, {**files, **tfiles}, pairs, _dev_dependencies(lower), set(tfiles), includers)
+    apply_shares(test_shares, test_share_imports, args.src_dir, {**files, **tfiles}, pairs, _dev_dependencies(lower), set(tfiles), includers, new_src, lower)
     for rel, names in macro_imports.items():
         path = os.path.join(new_src, rel)
         if not os.path.exists(path):
