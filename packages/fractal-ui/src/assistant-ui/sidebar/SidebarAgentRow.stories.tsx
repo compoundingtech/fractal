@@ -5,7 +5,10 @@ import * as stylex from '@stylexjs/stylex'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { AgentHoverCard, SidebarAgentRow, sidebarRowDescription, type RowVariant } from './SidebarAgentRow'
 import type { SidebarAgentRow as Row } from './model'
-import { spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, geometryVars as g, borderVars as border, radiusVars as r, elevationVars as elevation } from '../composition-tokens.stylex'
+import { accentVars as accent, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, geometryVars as g, borderVars as border, radiusVars as r, elevationVars as elevation } from '../composition-tokens.stylex'
+import { baselineTheme } from '../neutral-theme'
+import { lightTheme, type Scheme } from '../composition-theme'
+import { ThemePortal } from '../taste/ThemePortal'
 
 const storyNow = Date.UTC(2026, 9, 8, 12, 0, 0)
 /** Fully reported synthetic identity; every optional fact the card can render is present. */
@@ -136,6 +139,25 @@ function CohortList() {
   return <div data-frame-rows {...stylex.props(styles.list)}>{cohortRows.map((row, index) => <SidebarAgentRow key={row.ref} item={row} now={storyNow} active={index === 0} />)}</div>
 }
 
+/** A themed surface whose overlays portal through ThemePortal; the hidden probe resolves the surface's own tokens. Rows are openable, so their buttons take keyboard focus. */
+function ThemedOverlays({ scheme }: { readonly scheme: Scheme }) {
+  const [openedRef, setOpenedRef] = React.useState(cohortRows[0]!.ref)
+  const open = React.useCallback((row: Row) => setOpenedRef(row.ref), [])
+  return <main data-testid="themed-overlays" data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
+    <span aria-hidden="true" data-token-probe="" {...stylex.props(styles.tokenProbe)} />
+    <div data-frame-rows {...stylex.props(styles.list)}>{cohortRows.slice(0, 3).map(row => <SidebarAgentRow key={row.ref} item={row} now={storyNow} onOpen={open} active={openedRef === row.ref} />)}</div>
+  </ThemePortal></main>
+}
+async function assertThemedOverlay(surfaceElement: HTMLElement, overlay: Element, raised: string) {
+  await expect(surfaceElement.contains(overlay)).toBe(true)
+  await expect(getComputedStyle(overlay).backgroundColor).toBe(raised)
+}
+async function assertNeutralRing(element: Element, focus: string) {
+  const style = getComputedStyle(element)
+  await expect(style.outlineStyle).toBe('solid')
+  await expect(style.outlineColor).toBe(focus)
+}
+
 /** Every density with one fixture set; SR-1/SR-3 copies carry distinct refs so each row maps back to its fixture. */
 function DensityMatrix() {
   const [expanded, setExpanded] = React.useState(false)
@@ -162,14 +184,14 @@ const meta = {
 } satisfies Meta
 export default meta
 type Story = StoryObj
-export const HoverCardKnown: Story = { name: 'Hover card · fully reported', render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /></main>, play: async ({ canvasElement }) => assertCompactCard(canvasElement) }
-export const HoverCardUnknown: Story = { name: 'Hover card · unreported fields omitted', render: () => <main {...stylex.props(styles.root)}><CardPair row={unreportedRow} /></main>, play: async ({ canvasElement }) => {
+export const HoverCardKnown: Story = { tags: ['critical'], name: 'Hover card · fully reported', render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /></main>, play: async ({ canvasElement }) => assertCompactCard(canvasElement) }
+export const HoverCardUnknown: Story = { tags: ['critical'], name: 'Hover card · unreported fields omitted', render: () => <main {...stylex.props(styles.root)}><CardPair row={unreportedRow} /></main>, play: async ({ canvasElement }) => {
   const card = within(canvasElement).getByTestId('hover-facts')
   await assertCompactCard(canvasElement)
   await expect(await paintedText(card)).not.toMatch(/unknown|unavailable|—/i)
   for (const label of ['Spend', 'Duration', 'Last turn', 'Model', 'PR', 'Branch']) await expect(within(card).queryByText(label)).toBeNull()
 } }
-export const TimeCohort: Story = { name: 'Time cohort · known vs none', render: () => <main {...stylex.props(styles.root)}><CohortList /></main>, play: async ({ canvasElement }) => {
+export const TimeCohort: Story = { tags: ['critical'], name: 'Time cohort · known vs none', render: () => <main {...stylex.props(styles.root)}><CohortList /></main>, play: async ({ canvasElement }) => {
   await assertRowNames(canvasElement)
   const rows = within(canvasElement).getAllByTestId('taste-agent-row')
   const child = rows.find(row => row.textContent?.includes('Check output'))!
@@ -178,7 +200,7 @@ export const TimeCohort: Story = { name: 'Time cohort · known vs none', render:
   const titleLeft = rows[0]!.querySelector('[data-row-column="title-text"]')!.getBoundingClientRect().left
   for (const row of rows) await expect(Math.abs(row.querySelector('[data-row-column="title-text"]')!.getBoundingClientRect().left - titleLeft)).toBeLessThanOrEqual(1)
 } }
-export const QuickOpenAction: Story = { name: 'Row hover · quick Open', render: () => <main {...stylex.props(styles.root)}><QuickOpenCohort /></main>, play: async ({ canvasElement }) => {
+export const QuickOpenAction: Story = { tags: ['critical'], name: 'Row hover · quick Open', render: () => <main {...stylex.props(styles.root)}><QuickOpenCohort /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const rows = canvas.getAllByTestId('taste-agent-row')
   const target = rows[1]!
@@ -197,7 +219,7 @@ export const QuickOpenAction: Story = { name: 'Row hover · quick Open', render:
   await waitFor(() => expect(rows[2]!.querySelector('[aria-current="page"]')).not.toBeNull())
   await assertRowNames(canvasElement)
 } }
-export const AllStates: Story = { render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /></main>, play: async ({ canvasElement }) => {
+export const AllStates: Story = { tags: ['critical'], render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /></main>, play: async ({ canvasElement }) => {
   await assertRowNames(canvasElement)
   await assertHelperDescriptions(canvasElement)
   await assertSingleHoverDisclosure(canvasElement)
@@ -208,7 +230,7 @@ export const AllStates: Story = { render: () => <main {...stylex.props(styles.ro
   probe.removeAttribute('title')
   await assertRowNames(canvasElement)
 } }
-export const DensitiesAndChildren: Story = { name: 'Names and descriptions · SR-1/2/3, collapsed and expanded', render: () => <main {...stylex.props(styles.root)}><DensityMatrix /></main>, play: async ({ canvasElement }) => {
+export const DensitiesAndChildren: Story = { tags: ['critical'], name: 'Names and descriptions · SR-1/2/3, collapsed and expanded', render: () => <main {...stylex.props(styles.root)}><DensityMatrix /></main>, play: async ({ canvasElement }) => {
   await assertRowNames(canvasElement)
   await assertSingleHoverDisclosure(canvasElement)
   const toggle = within(canvasElement).getByRole('button', { name: 'Expand 2 subagents' })
@@ -219,11 +241,55 @@ export const DensitiesAndChildren: Story = { name: 'Names and descriptions · SR
   await userEvent.click(within(canvasElement).getByRole('button', { name: 'Collapse 2 subagents' }))
   await waitFor(() => expect(within(canvasElement).queryByRole('button', { name: 'Subagent two' })).toBeNull())
   await assertRowNames(canvasElement)
+  // The pointer rests on the row, so its hover card opens; the a11y check must see it open, not race its delay.
+  await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1), { timeout: hoverSettleTimeout })
 } }
+export const ThemedOverlaysAndFocus: StoryObj<{ scheme: Scheme }> = {
+  name: 'Themed overlays · row menu and neutral focus',
+  args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
+  render: ({ scheme }) => <ThemedOverlays scheme={scheme} />,
+  play: async ({ canvasElement }) => {
+    const themed = within(canvasElement).getByTestId('themed-overlays')
+    const probe = getComputedStyle(themed.querySelector('[data-token-probe]')!)
+    const raised = probe.backgroundColor, focus = probe.color, accentColor = probe.borderTopColor
+    await expect(focus).not.toBe(accentColor)
+    const row = within(canvasElement).getAllByTestId('taste-agent-row')[0]!
+    const gear = row.querySelector<HTMLElement>('[data-agent-menu]')!
+    gear.focus()
+    await userEvent.keyboard('{Enter}')
+    const menu = await waitFor(() => { const element = document.querySelector('[role="menu"]'); if (element === null) throw new Error('menu not open'); return element })
+    const popover = menu.closest('[data-trigger="MenuTrigger"]')!
+    await assertThemedOverlay(themed, popover, raised)
+    const item = await waitFor(() => { const element = menu.querySelector('[role="menuitem"][data-focus-visible]'); if (element === null) throw new Error('no keyboard-focused item'); return element })
+    await assertNeutralRing(item, focus)
+    await userEvent.keyboard('r')
+    const reportedDetails = within(menu as HTMLElement).getByRole('menuitem', { name: 'Reported agent details' })
+    await expect(reportedDetails).toHaveFocus()
+    await assertNeutralRing(reportedDetails, focus)
+    // Negative controls: an overlay outside the themed surface and an accent ring must both be rejected.
+    const escaped = document.createElement('div')
+    escaped.className = popover.className
+    document.body.append(escaped)
+    await expect(assertThemedOverlay(themed, escaped, raised)).rejects.toThrow()
+    escaped.remove()
+    ;(item as HTMLElement).style.outlineColor = accentColor
+    await expect(assertNeutralRing(item, focus)).rejects.toThrow()
+    ;(item as HTMLElement).style.removeProperty('outline-color')
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
+    // Keyboard focus on the active row: the same neutral ring.
+    const rowButton = row.querySelector<HTMLElement>(':scope > button')!
+    rowButton.focus()
+    await userEvent.keyboard('{Shift}')
+    await waitFor(() => expect(rowButton).toHaveAttribute('data-focus-visible'))
+    await assertNeutralRing(rowButton, focus)
+  },
+}
 
 const styles = stylex.create({
   root: { height: '100vh', minHeight: 0, overflowY: 'auto', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, display: 'flex', flexDirection: 'column', gap: s.xl },
   spread: { display: 'flex', alignItems: 'flex-start', flexWrap: 'wrap', gap: s.xl },
   list: { display: 'flex', flexDirection: 'column', gap: s.xs, width: g.specimenAside, minWidth: 0 },
   aside: { width: g.specimenAside, maxWidth: '100%', minWidth: 0, boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.raised, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, boxShadow: elevation.popover },
+  tokenProbe: { position: 'absolute', width: 0, height: 0, overflow: 'hidden', backgroundColor: surface.raised, color: ink.fgMuted, borderTopStyle: 'solid', borderTopWidth: 0, borderTopColor: accent.primary },
 })

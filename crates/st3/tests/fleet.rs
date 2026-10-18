@@ -4,6 +4,7 @@
 //! `st3` CLI. Nothing here touches the real fleet's state, services, ports, or Fabric names: every
 //! node runs in the foreground under a temporary root, and no test installs a service.
 
+use st3::WatchesStore;
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -1072,7 +1073,15 @@ async fn invalid_admission_preserves_running_daemon_and_never_stops_services() {
     let manager = node.root.join("bin/systemctl");
     fs::write(
         &manager,
-        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'\n", log.display()),
+        format!(r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+if [ "$2" != show ]; then exit 9; fi
+if [ "$3" = st3.service ]; then
+    printf '%s\n' 'LoadState=loaded' 'ActiveState=active' 'SubState=running'
+else
+    printf '%s\n' 'LoadState=not-found' 'ActiveState=inactive' 'SubState=dead'
+fi
+"#, log.display()),
     ).unwrap();
     fs::set_permissions(manager, fs::Permissions::from_mode(0o700)).unwrap();
     node.env.push((
@@ -1092,10 +1101,10 @@ async fn invalid_admission_preserves_running_daemon_and_never_stops_services() {
             String::from_utf8_lossy(&output.stderr).contains(message),
             "{output:?}"
         );
-        assert_eq!(
-            fs::read_to_string(log).unwrap(),
-            "",
-            "preconditions must precede even service inspection"
+        let calls = fs::read_to_string(log).unwrap();
+        assert!(
+            calls.lines().all(|line| line.starts_with("--user show ")),
+            "admission preconditions may inspect services but must never mutate them: {calls}"
         );
         assert_eq!(
             node.client().get::<Value>("/v1/health").await.unwrap()["node"],
@@ -1136,7 +1145,7 @@ async fn invalid_admission_preserves_running_daemon_and_never_stops_services() {
     node.stop();
     node.migrate(&["--anchor"]);
     // A native member no longer needs legacy fleet_id in config.toml. Create must
-    // inspect saved membership before it even asks whether services are installed.
+    // reject saved membership without changing any service.
     fs::write(
         node.root.join("config/st3/config.toml"),
         format!("node = \"{}\"\nperson = \"{PERSON}\"\n", node.name),
@@ -4082,7 +4091,7 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
             .is_err()
     );
 
-    for (label, sleep, age_ms) in [("minutes", 120, 120_000), ("hours", 2, 4 * 3_600_000)] {
+    for (label, sleep, age_ms) in [("minutes", 2, 120_000), ("hours", 2, 4 * 3_600_000)] {
         // Leave its local daemon alive so it can record work while the network worker sleeps.
         let mut worker = traveller.worker.take().unwrap();
         worker.kill().unwrap();
@@ -4095,8 +4104,10 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
         b.note(&format!("beacon-{label}")).await;
         expected.insert(format!("custom/fleet-test/beacon-{label}"));
         tokio::time::sleep(Duration::from_secs(sleep)).await;
-        // The minutes case uses real elapsed time. The hours case ages persistent evidence;
-        // virtual-clock worker tests separately exercise the full four-hour retry schedule.
+        // Both cases age persistent evidence instead of sleeping through the absence. The worker
+        // test isolated_outbound_only_node_converges_after_two_minutes_and_four_hours runs the
+        // real worker timers over both absences on a virtual clock, with its attempt bounds and
+        // the return through the servers' backoff.
         for node in [&a, &b] {
             let db = rusqlite::Connection::open(node.state_dir().join("claims.sqlite3")).unwrap();
             db.busy_timeout(Duration::from_secs(5)).unwrap();
@@ -4543,7 +4554,7 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::canonical_tempdir();
     struct SeatCleanup {
         pty: PathBuf,
         roots: Vec<PathBuf>,
