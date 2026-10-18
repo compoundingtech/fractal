@@ -1296,7 +1296,7 @@ def apply_cut(args, nodes, files, tfiles, order):
             continue
         text, items = tfiles[rel]
         out = remove_spans(text, spans)
-        if is_vacant(out):
+        if is_vacant(out) and rel not in {r for (r, _) in test_shares}:
             deleted_test_files.append(rel)
             parts = module_path(rel)
             parent = "/".join(parts[:-1]) + ".rs"
@@ -1700,7 +1700,11 @@ def fix_once(diags, roots, traits):
         m = re.search(r"(?m)^pub use (\w+)::([\w:]+)::\*;$", t)
         if not m:
             continue
-        lines = "\n".join("pub use %s::%s::%s;" % (m.group(1), m.group(2), n) for n in sorted(nms) if ("::%s;" % n) not in t)
+        defined = set()
+        lower_file = Path("crates") / m.group(1).replace("_", "-") / "src" / (m.group(2).replace("::", "/") + ".rs")
+        if lower_file.exists():
+            defined = {it.name for it in ri.parse(lower_file.read_text()) if it.name}
+        lines = "\n".join("pub use %s::%s::%s;" % (m.group(1), m.group(2), n) for n in sorted(nms) if ("::%s;" % n) not in t and n in defined)
         if lines:
             Path(f).write_text(t[: m.end()] + "\n" + lines + t[m.end() :])
             edits += 1
