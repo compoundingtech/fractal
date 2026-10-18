@@ -863,9 +863,9 @@ def place_tests(nodes, mtests, files, tfiles, lower):
     def shared_pub(n):
         """Whether code outside this test module can name the type: pub, in modules that are pub (a
         prod file, a pub test-support file, or inline modules declared pub)."""
-        if not n.item.is_pub:
+        if not n.item.is_pub or any(re.fullmatch(r"#\[cfg\(test\)\]", at.strip()) for at in n.item.attrs):
             return False
-        if any(not CONTAINERS.get((n.file, n.container[: k + 1]), ("", []))[0].rstrip().endswith("pub") for k in range(len(n.container))):
+        if any(not CONTAINERS.get((n.file, n.container[: k + 1]), ("", []))[0].rstrip().endswith("pub") or "#[cfg(test)]" in CONTAINERS.get((n.file, n.container[: k + 1]), ("", []))[0] for k in range(len(n.container))):
             return False
         return n.file in files or pub_support(n.file)
     defs_by_name = collections.defaultdict(list)
