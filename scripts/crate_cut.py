@@ -196,6 +196,14 @@ def load(src, store_type="Store", nodes=None, fixed=None):
         text = open(os.path.join(src, rel)).read()
         parsed[rel] = (text, ri.parse(text))
     test_files = test_file_set(parsed)
+    for rel, (text, items) in parsed.items():
+        for it in items:
+            if it.kind == "mod" and it.text.rstrip().endswith(";"):
+                for at in it.attrs:
+                    pm = re.fullmatch(r'#\[path\s*=\s*"([^"]+)"\s*\]', at.strip())
+                    if pm:
+                        target = os.path.normpath(os.path.join(os.path.dirname(rel), pm.group(1)))
+                        MODULE_PATH_OVERRIDE[target] = module_path(rel) + [it.name]
     for rel in module_files(src):
         FILE_USES[rel] = "\n".join(it.text for it in parsed[rel][1] if it.kind == "use")
     for rel in module_files(src):
@@ -584,8 +592,11 @@ def summarize(nodes, order):
 WIDEN = re.compile(r"pub\((?:crate|super|self|in [A-Za-z_:]+)\)")
 
 
+MODULE_PATH_OVERRIDE = {}  # file -> module path, for files declared with #[path = "..."]
+
+
 def module_path(rel):
-    return rel[:-3].split("/")
+    return list(MODULE_PATH_OVERRIDE.get(rel) or rel[:-3].split("/"))
 
 
 def camel(stem):
