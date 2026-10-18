@@ -399,6 +399,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let text = format!("boundedneedle {}", "word ".repeat(1900));
         let (state, session_id, _, _) = super::super::tests::managed_conversation(root.path(), &text);
+        let session = ClientSession::local(Some("person/operator")).unwrap();
+        super::super::super::search::prepare_assistant_test_index(
+            &state, &session, "conversation-test-binding").await.unwrap();
         let (_, result) = project(&state, &new_client_snapshot(&state), "conversation-search",
             &parameters(&[("text","boundedneedle"), ("agent_id","agent/reads-codex"), ("limit","1")]),
             MAX_RESPONSE_BYTES).await.unwrap();

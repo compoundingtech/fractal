@@ -695,6 +695,21 @@ pub(super) async fn assistant_search(
     })).await
 }
 
+/// Build the real assistant index before tests that assert search results, without
+/// relying on the background refresh winning a timing race.
+#[cfg(test)]
+pub(super) async fn prepare_assistant_test_index(
+    state: &AppState, session: &ClientSession, binding: &str,
+) -> Result<(), ApiError> {
+    let index = index_for(state, session, true, Some(binding))?;
+    let runtime = tokio::runtime::Handle::current();
+    let reader = state.clone();
+    let session = session.clone();
+    crate::api::read_deadline::spawn_blocking(move ||
+        refresh(&reader, &session, &index, &runtime, true))
+        .await.map_err(ApiError::internal)?.map_err(ApiError::internal)
+}
+
 fn search_page(
     state: &AppState,
     query: &SearchQuery,

@@ -3298,12 +3298,11 @@ impl Store {
 
     /// Source-bounded current-generation candidates in subject order, with one lookahead ID.
     ///
-    /// Hydrate only the selected IDs with `client_work_item_at_snapshot` at the supplied time.
-    /// Effective terminal states and non-working revision-draining steps must still be omitted
-    /// by the caller. In particular, person asks can become effectively cancelled without a
-    /// step-table update. Advance the cursor over candidates even when projection omits them.
-    /// The step tables are current projections, not historical snapshots: callers must reject
-    /// continuation when the store index changes, including changes during hydration.
+    /// Hydrate only selected IDs with `work_at_snapshot_selected` at the supplied time
+    /// to omit effectively cancelled asks and non-working revision-draining steps.
+    /// Advance the cursor over candidates even when projection omits them. Step tables
+    /// are current projections, not historical snapshots: each page supplies its current
+    /// store index, checked before and after selection inside the caller's read snapshot.
     pub fn assistant_work_candidate_ids_page(
         &self,
         after: Option<&str>,

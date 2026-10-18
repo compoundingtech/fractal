@@ -121,10 +121,13 @@ mod tests {
         let source = format!("version 2\nmission \"paged-work\" state=\"ready\" {{ goal \"Page work.\"; {steps} }}");
         let intent = crate::graph::parse_internal_intent(&source, "work-discovery").unwrap();
         state.store.apply_internal(&intent, "paged-work-publication").unwrap();
-        state.store.create_mission_run(&crate::model::MissionRunRequest {
+        let run = state.store.create_mission_run(&crate::model::MissionRunRequest {
             mission:"paged-work".into(), revision:None, workspace:root.path().display().to_string(),
             requester:Some("person/operator".into()), mode:None, inputs:BTreeMap::new(), idempotency_key:"paged-work-run".into(),
         }).unwrap();
+        for step in run.steps {
+            state.store.set_step_state(&step.subject, "ready", None).unwrap();
+        }
         let mut snapshot = new_client_snapshot(&state);
         let mut query = BTreeMap::from([("limit".into(),"20".into())]);
         let mut ids = BTreeSet::new();
