@@ -112,6 +112,12 @@ function DragSessionObserver({ onChange }: { readonly onChange: (dragging: boole
 const copyButtonSlots: React.ContextType<typeof ButtonContext> = { slots: { [DEFAULT_SLOT]: {}, chevron: {}, drag: {} } }
 const copyCheckboxSlots: React.ContextType<typeof CheckboxContext> = { slots: { [DEFAULT_SLOT]: {}, selection: {} } }
 const copyCheckboxFieldSlots: React.ContextType<typeof CheckboxFieldContext> = { slots: { [DEFAULT_SLOT]: {}, selection: {} } }
+/**
+ * Every row reserves one `g.icon` disclosure gutter before its content, and a parent's chevron sits in it absolutely at
+ * the row's depth indent. Same-depth parents and leaves therefore start their content on one edge at one width, and each
+ * depth guide runs on its ancestor chevron's centre. Logical insets keep the gutter on the inline-start side in RTL.
+ */
+const depthIndent = (depth: number) => `calc(${s.lg} * ${depth})`
 
 interface RowContentProps<T extends SidebarTreeItem<T>> {
   readonly item: T
@@ -414,12 +420,18 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       state.selectionManager.setFocusedKey(destination)
     }
   }
-  const row = (item: T, expanded: boolean, pinned: boolean) => <div {...stylex.props(styles.row)} style={{ paddingInlineStart: `calc(${s.lg} * ${item.depth})` }}>
-    {Array.from({ length: item.depth }, (_, depth) => <span key={depth} aria-hidden {...stylex.props(styles.guide)} style={{ insetInlineStart: `calc(${s.lg} * ${depth} + ${s.sm})` }} />)}
-    {item.children?.length ? pinned ? <span data-pinned-chevron {...stylex.props(styles.chevron)}>{expanded ? '⌄' : '›'}</span> : <Button slot="chevron" {...stylex.props(styles.chevron)}>{expanded ? '⌄' : '›'}</Button> : null}
-    <div {...stylex.props(styles.content)}><RowContent item={item} expanded={expanded} pinned={pinned} renderRow={props.renderRow} /></div>
-    {!pinned && props.dragAndDropHooks !== undefined && <DragSessionObserver onChange={dragObserver} />}
-  </div>
+  const row = (item: T, expanded: boolean, pinned: boolean) => {
+    const glyph = expanded ? '⌄' : direction === 'rtl' ? '‹' : '›'
+    const inset = { insetInlineStart: depthIndent(item.depth) }
+    return <div {...stylex.props(styles.row)} style={{ paddingInlineStart: `calc(${depthIndent(item.depth)} + ${g.icon})` }}>
+      {Array.from({ length: item.depth }, (_, depth) => <span key={depth} aria-hidden data-sidebar-guide {...stylex.props(styles.guide)} style={{ insetInlineStart: `calc(${depthIndent(depth)} + ${g.icon} / 2)` }} />)}
+      {item.children?.length ? pinned
+        ? <span data-pinned-chevron data-sidebar-disclosure {...stylex.props(styles.chevron)} style={inset}>{glyph}</span>
+        : <Button slot="chevron" data-sidebar-disclosure {...stylex.props(styles.chevron)} style={inset}>{glyph}</Button> : null}
+      <div {...stylex.props(styles.content)}><RowContent item={item} expanded={expanded} pinned={pinned} renderRow={props.renderRow} /></div>
+      {!pinned && props.dragAndDropHooks !== undefined && <DragSessionObserver onChange={dragObserver} />}
+    </div>
+  }
   const renderItem = (item: T): React.ReactElement => <TreeItem id={item.id} textValue={item.textValue} aria-label={item.accessibleName ?? item.textValue} data-sidebar-tree-key={String(item.id)} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible }) => stylex.props(styles.item, isFocusVisible && styles.focused).className ?? ''}>
     <TreeItemContent>{({ isExpanded }) => row(item, isExpanded, false)}</TreeItemContent>
     <Collection items={item.children ?? []} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined]}>{renderItem}</Collection>
@@ -443,7 +455,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
         else focusReal(pin.item.id)
       }} onContextMenu={event => props.onRowContextMenu?.(pin.item, event)}>
         <div inert {...stylex.props(styles.copy)}>{pin.breadcrumb ? <div data-sidebar-breadcrumb {...stylex.props(styles.breadcrumb)}><span data-sidebar-breadcrumb-text {...stylex.props(styles.breadcrumbText)}>{pin.breadcrumb.map(item => item.textValue).join(' / ')}</span></div> : row(pin.item, props.expandedKeys.has(pin.item.id), true)}</div>
-        {pin.item.children?.length && !pin.breadcrumb ? <span data-pinned-toggle {...stylex.props(styles.toggleProxy, dragging && styles.dragPassthrough)} style={{ insetInlineStart: `calc(${s.lg} * ${pin.item.depth})` }} /> : null}
+        {pin.item.children?.length && !pin.breadcrumb ? <span data-pinned-toggle {...stylex.props(styles.toggleProxy, dragging && styles.dragPassthrough)} style={{ insetInlineStart: depthIndent(pin.item.depth) }} /> : null}
       </div></div>)}
     </div>
     {snapshot.drop !== undefined && <div aria-hidden data-sidebar-drop-indicator data-drop-key={String(snapshot.drop.key)} {...stylex.props(styles.dropIndicator)} style={{ top: snapshot.drop.top, height: snapshot.drop.height, width: snapshot.width }} />}
@@ -457,7 +469,8 @@ const styles = stylex.create({
   focused: { outlineStyle: 'solid', outlineWidth: g.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})`, outlineColor: ink.fgMuted },
   row: { position: 'relative', display: 'flex', alignItems: 'center', minHeight: g.controlSm, minWidth: 0, boxSizing: 'border-box' },
   guide: { position: 'absolute', top: 0, bottom: 0, width: g.hairline, backgroundColor: border.borderStrong, pointerEvents: 'none' },
-  chevron: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, height: g.controlSm, flexShrink: 0, padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgMuted },
+  // Absolute in the row's gutter, on line one: `g.controlSm` is the kit's minimum row and a two-line row's first line.
+  chevron: { position: 'absolute', top: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.controlSm, padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgMuted },
   content: { flex: 1, minWidth: 0 },
   stack: { position: 'absolute', top: 0, insetInline: 0, zIndex: 1, pointerEvents: 'none', overflow: 'hidden', maxHeight: '40%' },
   pinSlot: { position: 'relative', overflow: 'hidden', pointerEvents: 'none' },
@@ -466,7 +479,7 @@ const styles = stylex.create({
   dragPassthrough: { pointerEvents: 'none' },
   dropIndicator: { position: 'absolute', insetInlineStart: 0, boxSizing: 'border-box', zIndex: 3, pointerEvents: 'none', borderStyle: 'solid', borderWidth: g.focusRing, borderColor: accent.primary },
   copy: { height: '100%', pointerEvents: 'none' },
-  toggleProxy: { position: 'absolute', top: 0, width: g.controlSm, height: '100%' },
+  toggleProxy: { position: 'absolute', top: 0, width: g.icon, height: g.controlSm },
   breadcrumb: { height: '100%', display: 'flex', alignItems: 'center', paddingInline: s.md, overflow: 'hidden', fontSize: 'inherit', color: ink.fgMuted },
   // text-overflow paints only in a block container; a flex container's anonymous text is cut mid-glyph.
   breadcrumbText: { minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' },

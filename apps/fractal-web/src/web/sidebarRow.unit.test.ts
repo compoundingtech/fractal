@@ -6,9 +6,10 @@ const row = (change: Partial<Agent> = {}, stale = false) => sidebarRow({agent:{.
 describe('controlled native sidebar observations', () => {
   it('never exposes an unknown raw status in hover copy', () => {
     for (const status of ['indeterminate', 'unexpected-runtime-value']) {
-      expect(row({ status }).statusLabel).toBe('Not observed')
-      expect(row({ status }, true).statusLabel).toBe('Last verified · Not observed')
-      expect(row({ status, connected: false }).statusLabel).toBe('Offline · Not observed')
+      expect(row({ status }).statusLabel).toBe('Idle')
+      expect(row({ status }, true).statusLabel).toBe('Last verified · Idle')
+      expect(row({ status }).status).toBe('idle')
+      expect(row({ status, connected: false })).toMatchObject({ status: 'offline', statusLabel: 'Offline' })
     }
   })
   it('does not invent usage, duration, attention, unread or children', () => {
@@ -41,6 +42,17 @@ describe('controlled native sidebar observations', () => {
     expect(row({activity:'working'},true)).toMatchObject({status:'working',freshness:'stale'})
     expect(row({activity:'waiting'}).status).toBe('waiting')
     expect(row({activity:'waiting'}).needsMe).toBeUndefined()
+  })
+  it('uses the same canonical sentence-case state for the glyph and status word', () => {
+    for (const state of ['stopped', 'ended']) {
+      expect(row({ state, activity: 'idle', status: 'idle' })).toMatchObject({ status: 'ended', statusLabel: 'Ended' })
+    }
+    expect(row({ activity: 'working', status: 'working' })).toMatchObject({ status: 'working', statusLabel: 'Working' })
+    expect(row()).toMatchObject({ status: 'idle', statusLabel: 'Idle' })
+    expect(row({ activity: 'waiting', status: 'waiting' })).toMatchObject({ status: 'waiting', statusLabel: 'Needs you' })
+    expect(row({ activity: 'waiting', status: 'waiting for you (question)' })).toMatchObject({ status: 'waiting', statusLabel: 'Needs you' })
+    expect(row({ activity: 'errored', status: 'errored' })).toMatchObject({ status: 'stale', statusLabel: 'Stale observation' })
+    expect(row({ state: 'stopped' }, true)).toMatchObject({ status: 'ended', statusLabel: 'Last verified · Ended' })
   })
   it('retains canonical identity and reported metadata without a new read', () => {
     expect(row({description:'Actual description',harness:'codex',terminal:'terminal/native',mission:'mission/native'})).toMatchObject({ref:agent.ref,id:agent.ref,title:agent.name,host:agent.host,description:'Actual description',harness:'codex',terminal:'terminal/native',mission:'mission/native'})

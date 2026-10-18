@@ -1,4 +1,5 @@
 import type { SidebarAgentRowData, SidebarAgentStatus } from '@smalltalk/fractal-ui/assistant-ui'
+import { statuses } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import type { Agent } from '../data/source.ts'
 import type { AgentSubagent } from '../data/source.ts'
 
@@ -32,11 +33,12 @@ export const sidebarRow = ({ agent, stale, needsMe }: {
     value >= 0 && value <= 8640000000000000 ? value : undefined
   const lastActivityAt = validTimestamp(agent.lastActivityAt._tag === 'Known' ? agent.lastActivityAt.value : undefined)
   const statusSince = validTimestamp(agent.statusSince)
-  const knownStatuses = ['idle', 'working', 'waiting', 'errored', 'retired', 'suspended', 'stopped', 'ended', 'desired', 'starting', 'offline']
-  const statusLabel = knownStatuses.includes(agent.status) ? agent.status : 'Not observed'
+  // The canonical state drives both the G3 glyph and its sentence-case word.
+  // Lifecycle takes precedence over harness activity: a stopped idle harness is Ended, not Idle.
+  const statusLabel = statuses[status].label
   return {
     ref: agent.ref, id: agent.ref, title: agent.name, host: agent.host, status,
-    statusLabel: stale ? 'Last verified · ' + statusLabel : !agent.connected ? 'Offline · ' + statusLabel : statusLabel,
+    statusLabel: stale ? 'Last verified · ' + statusLabel : statusLabel,
     freshness: stale ? 'stale' : 'live', description: agent.description, harness: agent.harness,
     terminal: agent.terminal || undefined, mission: agent.mission, lastActivityAt, statusSince,
     needsMe,

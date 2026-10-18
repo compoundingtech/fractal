@@ -1,4 +1,4 @@
-/** RM1 two-line agent row: G3 glyph states live and frozen, the 48px two-line anatomy, nesting inside the kit SidebarTree, and the hover card. */
+/** RM1 two-line agent row: every canonical G3 state in both schemes at the live default sidebar width, G3 glyph states live and frozen, the 48px two-line anatomy, nesting inside the kit SidebarTree, and the hover card. */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
@@ -7,7 +7,9 @@ import type { Key } from 'react-aria-components'
 import { MilestoneAgentRow, openAgentRowMenu } from './MilestoneAgentRow'
 import { SidebarTree, type SidebarTreeItem } from './SidebarTree'
 import { statuses, type AgentStatus, type SidebarAgentRow as Row } from './model'
-import { geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { geometryNumbers, geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { lightTheme, type Scheme } from '../composition-theme'
+import { ThemePortal } from '../taste/ThemePortal'
 
 const storyNow = Date.UTC(2026, 9, 17, 9, 30, 0)
 const base: Row = {
@@ -24,7 +26,7 @@ const parent: Row = {
   usage: { _tag: 'Known', scope: 'lifetime-incl-subagents', usd: 3.42, tokens: 1_180_000 }, duration: { _tag: 'Known', scope: 'lifetime', ms: 2_460_000 },
   lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 95_000 },
   children: [
-    { ...subagent, ref: 'agent/parent/subagent/review', title: 'Review metric track diff', status: 'idle', statusLabel: 'Done', usage: { _tag: 'Known', scope: 'reported-agent', tokens: 48_200 }, lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 140_000 } },
+    { ...subagent, ref: 'agent/parent/subagent/review', title: 'Review metric track diff', status: 'ended', statusLabel: statuses.ended.label, usage: { _tag: 'Known', scope: 'reported-agent', tokens: 48_200 }, lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 140_000 } },
     { ...subagent, ref: 'agent/parent/subagent/checks', title: 'Run row fitting checks', status: 'working', statusLabel: 'Working', unread: 2, lastTurn: { _tag: 'Known', kind: 'activity', at: storyNow - 12_000 } },
   ],
 }
@@ -68,6 +70,16 @@ function TreeWithActions() {
     <SidebarTree aria-label="Agents with actions" items={treeItems} expandedKeys={expanded} onExpandedChange={setExpanded} renderRow={renderRow}
       onRowContextMenu={(_item, event) => { if (openAgentRowMenu(event.currentTarget)) event.preventDefault() }} />
   </section>
+}
+
+/** One live row per canonical state in the live default sidebar; the scheme themes the story root, as the app themes its shell. */
+function AllStatesSidebar({ scheme }: { readonly scheme: Scheme }) {
+  return <main data-testid="all-states" data-scheme={scheme} {...stylex.props(styles.root, scheme === 'light' && lightTheme)}><ThemePortal>
+    <span aria-hidden="true" data-tone-probe="" {...stylex.props(styles.toneProbe)} />
+    <section aria-label="All states" data-host="all-states" {...stylex.props(styles.column)}>
+      {stateRows.map(row => <MilestoneAgentRow key={row.ref} row={row} now={storyNow} />)}
+    </section>
+  </ThemePortal></main>
 }
 
 const meta = { title: 'Fractal UI/Sidebar/Milestone agent row', component: MilestoneAgentRow, parameters: { layout: 'fullscreen', docs: { description: { component: 'RM1 SR-2 row (48px, two lines) with SG-1 · G3 glyphs. Frozen rows mute every tone and draw a shape cue for every state, so working and idle stay apart; stale is never the danger red.' } } } } satisfies Meta<typeof MilestoneAgentRow>
@@ -130,7 +142,7 @@ export const TwoLineAndNesting: Story = {
     await expect(line2(root!, 'host')?.textContent).toBe('build-2')
     await expect(line2(root!, 'spend')?.textContent).toBe('$3.4 · 1.2M')
     await expect(line2(root!, 'duration')).not.toBeNull()
-    await expect(line2(review!, 'status-label')?.textContent).toBe('Done')
+    await expect(line2(review!, 'status-label')?.textContent).toBe('Ended')
     // A reported-agent aggregate without a USD cost shows tokens only, never a substituted $0.
     await expect(line2(review!, 'spend')?.textContent).toBe('48K tokens')
     await expect(line2(review!, 'spend')).toHaveAttribute('aria-label', 'Reported by agent: 48200 tokens')
@@ -142,6 +154,27 @@ export const TwoLineAndNesting: Story = {
     await expect(root!.closest('[role="row"]')).toHaveAttribute('aria-level', '1')
     await expect(review!.getBoundingClientRect().left).toBeGreaterThan(leaf!.getBoundingClientRect().left)
     await expect(Math.abs(review!.getBoundingClientRect().left - checks!.getBoundingClientRect().left)).toBeLessThanOrEqual(1)
+    // Disclosure gutter: the root parent's glyph and title share the same-depth leaf's edges and title width; the chevron
+    // costs no title room, sits wholly in the inline-start gutter before the glyph, and centres on line one.
+    const box = (row: Element, column: string) => row.querySelector(`[data-row-column="${column}"]`)!.getBoundingClientRect()
+    const disclosure = root!.closest('[role="row"]')!.querySelector('[data-sidebar-disclosure]')!.getBoundingClientRect()
+    await expect(leaf!.closest('[role="row"]')!.querySelector('[data-sidebar-disclosure]')).toBeNull()
+    await expect(Math.abs(box(root!, 'status').left - box(leaf!, 'status').left)).toBeLessThanOrEqual(0.5)
+    await expect(Math.abs(box(root!, 'title').left - box(leaf!, 'title').left)).toBeLessThanOrEqual(0.5)
+    await expect(Math.abs(box(root!, 'title').width - box(leaf!, 'title').width)).toBeLessThanOrEqual(0.5)
+    await expect(disclosure.width).toBeGreaterThan(0)
+    await expect(disclosure.left).toBeGreaterThanOrEqual(root!.closest('[role="row"]')!.getBoundingClientRect().left - 0.5)
+    await expect(disclosure.right).toBeLessThanOrEqual(root!.getBoundingClientRect().left + 0.5)
+    await expect(Math.abs((disclosure.top + disclosure.bottom) / 2 - (box(root!, 'status').top + box(root!, 'status').bottom) / 2)).toBeLessThanOrEqual(1)
+    // Children nest one step past their parent: same-depth subagents share glyph and title edges, and the child guide
+    // runs on the parent chevron's centre, clear of the child's own gutter content.
+    await expect(box(review!, 'status').left).toBeGreaterThan(box(root!, 'status').left)
+    await expect(Math.abs(box(review!, 'status').left - box(checks!, 'status').left)).toBeLessThanOrEqual(0.5)
+    await expect(Math.abs(box(review!, 'title').left - box(checks!, 'title').left)).toBeLessThanOrEqual(0.5)
+    await expect(Math.abs((box(review!, 'status').left - box(root!, 'status').left) - (box(review!, 'title').left - box(root!, 'title').left))).toBeLessThanOrEqual(0.5)
+    const guide = review!.closest('[role="row"]')!.querySelector('[data-sidebar-guide]')!.getBoundingClientRect()
+    await expect(Math.abs(guide.left + guide.width / 2 - (disclosure.left + disclosure.right) / 2)).toBeLessThanOrEqual(1)
+    await expect(guide.right).toBeLessThanOrEqual(review!.getBoundingClientRect().left)
     // Standalone hosts pass depth and their own chevron slot; depth indents the row content.
     const standalone = [...canvasElement.querySelectorAll<HTMLElement>('[data-host="standalone"] [data-milestone-row]')]
     await expect(standalone[0]!.querySelector('[data-row-column="chevron"]')).not.toBeNull()
@@ -183,10 +216,54 @@ export const RowActions: Story = {
   },
 }
 
+const neutralStates = ['idle', 'pending', 'offline', 'ended', 'suspended', 'retired', 'unobserved'] as const satisfies readonly AgentStatus[]
+const allStatesPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async ({ canvasElement }) => {
+  const surfaceRoot = within(canvasElement).getByTestId('all-states')
+  const host = surfaceRoot.querySelector<HTMLElement>('[data-host="all-states"]')!
+  // The fixture is the live default sidebar aside (`sidebarDefault`, roster inset), not a specimen width.
+  await expect(Math.abs(host.getBoundingClientRect().width - geometryNumbers.sidebarDefault)).toBeLessThanOrEqual(1)
+  const rows = [...host.querySelectorAll<HTMLElement>('[data-milestone-row]')]
+  await expect(rows.map(row => row.getAttribute('data-status'))).toEqual(stateOrder)
+  const at = (status: AgentStatus) => glyph(rows.find(row => row.getAttribute('data-status') === status)!)
+  const color = (status: AgentStatus) => getComputedStyle(at(status)).color
+  // G3: working and idle are bare discs told apart by tone; every other state draws its canonical shape over a faded disc.
+  for (const status of stateOrder) {
+    await expect(at(status)).toHaveAttribute('data-disc-refinement', 'G3')
+    await expect(at(status).children.length === 1).toBe(status === 'working' || status === 'idle')
+  }
+  await expect(new Set(stateOrder.map(status => `${at(status).innerHTML}|${color(status)}`)).size).toBe(stateOrder.length)
+  // Ended is not idle: a finished agent draws the stop shape, never the bare idle disc.
+  await expect(at('ended').innerHTML).not.toBe(at('idle').innerHTML)
+  const probe = getComputedStyle(surfaceRoot.querySelector('[data-tone-probe]')!)
+  const soft = probe.color, muted = probe.backgroundColor, danger = probe.borderTopColor
+  await expect(color('working')).not.toBe(soft)
+  await expect(color('waiting')).not.toBe(soft)
+  await expect(color('waiting')).not.toBe(color('working'))
+  for (const status of neutralStates) await expect(color(status)).toBe(soft)
+  // Stale is an observation gap: muted, never the danger red.
+  await expect(color('stale')).toBe(muted)
+  await expect(color('stale')).not.toBe(danger)
+  // The scheme reaches the surface: light renders on a light canvas, dark on a dark one (relative luminance of the canvas).
+  const [red, green, blue] = getComputedStyle(surfaceRoot).backgroundColor.match(/\d+(\.\d+)?/g)!.map(Number)
+  await expect((0.2126 * red! + 0.7152 * green! + 0.0722 * blue!) / 255 > 0.5).toBe(surfaceRoot.getAttribute('data-scheme') === 'light')
+}
+
+export const AllStates: StoryObj<{ scheme: Scheme }> = {
+  tags: ['critical'], name: 'All G3 states · live default width',
+  args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
+  render: ({ scheme }) => <AllStatesSidebar scheme={scheme} />,
+  play: allStatesPlay,
+}
+
+export const AllStatesLight: StoryObj<{ scheme: Scheme }> = { ...AllStates, name: 'All G3 states · live default width · light', args: { scheme: 'light' } }
+
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   matrix: { display: 'flex', alignItems: 'flex-start', flexWrap: 'wrap', gap: s.xl },
-  column: { display: 'flex', flexDirection: 'column', gap: s.xs2, width: g.specimenSidebar, padding: s.xs, backgroundColor: surface.sidebar },
+  // The live default sidebar: the app's aside opens at `sidebarDefault` and its roster insets rows by `s.md` with 2px gaps.
+  column: { display: 'flex', flexDirection: 'column', gap: s.xs2, width: g.sidebarDefault, boxSizing: 'border-box', padding: s.md, backgroundColor: surface.sidebar },
   tree: { height: '320px' },
   heading: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
+  // Resolves the surface's own tokens for the tone assertions: soft (neutral states), muted (stale), danger (never stale).
+  toneProbe: { position: 'absolute', width: s.zero, height: s.zero, overflow: 'hidden', color: ink.fgSoft, backgroundColor: ink.fgMuted, borderTopColor: tone.dangerFg },
 })
