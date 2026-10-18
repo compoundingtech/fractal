@@ -1965,6 +1965,9 @@ fn client_page_read_bounded(
         &query.cursor
     {
         let cursor = decode_client_cursor(cursor)?;
+        if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&cursor.limit) {
+            return Err(client_page_expired("the page cursor has an invalid item limit"));
+        }
         if cursor.collection != collection
             || cursor.history != query.history
             || cursor.person != query.person
@@ -2001,6 +2004,9 @@ fn client_page_read_bounded(
             .ok_or_else(|| {
                 client_page_expired("the page snapshot is no longer available; restart pagination")
             })?;
+        if cursor.offset >= cached.items.len() {
+            return Err(client_page_expired("the page cursor offset is outside its cached snapshot"));
+        }
         (
             cached.items.clone(),
             cursor.items_digest,

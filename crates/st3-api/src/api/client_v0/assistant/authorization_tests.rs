@@ -576,6 +576,34 @@ agent "worker" { workspace "/tmp"; command "true"; restart always; }
         }
         for mode in ["approval-once", "caller-bound-allow"] {
             projection_read_mode(&mut fixture, mode).await;
+            let first_query = "?max_response_bytes=16384&limit=1";
+            let payload = fixture.payload("attention-rich", first_query);
+            let header = fixture.header(&payload, &fixture.attestor);
+            let (status, first, _) = fixture.request(
+                &format!("/v1/client/assistant/attention-rich{first_query}"),
+                (mode == "approval-once").then_some(header.as_str()),
+            ).await;
+            assert_eq!(status, StatusCode::OK, "{first}");
+            let cursor = decode_client_cursor(first["value"]["page"]["next_cursor"].as_str().unwrap()).unwrap();
+            for (limit, offset) in [
+                (0, 1), (CLIENT_MAX_PAGE_ITEMS + 1, 1), (usize::MAX, 1),
+                (1, 6), (1, 7), (1, usize::MAX), (usize::MAX, usize::MAX),
+            ] {
+                let mut invalid = cursor.clone();
+                invalid.limit = limit;
+                invalid.offset = offset;
+                let encoded = encode_client_cursor(&invalid).unwrap();
+                let query = format!("?max_response_bytes=1024&cursor={}", urlencoding::encode(&encoded));
+                let payload = fixture.payload("attention-rich", &query);
+                let header = fixture.header(&payload, &fixture.attestor);
+                let (status, value, _) = fixture.request(
+                    &format!("/v1/client/assistant/attention-rich{query}"),
+                    (mode == "approval-once").then_some(header.as_str()),
+                ).await;
+                assert_eq!(status, StatusCode::GONE, "{mode}, limit={limit}, offset={offset}: {value}");
+                assert_eq!(value["code"], "page-cursor-expired", "{value}");
+                assert!(value.get("value").is_none(), "{value}");
+            }
             for limit in ["", "&limit=5", "&limit=20"] {
                 let mut query = format!("?max_response_bytes={budget}{limit}");
                 let mut ids = BTreeSet::new();

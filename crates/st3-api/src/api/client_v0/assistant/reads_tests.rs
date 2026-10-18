@@ -648,3 +648,36 @@ async fn assistant_pages_pack_whole_items_and_resume_at_the_exact_budget_boundar
         assert!(error.message.contains("item/oversized"));
     }
 }
+
+#[tokio::test]
+async fn assistant_pages_reject_cursor_limits_and_offsets_outside_the_cached_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let snapshot = new_client_snapshot(&state);
+    let context = response_body::Context {
+        state: state.clone(), client_request: true, observation_report: false,
+        request_id: "request/test".into(), client_snapshot: Some(snapshot.clone()),
+        server: None, roster: false,
+    };
+    let items = (0..CLIENT_MAX_PAGE_ITEMS + 2)
+        .map(|index| json!({"id":format!("item/{index}"),"title":"x".repeat(100)}))
+        .collect::<Vec<_>>();
+    let first = client_page_read_bounded(&state, &snapshot, "assistant.attention-rich", items,
+        &ClientListQuery { limit: Some(1), ..Default::default() }, true,
+        Some((&context, MAX_RESPONSE_BYTES))).unwrap();
+    let cursor = decode_client_cursor(first.page.next_cursor.as_deref().unwrap()).unwrap();
+    for (limit, offset) in [
+        (0, 1), (CLIENT_MAX_PAGE_ITEMS + 1, 1), (usize::MAX, 1),
+        (1, CLIENT_MAX_PAGE_ITEMS + 2), (1, CLIENT_MAX_PAGE_ITEMS + 3), (1, usize::MAX),
+        (usize::MAX, usize::MAX),
+    ] {
+        let mut invalid = cursor.clone();
+        invalid.limit = limit;
+        invalid.offset = offset;
+        let error = client_page_read_bounded(&state, &snapshot, "assistant.attention-rich", Vec::new(),
+            &ClientListQuery { cursor: Some(encode_client_cursor(&invalid).unwrap()), ..Default::default() },
+            false, Some((&context, 1024))).unwrap_err();
+        assert_eq!((error.status, error.code.as_str()), (StatusCode::GONE, "page-cursor-expired"),
+            "limit={limit} offset={offset}");
+    }
+}
