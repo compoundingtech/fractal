@@ -22,7 +22,7 @@ pub const SCHEMA_NAME: &str = "st3.v1";
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use st_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6f6b3100e124 owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h09403c055b13 owner=st3_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -78,7 +78,8 @@ The old version-18 binary refuses version 19. Do not lower `user_version` for ro
 checkpoint tables that record it. Triggers union every identity a row of `checkpoint_claims` or
 `checkpoint_envelopes` gains, through INSERT, UPDATE or before DELETE, so the ledger only grows. A
 background job (`maintenance.retired_identities`) unions rows that predate the triggers, 4,096
-per writer transaction with its cursor in `meta`. When a checkpoint table stops holding an
+per background writer loan with its cursor in `meta`, resting outside the loan for
+max(100 ms, 4 x the loan's hold), capped at 5 s. The ledger has no cap and no reclamation. When a checkpoint table stops holding an
 identity, as adoption does when it keeps only an adopted manifest's tombstones, the identity
 stays retired and is also labeled in `retired_claim_withdrawals` or
 `retired_envelope_withdrawals` with the recording checkpoint. Admission and evidence still read

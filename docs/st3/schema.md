@@ -4,7 +4,7 @@ This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
 Storage version: `20`
-Storage digest: `88999e2bc7ee48129dcb15431aab8b4e85d0192b539770fee0c0cb3aaed22481`
+Storage digest: `5a773ab229f6840a044c37d88812f64af0179542bff88ba67994415efd4cf6c3`
 
 ## Subject families
 
@@ -315,7 +315,8 @@ The old version-18 binary refuses version 19. Do not lower `user_version` for ro
 checkpoint tables that record it. Triggers union every identity a row of `checkpoint_claims` or
 `checkpoint_envelopes` gains, through INSERT, UPDATE or before DELETE, so the ledger only grows. A
 background job (`maintenance.retired_identities`) unions rows that predate the triggers, 4,096
-per writer transaction with its cursor in `meta`. When a checkpoint table stops holding an
+per background writer loan with its cursor in `meta`, resting outside the loan for
+max(100 ms, 4 x the loan's hold), capped at 5 s. The ledger has no cap and no reclamation. When a checkpoint table stops holding an
 identity, as adoption does when it keeps only an adopted manifest's tombstones, the identity
 stays retired and is also labeled in `retired_claim_withdrawals` or
 `retired_envelope_withdrawals` with the recording checkpoint. Admission and evidence still read

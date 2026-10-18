@@ -222,13 +222,40 @@ fn import_page(connection: &Connection) -> Result<RetiredImport> {
     })
 }
 
+/// The rest after each import page, outside the writer loan: at least 100 ms and four times the
+/// page's writer hold (acquisition through COMMIT), at most five seconds. This is the checkpoint
+/// trim's pacing rule; it yields the writer, it is not a bound on foreground latency.
+pub fn import_rest(held: std::time::Duration) -> std::time::Duration {
+    (held * 4)
+        .max(std::time::Duration::from_millis(100))
+        .min(std::time::Duration::from_secs(5))
+}
+
 impl Store {
     /// Union one bounded page of pre-existing checkpoint tombstones into the retired-identity
-    /// ledger, on the writer queue. Call until `done`.
-    pub fn import_retired_identities(&self) -> Result<RetiredImport> {
-        self.connection
-            .batched(|tx| import_page(tx))
-            .map_err(anyhow::Error::msg)?
+    /// ledger on a background writer loan, and return it with the loan's hold time.
+    pub fn import_retired_identities(&self) -> Result<(RetiredImport, std::time::Duration)> {
+        let mut connection = self.connection.write_background();
+        let started = std::time::Instant::now();
+        let transaction = connection.transaction()?;
+        let page = import_page(&transaction)?;
+        transaction.commit()?;
+        Ok((page, started.elapsed()))
+    }
+
+    /// Import every remaining page, resting `import_rest` outside the loan between pages. The
+    /// cursor commits with each page, so an interrupted import resumes where it stopped.
+    pub fn import_retired_identities_paced(
+        &self,
+        mut rest: impl FnMut(std::time::Duration),
+    ) -> Result<()> {
+        loop {
+            let (page, held) = self.import_retired_identities()?;
+            if page.done {
+                return Ok(());
+            }
+            rest(import_rest(held));
+        }
     }
 
     /// Whether every checkpoint row that predates the ledger has been imported into it.
@@ -415,8 +442,63 @@ mod tests {
             .unwrap();
         assert_eq!(withdrawals, (1, 1));
         drop(connection);
-        while !store.import_retired_identities().unwrap().done {}
+        store.import_retired_identities_paced(|_| {}).unwrap();
         assert!(store.retired_identity_import_done().unwrap());
+    }
+
+    #[test]
+    fn each_import_page_rests_outside_its_background_loan() {
+        use crate::store::runtime::Plain;
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let store = Arc::new(Store::open_memory("writer", Arc::new(Plain)).unwrap());
+        {
+            let mut writer = store.connection.write();
+            let transaction = writer.transaction().unwrap();
+            for sequence in 0..(IMPORT_PAGE * 2) {
+                transaction
+                    .execute(
+                        "INSERT INTO checkpoint_envelopes VALUES('oak',?1,?2,1,'checkpoint/one')",
+                        params![sequence, format!("{sequence:064x}")],
+                    )
+                    .unwrap();
+            }
+            // As if recorded before the ledger's triggers existed.
+            transaction.execute("DELETE FROM retired_envelopes", []).unwrap();
+            transaction.commit().unwrap();
+        }
+        let mut rests = Vec::new();
+        store
+            .import_retired_identities_paced(|rest| {
+                rests.push(rest);
+                // The loan is released: a foreground write completes during the rest.
+                let foreground = store.clone();
+                let (sent, received) = mpsc::channel();
+                let writer = std::thread::spawn(move || {
+                    let result = foreground.connection.write().execute(
+                        "INSERT OR REPLACE INTO meta(key,value) VALUES('foreground-during-import','ok')",
+                        [],
+                    );
+                    sent.send(result.is_ok()).unwrap();
+                });
+                assert!(received.recv_timeout(Duration::from_secs(5)).unwrap());
+                writer.join().unwrap();
+            })
+            .unwrap();
+        // The empty claims page, two envelope pages, then the empty page that finishes.
+        assert_eq!(rests.len(), 3);
+        assert!(rests.iter().all(|rest| *rest >= Duration::from_millis(100)
+            && *rest <= Duration::from_secs(5)));
+        let imported: i64 = store
+            .readers
+            .get()
+            .query_row("SELECT COUNT(*) FROM retired_envelopes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(imported, IMPORT_PAGE * 2);
+        assert!(store.retired_identity_import_done().unwrap());
+        assert_eq!(import_rest(Duration::from_millis(10)), Duration::from_millis(100));
+        assert_eq!(import_rest(Duration::from_millis(300)), Duration::from_millis(1200));
+        assert_eq!(import_rest(Duration::from_secs(2)), Duration::from_secs(5));
     }
 
     #[test]

@@ -17916,16 +17916,15 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
 }
 
 /// Checkpoint tombstones recorded before the retired-identity ledger union into it after
-/// startup, a page at a time on the writer queue with its cursor. Later recordings and
-/// deletions reach the ledger by trigger, so an unfinished import loses nothing. A failed page
-/// retries, including after a daemon restart.
+/// startup: a page per background writer loan, with its cursor, resting outside the loan
+/// (`retired::import_rest`). Later recordings and deletions reach the ledger by trigger, so an
+/// unfinished import loses nothing. A failed import retries, including after a daemon restart.
 async fn import_retired_identities(store: Arc<Store>) {
     loop {
-        let store = store.clone();
-        let result = store.connection.write_workers().spawn_blocking(move || st3::task_cpu::blocking("maintenance.retired_identities", || store.import_retired_identities())).await;
+        let worker = store.clone();
+        let result = tokio::task::spawn_blocking(move || st3::task_cpu::blocking("maintenance.retired_identities", || worker.import_retired_identities_paced(std::thread::sleep))).await;
         match result {
-            Ok(Ok(report)) if report.done => return,
-            Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(50)).await,
+            Ok(Ok(())) => return,
             error => {
                 eprintln!("st3: retired identity import failed: {error:?}");
                 tokio::time::sleep(Duration::from_secs(60)).await;
