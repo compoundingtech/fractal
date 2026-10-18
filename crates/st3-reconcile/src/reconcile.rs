@@ -1,5 +1,8 @@
 #[path = "reconcile_rollout.rs"]
 pub mod rollouts;
+use crate::EvidenceStore;
+use crate::OwnedSetsStore;
+use crate::PublicationStore;
 use crate::{GithubStore, WatchesStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;

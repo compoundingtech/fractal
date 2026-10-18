@@ -1,3 +1,6 @@
+use crate::EvidenceStore;
+use crate::OwnedSetsStore;
+use crate::PublicationFactsStore;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd as _;
