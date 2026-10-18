@@ -51,17 +51,37 @@ const TOOLS: &[(&str, &str, bool)] = &[
     ("st_conversation_read", "Read one bounded conversation content range. Content may contain sensitive material.", true),
     ("st_message_send", "Send one exact message to an owner-allowlisted agent, authorized by grant scope and the ChatGPT confirmation card.", false),
 ];
+
+// Discovery and local admission share these rules; ASCII keys also satisfy daemon byte bounds.
+const ACTION_ID_PREFIX: &str = "action/";
+const IDEMPOTENCY_KEY_MIN_LENGTH: usize = 16;
+const IDEMPOTENCY_KEY_MAX_LENGTH: usize = 256;
+const IDEMPOTENCY_KEY_CHAR_RANGE: std::ops::RangeInclusive<u8> = b' '..=b'~';
+
+fn idempotency_key_pattern() -> String {
+    format!("^[{}-{}]{{{IDEMPOTENCY_KEY_MIN_LENGTH},{IDEMPOTENCY_KEY_MAX_LENGTH}}}$",
+        char::from(*IDEMPOTENCY_KEY_CHAR_RANGE.start()), char::from(*IDEMPOTENCY_KEY_CHAR_RANGE.end()))
+}
+
+fn action_id_schema() -> Value {
+    json!({"type":"string","pattern":format!("^{ACTION_ID_PREFIX}"),
+        "description":"Unique per intended action, e.g. action/<short-slug>; reuse the same value on a retry"})
+}
+fn idempotency_key_schema() -> Value {
+    json!({"type":"string","pattern":idempotency_key_pattern(),
+        "description":format!("{IDEMPOTENCY_KEY_MIN_LENGTH}-{IDEMPOTENCY_KEY_MAX_LENGTH} printable ASCII chars only (stricter than daemon byte-length bounds); reuse the exact value on retries of the same action")})
+}
 fn fence_schema() -> Value {
     json!({"type":"object","description":"Use the snapshot returned by the preceding read. Copy subject revisions from that snapshot to fence writes against changed resources.",
         "properties":{
-            "snapshot_id":{"type":"string","description":"Opaque snapshot identifier returned by the paired gateway."},
+            "snapshot_id":{"type":"string","description":"The snapshot id from the immediately preceding read result."},
             "subject_revisions":{"type":"object","description":"Resource subject identifiers mapped to their opaque revision strings; omitted means no subject-specific revisions.","additionalProperties":{"type":"string"}}
         },"required":["snapshot_id"],"additionalProperties":false})
 }
 fn schema(name: &str) -> Value {
     let props = match name {
-        "st_alert_answer" => json!({"action_id":{"type":"string"},"idempotency_key":{"type":"string"},"fence":fence_schema(),"alert_id":{"type":"string"},"episode":{"type":"string"},"option":{"type":"string"},"summary":{"type":"string"}}),
-        "st_message_send" => json!({"action_id":{"type":"string"},"idempotency_key":{"type":"string"},"fence":fence_schema(),"to":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"}}),
+        "st_alert_answer" => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"alert_id":{"type":"string"},"episode":{"type":"string"},"option":{"type":"string"},"summary":{"type":"string"}}),
+        "st_message_send" => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"to":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"}}),
         "st_alert_get" => json!({"alert_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         "st_conversation_read" => json!({"agent_id":{"type":"string"},"session_id":{"type":"string"},"reference":{"type":"string"},"revision":{"type":"string"},"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":0},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         _ => json!({"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
@@ -76,8 +96,8 @@ fn schema(name: &str) -> Value {
     json!({"type":"object","properties":props,"required":required,"additionalProperties":false})
 }
 
-/// Validate the small JSON Schema vocabulary used by the published contracts.
-/// The same contracts drive discovery and validation, including nested fence maps.
+/// Validate the structural JSON Schema vocabulary used by the published contracts.
+/// Action string constraints are checked by validate_arguments with rule-specific errors.
 fn matches_schema(value: &Value, contract: &Value) -> bool {
     match contract["type"].as_str() {
         Some("string") => value.is_string(),
@@ -110,6 +130,19 @@ fn validate_arguments(name: &str, args: &Value) -> Result<(), Value> {
     }
     if !matches_schema(args, &schema(name)) {
         return Err(json!({"code":"invalid-arguments","message":"Use the exact published tool schema."}));
+    }
+    if matches!(name, "st_alert_answer" | "st_message_send") {
+        let action_id = args["action_id"].as_str().expect("validated action ID string");
+        if !action_id.starts_with(ACTION_ID_PREFIX) {
+            return Err(json!({"code":"invalid-arguments",
+                "message":format!("action_id must match ^{ACTION_ID_PREFIX} (start with {ACTION_ID_PREFIX}).")}));
+        }
+        let key = args["idempotency_key"].as_str().expect("validated idempotency key string");
+        if !(IDEMPOTENCY_KEY_MIN_LENGTH..=IDEMPOTENCY_KEY_MAX_LENGTH).contains(&key.len())
+            || !key.bytes().all(|byte| IDEMPOTENCY_KEY_CHAR_RANGE.contains(&byte)) {
+            return Err(json!({"code":"invalid-arguments",
+                "message":format!("idempotency_key must match {}: {IDEMPOTENCY_KEY_MIN_LENGTH}-{IDEMPOTENCY_KEY_MAX_LENGTH} printable ASCII chars only.", idempotency_key_pattern())}));
+        }
     }
     Ok(())
 }
