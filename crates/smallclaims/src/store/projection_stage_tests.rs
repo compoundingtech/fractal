@@ -308,7 +308,7 @@ fn each_point_inside_the_loan_is_charged_to_its_own_stage() {
                     .unwrap();
                 writer
                     .execute_batch(
-                        "CREATE TEMP TRIGGER stage_test_health BEFORE UPDATE ON projection_health
+                        /* sqlite-large-value: allow-for-now lv-hebc8bd0672dc owner=smallclaims::store::projection_stage_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER stage_test_health BEFORE UPDATE ON projection_health
                          BEGIN SELECT stage_test_pause(); END",
                     )
                     .unwrap();

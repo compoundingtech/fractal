@@ -18,16 +18,25 @@ import { parseSidebarQuery, sortModes, type SortMode } from './filter.ts'
 import { defaultFilters, type SidebarFilters } from './state.ts'
 import { statuses, type AgentStatus } from './StatusIcon.tsx'
 
+/** Inputs of the shared sidebar toolbar. */
+export interface SidebarToolbarProps {
+  readonly filters: SidebarFilters
+  readonly update: (value: SidebarFilters) => void
+  readonly hosts: readonly string[]
+  readonly needsMeCount?: number
+  readonly onEnterResults?: () => void
+  /** Host surface override for the search field, e.g. a fill that stands apart from its sidebar. */
+  readonly searchStyle?: stylex.StyleXStyles
+}
 /** Sidebar search, visibility, host, status and view-only ordering controls. */
 export const SidebarToolbar = ({
   filters,
   update,
   hosts,
-}: {
-  readonly filters: SidebarFilters
-  readonly update: (value: SidebarFilters) => void
-  readonly hosts: readonly string[]
-}) => {
+  needsMeCount,
+  onEnterResults,
+  searchStyle,
+}: SidebarToolbarProps) => {
   const search = React.useRef<HTMLDivElement>(null)
   const shortcut = React.useCallback((node: HTMLDivElement | null) => {
     if (node === null) return
@@ -48,16 +57,19 @@ export const SidebarToolbar = ({
     document.addEventListener('keydown', listener)
     return () => document.removeEventListener('keydown', listener)
   }, [])
+  const parsedQuery = parseSidebarQuery(filters.query)
   const activeCount =
     Number(filters.hideEnded) +
     Number(filters.hideRetired) +
     Number(filters.host !== '') +
-    parseSidebarQuery(filters.query).machines.length +
+    parsedQuery.machines.length +
+    parsedQuery.facets.length +
     filters.statuses.length
   return (
     <div ref={shortcut} {...stylex.props(styles.toolbar)}>
       <div {...stylex.props(styles.controls)}>
-        <ChromeControl icon="bell" label="Needs me only" pressed={filters.needsMe} onPress={() => update({ ...filters, needsMe: !filters.needsMe })} />
+        <ChromeControl icon="bell" label={`Needs me only${needsMeCount === undefined ? '' : ` · ${needsMeCount}`}`} pressed={filters.needsMe} onPress={() => update({ ...filters, needsMe: !filters.needsMe })} />
+        <ChromeControl icon="check" label="Show finished agents" pressed={!filters.hideEnded && !filters.hideRetired} onPress={() => { const show = filters.hideEnded || filters.hideRetired; update({ ...filters, hideEnded: !show, hideRetired: !show }) }} />
         <div {...stylex.props(styles.menus)}>
           <DialogTrigger>
             <ChromeControl icon="filter" label={`Filter agents${activeCount > 0 ? ` · ${activeCount} active` : ''}`} active={activeCount > 0} />
@@ -112,7 +124,7 @@ export const SidebarToolbar = ({
                   size="sm"
                   variant="secondary"
                   onPress={() =>
-                    update({ ...defaultFilters, query: parseSidebarQuery(filters.query).query, sort: filters.sort })
+                    update({ ...defaultFilters, query: parsedQuery.text, sort: filters.sort })
                   }
                 >
                   Reset filters
@@ -146,15 +158,17 @@ export const SidebarToolbar = ({
       </div>
       <div ref={search}>
         <Input
-          aria-label="Search agents and folders"
-          aria-description="Use machine:synthetic-138/1 or host:synthetic-138/1,synthetic-138/2 to filter by host; combine with search text."
-          placeholder="Search agents…  /"
+          aria-label="Search agents"
+          aria-description="Free text matches agent names and IDs. Use repo:, state:, or tool: to search other facts, and machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match."
+          placeholder="Search… repo: state: tool:  /"
           size="sm"
           value={filters.query}
           onChange={(query) => update({ ...filters, query })}
           onKeyDown={(event) => {
             if (event.key === 'Escape') update({ ...filters, query: '' })
+            if (event.key === 'ArrowDown' && onEnterResults !== undefined) { event.preventDefault(); onEnterResults() }
           }}
+          stylexStyle={searchStyle}
         />
       </div>
     </div>

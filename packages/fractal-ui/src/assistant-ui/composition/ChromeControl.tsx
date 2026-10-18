@@ -2,7 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Focusable, Pressable } from 'react-aria-components'
-import { accentVars as accent, geometryVars as g, motionVars as m, radiusVars as r, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
+import { interactionVars as interaction, geometryVars as g, motionVars as m, radiusVars as r, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { Icon, type IconName } from './Icons'
 import { Tooltip } from './Controls'
 
@@ -82,7 +82,7 @@ const styles = stylex.create({
     cursor: 'pointer',
     transitionProperty: 'background-color, color', transitionDuration: m.fast, transitionTimingFunction: m.ease,
     ':hover': { backgroundColor: surface.rowHover, color: ink.fg },
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset },
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
     ':disabled': { opacity: 0.64, cursor: 'default', backgroundColor: 'transparent', color: ink.fgMuted },
   },
   pressed: { backgroundColor: surface.rowActive, color: ink.fg, ':hover': { backgroundColor: surface.rowActive, color: ink.fg } },
