@@ -773,6 +773,19 @@ def prune_uses(text, items, moved_pairs):
 
 
 
+def _without_unused_relative(use_text, body):
+    """A `use super::...` import of names the text below never mentions (it served code that stayed behind)."""
+    parsed = use_paths(use_text)
+    if not parsed:
+        return use_text
+    attrs, vis, paths = parsed
+    keep = [(segs, alias) for segs, alias in paths
+            if segs[0] != "super" or segs[-1] == "*" or re.search(r"\b" + re.escape(alias or segs[-1]) + r"\b", body)]
+    if len(keep) == len(paths):
+        return use_text
+    return render_use(attrs, vis, keep)
+
+
 def _without_names(use_text, names):
     """A `use` item without the paths that import one of `names` (they are defined next to the user)."""
     parsed = use_paths(use_text)
@@ -873,6 +886,11 @@ def place_tests(nodes, mtests, files, tfiles, lower):
             groups[k[0]][k[1]].append(((u.file, u.item.start), _copy_text(u)))
             work.append((u, k))
 
+    defined = collections.defaultdict(set)  # (file, container) -> names defined there by moved or copied items
+    for t in mtests:
+        if t.name:
+            defined[(t.file, t.container)].add(t.name)
+
     def render(rel, prefix, g):
         out = []
         for _, text in sorted(g.get(prefix, ()), key=lambda x: x[0]):
@@ -883,7 +901,7 @@ def place_tests(nodes, mtests, files, tfiles, lower):
             attrs, uses = CONTAINERS.get((rel, c), ("#[cfg(test)]\n", []))
             inner = render(rel, c, g)
             pad = "    " * len(prefix)
-            uses = list(uses)
+            uses = [u2 for u2 in (_without_names(u, defined[(rel, c)] | {x.name for x in copied if x.name}) for u in uses) if u2]
             if attrs.rstrip().endswith("pub") and "test-support" in attrs:
                 uses.append("pub use %s::%s::*;" % (lower, "::".join(module_path(rel) + list(c))))
             body = "\n".join(pad + "    " + u for u in uses) + ("\n\n" if uses else "") + inner
@@ -926,7 +944,7 @@ def place_tests(nodes, mtests, files, tfiles, lower):
         else:
             text, items = tfiles[rel]
             local = {u.name for u in copied if u.name} | {t.name for t in mtests if t.name}
-            uses = [_without_names(it.text, local) for it in items if it.kind == "use"]
+            uses = [_without_unused_relative(_without_names(it.text, local), body) for it in items if it.kind == "use"]
             new_files[rel] = "#![allow(unused_imports)]\n" + "\n".join(u for u in uses if u) + "\n" + "\n".join(decls.get(rel, [])) + "\n\n" + body + "\n"
     return facade_blocks, new_files, decls, removals, copied, pub_test_mods
 
@@ -1157,12 +1175,12 @@ def apply_cut(args, nodes, files, tfiles, order):
         if not os.path.exists(path):
             continue
         line = "\n".join("use crate::%s;" % nm for nm in sorted(names)) + "\n"
-        t = open(path).read()
-        if t.startswith("//!"):
-            first, rest = t.split("\n", 1)
-            t = first + "\n" + line + rest
-        else:
-            t = line + t
+        t = Path(path).read_text()
+        lines_ = t.split("\n")
+        k = 0
+        while k < len(lines_) and (lines_[k].startswith("//!") or lines_[k].startswith("#![")):
+            k += 1
+        t = "\n".join(lines_[:k] + [line.rstrip("\n")] + lines_[k:])
         open(path, "w").write(t)
     lib = ['//! %s: the %s domain of the store, cut out of %s at function level. Everything of %s is re-exported at the root;' % (args.crate, args.layer, args.lower, args.lower),
            "//! the modules below shadow the lower crate's modules of the same name and re-export them, so every old path still resolves.",
