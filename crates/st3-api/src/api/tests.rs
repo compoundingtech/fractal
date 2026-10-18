@@ -1254,7 +1254,7 @@ mission "expiring-work" state="ready" {
     // Shorten this fixture's lease before any cache is built; no claims are changed.
     let expires = client_now_ms() + 1_000;
     store.connection.lock().expect("fixture writer").execute(
-        "UPDATE step_runs SET lease_expires_at_unix_ms=?1 WHERE subject=?2",
+        /* sqlite-large-value: allow-for-now lv-hc6f68b0fab3e owner=st3_api::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?1 WHERE subject=?2",
         rusqlite::params![expires.to_string(), step],
     ).unwrap();
     let index = store.index().unwrap();
@@ -1263,7 +1263,7 @@ mission "expiring-work" state="ready" {
     assert_eq!(claimed["items"][1]["current_work_ids"], json!([step]));
     let full = client_agent_resources_cached(store, false, index).unwrap();
     assert_eq!(full[1]["current_work_ids"], json!([step]));
-    assert_eq!(store.agent_roster_valid_until(index), Some(expires));
+    assert_eq!(store.agent_roster_valid_until(index, None), Some(expires));
     let (status, first) = get_request(router(state.clone()), "/v1/client/agents?limit=1").await;
     assert_eq!(status, StatusCode::OK, "{first}");
     assert_eq!(first["items"][0]["id"], "agent/node.amber");
@@ -1286,7 +1286,7 @@ mission "expiring-work" state="ready" {
     assert_eq!(status, StatusCode::OK, "{ready}");
     assert_eq!(ready["items"][1]["current_work_ids"], json!([]));
     assert_eq!(ready["items"][1]["next_work_id"], step.as_str());
-    assert_eq!(store.agent_roster_valid_until(index), None);
+    assert_eq!(store.agent_roster_valid_until(index, None), None);
 }
 
 #[test]
@@ -3787,7 +3787,7 @@ async fn retention_quick_response_failure_rolls_back_declaration() {
         .connection
         .write()
         .execute_batch(
-            "CREATE TRIGGER retention_quick_failure BEFORE INSERT ON idempotency
+            /* sqlite-large-value: allow-for-now lv-h2f874c96b1d3 owner=st3_api::api::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER retention_quick_failure BEFORE INSERT ON idempotency
              WHEN json_type(NEW.response,'$.runtime_id') IS NOT NULL
              BEGIN SELECT RAISE(ABORT,'injected lost quick response'); END;",
         )
@@ -3809,7 +3809,7 @@ async fn retention_quick_response_failure_rolls_back_declaration() {
         .store
         .connection
         .write()
-        .execute_batch("DROP TRIGGER retention_quick_failure")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-ha1f13b5ab4db owner=st3_api::api::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER retention_quick_failure")
         .unwrap();
     let first = quick_agent(&state, retention_quick_request(root.path()), "codex")
         .await
@@ -3879,7 +3879,7 @@ async fn retention_quick_legacy_missing_receipt_is_explicitly_reconstructed() {
         .connection
         .write()
         .execute(
-            "DELETE FROM idempotency WHERE operation_id=?1",
+            /* sqlite-large-value: allow-for-now lv-hfa89d2d90c01 owner=st3_api::api::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM idempotency WHERE operation_id=?1",
             [smallclaims::store::opaque_cache_key(
                 "quick-agent-response:retention-quick",
             )],
@@ -4185,7 +4185,7 @@ async fn retention_event_http_envelope_preserves_pacing_continuation_and_410() {
     assert_eq!(page["next_after"], json!(indexes[1]));
 
     state.store.connection.write().execute(
-        "INSERT INTO meta(key,value) VALUES('event_resume_floor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-he1b6b0291d8c owner=st3_api::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('event_resume_floor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [indexes[1].to_string()],
     ).unwrap();
     let (status, gap) = get_request(
@@ -4295,7 +4295,7 @@ async fn retention_global_empty_wait_pages_are_paced_without_losing_eligible_eve
     };
     let floor = append(&store, "custom/test/old");
     store.connection.write().execute_batch(
-        "BEGIN;
+        /* sqlite-large-value: allow-for-now lv-h50c972a0cb89 owner=st3_api::api::tests TODO=chunk-or-reference-variable-columns */ "BEGIN;
              CREATE TABLE legacy_fixture_events(store_index INTEGER PRIMARY KEY,kind TEXT,subject TEXT,body TEXT);
              INSERT INTO legacy_fixture_events SELECT * FROM events;
              DROP VIEW events;
@@ -4403,7 +4403,7 @@ async fn retention_event_upgrade_resyncs_lagging_cursors_and_continues_the_front
         })
         .unwrap();
     store.connection.write().execute_batch(
-        "BEGIN;
+        /* sqlite-large-value: allow-for-now lv-hd1cdcb84e491 owner=st3_api::api::tests TODO=chunk-or-reference-variable-columns */ "BEGIN;
              CREATE TABLE legacy_fixture_events(store_index INTEGER PRIMARY KEY,kind TEXT NOT NULL,subject TEXT NOT NULL,body TEXT NOT NULL);
              INSERT INTO legacy_fixture_events SELECT store_index,kind,subject,body FROM events;
              DROP VIEW events;
@@ -9202,7 +9202,7 @@ fn agent_roster_claim_fixture_refreshes_at_lease_expiry_without_new_claims() {
         let card = cards.iter().find(|card| card["id"] == fixture.subjects[0]).unwrap();
         assert_eq!(card["current_work_ids"], json!([step]));
     }
-    assert_eq!(store.agent_roster_valid_until(index), Some(expires));
+    assert_eq!(store.agent_roster_valid_until(index, None), Some(expires));
     roster_fixture_expire_leases(&fixture);
     assert_eq!(store.index().unwrap(), index);
     for history in [false, true] {
@@ -10271,10 +10271,10 @@ fn agent_card_status_preserves_declared_and_canonical_fallback_revisions() {
     {
         let connection = store.connection.write();
         connection.execute(
-            "UPDATE claims SET accepted_at_unix_ms='1000' WHERE subject='agent/undeclared'", [],
+            /* sqlite-large-value: allow-for-now lv-h29bfe1d8c90f owner=st3_api::api::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='1000' WHERE subject='agent/undeclared'", [],
         ).unwrap();
-        connection.execute("UPDATE batches SET origin='zz-card-tie' WHERE id=?1", [&runtime.batch_id]).unwrap();
-        connection.execute("UPDATE claims SET origin='zz-card-tie' WHERE batch_id=?1", [&runtime.batch_id]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h493cbc90a7d9 owner=st3_api::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE batches SET origin='zz-card-tie' WHERE id=?1", [&runtime.batch_id]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h65bbb3b76007 owner=st3_api::api::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET origin='zz-card-tie' WHERE batch_id=?1", [&runtime.batch_id]).unwrap();
     }
     store.forget_current_views();
     let index = store.index().unwrap();

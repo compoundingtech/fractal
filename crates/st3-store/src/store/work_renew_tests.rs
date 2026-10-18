@@ -103,7 +103,7 @@ fn renewal_poll_excludes_expired_or_ended_claims() {
     {
         let connection = renewal.store.connection.write();
         connection.execute(
-            "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-hbc547c428826 owner=st3_store::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
             [&renewal.subject],
         ).unwrap();
     }
@@ -111,11 +111,11 @@ fn renewal_poll_excludes_expired_or_ended_claims() {
     {
         let connection = renewal.store.connection.write();
         connection.execute(
-            "UPDATE step_runs SET lease_expires_at_unix_ms=?2 WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-hcb88e982b482 owner=st3_store::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?2 WHERE subject=?1",
             params![renewal.subject, (now_ms() + 60_000).to_string()],
         ).unwrap();
         connection.execute(
-            "UPDATE mission_runs SET status='cancelled',phase='terminal' WHERE id=(
+            /* sqlite-large-value: allow-for-now lv-h2d4c56f6f710 owner=st3_store::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status='cancelled',phase='terminal' WHERE id=(
                 SELECT run_id FROM step_runs WHERE subject=?1)",
             [&renewal.subject],
         ).unwrap();
@@ -316,7 +316,7 @@ fn the_last_replicated_lease_is_what_sorting_every_lease_claim_found() {
         store
             .readers
             .get()
-            .query_row(query, [subject], |row| row.get(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-hfac2e50c92ea owner=st3_store::store::work_renew_tests TODO=trace-statement-and-value-representation */ query, [subject], |row| row.get(0))
             .unwrap()
     };
     // Reports and published renewals interleave, many in the same millisecond, some apart.
@@ -352,7 +352,7 @@ fn the_last_replicated_lease_seeks_each_kinds_newest_millisecond() {
     let renewal = claimed_step(0);
     let connection = renewal.store.readers.get();
     let mut statement = connection
-        .prepare(&format!(
+        .prepare(/* sqlite-large-value: allow-for-now lv-hd793cef9ff30 owner=st3_store::store::work_renew_tests TODO=trace-statement-and-value-representation */ &format!(
             "EXPLAIN QUERY PLAN {}",
             last_replicated_lease_query()
         ))
@@ -380,7 +380,7 @@ fn renewal_poll_and_driver_share_all_held_states_including_blocked_and_verifying
     for status in ["claimed", "working", "verifying", "blocked"] {
         let before = now_ms() + 10_000;
         renewal.store.connection.write().execute(
-            "UPDATE step_runs SET status=?2,lease_expires_at_unix_ms=?3 WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h7e2b74a34254 owner=st3_store::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2,lease_expires_at_unix_ms=?3 WHERE subject=?1",
             params![renewal.subject, status, before.to_string()],
         ).unwrap();
         STEP_TIMING_FOLD_CALLS.with(|calls| calls.set(0));
@@ -397,7 +397,7 @@ fn renewal_poll_and_driver_share_all_held_states_including_blocked_and_verifying
     }
     for status in ["ready", "pending", "completed", "cancelled", "failed"] {
         renewal.store.connection.write().execute(
-            "UPDATE step_runs SET status=?2 WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h61e394afb836 owner=st3_store::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2 WHERE subject=?1",
             params![renewal.subject, status],
         ).unwrap();
         assert!(renewal.store.work_for_renewal(actor).unwrap().is_empty(), "{status}");

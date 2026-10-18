@@ -127,14 +127,14 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let newest = |subject: &str, kind: &str| -> Result<Option<(String, u128, Value)>> {
             let row = connection
-                .prepare_cached(&format!(
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb30b66641732 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
                     "{} LIMIT 1",
                     newest_claims_of_kind_query(
                         "claims.id, claims.accepted_at_unix_ms, claims.body",
                         kind
                     )
                 ))?
-                .query_row(params![subject, i64::MAX], |row| {
+                .query_row(/* sqlite-large-value: allow-for-now lv-h6e3465a3c777 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ params![subject, i64::MAX], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -169,7 +169,7 @@ impl Store {
                        WHERE json_extract(body, '$._operation.id') IS NOT NULL
                          AND json_extract(body, '$._operation.id')=?1)",
                 )?
-                .query_row([native_prompt_gone_operation(&claim)], |row| row.get(0))?;
+                .query_row(/* sqlite-large-value: allow-for-now lv-hfc7d87610d2f owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ [native_prompt_gone_operation(&claim)], |row| row.get(0))?;
             if gone || native_prompt_answer(&connection, &claim)?.is_some() {
                 continue;
             }
@@ -278,7 +278,7 @@ impl Store {
     ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
         let mut items = Vec::new();
-        let mut query = connection.prepare(PERSON_STEPS_QUERY)?;
+        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h416801b01aba owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ PERSON_STEPS_QUERY)?;
         let subjects = query
             .query_map([person], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -537,7 +537,7 @@ impl Store {
 
     fn operational_failures(&self) -> Result<Vec<AttentionRequestView>> {
         let connection = self.readers.get();
-        let mut query = connection.prepare(&canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0b8812c8c24d owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
             FROM claims WHERE kind IN ('operational.failure','operational.recovered') ORDER BY CANONICAL_ASC(claims)"))?;
         let claims = query
             .query_map([], claim_from_row)?
@@ -591,7 +591,7 @@ impl Store {
             return Ok(Vec::new());
         }
         let connection = self.readers.get();
-        let mut query = connection.prepare(&canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9303af4f78ca owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
             FROM claims WHERE kind='reconcile.fault' ORDER BY CANONICAL_ASC(claims)"))?;
         let mut latest = BTreeMap::new();
         for claim in query.query_map([], claim_from_row)? {
@@ -930,7 +930,7 @@ impl Store {
         let connection = self.readers.get();
         // Begin with the small open-run index, then point-read each deadline and its
         // after-steps. Finished history is never scanned for this fault.
-        let runs = connection.prepare_cached(&format!(
+        let runs = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h97434be403f3 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "SELECT mission_runs.id FROM mission_runs INDEXED BY mission_runs_open_index
              CROSS JOIN mission_run_deadlines AS deadlines
              WHERE {OPEN_MISSION_RUN} AND deadlines.run_id=mission_runs.id
@@ -1233,7 +1233,7 @@ impl Store {
             if source.starts_with("mission-run/") {
                 if claim.body["fields"]["condition"] == MISSING_AGENT_CONDITION {
                     let latest: Option<String> = connection.query_row(
-                        &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='operational.failure' AND json_extract(body,'$.fields.condition')=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                        /* sqlite-large-value: allow-for-now lv-haecc3830f028 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='operational.failure' AND json_extract(body,'$.fields.condition')=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
                         params![source, MISSING_AGENT_CONDITION], |row| row.get(0),
                     ).optional()?;
                     if latest.as_deref() != Some(claim.id.as_str())
@@ -1590,7 +1590,7 @@ fn recorded(connection: &Connection, key: &str) -> Result<bool> {
                WHERE json_extract(body, '$._operation.id') IS NOT NULL
                  AND json_extract(body, '$._operation.id')=?1)",
         )?
-        .query_row([smallclaims::store::operation_id_for_key(key)], |row| row.get(0))?)
+        .query_row(/* sqlite-large-value: allow-for-now lv-h3c8465cb373f owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ [smallclaims::store::operation_id_for_key(key)], |row| row.get(0))?)
 }
 
 /// The reason recorded with the record whose idempotency key this is, when it exists.
@@ -1601,7 +1601,7 @@ fn recorded_reason(connection: &Connection, key: &str) -> Result<Option<String>>
                WHERE json_extract(body, '$._operation.id') IS NOT NULL
                  AND json_extract(body, '$._operation.id')=?1 LIMIT 1",
         )?
-        .query_row([smallclaims::store::operation_id_for_key(key)], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h9a1fb1d11dc4 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ [smallclaims::store::operation_id_for_key(key)], |row| {
             row.get::<_, Option<String>>(0)
         })
         .optional()?
@@ -1662,11 +1662,11 @@ impl Store {
         person: Option<&str>,
     ) -> Result<Option<AttentionItemView>> {
         let runtime = connection
-            .prepare_cached(&format!(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h1ee77b7cbe07 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
                 "{} LIMIT 1",
                 newest_claims_of_kind_query("claims.body", "runtime.observed")
             ))?
-            .query_row(params![seat, i64::MAX], |row| row.get::<_, String>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h8ecc1eaa50c4 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ params![seat, i64::MAX], |row| row.get::<_, String>(0))
             .optional()?;
         let Some(runtime) = runtime else {
             return Ok(None);
@@ -1936,11 +1936,11 @@ impl Store {
 /// it is not running. Store order, not a clock: a denial after it belongs to that incarnation.
 fn running_since(connection: &Connection, seat: &str) -> Result<Option<(i64, String)>> {
     let row = connection
-        .prepare_cached(&format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-he338905354f3 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "{} LIMIT 1",
             newest_claims_of_kind_query("claims.store_index, claims.body", "runtime.observed")
         ))?
-        .query_row(params![seat, i64::MAX], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h153ab4f8ebfd owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ params![seat, i64::MAX], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })
         .optional()?;
@@ -1960,14 +1960,14 @@ fn running_since(connection: &Connection, seat: &str) -> Result<Option<(i64, Str
 /// refreshed, lie after it and are passed over.
 fn last_turn_or_end(connection: &Connection, seat: &str) -> Result<Option<(i64, String, Option<u64>)>> {
     connection
-        .prepare_cached(&format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf91cb945f032 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "{} LIMIT 1",
             newest_claims_of_kind_query("claims.store_index, claims.body", "harness.observed").replace(
                 " ORDER BY",
                 " AND json_extract(claims.body, '$.fields.state') IN ('working', 'ended') ORDER BY"
             )
         ))?
-        .query_row(params![seat, i64::MAX], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h3d63041cdbf2 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ params![seat, i64::MAX], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })
         .optional()?
@@ -1999,7 +1999,7 @@ fn moved_on(last: Option<&(i64, String, Option<u64>)>, index: i64, at: u128) -> 
 /// and fields.
 fn recent_denials(connection: &Connection, seat: &str) -> Result<Vec<(String, i64, u128, Value)>> {
     connection
-        .prepare_cached(&format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h36ffc8d3f925 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "{} LIMIT 8",
             newest_claims_of_kind_query(
                 "claims.id, claims.store_index, claims.accepted_at_unix_ms, claims.body",
@@ -2032,7 +2032,7 @@ fn open_screen_prompt(
     incarnation: &str,
 ) -> Result<Option<(String, u128, Value)>> {
     let row = connection
-        .prepare_cached(&format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h32ec5790a313 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "{} LIMIT 1",
             newest_claims_of_kind_query(
                 "claims.id, claims.accepted_at_unix_ms, claims.body",
@@ -2043,7 +2043,7 @@ fn open_screen_prompt(
                 " AND json_extract(claims.body, '$.fields.code')='native-screen-prompt' ORDER BY"
             )
         ))?
-        .query_row(params![seat, i64::MAX], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-ha0d620565c2a owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ params![seat, i64::MAX], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -2206,7 +2206,7 @@ fn prompt_call(connection: &Connection, seat: &str, harness: &Value) -> Result<O
         return Ok(None);
     };
     let rows = connection
-        .prepare_cached(&format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-he82b9323fd7c owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "{} LIMIT 8",
             newest_claims_of_kind_query("claims.body", "harness.diagnostic").replace(
                 " ORDER BY",
@@ -2253,7 +2253,7 @@ fn native_prompt_answer(connection: &Connection, observation: &str) -> Result<Op
              WHERE json_extract(body, '$._operation.id') IS NOT NULL
                AND json_extract(body, '$._operation.id')=?1 LIMIT 1",
         )?
-        .query_row([operation], |row| native_prompt_answer_from_row(row, 0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h1e58f931e318 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ [operation], |row| native_prompt_answer_from_row(row, 0))
         .optional()?
         .flatten())
 }
@@ -2300,7 +2300,7 @@ fn native_prompt_sequence_resolution(
     transition: u64,
     index: u64,
 ) -> Result<Option<(NativePromptState, u128)>> {
-    let mut observations = connection.prepare_cached(&canonical_sql(
+    let mut observations = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7a8ee6803462 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT claims.id FROM claims INDEXED BY claims_harness_episode_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind='harness.observed'
@@ -2313,7 +2313,7 @@ fn native_prompt_sequence_resolution(
     // cannot supersede Gone, even when it arrives later in canonical order.
     // Operation identity distinguishes closure from an answer: question choices
     // are answer payloads too, not just the permission words "allow" and "deny".
-    let mut resolutions = connection.prepare_cached(&canonical_sql(
+    let mut resolutions = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h41335a012b43 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT json_extract(body, '$._operation.id')=?1,
            json_extract(body, '$.fields.status'), json_extract(body, '$.fields.reason'),
            accepted_at_unix_ms
@@ -2331,7 +2331,7 @@ fn native_prompt_sequence_resolution(
         let gone = native_prompt_gone_operation(&claim);
         let answer = smallclaims::store::operation_id_for_key(&native_prompt_answer_key(&claim));
         let resolved: Option<(bool, Option<String>, String)> = resolutions
-            .query_row(params![gone, answer, index], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-hf7276efc8832 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ params![gone, answer, index], |row| {
                 Ok((row.get(0)?, native_prompt_answer_from_row(row, 1)?, row.get(3)?))
             })
             .optional()?;
@@ -2369,14 +2369,14 @@ impl Store {
     fn newest_harness_observation(&self, seat: &str) -> Result<Option<(String, u128, Value)>> {
         let connection = self.readers.get();
         let row = connection
-            .prepare_cached(&format!(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hedfe46cb411e owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
                 "{} LIMIT 1",
                 newest_claims_of_kind_query(
                     "claims.id, claims.accepted_at_unix_ms, claims.body",
                     "harness.observed"
                 )
             ))?
-            .query_row(params![seat, i64::MAX], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-h68f781d5ecd9 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ params![seat, i64::MAX], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -2404,7 +2404,7 @@ impl Store {
         // The hook's observation is among the seat's last few: it is published moments after the
         // hook writes it, and a hook that waited past a few later observations has nothing left.
         let recent = connection
-            .prepare_cached(&format!(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hbf9ea2a0b424 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
                 "{} LIMIT 16",
                 newest_claims_of_kind_query("claims.id, claims.body", "harness.observed")
             ))?
@@ -2485,7 +2485,7 @@ impl Store {
                        WHERE json_extract(body, '$._operation.id') IS NOT NULL
                          AND json_extract(body, '$._operation.id')=?1)",
                 )?
-                .query_row([native_prompt_gone_operation(claim)], |row| row.get(0))?;
+                .query_row(/* sqlite-large-value: allow-for-now lv-h6397d51366b2 owner=st3_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ [native_prompt_gone_operation(claim)], |row| row.get(0))?;
             if refused {
                 return Ok(NativePromptState::Gone);
             }

@@ -24,7 +24,8 @@ it('ANDs the host menu with typed facets, counts them, and resets facets while p
   const row: SidebarRow = { workspace: { id: 'agent/compiler', title: 'Compiler', host: 'synthetic-138/1', layout: dailyDriver, unread: [], notifications: [] }, agent: undefined, status: 'idle', needsMe: false }
   try {
     await act(async () => render())
-    expect(host.querySelector('input[aria-label="Search agents and folders"]')?.getAttribute('aria-description')).toBe('Use machine:build-1 or host:build-1,build-2 to filter by host; combine with search text.')
+    const search = host.querySelector<HTMLInputElement>('input[aria-label="Search agents"]')!
+    expect(search.getAttribute('aria-description')).toBe('Free text matches agent names and IDs. Use repo:, state:, or tool: to search other facts, and machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match.')
     const filterButton = host.querySelector<HTMLButtonElement>('button[aria-label="Filter agents · 2 active"]')!
     expect(filterButton).not.toBeNull()
     await act(async () => filterButton.click())
@@ -32,10 +33,10 @@ it('ANDs the host menu with typed facets, counts them, and resets facets while p
     expect(menu).not.toBeNull()
     await act(async () => { menu.value = 'synthetic-138/2'; menu.dispatchEvent(new Event('change', { bubbles: true })) })
     expect(filters.host).toBe('synthetic-138/2')
-    expect(matchesRow({ row, filters, context: '' })).toBe(false)
+    expect(matchesRow({ row, filters })).toBe(false)
     expect(host.querySelector('button[aria-label="Filter agents · 3 active"]')).not.toBeNull()
     await act(async () => { menu.value = 'synthetic-138/1'; menu.dispatchEvent(new Event('change', { bubbles: true })) })
-    expect(matchesRow({ row, filters, context: '' })).toBe(true)
+    expect(matchesRow({ row, filters })).toBe(true)
     const reset = [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Reset filters')!
     await act(async () => reset.click())
     expect(filters).toEqual({ ...defaultFilters, query: 'compiler', sort: 'name' })
