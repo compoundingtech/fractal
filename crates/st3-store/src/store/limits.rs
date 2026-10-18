@@ -14,23 +14,28 @@ use super::accounts::limit_binding_is_current;
 use super::*;
 use crate::model::DoctorCheck;
 use serde::Deserialize;
+use smallclaims::store::canonical;
 
 /// The actor st records for what its limits policy does.
 pub const LIMITS_ACTOR: &str = "daemon/limits";
 
 pub const ACCOUNT_READING_WINDOW_MS: u64 = 3_600_000;
 
-fn select_account_reading(readings: Vec<AccountLimit>) -> AccountLimit {
+/// Choose an account's reading. `readings` pairs each with its claim's canonical key, which breaks
+/// the ties nothing in the readings themselves decides.
+fn select_account_reading(readings: Vec<(AccountLimit, Vec<u8>)>) -> AccountLimit {
     // A partial snapshot after a relaunch can know only the five-hour window. It is not a
     // weekly observation and must neither erase nor freshen the last weekly evidence.
-    let has_weekly = readings.iter().any(|limit| limit.weekly_percent.is_some());
+    let has_weekly = readings
+        .iter()
+        .any(|(limit, _)| limit.weekly_percent.is_some());
     let readings = readings
         .into_iter()
-        .filter(|limit| !has_weekly || limit.weekly_percent.is_some())
+        .filter(|(limit, _)| !has_weekly || limit.weekly_percent.is_some())
         .collect::<Vec<_>>();
     let latest = readings
         .iter()
-        .map(|limit| limit.measured_at_unix_ms)
+        .map(|(limit, _)| limit.measured_at_unix_ms)
         .max()
         .unwrap();
     let since = latest.saturating_sub(ACCOUNT_READING_WINDOW_MS);
@@ -38,15 +43,15 @@ fn select_account_reading(readings: Vec<AccountLimit>) -> AccountLimit {
     // a reset, even when an older producer publishes that window again with a fresh stamp.
     let reset = readings
         .iter()
-        .filter(|limit| limit.measured_at_unix_ms >= since)
-        .filter_map(|limit| limit.weekly_resets_at_unix_ms)
+        .filter(|(limit, _)| limit.measured_at_unix_ms >= since)
+        .filter_map(|(limit, _)| limit.weekly_resets_at_unix_ms)
         .max();
     readings
         .into_iter()
-        .filter(|limit| {
+        .filter(|(limit, _)| {
             limit.measured_at_unix_ms >= since && limit.weekly_resets_at_unix_ms == reset
         })
-        .max_by(|left, right| {
+        .max_by(|(left, left_key), (right, right_key)| {
             left.weekly_percent
                 .partial_cmp(&right.weekly_percent)
                 .unwrap()
@@ -68,7 +73,9 @@ fn select_account_reading(readings: Vec<AccountLimit>) -> AccountLimit {
                     (left.measured_at_unix_ms, &left.measured_by)
                         .cmp(&(right.measured_at_unix_ms, &right.measured_by))
                 })
+                .then_with(|| left_key.cmp(right_key))
         })
+        .map(|(limit, _)| limit)
         .expect("the latest reset has a recent reading")
 }
 
@@ -204,11 +211,15 @@ pub fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
 // `account_limit_readings` holds, per account and per weekly or partial (five-hour only)
 // reading, the readings within an hour of that account's newest: all the answer can still depend
 // on, since the newest only moves forward and a weekly reading anywhere hides every partial one.
-// `account_limit_seats` holds each seat's newest reading by acceptance time and the account it
-// names. A claim's store index only grows, so a cursor in `meta` says which claims are folded.
-const LIMITS_PROJECTION_VERSION: &str = "1";
+// `account_limit_seats` holds each seat's newest reading in canonical claim order and the account
+// it names. Every tie is broken by the claim's canonical key, never by the order this node admitted
+// claims in, so every node folds the same answer. A claim's store index only grows, so a cursor in
+// `meta` says which claims are folded; it decides only what is folded next, never a winner.
+// The tables keep version 1's columns, which this version fills but never decides by, so a
+// version 1 build that opens this store can still fold into them after it empties them.
+const LIMITS_PROJECTION_VERSION: &str = "2";
 const LIMITS_CURSOR: &str = "account_limits_through_index";
-const LIMITS_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h83339b6b617a owner=st3_store::store::limits TODO=chunk-or-reference-variable-columns */ r#"
+const LIMITS_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hdd1418b2a7b3 owner=st3_store::store::limits TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS account_limit_readings (
     driver TEXT NOT NULL,
     account TEXT NOT NULL,
@@ -219,6 +230,7 @@ CREATE TABLE IF NOT EXISTS account_limit_readings (
     store_index INTEGER NOT NULL,
     origin TEXT NOT NULL,
     body TEXT NOT NULL,
+    head_key BLOB NOT NULL DEFAULT x'',
     PRIMARY KEY (driver, account, account_ref, weekly, measured_at_unix_ms, subject, store_index)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS account_limit_seats (
@@ -227,7 +239,8 @@ CREATE TABLE IF NOT EXISTS account_limit_seats (
     account TEXT NOT NULL,
     account_ref TEXT NOT NULL,
     accepted_at_unix_ms INTEGER NOT NULL,
-    store_index INTEGER NOT NULL
+    store_index INTEGER NOT NULL,
+    head_key BLOB NOT NULL DEFAULT x''
 ) WITHOUT ROWID;
 "#;
 
@@ -257,8 +270,12 @@ pub fn open_limits(transaction: &Transaction<'_>) -> Result<()> {
         )
         .optional()?;
     if version.as_deref() != Some(LIMITS_PROJECTION_VERSION) {
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h46d8686f7309 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_readings", [])?;
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h231322b87279 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_seats", [])?;
+        // An earlier version's tables lack the canonical keys: they hold nothing but what the
+        // claims fold to, so drop them and fold the claims again.
+        transaction.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h9c16acb9f205 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE IF EXISTS account_limit_readings; DROP TABLE IF EXISTS account_limit_seats;",
+        )?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h3cf8cc9dc3b0 owner=st3_store::store::limits TODO=trace-statement-and-value-representation */ LIMITS_SCHEMA)?;
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h5631f80b3027 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key IN (?1, ?2)",
             [LIMITS_CURSOR, LIMITS_READY],
@@ -309,7 +326,7 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
         .unwrap_or(0);
     let claims = transaction
         .prepare_cached(
-            "SELECT subject, origin, body, accepted_at_unix_ms, store_index FROM claims
+            "SELECT id, subject, origin, body, accepted_at_unix_ms, store_index FROM claims
              WHERE kind='harness.limits' AND store_index>?1 ORDER BY store_index LIMIT ?2",
         )?
         .query_map(params![through, limit as i64], |row| {
@@ -318,27 +335,29 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, u64>(4)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, u64>(5)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut newest_index = through;
     let mut touched = BTreeSet::<(String, String, String, bool)>::new();
-    for (subject, origin, body, accepted_at, store_index) in &claims {
+    for (id, subject, origin, body, accepted_at, store_index) in &claims {
         newest_index = newest_index.max(*store_index);
         let value: Value = serde_json::from_str(body)?;
         let Some((limit, _)) = reading(origin, &value) else {
             continue;
         };
+        let head_key = canonical::sortable_key(&canonical::claim_key(transaction, id)?);
         let account_ref = limit.account_ref.clone().unwrap_or_default();
         let weekly = limit.weekly_percent.is_some();
         transaction
             .prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-h668cce5107bc owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO account_limit_readings
-                 (driver, account, account_ref, weekly, measured_at_unix_ms, subject, store_index, origin, body)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                /* sqlite-large-value: allow-for-now lv-h98e4f96e3234 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO account_limit_readings
+                 (driver, account, account_ref, weekly, measured_at_unix_ms, subject, store_index, origin, body, head_key)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             )?
-            .execute(/* sqlite-large-value: allow-for-now lv-h011a10bff7b3 owner=st3_store::store::limits TODO=trace-statement-and-value-representation */ params![
+            .execute(/* sqlite-large-value: allow-for-now lv-hf84db196a868 owner=st3_store::store::limits TODO=trace-statement-and-value-representation */ params![
                 limit.driver,
                 limit.account,
                 account_ref,
@@ -347,28 +366,29 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
                 subject,
                 *store_index as i64,
                 origin,
-                body
+                body,
+                head_key
             ])?;
-        // The seat's newest reading by acceptance time, ties by arrival.
+        // The seat's newest reading in canonical claim order.
         transaction
             .prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-h28a35ac5c79c owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO account_limit_seats
-                 (subject, driver, account, account_ref, accepted_at_unix_ms, store_index)
-                 VALUES (?1,?2,?3,?4,?5,?6)
+                /* sqlite-large-value: allow-for-now lv-hc0a799c8a976 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO account_limit_seats
+                 (subject, driver, account, account_ref, accepted_at_unix_ms, store_index, head_key)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(subject) DO UPDATE SET driver=excluded.driver,
                     account=excluded.account, account_ref=excluded.account_ref,
                     accepted_at_unix_ms=excluded.accepted_at_unix_ms,
-                    store_index=excluded.store_index
-                 WHERE (excluded.accepted_at_unix_ms, excluded.store_index)
-                    >= (accepted_at_unix_ms, store_index)",
+                    store_index=excluded.store_index, head_key=excluded.head_key
+                 WHERE excluded.head_key > head_key",
             )?
-            .execute(/* sqlite-large-value: allow-for-now lv-h1d4b05d48aef owner=st3_store::store::limits TODO=trace-statement-and-value-representation */ params![
+            .execute(/* sqlite-large-value: allow-for-now lv-ha4b507d528fd owner=st3_store::store::limits TODO=trace-statement-and-value-representation */ params![
                 subject,
                 limit.driver,
                 limit.account,
                 account_ref,
                 accepted_at.parse::<u64>().unwrap_or(0) as i64,
-                *store_index as i64
+                *store_index as i64,
+                head_key
             ])?;
         touched.insert((limit.driver, limit.account, account_ref, weekly));
     }
@@ -412,8 +432,8 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
 /// Empty the projection and fold every `harness.limits` claim into it again, in one
 /// transaction: what a checkpoint proof's copy reads, as a node that never trimmed would.
 pub fn refold_limits_tx(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-ha766e4cb07ac owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_readings", [])?;
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h8fd15a1bcffd owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_seats", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h46d8686f7309 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_readings", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h231322b87279 owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_seats", [])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-he2581cc0d3eb owner=st3_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [LIMITS_CURSOR])?;
     while flush_limits_page(transaction, LIMITS_CATCH_UP_PAGE)? == LIMITS_CATCH_UP_PAGE {}
     Ok(())
@@ -422,7 +442,7 @@ pub fn refold_limits_tx(transaction: &Transaction<'_>) -> Result<()> {
 pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
     type Key = (String, String, Option<String>);
     let mut statement = connection.prepare_cached(
-        "SELECT driver, account, account_ref, weekly, origin, subject, body
+        "SELECT driver, account, account_ref, weekly, origin, subject, body, head_key
          FROM account_limit_readings",
     )?;
     let mut rows = Vec::new();
@@ -435,6 +455,7 @@ pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
             row.get::<_, String>(4)?,
             row.get::<_, String>(5)?,
             row.get::<_, String>(6)?,
+            row.get::<_, Vec<u8>>(7)?,
         ))
     })? {
         rows.push(row?);
@@ -443,7 +464,7 @@ pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
     // login that changed identity (a re-login), not two accounts: the identity's readings are the
     // declared account's. Only a seat's own reports link them, so nothing else is ever merged.
     let mut named = BTreeMap::<(String, String), BTreeSet<String>>::new();
-    for (driver, _, account_ref, _, _, subject, _) in &rows {
+    for (driver, _, account_ref, _, _, subject, _, _) in &rows {
         if !account_ref.is_empty() {
             named
                 .entry((driver.clone(), subject.clone()))
@@ -452,7 +473,7 @@ pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
         }
     }
     let mut alias = BTreeMap::<(String, String), String>::new();
-    for (driver, account, account_ref, _, _, subject, _) in &rows {
+    for (driver, account, account_ref, _, _, subject, _, _) in &rows {
         if account_ref.is_empty()
             && let Some(declared) = named
                 .get(&(driver.clone(), subject.clone()))
@@ -478,9 +499,9 @@ pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
             _ => (driver, account, (!account_ref.is_empty()).then_some(account_ref)),
         }
     };
-    let mut weekly = BTreeMap::<Key, Vec<AccountLimit>>::new();
-    let mut partial = BTreeMap::<Key, Vec<AccountLimit>>::new();
-    for (driver, account, account_ref, is_weekly, origin, subject, body) in rows {
+    let mut weekly = BTreeMap::<Key, Vec<(AccountLimit, Vec<u8>)>>::new();
+    let mut partial = BTreeMap::<Key, Vec<(AccountLimit, Vec<u8>)>>::new();
+    for (driver, account, account_ref, is_weekly, origin, subject, body, head_key) in rows {
         let body: Value = serde_json::from_str(&body)?;
         let Some((mut limit, _)) = reading(&origin, &body) else {
             continue;
@@ -493,9 +514,9 @@ pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
             limit.identified = true;
         }
         if is_weekly {
-            weekly.entry(key).or_default().push(limit);
+            weekly.entry(key).or_default().push((limit, head_key));
         } else {
-            partial.entry(key).or_default().push(limit);
+            partial.entry(key).or_default().push((limit, head_key));
         }
     }
     let mut accounts = BTreeMap::<Key, AccountLimit>::new();
@@ -1243,7 +1264,7 @@ mod tests {
         let connection = store.readers.get();
         let mut statement = connection
             .prepare(
-                "EXPLAIN QUERY PLAN SELECT subject, origin, body, accepted_at_unix_ms, store_index
+                "EXPLAIN QUERY PLAN SELECT id, subject, origin, body, accepted_at_unix_ms, store_index
                  FROM claims WHERE kind='harness.limits' AND store_index>?1
                  ORDER BY store_index LIMIT ?2",
             )
