@@ -4,7 +4,7 @@
   "replay": { "status": "none", "detail": "No replay or rebuild." },
   "schema": { "status": "none", "detail": "No tables, columns, indexes or triggers." },
   "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
-  "compatibility": { "status": "none", "detail": "Web client only; no protocol, harness or CLI change. Free text in the live sidebar no longer matches host names: use machine:dev3 or host:dev3 to filter by host. The live sidebar query and filters are now kept per gateway in the browser's existing sidebar settings. fractal-ui additively exports SidebarTree and its props, item and handle types from assistant-ui/shell." },
+  "compatibility": { "status": "none", "detail": "Web client only; no protocol, harness or CLI change. Free text in the live sidebar no longer matches host names: use machine:build-1 or host:build-1 to filter by host. The live sidebar query and filters are now kept per gateway in the browser's existing sidebar settings. fractal-ui additively exports SidebarTree and its props, item and handle types from assistant-ui/shell." },
   "downtime": { "status": "none", "detail": "None." },
   "manual": { "status": "none", "detail": "No manual step." },
   "recovery": { "status": "none", "detail": "Nothing to recover." }

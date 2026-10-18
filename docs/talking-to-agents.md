@@ -52,7 +52,7 @@ saved for the gateway; searching temporarily expands matching folders.
 
 Press **/** to search the sidebar and **ArrowDown** to move into the results. Free text
 matches agent names and IDs; `repo:`, `state:` and `tool:` match reported facts, and
-`machine:dev3` or `host:dev3,dev5` filter by host prefix.
+`machine:build-1` or `host:build-1,build-2` filter by host prefix.
 
 Tool rows show a short description rather than raw commands or infrastructure paths.
 Protocol events are hidden by default; the conversation menu can show payload-free

@@ -32,9 +32,9 @@ describe('live sidebar search bindings', () => {
     expect(ids(project('tool:codex'))).toEqual(['agent/reviewer'])
   })
   it('keeps machine: and host: prefix facets out of free text', () => {
-    expect(parseSidebarQuery('machine:LOC,dev3 host:lo bldr')).toEqual({ text: 'bldr', tokens: ['bldr'], facets: [], machines: [['loc', 'dev3'], ['lo']] })
+    expect(parseSidebarQuery('machine:LOC,build-1 host:lo bldr')).toEqual({ text: 'bldr', tokens: ['bldr'], facets: [], machines: [['loc', 'build-1'], ['lo']] })
     expect(ids(project('machine:loc'))).toHaveLength(3)
-    expect(ids(project('host:dev3'))).toEqual([])
+    expect(ids(project('host:build-1'))).toEqual([])
     expect(ids(project('machine:lo builder'))).toEqual(['agent/builder'])
   })
   it('does not infer unreported repositories from names or treat a missing facet value as a match', () => {
