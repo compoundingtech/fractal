@@ -28,11 +28,11 @@ fn conform(validator: &jsonschema::Validator, entries: &[Value]) {
 fn every_native_reader_output_conforms_to_client_v0_timeline_entry() {
     let validator = validator();
     let fixtures = [
-        (ExternalDriver::Omp, include_str!("../../../../../st3-daemon/fixtures/native-records/omp-parity.jsonl")),
-        (ExternalDriver::Pi, include_str!("../../../../../st3-daemon/fixtures/native-records/omp-parity.jsonl")),
-        (ExternalDriver::Claude, include_str!("../../../../../st3-daemon/fixtures/native-records/claude.jsonl")),
-        (ExternalDriver::Codex, include_str!("../../../../../st3-daemon/fixtures/native-records/codex.jsonl")),
-        (ExternalDriver::Omp, include_str!("../../../../../st3-daemon/fixtures/native-records/schema-conformance.jsonl")),
+        (ExternalDriver::Omp, /* sqlite-large-value: allow-for-now lv-h0393ff99af36 owner=st3_api::api::client_v0::conversation_blocks::conformance_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../../st3-daemon/fixtures/native-records/omp-parity.jsonl")),
+        (ExternalDriver::Pi, /* sqlite-large-value: allow-for-now lv-h8a6844bd5e97 owner=st3_api::api::client_v0::conversation_blocks::conformance_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../../st3-daemon/fixtures/native-records/omp-parity.jsonl")),
+        (ExternalDriver::Claude, /* sqlite-large-value: allow-for-now lv-h06ddee282588 owner=st3_api::api::client_v0::conversation_blocks::conformance_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../../st3-daemon/fixtures/native-records/claude.jsonl")),
+        (ExternalDriver::Codex, /* sqlite-large-value: allow-for-now lv-hc8dfb9e6ae58 owner=st3_api::api::client_v0::conversation_blocks::conformance_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../../st3-daemon/fixtures/native-records/codex.jsonl")),
+        (ExternalDriver::Omp, /* sqlite-large-value: allow-for-now lv-h0573f439cdad owner=st3_api::api::client_v0::conversation_blocks::conformance_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../../st3-daemon/fixtures/native-records/schema-conformance.jsonl")),
     ];
     let mut exported = Vec::new();
     for (driver, records) in fixtures {
@@ -83,7 +83,7 @@ fn every_native_reader_output_conforms_to_client_v0_timeline_entry() {
 fn incomplete_native_views_preserve_raw_records_without_invalid_projections() {
     let root = tempfile::tempdir().unwrap();
     let native = super::tests::fixture(root.path(), json!([]));
-    std::fs::write(&native.transcript, include_str!("../../../../../st3-daemon/fixtures/native-records/schema-conformance.jsonl")).unwrap();
+    std::fs::write(&native.transcript, /* sqlite-large-value: allow-for-now lv-h097ed8e7e240 owner=st3_api::api::client_v0::conversation_blocks::conformance_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../../st3-daemon/fixtures/native-records/schema-conformance.jsonl")).unwrap();
     let entries = crate::external_sessions::normalized_timeline(&native).unwrap();
     let blocks: Vec<_> = entries.iter().flat_map(|entry| entry["body"]["blocks"].as_array().into_iter().flatten()).collect();
     assert!(blocks.iter().any(|block| block["view"]["wall_ms"] == 13));

@@ -3136,7 +3136,7 @@ fn opencode_timeline_slice(
 
 fn opencode_timeline(session: &ExternalSession) -> Result<(Vec<Value>, u64)> {
     let connection = open_opencode_database(&session.transcript)?;
-    let mut message_statement = connection.prepare(OPENCODE_MESSAGE_WINDOW_SQL)?;
+    let mut message_statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h88abf4a78848 owner=st3_store::external_sessions TODO=trace-statement-and-value-representation */ OPENCODE_MESSAGE_WINDOW_SQL)?;
     // Count only row identities, then stream native bytes. Never collect 4,097 payload rows.
     let message_count: usize = connection.query_row(
         "SELECT count(*) FROM (SELECT 1 FROM message WHERE session_id=?1 LIMIT ?2)",
@@ -5018,7 +5018,7 @@ fn system_time_ms(value: SystemTime) -> u128 {
         .as_millis()
 }
 
-fn digest(value: &str) -> String {
+pub fn digest(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 

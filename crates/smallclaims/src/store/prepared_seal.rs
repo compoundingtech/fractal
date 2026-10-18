@@ -69,7 +69,7 @@ pub(crate) fn unsealed_batches(
     } else {
         "origin, replica_sequence, id"
     };
-    let mut statement = connection.prepare(&format!(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h1b7cc8d148aa owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ &format!(
         "SELECT id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms,
                 batches.rowid
          FROM batches
@@ -116,7 +116,7 @@ pub(crate) fn own_unsigned_envelopes(
     } else {
         "FROM replica_envelopes AS envelopes WHERE envelopes.writer=?1 AND envelopes.rowid>?2 AND envelopes.rowid<=?4"
     };
-    let mut statement = connection.prepare(&format!(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9a397347cb41 owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ &format!(
         "SELECT envelopes.sequence, envelopes.envelope_hash {from}
            AND NOT EXISTS (
              SELECT 1 FROM replica_envelope_signatures AS signatures
@@ -218,7 +218,7 @@ pub(crate) fn seal_batch(
     for claim in &claims {
         let stored = connection
             .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
-            .query_row([&claim.id], |row| row.get::<_, String>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h86d76377c311 owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get::<_, String>(0))
             .optional()?;
         let existing = stored
             .as_deref()
@@ -310,7 +310,7 @@ pub(crate) fn write_sealed_batch_tx(
     }
     let batch = &sealed.batch;
     transaction.execute(
-        "INSERT OR IGNORE INTO replica_envelopes(
+        /* sqlite-large-value: allow-for-now lv-hd1c17b25ad79 owner=smallclaims::store::prepared_seal TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_envelopes(
              writer, sequence, envelope_hash, previous_hash, accepted_at_unix_ms,
              payload, batch_id, relay, receipt_state, received_at_unix_ms
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'validated', ?5)",
@@ -327,7 +327,7 @@ pub(crate) fn write_sealed_batch_tx(
     )?;
     for (position, record) in sealed.records.iter().enumerate() {
         transaction.execute(
-            "INSERT OR IGNORE INTO replica_records(
+            /* sqlite-large-value: allow-for-now lv-h7bd22e8b7f8a owner=smallclaims::store::prepared_seal TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_records(
                  record_ref, writer, sequence, envelope_hash, position, raw, state,
                  claim_id, subject_hint, kind_hint, updated_at_unix_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, ?8, ?9, ?10)",
@@ -370,7 +370,7 @@ fn sealed_batch_current(connection: &Connection, sealed: &SealedBatch) -> Result
     for (hash, stored) in &sealed.named_blobs {
         let now: bool = connection
             .prepare_cached("SELECT EXISTS(SELECT 1 FROM blobs WHERE hash=?1)")?
-            .query_row([hash], |row| row.get(0))?;
+            .query_row(/* sqlite-large-value: allow-for-now lv-h4ebac36e3058 owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ [hash], |row| row.get(0))?;
         if now != *stored {
             return Ok(false);
         }
@@ -378,7 +378,7 @@ fn sealed_batch_current(connection: &Connection, sealed: &SealedBatch) -> Result
     for ((claim_id, _), stored) in claims.iter().zip(&sealed.stored_signatures) {
         let now = connection
             .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
-            .query_row([claim_id], |row| row.get::<_, String>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h1ba25ea8cf26 owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ [claim_id], |row| row.get::<_, String>(0))
             .optional()?;
         if now != *stored {
             return Ok(false);
@@ -605,7 +605,7 @@ impl Store {
                     return Ok(false);
                 };
                 transaction.execute(
-                    "INSERT OR IGNORE INTO replica_envelope_signatures(
+                    /* sqlite-large-value: allow-for-now lv-hf26ab9520d69 owner=smallclaims::store::prepared_seal TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_envelope_signatures(
                          writer, sequence, envelope_hash, member_key, signature, stored_at_unix_ms
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![

@@ -1,6 +1,12 @@
 //! Dormant, test-registered negative operator. This module is absent from non-test builds.
 //! Inputs are eight fixture-supplied selected facts, NOT a native authority certificate.
 //! No production extractor, trigger, registration, seed, flush or Doctor call exists here.
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::terminal_gate_evidence_shared::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::terminal_gate_evidence_shared::{INPUT_BYTES, NON_SELECTING, STRUCTURAL_MARKERS, id, preflight};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Deserialize;
@@ -10,19 +16,6 @@ use smallclaims::ivm::install::{Mutation, Namespace, Operator};
 pub const VIEW: &str = "test.terminal-exec-gates.v1";
 pub const SOURCE: &str = "test.selected-terminal-facts.v1";
 const MEMBERS: usize = 64;
-const INPUT_BYTES: usize = 16 * 1024;
-const STRUCTURAL_MARKERS: usize = 72;
-// These kinds participate in actual-state folding but do not select the runtime observation.
-// No wildcard is accepted: a new runtime.action kind requires a source-policy review.
-const NON_SELECTING: &[&str] = &[
-    "runtime.action.requested",
-    "runtime.action.succeeded",
-    "runtime.action.failed",
-    "runtime.action.deadline-reached",
-    "runtime.reconcile-decision",
-    "runtime.restart-window-reset",
-];
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Facts {
@@ -105,51 +98,6 @@ struct Domain {
     complete: bool,
     origin: String,
     kinds: Vec<String>,
-}
-
-// Byte, depth and allocation-marker limits precede serde's allocation. Count only syntax,
-// including object/array openings and value separators, outside escaped string contents.
-fn preflight(raw: &str) -> Result<()> {
-    ensure!(raw.len() <= INPUT_BYTES, "terminal input byte cap");
-    let (mut quoted, mut escaped, mut depth, mut markers) = (false, false, 0usize, 0usize);
-    for byte in raw.bytes() {
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                quoted = false;
-            }
-            continue;
-        }
-        match byte {
-            b'"' => quoted = true,
-            b'{' | b'[' => {
-                depth += 1;
-                markers += 1;
-            }
-            b'}' | b']' => {
-                depth = depth.checked_sub(1).context("terminal input syntax")?;
-            }
-            b',' => markers += 1,
-            _ => (),
-        }
-        ensure!(
-            depth <= 8 && markers <= STRUCTURAL_MARKERS,
-            "terminal input structure cap"
-        );
-    }
-    ensure!(!quoted && depth == 0, "terminal input syntax");
-    Ok(())
-}
-
-fn id(value: &str) -> Result<()> {
-    ensure!(
-        !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control),
-        "terminal identifier refused"
-    );
-    Ok(())
 }
 
 fn expanded_subject(f: &Facts) -> Result<Option<String>> {
@@ -313,7 +261,7 @@ impl Operator for TerminalGates {
         SOURCE
     }
     fn create_schema(&self, c: &Connection) -> Result<()> {
-        c.execute_batch("CREATE TABLE test_terminal_meta(namespace TEXT PRIMARY KEY, members INTEGER NOT NULL CHECK(members BETWEEN 0 AND 64)) WITHOUT ROWID;
+        c.execute_batch(/* sqlite-large-value: allow-for-now lv-h9a2e7a2235ad owner=st3_store::store::terminal_gate_evidence TODO=chunk-or-reference-variable-columns */ "CREATE TABLE test_terminal_meta(namespace TEXT PRIMARY KEY, members INTEGER NOT NULL CHECK(members BETWEEN 0 AND 64)) WITHOUT ROWID;
             CREATE TABLE test_terminal_members(namespace TEXT NOT NULL,key TEXT NOT NULL,body TEXT NOT NULL CHECK(length(CAST(body AS BLOB))<=1024),PRIMARY KEY(namespace,key)) WITHOUT ROWID;")?;
         Ok(())
     }
@@ -328,7 +276,7 @@ impl Operator for TerminalGates {
             .optional()?;
         if members.is_none() {
             tx.execute(
-                "INSERT INTO test_terminal_meta(namespace,members) VALUES(?1,0)",
+                /* sqlite-large-value: allow-for-now lv-h01fd752aa16e owner=st3_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO test_terminal_meta(namespace,members) VALUES(?1,0)",
                 [ns.as_str()],
             )?;
             members = Some(0);
@@ -365,10 +313,10 @@ impl Operator for TerminalGates {
                     .context("terminal membership underflow")?;
             }
             if let Some(body) = next {
-                tx.execute("INSERT INTO test_terminal_members VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET body=excluded.body", params![ns.as_str(), row.key, body])?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h8a8f3dbdefde owner=st3_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO test_terminal_members VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET body=excluded.body", params![ns.as_str(), row.key, body])?;
             } else {
                 tx.execute(
-                    "DELETE FROM test_terminal_members WHERE namespace=?1 AND key=?2",
+                    /* sqlite-large-value: allow-for-now lv-h4c20fd52d95e owner=st3_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM test_terminal_members WHERE namespace=?1 AND key=?2",
                     params![ns.as_str(), row.key],
                 )?;
             }
@@ -376,7 +324,7 @@ impl Operator for TerminalGates {
         }
         if changed {
             tx.execute(
-                "UPDATE test_terminal_meta SET members=?2 WHERE namespace=?1",
+                /* sqlite-large-value: allow-for-now lv-h46c4f32a2ee4 owner=st3_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_terminal_meta SET members=?2 WHERE namespace=?1",
                 params![ns.as_str(), count],
             )?;
         }
@@ -393,12 +341,12 @@ impl Operator for TerminalGates {
     }
     fn reclaim(&self, tx: &Transaction<'_>, ns: &Namespace, rows: usize) -> Result<bool> {
         ensure!(rows > 0 && rows <= MEMBERS, "terminal reclaim bound");
-        let removed = tx.execute("DELETE FROM test_terminal_members WHERE namespace=?1 AND key IN (SELECT key FROM test_terminal_members WHERE namespace=?1 ORDER BY key LIMIT ?2)", params![ns.as_str(), rows])?;
+        let removed = tx.execute(/* sqlite-large-value: allow-for-now lv-h1ba9e89b5caa owner=st3_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM test_terminal_members WHERE namespace=?1 AND key IN (SELECT key FROM test_terminal_members WHERE namespace=?1 ORDER BY key LIMIT ?2)", params![ns.as_str(), rows])?;
         if removed == rows {
             return Ok(false);
         }
         tx.execute(
-            "DELETE FROM test_terminal_meta WHERE namespace=?1",
+            /* sqlite-large-value: allow-for-now lv-he891a6f2eced owner=st3_store::store::terminal_gate_evidence TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM test_terminal_meta WHERE namespace=?1",
             [ns.as_str()],
         )?;
         Ok(true)
@@ -410,3 +358,9 @@ pub mod tests;
 
 #[cfg(test)]
 mod native_source;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod native_source_shared;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod native_source_tests_shared;

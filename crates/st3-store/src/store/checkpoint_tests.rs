@@ -16,7 +16,7 @@ fn compact_capture_metadata_rejects_malformed_claim_times() {
         )).unwrap();
         store.seal_local_batches().unwrap();
         store.connection.write().execute(
-            "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+            /* sqlite-large-value: allow-for-now lv-h840206155832 owner=st3_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
             params![malformed, claim.id],
         ).unwrap();
         let error = store.checkpoint_sealed_set_paged(150, None, 1, 1).unwrap_err();
@@ -412,7 +412,7 @@ fn a_sealed_set_read_in_pages_is_the_same_set_whatever_the_page() {
     // The Rust sort of the pages is the SQL canonical order, on a fixture of many batches.
     let connection = store.readers.get();
     let sql_order: Vec<String> = connection
-        .prepare(&canonical_sql(
+        .prepare(/* sqlite-large-value: allow-for-now lv-h9bfb2d7429b7 owner=st3_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT claims.id FROM claims
              JOIN replica_records records ON records.claim_id=claims.id
              WHERE records.state<>'repaired' ORDER BY CANONICAL_ASC(claims)",
@@ -431,7 +431,7 @@ fn a_sealed_set_read_in_pages_is_the_same_set_whatever_the_page() {
     // The record page query is driven from replica_records by its rowid range. A plan that
     // drove from claims would read every claim for every window.
     let plan: Vec<String> = connection
-        .prepare(&format!("EXPLAIN QUERY PLAN {}", sealed_records_page_sql()))
+        .prepare(/* sqlite-large-value: allow-for-now lv-h797a0e1c7503 owner=st3_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {}", sealed_records_page_sql()))
         .unwrap()
         .query_map(params![0_i64, 1_000_i64, i64::try_from(cut).unwrap(), whole.seal_rowid], |row| row.get::<_, String>(3))
         .unwrap()
@@ -481,7 +481,7 @@ fn sealed_record_windows_leave_later_envelopes_out_before_reading_bodies() {
         vec![older.as_str()]
     );
     let connection = store.readers.get();
-    let record_ids = connection.prepare(&sealed_records_page_sql()).unwrap()
+    let record_ids = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0b560d5467cf owner=st3_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &sealed_records_page_sql()).unwrap()
         .query_map(params![0_i64, i64::MAX, 150_i64, sealed.seal_rowid], |row| row.get::<_, String>(6))
         .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert_eq!(record_ids, vec![older.clone()], "the later body is not part of the metadata window");
@@ -511,17 +511,17 @@ fn sealed_capture_rejects_invalid_times_even_when_another_claim_excludes_the_env
         {
             let connection = store.connection.write();
             connection.execute(
-                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                /* sqlite-large-value: allow-for-now lv-hdd4c37fdf367 owner=st3_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
                 params![malformed, broken.id],
             ).unwrap();
             connection.execute(
-                "UPDATE claims SET accepted_at_unix_ms='200' WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h83afe6ba2ae3 owner=st3_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='200' WHERE id=?1",
                 [&later.id],
             ).unwrap();
             // Put both records in one envelope so a late claim would otherwise hide
             // the malformed claim when the envelope is excluded from the sealed set.
             connection.execute(
-                "UPDATE replica_records SET (writer, sequence, envelope_hash, position)=(
+                /* sqlite-large-value: allow-for-now lv-hfb7d86a3dce9 owner=st3_store::store::checkpoint_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET (writer, sequence, envelope_hash, position)=(
                     SELECT writer, sequence, envelope_hash, position+1 FROM replica_records
                     WHERE claim_id=?1) WHERE claim_id=?2",
                 params![broken.id, later.id],
@@ -546,7 +546,7 @@ fn sealed_capture_rejects_invalid_envelope_times_at_first_use() {
         )).unwrap();
         store.seal_local_batches().unwrap();
         store.connection.write().execute(
-            "UPDATE replica_envelopes SET accepted_at_unix_ms=?1", [malformed],
+            /* sqlite-large-value: allow-for-now lv-he3ba3f1763ac owner=st3_store::store::checkpoint_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET accepted_at_unix_ms=?1", [malformed],
         ).unwrap();
         assert!(
             store.checkpoint_sealed_set(150).is_err(),
@@ -853,7 +853,7 @@ fn sealed_capture_fails_closed_after_three_consecutive_invalidations() {
         };
         if sql.to_bytes() == b"SELECT value FROM checkpoint_capture_epoch WHERE id=1" {
             mutation.connection.execute(
-                "UPDATE checkpoint_capture_epoch SET value=value+1 WHERE id=1", [],
+                /* sqlite-large-value: allow-for-now lv-h796d9f483f1a owner=st3_store::store::checkpoint_tests TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoint_capture_epoch SET value=value+1 WHERE id=1", [],
             ).unwrap();
             mutation.changes.set(mutation.changes.get() + 1);
         }
@@ -868,7 +868,7 @@ fn sealed_capture_fails_closed_after_three_consecutive_invalidations() {
     )).unwrap();
     let cut = now_ms() + 1_000;
     store.connection.write().execute_batch(
-        "CREATE TABLE capture_registration_count(value INTEGER NOT NULL);
+        /* sqlite-large-value: allow-for-now lv-hd4f3200c49e7 owner=st3_store::store::checkpoint_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE capture_registration_count(value INTEGER NOT NULL);
          INSERT INTO capture_registration_count VALUES (0);
          CREATE TRIGGER capture_registration_count AFTER UPDATE OF envelope_frontier, cut_unix_ms
          ON checkpoint_capture_epoch BEGIN
@@ -880,7 +880,7 @@ fn sealed_capture_fails_closed_after_three_consecutive_invalidations() {
         "SELECT value FROM capture_registration_count", [], |row| row.get::<_, i64>(0),
     ).unwrap(), 1);
     store.connection.write().execute(
-        "UPDATE capture_registration_count SET value=0", [],
+        /* sqlite-large-value: allow-for-now lv-h6004bdd16653 owner=st3_store::store::checkpoint_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE capture_registration_count SET value=0", [],
     ).unwrap();
     let mutation = Mutate {
         connection: rusqlite::Connection::open(&path).unwrap(),
@@ -1940,7 +1940,7 @@ fn seal_identity_pages_seek_the_identity_key() {
             vec![0_i64.into(), "alder".to_owned().into(), 1_i64.into(), "hash".to_owned().into()];
         values.extend(std::iter::repeat_n(rusqlite::types::Value::from(64_i64), parameters - 4));
         let plan: Vec<String> = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .prepare(/* sqlite-large-value: allow-for-now lv-hc5c0b704ba9c owner=st3_store::store::checkpoint_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}"))
             .unwrap()
             .query_map(rusqlite::params_from_iter(values), |row| row.get::<_, String>(3))
             .unwrap()
@@ -2900,7 +2900,7 @@ fn a_repaired_usage_claim_is_folded_afresh_once_kept_reductions_are_forgotten() 
     assert_eq!(store.usage_summaries_at(&subjects, None).unwrap()[AGENT].total_tokens, 100);
     // A repair rewrites rows without a new store index, then forgets every kept reduction.
     store.connection.lock().unwrap().execute(
-        "UPDATE claims SET body=json_set(body, '$.fields.total_tokens', 250) WHERE id=?1",
+        /* sqlite-large-value: allow-for-now lv-h97ca6c195876 owner=st3_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body, '$.fields.total_tokens', 250) WHERE id=?1",
         params![claim.id],
     ).unwrap();
     store.forget_current_views();
@@ -3101,7 +3101,7 @@ fn staged_review_reader_retains_every_reference_and_predecessor_like_in_memory()
                 Vec::new()
             };
             store.connection.write().execute(
-                "UPDATE claims SET subject=?1,kind=?2,body=?3,predecessors=?4 WHERE id=?5",
+                /* sqlite-large-value: allow-for-now lv-h391b48dc5187 owner=st3_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET subject=?1,kind=?2,body=?3,predecessors=?4 WHERE id=?5",
                 params![
                     "gate-operation/tester", kind, serde_json::to_string(&body).unwrap(),
                     serde_json::to_string(&predecessors).unwrap(), history.id,

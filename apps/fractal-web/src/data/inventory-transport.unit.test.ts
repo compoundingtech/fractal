@@ -31,8 +31,8 @@ const harness = async (order: 'editor-first' | 'follow-first') => {
     (value) => ({ _tag: 'Success' as const, value }),
     (cause: unknown) => ({ _tag: 'Failure' as const, cause }),
   )
-  const readEditor = () => observe(gateway.arrangementsList(testSelection.owner, { limit: 50 }, editor.signal))
-  const readFollow = () => observe(gateway.arrangementsList(testSelection.owner, { limit: 100 }, follow.signal))
+  const readEditor = () => observe(gateway.arrangementsList(testSelection.owner, { limit: 50 }, { signal: editor.signal }))
+  const readFollow = () => observe(gateway.arrangementsList(testSelection.owner, { limit: 100 }, { signal: follow.signal }))
   // Both calls start in one turn, before generated discovery/credential awaits reach fetch.
   const [editorResult, followResult] = order === 'editor-first'
     ? [readEditor(), readFollow()] : (() => { const following = readFollow(); return [readEditor(), following] })()

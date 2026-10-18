@@ -17,7 +17,7 @@ pub fn read(
     if subjects.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let mut statement = connection.prepare(QUERY)?;
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h11ca7e81c213 owner=st3_store::store::step_labels TODO=trace-statement-and-value-representation */ QUERY)?;
     statement
         .query_map([serde_json::to_string(subjects)?], |row| {
             Ok((

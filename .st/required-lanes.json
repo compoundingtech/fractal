@@ -15,6 +15,9 @@
         "flake.lock",
         "flake.nix",
         "scripts"
+      ],
+      "tree_inputs": [
+        "."
       ]
     },
     "typescript-client": {
@@ -38,6 +41,7 @@
       "tree_inputs": [
         "apps/fractal-web/package.json",
         "apps/fractal-web/packages/st3-sdk/package.json",
+        "apps/fractal-web/src/folders/core.mts",
         "apps/ios",
         "clients/typescript",
         "crates/stui/tests/fixtures/quality-hour.json",
@@ -50,6 +54,32 @@
         "pnpm-lock.yaml",
         "pnpm-workspace.yaml",
         "scripts/ci-typescript-client"
+      ],
+      "absent_paths": [
+        ".npmrc",
+        ".pnp.cjs",
+        ".pnpmfile.cjs",
+        ".pnpmfile.mjs",
+        "apps/fractal-web/binding.gyp",
+        "apps/fractal-web/package.json5",
+        "apps/fractal-web/package.yaml",
+        "apps/fractal-web/packages/st3-sdk/binding.gyp",
+        "apps/fractal-web/packages/st3-sdk/package.json5",
+        "apps/fractal-web/packages/st3-sdk/package.yaml",
+        "apps/fractal-web/packages/st3-sdk/pnpm-workspace.yaml",
+        "apps/fractal-web/pnpm-workspace.yaml",
+        "apps/node_modules",
+        "binding.gyp",
+        "clients/node_modules",
+        "clients/pnpm-workspace.yaml",
+        "fixtures/node_modules",
+        "fixtures/package.json",
+        "package.json5",
+        "package.yaml",
+        "packages/fractal-ui/binding.gyp",
+        "packages/fractal-ui/package.json5",
+        "packages/fractal-ui/package.yaml",
+        "packages/fractal-ui/pnpm-workspace.yaml"
       ]
     }
   }

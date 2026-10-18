@@ -40,7 +40,7 @@ use super::*;
         }
     }
     while !backfill_page(&tx, 0, 2).unwrap() {}
-    tx.execute("UPDATE ivm_views SET ready=1", []).unwrap();
+    tx.execute(/* sqlite-large-value: allow-for-now lv-ha5c097e9f163 owner=st3_store::store::attention_ivm::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE ivm_views SET ready=1", []).unwrap();
     tx.commit().unwrap();
 }
 
@@ -57,7 +57,7 @@ use super::*;
 }
 
     fn custom(store: &Store, subject: &str, person: &str) {
-    let manifest = serde_json::from_str(include_str!(
+    let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hea5cc21cfb9d owner=st3_store::store::attention_ivm::tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../../../examples/st3/custom-review.json"
     ))
     .unwrap();

@@ -25,7 +25,7 @@ impl NativeCut {
         }
         let pragma = |sql| {
             connection
-                .query_row(sql, [], |row| row.get::<_, i64>(0))
+                .query_row(/* sqlite-large-value: allow-for-now lv-hd79ae6b232fb owner=st3_store::store::resource_preparation TODO=trace-statement-and-value-representation */ sql, [], |row| row.get::<_, i64>(0))
                 .ok()
         };
         Some(Self {
@@ -57,11 +57,11 @@ fn temporary_schema_safe(connection: &Connection) -> bool {
             let sql: Option<String> = row.get(2)?;
             let expected = match name.as_str() {
                 "write_clock" => {
-                    "CREATE TABLE write_clock(offset_ms INTEGER NOT NULL, at_ms INTEGER)"
+                    /* sqlite-large-value: allow-for-now lv-h854e76d1a531 owner=st3_store::store::resource_preparation TODO=chunk-or-reference-variable-columns */ "CREATE TABLE write_clock(offset_ms INTEGER NOT NULL, at_ms INTEGER)"
                 }
                 "heal_replay_base_order" => {
                     replay = true;
-                    "CREATE TABLE heal_replay_base_order( ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL)"
+                    /* sqlite-large-value: allow-for-now lv-h7fe8cf7539ff owner=st3_store::store::resource_preparation TODO=chunk-or-reference-variable-columns */ "CREATE TABLE heal_replay_base_order( ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL)"
                 }
                 _ => return Ok(false),
             };
@@ -406,7 +406,7 @@ pub fn inputs_with_actuals(
                 .and_then(|actual| actual.get("facts").cloned());
             let observed_at = transaction
                 .query_row(
-                    &canonical_sql(
+                    /* sqlite-large-value: allow-for-now lv-h5ad9fe95d0b8 owner=st3_store::store::resource_preparation TODO=trace-statement-and-value-representation */ &canonical_sql(
                         "SELECT accepted_at_unix_ms FROM claims
                                      WHERE subject=?1 AND kind='resource.observed'
                                      ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1",

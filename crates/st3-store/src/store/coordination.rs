@@ -1,7 +1,7 @@
 //! Count-only coordination reads. Writers populate metadata; readers never scan claim bodies.
 use super::*;
 
-const SCHEMA: &str = r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h0decf718bd22 owner=st3_store::store::coordination TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS coordination_sends (
     subject TEXT PRIMARY KEY,
     sent_ms INTEGER NOT NULL,
@@ -20,24 +20,24 @@ CREATE TABLE IF NOT EXISTS local_coordination_backfill (
 "#;
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(SCHEMA)?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9004ea400095 owner=st3_store::store::coordination TODO=trace-statement-and-value-representation */ SCHEMA)?;
     let columns = |table: &str| -> Result<Vec<String>> {
         Ok(connection
-            .prepare(&format!("PRAGMA table_info({table})"))?
+            .prepare(/* sqlite-large-value: allow-for-now lv-h22b7717b00b0 owner=st3_store::store::coordination TODO=trace-statement-and-value-representation */ &format!("PRAGMA table_info({table})"))?
             .query_map([], |row| row.get(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     };
     let existing = columns("coordination_sends")?;
     if existing.iter().any(|name| name == "fyi") && !existing.iter().any(|name| name == "silent") {
         // SQLite rewrites the covering index too; canonical message claims stay immutable.
-        connection.execute_batch("ALTER TABLE coordination_sends RENAME COLUMN fyi TO silent;")?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h1b5a97b0d567 owner=st3_store::store::coordination TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE coordination_sends RENAME COLUMN fyi TO silent;")?;
     }
     if !columns("coordination_sends")?
         .iter()
         .any(|name| name == "held")
     {
         connection.execute_batch(
-            "ALTER TABLE coordination_sends ADD COLUMN held INTEGER NOT NULL DEFAULT 0;
+            /* sqlite-large-value: allow-for-now lv-h0c51aeb6b59a owner=st3_store::store::coordination TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE coordination_sends ADD COLUMN held INTEGER NOT NULL DEFAULT 0;
              UPDATE local_coordination_backfill SET cursor=0,ceiling=0,complete=0;",
         )?;
     }
@@ -45,10 +45,10 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         .iter()
         .any(|name| name == "progress_ms")
     {
-        connection.execute_batch("ALTER TABLE local_coordination_backfill ADD COLUMN progress_ms INTEGER NOT NULL DEFAULT 0;")?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h28e8b5415bbe owner=st3_store::store::coordination TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE local_coordination_backfill ADD COLUMN progress_ms INTEGER NOT NULL DEFAULT 0;")?;
     }
     connection.execute_batch(
-        "CREATE INDEX IF NOT EXISTS coordination_sends_time ON coordination_sends(sent_ms,agent_to_agent,silent,to_person);
+        /* sqlite-large-value: allow-for-now lv-h9dfcaf4a65b8 owner=st3_store::store::coordination TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS coordination_sends_time ON coordination_sends(sent_ms,agent_to_agent,silent,to_person);
          CREATE INDEX IF NOT EXISTS coordination_sends_held ON coordination_sends(held,sent_ms);
          CREATE TRIGGER IF NOT EXISTS coordination_offer AFTER INSERT ON claims
          WHEN NEW.kind IN ('message.staged','message.delivered','message.read','message.closed')
@@ -77,7 +77,7 @@ pub fn initialize(transaction: &Transaction<'_>) -> Result<()> {
     match current {
         None => {
             transaction.execute(
-                "INSERT INTO local_coordination_backfill VALUES(1,0,?1,0,?2)",
+                /* sqlite-large-value: allow-for-now lv-h1bd5d60b8676 owner=st3_store::store::coordination TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_coordination_backfill VALUES(1,0,?1,0,?2)",
                 params![maximum, now],
             )?;
         }
@@ -85,7 +85,7 @@ pub fn initialize(transaction: &Transaction<'_>) -> Result<()> {
             // Old binaries do not populate this cache or raise the ceiling. Recheck the
             // uncovered tail on every reopen, without rebuilding or dropping existing count
             // metadata. Sends this binary synced live are already under the ceiling.
-            transaction.execute("UPDATE local_coordination_backfill SET cursor=CASE WHEN ?4 THEN ?1 ELSE cursor END,ceiling=?2,complete=0,progress_ms=?3 WHERE singleton=1", params![ceiling,maximum,now,complete])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h40a2b6f27250 owner=st3_store::store::coordination TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_coordination_backfill SET cursor=CASE WHEN ?4 THEN ?1 ELSE cursor END,ceiling=?2,complete=0,progress_ms=?3 WHERE singleton=1", params![ceiling,maximum,now,complete])?;
         }
         _ => {}
     }
@@ -125,7 +125,7 @@ pub fn cover_synced_sends(
     }
     if let Some((latest, _)) = after.last() {
         transaction.execute(
-            "UPDATE local_coordination_backfill SET ceiling=?1 WHERE singleton=1",
+            /* sqlite-large-value: allow-for-now lv-ha56023e193d7 owner=st3_store::store::coordination TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_coordination_backfill SET ceiling=?1 WHERE singleton=1",
             [latest],
         )?;
     }
@@ -138,7 +138,7 @@ pub fn sync(
     sent: Option<(u64, &Value)>,
 ) -> Result<()> {
     let Some((at, fields)) = sent else {
-        transaction.execute("DELETE FROM coordination_sends WHERE subject=?1", [subject])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h5f50df9ff6fc owner=st3_store::store::coordination TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM coordination_sends WHERE subject=?1", [subject])?;
         return Ok(());
     };
     let from = fields["from"].as_str().unwrap_or_default();
@@ -164,11 +164,11 @@ pub fn sync(
             |row| row.get::<_, bool>(0),
         )?;
     if !agent_to_agent && !to_person && !held {
-        transaction.execute("DELETE FROM coordination_sends WHERE subject=?1", [subject])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h3ef93aed6d8a owner=st3_store::store::coordination TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM coordination_sends WHERE subject=?1", [subject])?;
         return Ok(());
     }
     transaction.execute(
-        "INSERT INTO coordination_sends VALUES(?1,?2,?3,?4,?5,?6)
+        /* sqlite-large-value: allow-for-now lv-ha94e50ed1a9b owner=st3_store::store::coordination TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO coordination_sends VALUES(?1,?2,?3,?4,?5,?6)
          ON CONFLICT(subject) DO UPDATE SET sent_ms=excluded.sent_ms,
              agent_to_agent=excluded.agent_to_agent, silent=excluded.silent, to_person=excluded.to_person,
              held=excluded.held
@@ -226,7 +226,7 @@ pub fn backfill(transaction: &Transaction<'_>) -> Result<bool> {
     }
     let complete = processed == batch.len() && batch.len() < 8;
     transaction.execute(
-        "UPDATE local_coordination_backfill SET cursor=?1,complete=?2,progress_ms=?3 WHERE singleton=1",
+        /* sqlite-large-value: allow-for-now lv-haddf1bbcb8ab owner=st3_store::store::coordination TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_coordination_backfill SET cursor=?1,complete=?2,progress_ms=?3 WHERE singleton=1",
         params![
             batch
                 .get(processed.wrapping_sub(1))

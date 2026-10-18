@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
 pub const API_VERSION: &str = "st3.client.v0";
 pub const ERROR_VERSION: &str = "st3.client.error.v0";
 pub const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
@@ -64,9 +65,6 @@ pub enum ErrorCode {
     RecipientRetired,
     LifecycleUnavailable,
     RetirementUpgradeRequired,
-    NotFound,
-    Forbidden,
-    UnsupportedCapability,
     AttentionMigrated,
     ArrangementExists,
     ArrangementFolderExists,
@@ -83,6 +81,9 @@ pub enum ErrorCode {
     InvalidArrangementName,
     InvalidArrangementKey,
     InvalidSubjectReference,
+    NotFound,
+    Forbidden,
+    UnsupportedCapability,
     ValidationFailed,
     IdempotencyConflict,
     IssuerRequired,
@@ -91,15 +92,17 @@ pub enum ErrorCode {
     CursorGap,
     PageCursorExpired,
     AgentRosterCutNotReady,
-    ProjectionDetailTooLarge,
-    ProjectionDetailInvalidSource,
     RateLimited,
     RuntimeNotLocal,
     RuntimeAuthorityIndeterminate,
+    RuntimeListNotReady,
+    RuntimeListEnded,
     RemoteUnavailable,
     TerminalUnavailable,
     TerminalEnded,
     TimelineHistoryIncomplete,
+    ProjectionDetailTooLarge,
+    ProjectionDetailInvalidSource,
     ConversationContentInvalidated,
     TranscriptUnavailable,
     BlobTooLarge,
@@ -1315,6 +1318,16 @@ pub struct AgentRelationship {
     pub reason: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AgentEndReason {
+    pub kind: String,
+    pub ended_at: String,
+    pub actor: Option<String>,
+    pub reason: Option<String>,
+    pub exit_code: Option<i64>,
+    pub exit_signal: Option<String>,
+    pub diagnostic: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Agent {
     #[serde(flatten)]
     pub header: ResourceHeader,
@@ -1337,6 +1350,8 @@ pub struct Agent {
     pub since: Option<String>,
     #[serde(default)]
     pub observation: Option<String>,
+    #[serde(default)]
+    pub end_reason: Option<AgentEndReason>,
     #[serde(default)]
     pub blocked_on: Option<String>,
     #[serde(default)]

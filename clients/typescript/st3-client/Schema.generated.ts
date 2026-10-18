@@ -179,7 +179,64 @@ export const ActionCommon = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")),
   "parameters": Schema.Record(Schema.String, Schema.Unknown),
-  "type": Schema.Literals(["arrangement.edit","custom.reply","prompt.respond","attention.resolve","review.approve","review.reject","review.request-changes","message.send","message.read","message.close","launch.create","launch.revise","launch.preview","launch.approve","launch.cancel","mission.start","mission.revise","mission.approve-revision","mission.cancel-revision","mission.cancel","session.import","work.ask","work.done","work.cancel-ask","work.claim","work.renew","work.progress","work.complete","work.fail","work.release","work.retry","work.publish-mission","agent.create","agent.stop","agent.retire","agent.start","agent.suspend","agent.resume","terminal.create","terminal.end","agent.queue-move","lane.join","lane.leave","lane.move","lane.mark","lane.approve","runtime.stop","runtime.restart","runtime.reset","runtime.context-clear","runtime.signal","terminal.input","terminal.resize","terminal.attach","terminal.detach","pairing.revoke"])
+  "type": Schema.Literals([
+  "arrangement.edit",
+  "custom.reply",
+  "prompt.respond",
+  "attention.resolve",
+  "review.approve",
+  "review.reject",
+  "review.request-changes",
+  "message.send",
+  "message.read",
+  "message.close",
+  "launch.create",
+  "launch.revise",
+  "launch.preview",
+  "launch.approve",
+  "launch.cancel",
+  "mission.start",
+  "mission.revise",
+  "mission.approve-revision",
+  "mission.cancel-revision",
+  "mission.cancel",
+  "session.import",
+  "work.ask",
+  "work.done",
+  "work.cancel-ask",
+  "work.claim",
+  "work.renew",
+  "work.progress",
+  "work.complete",
+  "work.fail",
+  "work.release",
+  "work.retry",
+  "work.publish-mission",
+  "agent.create",
+  "agent.stop",
+  "agent.retire",
+  "agent.start",
+  "agent.suspend",
+  "agent.resume",
+  "terminal.create",
+  "terminal.end",
+  "agent.queue-move",
+  "lane.join",
+  "lane.leave",
+  "lane.move",
+  "lane.mark",
+  "lane.approve",
+  "runtime.stop",
+  "runtime.restart",
+  "runtime.reset",
+  "runtime.context-clear",
+  "runtime.signal",
+  "terminal.input",
+  "terminal.resize",
+  "terminal.attach",
+  "terminal.detach",
+  "pairing.revoke"
+])
 }).annotate({ identifier: "ActionCommon" }))()
 export type ActionCommon = typeof ActionCommon.Type
 export type ActionCommonEncoded = typeof ActionCommon.Encoded
@@ -338,7 +395,18 @@ export type RequestAnswerOption = typeof RequestAnswerOption.Type
 export type RequestAnswerOptionEncoded = typeof RequestAnswerOption.Encoded
 
 export const RequestSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.Literals(["pull_request","issue","document","mission","run","step","agent","host","commit","link"]),
+  "kind": Schema.Literals([
+  "pull_request",
+  "issue",
+  "document",
+  "mission",
+  "run",
+  "step",
+  "agent",
+  "host",
+  "commit",
+  "link"
+]),
   "label": Schema.String,
   /** A graph reference. */
   "ref": optionalKey(Schema.String).annotate({ description: "A graph reference." }),
@@ -546,6 +614,18 @@ export const AgentDelivery = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentDelivery = typeof AgentDelivery.Type
 export type AgentDeliveryEncoded = typeof AgentDelivery.Encoded
 
+export const AgentEndReason = /*#__PURE__*/ (() => Schema.Struct({
+  "actor": optionalKey(Schema.String),
+  "diagnostic": optionalKey(Schema.String),
+  "ended_at": Timestamp,
+  "exit_code": optionalKey(Schema.Int),
+  "exit_signal": optionalKey(Schema.String),
+  "kind": Schema.Literals(["completed","stopped-by-person","stopped-by-agent","crashed","harness-exited","host-lost","retired"]),
+  "reason": optionalKey(Schema.String)
+}).annotate({ identifier: "AgentEndReason" }))()
+export type AgentEndReason = typeof AgentEndReason.Type
+export type AgentEndReasonEncoded = typeof AgentEndReason.Encoded
+
 export const AgentHandoff = /*#__PURE__*/ (() => Schema.Struct({
   "desired_token": Schema.String,
   "destination": Schema.String,
@@ -607,7 +687,19 @@ export const AgentPresentation = /*#__PURE__*/ (() => Schema.Struct({
   /** How many steps are queued in all. */
   "queued": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "How many steps are queued in all." }),
   /** The agent state word, by its fixtures/clients/words.json id. */
-  "state": Schema.Literals(["needs_you","needs_login","fault","working","compacting","idle","starting","down","stopped","retired","unknown"]).annotate({ description: "The agent state word, by its fixtures/clients/words.json id." })
+  "state": Schema.Literals([
+  "needs_you",
+  "needs_login",
+  "fault",
+  "working",
+  "compacting",
+  "idle",
+  "starting",
+  "down",
+  "stopped",
+  "retired",
+  "unknown"
+]).annotate({ description: "The agent state word, by its fixtures/clients/words.json id." })
 }).annotate({ identifier: "AgentPresentation" }))()
 export type AgentPresentation = typeof AgentPresentation.Type
 export type AgentPresentationEncoded = typeof AgentPresentation.Encoded
@@ -625,7 +717,17 @@ export type AgentRelationship = typeof AgentRelationship.Type
 export type AgentRelationshipEncoded = typeof AgentRelationship.Encoded
 
 /** Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`. */
-export const AgentState = /*#__PURE__*/ (() => openEnum(["desired","starting","running","waiting","down","stopped","failed","suspended","retired"]).annotate({ identifier: "AgentState", description: "Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`." }))()
+export const AgentState = /*#__PURE__*/ (() => openEnum([
+  "desired",
+  "starting",
+  "running",
+  "waiting",
+  "down",
+  "stopped",
+  "failed",
+  "suspended",
+  "retired"
+]).annotate({ identifier: "AgentState", description: "Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`." }))()
 export type AgentState = typeof AgentState.Type
 export type AgentStateEncoded = typeof AgentState.Encoded
 
@@ -661,7 +763,17 @@ export const AgentSuspension = /*#__PURE__*/ (() => Schema.Struct({
   /** The request claim; each phase change is a change of this agent. */
   "operation_id": Schema.String.annotate({ description: "The request claim; each phase change is a change of this agent." }),
   /** suspend: quiescing, snapshotting, suspended, or failed (refused; the seat keeps running). resume: restoring, verifying, resumed; a failed resume returns to suspended with code and reason. */
-  "phase": Schema.Literals(["quiescing","snapshotting","suspended","failed","fencing-source","transferring","restoring","verifying","resumed"]).annotate({ description: "suspend: quiescing, snapshotting, suspended, or failed (refused; the seat keeps running). resume: restoring, verifying, resumed; a failed resume returns to suspended with code and reason." }),
+  "phase": Schema.Literals([
+  "quiescing",
+  "snapshotting",
+  "suspended",
+  "failed",
+  "fencing-source",
+  "transferring",
+  "restoring",
+  "verifying",
+  "resumed"
+]).annotate({ description: "suspend: quiescing, snapshotting, suspended, or failed (refused; the seat keeps running). resume: restoring, verifying, resumed; a failed resume returns to suspended with code and reason." }),
   "reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "source_host": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "suspended_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
@@ -772,7 +884,17 @@ export const MissionId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:mission
 export type MissionId = typeof MissionId.Type
 export type MissionIdEncoded = typeof MissionId.Encoded
 
-export const WorkState = /*#__PURE__*/ (() => Schema.Literals(["waiting-person","waiting","ready","claimed","blocked","verifying","completed","failed","cancelled"]).annotate({ identifier: "WorkState" }))()
+export const WorkState = /*#__PURE__*/ (() => Schema.Literals([
+  "waiting-person",
+  "waiting",
+  "ready",
+  "claimed",
+  "blocked",
+  "verifying",
+  "completed",
+  "failed",
+  "cancelled"
+]).annotate({ identifier: "WorkState" }))()
 export type WorkState = typeof WorkState.Type
 export type WorkStateEncoded = typeof WorkState.Encoded
 
@@ -810,6 +932,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   /** When a `down` seat began waiting for a session; null in every other state. */
   "down_since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When a `down` seat began waiting for a session; null in every other state." }),
   "driver": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** Derived terminal reason; absent when evidence is missing or stale. Never infer completion from absence. */
+  "end_reason": Schema.OptionFromOptionalNullOr(AgentEndReason, NULL_NONE).annotate({ description: "Derived terminal reason; absent when evidence is missing or stale. Never infer completion from absence." }),
   /** Current member reconcile failure; cleared by a successful pass. */
   "fault": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Current member reconcile failure; cleared by a successful pass." }),
   /** Placement handoff phase; the destination waits for former hosts to acknowledge their stopped runtimes. */
@@ -1109,7 +1233,16 @@ export const AssistantAgentItem = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   /** Null when undeclared. */
   "lifecycle": Schema.OptionFromNullOr(Schema.Literals(["standing","owner","bounded","unknown"])).annotate({ description: "Null when undeclared." }),
-  "runtime_state": Schema.Literals(["desired","starting","running","waiting","stopped","failed","suspended","unknown"]),
+  "runtime_state": Schema.Literals([
+  "desired",
+  "starting",
+  "running",
+  "waiting",
+  "stopped",
+  "failed",
+  "suspended",
+  "unknown"
+]),
   /** Null when the agent has not been observed. */
   "updated_at": Schema.OptionFromNullOr(Timestamp).annotate({ description: "Null when the agent has not been observed." })
 }).annotate({ identifier: "AssistantAgentItem" }))()
@@ -1135,7 +1268,19 @@ export type PersonIdEncoded = typeof PersonId.Encoded
 export const AssistantAttentionItem = /*#__PURE__*/ (() => Schema.Struct({
   "agent_id": Schema.OptionFromNullOr(Schema.String),
   /** Every custom.* kind collapses to custom; any other unrecognized source kind is unknown. */
-  "attention_kind": Schema.Literals(["human-gate","launch-approval","revision-approval","unread-message","person-step","agent-request","fault","harness-login","harness-prompt","custom","unknown"]).annotate({ description: "Every custom.* kind collapses to custom; any other unrecognized source kind is unknown." }),
+  "attention_kind": Schema.Literals([
+  "human-gate",
+  "launch-approval",
+  "revision-approval",
+  "unread-message",
+  "person-step",
+  "agent-request",
+  "fault",
+  "harness-login",
+  "harness-prompt",
+  "custom",
+  "unknown"
+]).annotate({ description: "Every custom.* kind collapses to custom; any other unrecognized source kind is unknown." }),
   "episode": Schema.String,
   "id": Id,
   "mission_id": Schema.OptionFromNullOr(Schema.String),
@@ -1268,7 +1413,16 @@ export const AssistantReadTrust = /*#__PURE__*/ (() => Schema.Struct({
 export type AssistantReadTrust = typeof AssistantReadTrust.Type
 export type AssistantReadTrustEncoded = typeof AssistantReadTrust.Encoded
 
-export const AssistantScope = /*#__PURE__*/ (() => Schema.Literals(["read.assistant.summary","read.assistant.attention","read.assistant.missions","read.assistant.agents","read.assistant.conversation","read.assistant.terminal","write.assistant.messages","write.assistant.custom-reply"]).annotate({ identifier: "AssistantScope" }))()
+export const AssistantScope = /*#__PURE__*/ (() => Schema.Literals([
+  "read.assistant.summary",
+  "read.assistant.attention",
+  "read.assistant.missions",
+  "read.assistant.agents",
+  "read.assistant.conversation",
+  "read.assistant.terminal",
+  "write.assistant.messages",
+  "write.assistant.custom-reply"
+]).annotate({ identifier: "AssistantScope" }))()
 export type AssistantScope = typeof AssistantScope.Type
 export type AssistantScopeEncoded = typeof AssistantScope.Encoded
 
@@ -1317,7 +1471,18 @@ export const AssistantMissionItem = /*#__PURE__*/ (() => Schema.Struct({
   "agent_ids": Schema.Array(Schema.String),
   "blocked_count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "id": Id,
-  "phase": Schema.Literals(["draft","ready","running","standing","blocked","completed","failed","cancelled","retired","unknown"]),
+  "phase": Schema.Literals([
+  "draft",
+  "ready",
+  "running",
+  "standing",
+  "blocked",
+  "completed",
+  "failed",
+  "cancelled",
+  "retired",
+  "unknown"
+]),
   /** Null when the source revision is not identifier-shaped. */
   "revision": Schema.OptionFromNullOr(Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(256))).annotate({ description: "Null when the source revision is not identifier-shaped." }),
   "run_id": Schema.OptionFromNullOr(Schema.String),
@@ -1457,10 +1622,32 @@ export type PersonUpdateEncoded = typeof PersonUpdate.Encoded
 
 export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "action_parameters": optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
-  "actions": Schema.Array(Schema.Literals(["custom.reply","prompt.respond","work.done","review.approve","review.reject","review.request-changes","launch.approve","launch.cancel","mission.approve-revision","mission.cancel-revision","message.read"])),
+  "actions": Schema.Array(Schema.Literals([
+  "custom.reply",
+  "prompt.respond",
+  "work.done",
+  "review.approve",
+  "review.reject",
+  "review.request-changes",
+  "launch.approve",
+  "launch.cancel",
+  "mission.approve-revision",
+  "mission.cancel-revision",
+  "message.read"
+])),
   /** Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts. */
   "alert": optionalKey(Schema.Boolean).annotate({ description: "Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts." }),
-  "attention_kind": Schema.Union([Schema.Literals(["human-gate","launch-approval","revision-approval","unread-message","person-step","agent-request","fault","harness-login","harness-prompt"]), Schema.String.check(Schema.isPattern(new RegExp("^custom\\.[a-zA-Z0-9_.-]+$", "u")))]),
+  "attention_kind": Schema.Union([Schema.Literals([
+  "human-gate",
+  "launch-approval",
+  "revision-approval",
+  "unread-message",
+  "person-step",
+  "agent-request",
+  "fault",
+  "harness-login",
+  "harness-prompt"
+]), Schema.String.check(Schema.isPattern(new RegExp("^custom\\.[a-zA-Z0-9_.-]+$", "u")))]),
   "because": optionalKey(Schema.String),
   /** The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask. */
   "blocked": optionalKey(AttentionBlocked),
@@ -1587,7 +1774,9 @@ export type ClientConnectionsEncoded = typeof ClientConnections.Encoded
 
 export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
-  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","agents","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), /** Follow exactly this current agent rather than the bounded fleet window. */
+"agent": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE).annotate({ description: "Follow exactly this current agent rather than the bounded fleet window." }), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */
 "subject": optionalKey(ArrangementId) }),
   Schema.Struct({ "capability": Schema.String, "collection": Schema.Literal("terminal"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "kind": Schema.Literal("subscribe"), "terminal": Id }),
@@ -1597,7 +1786,21 @@ export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
 export type CollectionCommand = typeof CollectionCommand.Type
 export type CollectionCommandEncoded = typeof CollectionCommand.Encoded
 
-export const CollectionName = /*#__PURE__*/ (() => Schema.Literals(["missions","attention","agents","work","glasses","arrangements","summary","clients","usage","machines","devices","sessions","terminals"]).annotate({ identifier: "CollectionName" }))()
+export const CollectionName = /*#__PURE__*/ (() => Schema.Literals([
+  "missions",
+  "attention",
+  "agents",
+  "work",
+  "glasses",
+  "arrangements",
+  "summary",
+  "clients",
+  "usage",
+  "machines",
+  "devices",
+  "sessions",
+  "terminals"
+]).annotate({ identifier: "CollectionName" }))()
 export type CollectionName = typeof CollectionName.Type
 export type CollectionNameEncoded = typeof CollectionName.Encoded
 
@@ -2042,7 +2245,16 @@ export const MissionStepPresentation = /*#__PURE__*/ (() => Schema.Struct({
   "owner": PresentationActor,
   "path": Schema.String,
   "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
-  "word": Schema.Literals(["needs_you","done","working","ready","waiting","cancelled","failed","pending"])
+  "word": Schema.Literals([
+  "needs_you",
+  "done",
+  "working",
+  "ready",
+  "waiting",
+  "cancelled",
+  "failed",
+  "pending"
+])
 }).annotate({ identifier: "MissionStepPresentation" }))()
 export type MissionStepPresentation = typeof MissionStepPresentation.Type
 export type MissionStepPresentationEncoded = typeof MissionStepPresentation.Encoded
@@ -2053,7 +2265,16 @@ export const MissionStuck = /*#__PURE__*/ (() => Schema.Struct({
   "attempts": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "blockers": Schema.Array(Schema.String),
   "step": StepRunId,
-  "word": Schema.Literals(["needs_you","done","working","ready","waiting","cancelled","failed","pending"])
+  "word": Schema.Literals([
+  "needs_you",
+  "done",
+  "working",
+  "ready",
+  "waiting",
+  "cancelled",
+  "failed",
+  "pending"
+])
 }).annotate({ identifier: "MissionStuck" }))()
 export type MissionStuck = typeof MissionStuck.Type
 export type MissionStuckEncoded = typeof MissionStuck.Encoded
@@ -2073,7 +2294,21 @@ export const MissionPresentation = /*#__PURE__*/ (() => Schema.Struct({
   /** Who must act now. */
   "who": PresentationActor,
   /** The mission word, by its fixtures/clients/words.json id. */
-  "word": Schema.Literals(["decision","stalled","unstaffed","unclaimed","queued","working","watching","held","idle","done","failed","cancelled","not_started"]).annotate({ description: "The mission word, by its fixtures/clients/words.json id." })
+  "word": Schema.Literals([
+  "decision",
+  "stalled",
+  "unstaffed",
+  "unclaimed",
+  "queued",
+  "working",
+  "watching",
+  "held",
+  "idle",
+  "done",
+  "failed",
+  "cancelled",
+  "not_started"
+]).annotate({ description: "The mission word, by its fixtures/clients/words.json id." })
 }).annotate({ identifier: "MissionPresentation" }))()
 export type MissionPresentation = typeof MissionPresentation.Type
 export type MissionPresentationEncoded = typeof MissionPresentation.Encoded
@@ -2169,7 +2404,16 @@ export type MissionRunSummary = typeof MissionRunSummary.Type
 export type MissionRunSummaryEncoded = typeof MissionRunSummary.Encoded
 
 /** Lifecycle state of a mission. */
-export const MissionState = /*#__PURE__*/ (() => openEnum(["draft","ready","retired","running","standing","completed","failed","cancelled"]).annotate({ identifier: "MissionState", description: "Lifecycle state of a mission." }))()
+export const MissionState = /*#__PURE__*/ (() => openEnum([
+  "draft",
+  "ready",
+  "retired",
+  "running",
+  "standing",
+  "completed",
+  "failed",
+  "cancelled"
+]).annotate({ identifier: "MissionState", description: "Lifecycle state of a mission." }))()
 export type MissionState = typeof MissionState.Type
 export type MissionStateEncoded = typeof MissionState.Encoded
 
@@ -2269,7 +2513,16 @@ export const Runtime = /*#__PURE__*/ (() => Schema.Struct({
   "revision": Revision,
   "runtime_id": Schema.String,
   "runtime_kind": Schema.Literals(["agent","exec","terminal","observer","gate"]),
-  "state": Schema.Literals(["pending","starting","running","stopping","stopped","exited","failed","unreachable"]),
+  "state": Schema.Literals([
+  "pending",
+  "starting",
+  "running",
+  "stopping",
+  "stopped",
+  "exited",
+  "failed",
+  "unreachable"
+]),
   "terminal_access": Schema.OptionFromOptionalNullOr(Schema.Struct({ "input": Schema.Literals(["granted","ungranted","unavailable"]), "read": Schema.Literals(["granted","ungranted","unavailable"]), "resize": Schema.Literals(["granted","ungranted","unavailable"]) }), NULL_NONE),
   "terminal_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
   "terminal_sequence": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
@@ -2460,7 +2713,16 @@ export type UsageEncoded = typeof Usage.Encoded
 export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "id": optionalKey(Schema.String),
   "label": optionalKey(Schema.String),
-  "outcome": Schema.Literals(["accept","decline","request_changes","selected","custom","feedback","read","dismissed"]),
+  "outcome": Schema.Literals([
+  "accept",
+  "decline",
+  "request_changes",
+  "selected",
+  "custom",
+  "feedback",
+  "read",
+  "dismissed"
+]),
   "text": optionalKey(Schema.String),
   "type": Schema.Literals(["decision","choice","feedback","update"])
 }).annotate({ identifier: "PersonAnswer" }))()
@@ -3571,8 +3833,66 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
 
-/** Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
-export const ErrorCode = /*#__PURE__*/ (() => openEnum(["recipient-retired","lifecycle-unavailable","retirement-upgrade-required","attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","suspend-authored-session-selection","stale-fence","cursor-gap","page-cursor-expired","agent-roster-cut-not-ready","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","projection-detail-too-large","projection-detail-invalid-source","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","message-too-large","message-store-full","long-message-signature-unsupported","response-budget-exceeded","content-not-text","invalid-document-reference","document-not-synced","internal"]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
+/** Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
+export const ErrorCode = /*#__PURE__*/ (() => openEnum([
+  "recipient-retired",
+  "lifecycle-unavailable",
+  "retirement-upgrade-required",
+  "attention-migrated",
+  "arrangement-exists",
+  "arrangement-folder-exists",
+  "arrangement-retired",
+  "arrangement-limit",
+  "arrangement-folder-deleted",
+  "arrangement-cycle",
+  "arrangement-body-too-large",
+  "arrangement-owner-forbidden",
+  "invalid-arrangement-subject",
+  "invalid-arrangement-action",
+  "invalid-arrangement-operations",
+  "invalid-arrangement-folder",
+  "invalid-arrangement-name",
+  "invalid-arrangement-key",
+  "invalid-subject-reference",
+  "not-found",
+  "forbidden",
+  "unsupported-capability",
+  "validation-failed",
+  "idempotency-conflict",
+  "issuer-required",
+  "suspend-authored-session-selection",
+  "stale-fence",
+  "cursor-gap",
+  "page-cursor-expired",
+  "agent-roster-cut-not-ready",
+  "rate-limited",
+  "runtime-not-local",
+  "runtime-authority-indeterminate",
+  "runtime-list-not-ready",
+  "runtime-list-ended",
+  "remote-unavailable",
+  "terminal-unavailable",
+  "terminal-ended",
+  "timeline-history-incomplete",
+  "projection-detail-too-large",
+  "projection-detail-invalid-source",
+  "conversation-content-invalidated",
+  "transcript-unavailable",
+  "blob-too-large",
+  "unsupported-media-type",
+  "blob-content-mismatch",
+  "blob-quota-exceeded",
+  "blob-not-found",
+  "blob-expired",
+  "message-too-large",
+  "message-store-full",
+  "long-message-signature-unsupported",
+  "response-budget-exceeded",
+  "content-not-text",
+  "invalid-document-reference",
+  "document-not-synced",
+  "internal"
+]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
 export type ErrorCode = typeof ErrorCode.Type
 export type ErrorCodeEncoded = typeof ErrorCode.Encoded
 
@@ -3725,7 +4045,31 @@ export type PairingCompleteEncoded = typeof PairingComplete.Encoded
 export const ResourceHeader = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   /** Resource family. */
-  "kind": openEnum(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","summary","connected-client","usage"]).annotate({ description: "Resource family." }),
+  "kind": openEnum([
+  "attention",
+  "message",
+  "launch",
+  "launch-variant",
+  "launch-decision",
+  "launch-approval",
+  "mission",
+  "work",
+  "agent",
+  "runtime",
+  "observer",
+  "subscription",
+  "lane",
+  "machine",
+  "device",
+  "operation",
+  "history",
+  "session",
+  "glass",
+  "arrangement",
+  "summary",
+  "connected-client",
+  "usage"
+]).annotate({ description: "Resource family." }),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp

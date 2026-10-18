@@ -8,14 +8,14 @@ use tokio::sync::watch;
 const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum Dependency {
+pub enum Dependency {
     Subject(String),
     Recipient(String),
     Owner(String, String),
 }
 
 #[derive(Default)]
-struct Registry {
+pub struct Registry {
     next: u64,
     subscribers: HashMap<Dependency, HashMap<u64, watch::Sender<u64>>>,
 }
@@ -215,7 +215,7 @@ impl Store {
                 "SELECT COALESCE((SELECT MAX(store_index) FROM claims),0),
                     COALESCE((SELECT MAX(id) FROM local_observations),0)",
             )?
-            .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))?)
+            .query_row(/* sqlite-large-value: allow-for-now lv-h1e0925b834e5 owner=st3_store::store::mailbox_wakes TODO=trace-statement-and-value-representation */ [], |r| Ok((r.get(0)?, r.get(1)?)))?)
     }
 
     fn mailbox_wake_batch(
@@ -574,7 +574,7 @@ mod tests {
             "unrelated declaration",
         ] {
             let store = Store::open_memory("node").unwrap();
-            crate::mailbox::tests::ready(&store, "boot");
+            crate::store::mailbox_tests::ready(&store, "boot");
             let fence = store
                 .bind_mailbox(&Fence::new("agent/eval.worker", "boot", "delivery"))
                 .unwrap();

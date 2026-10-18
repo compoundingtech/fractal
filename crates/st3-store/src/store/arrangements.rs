@@ -2,7 +2,7 @@
 use super::*;
 use st3_schema::arrangements::{self as schema, Operation};
 
-pub const SCHEMA: &str = r#"
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hcc71c4eb6d8b owner=st3_store::store::arrangements TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS arrangements (
     subject TEXT PRIMARY KEY, owner TEXT NOT NULL, created INTEGER NOT NULL DEFAULT 0,
     retired INTEGER NOT NULL DEFAULT 0, revision TEXT NOT NULL, winner BLOB NOT NULL,
@@ -27,12 +27,46 @@ fn heads(connection: &Connection, subject: &str) -> Result<BTreeMap<String, Head
 }
 fn register(head: &Head) -> Value { json!({"value":head.0,"revision":head.1}) }
 
+/// Projects one edit and bumps its owner's inventory revision. The projector registry calls this
+/// for every appended or replicated `arrangement.edited` claim.
 pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
+    let owner = project_owner(transaction, claim)?;
+    bump_inventory_revisions(transaction, std::iter::once(owner))
+}
+
+/// Projects a replicated claim without bumping: the range may hold several claims of one owner,
+/// including this node's own, so the owner is marked and [`flush`] bumps it once per transaction.
+pub fn project_replicated(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
+    let owner = project_owner(transaction, claim)?;
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hd7f38d868879 owner=st3_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO meta(key,value) VALUES('arrangement_inventory_pending_v1/'||?1,'1')",
+        [owner])?;
+    Ok(())
+}
+
+/// Bumps each owner marked by [`project_replicated`] once, in the transaction that projected it.
+pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
+    let owners = take_pending(transaction)?;
+    bump_inventory_revisions(transaction, owners.iter().map(String::as_str))
+}
+
+fn take_pending(transaction: &Transaction<'_>) -> Result<BTreeSet<String>> {
+    const PREFIX: &str = "arrangement_inventory_pending_v1/";
+    let owners = transaction.prepare_cached("SELECT substr(key,?1) FROM meta WHERE key>=?2 AND key<?3")?
+        .query_map(params![PREFIX.len() as i64 + 1, PREFIX, "arrangement_inventory_pending_v1\u{30}"],
+            |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h949f4a950236 owner=st3_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key>=?1 AND key<?2",
+        params![PREFIX, "arrangement_inventory_pending_v1\u{30}"])?;
+    Ok(owners)
+}
+
+fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> Result<&'a str> {
     let fields = schema_fields_for_body(&claim.kind, &claim.body)?;
     let operations = schema::operations(&claim.subject, &fields).map_err(anyhow::Error::new)?;
     let owner = schema::owner(&claim.subject).map_err(anyhow::Error::new)?;
     let key = canonical::sortable_key(&canonical::claim_key(transaction, &claim.id)?);
-    transaction.execute("INSERT INTO arrangements(subject,owner,revision,winner,updated_at,changed_index) VALUES(?1,?2,?3,?4,?5,?6)
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hcf4b2f5a1494 owner=st3_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO arrangements(subject,owner,revision,winner,updated_at,changed_index) VALUES(?1,?2,?3,?4,?5,?6)
         ON CONFLICT(subject) DO UPDATE SET revision=CASE WHEN excluded.winner>arrangements.winner THEN excluded.revision ELSE arrangements.revision END,
         updated_at=CASE WHEN excluded.winner>arrangements.winner THEN excluded.updated_at ELSE arrangements.updated_at END,
         winner=MAX(arrangements.winner,excluded.winner),changed_index=MAX(arrangements.changed_index,excluded.changed_index)", params![claim.subject,owner,claim.id,key,claim.accepted_at_unix_ms.to_string(),claim.store_index])?;
@@ -40,7 +74,7 @@ pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()>
     for operation in operations {
         match operation {
             Operation::Create { name } => {
-                transaction.execute("UPDATE arrangements SET created=1 WHERE subject=?1", [&claim.subject])?;
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-hb2ba876b4065 owner=st3_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "UPDATE arrangements SET created=1 WHERE subject=?1", [&claim.subject])?;
                 writes.push(("name".into(), json!(name)));
             }
             Operation::Rename { name } => writes.push(("name".into(), json!(name))),
@@ -52,14 +86,29 @@ pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()>
             Operation::FolderMove { id,parent,key } => writes.push((format!("folder/{id}/position"), json!({"parent":parent,"key":key}))),
             Operation::FolderDelete { id } => writes.push((format!("folder/{id}/tombstone"), json!(true))),
             Operation::SubjectPlace { subject,folder,key } => writes.push((format!("placement/{subject}"), json!({"folder":folder,"key":key}))),
-            Operation::Retire {} => { transaction.execute("UPDATE arrangements SET retired=1 WHERE subject=?1", [&claim.subject])?; }
+            Operation::Retire {} => { transaction.execute(/* sqlite-large-value: allow-for-now lv-h04cf56a8fdef owner=st3_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "UPDATE arrangements SET retired=1 WHERE subject=?1", [&claim.subject])?; }
         }
     }
     for (register,value) in writes {
-        transaction.execute("INSERT INTO arrangement_registers(subject,register,value,revision,winner) VALUES(?1,?2,?3,?4,?5)
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h0d478f1b9829 owner=st3_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO arrangement_registers(subject,register,value,revision,winner) VALUES(?1,?2,?3,?4,?5)
             ON CONFLICT(subject,register) DO UPDATE SET value=excluded.value,revision=excluded.revision,winner=excluded.winner
             WHERE excluded.winner>arrangement_registers.winner", params![claim.subject,register,canonical_json_text(&value)?,claim.id,key])?;
     }
+    Ok(owner)
+}
+
+/// Call once per local edit or projecting transaction with its distinct touched owners (a replicated
+/// batch marks them through `project_replicated` and `flush` calls this). Admission indices cannot order deferred materialization behind local edits.
+pub(super) fn bump_inventory_revisions<'a>(
+    transaction: &Transaction<'_>,
+    owners: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let mut owners = owners.into_iter().peekable();
+    if owners.peek().is_none() { return Ok(()); }
+    let mut statement = transaction.prepare_cached(
+        /* sqlite-large-value: allow-for-now lv-hb3472b82ce92 owner=st3_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('arrangement_inventory_revision_v1/'||?1,'1')
+         ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)")?;
+    for owner in owners { statement.execute(/* sqlite-large-value: allow-for-now lv-hae3109463808 owner=st3_store::store::arrangements TODO=trace-statement-and-value-representation */ [owner])?; }
     Ok(())
 }
 
@@ -207,21 +256,40 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
 
 pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     let ready: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='arrangement_heads_v1')", [], |row| row.get(0))?;
-    if !ready { rebuild(transaction)?; transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('arrangement_heads_v1','1')", [])?; }
+    if !ready { rebuild(transaction)?; transaction.execute(/* sqlite-large-value: allow-for-now lv-hfa607e6f65f4 owner=st3_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('arrangement_heads_v1','1')", [])?; }
     Ok(())
 }
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute("DELETE FROM arrangement_registers", [])?;
-    transaction.execute("DELETE FROM arrangements", [])?;
+    // Include owners whose heads disappear during repair/replay as well as owners
+    // recreated from claims. Keep their local counters outside the rebuilt tables.
+    let mut owners = transaction.prepare_cached("SELECT DISTINCT owner FROM arrangements")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    // Owners an earlier incremental pass of this transaction marked are bumped by this rebuild.
+    owners.extend(take_pending(transaction)?);
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-had2d30392e7b owner=st3_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM arrangement_registers", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h7a3c2b23a1cc owner=st3_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM arrangements", [])?;
     let mut statement = transaction.prepare("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='arrangement.edited' AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')")?;
     let claims = statement.query_map([],claim_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
-    for claim in claims { project(transaction,&claim)?; }
+    for claim in &claims {
+        let owner = project_owner(transaction, claim)?;
+        if !owners.contains(owner) { owners.insert(owner.to_owned()); }
+    }
+    bump_inventory_revisions(transaction, owners.iter().map(String::as_str))?;
     Ok(())
 }
 impl Store {
     pub fn arrangements(&self, person: &str, through: u64) -> Result<Vec<Value>> {
         self.read_snapshot(|_| arrangements_at(&self.readers.get(),person,through))
+    }
+    /// Owner-local projection counter, including retired and not-yet-created heads.
+    /// It commits with the heads and is independent of claim admission indices.
+    pub fn arrangement_inventory_revision(&self, person: &str) -> Result<u64> {
+        self.read_snapshot(|_| Ok(self.readers.get().query_row(
+            "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta
+             WHERE key='arrangement_inventory_revision_v1/'||?1),0)",
+            [person], |row| row.get(0))?))
     }
     pub fn arrangement(&self, subject: &str, through: u64) -> Result<Option<Value>> {
         self.read_snapshot(|_| arrangement_at(&self.readers.get(),subject,through))

@@ -1,6 +1,7 @@
 //! Shared bounded windows, never authority. The existing socket feed still publishes frames.
 //! A future graph-watch consumer can replace `revision` with view/frontier invalidations;
 //! authorized row reads and socket snapshot/diff delivery remain the same.
+use crate::PublishedViewsStore;
 use super::*;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -320,7 +321,8 @@ impl Windows {
             "conversation_blocks":session.conversation_blocks,
             "collection":request.collection, "limit":request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS),
             "since_ms":request.since_ms, "until_ms":request.until_ms,
-            "person":request.person, "subject":request.subject, "filter_actor":request.actor, "status":request.status,
+            "person":request.person, "subject":request.subject, "filter_actor":request.actor,
+            "agent":request.agent, "status":request.status,
         }).to_string()
     }
 
@@ -415,7 +417,7 @@ impl Windows {
         }
         let (items, has_more, valid_until) = compute()?;
         let valid_until = if request.collection == "agents" {
-            state.store.agent_roster_valid_until(index)
+            state.store.agent_roster_valid_until(index, request.agent.as_deref())
         } else if request.collection == "summary-missions" {
             items.first().and_then(|v| v["valid_until"].as_str()).map(str::parse).transpose()?
         } else {
@@ -756,6 +758,7 @@ mod tests {
         for (collection, scope) in [
             ("glasses", "read.glasses"),
             ("arrangements", "read.arrangements"),
+            ("agents", "read.projections"),
         ] {
             let root = tempfile::tempdir().unwrap();
             let state = state(root.path());
@@ -776,6 +779,9 @@ mod tests {
             if collection == "arrangements" {
                 query.person = Some("person/ada".into());
             }
+            if collection == "agents" {
+                query.agent = Some("agent/selected".into());
+            }
             collection_items_with_windows(
                 &state,
                 &original,
@@ -785,7 +791,7 @@ mod tests {
             )
             .await
             .unwrap();
-            pair(json!(["read.projections"]));
+            pair(if collection == "agents" { json!([]) } else { json!(["read.projections"]) });
             for cache in [Some(windows.clone()), None] {
                 let error = collection_items_with_windows(
                     &state,
@@ -827,7 +833,7 @@ mod tests {
         for other in variants {
             assert_ne!(read(&windows, &state, &other, &query, 0, &count), first);
         }
-        for field in ["limit", "person", "actor", "subject", "status"] {
+        for field in ["limit", "person", "actor", "subject", "status", "agent"] {
             let mut other = query.clone();
             match field {
                 "limit" => other.limit = Some(1),
@@ -835,11 +841,12 @@ mod tests {
                 "actor" => other.actor = Some("agent/selected".into()),
                 "subject" => other.subject = Some("arrangement/person/ada/one".into()),
                 "status" => other.status = Some("running".into()),
+                "agent" => other.agent = Some("agent/selected".into()),
                 _ => unreachable!(),
             }
             assert_ne!(read(&windows, &state, &session, &other, 0, &count), first);
         }
-        assert_eq!(count.load(Ordering::SeqCst), 10);
+        assert_eq!(count.load(Ordering::SeqCst), 11);
     }
 
     #[test]
@@ -1431,9 +1438,9 @@ mod tests {
                     let mut query = request(collection);
                     query.limit = Some(n % 8 + 1);
                     barrier.wait().await;
-                    let (_, items, more) = collection_items_with_windows(&state, &session, &query,
+                    let (_, items, more, _) = collection_items_with_windows(&state, &session, &query,
                         slots.clone().acquire_owned().await.unwrap(), Some(windows)).await.unwrap();
-                    let (_, oracle, oracle_more) = collection_items_with_windows(&state, &session, &query,
+                    let (_, oracle, oracle_more, _) = collection_items_with_windows(&state, &session, &query,
                         slots.acquire_owned().await.unwrap(), None).await.unwrap();
                     assert_eq!(items, oracle, "{collection} subscriber {n}");
                     assert_eq!(more, oracle_more);
@@ -1445,7 +1452,7 @@ mod tests {
         let mut query = request("attention");
         let ada = ClientSession::local(Some("person/ada")).unwrap();
         let avery = ClientSession::local(Some("person/avery")).unwrap();
-        let (_, items, _) = collection_items_with_windows(&state, &avery, &query,
+        let (_, items, _, _) = collection_items_with_windows(&state, &avery, &query,
             slots.clone().acquire_owned().await.unwrap(), Some(windows.clone())).await.unwrap();
         assert!(items.is_empty(), "another person must not receive Ada's rows");
         query.person = Some("person/ada".into());

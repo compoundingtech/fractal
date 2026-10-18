@@ -83,7 +83,7 @@ fn quiet_preparation_and_two_stale_attempts_report_separate_writer_work() {
     let _reset = ResetHook;
     BEFORE_VALIDATE.with(|hook| *hook.borrow_mut() = Some(Box::new(|store, pass| {
         store.connection.batched(|tx| -> Result<()> {
-            tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('invented-unrelated-write',?1)",
+            tx.execute(/* sqlite-large-value: allow-for-now lv-he8dd901ac66d owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('invented-unrelated-write',?1)",
                 [pass.to_string()])?;
             Ok(())
         }).unwrap().unwrap();
@@ -115,7 +115,7 @@ fn the_native_counter_fences_trigger_without_rowid_replace_delete_and_rollback()
         .connection
         .write()
         .execute_batch(
-            "CREATE TABLE invented_input(id INTEGER PRIMARY KEY,value TEXT);
+            /* sqlite-large-value: allow-for-now lv-h51ebd2697b2d owner=st3_store::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE invented_input(id INTEGER PRIMARY KEY,value TEXT);
          CREATE TABLE invented_output(id INTEGER PRIMARY KEY,value TEXT) WITHOUT ROWID;
          CREATE TABLE invented_child(id INTEGER PRIMARY KEY REFERENCES invented_input(id) ON DELETE CASCADE);
          CREATE TABLE invented_truncate(value TEXT);
@@ -128,13 +128,13 @@ fn the_native_counter_fences_trigger_without_rowid_replace_delete_and_rollback()
         )
         .unwrap();
     let fence = Fence::new(&store);
-    let prepared = fence.prepare(&store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h5a695c36f150 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     assert!(fence.current(&store, &transaction, &prepared));
     let count = transaction.total_changes();
     transaction
-        .execute("INSERT INTO invented_visible VALUES(1,'first')", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h1276e02f66d3 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO invented_visible VALUES(1,'first')", [])
         .unwrap();
     assert!(
         transaction.total_changes() >= count + 2,
@@ -151,15 +151,15 @@ fn the_native_counter_fences_trigger_without_rowid_replace_delete_and_rollback()
     store
         .connection
         .write()
-        .execute("INSERT INTO invented_input VALUES(1,'first')", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h2a0aef662216 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO invented_input VALUES(1,'first')", [])
         .unwrap();
-    let prepared = fence.prepare(&store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h71864eed6e29 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     let count = transaction.total_changes();
     transaction
         .execute(
-            "INSERT OR REPLACE INTO invented_input VALUES(1,'replacement')",
+            /* sqlite-large-value: allow-for-now lv-hbc8d9a9e06f5 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO invented_input VALUES(1,'replacement')",
             [],
         )
         .unwrap();
@@ -174,14 +174,14 @@ fn the_native_counter_fences_trigger_without_rowid_replace_delete_and_rollback()
     store
         .connection
         .write()
-        .execute("INSERT INTO invented_child VALUES(1)", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-h488b56d2c856 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO invented_child VALUES(1)", [])
         .unwrap();
-    let prepared = fence.prepare(&store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-hf1e2831889e9 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     let before_delete = transaction.total_changes();
     transaction
-        .execute("DELETE FROM invented_input", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-he1f19ebd2363 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM invented_input", [])
         .unwrap();
     assert!(
         transaction.total_changes() >= before_delete + 2,
@@ -193,12 +193,12 @@ fn the_native_counter_fences_trigger_without_rowid_replace_delete_and_rollback()
     );
     transaction.rollback().unwrap();
     drop(writer);
-    let prepared = fence.prepare(&store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h84407456cbef owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     let count = transaction.total_changes();
     transaction
-        .execute("DELETE FROM invented_truncate", [])
+        .execute(/* sqlite-large-value: allow-for-now lv-hdbb342d4817f owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM invented_truncate", [])
         .unwrap();
     assert!(transaction.total_changes() >= count + 2);
     assert!(
@@ -218,47 +218,47 @@ fn native_validation_fences_repair_order_pending_and_schema_changes() {
         .pop()
         .unwrap();
     let fence = Fence::new(&store);
-    let prepared = fence.prepare(&store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-hcef56f485dc0 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     transaction
         .execute(
-            "INSERT INTO projection_digest_repaired_claims VALUES(?1)",
+            /* sqlite-large-value: allow-for-now lv-h058e755ca4fc owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES(?1)",
             [&health.id],
         )
         .unwrap();
     assert!(!fence.current(&store, &transaction, &prepared));
     transaction.rollback().unwrap();
     drop(writer);
-    let prepared = fence.prepare(&store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-hb290f2b346dd owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     transaction
         .execute(
-            "UPDATE batches SET replica_sequence=replica_sequence+1 WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-ha6af10c30f84 owner=st3_store::store::resource_preparation::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=replica_sequence+1 WHERE id=?1",
             [&health.batch_id],
         )
         .unwrap();
     assert!(!fence.current(&store, &transaction, &prepared));
     transaction.rollback().unwrap();
     drop(writer);
-    let prepared = fence.prepare(&store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h4246fa1c3753 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     transaction
         .execute(
-            "INSERT INTO local_resource_projection_pending VALUES('resource/fixture')",
+            /* sqlite-large-value: allow-for-now lv-h62e232a14186 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_resource_projection_pending VALUES('resource/fixture')",
             [],
         )
         .unwrap();
     assert!(!fence.current(&store, &transaction, &prepared));
     transaction.rollback().unwrap();
     drop(writer);
-    let prepared = fence.prepare(&store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h5342ed0237f7 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
     transaction
-        .execute_batch("CREATE TABLE invented_ddl(value TEXT)")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h0476dcb0d28d owner=st3_store::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE invented_ddl(value TEXT)")
         .unwrap();
     assert!(!fence.current(&store, &transaction, &prepared));
     transaction.rollback().unwrap();
@@ -269,21 +269,21 @@ fn tokens_do_not_cross_store_or_fence_incarnations_and_nested_pins_are_unavailab
     let (_store_directory, store, _) = fixture();
     let (_other_directory, other, _) = fixture();
     let fence = Fence::new(&store);
-    let prepared = fence.prepare(&store, |_| ());
-    assert!(fence.prepare(&other, |_| ()).value.is_none());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h857c8f43a788 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
+    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h33bc96c975ec owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &other, |_| ()).value.is_none());
     assert!(!Fence::new(&other).current(&other, &other.connection.write(), &prepared));
     assert!(!Fence::new(&store).current(&store, &store.connection.write(), &prepared));
     store
         .read_snapshot(|_| {
-            assert!(fence.prepare(&store, |_| ()).value.is_none());
+            assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h40ef39be4279 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none());
             Ok(())
         })
         .unwrap();
     // Unknown/read-failed publication never authorizes an effect.
-    let mut unavailable = fence.prepare(&store, |_| ());
+    let mut unavailable = fence.prepare(/* sqlite-large-value: allow-for-now lv-h48d3ef01843e owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     unavailable.cut = None;
     assert!(!fence.current(&store, &store.connection.write(), &unavailable));
-    let mut wrapped = fence.prepare(&store, |_| ());
+    let mut wrapped = fence.prepare(/* sqlite-large-value: allow-for-now lv-h1933a33479ed owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     wrapped.cut.as_mut().unwrap().changes = u64::MAX;
     assert!(!fence.current(&store, &store.connection.write(), &wrapped));
 }
@@ -298,7 +298,7 @@ fn a_reopened_store_cannot_reuse_the_old_handles_token() {
         [], |row| row.get::<_, bool>(0),
     ).unwrap(), "file-backed open must exercise the retained replay scratch table");
     let fence = Fence::new(&store);
-    let prepared = fence.prepare(&store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h27f570970496 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     assert!(
         prepared.value.is_some(),
         "known replay scratch must not disable preparation"
@@ -338,28 +338,28 @@ fn a_reopened_store_cannot_reuse_the_old_handles_token() {
     store
         .connection
         .write()
-        .execute_batch("CREATE TEMP TABLE invented_shadow(value TEXT)")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-hba58047fa590 owner=st3_store::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE invented_shadow(value TEXT)")
         .unwrap();
-    assert!(fence.prepare(&store, |_| ()).value.is_none());
+    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h2173247ee4cf owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none());
     assert_unchanged_fallback();
     store
         .connection
         .write()
         .execute_batch(
-            "DROP TABLE temp.invented_shadow;
+            /* sqlite-large-value: allow-for-now lv-hcb2657bf5228 owner=st3_store::store::resource_preparation::tests TODO=prepare-body-and-predecessor-values */ "DROP TABLE temp.invented_shadow;
          CREATE TEMP VIEW claims AS SELECT * FROM main.claims;",
         )
         .unwrap();
     assert!(
-        fence.prepare(&store, |_| ()).value.is_none(),
+        fence.prepare(/* sqlite-large-value: allow-for-now lv-h7f5f1ce50c6f owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
         "a TEMP view shadowing an actual input is refused"
     );
     store.connection.write().execute_batch(
-        "DROP VIEW temp.claims;
+        /* sqlite-large-value: allow-for-now lv-he8780588029a owner=st3_store::store::resource_preparation::tests TODO=prepare-body-and-predecessor-values */ "DROP VIEW temp.claims;
          CREATE TEMP TRIGGER invented_replay_trigger AFTER INSERT ON heal_replay_base_order BEGIN SELECT 1; END;",
     ).unwrap();
     assert!(
-        fence.prepare(&store, |_| ()).value.is_none(),
+        fence.prepare(/* sqlite-large-value: allow-for-now lv-hbe3d4c50f27f owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
         "a TEMP trigger on an admitted scratch table is still refused"
     );
     assert_unchanged_fallback();
@@ -367,55 +367,55 @@ fn a_reopened_store_cannot_reuse_the_old_handles_token() {
         .connection
         .write()
         .execute_batch(
-            "DROP TRIGGER temp.invented_replay_trigger;
+            /* sqlite-large-value: allow-for-now lv-h7d61a36c449a owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER temp.invented_replay_trigger;
          INSERT INTO temp.heal_replay_base_order(claim_id) VALUES ('invented-pending-replay');",
         )
         .unwrap();
     assert!(
-        fence.prepare(&store, |_| ()).value.is_none(),
+        fence.prepare(/* sqlite-large-value: allow-for-now lv-he03cea0dd216 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
         "nonempty replay scratch is ineligible"
     );
     assert_unchanged_fallback();
     store
         .connection
         .write()
-        .execute_batch("DELETE FROM temp.heal_replay_base_order")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h8ba6b394522b owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM temp.heal_replay_base_order")
         .unwrap();
-    assert!(fence.prepare(&store, |_| ()).value.is_some());
+    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h9e66f6462d11 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_some());
     for definition in [
-        "CREATE TEMP TABLE heal_replay_base_order(ordinal TEXT PRIMARY KEY, claim_id TEXT NOT NULL)",
-        "CREATE TEMP TABLE heal_replay_base_order(ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL, extra TEXT)",
-        "CREATE TEMP VIEW heal_replay_base_order AS SELECT 1 AS ordinal, 'invented' AS claim_id",
+        /* sqlite-large-value: allow-for-now lv-h36b6b26d8de2 owner=st3_store::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(ordinal TEXT PRIMARY KEY, claim_id TEXT NOT NULL)",
+        /* sqlite-large-value: allow-for-now lv-hf38c23e5b963 owner=st3_store::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL, extra TEXT)",
+        /* sqlite-large-value: allow-for-now lv-h5de82fc83307 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP VIEW heal_replay_base_order AS SELECT 1 AS ordinal, 'invented' AS claim_id",
     ] {
         store
             .connection
             .write()
-            .execute_batch("DROP TABLE temp.heal_replay_base_order")
+            .execute_batch(/* sqlite-large-value: allow-for-now lv-h709ee0ada3aa owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE temp.heal_replay_base_order")
             .unwrap();
-        store.connection.write().execute_batch(definition).unwrap();
+        store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h61d95f81d313 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ definition).unwrap();
         assert!(
-            fence.prepare(&store, |_| ()).value.is_none(),
+            fence.prepare(/* sqlite-large-value: allow-for-now lv-h2a28c55a9ce1 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
             "mismatched TEMP definition was admitted: {definition}"
         );
         assert_unchanged_fallback();
-        if definition.starts_with("CREATE TEMP VIEW") {
+        if definition.starts_with(/* sqlite-large-value: allow-for-now lv-h21d6864b6d88 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP VIEW") {
             store
                 .connection
                 .write()
-                .execute_batch("DROP VIEW temp.heal_replay_base_order")
+                .execute_batch(/* sqlite-large-value: allow-for-now lv-h18b8992cd20e owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP VIEW temp.heal_replay_base_order")
                 .unwrap();
         } else {
             store
                 .connection
                 .write()
-                .execute_batch("DROP TABLE temp.heal_replay_base_order")
+                .execute_batch(/* sqlite-large-value: allow-for-now lv-h631dba110641 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TABLE temp.heal_replay_base_order")
                 .unwrap();
         }
         store
             .connection
             .write()
             .execute_batch(
-                "CREATE TEMP TABLE heal_replay_base_order(
+                /* sqlite-large-value: allow-for-now lv-hf9212450a11e owner=st3_store::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE heal_replay_base_order(
              ordinal INTEGER PRIMARY KEY, claim_id TEXT NOT NULL)",
             )
             .unwrap();
@@ -423,13 +423,13 @@ fn a_reopened_store_cannot_reuse_the_old_handles_token() {
     drop(store);
     let reopened = Store::open(&path, "prepared-reopen").unwrap();
     let reopened_fence = Fence::new(&reopened);
-    let fresh = reopened_fence.prepare(&reopened, |_| ());
+    let fresh = reopened_fence.prepare(/* sqlite-large-value: allow-for-now lv-h6a67d1fe0b3f owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &reopened, |_| ());
     assert!(
         fresh.value.is_some(),
         "a fresh file-backed incarnation can prepare"
     );
     assert!(reopened_fence.current(&reopened, &reopened.connection.write(), &fresh));
-    assert!(fence.prepare(&reopened, |_| ()).value.is_none());
+    assert!(fence.prepare(/* sqlite-large-value: allow-for-now lv-h84bab8f9c735 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &reopened, |_| ()).value.is_none());
     assert!(!fence.current(&reopened, &reopened.connection.write(), &prepared));
     // The retained Arc allocation prevents an address-reused native handle from making a
     // newly opened Store the old incarnation. Neither the path nor cookie proves identity.
@@ -473,12 +473,12 @@ fn preparation_reads_the_post_seed_cut_and_refuses_a_foreign_reader_file() {
         .connection
         .write()
         .execute(
-            "INSERT INTO meta(key,value) VALUES('invented-fresh-cut','new')",
+            /* sqlite-large-value: allow-for-now lv-h70061f0e2590 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('invented-fresh-cut','new')",
             [],
         )
         .unwrap();
     let fence = Fence::new(&store);
-    let prepared = fence.prepare(&store, |reader| {
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h09837ff10b59 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |reader| {
         assert!(
             !reader.is_autocommit(),
             "the canonical inputs share a real read transaction"
@@ -492,17 +492,17 @@ fn preparation_reads_the_post_seed_cut_and_refuses_a_foreign_reader_file() {
             .unwrap()
     });
     assert_eq!(prepared.value.as_deref(), Some("new"));
-    let mut foreign = fence.prepare(&store, |_| ());
+    let mut foreign = fence.prepare(/* sqlite-large-value: allow-for-now lv-h15c8757be5dd owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     foreign.cut.as_mut().unwrap().file = "invented-other-file".into();
     assert!(!fence.current(&store, &store.connection.write(), &foreign));
 
     store
         .connection
         .write()
-        .execute_batch("CREATE TEMP TABLE invented_shadow(value TEXT)")
+        .execute_batch(/* sqlite-large-value: allow-for-now lv-h2f1cf05375e8 owner=st3_store::store::resource_preparation::tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE invented_shadow(value TEXT)")
         .unwrap();
     assert!(
-        fence.prepare(&store, |_| ()).value.is_none(),
+        fence.prepare(/* sqlite-large-value: allow-for-now lv-h25cf5d63e65c owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ()).value.is_none(),
         "a preexisting writer TEMP schema cannot silently change name resolution"
     );
 }
@@ -723,12 +723,12 @@ fn a_second_connection_commit_is_detected_by_the_same_writer_data_version() {
     let path = directory.path().join("claims.sqlite");
     let store = Store::open(&path, "prepared-other-writer").unwrap();
     let fence = Fence::new(&store);
-    let prepared = fence.prepare(&store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-hb69a74eb59eb owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let expected = prepared.cut.as_ref().unwrap();
     let other = Connection::open(&path).unwrap();
     other
         .execute(
-            "INSERT INTO meta(key,value) VALUES('invented-external-write','1')",
+            /* sqlite-large-value: allow-for-now lv-ha0c76ae0907f owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('invented-external-write','1')",
             [],
         )
         .unwrap();
@@ -767,7 +767,7 @@ fn an_observer_repair_reprepares_instead_of_consuming_stale_health() {
                     .connection
                     .write()
                     .execute(
-                        "INSERT INTO projection_digest_repaired_claims VALUES(?1)",
+                        /* sqlite-large-value: allow-for-now lv-h133166001579 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims VALUES(?1)",
                         [&health.id],
                     )
                     .unwrap();
@@ -841,7 +841,7 @@ fn a_later_queued_job_rejects_an_earlier_jobs_uncommitted_write() {
     let (_store_directory, store, _) = fixture();
     let store = Arc::new(store);
     let fence = Arc::new(Fence::new(&store));
-    let prepared = fence.prepare(&store, |_| ());
+    let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-h5169aeee3a44 owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ &store, |_| ());
     let commits = Arc::new(AtomicUsize::new(0));
     let seen = commits.clone();
     let _observer = store.observe_commits(move |_| {
@@ -858,7 +858,7 @@ fn a_later_queued_job_rejects_an_earlier_jobs_uncommitted_write() {
     store.connection.send(WriterJob::Batched {
         run: Box::new(|tx| {
             tx.execute(
-                "INSERT INTO meta(key,value) VALUES('invented-same-batch','1')",
+                /* sqlite-large-value: allow-for-now lv-h8e48e2e77211 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('invented-same-batch','1')",
                 [],
             )
             .is_ok()
@@ -915,7 +915,7 @@ fn an_observer_revision_change_keeps_the_existing_refusal_without_partial_effect
         .unwrap();
     let _reset = ResetHook;
     BEFORE_VALIDATE.with(|hook| *hook.borrow_mut() = Some(Box::new(|store, _| {
-        store.connection.write().execute("UPDATE desired SET revision='invented-new-revision' WHERE subject='observer/fixture'", []).unwrap();
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hcbf95a2cd0e6 owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET revision='invented-new-revision' WHERE subject='observer/fixture'", []).unwrap();
     })));
     let error = store
         .record_resource_observation(
@@ -1059,7 +1059,7 @@ subscription "fixture" {
                     .connection
                     .write()
                     .execute(
-                        "DELETE FROM desired WHERE subject='agent/prepared-recipient.receiver'",
+                        /* sqlite-large-value: allow-for-now lv-h2f2026408b3d owner=st3_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject='agent/prepared-recipient.receiver'",
                         [],
                     )
                     .unwrap();
@@ -1161,7 +1161,7 @@ fn preparation_never_pins_shared_cache_before_an_unrelated_publication() {
         let fence = Fence::new(store);
         take_counts();
         let mut entered = false;
-        let prepared = fence.prepare(store, |_| {
+        let prepared = fence.prepare(/* sqlite-large-value: allow-for-now lv-heb0858aa879b owner=st3_store::store::resource_preparation::tests TODO=trace-statement-and-value-representation */ store, |_| {
             entered = true;
             concurrent_timeline(store, 2)
         });

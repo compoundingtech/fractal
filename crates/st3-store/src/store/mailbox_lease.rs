@@ -38,7 +38,7 @@ fn lease(
          FROM local_mailbox_leases WHERE subject=?1 AND component=?2",
         )
         .map_err(internal)?
-        .query_row(params![fence.subject, fence.component], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h4c5d5462bedf owner=st3_store::store::mailbox_lease TODO=trace-statement-and-value-representation */ params![fence.subject, fence.component], |row| {
             Ok((
                 Fence {
                     subject: fence.subject.clone(),
@@ -95,7 +95,7 @@ fn capture_mailbox_faults(
             AND +store_index<=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1)
          FROM unresolved JOIN claims fault ON fault.id=unresolved.failure",
     );
-    let mut statement = connection.prepare_cached(&query)?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb48185c671e1 owner=st3_store::store::mailbox_lease TODO=trace-statement-and-value-representation */ &query)?;
     let rows = statement.query_map(params![serde_json::to_string(subjects)?, index], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
     })?;
@@ -159,7 +159,7 @@ mod tests {
     fn fixture() -> Store {
         let store = Store::open_memory("node").unwrap();
         declare(&store);
-        crate::mailbox::tests::ready(&store, "current");
+        crate::store::mailbox_tests::ready(&store, "current");
         store
     }
 
@@ -290,7 +290,7 @@ mod tests {
         let second_cut = store.index().unwrap();
         assert_eq!(store.mailbox_faults_for(&subjects, second_cut).unwrap()[subject], "second loss",
             "an old recovery must not quiet a new interruption");
-        crate::mailbox::tests::ready(&store, "replacement");
+        crate::store::mailbox_tests::ready(&store, "replacement");
         assert!(store.mailbox_faults_for(&subjects, store.index().unwrap()).unwrap().is_empty());
         assert_eq!(store.mailbox_faults_for(&subjects, second_cut).unwrap()[subject], "second loss");
         assert!(store.mailbox_faults_for(&[], second_cut).unwrap().is_empty());
@@ -597,7 +597,7 @@ mod tests {
         let bound = {
             let store = Store::open(&path, "node").unwrap();
             declare(&store);
-            crate::mailbox::tests::ready(&store, "current");
+            crate::store::mailbox_tests::ready(&store, "current");
             store
                 .bind_mailbox_with_lease(&request(), Some(&authority(1)))
                 .unwrap()
@@ -1015,7 +1015,7 @@ mod tests {
         let path = root.path().join("argv.db");
         let store = Store::open(&path,"node").unwrap();
         declare(&store);
-        crate::mailbox::tests::ready(&store,"current");
+        crate::store::mailbox_tests::ready(&store,"current");
         let member = declare_argv(&store,"node");
         let bound = store.bind_argv_mailbox_checked(&request(), &member, &|| Ok(())).unwrap();
         drop(store);
@@ -1410,7 +1410,7 @@ fn refused(reason: &str) -> St3Error {
 fn argv_binding(connection: &Connection, fence: &Fence) -> Result<Option<MemberSpec>, St3Error> {
     let held: Option<(Fence, String)> = connection.prepare_cached(
         "SELECT subject,component,incarnation,epoch,member FROM local_mailbox_argv_bindings WHERE token=?1",
-    ).map_err(internal)?.query_row([&fence.token], |row| Ok((Fence {
+    ).map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-heb6759882bc5 owner=st3_store::store::mailbox_lease TODO=trace-statement-and-value-representation */ [&fence.token], |row| Ok((Fence {
         token: fence.token.clone(), subject: row.get(0)?, component: row.get(1)?,
         incarnation: row.get(2)?, epoch: row.get(3)?,
     }, row.get(4)?))).optional().map_err(internal)?;
@@ -1434,7 +1434,7 @@ pub fn refuse_argv_native_adoption(connection: &Connection, fence: &Fence) -> Re
 
 pub fn record_argv_binding(connection: &Connection, fence: &Fence, member: &MemberSpec) -> Result<(), St3Error> {
     connection.execute(
-        "INSERT INTO local_mailbox_argv_bindings VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(token) DO NOTHING",
+        /* sqlite-large-value: allow-for-now lv-h1a5526aa3579 owner=st3_store::store::mailbox_lease TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_argv_bindings VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(token) DO NOTHING",
         params![fence.token,fence.subject,fence.component,fence.incarnation,fence.epoch,serde_json::to_string(member).map_err(internal)?],
     ).map_err(internal)?;
     Ok(())
@@ -1681,7 +1681,7 @@ pub fn record(
 ) -> Result<(), St3Error> {
     connection
         .execute(
-            "INSERT INTO local_mailbox_leases VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0)
+            /* sqlite-large-value: allow-for-now lv-h17864914d6eb owner=st3_store::store::mailbox_lease TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_leases VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,0)
          ON CONFLICT(subject,component) DO UPDATE SET incarnation=excluded.incarnation,
          provider=excluded.provider,session=excluded.session,sequence=excluded.sequence,
          pid=excluded.pid,process_token=excluded.process_token,token=excluded.token,
@@ -1711,7 +1711,7 @@ impl Store {
     ) -> Result<Option<(String, bool)>, St3Error> {
         let connection = self.readers.get();
         connection
-            .prepare_cached(&canonical_sql(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha88f631727c8 owner=st3_store::store::mailbox_lease TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT id, NOT EXISTS(
                     SELECT 1 FROM claims AS recovery INDEXED BY claims_subject_kind_index
                     WHERE recovery.subject=claims.subject
@@ -1723,7 +1723,7 @@ impl Store {
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1",
             ))
             .map_err(internal)?
-            .query_row(params![fence.subject, episode], |row| {
+            .query_row(/* sqlite-large-value: allow-for-now lv-hd0a028b98419 owner=st3_store::store::mailbox_lease TODO=trace-statement-and-value-representation */ params![fence.subject, episode], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .optional()
@@ -2041,7 +2041,7 @@ impl Store {
             return Err(refused("a successor owner cannot be rewound by recovery"));
         }
         tx.execute(
-            "INSERT INTO local_mailbox_owners VALUES (?1,?2,?3,?4)
+            /* sqlite-large-value: allow-for-now lv-h9d72a0d5d1ad owner=st3_store::store::mailbox_lease TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_owners VALUES (?1,?2,?3,?4)
              ON CONFLICT(subject,component) DO UPDATE SET incarnation=excluded.incarnation,epoch=excluded.epoch",
             params![fence.subject,fence.component,fence.incarnation,fence.epoch],
         ).map_err(internal)?;

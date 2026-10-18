@@ -1,100 +1,21 @@
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::terminal_gate_evidence::native_source_tests_shared::*;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use crate::store::terminal_gate_evidence::native_source_tests_shared::{Fixture, seed_native};
 use super::*;
-use crate::graph::{parse_execution_intent, parse_intent};
-use crate::store::{
-    Store, append_claim_tx, project_mission_run_created, select_replicated_desired,
-    select_replicated_mission,
-};
-use serde_json::json;
-use smallclaims::sqlite::work::{SqliteWork, SqliteWorkScope};
 
-struct Fixture {
-    source: NativeSource,
-    store: Store,
-    dir: tempfile::TempDir,
-}
-impl Fixture {
-    fn empty() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("claims.sqlite3"), "node").unwrap();
-        let source = {
-            let mut writer = store.connection.write();
-            let tx = writer.transaction().unwrap();
-            let source = NativeSource::attach(
-                &tx,
-                Binding {
-                    origin: "node".into(),
-                    mission: "one".into(),
-                    run: "mission-run/one".into(),
-                    generation: "run-generation/one".into(),
-                    step: "step-run/one/prepare".into(),
-                    path: "prepare".into(),
-                    gate: "prepared".into(),
-                    exec: "exec/one/probe".into(),
-                },
-            )
-            .unwrap();
-            tx.commit().unwrap();
-            source
-        };
-        Self { source, store, dir }
-    }
-    fn seeded() -> Self {
-        let fixture = Self::empty();
-        let mut writer = fixture.store.connection.write();
-        let tx = writer.transaction().unwrap();
-        seed_native(&tx, &fixture.source.binding);
-        fixture.source.finish(&tx).unwrap();
-        assert_eq!(fixture.source.doctor_line(&tx)["status"], "warn");
-        tx.commit().unwrap();
-        drop(writer);
-        fixture
-    }
-    fn edit(&self, change: impl FnOnce(&Transaction<'_>)) {
-        let mut writer = self.store.connection.write();
-        let tx = writer.transaction().unwrap();
-        change(&tx);
-        self.source.finish(&tx).unwrap();
-        tx.commit().unwrap();
-    }
-    fn line(&self) -> Value {
-        let mut writer = self.store.connection.write();
-        let tx = writer.transaction().unwrap();
-        self.source.doctor_line(&tx)
-    }
-    fn measured(&self, change: impl FnOnce(&Transaction<'_>)) -> SqliteWork {
-        let mut writer = self.store.connection.write();
-        let tx = writer.transaction().unwrap();
-        let work = SqliteWorkScope::start();
-        change(&tx);
-        self.source.finish(&tx).unwrap();
-        let measured = work.finish();
-        tx.commit().unwrap();
-        measured
-    }
-    fn populate_foreign(&self, n: usize) {
-        let mut writer = self.store.connection.write();
-        let tx = writer.transaction().unwrap();
-        tx.execute("INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('foreign','node',999,'fixture-foreign','1')",[]).unwrap();
-        // Keep the raw legacy volume fixture in bounded batches. Replica-record writes
-        // intentionally invalidate this private source adapter; a single 100000-row legacy
-        // batch would instead multiply position-recovery work while settling publication.
-        tx.execute("WITH RECURSIVE pages(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM pages WHERE n<(?1-1)/64)
-            INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
-            SELECT 'foreign-page/'||n,'node',1000+n,'fixture-page/'||n,'1' FROM pages", [n]).unwrap();
-        tx.execute("WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<?1)
-            INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
-            SELECT 'foreign/'||n,'foreign-page/'||((n-1)/64),'exec/unrelated/'||n,'runtime.observed','node','{}','[]','1' FROM rows WHERE n<=?1",
-            [n]).unwrap();
-        tx.commit().unwrap();
-    }
-}
+use crate::store::Store;
+use serde_json::json;
+use smallclaims::sqlite::work::SqliteWorkScope;
 
 #[test]
 fn native_gate_derives_eight_native_facts_and_preserves_canonical_selection() {
     let f = Fixture::seeded();
     f.edit(|tx| {
         // A later arrival with an older canonical time must not replace the selected exit.
-        tx.execute("INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h4f4db78f0dbc owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
             SELECT 'late-old-observation',batch_id,subject,kind,origin,?1,'[]','0' FROM claims
             WHERE subject='exec/one/probe' AND kind='runtime.observed'",
             [json!({"fields":{"status":"exited","exit_code":3,"incarnation_id":"older"},"evidence":[]}).to_string()]).unwrap();
@@ -156,7 +77,7 @@ fn native_gate_action_domain_refusal_and_recovery_preserve_unknown() {
     assert_eq!(f.line()["status"], "unknown");
     f.edit(|tx| {
         tx.execute(
-            "DELETE FROM claims WHERE subject='exec/one/probe' AND kind='runtime.action.unlisted'",
+            /* sqlite-large-value: allow-for-now lv-h389177a7dc0b owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE subject='exec/one/probe' AND kind='runtime.action.unlisted'",
             [],
         )
         .unwrap();
@@ -169,7 +90,7 @@ fn native_gate_changed_declaration_and_generation_retract_without_read_repair() 
     let f = Fixture::seeded();
     f.edit(|tx| {
         tx.execute(
-            "UPDATE desired SET owner_generation='run-generation/other' WHERE subject='exec/one/probe'",
+            /* sqlite-large-value: allow-for-now lv-h81d0bbe5286c owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_generation='run-generation/other' WHERE subject='exec/one/probe'",
             [],
         )
         .unwrap();
@@ -177,7 +98,7 @@ fn native_gate_changed_declaration_and_generation_retract_without_read_repair() 
     assert_eq!(f.line()["status"], "unknown");
     f.edit(|tx| {
         tx.execute(
-            "UPDATE desired SET owner_generation='run-generation/one' WHERE subject='exec/one/probe'",
+            /* sqlite-large-value: allow-for-now lv-hd1a7827579a9 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_generation='run-generation/one' WHERE subject='exec/one/probe'",
             [],
         )
         .unwrap();
@@ -185,7 +106,7 @@ fn native_gate_changed_declaration_and_generation_retract_without_read_repair() 
     assert_eq!(f.line()["status"], "warn");
     f.edit(|tx| {
         tx.execute(
-            "UPDATE mission_runs SET current_generation_id='other' WHERE id='one'",
+            /* sqlite-large-value: allow-for-now lv-h9c89d7b10625 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET current_generation_id='other' WHERE id='one'",
             [],
         )
         .unwrap();
@@ -200,7 +121,7 @@ fn native_gate_caps_complete_subject_and_related_batch_rows() {
         f.edit(|tx| {
             let batch:String=tx.query_row("SELECT batch_id FROM claims WHERE subject='exec/one/probe' AND kind='runtime.observed'",[],|r|r.get(0)).unwrap();
             for n in 0..17 {
-                tx.execute("INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h3258747558e2 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                     VALUES(?1,?2,?3,'harness.observed','node','{}','[]','1')",
                     params![format!("overflow/{n}"),batch,subject]).unwrap();
             }
@@ -235,7 +156,7 @@ fn native_gate_octet_header_guard_refuses_oversize_and_proves_bundled_opcodes() 
         "{opcodes:?}"
     );
     tx.execute(
-        "UPDATE claims SET body=?1 WHERE subject='exec/one/probe' AND kind='runtime.observed'",
+        /* sqlite-large-value: allow-for-now lv-hc11ea7f167bc owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE subject='exec/one/probe' AND kind='runtime.observed'",
         [json!({"padding": "x".repeat(RAW_BYTES + 1)}).to_string()],
     )
     .unwrap();
@@ -270,7 +191,7 @@ fn native_gate_malformed_deep_and_wrong_type_source_is_visible_unknown() {
     let capture = f.source.state(&tx).unwrap();
     let root = f.source.installer.root(&tx, VIEW).unwrap();
     assert!(tx.execute(
-        "UPDATE claims SET body='{broken' WHERE subject='exec/one/probe' AND kind='runtime.observed'",
+        /* sqlite-large-value: allow-for-now lv-h0c20e6834aea owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body='{broken' WHERE subject='exec/one/probe' AND kind='runtime.observed'",
         [],
     ).is_err());
     assert_eq!(f.source.state(&tx).unwrap(), capture);
@@ -280,7 +201,7 @@ fn native_gate_malformed_deep_and_wrong_type_source_is_visible_unknown() {
     // Bundled SQLite accepts x'00' as JSONB. That native admission does not make it
     // a supported TEXT source: capture stays pending until the header guard fences it.
     tx.execute(
-        "UPDATE claims SET body=x'00' WHERE subject='exec/one/probe' AND kind='runtime.observed'",
+        /* sqlite-large-value: allow-for-now lv-h07a29237db95 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=x'00' WHERE subject='exec/one/probe' AND kind='runtime.observed'",
         [],
     )
     .unwrap();
@@ -308,7 +229,7 @@ fn native_gate_malformed_deep_and_wrong_type_source_is_visible_unknown() {
         let f = Fixture::seeded();
         f.edit(|tx| {
             tx.execute(
-                "UPDATE mission_revisions SET body=?1 WHERE mission_id='one'",
+                /* sqlite-large-value: allow-for-now lv-h71bf3279b70b owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET body=?1 WHERE mission_id='one'",
                 [raw],
             )
             .unwrap();
@@ -328,7 +249,7 @@ fn native_gate_malformed_deep_and_wrong_type_source_is_visible_unknown() {
     let f = Fixture::seeded();
     f.edit(|tx| {
         tx.execute(
-            "UPDATE test_native_terminal_guard SET payload=x'00',pending=1 WHERE id=1",
+            /* sqlite-large-value: allow-for-now lv-h89b354dec868 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET payload=x'00',pending=1 WHERE id=1",
             [],
         )
         .unwrap();
@@ -363,7 +284,7 @@ fn native_gate_replace_on_each_protected_table_stays_pending_without_wrapper() {
             .unwrap();
         let tx = writer.transaction().unwrap();
         tx.execute(
-            &format!("INSERT OR REPLACE INTO {table} SELECT * FROM {table} WHERE {predicate}"),
+            &format!(/* sqlite-large-value: allow-for-now lv-h25e9c59cb1e7 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO {table} SELECT * FROM {table} WHERE {predicate}"),
             [],
         )
         .unwrap();
@@ -374,22 +295,22 @@ fn native_gate_replace_on_each_protected_table_stays_pending_without_wrapper() {
     // These tables are outside the local-only policy. Their initial insert already fences;
     // reset ONLY the fixture pending bit to isolate replacement capture, never readiness.
     for (table, insertion) in [
-        ("replica_records", "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,updated_at_unix_ms)
+        ("replica_records", /* sqlite-large-value: allow-for-now lv-h460510c19d5d owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,updated_at_unix_ms)
             VALUES('private-record','node',1,'private-envelope',0,x'00','repaired','1')"),
-        ("checkpoint_claims", "INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,predecessors,accepted_at_unix_ms,checkpoint)
+        ("checkpoint_claims", /* sqlite-large-value: allow-for-now lv-h4481cb60b033 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,predecessors,accepted_at_unix_ms,checkpoint)
             VALUES('private-dropped','node',1,'private-envelope','exec/one/probe','runtime.observed','[]',1,'private-checkpoint')"),
-        ("checkpoint_envelopes", "INSERT INTO checkpoint_envelopes(writer,sequence,envelope_hash,accepted_at_unix_ms,checkpoint)
+        ("checkpoint_envelopes", /* sqlite-large-value: allow-for-now lv-he4b77e6c9c4f owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes(writer,sequence,envelope_hash,accepted_at_unix_ms,checkpoint)
             VALUES('node',1,'private-envelope',1,'private-checkpoint')"),
     ] {
         let f = Fixture::seeded();
         let mut writer = f.store.connection.write();
         writer.execute_batch("PRAGMA recursive_triggers=OFF").unwrap();
         let tx = writer.transaction().unwrap();
-        tx.execute(insertion, []).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h881e5c22b765 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=trace-statement-and-value-representation */ insertion, []).unwrap();
         assert!(f.source.state(&tx).unwrap().2.is_some(), "{table}");
-        tx.execute("UPDATE test_native_terminal_guard SET pending=0 WHERE id=1", []).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hd463e417ca96 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET pending=0 WHERE id=1", []).unwrap();
         let revision = f.source.state(&tx).unwrap().0;
-        tx.execute(&format!("INSERT OR REPLACE INTO {table} SELECT * FROM {table}"), []).unwrap();
+        tx.execute(&format!(/* sqlite-large-value: allow-for-now lv-hfaa40f873577 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO {table} SELECT * FROM {table}"), []).unwrap();
         let after = f.source.state(&tx).unwrap();
         assert!(after.1 && after.0 > revision && after.2.is_some(), "{table}");
         assert!(f.source.installer.root(&tx, VIEW).is_err(), "{table}");
@@ -408,7 +329,7 @@ fn native_gate_rowid_collision_after_extraction_refuses_final_publication() {
     let before = f.source.state(&tx).unwrap().0;
     let _facts = f.source.extract(&tx).unwrap().unwrap();
     // Same claim id / different subject: DELETE triggers cannot be relied upon.
-    tx.execute("INSERT OR REPLACE INTO claims
+    tx.execute(/* sqlite-large-value: allow-for-now lv-had9c4c142a03 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=prepare-body-and-predecessor-values */ "INSERT OR REPLACE INTO claims
         SELECT store_index,id,batch_id,'exec/replaced',kind,origin,actor,body,predecessors,accepted_at_unix_ms
         FROM claims WHERE subject='exec/one/probe' AND kind='runtime.observed'",[]).unwrap();
     assert!(f.source.state(&tx).unwrap().0 > before);
@@ -423,15 +344,15 @@ fn native_gate_transaction_rollback_restores_source_root_and_witness() {
     let tx = writer.transaction().unwrap();
     let root = f.source.installer.root(&tx, VIEW).unwrap();
     let capture = f.source.state(&tx).unwrap();
-    tx.execute_batch("SAVEPOINT native_rollback").unwrap();
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hed67f07ab976 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=trace-statement-and-value-representation */ "SAVEPOINT native_rollback").unwrap();
     tx.execute(
-        "UPDATE step_runs SET status='cancelled' WHERE subject='step-run/one/prepare'",
+        /* sqlite-large-value: allow-for-now lv-h6245580b7fe4 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled' WHERE subject='step-run/one/prepare'",
         [],
     )
     .unwrap();
     f.source.finish(&tx).unwrap();
     assert_eq!(f.source.doctor_line(&tx)["status"], "unknown");
-    tx.execute_batch("ROLLBACK TO native_rollback;RELEASE native_rollback")
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hbbb959e30fca owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=trace-statement-and-value-representation */ "ROLLBACK TO native_rollback;RELEASE native_rollback")
         .unwrap();
     assert_eq!(f.source.state(&tx).unwrap(), capture);
     assert_eq!(f.source.installer.root(&tx, VIEW).unwrap(), root);
@@ -467,12 +388,12 @@ fn native_gate_repair_checkpoint_owned_set_and_lifecycle_gaps_never_pass() {
             }
             "repair" => {
                 // A raw repair/rank insertion into the private graph is outside LOCAL v0.
-                tx.execute("UPDATE test_native_terminal_guard SET gap='unsupported repair',pending=1 WHERE id=1",[]).unwrap();
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h2fa752296c5c owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET gap='unsupported repair',pending=1 WHERE id=1",[]).unwrap();
             }
             _ => {
                 // Explicit fixture lifecycle fence; no production dispatch is claimed.
                 tx.execute(
-                    "UPDATE test_native_terminal_guard SET gap=?1,pending=1 WHERE id=1",
+                    /* sqlite-large-value: allow-for-now lv-he0f930abbb4d owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET gap=?1,pending=1 WHERE id=1",
                     [format!("unsupported {family}")],
                 )
                 .unwrap();
@@ -485,130 +406,12 @@ fn native_gate_repair_checkpoint_owned_set_and_lifecycle_gaps_never_pass() {
 }
 
 #[test]
-fn native_gate_unrelated_and_noop_work_at_zero_1024_and_100000_rows() {
-    for n in [0, 1024, 100_000] {
-        let f = Fixture::seeded();
-        if n > 0 {
-            f.populate_foreign(n);
-        }
-        // Bulk admission intentionally leaves bounded publication-maintenance pages.
-        // Finish that independent work before measuring an idle terminal-gate transaction;
-        // its commit would otherwise correctly drain a publication page after the scope ends.
-        while !f.store.advance_publication_evidence().unwrap() {}
-        {
-            let writer = f.store.connection.write();
-            writer
-                .execute_batch(
-                    "CREATE TEMP TABLE witness_writes(n INTEGER NOT NULL);
-                INSERT INTO witness_writes VALUES(0);",
-                )
-                .unwrap();
-            for table in ["test_terminal_members", "test_terminal_meta"] {
-                for event in ["INSERT", "UPDATE", "DELETE"] {
-                    writer
-                        .execute_batch(&format!(
-                            "CREATE TEMP TRIGGER writes_{table}_{event}
-                        AFTER {event} ON main.{table} BEGIN UPDATE witness_writes SET n=n+1; END;"
-                        ))
-                        .unwrap();
-                }
-            }
-        }
-        let before = f.store.connection.write().total_changes();
-        let work = f.measured(|_| {});
-        eprintln!("native source idle finish unrelated={n}: {work:?}");
-        assert_eq!(work.statements, 1, "{n}: {work:?}");
-        assert_eq!(work.fullscan_steps, 0, "{n}: {work:?}");
-        assert!(work.vm_steps > 0 && work.vm_steps <= 40, "{n}: {work:?}");
-        assert_eq!(f.store.connection.write().total_changes(), before);
-        let mut writer = f.store.connection.write();
-        let tx = writer.transaction().unwrap();
-        let root = f.source.installer.root(&tx, VIEW).unwrap();
-        let capture = f.source.state(&tx).unwrap();
-        tx.commit().unwrap();
-        drop(writer);
-        // Establish the unrelated batch outside the measured INSERT. Report one claim
-        // admission itself, including every native and fixture trigger WHEN predicate.
-        f.store.connection.write().execute(
-            "INSERT OR IGNORE INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('foreign','node',999,'fixture-foreign','1')",
-            [],
-        ).unwrap();
-        let mut writer = f.store.connection.write();
-        let tx = writer.transaction().unwrap();
-        let insert_scope = SqliteWorkScope::start();
-        tx.execute("INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
-            VALUES('measured-unrelated','foreign','exec/measured-unrelated','runtime.observed','node','{}','[]','1')", []).unwrap();
-        let insert_work = insert_scope.finish();
-        eprintln!(
-            "native source per unrelated claim INSERT prior_rows={n} insert_count=1: {insert_work:?}"
-        );
-        assert_eq!(insert_work.statements, 1, "{n}: {insert_work:?}");
-        assert!(
-            insert_work.vm_steps > 0 && insert_work.vm_steps <= 20_000,
-            "{n}: {insert_work:?}"
-        );
-        assert_eq!(insert_work.fullscan_steps, 0, "{n}: {insert_work:?}");
-        let finish_scope = SqliteWorkScope::start();
-        f.source.finish(&tx).unwrap();
-        let finish_work = finish_scope.finish();
-        eprintln!("native source post-INSERT idle finish prior_rows={n}: {finish_work:?}");
-        assert_eq!(finish_work.statements, 1, "{n}: {finish_work:?}");
-        assert!(
-            finish_work.vm_steps > 0 && finish_work.vm_steps <= 40,
-            "{n}: {finish_work:?}"
-        );
-        assert_eq!(finish_work.fullscan_steps, 0, "{n}: {finish_work:?}");
-        assert_eq!(f.source.state(&tx).unwrap(), capture);
-        assert_eq!(f.source.installer.root(&tx, VIEW).unwrap(), root);
-        tx.commit().unwrap();
-        drop(writer);
-        // At n=0 this is a genuine absent-key point operation; the larger sources update
-        // one unrelated row. Neither may capture a source change or write a witness.
-        let unrelated = f.measured(|tx| {
-            tx.execute("UPDATE claims SET body=body WHERE id='foreign/1'", [])
-                .unwrap();
-        });
-        eprintln!("native source unrelated path rows={n}: {unrelated:?}");
-        assert!(
-            unrelated.statements > 0 && unrelated.statements <= 96 && unrelated.vm_steps <= 20_000,
-            "{n}: {unrelated:?}"
-        );
-        assert_eq!(unrelated.fullscan_steps, 0, "{n}: {unrelated:?}");
-        {
-            let mut writer = f.store.connection.write();
-            let tx = writer.transaction().unwrap();
-            assert_eq!(f.source.state(&tx).unwrap(), capture);
-            assert_eq!(f.source.installer.root(&tx, VIEW).unwrap(), root);
-        }
-        let work=f.measured(|tx|{
-            tx.execute("UPDATE claims SET body=body WHERE subject='exec/one/probe' AND kind='runtime.observed'",[]).unwrap();
-        });
-        eprintln!("native source full no-op path unrelated={n}: {work:?}");
-        assert!(
-            work.statements > 0 && work.statements <= 96 && work.vm_steps <= 20_000,
-            "{n}: {work:?}"
-        );
-        assert_eq!(work.fullscan_steps, 0, "{n}: {work:?}");
-        let mut writer = f.store.connection.write();
-        let tx = writer.transaction().unwrap();
-        let after = f.source.installer.root(&tx, VIEW).unwrap();
-        assert!(after.revision > root.revision);
-        assert_eq!(after.generation, root.generation);
-        let output_writes: i64 = tx
-            .query_row("SELECT n FROM witness_writes", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(output_writes, 0);
-        assert_eq!(f.source.doctor_line(&tx)["status"], "warn");
-    }
-}
-
-#[test]
 fn native_gate_raw_reopen_mutation_and_nonempty_attachment_refuse() {
     let f = Fixture::seeded();
     let raw = Connection::open(f.dir.path().join("claims.sqlite3")).unwrap();
-    let mutation = "UPDATE step_runs SET status='cancelled' WHERE subject='step-run/one/prepare'";
+    let mutation = /* sqlite-large-value: allow-for-now lv-h07f8bcbeedfc owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled' WHERE subject='step-run/one/prepare'";
     // Plain SQLite connections cannot bypass the native projection writer functions.
-    let error = raw.execute(mutation, []).unwrap_err();
+    let error = raw.execute(/* sqlite-large-value: allow-for-now lv-h9119e24177ba owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=trace-statement-and-value-representation */ mutation, []).unwrap_err();
     assert!(
         error.to_string().contains("st_projection_change"),
         "{error}"
@@ -617,7 +420,7 @@ fn native_gate_raw_reopen_mutation_and_nonempty_attachment_refuse() {
     // Register the existing native writer functions, without the private source wrapper
     // or finish. The committed mutation must still leave its diagnostic cut pending.
     smallclaims::store::configure_projection_writer(&raw).unwrap();
-    raw.execute(mutation, []).unwrap();
+    raw.execute(/* sqlite-large-value: allow-for-now lv-h5dee7749fd22 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=trace-statement-and-value-representation */ mutation, []).unwrap();
     assert_eq!(f.line()["status"], "unknown");
     let mut writer = f.store.connection.write();
     let tx = writer.transaction().unwrap();
@@ -630,17 +433,17 @@ fn native_gate_guard_binding_replacement_is_refused_or_sticky_unknown() {
     let f = Fixture::seeded();
     let mut writer = f.store.connection.write();
     let tx = writer.transaction().unwrap();
-    assert!(tx.execute("INSERT OR REPLACE INTO test_native_terminal_guard SELECT * FROM test_native_terminal_guard", []).is_err());
+    assert!(tx.execute(/* sqlite-large-value: allow-for-now lv-hbcbabaa2c725 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO test_native_terminal_guard SELECT * FROM test_native_terminal_guard", []).is_err());
     assert_eq!(f.source.doctor_line(&tx)["status"], "warn");
     tx.execute(
-        "UPDATE test_native_terminal_guard SET exec='exec/replaced' WHERE id=1",
+        /* sqlite-large-value: allow-for-now lv-h3001e50b7bbd owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET exec='exec/replaced' WHERE id=1",
         [],
     )
     .unwrap();
     f.source.finish(&tx).unwrap();
     assert_eq!(f.source.doctor_line(&tx)["status"], "unknown");
     tx.execute(
-        "UPDATE test_native_terminal_guard SET exec='exec/one/probe' WHERE id=1",
+        /* sqlite-large-value: allow-for-now lv-h44d65cd40f79 owner=st3_store::store::terminal_gate_evidence::native_source::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE test_native_terminal_guard SET exec='exec/one/probe' WHERE id=1",
         [],
     )
     .unwrap();
@@ -677,94 +480,3 @@ fn native_gate_guard_inventory_and_default_store_have_no_public_wiring() {
     assert_eq!(f.store.connection.write().total_changes(), before);
 }
 
-// Shared only by the two private fixture modules; the native writers are unchanged.
-pub fn seed_native(tx: &Transaction<'_>, binding: &Binding) -> String {
-    let intent = parse_intent(
-        r#"
-version 2
-mission "one" state="ready" {
- goal "Private source fixture."
- step "prepare" {
-   exec "probe" { workspace "/tmp"; command "true"; restart "never" }
-   gate "prepared" { field "exit_code" "exec/one/probe" is 0 }
- }
-}
-"#,
-        "node",
-    )
-    .unwrap();
-    let mission = intent.missions.values().next().unwrap();
-    let execution = parse_execution_intent(
-        mission.steps["prepare"]
-            .declarations_kdl
-            .as_deref()
-            .unwrap(),
-        "node",
-        "one",
-    )
-    .unwrap();
-    let mut desired = execution.subjects["exec/one/probe"].clone();
-    assert_eq!(desired.subject, binding.exec);
-    assert_eq!(desired.owner_run.as_deref(), Some("mission-run/one"));
-    desired.owner_run = Some(binding.run.clone());
-    desired.owner_generation = Some(binding.generation.clone());
-    desired.owner_step = Some(binding.step.clone());
-    let publication = append_claim_tx(
-        tx,
-        "node",
-        &mission.subject,
-        "mission.published",
-        Some("person/test"),
-        &serde_json::to_value(mission).unwrap(),
-        &[],
-        None,
-    )
-    .unwrap();
-    select_replicated_mission(tx, &publication, publication.store_index).unwrap();
-    let created = append_claim_tx(
-        tx,
-        "node",
-        "mission-run/one",
-        "mission-run.created",
-        None,
-        &json!({"fields":{"mission":"mission/one","revision":mission.revision,
-                "current_generation":"run-generation/one","workspace":"/tmp",
-                "requester":"person/test","mode":"run","root_revision":mission.revision,
-                "root_mission_run":"mission-run/one"},"evidence":[]}),
-        &[],
-        None,
-    )
-    .unwrap();
-    project_mission_run_created(tx, &created).unwrap();
-    tx.execute(
-        "UPDATE step_runs SET status='working' WHERE subject='step-run/one/prepare'",
-        [],
-    )
-    .unwrap();
-    let declaration = append_claim_tx(
-        tx,
-        "node",
-        "exec/one/probe",
-        "intent.desired",
-        Some("person/test"),
-        &serde_json::to_value(&desired).unwrap(),
-        &[],
-        None,
-    )
-    .unwrap();
-    select_replicated_desired(tx, &declaration, &desired).unwrap();
-    append_claim_tx(
-        tx,
-        "node",
-        "exec/one/probe",
-        "runtime.observed",
-        None,
-        &json!({"fields":{"runtime_id":"fixture-probe","host":"node","terminal":false,
-                "status":"exited","exit_code":2,"incarnation_id":"fixture-incarnation"},
-                "evidence":[declaration.id]}),
-        std::slice::from_ref(&declaration.id),
-        None,
-    )
-    .unwrap();
-    declaration.id
-}
