@@ -4756,7 +4756,12 @@ fn assistant_read_fixtures_conform_and_malformed_proofs_and_pins_do_not() {
         .iter()
         .filter(|read| read["path"].as_str().unwrap().starts_with("/v1/client/assistant/"))
         .collect::<Vec<_>>();
-    assert_eq!(assistant_reads.len(), 6);
+    assert_eq!(assistant_reads.iter().map(|read| read["id"].as_str().unwrap()).collect::<Vec<_>>(), [
+        "assistant.summary", "assistant.attention", "assistant.missions", "assistant.agents",
+        "assistant.conversations", "assistant.conversation-detail",
+        "assistant.conversation-timeline", "assistant.conversation-search",
+        "assistant.conversation-content", "assistant.terminal-content",
+    ]);
     for read in assistant_reads {
         assert_eq!(read["proof_header"], "x-st3-scg-read-authorization", "{read}");
         assert_eq!(read["minimal_read_mode"], "approval-once", "{read}");

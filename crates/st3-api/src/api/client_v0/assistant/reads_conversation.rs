@@ -478,7 +478,17 @@ mod tests {
         assert_eq!(page["items"].as_array().unwrap().len(), DEFAULT_LIMIT);
         assert_eq!(page["page"]["has_more"], true);
         let mut delivered = Vec::new();
+        let mut preceding_page_start = None;
         loop {
+            let sequences: Vec<_> = page["items"].as_array().unwrap().iter()
+                .map(|item| item["sequence"].as_u64().unwrap()).collect();
+            assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]),
+                "each native timeline page is oldest-to-newest");
+            if let Some(previous_start) = preceding_page_start {
+                assert!(sequences.last().unwrap() < &previous_start,
+                    "a continuation page precedes the newer page without boundary repeats");
+            }
+            preceding_page_start = sequences.first().copied();
             delivered.extend(page["items"].as_array().unwrap().iter().map(|item| item["id"].clone()));
             let Some(cursor) = page["page"]["next_cursor"].as_str() else { break; };
             assert!(cursor.starts_with("assistant.conversation-timeline:"));
@@ -488,6 +498,9 @@ mod tests {
             ]), MAX_RESPONSE_BYTES).await.unwrap();
             page = next;
         }
+        assert_eq!(delivered.len(), expected.len(), "continuations return every entry exactly once");
+        let delivered: BTreeSet<_> = delivered.iter().map(|id| id.as_str().unwrap()).collect();
+        let expected: BTreeSet<_> = expected.iter().map(|id| id.as_str().unwrap()).collect();
         assert_eq!(delivered, expected, "detail and timeline neither skip nor repeat entries");
     }
 

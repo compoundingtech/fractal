@@ -3004,7 +3004,20 @@
       "description": "Disjoint content queries: conversation range or terminal screen; mixing their fields is denied.",
       "oneOf": [{ "$ref": "#/$defs/AssistantConversationContentRequest" }, { "$ref": "#/$defs/AssistantTerminalContentRequest" }]
     },
-    "AssistantProjection": { "enum": ["summary", "attention", "missions", "agents", "conversation-content", "terminal-content", "conversations", "conversation-detail", "conversation-timeline", "conversation-search"] },
+    "AssistantProjection": {
+      "enum": [
+        "summary",
+        "attention",
+        "missions",
+        "agents",
+        "conversation-content",
+        "terminal-content",
+        "conversations",
+        "conversation-detail",
+        "conversation-timeline",
+        "conversation-search"
+      ]
+    },
     "ScgReadAuthorizationPayload": {
       "type": "object",
       "additionalProperties": false,

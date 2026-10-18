@@ -124,11 +124,12 @@ mod tests {
             client_snapshot:Some(snapshot.clone()), server:None, roster:false,
         };
         let mut parameters = BTreeMap::from([("limit".into(), "20".into())]);
+        let budget = 2048;
         let mut delivered = BTreeSet::new();
         let mut pages = 0;
         loop {
             let (cut, value) = page(&state, &snapshot, "conversations", &parameters,
-                DEFAULT_RESPONSE_BYTES, "test-grant-policy", &context).await.unwrap();
+                budget, "test-grant-policy", &context).await.unwrap();
             snapshot = cut;
             let items = value["items"].as_array().unwrap();
             assert!(!items.is_empty());
@@ -139,7 +140,7 @@ mod tests {
             let response = context.wrap((Extension(snapshot.clone()), Json(value.clone())).into_response()).await.unwrap();
             let encoded = axum::body::to_bytes(response.into_body(), MAX_RESPONSE_BYTES).await.unwrap();
             assert_eq!(encoded.len(), measured, "packer and delivery use identical envelope framing");
-            assert!(encoded.len() <= DEFAULT_RESPONSE_BYTES);
+            assert!(encoded.len() <= budget);
             pages += 1;
             assert!(pages <= expected.len());
             let Some(next) = value["page"]["next_cursor"].as_str() else { break; };
