@@ -27,7 +27,41 @@ fn heads(connection: &Connection, subject: &str) -> Result<BTreeMap<String, Head
 }
 fn register(head: &Head) -> Value { json!({"value":head.0,"revision":head.1}) }
 
+/// Projects one edit and bumps its owner's inventory revision. The projector registry calls this
+/// for every appended or replicated `arrangement.edited` claim.
 pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
+    let owner = project_owner(transaction, claim)?;
+    bump_inventory_revisions(transaction, std::iter::once(owner))
+}
+
+/// Projects a replicated claim without bumping: the range may hold several claims of one owner,
+/// including this node's own, so the owner is marked and [`flush`] bumps it once per transaction.
+pub fn project_replicated(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
+    let owner = project_owner(transaction, claim)?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('arrangement_inventory_pending_v1/'||?1,'1')",
+        [owner])?;
+    Ok(())
+}
+
+/// Bumps each owner marked by [`project_replicated`] once, in the transaction that projected it.
+pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
+    let owners = take_pending(transaction)?;
+    bump_inventory_revisions(transaction, owners.iter().map(String::as_str))
+}
+
+fn take_pending(transaction: &Transaction<'_>) -> Result<BTreeSet<String>> {
+    const PREFIX: &str = "arrangement_inventory_pending_v1/";
+    let owners = transaction.prepare_cached("SELECT substr(key,?1) FROM meta WHERE key>=?2 AND key<?3")?
+        .query_map(params![PREFIX.len() as i64 + 1, PREFIX, "arrangement_inventory_pending_v1\u{30}"],
+            |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    transaction.execute("DELETE FROM meta WHERE key>=?1 AND key<?2",
+        params![PREFIX, "arrangement_inventory_pending_v1\u{30}"])?;
+    Ok(owners)
+}
+
+fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> Result<&'a str> {
     let fields = schema_fields_for_body(&claim.kind, &claim.body)?;
     let operations = schema::operations(&claim.subject, &fields).map_err(anyhow::Error::new)?;
     let owner = schema::owner(&claim.subject).map_err(anyhow::Error::new)?;
@@ -60,6 +94,21 @@ pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()>
             ON CONFLICT(subject,register) DO UPDATE SET value=excluded.value,revision=excluded.revision,winner=excluded.winner
             WHERE excluded.winner>arrangement_registers.winner", params![claim.subject,register,canonical_json_text(&value)?,claim.id,key])?;
     }
+    Ok(owner)
+}
+
+/// Call once per local edit or projecting transaction with its distinct touched owners (a replicated
+/// batch marks them through `project_replicated` and `flush` calls this). Admission indices cannot order deferred materialization behind local edits.
+pub(super) fn bump_inventory_revisions<'a>(
+    transaction: &Transaction<'_>,
+    owners: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let mut owners = owners.into_iter().peekable();
+    if owners.peek().is_none() { return Ok(()); }
+    let mut statement = transaction.prepare_cached(
+        "INSERT INTO meta(key,value) VALUES('arrangement_inventory_revision_v1/'||?1,'1')
+         ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)")?;
+    for owner in owners { statement.execute([owner])?; }
     Ok(())
 }
 
@@ -211,17 +260,36 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
+    // Include owners whose heads disappear during repair/replay as well as owners
+    // recreated from claims. Keep their local counters outside the rebuilt tables.
+    let mut owners = transaction.prepare_cached("SELECT DISTINCT owner FROM arrangements")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    // Owners an earlier incremental pass of this transaction marked are bumped by this rebuild.
+    owners.extend(take_pending(transaction)?);
     transaction.execute("DELETE FROM arrangement_registers", [])?;
     transaction.execute("DELETE FROM arrangements", [])?;
     let mut statement = transaction.prepare("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='arrangement.edited' AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')")?;
     let claims = statement.query_map([],claim_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
-    for claim in claims { project(transaction,&claim)?; }
+    for claim in &claims {
+        let owner = project_owner(transaction, claim)?;
+        if !owners.contains(owner) { owners.insert(owner.to_owned()); }
+    }
+    bump_inventory_revisions(transaction, owners.iter().map(String::as_str))?;
     Ok(())
 }
 impl Store {
     pub fn arrangements(&self, person: &str, through: u64) -> Result<Vec<Value>> {
         self.read_snapshot(|_| arrangements_at(&self.readers.get(),person,through))
+    }
+    /// Owner-local projection counter, including retired and not-yet-created heads.
+    /// It commits with the heads and is independent of claim admission indices.
+    pub fn arrangement_inventory_revision(&self, person: &str) -> Result<u64> {
+        self.read_snapshot(|_| Ok(self.readers.get().query_row(
+            "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta
+             WHERE key='arrangement_inventory_revision_v1/'||?1),0)",
+            [person], |row| row.get(0))?))
     }
     pub fn arrangement(&self, subject: &str, through: u64) -> Result<Option<Value>> {
         self.read_snapshot(|_| arrangement_at(&self.readers.get(),subject,through))

@@ -10859,6 +10859,8 @@ fn check_mailbox_incarnation(
     connection: &Connection,
     fence: &crate::mailbox::Fence,
 ) -> Result<(), St3Error> {
+    #[cfg(any(test, feature = "test-support"))]
+    MAILBOX_INCARNATION_EVALUATIONS.set(MAILBOX_INCARNATION_EVALUATIONS.get() + 1);
     let runtime: Option<(String, String)> = connection
         .prepare_cached(&format!(
             "{} LIMIT 1",
@@ -11038,7 +11040,11 @@ impl crate::otlp::ObservationSource for Store {
             let store = self.clone();
             self.connection
                 .write_workers()
-                .spawn_blocking(move || store.set_otlp_export_cursor(cursor))
+                .spawn_blocking(move || {
+                    smallclaims::task_cpu::blocking("observations.export", || {
+                        store.set_otlp_export_cursor(cursor)
+                    })
+                })
                 .await??;
             Ok(())
         })
@@ -11069,11 +11075,30 @@ pub struct MailboxWatermark {
     desired: Option<String>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static MAILBOX_FENCE_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static MAILBOX_INCARNATION_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Thread-local instrumentation of actual full fence evaluations, not API calls.
+#[cfg(any(test, feature = "test-support"))]
+pub fn mailbox_fence_evaluations() -> u64 {
+    MAILBOX_FENCE_EVALUATIONS.get()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn mailbox_incarnation_evaluations() -> u64 {
+    MAILBOX_INCARNATION_EVALUATIONS.get()
+}
+
 fn check_mailbox_fence(
     connection: &Connection,
     fence: &crate::mailbox::Fence,
     host: &str,
 ) -> Result<(), St3Error> {
+    #[cfg(any(test, feature = "test-support"))]
+    MAILBOX_FENCE_EVALUATIONS.set(MAILBOX_FENCE_EVALUATIONS.get() + 1);
     check_mailbox_incarnation(connection, fence)?;
     mailbox_lease::check_lease_fence(connection, fence, host)?;
     let owner: Option<(String, u64)> = connection

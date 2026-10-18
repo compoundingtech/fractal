@@ -579,13 +579,13 @@ fn own_post_reactor(state: &AppState, fence: &Fence) -> tokio::sync::mpsc::Sende
     let (sender, mut pending) = tokio::sync::mpsc::channel::<String>(64);
     let state = state.clone();
     let fence = fence.clone();
-    tokio::spawn(async move {
+    tokio::spawn(crate::task_cpu::account("mailbox.own_post", async move {
         while let Some(subject) = pending.recv().await {
             let store = state.store.clone();
             let binding = fence.clone();
-            let result = store.connection.write_workers().spawn_blocking(move || {
+            let result = store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
                 store.close_mailbox_own_post_wake(&binding, &subject)
-            }).await;
+            })).await;
             match result {
                 Ok(Ok(true)) => signal_message_changed(&state, "message.closed", false),
                 Ok(Ok(false)) => {},
@@ -596,7 +596,7 @@ fn own_post_reactor(state: &AppState, fence: &Fence) -> tokio::sync::mpsc::Sende
             }
             tokio::task::yield_now().await;
         }
-    });
+    }));
     sender
 }
 
@@ -635,9 +635,9 @@ async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDe
         } => {},
     }
     if native {
-        let _ = state.store.connection.write_workers().spawn_blocking(move || {
+        let _ = state.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
             authority::loss_if_current(&state, &fence, &peer)
-        }).await;
+        })).await;
     }
 }
 
@@ -761,6 +761,7 @@ async fn stream_with_timers_inner<F, S, H>(
     let mut order = MailboxOrder::new();
     let own_posts = own_post_reactor(&state, &fence);
     let mut dirty = true;
+    let mut pending_caller = crate::otel::MailboxFenceCaller::DirtyPass;
     let mut last: Option<(crate::store::MailboxWatermark, Snapshot)> = None;
     loop {
         #[cfg(test)]
@@ -793,13 +794,17 @@ async fn stream_with_timers_inner<F, S, H>(
             let repaired = if let Some(peer) = peer.clone() {
                 let repair_state = state.clone();
                 let repair_fence = fence.clone();
-                match state.store.connection.write_workers().spawn_blocking(move || {
-                    if repair_state.store.check_mailbox(&repair_fence).is_ok() { return false; }
+                let caller = pending_caller;
+                match state.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+                    let started = std::time::Instant::now();
+                    let admitted = repair_state.store.check_mailbox(&repair_fence).is_ok();
+                    crate::otel::record_mailbox_fence_check(caller, started.elapsed());
+                    if admitted { return false; }
                     let _ = authority::loss_if_current(&repair_state, &repair_fence, &peer);
                     matches!(authority::with_authority(&repair_state, &repair_fence, &peer, |owner, validate| {
                         repair_state.store.repair_mailbox_checked(&repair_fence, owner, validate)
                     }), Ok(true))
-                }).await {
+                })).await {
                     Ok(repaired) => repaired,
                     Err(_) => return,
                 }
@@ -939,26 +944,33 @@ async fn stream_with_timers_inner<F, S, H>(
                     gate.notifications.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 dirty = true;
+                pending_caller = crate::otel::MailboxFenceCaller::DirtyPass;
             },
-            tick = safety.next() => { if tick.is_none() { return; } dirty = true; },
+            tick = safety.next() => {
+                if tick.is_none() { return; }
+                dirty = true;
+                pending_caller = crate::otel::MailboxFenceCaller::Safety;
+            },
             incoming = socket.recv() => match incoming {
                 Some(Ok(WsMessage::Text(report))) => {
-                    if state.store.check_mailbox(&fence).is_ok() {
-                        let authenticated = if let Some(peer) = peer.clone() {
-                            let checked_state = state.clone();
-                            let binding = fence.clone();
-                            let raw = report.to_string();
-                            matches!(state.store.connection.write_workers().spawn_blocking(move || {
-                                authority::admit_report(&checked_state, &binding, &peer, &raw)
-                            }).await, Ok(Ok(())))
-                        } else { true };
-                        // Native refusal discards all report-driven effects, including
-                        // capability negotiation and rollout ACKs. Typed presence failure
-                        // remains separate for an otherwise authenticated control report.
-                        if !authenticated {
-                            replay_proven = None;
-                            continue;
-                        }
+                    let authenticated = if let Some(peer) = peer.clone() {
+                        let checked_state = state.clone();
+                        let binding = fence.clone();
+                        let raw = report.to_string();
+                        matches!(state.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+                            authority::admit_report(&checked_state, &binding, &peer, &raw)
+                        })).await, Ok(Ok(())))
+                    } else {
+                        let started = std::time::Instant::now();
+                        let admitted = state.store.check_mailbox(&fence).is_ok();
+                        crate::otel::record_mailbox_fence_check(
+                            crate::otel::MailboxFenceCaller::Report, started.elapsed(),
+                        );
+                        admitted
+                    };
+                    // Refusal discards every report-driven effect, including
+                    // capability negotiation, replay proofs and rollout ACKs.
+                    if authenticated {
                         // Admission is never bypassed by retained replay. Recheck
                         // inputs here too: custody may change between dirty passes.
                         if let (Some(proof), Some(peer)) = (replay_proven.take(), peer.as_ref()) {
@@ -988,9 +1000,9 @@ async fn stream_with_timers_inner<F, S, H>(
                             let repair_state = state.clone();
                             let binding = fence.clone();
                             let raw = report.to_string();
-                            replay_proven = state.store.connection.write_workers().spawn_blocking(move || {
+                            replay_proven = state.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
                                 authority::repair_proven(&repair_state, &binding, &peer, &raw)
-                            }).await.ok().and_then(Result::ok);
+                            })).await.ok().and_then(Result::ok);
                         }
                         if let Ok(value) = serde_json::from_str::<Value>(&report)
                             && fence.component == "delivery"
@@ -1013,6 +1025,7 @@ async fn stream_with_timers_inner<F, S, H>(
                 if tick.is_none() { return; }
                 // The next loop checks the durable cursor and owner in a blocking read.
                 dirty = true;
+                pending_caller = crate::otel::MailboxFenceCaller::Heartbeat;
                 if socket.send(WsMessage::Ping(Vec::new().into())).await.is_err() { return; }
             },
         }
