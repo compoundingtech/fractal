@@ -199,7 +199,7 @@ impl ProofVfs {
                 OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
                 self.name(),
             )?;
-            connection.execute_batch("PRAGMA mmap_size=0; CREATE TABLE vfs_guard_probe(x);")?;
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd90253e72816 owner=smallclaims::store::checkpoint_space::vfs TODO=chunk-or-reference-variable-columns */ "PRAGMA mmap_size=0; CREATE TABLE vfs_guard_probe(x);")?;
             Ok(())
         })();
         data.self_test_refuse.store(false, Ordering::Release);
