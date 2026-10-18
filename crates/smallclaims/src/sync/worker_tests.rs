@@ -1071,6 +1071,22 @@ async fn members_exchange_with_signatures_and_a_removed_member_is_refused() {
     server.abort();
 }
 
+// Fixture imports must run the same admission and projection phases as Local::receive;
+// storing wire envelopes alone leaves membership claims pending.
+fn admit_fixture_exchange(
+    store: &Store,
+    peer: &str,
+    fleet_id: &str,
+    exchange: &ReplicationExchange,
+) {
+    store
+        .receive_replication_exchange(peer, fleet_id, exchange)
+        .unwrap();
+    store.validate_replication_backlog().unwrap();
+    store.apply_replication_repairs().unwrap();
+    store.project_replication_backlog().unwrap();
+}
+
 /// The HTTP tunnel below is the scoped Fabric boundary: there is no static peer
 /// fallback, and its availability is derived solely from runtime desired policy.
 struct LeaveFixture {
@@ -1122,7 +1138,32 @@ fn leave_fixture() -> LeaveFixture {
     let shared = a
         .export_replication_exchange(fleet, &ReplicationInventory::default())
         .unwrap();
-    b.receive_replication_exchange("a", fleet, &shared).unwrap();
+    assert!(
+        matches!(a.fleet_membership().unwrap().state("a"), crate::fleet::MemberState::Current(_)),
+        "the fixture anchor must be admitted before transport: {:?}",
+        a.fleet_view().unwrap()
+    );
+    assert!(
+        shared.envelopes.iter().all(|envelope| {
+            envelope.member_key.as_deref() == Some(anchor.public())
+                && envelope.signature.as_deref().is_some_and(|signature| {
+                    crate::fleet::verify_signature(
+                        anchor.public(),
+                        &crate::fleet::envelope_signature_message(
+                            fleet, &envelope.writer, envelope.sequence, &envelope.hash,
+                        ),
+                        signature,
+                    )
+                })
+        }),
+        "fixture envelopes must carry valid anchor signatures"
+    );
+    admit_fixture_exchange(&b, "a", fleet, &shared);
+    assert!(
+        matches!(b.fleet_membership().unwrap().state("a"), crate::fleet::MemberState::Current(_)),
+        "initial fixture replication must import the anchor: {:?}; unresolved: {:?}",
+        b.fleet_view().unwrap(), b.replica_records(true).unwrap()
+    );
     fleet_claim(
         &b,
         "fleet.member-endpoints",
@@ -1134,9 +1175,47 @@ fn leave_fixture() -> LeaveFixture {
     let advertised = b
         .export_replication_exchange(fleet, &ReplicationInventory::default())
         .unwrap();
-    a.receive_replication_exchange("b", fleet, &advertised)
-        .unwrap();
-    b.leave_fleet("person/test").unwrap();
+    admit_fixture_exchange(&a, "b", fleet, &advertised);
+    // The product runtime stamps a zero leave high-water with its envelope sequence.
+    // Plain deliberately has no product hooks, so supply the same signed sequence here.
+    let high_water = b
+        .replication_inventory()
+        .unwrap()
+        .envelopes
+        .iter()
+        .filter(|envelope| envelope.writer == "b")
+        .map(|envelope| envelope.sequence)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    fleet_claim(
+        &b,
+        "fleet.member-left",
+        "host/b",
+        serde_json::json!({"member_key": key.public(), "high_water": high_water}),
+    );
+    assert!(
+        matches!(
+            a.fleet_membership().unwrap().state("b"),
+            crate::fleet::MemberState::Current(_)
+        ),
+        "the receiver must admit the leaving member before transport: {:?}",
+        a.fleet_view().unwrap()
+    );
+    assert!(
+        matches!(b.fleet_membership().unwrap().state("a"), crate::fleet::MemberState::Current(_)),
+        "the anchor remains admitted after another member leaves: {:?}",
+        b.fleet_view().unwrap()
+    );
+    assert!(
+        matches!(
+            b.fleet_membership().unwrap().state("b"),
+            crate::fleet::MemberState::Ended(member)
+                if member.ended.as_deref() == Some("left")
+        ),
+        "the source must contain its signed leave before transport: {:?}",
+        b.fleet_view().unwrap()
+    );
     LeaveFixture {
         receiver: PeerState::new(
             Local(a.clone()),
@@ -1181,7 +1260,7 @@ async fn runtime_only_leave_keeps_both_carriers_until_signed_proof_receipt() {
                 let retained = retained_leave_members(
                     &view,
                     receiver.own_key.as_deref().unwrap(),
-                    &receiver.leave.lock().await,
+                    &*receiver.leave.lock().await,
                 );
                 let current = view
                     .members
@@ -1223,7 +1302,10 @@ async fn runtime_only_leave_keeps_both_carriers_until_signed_proof_receipt() {
         retained_for_test(&fixture.receiver.fleet)
             .await
             .contains(&key),
-        "receiving the signed leave must not revoke before exporting the response"
+        "receiving the signed leave must not revoke before exporting the response: receiver={:?}; awaiting={:?}; source={:?}",
+        fixture.receiver.backend.0.fleet_view().unwrap(),
+        &fixture.receiver.fleet.leave.lock().await.awaiting,
+        fixture.leaving.fleet_view().unwrap()
     );
     let error = exchange(
         &http,
@@ -1525,8 +1607,7 @@ async fn a_durable_confirmer_fences_competing_push_and_pull_exports_even_with_a_
             &ReplicationInventory::default(),
         )
         .unwrap();
-    c.receive_replication_exchange("a", fixture.leaving_auth.fleet_id(), &shared)
-        .unwrap();
+    admit_fixture_exchange(&c, "a", fixture.leaving_auth.fleet_id(), &shared);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer = PeerConfig {
         name: "b".into(),
@@ -1637,9 +1718,7 @@ async fn pulling_the_selected_members_leave_retains_only_its_direct_carrier() {
             &ReplicationInventory::default(),
         )
         .unwrap();
-    relay
-        .receive_replication_exchange("a", fixture.leaving_auth.fleet_id(), &before)
-        .unwrap();
+    admit_fixture_exchange(&relay, "a", fixture.leaving_auth.fleet_id(), &before);
     let relayed_context = member_context(&relay, &fixture.other_key, &[], &[], false);
     assert!(
         !retained_for_test(&relayed_context)
@@ -1758,8 +1837,7 @@ async fn dial_out_pull_cannot_pin_leave_and_a_listening_confirmer_can_finish() {
         .0
         .export_replication_exchange(fleet_id, &ReplicationInventory::default())
         .unwrap();
-    c.receive_replication_exchange("a", fleet_id, &shared)
-        .unwrap();
+    admit_fixture_exchange(&c, "a", fleet_id, &shared);
     fleet_claim(
         &c,
         "fleet.member-endpoints",
@@ -1770,10 +1848,7 @@ async fn dial_out_pull_cannot_pin_leave_and_a_listening_confirmer_can_finish() {
     let dial_out = c
         .export_replication_exchange(fleet_id, &ReplicationInventory::default())
         .unwrap();
-    fixture
-        .leaving
-        .receive_replication_exchange("c", fleet_id, &dial_out)
-        .unwrap();
+    admit_fixture_exchange(&fixture.leaving, "c", fleet_id, &dial_out);
     refresh_fleet_view(&Local(fixture.leaving.clone()), &fixture.leaving_fleet).await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let leaver = PeerConfig {
@@ -2167,6 +2242,10 @@ async fn ordinary_signatures_discard_expired_provisional_leave_deadlines() {
         leave
             .receiver_deadlines_unix_ms
             .insert(key.clone(), crate::store::now_ms().saturating_sub(1));
+        leave.receiver_first_receive_unix_ms.insert(
+            key.clone(),
+            crate::store::now_ms().saturating_sub(LEAVE_RECEIPT_GRACE.as_millis() + 1),
+        );
         save_leave_state(&fixture.receiver.fleet, &leave)
             .await
             .unwrap();
@@ -2221,6 +2300,7 @@ async fn ordinary_signatures_discard_expired_provisional_leave_deadlines() {
         !persisted.receiver_deadlines_unix_ms.contains_key(&key),
         "a current member's ordinary signature must not consume its future leave grace"
     );
+    assert!(!persisted.receiver_first_receive_unix_ms.contains_key(&key));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer = PeerConfig {
@@ -2291,6 +2371,104 @@ async fn ordinary_signatures_discard_expired_provisional_leave_deadlines() {
             .contains(&key)
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn interrupted_leave_admission_keeps_first_receive_bound_and_denies_failed_journaling() {
+    let fixture = leave_fixture();
+    let root = tempfile::tempdir().unwrap();
+    let settings = FleetFile {
+        fleet_id: fixture.leaving_auth.fleet_id().into(),
+        node: Some("a".into()),
+        ..FleetFile::default()
+    };
+    settings.save(root.path()).unwrap();
+    crate::fleet::join::write_private(&settings.node_key_path(root.path()), &fixture.anchor_bytes)
+        .unwrap();
+    let key = fixture.key.public().to_owned();
+    let first_receive =
+        crate::store::now_ms().saturating_sub(LEAVE_RECEIPT_GRACE.as_millis() + 1);
+    let mut before_admission = LeaveState::default();
+    before_admission.awaiting.insert(key.clone());
+    before_admission
+        .receiver_first_receive_unix_ms
+        .insert(key.clone(), first_receive);
+    let anchor = MemberKey::load(&settings.node_key_path(root.path())).unwrap();
+    let mut journal_owner = member_context(&fixture.receiver.backend.0, &anchor, &[], &[], false);
+    journal_owner.state_dir = Some(root.path().to_path_buf());
+    save_leave_state(&journal_owner, &before_admission)
+        .await
+        .unwrap();
+    let exchange = fixture
+        .leaving
+        .export_replication_exchange(
+            fixture.leaving_auth.fleet_id(),
+            &ReplicationInventory::default(),
+        )
+        .unwrap();
+    // Commit the signed departure, then model interruption before deadline publication.
+    fixture
+        .receiver
+        .backend
+        .receive(
+            "b",
+            fixture.leaving_auth.fleet_id(),
+            &exchange,
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let persisted = fs::read(root.path().join("fleet/leave-carriers.json")).unwrap();
+    let mut restarted = member_context(&fixture.receiver.backend.0, &anchor, &[], &[], false);
+    restarted.leave = Arc::new(tokio::sync::Mutex::new(
+        serde_json::from_slice(&persisted).unwrap(),
+    ));
+    restarted.state_dir = Some(root.path().join("missing-fleet"));
+    refresh_fleet_view(&fixture.receiver.backend, &restarted).await;
+    {
+        let leave = restarted.leave.lock().await;
+        assert!(
+            leave.persistence_error.is_some(),
+            "failed deadline publication is visible"
+        );
+        assert!(
+            !leave.receiver_deadlines_unix_ms.contains_key(&key),
+            "never accept the non-durable deadline"
+        );
+        let view = restarted.view.read().expect("fleet view lock poisoned");
+        assert!(
+            !retained_leave_members(&view, anchor.public(), &leave).contains(&key),
+            "persistence failure denies carrier retention"
+        );
+        let mut status = crate::fleet::fabric_reconcile::ReconcileStatus {
+            state: "applied".into(),
+            ..Default::default()
+        };
+        annotate_leave_expiry(&mut status, &view, &leave, crate::store::now_ms());
+        assert_eq!(status.state, "error");
+    }
+    // Restart from the unchanged pre-import journal once persistence is available.
+    restarted.state_dir = Some(root.path().to_path_buf());
+    restarted.leave = Arc::new(tokio::sync::Mutex::new(
+        serde_json::from_slice(&persisted).unwrap(),
+    ));
+    refresh_fleet_view(&fixture.receiver.backend, &restarted).await;
+    let leave = restarted.leave.lock().await;
+    assert_eq!(
+        leave.receiver_deadlines_unix_ms[&key],
+        first_receive.saturating_add(LEAVE_RECEIPT_GRACE.as_millis())
+    );
+    assert!(leave.persistence_error.is_none());
+    let view = restarted.view.read().expect("fleet view lock poisoned");
+    assert!(
+        !retained_leave_members(&view, anchor.public(), &leave).contains(&key),
+        "restart must not renew grace consumed during interruption"
+    );
+    assert!(
+        !leave.completed.contains(&key),
+        "neither restart nor expiry confirms receipt"
+    );
 }
 
 mod retry_tests {

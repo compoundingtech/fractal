@@ -53,8 +53,12 @@ struct LeaveState {
     completed: BTreeSet<String>,
     awaiting: BTreeSet<String>,
     #[serde(default)]
+    receiver_first_receive_unix_ms: BTreeMap<String, u128>,
+    #[serde(default)]
     receiver_deadlines_unix_ms: BTreeMap<String, u128>,
     pending: BTreeMap<String, LeaveProof>,
+    #[serde(skip)]
+    persistence_error: Option<String>,
 }
 
 #[derive(Clone, serde::Deserialize, Serialize)]
@@ -970,6 +974,7 @@ async fn refresh_fleet_view_locked<B: Backend>(backend: &B, fleet: &FleetContext
         {
             let mut leave = fleet.leave.lock().await;
             let mut updated = leave.clone();
+            updated.persistence_error = None;
             updated.awaiting.retain(|key| {
                 view.members.iter().any(|member| {
                     member.member_key == *key
@@ -984,22 +989,31 @@ async fn refresh_fleet_view_locked<B: Backend>(backend: &B, fleet: &FleetContext
                         && member.ended.as_deref() == Some("left")
                 })
             });
-            // A conservative prefilter may see an ordinary signature exchange.
-            // Start grace only after the authoritative fold admits a real leave.
-            let now = crate::store::now_ms();
+            updated
+                .receiver_first_receive_unix_ms
+                .retain(|key, _| updated.awaiting.contains(key));
+            // Only a confirmed leave gets a deadline, anchored to the durable
+            // pre-import receive time so a crash cannot restart its grace.
             for key in &updated.awaiting {
-                updated
-                    .receiver_deadlines_unix_ms
-                    .entry(key.clone())
-                    .or_insert_with(|| now.saturating_add(LEAVE_RECEIPT_GRACE.as_millis()));
+                if let Some(first) = updated.receiver_first_receive_unix_ms.get(key) {
+                    updated
+                        .receiver_deadlines_unix_ms
+                        .entry(key.clone())
+                        .or_insert_with(|| first.saturating_add(LEAVE_RECEIPT_GRACE.as_millis()));
+                }
             }
             if updated.awaiting != leave.awaiting
                 || updated.receiver_deadlines_unix_ms != leave.receiver_deadlines_unix_ms
+                || updated.receiver_first_receive_unix_ms != leave.receiver_first_receive_unix_ms
+                || leave.persistence_error.is_some()
             {
-                if let Err(error) = save_leave_state(fleet, &updated).await {
-                    eprintln!("cannot retire completed exchange carrier: {error:#}");
+                match save_leave_state(fleet, &updated).await {
+                    Ok(()) => *leave = updated,
+                    Err(error) => {
+                        eprintln!("cannot persist receiver leave grace: {error:#}");
+                        leave.persistence_error = Some(format!("{error:#}"));
+                    }
                 }
-                *leave = updated;
             }
         }
         let changed = {
@@ -1181,10 +1195,8 @@ async fn receive_from_peer<B: Backend>(
     carrier: crate::replication::ReplicationCarrier,
 ) -> Result<crate::replication::ReplicationReceiveResponse> {
     let _refresh = fleet.view_refresh.lock().await;
-    let protect = fleet
-        .view
-        .read()
-        .expect("fleet view lock poisoned")
+    let before = backend.fleet_view().await?;
+    let protect = before
         .members
         .iter()
         .find(|member| {
@@ -1197,6 +1209,12 @@ async fn receive_from_peer<B: Backend>(
         let mut leave = fleet.leave.lock().await;
         let mut updated = leave.clone();
         updated.awaiting.insert(key.clone());
+        // Fresh authoritative current membership proves no departure has yet
+        // consumed grace, even if a previous provisional exchange was interrupted.
+        updated.receiver_deadlines_unix_ms.remove(key);
+        updated
+            .receiver_first_receive_unix_ms
+            .insert(key.clone(), crate::store::now_ms());
         save_leave_state(fleet, &updated).await?;
         *leave = updated;
     }
@@ -1232,6 +1250,7 @@ fn retained_leave_members_at(
                 && member.ended.as_deref() == Some("left")
                 && (member.member_key == own_key
                     || (leave.awaiting.contains(&member.member_key)
+                        && leave.persistence_error.is_none()
                         && leave
                             .receiver_deadlines_unix_ms
                             .get(&member.member_key)
@@ -1248,6 +1267,17 @@ fn annotate_leave_expiry(
     leave: &LeaveState,
     now: u128,
 ) {
+    if let Some(error) = &leave.persistence_error {
+        if matches!(status.state.as_str(), "applied" | "leaving" | "leave_unconfirmed") {
+            status.state = "error".into();
+        }
+        let detail = format!("Receiver leave grace was not durably persisted; carrier denied: {error}");
+        status.message = Some(match status.message.take() {
+            Some(message) => format!("{message}; {detail}"),
+            None => detail,
+        });
+        return;
+    }
     let expired = view
         .members
         .iter()
@@ -1345,6 +1375,8 @@ async fn receive_leave_receipt<B: Backend>(
             updated.completed.insert(key.to_owned());
             updated.awaiting.remove(key);
             updated.receiver_deadlines_unix_ms.remove(key);
+            updated.receiver_first_receive_unix_ms.remove(key);
+            updated.persistence_error = None;
             save_leave_state(&state.fleet, &updated).await?;
             *leave = updated;
         }
@@ -1381,7 +1413,7 @@ async fn reconcile_fabric_policy(
     let view = fleet.view.read().expect("fleet view lock poisoned").clone();
     let decision_time = crate::store::now_ms();
     let retained =
-        retained_leave_members_at(&view, own_key, &fleet.leave.lock().await, decision_time);
+        retained_leave_members_at(&view, own_key, &*fleet.leave.lock().await, decision_time);
     let Some(_lock) = lock_current_settings(state_dir, settings).await? else {
         return Ok(false);
     };
@@ -1401,7 +1433,7 @@ async fn reconcile_fabric_policy(
         },
         Err(error) => crate::fleet::fabric_reconcile::error_status(&error),
     };
-    annotate_leave_expiry(&mut status, &view, &fleet.leave.lock().await, decision_time);
+    annotate_leave_expiry(&mut status, &view, &*fleet.leave.lock().await, decision_time);
     let path = state_dir.join("fleet/fabric-reconcile.json");
     let bytes = serde_json::to_vec(&status)?;
     tokio::task::spawn_blocking(move || {

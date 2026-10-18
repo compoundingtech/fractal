@@ -423,10 +423,13 @@ Only that member receives a direct export of the leave; other members learn it
 through ordinary replication and revoke on the sync that admits it. An ambiguous
 send cannot silently select another confirmer.
 
-The direct receiver records the provisional carrier drain before admission,
-whether the leave arrives in a push or pull response. Its first absolute
-120-second deadline starts only when the authoritative membership fold confirms
-departure; ordinary signatures cannot consume a future leave's grace.
+The direct receiver journals the provisional carrier drain and receive timestamp
+before admission, whether the leave arrives in a push or pull response. Only an
+authoritatively confirmed departure publishes a deadline, anchored to that
+durable timestamp plus 120 seconds. A crash after import but before deadline
+publication cannot restart grace. Ordinary signature false positives discard
+their provisional timestamp; journal-write failure denies carrier retention and
+reports an error rather than accepting non-durable state.
 It retains only the fleet replication grant while awaiting the leaving
 member's authenticated receipt of its signed `member-left` proof through
 `/v1/replication/leave-receipt`. A receipt is persisted before the carrier is
