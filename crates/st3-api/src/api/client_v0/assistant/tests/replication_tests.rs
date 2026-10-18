@@ -8,7 +8,7 @@ fn sync(source: &AppState, receiver: &AppState) {
         &receiver.store.replication_inventory().unwrap(),
         &receiver.store.replication_signature_requests().unwrap(),
     ).unwrap();
-    receiver.store.receive_replication_exchange("relay", FLEET, &exchange).unwrap();
+    receiver.store.receive_replication_exchange(source.store.origin(), FLEET, &exchange).unwrap();
     receiver.store.validate_replication_backlog().unwrap();
     receiver.store.project_replication_backlog().unwrap();
 }
