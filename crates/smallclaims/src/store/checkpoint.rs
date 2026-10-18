@@ -388,21 +388,26 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
 ) -> Result<()> {
     for claim in claims {
         if let Some(operation) = &claim.operation_id {
-            transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h571c64003cb6 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1 AND canonical_claim_id=?2",
-                params![operation, claim.id],
-            )?;
+            transaction
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h571c64003cb6 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1 AND canonical_claim_id=?2")?
+                .execute(/* sqlite-large-value: allow-for-now lv-hc07a2911d40a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![operation, claim.id])?;
         }
         super::events::remove_claim_tx(transaction, &claim.id)?;
         super::principals::forget_claim_tx(transaction, &claim.id)?;
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h62a1eb703826 owner=smallclaims::store::checkpoint TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&claim.id])?;
+        // Cached: claims, records and envelopes carry delete triggers, and preparing a statement
+        // compiles every trigger program again. Per row that cost several times the delete.
+        transaction
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h62a1eb703826 owner=smallclaims::store::checkpoint TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1")?
+            .execute(/* sqlite-large-value: allow-for-now lv-hbda25652774a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
     }
     for envelope in envelopes {
         let batch: Option<String> = transaction
-            .query_row(
+            .prepare_cached(
                 "SELECT batch_id FROM replica_envelopes
                  WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
-                params![envelope.writer, envelope.sequence, envelope.envelope_hash],
+            )?
+            .query_row(
+                /* sqlite-large-value: allow-for-now lv-h5c9af66a6a3a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash],
                 |row| row.get(0),
             )
             .optional()?
@@ -413,20 +418,18 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
             "replica_envelope_holds",
             "replica_envelopes",
         ] {
-            transaction.execute(
-                &format!(
+            transaction
+                .prepare_cached(&format!(
                     /* sqlite-large-value: allow-for-now lv-h5f5425870484 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM {table} WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
-                ),
-                params![envelope.writer, envelope.sequence, envelope.envelope_hash],
-            )?;
+                ))?
+                .execute(/* sqlite-large-value: allow-for-now lv-h9bdfd18f2c1e owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.envelope_hash])?;
         }
         if let Some(batch) = batch {
-            transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h2b6b5a02d0f0 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
+            transaction
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2b6b5a02d0f0 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM batches WHERE id=?1
                  AND NOT EXISTS (SELECT 1 FROM claims WHERE batch_id=?1)
-                 AND NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=?1)",
-                [&batch],
-            )?;
+                 AND NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=?1)")?
+                .execute(/* sqlite-large-value: allow-for-now lv-h971ef649bc2a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&batch])?;
         }
     }
     Ok(())

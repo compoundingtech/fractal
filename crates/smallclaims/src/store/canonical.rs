@@ -10,7 +10,7 @@ use super::*;
 /// only lowers the value, as the least position over its records always has, so the stored value
 /// is a join and its order of arrival does not matter. Rows outlive their claim: the position of
 /// a retired claim is part of its identity, not of the claim body that a trim removes.
-pub const POSITION_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hbe1008ea8f00 owner=smallclaims::store::canonical TODO=chunk-or-reference-variable-columns */ "
+pub const POSITION_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha962eb0285cf owner=smallclaims::store::canonical TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS claim_positions (
     claim_id TEXT PRIMARY KEY,
     position INTEGER NOT NULL
@@ -24,6 +24,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS claim_positions_record_change_v1
 BEFORE UPDATE OF claim_id, position ON replica_records
 WHEN OLD.claim_id IS NOT NULL AND (OLD.claim_id IS NOT NEW.claim_id OR OLD.position<>NEW.position)
+    AND NOT EXISTS (SELECT 1 FROM claim_positions WHERE claim_id=OLD.claim_id)
 BEGIN
     INSERT OR IGNORE INTO claim_positions(claim_id, position)
     SELECT OLD.claim_id, MIN(position) FROM replica_records WHERE claim_id=OLD.claim_id;
@@ -37,7 +38,9 @@ BEGIN
     ON CONFLICT(claim_id) DO UPDATE SET position=MIN(position, excluded.position);
 END;
 CREATE TRIGGER IF NOT EXISTS claim_positions_record_delete_v1 BEFORE DELETE ON replica_records
-WHEN OLD.claim_id IS NOT NULL BEGIN
+WHEN OLD.claim_id IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM claim_positions WHERE claim_id=OLD.claim_id)
+BEGIN
     INSERT OR IGNORE INTO claim_positions(claim_id, position)
     SELECT OLD.claim_id, MIN(position) FROM replica_records WHERE claim_id=OLD.claim_id;
 END;
